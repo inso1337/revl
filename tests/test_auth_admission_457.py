@@ -181,11 +181,171 @@ service NotesApi {
 def test_principal_flows_only_from_validate(tmp_path):
     """The positive twin of the refusal: a `Principal` obtained from
     `Auth.validate` flows into the user-scoped store, and nothing else can. A
-    second required service that also produces a `Principal` is impossible to
-    declare in revl (no constructor), so `Auth.validate` is provably the one
-    door."""
+    second declaration whose result carries a `Principal` is refused by the
+    reservation pinned below, so `Auth.validate` is provably the one door."""
     ir = _compile(tmp_path, APP.format(body=ADMITTED))
     # the store op's parameter is the opaque principal, reachable only via the
     # validate step checked above
     store_get = ir["services"]["NoteStore"]["methods"]["get"]
     assert store_get["params"][0] == {"name": "who", "type": "Principal"}
+
+
+# ------------------------------------------------- the producer reservation
+
+# A `Principal` is an undeclared opaque nominal, so reserving the NAME (`type
+# Principal = ...` is refused above) is not the whole invariant: nothing else
+# objects to a *signature* that RETURNS one. Each shape below is a second
+# producer, and each must be refused — otherwise the admission refusal that
+# makes a dropped auth step a compile error is bypassable by declaring a door of
+# one's own. The shipped `stdlib/auth.rvl` is the one module that may declare a
+# result carrying `Principal` (the `Auth.validate` signature and the
+# `host_validate` extern behind it); every shape here is application source.
+
+# an `extern` with an arbitrary host body: the producer in its plainest form
+MUTANT_EXTERN = """\
+use "stdlib/http.rvl" { ApiError }
+use "stdlib/auth.rvl" { Auth, Bearer }
+
+type Note = { id: Str, owner: Str, title: Str, body: Str }
+
+service NoteStore {
+  fn get(who: Principal, id: Str) -> Result[Note, ApiError]
+}
+
+service NotesApi {
+  route get "/notes/{id}"
+  fn get_note(bearer: Bearer, id: Str) -> Result[Note, ApiError]
+}
+
+extern pure fn mint() -> Result[Principal, ApiError] = @py {
+    return Ok({"subject": "attacker"})
+}
+
+component NotesHttp requires auth: Auth, store: NoteStore
+                    provides notes_api: NotesApi {
+  provide notes_api {
+    fn get_note(bearer, id) {
+      return match mint() {
+        Err(e) => Err(e),
+        Ok(who) => store.get(who, id),
+      }
+    }
+  }
+}
+"""
+
+# the extern is hidden behind a plain revl `fn`, so the call site names no
+# extern at all and reads as ordinary revl to a reviewer
+MUTANT_LAUNDERED = """\
+use "stdlib/http.rvl" { ApiError }
+
+extern pure fn raw() -> Principal = @py {
+    return {"subject": "attacker"}
+}
+
+fn mint() -> Result[Principal, ApiError] { return Ok(raw()) }
+"""
+
+
+def _refused(tmp_path, source: str) -> str:
+    with pytest.raises((RevlError, RevlErrors)) as exc:
+        _compile(tmp_path, source)
+    return _errmsg(exc)
+
+
+def test_a_declared_principal_producer_is_refused(tmp_path):
+    """Design exit test 4 depends on `Auth.validate` being the SOLE producer.
+    An `extern` that declares `Result[Principal, ApiError]` is a second door:
+    the handler above reaches the user-scoped store through it without ever
+    authorizing, so it is refused at admission."""
+    msg = _refused(tmp_path, MUTANT_EXTERN)
+    assert "Principal" in msg
+    assert "reserved" in msg
+    assert "Auth.validate" in msg
+    assert "mint" in msg
+
+
+def test_a_plain_fn_cannot_launder_a_principal(tmp_path):
+    """Wrapping the producer in a plain `fn` changes nothing: the result still
+    carries `Principal`, so the wrapper is refused too — the shape whose call
+    site names no extern is exactly the one a reviewer cannot see through."""
+    msg = _refused(tmp_path, MUTANT_LAUNDERED)
+    assert "Principal" in msg and "Auth.validate" in msg
+    # both ends of the chain are producers, and the `fn` is the one the app
+    # would call, so the refusal names it
+    assert "`fn mint`" in msg
+
+
+def test_a_service_cannot_declare_a_principal_producer(tmp_path):
+    """A `service` method is a producer slot like any other: an unimplemented
+    `fn steal() -> Result[Principal, ApiError]` still hands every consumer a
+    signature that mints a principal, so it is refused on the declaration."""
+    src = """\
+use "stdlib/http.rvl" { ApiError }
+service Evil {
+  fn steal() -> Result[Principal, ApiError]
+}
+"""
+    msg = _refused(tmp_path, src)
+    assert "Evil.steal" in msg and "Auth.validate" in msg
+
+
+def test_a_box_of_principal_cannot_be_returned(tmp_path):
+    """The reservation is transitive: `type Box = { who: Principal }` is a
+    harmless consumer on its own, but a declaration whose result is `Box` mints
+    a principal just as surely as one that spells `Principal` out."""
+    src = """\
+type Box = { who: Principal, note: Str }
+extern pure fn mint() -> Box = @py {
+    return {"who": {"subject": "attacker"}, "note": "x"}
+}
+"""
+    msg = _refused(tmp_path, src)
+    assert "`extern mint`" in msg and "Auth.validate" in msg
+
+
+def test_a_nested_principal_result_is_refused(tmp_path):
+    """A generic wrapper is not a hiding place: `Opt[Principal]` and
+    `(Str) -> Principal` both carry the opaque type in the result position."""
+    for returns in ("Opt[Principal]", "(Str) -> Principal", "List[Principal]"):
+        msg = _refused(
+            tmp_path,
+            f"extern pure fn mint() -> {returns} = @py {{ return None }}")
+        assert "`extern mint`" in msg and "Principal" in msg
+
+
+def test_consuming_a_principal_is_still_allowed(tmp_path):
+    """The reservation bounds PRODUCTION, not mention. A `Principal` parameter
+    is a consumer — it cannot be called without one — so the user-scoped store
+    signature and a helper that passes a principal along stay admissible, and
+    the shipped `stdlib/auth.rvl` keeps its `Auth.validate` result."""
+    src = """\
+type Box = { who: Principal, note: Str }
+fn peek(b: Box) -> Str { return b.note }
+fn hand(who: Principal) -> Str { return "x" }
+"""
+    assert _compile(tmp_path, src)["types"]["Box"]["fields"] == {
+        "who": "Principal", "note": "Str"}
+    # and the shipped producer is not caught by its own reservation
+    ir = compile_files([str(ROOT / "stdlib" / "auth.rvl")])
+    assert (ir["services"]["Auth"]["methods"]["validate"]["returns"]
+            == "Result[Principal, ApiError]")
+    assert [e for e in ir["externs"] if e["name"] == "host_validate"]
+
+
+def test_a_shadowing_auth_module_cannot_mint_a_principal(tmp_path):
+    """The exemption is the SHIPPED stdlib, not the path spelling: a local
+    `stdlib/auth.rvl` that shadows it is application source, so a producer
+    declared there is refused too — the sole-producer guarantee cannot be
+    replaced by distribution either."""
+    shadow = tmp_path / "stdlib"
+    shadow.mkdir()
+    (shadow / "auth.rvl").write_text(
+        "pub extern pure fn mint() -> Principal = @py { return {\"subject\": \"x\"} }\n",
+        encoding="utf-8")
+    app = tmp_path / "app.rvl"
+    app.write_text('use "stdlib/auth.rvl" { mint }\n', encoding="utf-8")
+    with pytest.raises((RevlError, RevlErrors)) as exc:
+        compile_files([str(app)])
+    msg = _errmsg(exc)
+    assert "Principal" in msg and "Auth.validate" in msg
