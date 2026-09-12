@@ -1851,6 +1851,7 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         module_callables = program.fn_scopes.get(id(decl), default_callables)
         callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS | set(module_callables) | {ext.name for ext in program.externs}
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
+        check_list_index_bounds(decl.body, decl_file)
         body: list[dict] = []
         for stmt in decl.body:
             _lower_pure_stmt(stmt, scope, callables, alias_fns, body, decl_file, type_env, types,
@@ -5187,6 +5188,7 @@ def _lower_tests(program: Program, filename: str, types: dict,
             continue
         scope: dict[str, bool] = {}
         type_env: dict[str, str] = {}
+        check_list_index_bounds(decl.body, filename)
         body: list[dict] = []
         for stmt in decl.body:
             _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
@@ -5294,6 +5296,7 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
             scope[param.name] = False
             type_env[param.name] = param.type
         body: list[dict] = []
+        check_list_index_bounds(decl.body, filename)
         for stmt in decl.body:
             _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
         units.append({
@@ -5598,6 +5601,274 @@ def _bool_cond(expr, type_env: dict, types: dict, filename: str, where: str) -> 
     t = infer_ast(expr, type_env, types, filename)
     if t is not None and t != "Bool":
         raise mismatch(filename, getattr(expr, "line", 0), f"`{where}` condition", "Bool", t)
+
+
+# ------------------------------------- item 485: `List` index bounds (#938)
+#
+# `["a"][5]`, and `xs[0 - 1]` with `xs` a list literal in scope, are indexes
+# the checker can see fall outside the only domain a `List` index has:
+# `0 .. len - 1`. Every tier faults on them, and not even uniformly — py/go/
+# rust/java raise, ts reads `undefined` and wasm reads `0`, which is the
+# `xs[5]` drift `tests/test_cross_tier_execution.py` records as still needing
+# "a static emitted-code guard per tier". The `Str` arm of `infer_ast` already
+# refuses a literal index on a known receiver with a coded `T1` (issue #938
+# row 4); this is that same refusal for `List`, where the length is known.
+#
+# An index that is not a foldable literal — `xs[i]`, `xs[f()]` — is
+# deliberately untouched. Bounds are not a static property in general, and the
+# runtime fault for that case stays pinned by `AGREED_549`. The pass runs over
+# a fn/test/prop-test body *before* it is lowered, so a refused program never
+# reaches an emitter (the issue's acceptance half is the frontend).
+
+_FOLD_OPS = {
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "*": lambda a, b: a * b,
+}
+
+
+def _index_const(expr):
+    """The `int` an index expression folds to, or `None` when the checker
+    cannot trust a value for it.
+
+    Only total operations over integer literals are folded (`5`, `0 - 1`,
+    `2 * 3`). A division, a variable, or a call is not: a fold the runtime
+    could disagree with would refuse a program that runs."""
+    if isinstance(expr, ExprLit):
+        value = expr.value
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    if isinstance(expr, ExprUn) and expr.op in ("-", "+"):
+        inner = _index_const(expr.operand)
+        if inner is None:
+            return None
+        return -inner if expr.op == "-" else inner
+    if isinstance(expr, ExprBin) and expr.op in _FOLD_OPS:
+        left = _index_const(expr.left)
+        right = _index_const(expr.right)
+        if left is None or right is None:
+            return None
+        return _FOLD_OPS[expr.op](left, right)
+    return None
+
+
+def _indexed_len(target, lens: dict):
+    """The known length of the list an index expression reads, or `None`.
+
+    A list literal is its own length; a name is its length only if the binding
+    in scope was a list literal and has not been reassigned since."""
+    if isinstance(target, ExprList):
+        return len(target.items)
+    if isinstance(target, ExprVar):
+        return lens.get(target.name)
+    return None
+
+
+def _refuse_index_bounds(filename: str, line: int, index: int, length: int) -> None:
+    if length == 0:
+        detail = "it is empty"
+    elif index < 0:
+        detail = ("a `List` index counts from the front — a negative index "
+                  "faults on every tier (docs/contract-errata.md §549)")
+    else:
+        detail = f"the only valid indexes are 0 .. {length - 1}"
+    raise RevlError(
+        filename, line,
+        f"index {index} is out of range for a {length}-element `List` — {detail}",
+        hint="a `List` index is bounded by the list's length; read a shorter "
+             "index, or guard the read with `xs.length()` first "
+             "(docs/stdlib-2.0.md § The surface)",
+        code="T1", category="type-mismatch",
+    )
+
+
+def _scan_index_bounds(expr, lens: dict, filename: str) -> None:
+    """Walk one expression, refusing a `List` index that is provably outside
+    `0 .. len - 1`. `lens` maps a name in scope to the length of the list
+    literal it was bound to.
+
+    Unrecognized node types are skipped rather than guessed at: a shape this
+    walk does not know is an unchecked index (a gap), never a wrong refusal."""
+    if isinstance(expr, ExprIndex):
+        index = _index_const(expr.index)
+        if index is not None:
+            length = _indexed_len(expr.target, lens)
+            if length is not None and not 0 <= index < length:
+                _refuse_index_bounds(filename, expr.line, index, length)
+        _scan_index_bounds(expr.target, lens, filename)
+        _scan_index_bounds(expr.index, lens, filename)
+    elif isinstance(expr, ExprBin):
+        _scan_index_bounds(expr.left, lens, filename)
+        _scan_index_bounds(expr.right, lens, filename)
+    elif isinstance(expr, ExprUn):
+        _scan_index_bounds(expr.operand, lens, filename)
+    elif isinstance(expr, ExprCall):
+        _scan_index_bounds(expr.callee, lens, filename)
+        for arg in expr.args:
+            _scan_index_bounds(arg, lens, filename)
+    elif isinstance(expr, (ExprField, ExprOptField)):
+        _scan_index_bounds(expr.target, lens, filename)
+    elif isinstance(expr, ExprOptCall):
+        _scan_index_bounds(expr.target, lens, filename)
+        for arg in expr.args:
+            _scan_index_bounds(arg, lens, filename)
+    elif isinstance(expr, ExprIf):
+        _scan_index_bounds(expr.cond, lens, filename)
+        _scan_index_bounds(expr.then, lens, filename)
+        _scan_index_bounds(expr.otherwise, lens, filename)
+    elif isinstance(expr, ExprList):
+        for item in expr.items:
+            _scan_index_bounds(item, lens, filename)
+    elif isinstance(expr, ExprRecord):
+        for _, value in expr.fields:
+            _scan_index_bounds(value, lens, filename)
+    elif isinstance(expr, ExprRecordUpdate):
+        _scan_index_bounds(expr.base, lens, filename)
+        for _, value in expr.updates:
+            _scan_index_bounds(value, lens, filename)
+    elif isinstance(expr, ExprEndorse):
+        _scan_index_bounds(expr.expr, lens, filename)
+    elif isinstance(expr, Interp):
+        for kind, part in expr.parts:
+            if kind == "expr":
+                _scan_index_bounds(part, lens, filename)
+    elif isinstance(expr, ExprArrow):
+        # an arrow body is either an expression or a statement block; a block
+        # is checked by `_scan_index_bounds_body`, which owns the scoping
+        _scan_index_bounds_body_of(expr.body, lens, filename)
+    elif isinstance(expr, ExprMatch):
+        _scan_index_bounds(expr.scrutinee, lens, filename)
+        for _, _, arm_body in expr.arms:
+            _scan_index_bounds_body_of(arm_body, lens, filename)
+    elif isinstance(expr, ExprBlockArm):
+        _scan_index_bounds_body_of(expr, lens, filename)
+
+
+def _scan_index_bounds_body_of(node, lens: dict, filename: str) -> None:
+    """Dispatch a body position that is either an expression or a statement
+    block. A block gets a child scope: its own `let`s must not leak out."""
+    if isinstance(node, ExprBlockArm):
+        inner = dict(lens)
+        _scan_index_bounds_body(node.stmts, inner, filename)
+        _scan_index_bounds(node.tail, inner, filename)
+    elif isinstance(node, list):
+        inner = dict(lens)
+        _scan_index_bounds_body(node, inner, filename)
+    elif node is not None:
+        _scan_index_bounds(node, lens, filename)
+
+
+def _scan_index_bounds_body(stmts: list, lens: dict, filename: str) -> None:
+    """Walk a statement list in order, tracking which names are bound to a list
+    literal of a known length. A binding is forgotten the moment it is
+    reassigned or shadowed, so a stale length can never refuse a live program.
+
+    Statement kinds this walk does not know are skipped (a gap, not a wrong
+    refusal); the acquisition-shaped kinds never appear in the fn/test/prop-test
+    bodies this pass is run over."""
+    for stmt in stmts:
+        if isinstance(stmt, LetStmt):
+            _scan_index_bounds(stmt.value, lens, filename)
+            # Only an IMMUTABLE binding is tracked. `var` is excluded because a
+            # nested block can reassign it (`var xs = []` … `xs = xs.push(v)`
+            # inside a `while`), and this walk gives each nested block its own
+            # scope copy — so the enclosing scope would keep a stale length and
+            # refuse a live program. A `let` binds once and cannot be reassigned,
+            # so its literal length is true for the whole scope.
+            if isinstance(stmt.value, ExprList) and not stmt.mutable:
+                lens[stmt.name] = len(stmt.value.items)
+            else:
+                lens.pop(stmt.name, None)
+        elif isinstance(stmt, LetPatternStmt):
+            _scan_index_bounds(stmt.value, lens, filename)
+            # a destructured binding has parts whose lengths are not tracked
+            for name in _pattern_bound_names(stmt.pattern):
+                lens.pop(name, None)
+        elif isinstance(stmt, AssignStmt):
+            _scan_index_bounds(stmt.value, lens, filename)
+            # only a `var` is assignable, and `var` is never tracked, so an
+            # assignment can only ever forget a name
+            lens.pop(stmt.name, None)
+        elif isinstance(stmt, (ExprStmt, AssertStmt, AwaitStmt)):
+            _scan_index_bounds(stmt.expr, lens, filename)
+        elif isinstance(stmt, FailStmt):
+            _scan_index_bounds(stmt.message, lens, filename)
+        elif isinstance(stmt, ReturnStmt):
+            if stmt.expr is not None:
+                _scan_index_bounds(stmt.expr, lens, filename)
+        elif isinstance(stmt, IfStmt):
+            _scan_index_bounds(stmt.cond, lens, filename)
+            # each arm is its own block, exactly as `_lower_pure_stmt` scopes it
+            _scan_index_bounds_body(stmt.then, dict(lens), filename)
+            if stmt.otherwise:
+                _scan_index_bounds_body(stmt.otherwise, dict(lens), filename)
+        elif isinstance(stmt, WhileStmt):
+            _scan_index_bounds(stmt.cond, lens, filename)
+            _scan_index_bounds_body(stmt.body, dict(lens), filename)
+        elif isinstance(stmt, ForStmt):
+            _scan_index_bounds(stmt.iterable, lens, filename)
+            inner = dict(lens)
+            inner.pop(stmt.bind, None)
+            _scan_index_bounds_body(stmt.body, inner, filename)
+        elif isinstance(stmt, LetEffect):
+            _scan_index_bounds(stmt.acquire, lens, filename)
+            if isinstance(stmt.acquire, SpawnExpr):
+                for value in stmt.acquire.config.values():
+                    _scan_index_bounds(value, lens, filename)
+            _scan_index_bounds(stmt.undo, lens, filename)
+            for setup in stmt.setup:
+                _scan_index_bounds_body([setup], dict(lens), filename)
+        # ---- component activation bodies (the one place `let … = effect { … }`
+        # and the rest of the action statements are legal). A component body is
+        # an action list, so only the fields that can carry an index expression
+        # are walked; `timer.interval_ms` is an int literal by construction, and
+        # a `provide` method body is an ordinary statement list.
+        elif isinstance(stmt, EffectStmt):
+            _scan_index_bounds(stmt.acquire, lens, filename)
+            if isinstance(stmt.acquire, SpawnExpr):
+                for value in stmt.acquire.config.values():
+                    _scan_index_bounds(value, lens, filename)
+            _scan_index_bounds(stmt.undo, lens, filename)
+            for setup in stmt.setup:
+                _scan_index_bounds_body([setup], dict(lens), filename)
+        elif isinstance(stmt, EmitStmt):
+            _scan_index_bounds(stmt.expr, lens, filename)
+            _scan_index_bounds(stmt.compensate, lens, filename)
+            _scan_index_bounds(stmt.approval, lens, filename)
+        elif isinstance(stmt, LetApprovalStmt):
+            _scan_index_bounds(stmt.request, lens, filename)
+        elif isinstance(stmt, TimerStmt):
+            _scan_index_bounds_body(stmt.body, dict(lens), filename)
+        elif isinstance(stmt, StreamIterStmt):
+            _scan_index_bounds(stmt.subject, lens, filename)
+            inner = dict(lens)
+            inner.pop(stmt.bind, None)
+            _scan_index_bounds_body(stmt.body, inner, filename)
+        elif isinstance(stmt, ProvideStmt):
+            for method in stmt.methods:
+                inner = dict(lens)
+                for param in method.params:
+                    inner.pop(param, None)
+                _scan_index_bounds_body(method.body, inner, filename)
+
+
+def check_list_index_bounds(stmts: list, filename: str) -> None:
+    """Refuse a `List` index that is statically outside `0 .. len - 1`
+    (roadmap item 485, issue #938). Runs over a body before it is lowered."""
+    _scan_index_bounds_body(stmts, {}, filename)
+
+
+def _pattern_bound_names(pattern) -> list[str]:
+    """Every name a `let` destructuring pattern binds. Both shapes are
+    `list[str]`-valued, so no element of a destructured binding is ever a list
+    literal whose length this pass could track."""
+    if isinstance(pattern, RecordPattern):
+        return list(pattern.fields)
+    if isinstance(pattern, ListPattern):
+        names = list(pattern.binds)
+        if pattern.rest:
+            names.append(pattern.rest)
+        return names
+    return []
 
 
 def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: list, filename: str,
@@ -10634,6 +10905,10 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             raise RevlError(filename, stmt.line, "unexpected statement in component body")
         return provide_seen_line
 
+    # an activation body is the one place `let x = effect { …setup…; acq }` is
+    # legal, so it is the one place the `setup` statements can carry an index
+    # this pass has to bound (item 485)
+    check_list_index_bounds(comp.body, filename)
     for stmt in comp.body:
         if isinstance(stmt, HandoffStmt):
             # `handoff <key>: <Type>` (roadmap item 53): the verified state

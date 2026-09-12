@@ -105,7 +105,7 @@ was corrected by hand and had drifted back within a day.
 | composition-layers.md | needs-work | 20 |  |
 | composition-rows.md | needs-work | 23 |  |
 | conformance.md | needs-work | 0 |  |
-| contract-errata.md | needs-work | 42 | yes |
+| contract-errata.md | needs-work | 50 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
@@ -179,7 +179,7 @@ was corrected by hand and had drifted back within a day.
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 17 |  |
 | state-handoff.md | needs-work | 22 |  |
-| stdlib-2.0.md | current | 82 | yes |
+| stdlib-2.0.md | current | 85 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 16 |  |

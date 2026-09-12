@@ -644,9 +644,10 @@ until then the tier documents "faults with `unreachable`, no payload".
 A private review (issue #549) caught a cluster of stdlib operations whose
 emitters disagreed with the reference. Each is now closed. The ones with a
 value-or-fault verdict (`split("")`, `"+7".to_int()`, `div_trunc(Int.MIN, -1)`,
-a negative slice bound, a negative list index) are asserted to AGREE on every
-tier in `tests/test_cross_tier_execution.py` (`AGREED_549`); `Str + Int` is
-closed by uniform frontend rejection (below).
+a negative slice bound) are asserted to AGREE on every tier in
+`tests/test_cross_tier_execution.py` (`AGREED_549`); `Str + Int` and, since
+issue #938, a statically-bounded list index are closed by uniform frontend
+rejection (below).
 
 - **`split("")` counted UTF-16 units on TypeScript and Java** (closed). An
   empty separator splits by code point (docs/stdlib-2.0.md §split), so an
@@ -679,17 +680,24 @@ closed by uniform frontend rejection (below).
   yields the same one element. Asserted in `AGREED_549`
   ("negative slice bounds are end-relative everywhere", verdict `pass`).
 - **A negative list index diverged: py read the wrapped last element, ts read
-  `undefined`, go/rust/java faulted** (closed, uniform fault). `xs[-1]` has no
-  agreed reading — JS bracket indexing is not end-relative (`xs[-1]` is
-  `undefined`, not the last element), so the only close that makes every tier
-  agree without pervasive runtime surgery is the FAULT the original reference
-  names and that go/rust/java already take. End-relative indexing was rejected
-  as disproportionate: it would need a bounds-checked indexer on the hottest
-  read path of ts AND go/rust/java, and rust's index read is woven through its
-  borrow/clone machinery. Instead a List subscript now routes through
+  `undefined`, go/rust/java faulted** (closed, uniform fault — and, since issue
+  #938, refused at the frontend whenever the index is statically bounded).
+  `xs[-1]` has no agreed reading — JS bracket indexing is not end-relative
+  (`xs[-1]` is `undefined`, not the last element), so the only close that makes
+  every tier agree without pervasive runtime surgery is the FAULT the original
+  reference names and that go/rust/java already take. End-relative indexing was
+  rejected as disproportionate: it would need a bounds-checked indexer on the
+  hottest read path of ts AND go/rust/java, and rust's index read is woven
+  through its borrow/clone machinery. Instead a List subscript routes through
   `_revl_index` (python) / `revlIndex` (TypeScript), each throwing on a
-  negative index the way go/rust/java panic. Asserted in `AGREED_549`
-  ("negative list index faults everywhere", verdict `fail`).
+  negative index the way go/rust/java panic. **That fault is now the answer
+  only for the index the checker cannot bound**: issue #938 added a frontend
+  refusal for an index the checker CAN bound, so `xs[-1]` and `["a"][5]` are a
+  coded `T1` compile error on every tier (see "Static list-index bounds" below),
+  while `xs[i]` still faults at runtime. Asserted in
+  `tests/test_list_index_bounds_938.py` (the bound case) and recorded as the
+  residual divergence in `tests/test_cross_tier_execution.py` (the unbounded
+  one).
 - **`Str + Int` scattered across every tier** (closed by rejection). The
   frontend accepted a mixed `Str + <non-Str>` and left the operand to the
   tiers, which disagreed: python raised a `TypeError`, go REFUSED to compile
@@ -705,6 +713,53 @@ closed by uniform frontend rejection (below).
 With the value-or-fault divergences agreeing on every tier (`AGREED_549`) and
 `Str + Int` refused uniformly at the frontend, every #549 divergence is now
 closed — none remains pinned in `DIVERGENCES`.
+
+### Static list-index bounds (issue #938, roadmap item 486)
+
+The `Str` arm of the checker already refused a literal index on a known
+receiver (`"ab"[9]` is `Str has no index operator`, a coded `T1`), while the
+`List` arm accepted every index and left the outcome to the tiers — which
+disagreed exactly as the negative-index case did: py/go/rust/java fault, ts
+reads `undefined`, wasm reads `0`. So `["a"][5]` was silent at the frontend and
+non-uniform at the back, which is what made the silence read as a gap rather
+than a decision.
+
+The close is the *same* one `Str` already takes, applied where the length is
+knowable: an index that is a foldable integer literal — `5`, `0 - 1`, `2 * 3`
+— against a `List` whose length the checker can see (a list literal, or an
+**immutable** `let`-bound name) is refused at the frontend:
+
+```
+index 5 is out of range for a 1-element `List` — the only valid indexes are 0 .. 0
+```
+
+The refusal is coded `T1` / `type-mismatch`, carries a line and a hint, and
+runs over a fn / test / prop-test body and a component activation body *before*
+it is lowered, so a refused program never reaches an emitter
+(`check_list_index_bounds` in `src/revl/lower.py`).
+
+This is deliberately **not** a bounds analysis. An index the checker cannot
+fold — `xs[i]`, `xs[f()]` — is untouched and still faults at runtime, which is
+what `tests/test_cross_tier_execution.py` records as the residual per-tier
+divergence needing "a static emitted-code guard per tier".
+
+Two soundness rules keep the pass from refusing a program that runs. **Only an
+immutable `let` binding is tracked.** A `var` is excluded outright, because a
+nested block can grow it (`var inner = []` … `inner = inner.push(v)` inside a
+`while`) and the walk gives each nested block its own scope copy, so the
+enclosing scope would keep a stale length and refuse a live read — which is
+exactly how the pass first refused the self-host compiler's own
+`selfhost/parser.rvl`. A `let` binds once and cannot be reassigned, so its
+literal length holds for the whole scope. **And any AST shape the walk does not
+recognize is skipped rather than guessed at**, so an uncovered position is a
+gap rather than a wrong refusal.
+
+The emitter-side guards (`_revl_index` in `backends/python/emit.py`, `revlIndex`
+in `backends/typescript/emit.py`) stay exactly as they are: they are the whole
+answer for the unbounded index, and the frontend refusal is strictly upstream
+of them.
+
+Asserted in `tests/test_list_index_bounds_938.py`.
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
