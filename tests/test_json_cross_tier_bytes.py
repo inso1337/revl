@@ -171,3 +171,153 @@ def test_go_record_round_trips_after_construct():
     if status == "skip":
         pytest.skip(f"go: {message}")
     assert status == "pass", f"go record round-trip broke: {message}"
+
+
+# ---------------------------------------------------------------------------
+# A non-finite Float is REFUSED, never encoded (item 481)
+# ---------------------------------------------------------------------------
+#
+# `json_stringify` is `pure`, so the byte-equality guarantee above is a
+# requirement rather than a nicety. A non-finite `Float` is a reachable VALUE
+# and not exotic input — `/` is IEEE true division on every tier, so `1.0/0.0`
+# is inf and `0.0/0.0` is nan — and it used to reach FOUR different encodings:
+#
+#   py    `Infinity` / `NaN` — not JSON at all (json.dumps defaults to
+#         allow_nan=True), which poisons a strict downstream parser
+#   ts    `null` — JSON.stringify's silent substitution
+#   rust  `null` — serde_json's `From<f64>` maps a non-finite f64 to Null
+#   go    the EMPTY string — `Encoder.Encode`'s error was discarded, so a
+#         signature over "nothing" was returned where an encoding was promised
+#
+# A non-finite Float has no JSON spelling (RFC 8259 section 6), and the
+# frontend already refuses a non-finite Float LITERAL for exactly that reason
+# (item 312). These probes pin the same refusal on the RUNTIME value, which the
+# literal check structurally cannot see.
+#
+# The value is passed INLINE as the argument, because that is the path that
+# boxes it for the `Any` parameter (`backends/rust/emit.py::_coerce_any_arg`,
+# where the fix lives). A `fn v() -> Any { ... }` wrapper is deliberately NOT
+# used: the rust emitter does not box a Float on the way out of an
+# `Any`-returning fn at all, so such a probe fails to compile on rust for a
+# FINITE float too (a pre-existing, orthogonal gap, not this finding).
+NON_FINITE = [
+    ("inf", "1.0/0.0"),
+    ("neg_inf", "-1.0/0.0"),
+    ("nan", "0.0/0.0"),
+]
+
+#: Each tier's OWN refusal text. Asserting on it is what keeps these tests
+#: non-vacuous: before the fix every tier ALREADY failed a sentinel probe,
+#: because it substituted a wrong string rather than refusing, so
+#: `status != "pass"` alone cannot tell a refusal from the old substitution.
+#: Only the py and go strings are the host stdlib's; ts and rust are this
+#: repo's own text.
+REFUSAL_TEXT = {
+    "py": "Out of range float values are not JSON compliant",
+    "ts": "a non-finite Float has no JSON representation",
+    "rust": "a non-finite Float has no representation in a dynamic value",
+    "go": "json_stringify: json: unsupported value",
+}
+
+ALL_TIERS = ["py", "ts", "rust", "go"]
+
+
+def _run_program(tier: str, imports: str, decl: str, body: str,
+                 expected: str) -> tuple[str, str]:
+    """Compile a probe whose `out()` is *body* and run it on *tier*,
+    asserting `out() == expected`. `imports` is the `use` name list, spelled
+    per probe so no probe carries an unused import."""
+    literal = expected.replace("\\", "\\\\").replace('"', '\\"')
+    src = (
+        f'use "stdlib/json.rvl" {{ {imports} }}\n'
+        f"{decl}"
+        f"pub fn out() -> Str {{ {body} }}\n"
+        f'test "canonical" {{ assert out() == "{literal}" }}\n'
+    )
+    ir = compile_source(src, "json_probe.rvl",
+                        modules={"stdlib/json.rvl": STDLIB})
+    return RUNNERS[tier](ir)
+
+
+def _run_inline(tier: str, arg: str, expected: str) -> tuple[str, str]:
+    """Assert `json_stringify(<arg>) == expected` on *tier*."""
+    return _run_program(tier, "json_stringify", "",
+                        f"return json_stringify({arg})", expected)
+
+
+@pytest.mark.parametrize("name,arg", NON_FINITE, ids=[c[0] for c in NON_FINITE])
+@pytest.mark.parametrize("tier", ALL_TIERS)
+def test_a_non_finite_float_is_refused_not_encoded(tier, name, arg, capsys):
+    """Every tier refuses `json_stringify(<non-finite Float>)`, and says so.
+
+    The sentinel expectation is deliberately unreachable: the point is that the
+    tier neither returns it NOR returns the bytes it used to substitute. The
+    refusal text is asserted separately, so a future change that swaps one
+    wrong encoding for another still reddens here."""
+    status, message = _run_inline(tier, arg, "SENTINEL")
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert status != "pass", (
+        f"{tier} encoded {name!r} instead of refusing it ({message})")
+    assert REFUSAL_TEXT[tier] in output, (
+        f"{tier} failed on {name!r} without its refusal text — a substitution "
+        f"rather than a refusal?\n--- output ---\n{output[-3000:]}")
+
+
+@pytest.mark.parametrize("name,arg", NON_FINITE, ids=[c[0] for c in NON_FINITE])
+@pytest.mark.parametrize("tier", ["py", "ts", "go"])
+def test_a_non_finite_float_inside_a_container_is_refused(tier, name, arg,
+                                                          capsys):
+    """A non-finite Float nested in a list is refused too — the encoding walks
+    the whole value, so a top-level-only guard would not be a fix. rust is
+    excluded on purpose: it does not box a CONTAINER argument into the dynamic
+    representation at all, so `json_stringify([1.5])` already fails there for a
+    finite float. That is a pre-existing, orthogonal boundary documented in
+    docs/stdlib-json.md, not part of this finding."""
+    status, message = _run_inline(tier, f"[{arg}]", "SENTINEL")
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert status != "pass", (
+        f"{tier} encoded [{name}] instead of refusing it ({message})")
+    assert REFUSAL_TEXT[tier] in output, (
+        f"{tier} failed on [{name!r}] without its refusal text — a "
+        f"substitution rather than a refusal?\n--- output ---\n{output[-3000:]}")
+
+
+@pytest.mark.parametrize("tier", ALL_TIERS)
+def test_a_finite_computed_float_still_stringifies(tier):
+    """The control, and the reason the refusal is not a blanket ban: an ordinary
+    COMPUTED float — the same `/` that can produce inf — still stringifies to the
+    canonical bytes on every tier. On rust this exercises the checked
+    `serde_json::Number::from_f64` path with a `Some`, so the new branch is
+    proved to pass finite values through rather than refuse them."""
+    status, message = _run_inline(tier, "1.0/4.0", "0.25")
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} refused a finite computed float: {message}"
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("tier", ALL_TIERS)
+def test_the_parse_side_rejects_the_non_finite_constants(tier, literal):
+    """The read half of the same rule: `NaN`, `Infinity` and `-Infinity` are not
+    JSON (RFC 8259 section 6) and must be an `Err` on every tier.
+
+    py's `json.loads` was the sole tier that accepted them (its `parse_constant`
+    hook defaults to passing them through), so `json_try_parse("NaN")` was `Ok`
+    on py and `Err` on ts/rust/go. Asserted through the TOTAL wrapper so the
+    probe needs no error handling, and so the check is the same on all four
+    tiers. A tier that accepts the constant returns "ACCEPTED" and reddens."""
+    status, message = _run_program(
+        tier, "json_try_parse", "",
+        'return match json_try_parse("%s") { Ok(_) => "ACCEPTED", '
+        'Err(_) => "REFUSED" }' % literal,
+        "REFUSED")
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", (
+        f"{tier} accepted the non-finite JSON constant {literal!r}: {message}")

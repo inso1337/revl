@@ -69,6 +69,28 @@
 //     -0.25) are byte-identical; a WHOLE-NUMBER float (1.0 vs 1), -0.0, or an
 //     extreme-exponent float can still format differently between the two
 //     runtimes — canonicalize integral quantities as `Int`, not `Float`.
+//   * A NON-FINITE Float (inf/-inf/nan) is REFUSED, never encoded (item 481).
+//     It is a reachable VALUE, not exotic input — `/` is IEEE true division on
+//     every tier (docs/arithmetic.md), so `1.0/0.0` is inf, and the py
+//     emitter's `_revl_div` manufactures exactly that so py matches the rest.
+//     It has no JSON spelling (RFC 8259 §6 has no NaN/Infinity token), and the
+//     tiers disagreed four ways: py's default `allow_nan=True` emitted the
+//     bare tokens `Infinity`/`NaN` (INVALID JSON), ts `JSON.stringify`
+//     silently substituted `null`, rs mapped it to `null` via
+//     `serde_json::Value::from`, and go discarded `Encoder.Encode`'s error and
+//     returned the EMPTY STRING — a signature over nothing. All four now
+//     refuse (py `allow_nan=False`; the ts replacer throws; the @go body
+//     panics on `Encode`'s error; the rust emitter boxes a Float through
+//     `serde_json::Number::from_f64`, which is `None` for a non-finite input,
+//     instead of the silent `From<f64>` mapping). This is the same policy the
+//     frontend already applies to a non-finite Float LITERAL (item 312) — the
+//     literal was refused while the runtime-computed value was not, which is
+//     why the divergence survived. On the PARSE side the same constants are
+//     refused and only py needed changing: serde_json and Go's encoding/json
+//     are strict, and the @ts parser has no `N`/`I` production, so py's
+//     `json.loads` (`parse_constant` unset by default, so `json_parse("NaN")`
+//     returned a float) was the sole exception; its body now passes a
+//     `parse_constant` that raises.
 //   * GO RECORD CAVEAT — a SEPARATE, deeper defect that this @go body cannot
 //     fix: a revl record lowers to a Go struct whose fields are UNEXPORTED
 //     (lowercase) with no `json:` tags, so `encoding/json` drops them and a
@@ -78,7 +100,21 @@
 //     taught to export + tag record fields (its own roadmap item).
 
 pub extern pure fn json_parse(s: Str) -> Any
-  = @py { import json; return json.loads(s) }
+  = @py {
+    # RFC 8259 section 6 has no `NaN`/`Infinity`/`-Infinity` token, and every
+    # other tier's decoder is strict: `serde_json::from_str` and Go's
+    # `encoding/json` both reject them, and this file's @ts parser never
+    # admits them (no `N`/`I` production). Python's `json` is the sole
+    # exception — `parse_constant` is unset by default, so `json.loads("NaN")`
+    # returns a float where the other tiers return a decode error. A `pure`
+    # fn must not diverge per tier (docs/syntax-2.0.md §3.4), so refuse the
+    # constants here rather than accept a document three tiers reject.
+    import json
+    def _revl_reject_constant(name):
+        raise ValueError("json_parse: " + name +
+                         " is not valid JSON (RFC 8259 section 6)")
+    return json.loads(s, parse_constant=_revl_reject_constant)
+  }
   = @ts {
     // The builtin JSON.parse decodes every JSON number to a JS number (f64),
     // so an integer past 2^53 comes back rounded - a silent precision loss on
@@ -208,8 +244,18 @@ pub extern pure fn json_stringify(v: Any) -> Str
     # json.dumps(v) inserts ', '/': ' and escapes non-ASCII, both of which
     # diverge from ts/go byte-for-byte. See the canonical-form contract in
     # this file's header. (Comments here are '#': a @py body is real Python.)
+    # allow_nan=False (item 481): a non-finite Float is a reachable VALUE, not
+    # a throw — `/` is IEEE true division, so `1.0/0.0` is `inf` on every tier
+    # (docs/arithmetic.md; the py emitter's `_revl_div` manufactures it
+    # precisely so py matches the others). It has no JSON spelling: py's
+    # default allow_nan=True emits the bare tokens `Infinity`/`NaN`, which are
+    # INVALID JSON (RFC 8259 section 6) and which no other tier produces. The
+    # frontend already refuses a non-finite Float LITERAL (item 312); refuse
+    # the runtime-computed one here too, instead of emitting a document that
+    # only a lenient parser accepts and no other tier would have emitted.
     import json
-    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False)
   }
   = @ts {
     // `Int` maps to JS `bigint` (TYPE_MAP), which `JSON.stringify` refuses
@@ -220,7 +266,18 @@ pub extern pure fn json_stringify(v: Any) -> Str
     // the py tier `json.dumps`. With no bigint present the fast path returns
     // the builtin result unchanged.
     const marks: string[] = [];
-    const wire = JSON.stringify(v, (_k, x) => typeof x === "bigint" ? "@@revlBigInt:" + (marks.push(x.toString()) - 1) + "@@" : x);
+    const wire = JSON.stringify(v, (_k, x) => {
+      // JSON.stringify maps a non-finite number to `null` — a SILENT
+      // substitution of a different value, not a refusal. A non-finite Float
+      // is reachable (`/` is IEEE true division: `1.0/0.0` is `inf` on every
+      // tier, docs/arithmetic.md) and has no JSON spelling (RFC 8259 section
+      // 6). Refuse, matching the py @py body's `allow_nan=False` and the
+      // frontend's existing refusal of a non-finite Float literal (item 312).
+      if (typeof x === "number" && !Number.isFinite(x)) {
+        throw new TypeError("json_stringify: a non-finite Float has no JSON representation (RFC 8259 section 6)");
+      }
+      return typeof x === "bigint" ? "@@revlBigInt:" + (marks.push(x.toString()) - 1) + "@@" : x;
+    });
     return marks.length === 0 ? wire : wire.replace(/"@@revlBigInt:(\d+)@@"/g, (_m, i) => marks[Number(i)]);
   }
   = @rs { v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() }
@@ -238,7 +295,15 @@ pub extern pure fn json_stringify(v: Any) -> Str
     var buf bytes.Buffer
     enc := json.NewEncoder(&buf)
     enc.SetEscapeHTML(false)
-    _ = enc.Encode(v)
+    // item 481: `Encode` REFUSES a non-finite Float ("unsupported value:
+    // +Inf") — `encoding/json` is strict JSON. Discarding that error returned
+    // the empty string, so a `pure` fn handed an `inf` produced bytes no
+    // other tier produced (py emitted invalid JSON, ts/rs emitted `null`).
+    // Refuse loudly instead: a non-finite Float is reachable (`/` is IEEE
+    // true division, docs/arithmetic.md) and has no JSON spelling.
+    if err := enc.Encode(v); err != nil {
+        panic("json_stringify: " + err.Error())
+    }
     return string(bytes.TrimRight(buf.Bytes(), "\n"))
   }
 
