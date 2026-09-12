@@ -5,6 +5,25 @@ Inserts `<rootdir>/src` ahead of sys.path only when it actually exists —
 an installed-package environment (no in-tree src/) is left untouched, and
 the backends/*/ suites keep owning their own loader paths (this conftest
 scopes to tests/ only).
+
+Appends `<rootdir>` itself, so a module under tests/ can import a repo-root
+directory. `tools/`, `backends/`, `tests/` and friends are plain directories
+at the repository root with no `__init__.py`, so importing them needs the root
+on sys.path. `python -m pytest` supplies that by prepending the cwd; the
+`pytest` console script does NOT, and the console script is what the
+`root-suite-affected` CI job (`.github/workflows/ci.yml`) and
+`tools/pre_merge.sh` both run. Three modules here import a repo-root directory
+inside a test body -- `tests/test_affected_tests.py` (tools.affected_tests),
+`tests/test_274_navigable_slice2.py` (tests.test_evidence_policy) and
+`tests/test_inverse_capture_by_value.py` (backends.<tier>.emit) -- so under the
+CI invocation they raised `ModuleNotFoundError` instead of checking anything,
+and the affected suite reported a red that had nothing to do with the change
+under test. It looked green locally for two independent reasons: `python -m
+pytest` prepends the cwd, and pytest imports every collected module before
+running any test, so one module that bootstraps the root itself
+(`tests/test_reserved_lexicon_sweep.py`) papered over the others whenever the
+selector picked it too. Appended rather than inserted, so the resolution order
+of everything that already resolved is unchanged.
 """
 
 import importlib.util
@@ -13,10 +32,14 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parents[1] / "src"
+_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _ROOT / "src"
 
 if (_SRC / "revl").is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+if _ROOT.is_dir() and str(_ROOT) not in sys.path:
+    sys.path.append(str(_ROOT))
 
 
 # A test that needs the cordis-py runtime carries its own guard
