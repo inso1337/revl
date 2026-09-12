@@ -89,7 +89,8 @@
 //   * ts  — a self-contained pure-JS SHA-256 core (no host import, exactly as
 //           stdlib/json.rvl ships a pure-JS parser), `globalThis.crypto.
 //           getRandomValues` for the entropy draw (a WHATWG global, synchronous,
-//           no import). Verified against Node's own `crypto` and RFC 4231.
+//           no import), drawn in 65536-byte windows because one call is capped
+//           at that size. Verified against Node's own `crypto` and RFC 4231.
 //   * rs / go / java / wasm — DEFERRED. Each adds its `@<backend>` body here
 //           against that tier's hashing facility.
 //
@@ -284,7 +285,9 @@ pub extern pure fn ct_equal(a: Str, b: Str) -> Bool
 // `n` cryptographic random bytes as 2n lower-case hex chars (Python
 // `secrets.token_hex(n)`). `emission` — an entropy draw is a non-revertible
 // boundary crossing that reads the host CSPRNG (see the header's classification
-// rationale). `n == 0` yields `""`.
+// rationale). `n == 0` yields `""`; a negative `n` is refused on both tiers. The
+// ts tier draws in 65536-byte windows (the WHATWG `getRandomValues` per-call
+// cap), so any `n` the py reference accepts is accepted at the same width.
 pub extern emission fn random_token(n: Int) -> Str
   = @py {
     import secrets
@@ -296,9 +299,21 @@ pub extern emission fn random_token(n: Int) -> Str
     // Number(n): revl `Int` maps to a JS `bigint` on the ts backend, and
     // `new Uint8Array(bigint)` throws (TypeError: Cannot convert a BigInt value
     // to a number) — the Uint8Array length must be a JS number.
-    const buf = new Uint8Array(Number(n));
-    globalThis.crypto.getRandomValues(buf);
+    // ONE getRandomValues call is capped at 65536 bytes — a WHATWG limit that
+    // both browsers and Node enforce (QuotaExceededError) — while the py tier's
+    // `secrets.token_hex` has no ceiling. Draw in 65536-byte windows so every `n`
+    // the py reference accepts is accepted here too, at the same 2n width.
+    // The negative guard is explicit: the windowed loop would otherwise fall
+    // through to "" and silently disagree with the py tier's refusal.
+    const total = Number(n);
+    if (total < 0) {
+      throw new RangeError("random_token: n must be non-negative");
+    }
     let hex = "";
-    for (const x of buf) hex += x.toString(16).padStart(2, "0");
+    for (let off = 0; off < total; off += 65536) {
+      const buf = new Uint8Array(Math.min(65536, total - off));
+      globalThis.crypto.getRandomValues(buf);
+      for (const x of buf) hex += x.toString(16).padStart(2, "0");
+    }
     return hex;
   }
