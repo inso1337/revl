@@ -141,7 +141,7 @@ was corrected by hand and had drifted back within a day.
 | import-wit.md | needs-work | 29 |  |
 | int32-proposal.md | needs-work | 8 |  |
 | integer-proposal.md | needs-work | 20 |  |
-| interchange-format.md | needs-work | 8 |  |
+| interchange-format.md | needs-work | 10 |  |
 | interop-bridge.md | needs-work | 51 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
 | mcp-bridge.md | needs-work | 76 |  |

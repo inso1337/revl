@@ -48,6 +48,10 @@ def audit_report(ir: dict) -> dict:
          # item 373: carry the reach so the drift gate can read it. Absent unless
          # declared — a bare emission's audit entry is byte-identical to today's.
          **({"reach": ext["reach"]} if ext.get("reach") else {}),
+         # item 484: carry the `deferred` modifier, so `revl_audit`'s entry says
+         # whether a crossing fires now or is held to the commit prompt. Must
+         # match `__main__`'s entry key-for-key. Absent unless declared.
+         **({"deferred": True} if ext.get("deferred") else {}),
          # item 309: carry the idempotency register so the `--recovery` view and
          # the register/idempotent-teardown policy floors read it. Absent unless
          # declared — a non-idempotent extern's audit entry is byte-identical.
