@@ -22,6 +22,9 @@ regression that lets any of them through fails loudly here.
 
 from __future__ import annotations
 
+import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -177,6 +180,103 @@ def test_single_quoted_metachars_are_literal():
     assert op["args"] == ["weird$name"]
 
 
+# A `$` or a backtick INSIDE double quotes is STILL a shell expansion — only
+# `'...'` suppresses them. The scanner's "quoted => literal data" premise holds
+# for `;` and every other metacharacter, but NOT for these two, and they are
+# exactly the two that make the real operand unknowable at parse time:
+# `/bin/sh -c 'rm "$(echo x)"'` deletes the file `x`, while the tokenizer records
+# the operand `$(echo x)` — a DIFFERENT path. A `witnessed` verdict there
+# auto-approves a mutation of a path the command does not name, which is the
+# module's catastrophic direction. Found by differential testing against the real
+# shell (`/bin/sh -c`), which is what the `emission` fallback actually runs.
+_DOUBLE_QUOTED_EXPANSIONS = [
+    'rm "$(echo x)"',           # command substitution in "..." — sh removes `x`
+    'rm "`echo x`"',            # backtick command substitution in "..."
+    'rm "$HOME/secret"',        # parameter expansion in "..."
+    'rm "${HOME}/secret"',      # braced parameter expansion in "..."
+    'mv "${SRC}" dst',          # the source path is a variable
+    'cp "${IFS}x" dst',         # expansion that also rewrites word splitting
+    'mv "a$(rm -rf /)b" dst',   # substitution spliced into the middle of a word
+    'touch "$F"',               # create_only write of an unknown path
+    'mkdir "$(pwd)/x"',         # substitution as a path component
+    'rm "$(cat targets)"',      # the substitution picks the file to delete
+]
+
+
+@pytest.mark.parametrize("cmd", _DOUBLE_QUOTED_EXPANSIONS)
+def test_double_quoted_expansion_refuses(cmd):
+    assert "double quotes" in _emission(cmd)
+
+
+def test_double_quoted_expansion_runs_a_different_operand(tmp_path):
+    """The refusal above is not theoretical — it is the shell's actual behaviour.
+    `/bin/sh` substitutes inside double quotes, so the path the command touches
+    is not the path the classifier would have planned and recorded."""
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("no /bin/sh on PATH")
+    (tmp_path / "x").write_text("A")
+    (tmp_path / "$(echo x)").write_text("B")  # the literal name the plan records
+    done = subprocess.run([sh, "-c", 'rm "$(echo x)"'], cwd=tmp_path,
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert not (tmp_path / "x").exists()      # the shell removed `x`
+    assert (tmp_path / "$(echo x)").exists()  # ...not the name the plan records
+    assert sc.classify('rm "$(echo x)"')["verdict"] == "emission"
+
+
+# A backslash-`$` / backslash-backtick inside double quotes: POSIX deletes the
+# backslash (a backslash escapes only `$`, backtick, `"` and itself there), so
+# `"a\$b"` is the word `a$b`, while `shlex` keeps it and yields `a\$b`. Two
+# different words — the plan would name a path the command never mentions.
+_ESCAPED_EXPANSIONS_IN_QUOTES = [
+    'mv "a\\$b" dst',
+    'mv "a\\`b" dst',
+    'rm "\\$HOME"',
+    'touch "x\\`y`"',
+]
+
+
+@pytest.mark.parametrize("cmd", _ESCAPED_EXPANSIONS_IN_QUOTES)
+def test_escaped_expansion_in_double_quotes_refuses(cmd):
+    assert "double quotes" in _emission(cmd)
+
+
+def test_escaped_expansion_backslash_is_eaten_by_the_shell():
+    """Positive control for the refusal above, against the real shell and against
+    the tokenizer: the shell consumes the backslash, `shlex` does not, so the two
+    disagree on the word — which is why the plan is refused rather than recorded.
+    """
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("no /bin/sh on PATH")
+    done = subprocess.run([sh, "-c", 'set -- "a\\$b"; printf %s "$1"'],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == "a$b"                      # shell eats the backslash
+    assert shlex.split('"a\\$b"', posix=True) == ["a\\$b"]  # shlex keeps it
+
+
+def test_double_quoted_non_expansion_metachars_still_lower():
+    """The positive control that scopes the refusal: every metacharacter OTHER
+    than `$`/backtick IS literal data inside `"..."`, so those commands must keep
+    lowering (a fix that refused all double quotes would be over-broad)."""
+    for cmd, args in [
+        ('mv "a;b" c', ["a;b", "c"]),
+        ('mv "a|b" c', ["a|b", "c"]),
+        ('mv "a>b" c', ["a>b", "c"]),
+        ('mv "a*b" c', ["a*b", "c"]),
+        ('mv "a?b" c', ["a?b", "c"]),
+        (r'mv "a\"b" c', ['a"b', "c"]),
+        (r'mv "a\\b" c', ["a\\b", "c"]),
+        (r'mv "a\;b" c', ["a\\;b", "c"]),
+        (r'mv "a\ b" c', ["a\\ b", "c"]),
+        ("mv 'a\\$b' c", ["a\\$b", "c"]),   # single quotes: no escape at all
+    ]:
+        (op,) = _witnessed(cmd)
+        assert op["args"] == args, (cmd, op)
+
+
 def test_leading_and_trailing_whitespace_tolerated():
     (op,) = _witnessed("   mv a b   ")
     assert op["witnessed"] == "move"
@@ -198,6 +298,13 @@ ADVERSARIAL = [
     "cat x | sh",                    # pipeline into a shell
     "rm $(cat targets)",             # command substitution
     "rm `cat targets`",              # backtick command substitution
+    'rm "$(cat targets)"',           # substitution INSIDE double quotes (still a
+    'rm "`cat targets`"',            #   shell feature — only '...' suppresses it)
+    'rm "$HOME/secret"',             # parameter expansion inside double quotes
+    'mv "${SRC}" dst',               # braced parameter expansion in "..."
+    'touch "$F"',                    # unknown path in a create_only write
+    'mv "a\\$b" dst',                # backslash-$ in "...": shell eats the \
+    'mv "a\\`b" dst',                # backslash-backtick in "..."
     "rm *.txt",                       # glob (expansion not provably fs-local)
     "rm a?.txt",                      # glob ?
     "rm file[0-9]",                  # glob character class
