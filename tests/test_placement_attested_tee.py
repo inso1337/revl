@@ -47,7 +47,6 @@ from test_tee_attestation import (  # noqa: E402
     NOW,
     OTHER_BUNDLE,
     OTHER_REGION,
-    PEER_ID,
     PEER_KEY,
     REGION,
     make_offer,
