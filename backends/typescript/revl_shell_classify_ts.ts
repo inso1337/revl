@@ -54,10 +54,14 @@ const ARITY: Record<string, number | null> = {
 }
 
 /** The first shell metacharacter OUTSIDE any quoted span (or a description of a
- * newline / dangling escape / unbalanced quote), or `null` if the command is
- * free of unquoted shell features. The load-bearing safety scan — a
- * metacharacter that is part of a quoted or escaped argument (literal filename
- * data) is allowed through, while one acting as a shell operator is caught.
+ * newline / dangling escape / unbalanced quote / a double-quoted expansion), or
+ * `null` if the command is free of unquoted shell features. The load-bearing
+ * safety scan — a metacharacter that is part of a quoted or escaped *argument*
+ * (literal data) is allowed through, while one acting as a shell operator is
+ * caught. Being purely textual it cannot be fooled by anything the shell would
+ * expand — because it refuses everything the shell would expand, INCLUDING
+ * inside double quotes, where `$` and the backtick are still features (only
+ * `'...'` suppresses them).
  * Peer of py `_first_unquoted_metachar`. */
 function firstUnquotedMetachar(cmd: string): string | null {
   let i = 0
@@ -79,10 +83,33 @@ function firstUnquotedMetachar(cmd: string): string | null {
         // operand would not be the word the command names. Refuse. Mirrors py
         // `_first_unquoted_metachar`.
         if (i + 1 < n && cmd[i + 1] === '\n') return '\\n'
+        // POSIX: inside double quotes a backslash escapes ONLY `$`, backtick,
+        // `"` and `\` — and for `$`/backtick the shell CONSUMES it, so `"a\$b"`
+        // is the word `a$b` while the tokenizer below (shlex's
+        // `escapedquotes='"'` rule) keeps the backslash and yields `a\$b`. The
+        // plan would name a path the command never mentions. Refuse.
+        if (i + 1 < n && (cmd[i + 1] === '$' || cmd[i + 1] === '`')) {
+          return 'escaped-expansion'
+        }
         i += 2
         continue
       }
-      if (c === '"') inDouble = false
+      if (c === '"') {
+        inDouble = false
+        i += 1
+        continue
+      }
+      // DOUBLE quotes do NOT make `$` or the backtick literal — only single
+      // quotes do. Inside `"..."` the shell still performs command substitution
+      // (`"$(id)"`, `"`id`"`), parameter expansion (`"$HOME/x"`, `"${SRC}"`) and
+      // arithmetic, so the operand the tokenizer records is not the path the
+      // command will use. Refusing here is the whole point of the scan: `mv
+      // "$(id)" dst` runs a command whose target the text does not name, and
+      // auto-approving it as `witnessed` (reversible by construction) would
+      // lower an op on a different path than the one that runs. Every OTHER
+      // metacharacter IS literal inside double quotes, so `mv "a;b" c` still
+      // lowers. Mirrors py `_first_unquoted_metachar`.
+      if (c === '$' || c === '`') return 'expansion'
       i += 1
       continue
     }
@@ -232,6 +259,10 @@ export function classify(cmd: unknown): ShellPlan {
     if (meta === 'unbalanced-quote') return emission(cmd, 'unbalanced quotes')
     if (meta === '\\') return emission(cmd, 'dangling backslash escape')
     if (meta === '\\n') return emission(cmd, 'command spans multiple lines')
+    if (meta === 'expansion') return emission(cmd, 'shell expansion inside double quotes')
+    if (meta === 'escaped-expansion') {
+      return emission(cmd, 'escaped expansion inside double quotes')
+    }
     return emission(cmd, `unquoted shell metacharacter ${reprChar(meta)}`)
   }
 

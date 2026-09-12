@@ -58,7 +58,11 @@ Anything with an unquoted shell metacharacter (pipe, ampersand, semicolon, the
 redirect angles, parens, braces, dollar, backtick, star, question mark, bracket,
 tilde, bang, hash) or a newline — pipelines, redirects, command substitution,
 subshells,
-globs, variable expansion, comments, command sequences; a backslash-newline
+globs, variable expansion, comments, command sequences; a `$` or a backtick
+INSIDE DOUBLE QUOTES (they are still expansions there — only `'...'` suppresses
+them); a backslash-`$` or backslash-backtick inside double quotes (the shell
+consumes the backslash, shlex does not, so the two name different words); a
+backslash-newline
 LINE CONTINUATION (the shell deletes the pair and joins the words around it, so
 the operand the tokenizer would produce is not the word the command names — and
 the join crosses quotes, which no tokenizer can express); any flag at all (so
@@ -70,7 +74,24 @@ empty command.
 
 A metacharacter INSIDE quotes is literal data, not a shell feature: `mv "a;b" c`
 lowers (the `;` is part of a filename), while `mv a b ; c` does not. The quote
-scanner below draws exactly that line.
+scanner below draws exactly that line — but the two quote kinds are NOT alike.
+SINGLE quotes make every metacharacter literal; DOUBLE quotes do not, because
+`$` and the backtick stay shell features inside them (`mv "$(id)" dst` runs a
+command, `rm "$HOME/x"` expands a variable, `rm "`cat targets`"` substitutes a
+command). A pure classifier cannot see what those expand to, so the text does
+not prove an fs-local operand and both are refused inside double quotes too.
+`mv "a;b" c` lowers; `mv "$(id)" c` does not.
+
+Two spellings of that same boundary are refused for the sibling reason — the
+tokenized word is not the word the command names:
+
+  * a backslash-NEWLINE LINE CONTINUATION, anywhere (the shell deletes the pair
+    and joins the words around it, and the join crosses quotes);
+  * a backslash-`$` or backslash-backtick INSIDE double quotes: POSIX says a
+    backslash escapes only `$`, backtick, `"` and the backslash itself there, so
+    the shell CONSUMES it (`"a\\$b"` is the word `a$b`) while `shlex` keeps it
+    (`a\\$b`). Naming either would auto-approve an op on a path the command
+    never mentions.
 """
 
 from __future__ import annotations
@@ -99,8 +120,9 @@ _ARITY = {
 
 def _first_unquoted_metachar(cmd: str) -> Optional[str]:
     """Return the first shell metacharacter that appears OUTSIDE any quoted span
-    (or a description of a newline / dangling escape / unbalanced quote), or
-    `None` if the command is free of unquoted shell features.
+    (or a description of a newline / dangling escape / unbalanced quote / a
+    double-quoted expansion), or `None` if the command is free of unquoted shell
+    features.
 
     This is the load-bearing safety scan. It walks the raw string tracking
     single- and double-quote state and honouring backslash escapes, so a
@@ -108,7 +130,8 @@ def _first_unquoted_metachar(cmd: str) -> Optional[str]:
     e.g. a filename containing `;`) is allowed through, while a metacharacter
     acting as a shell operator is caught. Being purely textual it cannot be
     fooled by anything the shell would expand — because it refuses everything the
-    shell would expand.
+    shell would expand, INCLUDING inside double quotes, where `$` and the
+    backtick are still features (only `'...'` suppresses them).
     """
     i = 0
     n = len(cmd)
@@ -132,10 +155,31 @@ def _first_unquoted_metachar(cmd: str) -> Optional[str]:
                 # the text does not prove stays an emission).
                 if i + 1 < n and cmd[i + 1] == "\n":
                     return "\\n"
+                # POSIX: inside double quotes a backslash escapes ONLY `$`,
+                # backtick, `"` and `\` — and for `$`/backtick the shell
+                # CONSUMES it, so `"a\$b"` is the word `a$b` while shlex keeps
+                # the backslash and yields `a\$b`. The plan would name a path the
+                # command never mentions. Refuse rather than name it.
+                if i + 1 < n and cmd[i + 1] in "$`":
+                    return "escaped-expansion"
                 i += 2
                 continue
             if c == '"':
                 in_double = False
+                i += 1
+                continue
+            # DOUBLE quotes do NOT make `$` or the backtick literal — only single
+            # quotes do. Inside `"..."` the shell still performs command
+            # substitution (`"$(id)"`, `` "`id`" ``), parameter expansion
+            # (`"$HOME/x"`, `"${SRC}"`) and arithmetic, so the operand the
+            # tokenizer records is not the path the command will use. Refusing
+            # here is the whole point of the scan: `mv "$(id)" dst` runs a
+            # command whose target the text does not name, and auto-approving it
+            # as `witnessed` (reversible by construction) would lower an op on a
+            # different path than the one that runs. Every OTHER metacharacter
+            # IS literal inside double quotes, so `mv "a;b" c` still lowers.
+            if c == "$" or c == "`":
+                return "expansion"
             i += 1
             continue
         # unquoted context
@@ -211,7 +255,8 @@ def classify(cmd: str) -> dict:
         return _emission(cmd, "empty command")
 
     # (1) Safety scan FIRST: any unquoted shell metacharacter, newline, dangling
-    # escape, or unbalanced quote => this is not a single bare fs command.
+    # escape, unbalanced quote, or a double-quoted expansion => this is not a
+    # single bare fs command.
     meta = _first_unquoted_metachar(cmd)
     if meta is not None:
         if meta == "unbalanced-quote":
@@ -220,6 +265,10 @@ def classify(cmd: str) -> dict:
             return _emission(cmd, "dangling backslash escape")
         if meta == "\\n":
             return _emission(cmd, "command spans multiple lines")
+        if meta == "expansion":
+            return _emission(cmd, "shell expansion inside double quotes")
+        if meta == "escaped-expansion":
+            return _emission(cmd, "escaped expansion inside double quotes")
         return _emission(cmd, f"unquoted shell metacharacter {meta!r}")
 
     # (2) Tokenize. shlex in POSIX mode resolves the quoting/escaping the scanner

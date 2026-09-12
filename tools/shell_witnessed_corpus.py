@@ -41,6 +41,15 @@ CORPUS: list[tuple[str, str]] = [
     ("mv draft.md final.md", "witnessed"),
     ("mv src/old.py src/new.py", "witnessed"),
     ("mv 'my notes.txt' archive.txt", "witnessed"),
+    # positive controls for the double-quote scan: every metacharacter OTHER than
+    # `$`/backtick IS literal inside `"..."`, so these still lower (the refusal
+    # above is scoped to expansions, not to double quotes in general).
+    ('mv "a;b" c', "witnessed"),
+    ('mv "a|b" c', "witnessed"),
+    ('mv "a>b" c', "witnessed"),
+    ('mv "a*b" c', "witnessed"),
+    ('mv "a\\"b" c', "witnessed"),
+    ('mv "a\\;b" c', "witnessed"),
     ("rm scratch.tmp", "witnessed"),
     ("rm build.log", "witnessed"),
     ("rm a.o b.o c.o", "witnessed"),
@@ -68,6 +77,24 @@ CORPUS: list[tuple[str, str]] = [
 
     # --- shell features: pipelines, redirects, substitution, sequences ---
     ("cat setup.py | grep version", "emission"),
+    # `$` and the backtick are STILL shell expansions inside double quotes —
+    # only `'...'` suppresses them. `/bin/sh -c 'rm "$(echo x)"'` deletes the
+    # file `x`, while the tokenizer records the operand `$(echo x)`: a
+    # `witnessed` here would auto-approve a mutation of a DIFFERENT path than
+    # the command names. MUST stay emission.
+    ('rm "$(echo x)"', "emission"),
+    ('rm "`echo x`"', "emission"),
+    ('rm "$HOME/secret"', "emission"),
+    ('rm "${HOME}/secret"', "emission"),
+    ('mv "${SRC}" dst', "emission"),
+    ('cp "${IFS}x" dst', "emission"),
+    ('touch "$F"', "emission"),
+    ('mkdir "$(pwd)/x"', "emission"),
+    # a backslash-`$`/backslash-backtick inside double quotes: POSIX DELETES the
+    # backslash (`"a\$b"` is the word `a$b`), shlex keeps it (`a\$b`) — the two
+    # name different paths, so the plan is refused rather than recorded.
+    ('mv "a\\$b" dst', "emission"),
+    ('mv "a\\`b" dst', "emission"),
     # a backslash-newline line continuation: the shell deletes the pair and
     # joins the words, so the tokenizer's operand is not the word it would run
     ("mv stale\\\nname.txt current.txt", "emission"),
