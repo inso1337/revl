@@ -290,6 +290,21 @@ TARGETS: tuple[Target, ...] = (
                "or to selfhost/*.rvl rewrites it. Regenerate it in the same commit as "
                "the emitter change; a PR that does not is red on drift alone.",),
     ),
+    Target(
+        name="gate-wasm",
+        what="crates/revl-gate-wasm, the gate as a wasm component (item 335)",
+        files=("crates/revl-gate-wasm/",),
+        commands=(("python3", "tools/build_gate_wasm.py"),),
+        check_command=("python3", "tools/build_gate_wasm.py", "--check"),
+        gate="pytest tests/test_gate_wasm_drift.py",
+        notes=("The component INHERITS its frontier id, language version and covered "
+               "layer from crates/revl-gate's provenance instead of restating them, so "
+               "regenerating the rust crate rewrites these bytes too: the two targets "
+               "move together and a PR that refreshes one without the other is red on "
+               "drift alone. No toolchain is needed — the .wasm itself is not committed, "
+               "only the crate source — so this is a pure regenerate-and-compare and it "
+               "runs on every machine.",),
+    ),
 )
 
 BY_NAME = {t.name: t for t in TARGETS}
