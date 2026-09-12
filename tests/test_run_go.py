@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
+from revl import run_go as run_go_module  # noqa: E402
 from revl.run import RUNNABLE_BACKENDS  # noqa: E402
 from revl.run_go import go_runtime_reason  # noqa: E402
 from revl.test import RUNNERS  # noqa: E402
@@ -92,6 +93,57 @@ def test_go_plan_reports_the_tier_as_runnable():
     assert result.returncode == 0, result.stderr
     assert "backend: go" in result.stdout
     assert "not runnable yet" not in result.stdout
+
+
+@pytest.mark.parametrize("marker", run_go_module._DOWNLOAD_MARKERS)
+def test_a_cold_cache_phrase_takes_the_networked_retry(
+        marker, monkeypatch, tmp_path):
+    """Every phrase the resolver reads as "the module is not cached" must be
+    recognized in the casing `go` actually prints it in.
+
+    The probe folds the build output to lower case before comparing it against
+    ``_DOWNLOAD_MARKERS``, which is written in `go`'s own casing — so a needle
+    carrying an upper-case letter could never match. `GOPROXY=off` is the one
+    that does, and it is the phrase a cold cache always prints: the branch was
+    therefore dead for the exact case it exists for, and a cold cache with a
+    perfectly good network reported `go build probe failed: ... module lookup
+    disabled by GOPROXY=off` instead of retrying over the network.
+
+    Nothing here invokes `go`: the build and the proxy probe are both stubbed,
+    so this runs on every interpreter, toolchain or not.
+    """
+    attempts = []
+
+    def _run(cmd, **kwargs):
+        attempts.append((kwargs.get("env") or {}).get("GOPROXY"))
+        first = len(attempts) == 1
+        return subprocess.CompletedProcess(
+            cmd, 1 if first else 0, "",
+            f"probe/probe.go:3:8: {marker}\n" if first else "")
+
+    monkeypatch.setattr(run_go_module.subprocess, "run", _run)
+    monkeypatch.setattr(run_go_module, "_proxy_reachable", lambda: True)
+    assert run_go_module._resolve_probe(tmp_path) == (True, None)
+    assert len(attempts) == 2, "a cold cache must be retried over the network"
+    assert attempts[0] == "off", "the first attempt must resolve offline"
+    assert attempts[1] != "off", "the retry must be allowed to download"
+
+
+def test_a_cold_cache_without_a_proxy_says_what_to_do(monkeypatch, tmp_path):
+    """With no network to fall back on, the resolver names the remedy instead of
+    reporting the raw build failure — the same message a laptop with a cold
+    module cache gets from `revl run --backend go`."""
+
+    def _run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, "", "probe/probe.go:3:8: module lookup disabled by GOPROXY=off\n")
+
+    monkeypatch.setattr(run_go_module.subprocess, "run", _run)
+    monkeypatch.setattr(run_go_module, "_proxy_reachable", lambda: False)
+    ok, reason = run_go_module._resolve_probe(tmp_path)
+    assert ok is False
+    assert "module cache" in reason and "proxy.golang.org" in reason
+    assert "go build probe failed" not in reason
 
 
 # --------------------------------------------------------- with the runtime
