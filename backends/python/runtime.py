@@ -1237,7 +1237,17 @@ def _record(event: str) -> None:
         observer(event)
 
 
-def mark_secret(*values) -> None:
+def declare_secret_types(table) -> None:
+    """Declare the field types of the record types a declared `Secret[T]`
+    reaches, for the redaction walk (item 421 F6).
+
+    Emitted once per module and only when a declared secret type reaches a
+    record, so a module whose secrets are all scalars emits no call and the
+    walk keeps its previous behavior. Type NAMES only — no program data."""
+    confidential.declare_secret_types(table)
+
+
+def mark_secret(*values, _declared=None) -> None:
     """Remember that these values crossed at a declared `Secret[T]` receiver
     (item 421 F6). Emitted at the head of every provide method implementing an
     operation whose IR params carry `secret: true`.
@@ -1249,12 +1259,21 @@ def mark_secret(*values) -> None:
     is exactly the console the audit read the secret off, so the positional
     marking has to fire from the emitted program itself. Registration is
     idempotent and exact-valued, so doing it in both places costs one set
-    insert."""
-    for value in values:
-        confidential.register_secret_tree(value)
+    insert.
+
+    `_declared` is the declared type of each value, positionally, when the
+    emitter knows it. A `Map` and a record are both a `dict` on this tier, so
+    the walk needs it to know whether a key is the caller's data or a field
+    name; `None` for a value whose declared type was not threaded keeps the
+    previous behavior."""
+    for index, value in enumerate(values):
+        declared = None
+        if _declared is not None and index < len(_declared):
+            declared = _declared[index]
+        confidential.register_secret_tree(value, None, declared)
 
 
-def secret_result(fn):
+def secret_result(fn=None, *, _declared=None):
     """Decorator on an extern whose DECLARED return was `Secret[T]`: item 256
     §7a's origin, where a confidential value enters the value world.
 
@@ -1265,31 +1284,41 @@ def secret_result(fn):
     the narrowest place to do it: one wrapper per declared extern, not one per
     call site, and the verbatim `@py` body is untouched.
 
+    `_declared` is the declared return type, emitted only when it is a shape the
+    walk has to distinguish (a `Map`); a bare `@secret_result` leaves it `None`
+    and keeps the previous values-only behavior, so a scalar-returning extern
+    emits exactly what it did before.
+
     Registration is the ONLY effect: the value is returned unchanged, so the
     program's semantics are byte-identical and only what a trace or a seam error
     may SAY about it changes."""
-    if inspect.iscoroutinefunction(fn):
-        async def _secret_result_async(*args, **kwargs):
-            value = await fn(*args, **kwargs)
-            confidential.register_secret_tree(value)
-            return value
-        _secret_result_async.__name__ = fn.__name__
-        _secret_result_async.__qualname__ = fn.__qualname__
-        _secret_result_async.__doc__ = fn.__doc__
-        return _secret_result_async
+    def _wrap(fn):
+        if inspect.iscoroutinefunction(fn):
+            async def _secret_result_async(*args, **kwargs):
+                value = await fn(*args, **kwargs)
+                confidential.register_secret_tree(value, None, _declared)
+                return value
+            _secret_result_async.__name__ = fn.__name__
+            _secret_result_async.__qualname__ = fn.__qualname__
+            _secret_result_async.__doc__ = fn.__doc__
+            return _secret_result_async
 
-    def _secret_result_sync(*args, **kwargs):
-        value = fn(*args, **kwargs)
-        # A sync extern that hands back an awaitable is a colour error the ref
-        # thunk already refuses; here we simply do not touch it, so the wrapper
-        # never awaits on a caller's behalf.
-        if not inspect.isawaitable(value):
-            confidential.register_secret_tree(value)
-        return value
-    _secret_result_sync.__name__ = fn.__name__
-    _secret_result_sync.__qualname__ = fn.__qualname__
-    _secret_result_sync.__doc__ = fn.__doc__
-    return _secret_result_sync
+        def _secret_result_sync(*args, **kwargs):
+            value = fn(*args, **kwargs)
+            # A sync extern that hands back an awaitable is a colour error the
+            # ref thunk already refuses; here we simply do not touch it, so the
+            # wrapper never awaits on a caller's behalf.
+            if not inspect.isawaitable(value):
+                confidential.register_secret_tree(value, None, _declared)
+            return value
+        _secret_result_sync.__name__ = fn.__name__
+        _secret_result_sync.__qualname__ = fn.__qualname__
+        _secret_result_sync.__doc__ = fn.__doc__
+        return _secret_result_sync
+
+    if fn is None:
+        return _wrap
+    return _wrap(fn)
 
 
 # ---------------------------------------------------------------------------
