@@ -431,6 +431,137 @@ This goes in the compiler spec, not the runtimes.
     plain assert once fixed).
   - **wasm — by-design.** The per-MODULE (not per-component) host-import subset
     check the issue lists is item 289's extern-trust posture, not a divergence.
+- ✅ **Emitter-injected TYPE names, the other half of the same class — CLOSED
+  (2026-09-12, `fix/prelude-type-name-reservation`).** The list above reserved the
+  injected *callables*; the emitters also inject *type declarations* into the
+  module they emit, and that half was never reserved. A user type declared
+  under one of those names lands in the same scope as the prelude's, so the
+  emitted module carries the declaration twice — the checker accepts a program
+  whose output does not compile. Measured: on **java** a user
+  `type RevlResult` (against a program that uses `Result`) and a user
+  `type RevlSecretShape` (in a secret-mode program) each emit the nested type
+  twice inside `Components`; on **go** a user `type RevlResult`/`RevlOpt`
+  (against a program that uses `Result`/`Opt`) emits it twice at package scope;
+  on **python** a user `type Ok`/`type Err` silently REPLACES the runtime's own
+  result constructor, so an accepted program fails at run time rather than at
+  build time (the only instance here not confined to the build); and on
+  **rust** 25 emitter-written scaffolding types collide the same way.
+  Two further java names, `Pool` and `Map`, duplicate the same way against the
+  host-runtime classes of the same name when the program also *uses* that host.
+  - **java — CLOSED.** `RevlSecretShape`/`RevlResult`/
+    `RevlActivation` join `_EMITTER_RESERVED`, so `_ident` refuses them with the
+    same message the neighbouring `Components` case already produced.
+    `RevlFrame`/`RevlSpawnHandle` (the frame + spawn-handle scaffolding types,
+    nested in `Components`) were found open by the corrected sweep below and
+    join them. `RevlSecretShape` is the one whose failure is not a plain
+    redeclaration: the user's own class is emitted `implements
+    RevlSecretShape` and that name now resolves to the class itself, and the
+    redaction interface the `instanceof RevlSecretShape` at the
+    `revlRememberSecret` call site names is the user's class rather than the
+    prelude's. It is still a compile failure of the emitted program — there is
+    no runtime impact and no value escapes redaction — but the source no longer
+    says what it means, which is why it is worth a clean emitter refusal rather
+    than a note.
+    `Pool`/`Map`/`Job` are **escaped at the type-name position only**, not
+    refused: they are also live host-root and service identifiers
+    (`effect Pool.open(...)`, `Job.run(...)`), so a role-agnostic refusal
+    rejects valid programs — measured on
+    `backends/java/scenarios/runtime_values.rvl`,
+    `tests/fixtures/emit_py_corpus/hostroots.rvl` and
+    `tests/fixtures/emit_rust_corpus/effect_undo.rvl`. A new
+    `_JAVA_TYPE_RESERVED = {"Map", "Pool", "Job"}`, consulted only when `_ident`
+    is naming a TYPE, leaves the bare-token call sites untouched and moves the
+    user's declaration off the runtime class (`class Map` emits as `class Map_`).
+    This is deliberately narrower than go's `_HOST_RUNTIME_RENAMES`, which
+    renames the host side; the observable fix is the same and the change stays
+    inside the emitter.
+  - **go — CLOSED (escaped).** `RevlResult`, `RevlOk`, `RevlErr`, `RevlOpt`,
+    `RevlFrame`, `RevlTimer`, `RevlTeardownRecord`, `Stream`, `Subscription` and
+    `EventContract` join `_GO_RESERVED`, so the existing injective `_v3_ident`
+    ladder escapes a user declaration off the runtime name (`type RevlResult`
+    emits as `RevlResult_`). `RevlOpt` was not recorded anywhere before this.
+    `RevlSpawnHandle` also joins it; the earlier sweep missed it because it is
+    declared on the **live (`stc-go`) path only** — `_emit` routes a document
+    with top-level declarations but no `lifecycle test` onto the pure
+    typed-core path, which drops the components and never reaches the
+    declaration, so a component-only fixture reports no collision. Measured on
+    `backends/go/scenarios/accessor.rvl` plus a `lifecycle test`: two bare
+    `type RevlSpawnHandle struct` declarations (Go's `redeclared in this
+    block`).
+  - **rust — CLOSED (escaped).** 25 emitter-written scaffolding types were never
+    reserved: `Map`, `Pool`/`PoolState`, the `Job`/`JobToken`/`JobHandle` family,
+    the `Stream` family (`Stream`, `StreamNext`, `StreamState`, `StreamInner`,
+    `StreamRegistry`), the `Subscription` family, `EventContract`, the `Revl*`
+    operation structs (`RevlStrOps`, `RevlStrListOps`, `RevlListOps`,
+    `RevlListSearchOps`, `RevlTimer`, `RevlClock`, `RevlSpawnHandle`,
+    `RevlTeardown`, `RevlPendingCompensation`) and `RevlWal` (only in a
+    `record=True` emission). All join `_RUST_TYPE_RESERVED`, applied at the
+    type-name position, so `pub type Map` emits as `pub struct Map_` and rustc
+    sees one declaration. `Map`/`Pool`/`Job` are escaped rather than refused for
+    the same reason as java: they are live host roots spelled as bare tokens at
+    call sites.
+  - **python — CLOSED, and the one case with a RUNTIME effect.**
+    `_emit_builtin_result` injects `class Ok:` / `class Err:` at module scope,
+    guarded only by `user_cases` — a set of user VARIANT CASE names, which a
+    user *type* name does not enter. Python class redefinition is silent and the
+    later class wins, so a user `type Ok` replaced the runtime's own `Ok`
+    constructor and the emitted program died with
+    `TypeError: Ok() takes no arguments` — an accepted program that passes on
+    every other tier failing on the reference tier at RUN time, not build time.
+    `_RevlNoLiveWorker` / `_RevlRouter` (module-scope classes in the router
+    scaffolding) were reachable the same way, having slipped the scaffolding
+    guard because it is case-sensitive on the lowercase `_revl*` spelling. A new
+    `_TYPE_RESERVED` folds all four into the `_mangle` ladder at the type-name
+    position, so the user's `Ok` emits and runs as `Ok_` and the runtime's `Ok`
+    survives. This is the only instance in this cluster whose impact is not
+    confined to the build.
+  - **Corrected sweep — why the earlier list was short.** The first pass
+    filtered candidate names against fixtures that merely *mention* the name,
+    which hid every case whose collision needs the name DECLARED in the same
+    document; a declaration-aware base filter exposed 36 further collisions, all
+    now fixed. Two mechanical traps are worth recording: `Map` is a revl builtin
+    GENERIC, so `pub type Map = { a: Int }` is legal but `use(v: Map)` is
+    refused before emission (a shadow fixture for it must be
+    declaration-only); and on go the top-level-`type`-without-lifecycle routing
+    above.
+  - **Already covered, dropped as leads.** `Row`, `Map` and `Pool` on go are
+    renamed on the *host* side by `_HOST_RUNTIME_RENAMES`, so a user declaration
+    of those names never collided there; java's `Components` was already in
+    `_EMITTER_RESERVED`.
+  - **Corpus-neutral.** Verified byte-identical emission over all 997 `.rvl`
+    files in the tree (690 accepted by the frontend; per-tier module counts
+    unchanged) before and after, and pinned by
+    `test_go_escapes_injected_type_names` /
+    `test_java_reserves_injected_type_names` plus the per-tier cases appended to
+    the same file — every one of which fails when its reservation is removed
+    (verified as a negative control: 35 tests, 35 failures). The bug was latent
+    — no program in the tree declares one of these names.
+  - **OPEN — the DERIVED half of the same class, pinned.** The names above are
+    literals the emitter writes; the emitters also DERIVE type names from the
+    user's own names, and that set is not static: `export interface
+    <Comp>Config` (ts, `emit.py:2251`), `<Comp>Config` / `<Svc>Proxy`
+    (rust, `_emit_config_struct` / the service proxy), and a large
+    tier-specific family (`<Comp><Provision>`, `<Comp><Sink>Intercept<N>`,
+    `<Comp>Plugin`, `<Comp>ProviderPlugin`, `<Comp>ProviderReset`, `<Comp>Runner`,
+    `<Comp>Vault`, `<Comp>Background`, `<Comp>Edge`, `<Comp>Equality`,
+    `<Comp>Evolve`, `<Comp>Mailbox`, `<Comp>Store`, `<Comp>Writer`,
+    `<Comp>Reader`, python's `_<Provision>`, …). A user type spelled after the
+    component or service it derives from is a duplicate declaration
+    (measured: a `component Worker` plus `pub type WorkerConfig` emits
+    `export interface WorkerConfig` twice in one ts module). This cannot be
+    closed by adding to a reserved set — the colliding spelling depends on the
+    document — so it needs a derivation-aware reservation (reserve the derived
+    name at the point it is derived, or give user type names a reserved suffix)
+    and is left open rather than half-fixed. Pinned by the strict-`xfail`
+    `test_derived_component_config_type_name_is_reserved`.
+  - **Not mirrored into the self-host ports, which is pre-existing.**
+    `selfhost/emit_go.rvl::is_go_reserved` carries the Go keywords only and
+    `selfhost/emit_java.rvl::emitter_reserved` the three scaffolding names only,
+    so neither carries the predeclared set either — both are partial ports whose
+    covered subset is enumerated in `tests/test_selfhost_emit_java.py` /
+    `test_selfhost_emit_go.py`, and the reservation lives in the reference
+    emitters. The byte oracle compares the corpus, which declares none of these
+    names, so the divergence is invisible to it in both directions.
 
 ## Arithmetic divergences (open, pinned, one root cause)
 
