@@ -450,7 +450,9 @@ file lives in the repo as `stdlib/crypto.rvl`.
 **py + ts are the exit bar** (item 272). `sha256`/`hmac_sha256`/`ct_equal` ship
 a self-contained pure-JS SHA-256 on the ts tier (no host import, exactly as
 `stdlib/json.rvl` ships a pure-JS parser); `random_token` draws from
-`globalThis.crypto.getRandomValues` (a synchronous WHATWG global). Both tiers
+`globalThis.crypto.getRandomValues` (a synchronous WHATWG global), in 65536-byte
+windows because one call is capped at that size — so both tiers accept every
+`n`. Both tiers
 hash the identical UTF-8 encoding, so the hex digests agree across py and ts.
 The rust/go/java/wasm bodies are a documented follow-up.
 

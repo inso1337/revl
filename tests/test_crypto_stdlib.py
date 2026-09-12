@@ -83,6 +83,16 @@ test "random_token: 2n hex chars, empty at zero, distinct across draws" {
   assert random_token(0) == ""
   assert random_token(16) != random_token(16)
 }
+
+// One WHATWG `getRandomValues` call is capped at 65536 bytes; the py tier's
+// `secrets.token_hex` has no ceiling. A width past that cap must still draw (in
+// windows) at the same 2n width on both tiers instead of failing on ts.
+test "random_token: draws past the 65536-byte getRandomValues window" {
+  assert random_token(65536).length() == 131072
+  assert random_token(65537).length() == 131074
+  assert random_token(70000).length() == 140000
+  assert random_token(70000) != random_token(70000)
+}
 """
 
 
