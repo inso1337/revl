@@ -76,7 +76,9 @@ from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
+from .peer_offer import PlacementSlot, offer_eligible
 from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
+from .tee_attestation import TeeError, TeeRequirement
 from .typecheck import FN_HEAD, parse_type
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
@@ -624,6 +626,251 @@ def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> b
     if kind == "fs":
         return _fs_covers(env.get("fs") or [], path or "", mode or "ro")
     return False  # unmappable; handled as a refusal by the caller
+
+
+# ---------------------------------------------------------------------------
+# attested-TEE placement (roadmap item 475, issue #827)
+# ---------------------------------------------------------------------------
+#
+# A placement file may DEMAND that a process run inside an approved enclave, and
+# the demand is a word in the placement vocabulary rather than prose:
+#
+#     [processes.worker.attest]
+#     requires = "attested_tee"          # the only word this surface knows
+#     bundle = "<64 hex>"                # the approved bundle's content hash
+#     measurements = ["<hex digest>"]    # one per permitted enclave build
+#     region = "eu-west"                 # the permitted region (or `regions`)
+#     outbound_network = "forbidden"     # the only posture this item defines
+#     max_age_s = 120                    # optional: the proof's freshness window
+#     nonce = "<challenge>"              # optional: else one is minted here
+#
+# This surface PARSES into the `TeeRequirement` that `tee_attestation.py` already
+# defines and is checked by the `tee_admits` it already has: there is no second
+# implementation of "attested" here, only a second way to spell the demand, so
+# the two spellings cannot drift into two answers. What this surface adds is
+# shape (an unknown word, an unknown key, a missing bundle, a permitted set that
+# is not a list are each refused by name, so a placement cannot be spelled into
+# one that demands nothing) and the plan-time verdict: a placement whose demand
+# this build cannot satisfy is refused rather than run unattested
+# (`tee_placement_diagnostic`). docs/design/475-attested-tee-placement.md.
+
+TEE_WORD_ATTESTED = "attested_tee"
+#: The words `requires` accepts. One today: the item's own word.
+TEE_REQUIREMENT_WORDS = (TEE_WORD_ATTESTED,)
+#: Every key `[processes.<p>.attest]` knows. An unknown one is refused by name,
+#: so a typo cannot silently drop a demand (`DEPLOY_KEYS`, item 118).
+ATTEST_KEYS = ("requires", "bundle", "measurements", "region", "regions",
+               "outbound_network", "max_age_s", "nonce")
+#: `region` and `regions` are the singular and plural of ONE fact, so a table
+#: carrying both is ambiguous and refused rather than resolved by a rule.
+_ATTEST_REGION_KEYS = ("region", "regions")
+
+
+def _attest_text_list(raw: dict, process: str, key: str) -> tuple[list[str] | None, str | None]:
+    """`[processes.<p>.attest].<key>` as a list of strings, or a diagnostic."""
+    spelled = raw.get(key)
+    if not isinstance(spelled, (list, tuple)):
+        return None, (f"process {process!r} [attest]: `{key}` must be a list of "
+                      f"strings, got {spelled!r}")
+    bad = [v for v in spelled if not isinstance(v, str)]
+    if bad:
+        return None, (f"process {process!r} [attest]: every `{key}` entry must be "
+                      f"a string, got {bad!r}")
+    return list(spelled), None
+
+
+def parse_tee_requirement(placement: dict, process: str, *,
+                          nonce: str | None = None,
+                          ) -> tuple[TeeRequirement | None, str | None]:
+    """The attested-TEE requirement `[processes.<process>.attest]` states, as the
+    typed :class:`~revl.tee_attestation.TeeRequirement` that `tee_attestation.py`
+    verifies against.
+
+    Returns `(requirement, None)` when the table is present and well-formed,
+    `(None, diagnostic)` when it is malformed (the placement surface reports
+    refusals, it does not raise), and `(None, None)` when the process declares no
+    `[attest]` table at all — the pre-item-475 behaviour, byte for byte.
+
+    The one thing this surface decides that the typed requirement does not is the
+    CHALLENGE. A placement that spells `nonce` pins it; a caller may pass one
+    (`nonce=`); failing both, one is minted here, because an attestation that
+    answers no challenge of the verifier's choosing is evidence of nothing in
+    particular. The minted value is why :func:`render_tee_requirement` always
+    writes the `nonce` back out: parse -> render -> parse is then stable.
+
+    Only SHAPE is judged here. Whether the named measurements, region, posture
+    and window amount to a requirement at all is `TeeRequirement.__post_init__`'s
+    call, and its refusal is re-raised as this surface's diagnostic, so the rule
+    has exactly one home."""
+    processes = placement.get("processes")
+    if not isinstance(processes, dict):
+        return None, None
+    entry = processes.get(process)
+    if not isinstance(entry, dict):
+        return None, None
+    raw = entry.get("attest")
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        return None, (f"process {process!r}: `attest` must be a table of "
+                      f"attested-TEE requirements, got {raw!r}")
+
+    unknown = sorted(k for k in raw if k not in ATTEST_KEYS)
+    if unknown:
+        known = ", ".join(repr(k) for k in ATTEST_KEYS)
+        return None, (f"process {process!r} [attest]: unknown key(s) "
+                      f"{', '.join(repr(k) for k in unknown)}; the attested-TEE "
+                      f"surface knows {known}")
+
+    word = raw.get("requires")
+    if word is None:
+        return None, (f"process {process!r} [attest]: no `requires` word; a table "
+                      f"that demands nothing is refused rather than silently "
+                      f"dropped (expected `requires = {TEE_WORD_ATTESTED!r}`)")
+    if word not in TEE_REQUIREMENT_WORDS:
+        known = ", ".join(repr(w) for w in TEE_REQUIREMENT_WORDS)
+        return None, (f"process {process!r} [attest]: `requires` must be {known}; "
+                      f"got {word!r}. The placement vocabulary knows no other "
+                      f"requirement word, and an unrecognized one is refused "
+                      f"rather than ignored.")
+
+    spelled_regions = [k for k in _ATTEST_REGION_KEYS if k in raw]
+    if len(spelled_regions) > 1:
+        return None, (f"process {process!r} [attest]: `region` and `regions` are "
+                      f"the same fact spelled twice; a table carrying both is "
+                      f"refused rather than resolved")
+    if "regions" in raw:
+        regions, problem = _attest_text_list(raw, process, "regions")
+        if problem:
+            return None, problem
+    else:
+        region = raw.get("region")
+        if not isinstance(region, str):
+            return None, (f"process {process!r} [attest]: `region` must be a "
+                          f"region name, got {region!r}")
+        regions = [region]
+
+    measurements, problem = _attest_text_list(raw, process, "measurements")
+    if problem:
+        return None, problem
+
+    challenge = raw.get("nonce")
+    if challenge is None:
+        challenge = nonce if nonce is not None else secrets.token_urlsafe(32)
+
+    optional = {k: raw[k] for k in ("outbound_network", "max_age_s") if k in raw}
+    try:
+        requirement = TeeRequirement(bundle=raw.get("bundle"),
+                                     measurements=frozenset(measurements),
+                                     nonce=challenge,
+                                     regions=frozenset(regions),
+                                     **optional)
+    except TeeError as error:
+        return None, f"process {process!r} [attest]: {error}"
+    return requirement, None
+
+
+def render_tee_requirement(requirement: TeeRequirement, *,
+                           process: str = "worker") -> str:
+    """The `[processes.<process>.attest]` table a requirement is spelled by: the
+    inverse of :func:`parse_tee_requirement`, so a placement file can be printed
+    back out and re-parsed into the same requirement. `region` is written for the
+    one region the placement spelling names and `regions` for several."""
+    lines = [f"[processes.{process}.attest]",
+             f"requires = {json.dumps(TEE_WORD_ATTESTED)}",
+             f"bundle = {json.dumps(requirement.bundle)}",
+             "measurements = [" + ", ".join(
+                 json.dumps(m) for m in sorted(requirement.measurements)) + "]"]
+    regions = sorted(requirement.regions)
+    if len(regions) == 1:
+        lines.append(f"region = {json.dumps(regions[0])}")
+    else:
+        lines.append("regions = [" + ", ".join(json.dumps(r) for r in regions) + "]")
+    lines.append(f"outbound_network = {json.dumps(requirement.outbound_network)}")
+    lines.append(f"max_age_s = {requirement.max_age_s!r}")
+    lines.append(f"nonce = {json.dumps(requirement.nonce)}")
+    return "\n".join(lines) + "\n"
+
+
+def process_placement_slot(placement: dict, process: str, *,
+                           nonce: str | None = None,
+                           ) -> tuple[PlacementSlot | None, str | None]:
+    """The slot a placement file describes for ONE process, as the
+    :class:`~revl.peer_offer.PlacementSlot` a dispatcher fills, or
+    `(None, None)` when the file describes none.
+
+    A process with no `[attest]` table yields nothing rather than an empty
+    demand, so "declares no requirement" cannot be confused with "declares a
+    requirement that admits everything" — the second is refused at parse time.
+    The demand lands in the slot's `attested_tee` field, which `offer_eligible`
+    already checks against evidence the peer cannot author. The permitted
+    region is deliberately NOT copied into the slot's asserted `regions`: the
+    region is checked against the attestation, not against the peer's word."""
+    requirement, problem = parse_tee_requirement(placement, process, nonce=nonce)
+    if problem:
+        return None, problem
+    if requirement is None:
+        return None, None
+    return PlacementSlot(attested_tee=requirement), None
+
+
+def admit_peer_for_process(placement: dict, process: str, offer: dict, *,
+                           offer_key, attester_key=None, tee_ledger=None,
+                           now=None, nonce: str | None = None,
+                           ) -> tuple[bool, str]:
+    """Does `offer` satisfy what the placement file demands of `process`?
+    Returns `(admitted, reason)`, never raising.
+
+    This is the whole dispatcher-facing seam: the placement's demand is parsed
+    into the slot `peer_offer.offer_eligible` already reads, and the verdict is
+    that function's verdict — `tee_admits`, fail-closed — so an attested
+    placement refuses a non-attesting peer by the verifier the demand was always
+    meant to reach, not by a second check written for this surface. A malformed
+    table is refused in the same `(False, reason)` shape.
+
+    A process that declares no requirement is admitted on the pool's own terms:
+    the slot it is checked against is the empty :class:`PlacementSlot`, which
+    demands nothing and consumes no challenge — the pre-item-475 behaviour."""
+    slot, problem = process_placement_slot(placement, process, nonce=nonce)
+    if problem:
+        return False, f"placement: {problem}"
+    if slot is None:
+        slot = PlacementSlot()
+    return offer_eligible(offer, slot, offer_key, attester_key=attester_key,
+                          tee_ledger=tee_ledger, now=now)
+
+
+def tee_placement_diagnostic(placement: dict, *, nonce: str | None = None) -> str | None:
+    """The plan-time verdict on the attested-TEE placement surface, or `None`
+    when the placement makes no such demand.
+
+    A malformed `[attest]` table is refused by name. A WELL-FORMED `requires =
+    "attested_tee"` is refused too, and that refusal is the point of this
+    function: this build places a process on the planning host and has no peer
+    transport and no attester root, so nothing can produce the evidence the
+    demand is checked against. Running it anyway would be an unattested run of an
+    attested placement — the one outcome the demand exists to forbid — so the
+    demand is refused rather than ignored, and the refusal names the processes
+    that asked for it."""
+    processes = placement.get("processes")
+    if not isinstance(processes, dict):
+        return None
+    demanded: list[str] = []
+    for name in sorted(processes):
+        requirement, problem = parse_tee_requirement(placement, name, nonce=nonce)
+        if problem:
+            return problem
+        if requirement is not None:
+            demanded.append(name)
+    if not demanded:
+        return None
+    names = ", ".join(repr(n) for n in demanded)
+    return (f"process(es) {names} require an attested TEE (`requires = "
+            f"{TEE_WORD_ATTESTED!r}`), but this build places a process on the "
+            f"planning host and has no peer transport and no attester root, so "
+            f"nothing can produce the enclave evidence the demand is checked "
+            f"against; an attested placement is refused rather than run "
+            f"unattested")
 
 
 def _component_reach(ir: dict) -> dict[str, set]:
@@ -3293,6 +3540,18 @@ def run_placement(files, placement_path: str, once: bool = False,
             return abort(f"process {pname!r} [sandbox]: {sb_err}")
         sandboxes[pname] = normalized
     sandbox_needs = (placement.get("sandbox") or {}).get("needs") or {}
+
+    # --- attested-TEE placement (item 475, issue #827): a process may DEMAND
+    # that it run inside an approved enclave (`[processes.<p>.attest]` with
+    # `requires = "attested_tee"`), a word in the placement vocabulary rather
+    # than prose. A malformed table is refused by name here, and so is a
+    # well-formed demand this build cannot satisfy: the conductor places a
+    # process on the planning host, so it can produce no enclave evidence and
+    # must refuse rather than run an attested placement unattested. Purely
+    # additive: a placement with no `[attest]` table is a no-op here.
+    tee_problem = tee_placement_diagnostic(placement)
+    if tee_problem:
+        return abort(tee_problem)
 
     if placement.get("report_colocation"):
         for advice in colocation_advice(processes, placed, ir):
