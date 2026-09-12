@@ -1390,6 +1390,7 @@ jobs:
           tests/test_run_ts_stdlib_fs_root.py
           tests/test_stdlib_version.py
           tests/test_total_field_surface.py
+          tests/test_value_stdlib.py
           -q
         env:
           REVL_REQUIRE_TIERS: "py,ts"
