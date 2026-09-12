@@ -558,7 +558,8 @@ with the gauntlet, then compile it to a STANDARD wasm component and run its
 lifecycle + fault battery in wasmtime's component-model SANDBOX, where a fault
 that would escape on a hosted tier is a TRAP the runtime catches. `verdict` is
 `passed` (proved itself, eligible for admission), `trapped` (contained, host
-untouched, not eligible), `rejected` (admission refused, never reached the
+untouched, not eligible), `timeout` (a probe outran the runtime's fuel budget,
+contained, not eligible), `rejected` (admission refused, never reached the
 substrate), `deferred` (no Str-surface function) or `unavailable`
 (wasm-tools/wasmtime absent). It also reports the policy admission decision
 (`admission`): under `quarantine required`, a candidate is admissible only after
