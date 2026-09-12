@@ -43,16 +43,24 @@ effects, provisions and boundary crossings, in the same `replay.Step`
 vocabulary the backwards-replay engine records ([replay.md](replay.md)). The
 canary builds the slice provider's timeline for each generation and compares
 them step-for-step. Divergence is the **first step that differs** — in its
-`(kind, label)`, **or in the inverse/compensation it records** — or a length
-mismatch, reported with the exact `(component, realm)` that produced it.
+`(kind, label)`, **or in the inverse/compensation it records**, **or in the
+method that reaches it** — or a length mismatch, reported with the exact
+`(component, realm)` that produced it.
 
 The inverse is part of the comparison because it is part of the recorded world
 and part of the behaviour: an `effect … undo …` whose acquisition is unchanged
 and whose inverse is not takes back something different at teardown, and the
 inverse is exactly the half a promote hands to the rollback path. Comparing
 `(kind, label)` alone reported such a candidate as an identical generation and
-recommended the promote. The step's `origin` is deliberately not keyed: it is
-provenance, identical for two generations of one provider.
+recommended the promote. The entry point a step is reached from is part of the
+comparison for the same reason: the recorded world is a flat list of steps, so
+a step that MOVES between two methods of a provide block leaves that list
+unchanged, and comparing the list alone reported a step relocated from the
+write path to the read path as an identical generation and recommended the
+promote. The step's `origin` is deliberately not keyed — it carries the
+method's *name*, and keying that would report a rename as behavioural change —
+but the slot inside the provide block that `origin` names is keyed, because it
+says which entry point reaches the step without naming it.
 
 This is deliberately not a threshold on a counter. "The candidate diverged" is a
 statement about the recorded world, attributed to a code site, in the terms a

@@ -193,7 +193,7 @@ was corrected by hand and had drifted back within a day.
 | token-economy.md | needs-work | 19 |  |
 | truc.md | needs-work | 56 |  |
 | ts-runtime-contract.md | needs-work | 2 |  |
-| verified-canary.md | needs-work | 22 |  |
+| verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
 | wasm-capabilities.md | needs-work | 35 | yes |
