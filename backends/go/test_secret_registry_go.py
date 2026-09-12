@@ -470,6 +470,13 @@ def test_with_the_value_walk_stripped_a_container_leaks(tmp_path):
 
 _LEAF = "deep-canary-9999"
 
+# `"leaf"` is a KEY of the declared-secret map in both drivers below, and a key
+# the caller chose is as confidential as the value it maps to, so the literal
+# label in this rendered line is a needle as well as the value: the whole
+# right-hand side redacts. The line is asserted by value rather than by shape,
+# so a walk that drops either the key or the leaf still fails.
+_REDACTED_LEAF_LINE = f"leaf: {REDACTED_SECRET}={REDACTED_SECRET}"
+
 _NESTED_DRIVER = """
 var leaf = @LEAF@
 
@@ -504,6 +511,27 @@ func main() {
 \trevlMarkSecret(cyclic)
 \tfmt.Println("survived")
 \tfmt.Println("leaf:", revlRedactText("leaf="+leaf))
+}
+"""
+
+
+# The other half of the key rule. A revl record is a `reflect.Struct` and the
+# walk reads `rv.Field(i)`, so the names the author wrote are skipped by
+# construction -- the values below register, the names above them do not.
+_RECORD_DRIVER = """
+var leaf = @LEAF@
+
+type account struct {
+\tOwner   string
+\tAccount string `json:"account-token"`
+}
+
+func main() {
+\tRevlForgetSecrets()
+\trevlMarkSecret(account{Owner: leaf, Account: leaf})
+\tfmt.Println("name:", revlRedactText("Owner"))
+\tfmt.Println("tag:", revlRedactText("account-token"))
+\tfmt.Println("value:", revlRedactText("leaf="+leaf))
 }
 """
 
@@ -543,7 +571,7 @@ def test_a_deeply_nested_secret_still_registers_its_leaf(tmp_path, depth):
     the top, because the walk is bounded by the path it is on."""
     block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
     trace = _run_with_driver(tmp_path, block, _nested_driver(depth))
-    assert f"leaf: leaf={REDACTED_SECRET}" in trace, trace
+    assert _REDACTED_LEAF_LINE in trace, trace
 
 
 @needs_go
@@ -552,7 +580,7 @@ def test_a_value_deeper_than_any_cap_still_registers_its_leaf(tmp_path):
     read side by side: `nested(6)` is past `depth > 8` in frames."""
     block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
     trace = _run_with_driver(tmp_path, block, _nested_driver(6))
-    assert f"leaf: leaf={REDACTED_SECRET}" in trace, trace
+    assert _REDACTED_LEAF_LINE in trace, trace
     assert _LEAF not in trace, trace
 
 
@@ -568,7 +596,7 @@ def test_with_a_bound_on_how_deep_the_walk_goes_the_leaf_leaks(tmp_path):
     )
     assert capped != block, "revlRegisterValue no longer opens on the validity check"
     trace = _run_with_driver(tmp_path, capped, _nested_driver(6))
-    assert f"leaf: leaf={REDACTED_SECRET}" not in trace, trace
+    assert REDACTED_SECRET not in trace, trace
     assert _LEAF in trace, trace
 
 
@@ -581,5 +609,24 @@ def test_a_self_referential_container_terminates(tmp_path):
     block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
     trace = _run_with_driver(tmp_path, block, _cycle_driver())
     assert "survived" in trace, trace
-    # the leaf that shares the cyclic map is still registered
-    assert f"leaf: leaf={REDACTED_SECRET}" in trace, trace
+    # the leaf that shares the cyclic map is still registered, key and value
+    assert _REDACTED_LEAF_LINE in trace, trace
+
+
+@needs_go
+def test_a_records_field_names_are_not_registered(tmp_path):
+    """The bound on the key rule: a record is a `reflect.Struct` and the walk
+    reads `rv.Field(i)`, so the names the author wrote are skipped by
+    construction. Only a `Map`'s keys are the caller's data. Without this the
+    key registration could not be told apart from redacting every identifier
+    the diagnostic prints."""
+    block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
+    trace = _run_with_driver(tmp_path, block, _RECORD_DRIVER.replace(
+        "@LEAF@", json.dumps(_LEAF)))
+    assert "name: Owner" in trace, trace
+    assert "tag: account-token" in trace, trace
+    # the values beside those names did register, so the walk reached them --
+    # and `leaf` is only a needle when it is a KEY, which it is not here, so
+    # the label beside the value survives. The two drivers read as a pair.
+    assert f"value: leaf={REDACTED_SECRET}" in trace, trace
+    assert _LEAF not in trace, trace
