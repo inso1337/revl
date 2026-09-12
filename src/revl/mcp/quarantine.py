@@ -45,6 +45,13 @@ Verdicts (in ``report["quarantine"]["verdict"]``):
   * ``trapped``     — admissible, but a substrate probe **trapped in the
                       sandbox**. Contained: the host was never touched, so this
                       is a caught trap, not an incident. Not eligible.
+  * ``timeout``     — admissible, but a substrate probe **did not return** and
+                      was killed by the runtime. The wall-clock backstop behind
+                      ``trapped``: a guest that loops forever spends its fuel
+                      budget and traps (see ``PROBE_FUEL``), so reaching this
+                      verdict means the guest outran the runtime itself.
+                      Contained — the host was never touched — but the candidate
+                      is neither proved nor disproved. Not eligible.
   * ``rejected``    — admission refused; the candidate never reached the
                       substrate (the gauntlet graded it, nothing ran).
   * ``deferred``    — no canonical-ABI-emittable boundary function to present
@@ -59,8 +66,12 @@ Verdicts (in ``report["quarantine"]["verdict"]``):
 Isolation. Nothing here mutates the live composition. The gauntlet already runs
 its host battery in a throwaway :class:`~revl.mcp.session.Session`; the substrate
 battery builds and runs a component in a temporary directory. Whatever the
-candidate does — refuse admission, trap in the sandbox — the outcome is a graded
-report, never a raised error and never a touched running system.
+candidate does — refuse admission, trap in the sandbox, run away from the clock
+— the outcome is a graded report, never a raised error and never a touched
+running system. That last clause is a real bound, not a hope: each probe runs
+under a fuel budget and a wall-clock timeout, and *both* outcomes are graded, so
+a candidate that never returns still gets a verdict instead of stalling the
+caller.
 """
 
 from __future__ import annotations
@@ -78,6 +89,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import subprocess
 import tempfile
 
 from ..errors import RevlError
@@ -99,6 +111,20 @@ QUARANTINE_BYPASS_VERB = "quarantine-bypass"
 # Probes are kept ASCII and quote/backslash-free so they survive the WAVE
 # literal `wasmtime run --invoke f("...")` parses (canonical.run_component_str).
 _BATTERY: tuple[str, ...] = ("", "a", "revl", "x" * 64)
+
+# The fuel budget for one probe, in wasm instructions. Fuel bounds a guest by
+# *work* rather than by elapsed time, so a candidate whose boundary function
+# never returns (an unbounded `while`) traps deterministically in about a tenth
+# of a second instead of holding the wasmtime process until the 120 s
+# wall-clock timeout fires. That distinction is the whole point: a trap is an
+# `EmitError` this battery already grades, while a wall-clock timeout surfaces
+# as `subprocess.TimeoutExpired`, which is not a verdict at all.
+#
+# The budget sits three orders of magnitude above what a `Str`-surface boundary
+# function costs on this battery — a trivial `Str -> Str` template measures
+# under 1e5 — so it caps a runaway guest without narrowing what a real
+# candidate may compute.
+PROBE_FUEL = 1_000_000_000
 
 
 # --------------------------------------------------------------- canonical tier
@@ -182,7 +208,8 @@ def _unavailable(reason: str, *, functions=None) -> dict:
         "ran": False,
         "reason": reason,
         "functions": list(functions or []),
-        "counts": {"probes": 0, "returned": 0, "trapped": 0},
+        "counts": {"probes": 0, "returned": 0, "trapped": 0, "timeout": 0,
+                   "skipped": 0},
     }
 
 
@@ -195,9 +222,11 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
     clean round trip; a probe that **traps** is caught here as a contained wasm
     trap (the candidate could not escape its linear memory) and recorded — never
     re-raised. The section's ``status`` is ``passed`` when every probe returned,
-    ``trapped`` when any probe trapped, ``deferred`` when the candidate has no
-    canonical-ABI-emittable boundary function to present (every boundary
-    signature carries a still-un-lowerable type — Float/Map/resource/
+    ``trapped`` when any probe trapped (including a guest that spent its whole
+    fuel budget, see ``PROBE_FUEL``), ``timeout`` when a probe outran the
+    runtime's own wall-clock budget and was killed, ``deferred`` when the
+    candidate has no canonical-ABI-emittable boundary function to present (every
+    boundary signature carries a still-un-lowerable type — Float/Map/resource/
     function-value), and ``unavailable`` when the toolchain is absent."""
     EmitError = canonical.EmitError
 
@@ -217,7 +246,8 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
                         "resources, or function-values), so there is nothing to "
                         "present over the ABI. Deferred, not faked.",
                 "functions": [],
-                "counts": {"probes": 0, "returned": 0, "trapped": 0},
+                "counts": {"probes": 0, "returned": 0, "trapped": 0,
+                           "timeout": 0, "skipped": 0},
             }
         return _unavailable(f"canonical lowering failed: {error}")
 
@@ -246,28 +276,70 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
             # keeping "trapped" reserved for a real, contained runtime escape.
             return _unavailable(f"the candidate did not form a valid component: "
                                 f"{error}", functions=functions)
+        except subprocess.TimeoutExpired as error:
+            # the toolchain itself is the bound here, not the guest: forming the
+            # component did not finish in the tool's own budget. Nothing ran and
+            # nothing was admitted on this basis — unavailable, not trapped.
+            return _unavailable(
+                f"the toolchain did not build and validate the candidate's "
+                f"component within its wall-clock budget: {error}",
+                functions=functions)
 
         probes: list[dict] = []
-        returned = trapped = 0
+        returned = trapped = timed_out = skipped = 0
         for func in functions:
             for arg in _BATTERY:
                 probe = {"function": func, "input": arg,
                          "inputLen": len(arg.encode("utf-8"))}
-                try:
-                    result = canonical.run_component_str(component, func, arg)
-                    probe["outcome"] = "returned"
-                    probe["result"] = result
-                    returned += 1
-                except EmitError as error:
-                    # the physical confinement: wasmtime caught a trap and exited
-                    # non-zero. The host was never touched — this is a contained
-                    # trap, recorded, never re-raised.
-                    probe["outcome"] = "trapped"
-                    probe["trap"] = _trap_detail(str(error))
-                    trapped += 1
+                if timed_out:
+                    # A guest that blew the wall-clock budget once will blow it
+                    # again on every remaining probe. Stop rather than let one
+                    # candidate buy the budget once per probe.
+                    probe["outcome"] = "skipped"
+                    skipped += 1
+                else:
+                    try:
+                        result = canonical.run_component_str(component, func, arg,
+                                                             fuel=PROBE_FUEL)
+                        probe["outcome"] = "returned"
+                        probe["result"] = result
+                        returned += 1
+                    except EmitError as error:
+                        # the physical confinement: wasmtime caught a trap and
+                        # exited non-zero. The host was never touched — this is a
+                        # contained trap, recorded, never re-raised. A guest that
+                        # spends its whole fuel budget lands here too ("all fuel
+                        # consumed by WebAssembly"): a runaway candidate is a
+                        # trap, not a special case.
+                        probe["outcome"] = "trapped"
+                        probe["trap"] = _trap_detail(str(error))
+                        trapped += 1
+                    except subprocess.TimeoutExpired:
+                        # The wall-clock backstop for whatever fuel does not
+                        # cover. The guest did not return, so this is not a pass
+                        # — but it is still a graded outcome, never a raised
+                        # error: the contract is that a candidate always gets a
+                        # verdict.
+                        probe["outcome"] = "timeout"
+                        probe["timeout"] = ("did not return within the probe "
+                                            "budget and was killed by the "
+                                            "runtime — the host was never "
+                                            "touched")
+                        timed_out += 1
                 probes.append(probe)
 
-    status = "trapped" if trapped else "passed"
+    if timed_out:
+        status = "timeout"
+        tail = ("a probe did not return within the probe budget and was killed "
+                "by the runtime — contained, the host was never touched; "
+                f"{skipped} remaining probe(s) were not run")
+    elif trapped:
+        status = "trapped"
+        tail = ("a probe trapped in the sandbox — contained, the host was "
+                "never touched")
+    else:
+        status = "passed"
+        tail = "every probe returned cleanly"
     return {
         "kind": "confined",
         "status": status,
@@ -276,13 +348,10 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
         "interface": f"{emitted['package']}/{emitted['interface']}",
         "functions": functions,
         "counts": {"probes": len(probes), "returned": returned,
-                   "trapped": trapped},
+                   "trapped": trapped, "timeout": timed_out, "skipped": skipped},
         "probes": probes,
         "note": ("every Str-surface function was booted and invoked under "
-                 "wasmtime's component model; " + (
-                     "a probe trapped in the sandbox — contained, the host was "
-                     "never touched" if trapped else
-                     "every probe returned cleanly")) + ".",
+                 "wasmtime's component model; " + tail) + ".",
     }
 
 
@@ -384,13 +453,14 @@ def run(session, arguments: dict, *,
         over_the_transport: bool = True) -> dict:
     """Quarantine a candidate: grade it with the gauntlet, then prove it in the
     sandbox, and return a report whose verdict is one of ``passed`` / ``trapped``
-    / ``rejected`` / ``deferred`` / ``unavailable`` (see the module docstring).
+    / ``timeout`` / ``rejected`` / ``deferred`` / ``unavailable`` (see the module
+    docstring).
 
     ``session`` is read for the admission manifest (the gauntlet grades against
     the live composition when one is loaded) and never mutated. The substrate
     battery builds and runs a component in a temporary directory. A rejected,
-    trapping, or deferred candidate is *reported*, never raised, and the running
-    system is untouched throughout.
+    trapping, timing-out, or deferred candidate is *reported*, never raised, and
+    the running system is untouched throughout.
     """
     # 1. The gauntlet grade (item 31), reused verbatim: admission proved,
     #    teardown derived, boundary enumerated, host lifecycle battery tested in
@@ -410,7 +480,8 @@ def run(session, arguments: dict, *,
             "substrate": {
                 "kind": "confined", "status": "not-run",
                 "reason": "admission refused; nothing was lowered or run.",
-                "counts": {"probes": 0, "returned": 0, "trapped": 0},
+                "counts": {"probes": 0, "returned": 0, "trapped": 0,
+                           "timeout": 0, "skipped": 0},
             },
             "admission": admission_decision(session, {"verdict": "rejected"}),
         }
@@ -441,6 +512,7 @@ def run(session, arguments: dict, *,
     verdict = {
         "passed": "passed",
         "trapped": "trapped",
+        "timeout": "timeout",
         "deferred": "deferred",
         "unavailable": "unavailable",
     }.get(substrate.get("status"), "unavailable")
@@ -487,6 +559,10 @@ def _verdict_note(verdict: str) -> str:
         "trapped": "the candidate TRAPPED in the sandbox — a fault probe would "
                    "have escaped on a hosted tier, but here it was caught by "
                    "wasmtime, contained, the host never touched. Not eligible.",
+        "timeout": "the candidate did not return from a probe within the "
+                   "sandbox's budget, so the runtime killed it — contained, the "
+                   "host was never touched, but the candidate was neither "
+                   "proved nor disproved. Not eligible.",
         "deferred": "the candidate has no canonical-ABI-emittable boundary "
                     "function to present over the canonical ABI — every boundary "
                     "signature carries a type still un-lowerable at the canonical "
