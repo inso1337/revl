@@ -109,24 +109,39 @@ def select_slice(ir: dict, realm: str) -> CanarySlice:
 # the recorded fields `compare_timelines` keys on, in the order a divergence
 # reports them. `kind` and `label` name what a step DID; `undo`/`compensate`
 # name what it will take back, which the timeline records in the same `Step`'s
-# detail. `origin` is deliberately absent: it is provenance (the component, key
-# and method the step came from), identical for two generations of one
-# provider, so keying it would report a rename as behavioural change.
-COMPARED_FIELDS = ("kind", "label", "undo", "compensate")
+# detail. `slot` names WHICH ENTRY POINT reached the step — the position of the
+# method inside the provide block. `origin` as a whole is deliberately absent:
+# it carries the method's NAME, and keying that would report a rename as
+# behavioural change. The part of it that says where a step is reached from is
+# not provenance though, it is behaviour, and it is keyed as `slot`. Two
+# generations that record the same steps from different methods have the same
+# flat step list and different worlds: a step reached from `get` runs when a
+# consumer reads, the same step reached from `set` runs when a consumer writes.
+COMPARED_FIELDS = ("kind", "label", "undo", "compensate", "slot")
 
 _INVERSE_FIELDS = {"undo": "inverse", "compensate": "compensation"}
+
+
+def _slot_label(value) -> str:
+    """Render a step's entry-point slot for a divergence report."""
+    if value is None:
+        return "the activation body"
+    return f"method #{value} of the provide block"
 
 
 def _step_key(step) -> tuple:
     """One recorded step's comparable content, aligned with ``COMPARED_FIELDS``.
 
-    The inverse is read from the step's `detail`, which is where `_walk_steps`
-    records it. A step kind that carries no inverse reports `None` for both
-    slots, so kinds that have none compare exactly as before.
+    The inverse and the entry-point slot are read from the step's `detail`,
+    which is where `_walk_steps` records them. A step kind that carries no
+    inverse reports `None` for both inverse slots, so kinds that have none
+    compare exactly as before; a step recorded outside any provided method —
+    the activation body, and the provision itself — reports `None` for `slot`.
     """
     detail = step.detail if isinstance(step.detail, dict) else {}
     return (step.kind, step.label,
-            detail.get("undo"), detail.get("compensate"))
+            detail.get("undo"), detail.get("compensate"),
+            detail.get("slot"))
 
 
 def _expr_label(expr) -> str:
@@ -156,7 +171,7 @@ def _expr_label(expr) -> str:
     return str(expr.get("kind"))
 
 
-def _walk_steps(nodes, timeline, replay, origin: str) -> None:
+def _walk_steps(nodes, timeline, replay, origin: str, slot=None) -> None:
     """Append one `replay.Step` per boundary-relevant node, in source order.
 
     The recorded world of a provider is its activation body followed by each
@@ -164,6 +179,14 @@ def _walk_steps(nodes, timeline, replay, origin: str) -> None:
     generation performs. This is the substrate the canary compares; it uses the
     replay engine's own step vocabulary so a divergence reads in the same terms
     a step-back does.
+
+    `origin` is the provenance string a divergence reads
+    (`Provider:key.method`) and `slot` is the position of the method that
+    reached these nodes inside its provide block, or `None` for the activation
+    body and the provision itself. The slot is the half of that provenance that
+    survives a rename: it says which entry point a step is reached from without
+    naming it, so a step that MOVED between methods is a divergence while a
+    renamed method is not.
     """
     for node in nodes or []:
         if not isinstance(node, dict):
@@ -172,26 +195,28 @@ def _walk_steps(nodes, timeline, replay, origin: str) -> None:
         if step == "let-effect":
             label = f"let {node.get('bind')} = {_expr_label(node.get('acquire'))}"
             timeline._add(replay.KIND_EFFECT, label, node.get("bind"),
-                          detail={"origin": origin, "undo": _expr_label(node.get("undo"))})
+                          detail={"origin": origin, "slot": slot,
+                                  "undo": _expr_label(node.get("undo"))})
         elif step == "effect":
             timeline._add(replay.KIND_EFFECT, _expr_label(node.get("acquire")), None,
-                          detail={"origin": origin, "undo": _expr_label(node.get("undo"))})
+                          detail={"origin": origin, "slot": slot,
+                                  "undo": _expr_label(node.get("undo"))})
         elif step == "emit":
             timeline._add(replay.KIND_EMISSION, _expr_label(node.get("expr")), None,
-                          detail={"origin": origin,
+                          detail={"origin": origin, "slot": slot,
                                   "compensate": _expr_label(node.get("compensate"))
                                   if node.get("compensate") is not None else None},
                           note="an emission is a one-way boundary crossing")
         elif step == "await":
             timeline._add(replay.KIND_BOUNDARY, "await", None,
-                          detail={"origin": origin})
+                          detail={"origin": origin, "slot": slot})
         elif step == "provide":
             key = node.get("name")
             timeline._add(replay.KIND_PROVISION, f"provide {key}: {node.get('service')}",
-                          key, detail={"origin": origin})
-            for method in node.get("methods") or []:
+                          key, detail={"origin": origin, "slot": slot})
+            for index, method in enumerate(node.get("methods") or []):
                 _walk_steps(method.get("body"), timeline, replay,
-                            f"{origin}:{key}.{method.get('name')}")
+                            f"{origin}:{key}.{method.get('name')}", index)
 
 
 def slice_timeline(ir: dict, provider: str):
@@ -216,12 +241,16 @@ def compare_timelines(baseline, candidate) -> dict:
     length mismatch — as the divergence, in the terms the replay engine uses.
     A clean comparison (`diverged: False`) is the evidence to promote.
 
-    The key is `_step_key`: the step's `(kind, label)` AND the inverse it
-    records. A candidate that acquires exactly what the baseline acquires and
-    then takes back something else has diverged — the inverse is behaviour, it
-    is what a promote hands to teardown, and it was already in the recorded
-    world, so comparing only `(kind, label)` reported a changed rollback as an
-    identical generation and recommended the promote.
+    The key is `_step_key`: the step's `(kind, label)`, the inverse it records,
+    and the entry point it is reached from. A candidate that acquires exactly
+    what the baseline acquires and then takes back something else has diverged —
+    the inverse is behaviour, it is what a promote hands to teardown, and it was
+    already in the recorded world, so comparing only `(kind, label)` reported a
+    changed rollback as an identical generation and recommended the promote. A
+    candidate that records the same steps from a DIFFERENT method has diverged
+    too: the flat step list is unchanged, so comparing the list alone reported a
+    step relocated from the write path to the read path as an identical
+    generation and recommended the promote.
     """
     b_steps, c_steps = baseline.steps, candidate.steps
     for i in range(min(len(b_steps), len(c_steps))):
@@ -238,6 +267,12 @@ def compare_timelines(baseline, candidate) -> dict:
             reason += (f" — the same recorded step with a different "
                        f"{_INVERSE_FIELDS[field]}: `{b_key[idx]}` vs "
                        f"`{c_key[idx]}`")
+        elif field == "slot":
+            reason += (f" — the same recorded step reached from a different "
+                       f"entry point ({_slot_label(b_key[idx])} vs "
+                       f"{_slot_label(c_key[idx])}): a step reached from `get` "
+                       f"runs when a consumer reads, the same step reached "
+                       f"from `set` runs when a consumer writes")
         return {
             "diverged": True,
             "atIndex": i,
