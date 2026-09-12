@@ -61,7 +61,7 @@ untrusted or partially-shaped document cannot fault.
 | `value_list(v)` | `Value -> List[Value]` | list elements; non-list → `[]` |
 | `value_at(v, i)` | `(Value, Int) -> Value` | list element by index; OOB/non-list → null `Value` |
 | `value_children(v)` | `Value -> List[Value]` | record values or list elements; scalar → `[]` (the walk driver) |
-| `value_len(v)` | `Value -> Int` | length of list/record/str; scalar/null → `0` |
+| `value_len(v)` | `Value -> Int` | length of list/record/str; a str counts CODE POINTS, never UTF-16 units (docs/strings.md); scalar/null → `0` |
 | `value_str(v)` | `Value -> Str` | as string; non-str → `""` |
 | `value_int(v)` | `Value -> Int` | as int (bool excluded); non-int → `0` |
 | `value_bool(v)` | `Value -> Bool` | as bool; non-bool → `false` |
