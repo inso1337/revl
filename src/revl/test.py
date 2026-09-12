@@ -590,6 +590,44 @@ def run_rust(ir: dict) -> tuple[str, str]:
     return ("pass", "cargo test: all emitted tests passed" + note)
 
 
+#: `run_go`'s stc-go resolve probe: ``""`` = not probed yet, ``None`` =
+#: resolvable, anything else = why it is not. One answer per process, because it
+#: is a property of the machine rather than of the document, and a lifecycle
+#: document reaches that runner once per test case.
+_STC_GO_REASON: str | None = ""
+
+
+def _stc_go_reason() -> str | None:
+    """``None`` when the emitted module's pinned stc-go can be resolved here.
+
+    A document carrying a `lifecycle test` lowers onto the live stc-go runtime,
+    so the throwaway module pins a `require` and :func:`run_go` resolves it
+    OFFLINE (`GOPROXY=off`) — the honest gate, and the reason a network hiccup
+    cannot redden the tier. That only holds while the module is already in the
+    local cache, which this runner cannot assume: the cache is warmed as a side
+    effect of *whatever else happened to run first*. ``tests/test_run_go.py``
+    warms it for the `frontend` job by importing ``revl.run_go`` at module
+    scope, and the `conformance` validator warms it by executing the corpus —
+    but that is a property of the SELECTION, not of the document. A job whose
+    selection happens to pull in a lifecycle go case without a warmer (the
+    `root-suite-affected` job on a `stdlib/value.rvl` diff) failed the tier with
+    `go test exited 1` and `module lookup disabled by GOPROXY=off` underneath,
+    which reads as a broken emitter and is not one.
+
+    So resolve the way every other go path in the tree already resolves —
+    :func:`revl.run_go.go_runtime_reason`, and `tools/validate.py`'s
+    ``GoValidator`` before it: probe offline first, and retry over the network
+    only when the offline attempt failed for a *resolution* reason and
+    proxy.golang.org answers. The answer is cached; see ``_STC_GO_REASON``.
+    """
+    global _STC_GO_REASON
+    if _STC_GO_REASON == "":
+        from . import run_go as _run_go  # noqa: PLC0415 — placement stays off `revl test`'s import path
+
+        _STC_GO_REASON = _run_go.go_runtime_reason()
+    return _STC_GO_REASON
+
+
 def run_go(ir: dict) -> tuple[str, str]:
     """Emit a throwaway module and run its ``Test*`` funcs under ``go test``.
 
@@ -598,7 +636,8 @@ def run_go(ir: dict) -> tuple[str, str]:
     as python and TypeScript. A document carrying a `lifecycle test` lowers to
     the live stc-go runtime path instead, so the throwaway module pins the
     same stc-go require the go placement runner and the conformance validator
-    use (resolved from the local module cache; FR-5).
+    use, and resolves it offline once :func:`_stc_go_reason` has confirmed the
+    pinned module is obtainable (FR-5).
 
     go lowers `timer` steps as of item 99 (schedule/cancel on the clock
     coeffect, residue-accounted), so a timer document routes to real execution
@@ -626,8 +665,15 @@ def run_go(ir: dict) -> tuple[str, str]:
         (tmp / "go.mod").write_text(go_mod, encoding="utf-8")
         env = {**os.environ, "GOFLAGS": "-mod=mod"}
         if "stc-go" in go_mod:
-            # the module is pinned and cached by the placement runner / the
-            # conformance validator; an offline resolve is the honest gate
+            reason = _stc_go_reason()
+            if reason is not None:
+                # a resolution failure stays a FAILURE rather than the rust
+                # tier's `Absent` skip: `go` is exempt from REVL_REQUIRE_TIERS
+                # (tests/test_env_gated_skips_run_somewhere.py), so no job would
+                # catch the skip, and a pinned module that cannot be obtained is
+                # a provisioning break rather than an absent toolchain.
+                return ("fail", f"stc-go could not be resolved: {reason}")
+            # the module is in the cache now; an offline resolve is the gate
             env["GOPROXY"] = "off"
         # item 314: run with `-vet=off`. `go test` invokes `go vet` by
         # default, whose `bools` analyzer rejects tautological boolean
