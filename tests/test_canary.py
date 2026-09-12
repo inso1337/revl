@@ -37,6 +37,9 @@ FIX = os.path.join(ROOT, "tests", "fixtures")
 BASELINE = os.path.join(FIX, "canary_tenants.rvl")
 CANDIDATE_DIVERGE = os.path.join(FIX, "canary_candidate_diverge.rvl")
 CANDIDATE_SAME = os.path.join(FIX, "canary_candidate_same.rvl")
+CANDIDATE_INVERSE = os.path.join(FIX, "canary_candidate_inverse.rvl")
+EMIT_BASELINE = os.path.join(FIX, "canary_emit_baseline.rvl")
+EMIT_CANDIDATES = os.path.join(FIX, "canary_emit_candidates.rvl")
 
 TENANTS = ("tenant_a", "tenant_b", "tenant_c")
 OTHER_TENANT_COMPONENTS = {
@@ -115,6 +118,94 @@ def test_divergence_uses_the_replay_step_vocabulary(baseline_ir):
     kinds = {s.kind for s in tl.steps}
     # activation `let` effect + the provision, at least
     assert "effect" in kinds and "provision" in kinds
+
+
+def test_inverse_divergence_reverts_an_identical_acquisition(baseline_ir):
+    """The candidate acquires EXACTLY what the baseline acquires — the same
+    `store.insert(k, v)` with the same args, the same activation, the same
+    provision — and differs only in the INVERSE it records: the baseline takes
+    the entry back with `store.remove(k)`, the candidate removes a key it never
+    wrote.
+
+    That is a divergence. The inverse is behaviour, it is already in the
+    recorded world, and it is the half a promote hands to teardown — so a
+    generation whose rollback takes back different state must be reverted, not
+    promoted. Comparing only `(kind, label)` reported this candidate as an
+    identical generation and recommended the promote."""
+    report = canary.run_canary(baseline_ir, candidate_files=[CANDIDATE_INVERSE],
+                               realm="tenant_a", prove_residue=False)
+    assert report["ok"] and report["admitted"]
+    div = report["divergence"]
+    assert div["diverged"] is True
+    assert div["field"] == "undo"
+    # the acquisition is untouched: only the inverse differs
+    assert div["baseline"]["kind"] == div["candidate"]["kind"] == "effect"
+    assert div["baseline"]["label"] == div["candidate"]["label"]
+    assert div["baseline"]["undo"] == "store.remove(k)"
+    assert div["candidate"]["undo"] == "store.remove('some-other-key')"
+    assert div["attribution"] == {"component": "TenantAStore", "realm": "tenant_a"}
+    assert report["recommendation"] == "revert"
+
+
+@pytest.mark.parametrize("provider", [
+    "EmitChangedCompensation",   # compensates a line it never committed
+    "EmitDroppedCompensation",   # drops the compensation: a one-way crossing
+])
+def test_a_compensation_only_change_is_a_divergence(provider):
+    """The same completeness on the boundary-crossing half of the world: a
+    provider that both provides `kv` and emits to a `Sink` records one step per
+    emission, and the step carries the COMPENSATION it registered. Two
+    generations whose acquisitions and emissions are identical and whose
+    compensation is not have diverged — the compensation is what a teardown
+    runs in place of an inverse that does not exist."""
+    baseline = canary.slice_timeline(compile_files([EMIT_BASELINE]), "TenantAStore")
+    candidate = canary.slice_timeline(compile_files([EMIT_CANDIDATES]), provider)
+    div = canary.compare_timelines(baseline, candidate)
+    assert div["diverged"] is True
+    assert div["field"] == "compensate"
+    # the emission itself is unchanged; only the compensation differs
+    assert div["baseline"]["kind"] == div["candidate"]["kind"] == "emission"
+    assert div["baseline"]["label"] == div["candidate"]["label"] == "sink.commit(v)"
+    assert div["baseline"]["compensate"] == "sink.rollback(v)"
+    assert div["candidate"]["compensate"] != "sink.rollback(v)"
+
+
+def test_the_compared_key_is_behaviour_not_provenance():
+    """`_step_key` keys `(kind, label, undo, compensate)` — the step's behaviour
+    and the inverse it records — and deliberately NOT `origin`.
+
+    `origin` is provenance (the component, key and method a step came from) and
+    is identical for two generations of one provider; keying it would report a
+    rename as behavioural change. The inverse IS behaviour, so it is keyed. This
+    pins both halves of that decision, plus the length-mismatch field."""
+    replay = canary.replay_module()
+
+    def step(origin: str, undo):
+        return replay.Step(0, replay.KIND_EFFECT, "store.insert(k, v)", None,
+                           {"origin": origin},
+                           detail={"origin": origin, "undo": undo})
+
+    def timeline(*steps):
+        tl = replay.Timeline("TenantAStore")
+        tl.steps.extend(steps)
+        return tl
+
+    # same behaviour recorded from a different site (a renamed method): NOT a
+    # divergence — the recorded world is the same world
+    a = timeline(step("TenantAStore:kv.set", "store.remove(k)"))
+    b = timeline(step("TenantAStore:kv.put", "store.remove(k)"))
+    assert canary.compare_timelines(a, b)["diverged"] is False
+
+    # same acquisition, different inverse: IS a divergence
+    div = canary.compare_timelines(a, timeline(step("TenantAStore:kv.set",
+                                                   "store.remove('other')")))
+    assert div["diverged"] is True and div["field"] == "undo"
+
+    # a length mismatch is still a divergence, named as such
+    div = canary.compare_timelines(a, timeline(step("TenantAStore:kv.set",
+                                                   "store.remove(k)"),
+                                              step("TenantAStore:kv.set", None)))
+    assert div["diverged"] is True and div["field"] == "length"
 
 
 # ---------------------------------------------- revert (derived, survivors)
