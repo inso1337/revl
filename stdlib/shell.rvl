@@ -45,6 +45,17 @@
 // operand count, unbalanced quotes. The dangerous failure is a false "fs-local"
 // on an actually-irreversible command, so every ambiguity resolves to emission.
 //
+// Quotes are literal data — `mv "a;b" c` lowers, the `;` is part of a filename —
+// but the two quote kinds are NOT alike, and the distinction is load-bearing.
+// SINGLE quotes suppress every shell feature. DOUBLE quotes do not: `$` and the
+// backtick are still command / parameter expansion inside `"..."` (only `'...'`
+// turns them literal), so `rm "$(echo x)"` really removes the file `x` while the
+// tokenizer would record the operand `$(echo x)` — a different path. Those two
+// characters, and a backslash-`$` / backslash-backtick inside double quotes
+// (POSIX makes the shell EAT that backslash, so `"a\$b"` is the word `a$b`),
+// therefore stay emission too. Every OTHER metacharacter remains literal inside
+// double quotes.
+//
 // -------------------------------------------------------------- confinement
 // The lowered ops execute through stdlib/fs.rvl, whose py bodies confine every
 // forward op AND every inverse to one session workspace root
