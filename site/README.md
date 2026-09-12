@@ -48,7 +48,15 @@ Pyodide's WebLoop cannot do; live mode patches `Session._run` to
 `pyodide.ffi.run_sync`, which needs JSPI (recent Chrome/Edge; the Boot button
 disables itself elsewhere). cordis-py ships as its own wheel
 (`vendor/cordis-*.whl`, built from the `backends/python/setup.sh` clone at the
-tested pin), and `cordis.hmr`'s watchdog import gets an inert browser shim.
+tested pin), and `cordis.hmr`'s watchdog import gets an inert browser shim. The
+wheel declares its own requirements — `pyyaml` (imported at module scope by
+`cordis.include`) and `watchdog` (imported at module scope by `cordis.hmr`,
+which `cordis/__init__` imports, so the documented zero-dependency install does
+not work yet) — so a plain `pip install vendor/cordis-*.whl` yields a working
+`import cordis`. The browser installs it with dependency resolution off
+(`deps=False`): `pyyaml` comes from the Pyodide distribution by name and
+`watchdog` is not in it at all, so resolving against PyPI would fail the whole
+install.
 Components whose `config` fields have no default are booted with typed
 placeholders, each one reported in the trace.
 

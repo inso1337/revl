@@ -383,14 +383,30 @@ async function boot() {
     await pyodide.loadPackage("micropip");
     const micropip = pyodide.pyimport("micropip");
     await micropip.install(new URL(WHEEL, window.location.href).href);
-    await micropip.install(new URL(CORDIS_WHEEL, window.location.href).href);
+    // deps=False: the cordis wheel declares `pyyaml` and `watchdog` in its
+    // METADATA so a plain `pip install` produces a working `import cordis`
+    // (issue #946). Neither is installable that way here. `pyyaml` is in the
+    // Pyodide distribution and is loaded by name below; `watchdog` is not in
+    // the distribution at all (pyodide-lock.json v0.27.2), so micropip would
+    // fall through to PyPI, find no pure-Python or wasm32 wheel it can use,
+    // and fail the whole install. The browser needs neither: it has no
+    // filesystem to watch, and LIVE_DRIVER installs an inert `watchdog` shim
+    // before anything imports cordis.
+    // `deps` has to be passed by name, which from JS means callKwargs: a bare
+    // object in the second positional slot lands in `keep_going` instead.
+    await micropip.install.callKwargs(new URL(CORDIS_WHEEL, window.location.href).href, {
+      deps: false,
+    });
     setMsg("Wiring up…");
     pyodide.runPython(DRIVER);
     runFn = pyodide.globals.get("run_playground");
     pyodideRef = pyodide;
     setMsg("Waking the runtime (live mode)…");
     try {
-      await pyodide.loadPackage("pyyaml"); // cordis imports yaml unconditionally
+      // cordis/include.py imports yaml at module scope, and the wheel's
+      // `Requires-Dist: pyyaml` is what pip would honour; here the Pyodide
+      // distribution's own pyyaml build is the only usable one.
+      await pyodide.loadPackage("pyyaml");
       const liveInfo = JSON.parse(await pyodide.runPythonAsync(LIVE_DRIVER));
       liveOk = !!liveInfo.live_ok;
     } catch (err) {
