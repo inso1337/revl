@@ -321,3 +321,200 @@ def test_the_parse_side_rejects_the_non_finite_constants(tier, literal):
         pytest.skip(f"{tier}: {message}")
     assert status == "pass", (
         f"{tier} accepted the non-finite JSON constant {literal!r}: {message}")
+
+
+# ---------------------------------------------------------------------------
+# An unpaired surrogate escape is REFUSED, never decoded (item 482)
+# ---------------------------------------------------------------------------
+#
+# `json_parse` is `pure`, and `docs/strings.md` pins a `Str` as a sequence of
+# Unicode scalar values — so a JSON string escape that denotes a UTF-16 code
+# UNIT rather than a scalar has no value the function can legally produce.
+# `docs/syntax-2.0.md` section 0.1 already refuses an unpaired surrogate
+# "wherever it appears ... reachable from every JSON-carried source path (the
+# LSP, the MCP verbs, `gate.admit(str)`)", and the frontend enforces that. The
+# parse side did not, and the four tiers gave FOUR answers for `"\ud800"`:
+#
+#   py    the RAW lone surrogate, which `str_utf8_bytes` spelled `ED A0 80` —
+#         the WTF-8 encoding of a surrogate, and NOT valid UTF-8, so a hash, a
+#         signature or a wire write over the parsed value produced bytes no
+#         UTF-8 decoder accepts
+#   ts    the six-character escape TEXT `\ud800` verbatim — a silently
+#         different VALUE
+#   rust  `serde_json` rejected the escape (the one correct answer, and now the
+#         reference the other three were brought to)
+#   go    `encoding/json` silently substituted `U+FFFD`, indistinguishable from
+#         a document that genuinely spelled a replacement character
+#
+# These probes pin the refusal on all four tiers. The controls matter as much as
+# the refusals: `\u` itself is not banned, so a surrogate PAIR must still decode
+# to its astral scalar, and the document `"\\ud800"` (an escaped backslash
+# followed by a literal `u`) must NOT be refused — the @go scanner reads the
+# input text, and an over-eager one would take that as an unpaired escape.
+#
+# The value is asserted through `json_try_parse` so the observable is uniform:
+# `json_parse` is total on rust/go (a refusal is `null`) and raising on py/ts,
+# while the TOTAL wrapper routes all four into `Err`.
+LONE_SURROGATE = [
+    ("lone_high", r'"\ud800"'),
+    ("lone_low", r'"\udc00"'),
+    ("high_then_ascii", r'"\ud800a"'),
+    ("high_then_bmp_escape", r'"\ud800\u0041"'),
+    ("lone_high_at_eof", r'"a\ud800"'),
+    ("lone_low_at_start", r'"\udc00z"'),
+    ("pair_then_lone", r'"\ud83d\ude00\ud800"'),
+    ("object_key", r'{"\ud800":1}'),
+    ("inside_a_list", r'["\ud800"]'),
+    ("nested", r'{"a":["\udc00"]}'),
+]
+
+#: Documents that carry `\u` but must still decode: the false-positive guard for
+#: the @go text scanner (an escaped backslash is not an escape) and the proof
+#: that a well-formed PAIR was always correct.
+SURROGATE_ACCEPTED = [
+    ("escaped_backslash", r'"\\ud800"'),
+    ("valid_pair", r'"\ud83d\ude00"'),
+    ("plain_ascii", r'"hello"'),
+]
+
+#: `json_stringify("\ud83d\ude00")` — U+1F600, four UTF-8 bytes inside quotes.
+ASTRAL_BYTES = "34,240,159,152,128,34"
+
+#: The byte spelling the py tier produced for `"\ud800"` BEFORE the fix: a
+#: quoted `ED A0 80`, i.e. the WTF-8 encoding of the lone surrogate. Asserting
+#: the refusal is what keeps the byte-level consequence pinned rather than
+#: described.
+WTF8_BYTES = "34,237,160,128,34"
+
+STDLIB_STR = (ROOT / "stdlib" / "str.rvl").read_text(encoding="utf-8")
+
+BYTELIST = (
+    "fn bytelist(xs: List[Int]) -> Str {\n"
+    '  var o = ""\n'
+    "  for (b of xs) {\n"
+    '    if (o != "") { o = o.concat(",") }\n'
+    "    o = o.concat(b.to_str())\n"
+    "  }\n"
+    "  return o\n"
+    "}\n"
+)
+
+
+def _json_doc(json_text: str) -> str:
+    """A revl string literal spelling *json_text*.
+
+    revl's escape set is minimal — only `\\"` and `\\\\` are processed, and
+    `\\u` is NOT an escape — so the literal is built here rather than written
+    out: the JSON text keeps its backslashes all the way to `json_try_parse`."""
+    return '"' + json_text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _run_utf8_program(tier: str, body: str, expected: str) -> tuple[str, str]:
+    """Assert `out() == expected` on *tier*, with `str_utf8_bytes` in scope.
+
+    `bytelist` spells a byte list as comma-separated decimal so the observable
+    is a plain `Str` that every tier can assert on."""
+    literal = expected.replace("\\", "\\\\").replace('"', '\\"')
+    src = (
+        'use "stdlib/json.rvl" { json_try_parse, json_stringify }\n'
+        'use "stdlib/str.rvl" { str_utf8_bytes }\n'
+        f"{BYTELIST}"
+        f"pub fn out() -> Str {{ {body} }}\n"
+        f'test "canonical" {{ assert out() == "{literal}" }}\n'
+    )
+    ir = compile_source(src, "json_probe.rvl",
+                        modules={"stdlib/json.rvl": STDLIB,
+                                 "stdlib/str.rvl": STDLIB_STR})
+    return RUNNERS[tier](ir)
+
+
+def _parse_verdict(tier: str, doc: str) -> tuple[str, str]:
+    """Assert `json_try_parse(<doc>)` is refused on *tier*, uniformly."""
+    return _run_program(
+        tier, "json_try_parse", "",
+        'return match json_try_parse(%s) { Ok(_) => "ACCEPTED", '
+        'Err(_) => "REFUSED" }' % _json_doc(doc),
+        "REFUSED")
+
+
+@pytest.mark.parametrize("name,doc", LONE_SURROGATE,
+                         ids=[c[0] for c in LONE_SURROGATE])
+@pytest.mark.parametrize("tier", ALL_TIERS)
+def test_an_unpaired_surrogate_escape_is_refused(tier, name, doc):
+    """Every tier refuses a document carrying an unpaired `\\uXXXX` escape.
+
+    The probe asserts "REFUSED" as a literal, so a tier that decodes the escape
+    — py's raw surrogate, ts's escape text, go's `U+FFFD` — returns "ACCEPTED"
+    and reddens with the value it produced. rust already refused before the
+    change; the other three are the ones this pins."""
+    status, message = _parse_verdict(tier, doc)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", (
+        f"{tier} decoded the unpaired surrogate in {name} ({doc!r}) instead of "
+        f"refusing it: {message}")
+
+
+@pytest.mark.parametrize("name,doc", SURROGATE_ACCEPTED,
+                         ids=[c[0] for c in SURROGATE_ACCEPTED])
+@pytest.mark.parametrize("tier", ALL_TIERS)
+def test_a_well_formed_escape_is_still_decoded(tier, name, doc):
+    """The controls, and the reason the refusal is not a blanket ban on `\\u`.
+
+    `"\\\\ud800"` is an ESCAPED BACKSLASH followed by a literal `u`, so the
+    string it denotes is `\\ud800` and there is no surrogate in it at all. The
+    @go bodies scan the raw input text (a post-decode check cannot work there),
+    so an over-eager scanner would refuse this document — that is the false
+    positive this test exists to catch."""
+    status, message = _run_program(
+        tier, "json_try_parse", "",
+        'return match json_try_parse(%s) { Ok(_) => "ACCEPTED", '
+        'Err(_) => "REFUSED" }' % _json_doc(doc),
+        "ACCEPTED")
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", (
+        f"{tier} refused the well-formed document {name} ({doc!r}): {message}")
+
+
+@pytest.mark.parametrize("tier", ALL_TIERS)
+def test_a_surrogate_pair_still_decodes_to_its_astral_scalar(tier):
+    """A PAIRED escape is one astral scalar, not a surrogate: `\\ud83d\\ude00`
+    is U+1F600, and `json_stringify` of it is the four-byte UTF-8 encoding
+    `F0 9F 98 80` inside quotes. Pinned at the byte level on every tier, because
+    the code-point check a tier uses to spot a LONE surrogate must not fire on
+    a pair — the check has to look at the decoded scalar, not at the escape."""
+    status, message = _run_utf8_program(
+        tier,
+        'return match json_try_parse(%s) { Err(_) => "REFUSED", '
+        'Ok(v) => bytelist(str_utf8_bytes(json_stringify(v))) }'
+        % _json_doc(r'"\ud83d\ude00"'),
+        ASTRAL_BYTES)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", (
+        f"{tier} did not encode the surrogate pair as U+1F600: {message}")
+
+
+@pytest.mark.parametrize("tier", ALL_TIERS)
+def test_a_lone_surrogate_never_reaches_utf8_bytes(tier):
+    """The sharp end of the finding, pinned at the byte level.
+
+    This probe pipes whatever `json_try_parse` returns through
+    `str_utf8_bytes(json_stringify(v))`. On py it returned
+    `"34,237,160,128,34"` before the fix — a quoted `ED A0 80`, which is the
+    WTF-8 encoding of the lone surrogate and NOT valid UTF-8, so anything that
+    hashed, signed or wrote the parsed value produced bytes no UTF-8 decoder
+    accepts. The refusal must now happen BEFORE that path is reached, so the
+    observable is the refusal rather than any byte string."""
+    status, message = _run_utf8_program(
+        tier,
+        'return match json_try_parse(%s) { Err(_) => "REFUSED", '
+        'Ok(v) => bytelist(str_utf8_bytes(json_stringify(v))) }'
+        % _json_doc(r'"\ud800"'),
+        "REFUSED")
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", (
+        f"{tier} let an unpaired surrogate reach str_utf8_bytes (the pre-fix py "
+        f"tier spelled it {WTF8_BYTES}, i.e. WTF-8 rather than UTF-8): {message}")

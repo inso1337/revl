@@ -176,6 +176,44 @@ where three tiers returned a decode error. The @py body now passes a
 `parse_constant` that raises, so `json_parse` and `json_try_parse` agree
 across tiers (`json_try_parse("NaN")` is `Err` everywhere).
 
+A **string** escape has the mirror hazard, and there three of the four tiers
+were wrong. RFC 8259 §7 lets a string spell a code point as `\uXXXX`, and a
+*paired* escape (`\uD83D\uDE00`) denotes one astral scalar — but an **unpaired**
+one (`"\ud800"`, with no low surrogate to follow) denotes a UTF-16 code unit
+that is not a Unicode scalar value, so it has no UTF-8 encoding and no byte
+spelling at all. `docs/strings.md` pins a `Str` as a sequence of Unicode scalar
+values, and `docs/syntax-2.0.md` §0.1 refuses an unpaired surrogate "wherever it
+appears … reachable from every JSON-carried source path (the LSP, the MCP
+verbs, `gate.admit(str)`)" — but `json_parse` did not, and the four tiers gave
+four answers for `"\ud800"`:
+
+- **py** — `json.loads` returned the raw lone surrogate, which
+  `str_utf8_bytes` then spelled `ED A0 80`. That is **not valid UTF-8** (it is
+  the WTF-8 encoding of a surrogate), so a hash, a signature or a wire write
+  over the parsed value produced bytes no UTF-8 decoder accepts.
+- **ts** — the recursive-descent parser returned the six-character escape text
+  `\ud800` verbatim: a silently different *value*.
+- **rust** — `serde_json` rejected the escape. That is the one correct answer,
+  and it is the reference the other three were brought to.
+- **go** — `encoding/json` silently substituted `U+FFFD`, which is
+  indistinguishable from a document that genuinely spelled a replacement
+  character.
+
+All four now **refuse**, as `serde_json` always did. The technique is forced by
+each runtime rather than chosen: py and ts check the **decoded** value (the @py
+body walks `str`/`list`/`dict` with an `isascii()` fast path and raises; the @ts
+body iterates the decoded string by code point, so a well-formed pair reports
+its astral scalar and passes), while the two @go bodies must scan the **input
+text** — `encoding/json` has already replaced the code unit by the time a value
+exists, so a post-decode check cannot see the difference. The scanner pairs a
+high escape with an immediately following low one and skips an *escaped*
+backslash, so `"\\ud800"` (a literal backslash followed by `u`) is not refused.
+`json_parse` keeps the split it already had — total on rust/go, raising on py/ts
+— and `json_try_parse` routes all four into `Err`. A **paired** escape was
+always correct on every tier and still decodes to its astral scalar:
+`json_stringify` of `"\ud83d\ude00"` is `34,240,159,152,128,34` (the four-byte
+UTF-8 encoding of U+1F600) on all four.
+
 **go record caveat** (a separate, deeper defect, not fixable in json.rvl's @go
 body): a revl record lowers to a Go struct whose fields are **unexported**
 (lowercase) with no `json:` tags, so `encoding/json` cannot see them and a
@@ -199,8 +237,10 @@ parse** rather than the builtin. It decodes a JSON **integer literal** (no `.`,
 no `e`/`E`) to a JS `bigint` — revl `Int`, full i64 precision — and a JSON
 **float** (a literal carrying `.`, `e`, or `E`) to a JS `number` — revl `Float`
 — matching the py tier's `int`/`float` split. Strings (including `\uXXXX`
-escapes and surrogate pairs), arrays, objects, `true`/`false`/`null` decode as
-JSON defines. A parsed `bigint` round-trips straight back to a bare JSON number
+escapes and surrogate *pairs*), arrays, objects, `true`/`false`/`null` decode as
+JSON defines; an **unpaired** `\uXXXX` escape is refused rather than decoded
+(see "A string escape has the mirror hazard" above). A parsed `bigint`
+round-trips straight back to a bare JSON number
 through the item-281 stringify replacer, so `json_stringify(json_parse(s))`
 agrees with the py tier in both directions. Regression:
 `backends/typescript/tests/fr3_json_int.test.ts` (runtime, under vitest) rounds
