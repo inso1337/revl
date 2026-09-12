@@ -1259,8 +1259,8 @@ def _tool_quarantine(arguments: dict) -> dict:
     """Quarantine a candidate: grade it with the gauntlet, then compile it to a
     standard wasm component and run its lifecycle + fault battery in wasmtime's
     component-model sandbox — where an escape is a trap, not an incident. Returns
-    a report whose `verdict` is passed | trapped | rejected | deferred |
-    unavailable, plus the policy admission decision. The live composition is
+    a report whose `verdict` is passed | trapped | timeout | rejected | deferred
+    | unavailable, plus the policy admission decision. The live composition is
     never touched (docs/quarantine-tier.md)."""
     if arguments.get("source") is None and not arguments.get("files"):
         return _session_error("provide `source` or `files` — quarantine proves "
@@ -2311,7 +2311,11 @@ TOOLS = [
                        "is a TRAP the runtime catches, not an incident. Returns a "
                        "report whose `verdict` is `passed` (proved itself in the "
                        "sandbox — eligible for admission), `trapped` (a probe "
-                       "trapped in the sandbox; contained, host untouched — not "
+                       "trapped in the sandbox, including a guest that spent its "
+                       "whole probe budget looping; contained, host untouched — "
+                       "not eligible), `timeout` (a probe outran the runtime's "
+                       "own wall-clock budget and was killed; contained, but the "
+                       "candidate is neither proved nor disproved — not "
                        "eligible), `rejected` (admission refused; never reached "
                        "the substrate), `deferred` (no Str-surface function — "
                        "records/lists across the boundary are the aggregate "
