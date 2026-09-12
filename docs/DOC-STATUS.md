@@ -180,7 +180,7 @@ was corrected by hand and had drifted back within a day.
 | stability.md | needs-work | 17 |  |
 | state-handoff.md | needs-work | 22 |  |
 | stdlib-2.0.md | current | 82 | yes |
-| stdlib-json.md | needs-work | 47 |  |
+| stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 16 |  |
 | stdlib-value.md | current | 26 |  |
