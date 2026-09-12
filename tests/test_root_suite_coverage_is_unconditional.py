@@ -39,11 +39,16 @@ the scan from passing vacuously.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
+import os
 import posixpath
 import re
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +63,14 @@ _SPEC.loader.exec_module(at)
 # is a deliberate edit to this pin rather than a scan that quietly matches some
 # other job.
 JOB = "root-suite-affected"
+
+# The module this pin re-runs under the console script, in a fresh process, to
+# observe the invocation difference directly. Chosen for being one of the three
+# modules that genuinely failed this way AND cheap (~0.2s): the other two are
+# tests/test_affected_tests.py (~21s) and tests/test_inverse_capture_by_value.py.
+# tests/test_reserved_lexicon_sweep.py also imports a repo-root directory but
+# bootstraps the root itself, so it cannot fail this way and it costs ~36s.
+_ROOT_IMPORT_PROBE = "tests/test_274_navigable_slice2.py"
 
 # The only jobs allowed to carry the fast-path routing condition. A new
 # `needs.changes.outputs.frontend` gate outside this pair would be a new
@@ -176,6 +189,53 @@ def _script(steps):
                 ln for ln in body.splitlines() if not ln.lstrip().startswith("#")
             )
     return "\n".join(lines)
+
+
+def _root_directory_imports():
+    """`tests/**/*.py` -> the repo-root directories it imports.
+
+    A repo-root directory is a plain directory at the repository root with no
+    `__init__.py` (`tools/`, `backends/`, `tests/`), so importing one needs the
+    repository root ITSELF on sys.path -- `<root>/src` does not cover it.
+    """
+    root_dirs = {
+        p.name for p in ROOT.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+    }
+    found = {}
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        if "fixtures" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - collected elsewhere
+            continue
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names |= {a.name for a in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                if node.level == 0 and node.module:
+                    names.add(node.module)
+            elif isinstance(node, ast.Call):
+                func = node.func
+                called = func.id if isinstance(func, ast.Name) else (
+                    func.attr if isinstance(func, ast.Attribute) else "")
+                if called not in ("__import__", "import_module") or not node.args:
+                    continue
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    names.add(arg.value)
+                elif isinstance(arg, ast.JoinedStr):
+                    for piece in arg.values:
+                        if (isinstance(piece, ast.Constant)
+                                and isinstance(piece.value, str) and piece.value):
+                            names.add(piece.value)
+                            break
+        hits = sorted(n for n in names if n.split(".")[0] in root_dirs)
+        if hits:
+            found[path.relative_to(ROOT).as_posix()] = hits
+    return found
 
 
 def _needs(spec):
@@ -602,6 +662,68 @@ def test_the_job_installs_what_the_root_suite_needs():
             "to run from whether a toolchain answers on PATH, so an absent pin "
             "silently drops them"
         )
+
+
+def test_the_job_can_import_a_repo_root_directory_from_a_test_body():
+    """`root-suite-affected` runs the `pytest` console script, and the console
+    script -- unlike `python -m pytest` -- does NOT prepend the cwd to sys.path.
+    A module under tests/ that imports a repo-root directory inside a test body
+    therefore needs the repository root on sys.path for some other reason, and
+    `tests/conftest.py` is that reason.
+
+    Not hypothetical: `tests/test_affected_tests.py` (tools.affected_tests),
+    `tests/test_274_navigable_slice2.py` (tests.test_evidence_policy) and
+    `tests/test_inverse_capture_by_value.py` (backends.<tier>.emit) raised
+    `ModuleNotFoundError` inside the test body under this job's invocation, so
+    the job reported a red that had nothing to do with the change under test.
+    It looked green locally for two independent reasons: `python -m pytest`
+    prepends the cwd, and pytest imports every collected module before running
+    any test, so a module that bootstraps the root itself
+    (`tests/test_reserved_lexicon_sweep.py`,
+    `tests/test_542_statement_nesting_bound.py`) covered for the others whenever
+    the selector happened to pick one of those too.
+
+    That second reason is why this has to run in a FRESH process over one file:
+    in-process, the root is on sys.path whenever any collected module put it
+    there, so an in-process assertion cannot see the defect at all.
+    """
+    imports = _root_directory_imports()
+    assert imports, (
+        "no module under tests/ imports a repo-root directory, so this scan "
+        "proves nothing. If those imports are really gone, delete this pin "
+        "deliberately rather than leaving a scan that can no longer fail."
+    )
+    assert _ROOT_IMPORT_PROBE in imports, (
+        f"{_ROOT_IMPORT_PROBE} no longer imports a repo-root directory, so it no "
+        "longer proves anything as the probe; choose another module from "
+        f"{sorted(imports)} deliberately."
+    )
+    script = _script(_steps(_jobs(), JOB))
+    assert re.search(r"(?m)^\s*pytest\s", script), (
+        f"{JOB} no longer invokes the `pytest` console script, which is the only "
+        "reason this pin exists: the console script and `python -m pytest` differ "
+        "on whether the cwd reaches sys.path. If the invocation really is "
+        "`python -m pytest` now, re-cost this pin deliberately."
+    )
+    entry = Path(sys.executable).parent / "pytest"
+    if not entry.is_file():  # pragma: no cover - a checkout without the script
+        pytest.skip(f"no `pytest` console script beside {sys.executable}")
+    proc = subprocess.run(
+        [str(entry), "-q", "-p", "no:cacheprovider", _ROOT_IMPORT_PROBE],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTEST_ADDOPTS": ""},
+    )
+    assert proc.returncode == 0, (
+        f"`{entry} -q {_ROOT_IMPORT_PROBE}` exits {proc.returncode} with the "
+        f"interpreter's own directory first on sys.path and no cwd entry, which "
+        f"is the invocation {JOB} uses. The repository root has to reach sys.path "
+        "for the modules listed above to import anything, and tests/conftest.py "
+        "owns that: it APPENDS the root rather than inserting it, so the "
+        "resolution order of everything that already resolved is unchanged.\n"
+        + proc.stdout[-2000:] + proc.stderr[-2000:]
+    )
 
 
 # --- the selector really is a fail-safe for these diffs -------------------- #
