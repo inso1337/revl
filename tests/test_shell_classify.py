@@ -135,6 +135,43 @@ def test_backslash_escaped_space_lowers():
     assert op["args"] == ["a b", "c"]
 
 
+# A backslash-NEWLINE is a LINE CONTINUATION, not an escaped newline. The shell
+# DELETES the pair and joins the words around it, so the word it would run is not
+# the operand a tokenizer produces: `mv a\<nl>b c` runs `mv ab c` (word `ab`),
+# while shlex puts a literal newline in the token (`a\nb`) — a DIFFERENT path
+# than the command names. `shlex` also cannot express the cross-quote join
+# (`mv 'x'\<nl>'y' c` runs `mv xy c`). Lowering any of these would auto-approve a
+# witnessed mutation of a path the author never wrote, so they are refused — the
+# module's documented direction for anything the text does not prove. Found by
+# differential testing against the real shell (`/bin/sh -c`), which is what the
+# `emission` fallback actually runs.
+_LINE_CONTINUATIONS = [
+    "mv a\\\nb c",          # unquoted: shell runs `mv ab c`
+    "mv \\\na b",           # continuation before the first operand
+    'mv "a\\\nb" c',        # inside double quotes: shell runs `mv "ab" c`
+    "mv 'x'\\\n'y' c",      # the join crosses quotes: shell runs `mv xy c`
+    "rm a\\\nb",            # a delete of a path the command does not name
+    "cp a\\\nb c",          # a read of a source the command does not name
+    "mkdir a\\\nb",         # same for mkdir/touch
+    "touch a\\\nb",
+]
+
+
+@pytest.mark.parametrize("cmd", _LINE_CONTINUATIONS)
+def test_line_continuation_refuses(cmd):
+    _emission(cmd)
+
+
+def test_line_continuation_inside_single_quotes_still_lowers():
+    # Inside '...' a backslash is literal and there is NO continuation — the
+    # shell keeps both characters, and so does the tokenizer, so the operand
+    # provably IS the word the command names. This is the positive control that
+    # the refusal above is scoped to continuations, not to backslashes or
+    # newlines in general.
+    (op,) = _witnessed("mv 'a\\\nb' c")
+    assert op["args"] == ["a\\\nb", "c"]
+
+
 def test_single_quoted_metachars_are_literal():
     (op,) = _witnessed("rm 'weird$name'")
     assert op["args"] == ["weird$name"]

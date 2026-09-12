@@ -37,8 +37,9 @@ export interface ShellPlan {
 
 // Unquoted occurrences of any of these mean a shell feature (pipeline, redirect,
 // expansion, glob, subshell, comment, sequence) is in play — an immediate
-// `emission`. A backslash escape and a newline are handled specially by the
-// scanner. Mirrors py `_METACHARS`.
+// `emission`. A backslash escape, a newline, and a backslash-newline LINE
+// CONTINUATION (which the shell deletes while joining the words) are handled
+// specially by the scanner. Mirrors py `_METACHARS`.
 const METACHARS = new Set('|&;<>(){}$`*?[]~!#'.split(''))
 
 // The commands we know how to lower, and the exact operand arity each requires.
@@ -72,6 +73,12 @@ function firstUnquotedMetachar(cmd: string): string | null {
     }
     if (inDouble) {
       if (c === '\\') {
+        // A backslash-NEWLINE is NOT an escaped newline: it is a line
+        // continuation, and the shell DELETES the pair (`"a\<nl>b"` is the word
+        // `ab`), while the tokenizer below keeps a literal newline — so the
+        // operand would not be the word the command names. Refuse. Mirrors py
+        // `_first_unquoted_metachar`.
+        if (i + 1 < n && cmd[i + 1] === '\n') return '\\n'
         i += 2
         continue
       }
@@ -82,6 +89,12 @@ function firstUnquotedMetachar(cmd: string): string | null {
     // unquoted context
     if (c === '\\') {
       if (i + 1 >= n) return '\\'
+      // A backslash-NEWLINE is a line continuation: the shell deletes the pair
+      // and joins the words (`mv a\<nl>b c` runs `mv ab c`), a join that also
+      // crosses quotes (`mv 'x'\<nl>'y' c` runs `mv xy c`). The tokenizer below
+      // cannot express either, so the plan would name a path the command never
+      // mentions. Refuse.
+      if (cmd[i + 1] === '\n') return '\\n'
       i += 2
       continue
     }

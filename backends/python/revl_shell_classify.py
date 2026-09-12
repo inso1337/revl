@@ -58,7 +58,10 @@ Anything with an unquoted shell metacharacter (pipe, ampersand, semicolon, the
 redirect angles, parens, braces, dollar, backtick, star, question mark, bracket,
 tilde, bang, hash) or a newline — pipelines, redirects, command substitution,
 subshells,
-globs, variable expansion, comments, command sequences; any flag at all (so
+globs, variable expansion, comments, command sequences; a backslash-newline
+LINE CONTINUATION (the shell deletes the pair and joins the words around it, so
+the operand the tokenizer would produce is not the word the command names — and
+the join crosses quotes, which no tokenizer can express); any flag at all (so
 `rm -rf`, `cp -a`, `mv -f`, `mkdir -p` are all refused — each changes the
 semantics or the reversibility the bare form guarantees); a command name outside
 the recognized set (including a pathful `/bin/mv`); an operand starting with `-`
@@ -120,7 +123,15 @@ def _first_unquoted_metachar(cmd: str) -> Optional[str]:
             continue
         if in_double:
             if c == "\\":
-                # in double quotes a backslash escapes the next char; skip both.
+                # In double quotes a backslash escapes the next char; skip both.
+                # A backslash-NEWLINE is NOT an escaped newline: it is a line
+                # continuation, and the shell DELETES the pair (`"a\<nl>b"` is
+                # the word `ab`), while shlex keeps a literal newline in the
+                # token. The tokenized operand would then not be the word the
+                # command names. Refuse (see `classify`'s asymmetry note: what
+                # the text does not prove stays an emission).
+                if i + 1 < n and cmd[i + 1] == "\n":
+                    return "\\n"
                 i += 2
                 continue
             if c == '"':
@@ -129,11 +140,18 @@ def _first_unquoted_metachar(cmd: str) -> Optional[str]:
             continue
         # unquoted context
         if c == "\\":
-            # a line-continuation backslash-newline, or an escaped char: the next
-            # character is literal data (e.g. `mv a\ b c`). Skip the pair. A
-            # trailing backslash (escape at end of string) is malformed -> refuse.
+            # An escaped char is literal data (e.g. `mv a\ b c`). Skip the pair.
+            # A trailing backslash (escape at end of string) is malformed.
             if i + 1 >= n:
                 return "\\"
+            # A backslash-NEWLINE is a line continuation, not an escaped
+            # newline: the shell deletes the pair and joins the words (`mv
+            # a\<nl>b c` runs `mv ab c`), while shlex puts a literal newline in
+            # the operand — the plan would name a path the command never
+            # mentions. The join also crosses quotes (`mv 'x'\<nl>'y' c` runs
+            # `mv xy c`), which shlex cannot express at all. Refuse.
+            if cmd[i + 1] == "\n":
+                return "\\n"
             i += 2
             continue
         if c == "'":
