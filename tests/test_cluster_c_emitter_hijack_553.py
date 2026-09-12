@@ -21,7 +21,10 @@ cluster-C case and locks the resolution. Findings (measured here):
         `error`, `make`, `append`, …) shadowed the universe-block name a runtime
         helper used, so `go build` failed. Same class as py, loud instead of
         silent. FIXED: `backends/go/emit.py::_GO_RESERVED` now carries the
-        predeclared set (user `len` runs as `len_`).
+        predeclared set (user `len` runs as `len_`) AND the type names the
+        prelude declares (`RevlResult`, `RevlOpt`, `RevlFrame`, `Stream`, …),
+        which had the same effect one name over — see the type-name section at
+        the end of this file.
 
   ts  : a require/provide key becomes a `ctx.<key>` PROPERTY on cordis's
         Context; a key colliding with a JS Object/Function member (`then`,
@@ -35,7 +38,11 @@ cluster-C case and locks the resolution. Findings (measured here):
   java: the frame/undo scaffolding names (`config`/`fx`/`frame`/`undos`/`ctx`/
         `root`) are ALREADY refused by `_EMITTER_RESERVED`; the flagged
         `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding
-        names and execute correctly. CONFIRMED SAFE.
+        names and execute correctly. CONFIRMED SAFE. `_EMITTER_RESERVED` now
+        also carries the prelude TYPE names (`RevlSecretShape`, `RevlResult`,
+        `RevlActivation`); the `RevlSecretShape` one is the case whose output no
+        longer says what it means — see the type-name section at the end of
+        this file.
 
   rust: a unit-service method named a smart-pointer/prelude method (`to_owned`,
         `as_ref`, `as_mut`) IS hijacked wherever the receiver is the
@@ -54,6 +61,7 @@ cluster-C case and locks the resolution. Findings (measured here):
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -307,3 +315,244 @@ def test_rust_smart_pointer_named_methods_hijack():
     if status == "skip":
         pytest.skip(f"rust: {message}")
     assert status == "pass", message
+
+
+# ------------------------------------------------- prelude TYPE names, not just fns
+#
+# The class above is about injected *callables*; the emitters also inject TYPE
+# declarations into the module they emit, and that half was never reserved. A
+# user type declared under one of those names lands in the same scope as the
+# prelude's, so the emitted module carries the declaration twice: the checker
+# accepts a program whose output does not compile. On go the user type is
+# escaped off the runtime name by the same `_GO_RESERVED` ladder that already
+# escapes user fns; on java the prelude nests its types inside `Components`, so
+# a user type of the same simple name is a javac duplicate — refused loudly by
+# `_EMITTER_RESERVED`, exactly like the `Components` case next to it.
+#
+# The java `RevlSecretShape` half is the one whose output no longer says what it
+# means: a user type of that name in a secret-mode program is emitted
+# `implements RevlSecretShape`, which now resolves to the user's own class, and
+# the interface the redaction path probes with `instanceof` is that class rather
+# than the prelude's. Still a compile failure of the emitted program — no
+# runtime impact — but worth a clean refusal. Refused now.
+_PRELUDE_TYPE_USE = """
+pub fn ok(x: Int) -> Result[Int, Str] { if (x == 0) { return Err("z") } return Ok(x) }
+pub fn maybe(x: Int) -> Opt[Int] { if (x > 0) { return Some(x) } return None }
+test "t" { assert ok(1) == Ok(1) }
+"""
+
+
+def _shadow_prelude_type(name: str) -> str:
+    return (_PRELUDE_TYPE_USE
+            + f"\npub type {name} = {{ a: Int }}\n"
+            + f"pub fn use_{name}(v: {name}) -> Int {{ return 1 }}\n")
+
+
+def _shadow_generic_type(name: str) -> str:
+    """`Map` is a revl builtin GENERIC, so a bare `Map` is not a usable type
+    annotation — `use_Map(v: Map)` is refused by the checker ("takes 2 type
+    argument(s), got 0") before any emitter runs. The declaration alone still
+    reaches the collision (every declared type gets a declaration emitted), so
+    that is all this builds."""
+    return _PRELUDE_TYPE_USE + f"\npub type {name} = {{ a: Int }}\n"
+
+
+_GO_PRELUDE_TYPES = ["RevlResult", "RevlOpt", "RevlOk", "RevlErr", "RevlFrame",
+                     "RevlTimer", "RevlTeardownRecord", "Stream", "Subscription",
+                     "EventContract"]
+
+
+@pytest.mark.parametrize("name", _GO_PRELUDE_TYPES)
+def test_go_escapes_injected_type_names(name: str):
+    """A user `type RevlResult` emits as `RevlResult_`, so the runtime type the
+    go prelude declares keeps its name and the package declares it once."""
+    emitted = _emit("go", _shadow_prelude_type(name))
+    assert f"type {name}_ struct" in emitted, f"user `type {name}` must be escaped"
+    assert f"type {name} struct" not in emitted, f"bare `type {name}` shadows the prelude"
+    assert len(re.findall(rf"^type {name}(?:\[| struct)", emitted, re.M)) <= 1
+
+
+@pytest.mark.parametrize("name", ["RevlResult", "RevlSecretShape", "RevlActivation"])
+def test_java_reserves_injected_type_names(name: str):
+    """java's prelude types are nested in `Components`; a user type of the same
+    simple name is a duplicate declaration, so the emitter refuses it."""
+    with pytest.raises(Exception) as exc:
+        _emit("java", _shadow_prelude_type(name))
+    assert name in str(exc.value)
+
+
+# ------------------------------------- the injected type names, tier by tier
+#
+# The block above closed the type-name half for the THREE java names and the TEN
+# go names #936 reserved. A corrected probe (a declaration-aware base filter, so
+# a fixture that merely *mentions* the name is no longer mistaken for one that
+# already declares it) showed the same class was still open on four more tiers,
+# and that on python it is not a build failure at all but a silent runtime one.
+# Each case below is pinned on the tier it belongs to.
+#
+#   py   : `_emit_builtin_result` injects `class Ok:` / `class Err:` at module
+#          scope, guarded only by the set of user VARIANT CASE names — a user
+#          `type Ok` is not in it. Python class redefinition is silent and the
+#          later class wins, so the user's `Ok` replaced the runtime's
+#          constructor and the emitted test crashed with
+#          `TypeError: Ok() takes no arguments`. Also `_RevlNoLiveWorker` /
+#          `_RevlRouter` (module-scope classes in the router scaffolding), which
+#          slipped through because the scaffolding guard is case-sensitive on
+#          the lowercase `_revl*` spelling. FIXED: `_TYPE_RESERVED`, applied at
+#          the type-name position through the same injective ladder.
+#   rust : 25 scaffolding structs/enums the emitter writes itself (`Map`,
+#          `Pool`/`PoolState`, the `Job*` family, `Stream*`, `Subscription*`,
+#          `EventContract`, the `Revl*` operation structs) were never reserved,
+#          so a user type of the same name emitted a SECOND declaration and
+#          rustc rejected the crate. Escaped, not refused: `Map`/`Pool`/`Job`
+#          are also live host roots spelled as bare tokens at call sites.
+#   java : `RevlFrame` / `RevlSpawnHandle` are nested in `Components`, so a user
+#          type of the same simple name is a javac duplicate — refused like the
+#          other emitter-scaffolding names. `Map`/`Pool`/`Job` are ALSO live
+#          host roots, so a role-agnostic refusal would make `effect Pool.open()`
+#          unportable; they are escaped at the type-name position only.
+#   go   : `RevlSpawnHandle` is declared on the live (`stc-go`) path only, which
+#          is why the earlier go sweep missed it — the pure typed-core path
+#          drops components, so a component-only fixture never reaches the
+#          declaration. The base below therefore carries a `lifecycle test` to
+#          hold the emission on the path that declares it.
+#
+# NOT fixed here, and pinned as an open gap below: the type names the emitter
+# DERIVES from a user-chosen name (`<Comp>Config`, `<Svc>Proxy`,
+# `<Comp><Provision>`, `<Comp><Sink>Intercept<N>`, py's `_<Provision>`) are not
+# a static set — the colliding spelling depends on the document — so they need
+# a derivation-aware reservation rather than another reserved-set entry. See
+# contract-errata.md.
+
+_PY_INJECTED_TYPES = ["Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"]
+
+_RUST_INJECTED_TYPES = [
+    "Pool", "PoolState", "Job", "JobToken", "JobHandle",
+    "StreamNext", "StreamState", "StreamInner", "Stream", "StreamRegistry",
+    "SubscriptionState", "SubscriptionInner", "Subscription", "EventContract",
+    "RevlStrOps", "RevlStrListOps", "RevlListOps", "RevlListSearchOps",
+    "RevlTimer", "RevlClock", "RevlSpawnHandle", "RevlTeardown",
+    "RevlPendingCompensation", "RevlWal",
+]
+
+_JAVA_INJECTED_TYPE_SCAFFOLDING = ["RevlFrame", "RevlSpawnHandle"]
+_JAVA_INJECTED_TYPE_HOST_ROOTS = ["Pool", "Job"]
+
+# The go emitter only declares `RevlSpawnHandle` on the live (`stc-go`) path; a
+# component-only document without a lifecycle test routes onto the pure
+# typed-core path, which drops the components and never reaches the
+# declaration. So the base is the real accessor scenario plus the `lifecycle
+# test` that holds the emission on the live path.
+_ACCESSOR_LIFECYCLE = (
+    (ROOT / "backends" / "go" / "scenarios" / "accessor.rvl").read_text()
+    + """
+lifecycle test "accessor" {
+  load App
+  let x = call reader.read_a()
+  assert x == 1
+}
+""")
+
+# The ts base whose component name makes the emitter derive `WorkerConfig`
+# (`backends/typescript/emit.py`: `export interface {name}Config`).
+_INSTANCE_GET = """
+component Worker {
+  provide store {
+    fn get() -> Int { return 1 }
+  }
+}
+service Store { fn get() -> Int }
+test "t" { assert 1 == 1 }
+"""
+
+
+@pytest.mark.parametrize("name", _PY_INJECTED_TYPES)
+def test_python_escapes_injected_type_names(name: str):
+    """A user `type Ok` emits as `Ok_`, so the runtime's own `Ok` keeps the
+    module-scope name its constructor is called by."""
+    emitted = _emit("python", _shadow_prelude_type(name))
+    assert f"class {name}_:" in emitted, f"user `type {name}` must be escaped"
+    assert emitted.count(f"class {name}:") <= 1, f"bare `class {name}` twice"
+
+
+def test_python_result_type_name_does_not_break_the_program():
+    """The runtime half of the finding: with a user `type Ok`, the pre-fix
+    emitter replaced the runtime's `Ok` constructor and the emitted test died
+    with `TypeError: Ok() takes no arguments` — a program the checker accepts
+    that passes on every other tier. It must now run."""
+    status, message = _run("py", _shadow_prelude_type("Ok"))
+    assert status == "pass", message
+
+
+@pytest.mark.parametrize("name", _RUST_INJECTED_TYPES)
+def test_rust_escapes_injected_type_names(name: str):
+    """A user `type Map` emits as `Map_`, so the scaffolding struct the emitter
+    writes keeps its name and the crate declares it once."""
+    emitted = _emit("rust", _shadow_prelude_type(name))
+    assert f"struct {name}_ {{" in emitted, f"user `type {name}` must be escaped"
+    assert f"struct {name} {{" not in emitted, f"bare `struct {name}` collides"
+
+
+def test_rust_escapes_injected_generic_type_name():
+    """`Map` is the one injected name that is also a revl builtin generic, so
+    the shadow is a bare declaration — see `_shadow_generic_type`."""
+    emitted = _emit("rust", _shadow_generic_type("Map"))
+    assert "struct Map_ {" in emitted, "user `type Map` must be escaped"
+    assert "struct Map {" not in emitted, "bare `struct Map` collides"
+
+
+@pytest.mark.parametrize("name", _JAVA_INJECTED_TYPE_SCAFFOLDING)
+def test_java_reserves_injected_type_scaffolding(name: str):
+    """`RevlFrame`/`RevlSpawnHandle` live inside `Components`, so a user type of
+    the same simple name is a javac duplicate declaration — refused loudly."""
+    with pytest.raises(Exception) as exc:
+        _emit("java", _shadow_prelude_type(name))
+    assert name in str(exc.value)
+
+
+@pytest.mark.parametrize("name", _JAVA_INJECTED_TYPE_HOST_ROOTS)
+def test_java_escapes_injected_host_root_type_names(name: str):
+    """`Map`/`Pool`/`Job` are both scaffolding type names and live host roots
+    (`effect Pool.open(...)`), so they are escaped at the type-name position
+    instead of refused — a refusal would make those programs unportable."""
+    emitted = _emit("java", _shadow_prelude_type(name))
+    assert f"class {name}_ {{" in emitted, f"user `type {name}` must be escaped"
+    assert f"class {name} {{" not in emitted, f"bare `class {name}` collides"
+
+
+def test_java_escapes_injected_generic_host_root_type_name():
+    """`Map` is both a scaffolding type name and a revl builtin generic; see
+    `_shadow_generic_type` for why the shadow is a bare declaration."""
+    emitted = _emit("java", _shadow_generic_type("Map"))
+    assert "class Map_ {" in emitted, "user `type Map` must be escaped"
+    assert "class Map {" not in emitted, "bare `class Map` collides"
+
+
+def test_go_escapes_spawn_handle_type_name():
+    """`RevlSpawnHandle` is declared on the live path only, so the base must
+    carry a `lifecycle test` — a bare top-level `type` routes the emitter onto
+    the pure typed-core path, which drops components and never declares it."""
+    source = (_ACCESSOR_LIFECYCLE
+              + "\npub type RevlSpawnHandle = { a: Int }\n")
+    emitted = _emit("go", source)
+    assert "type RevlSpawnHandle_ struct" in emitted, "user type must be escaped"
+    assert len(re.findall(r"^type RevlSpawnHandle(?![A-Za-z0-9_])", emitted,
+                          re.M)) == 1, "the runtime's handle must survive once"
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "#553 cluster C, CONFIRMED OPEN: the type names the emitter DERIVES from a "
+    "user-chosen name are not reserved. ts emits `export interface "
+    "<Comp>Config`, rust `<Comp>Config`/`<Svc>Proxy`/`<Comp><Provision>`, java "
+    "`<Comp>Plugin`/`<Comp><Provision>`, go `<Comp>Config`, py `_<Provision>`, "
+    "so a user type spelled after the component/service it derives from is a "
+    "duplicate declaration. Unlike the literal injected names these cannot be a "
+    "static reserved set — the colliding spelling depends on the document — so "
+    "they need a derivation-aware reservation. Flip to a plain assert once "
+    "fixed; see contract-errata.md."))
+def test_derived_component_config_type_name_is_reserved():
+    source = _INSTANCE_GET + "\npub type WorkerConfig = { a: Int }\n"
+    emitted = _emit("typescript", source)
+    assert emitted.count("export interface WorkerConfig {") == 1, (
+        "the user's `WorkerConfig` and the emitter's derived `<Comp>Config` "
+        "interface are declared twice in one module")
