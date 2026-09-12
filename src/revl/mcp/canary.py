@@ -21,8 +21,11 @@ rather than reinventing it.
     vocabulary the backwards-replay engine records. The canary compares the
     baseline generation's timeline for the slice against the candidate's and
     reports the first step that differs, attributed to the exact `(component,
-    realm)` that produced it. Divergence is a difference in the recorded world,
-    named to a code site — never a threshold on a counter.
+    realm)` that produced it. A step differs when its `(kind, label)` differs
+    **or when the inverse/compensation it records differs**: the acquisition
+    and the rollback are both behaviour, and the rollback is the half a promote
+    hands to teardown. Divergence is a difference in the recorded world, named
+    to a code site — never a threshold on a counter.
 
   * **Revert is the derived LIFO teardown of the slice, not a redeploy.** It
     reuses `erase_report.build_report(ir, realm)` verbatim: the runtime R4
@@ -103,10 +106,36 @@ def select_slice(ir: dict, realm: str) -> CanarySlice:
 
 # --------------------------------------------------- recorded-world timeline
 
+# the recorded fields `compare_timelines` keys on, in the order a divergence
+# reports them. `kind` and `label` name what a step DID; `undo`/`compensate`
+# name what it will take back, which the timeline records in the same `Step`'s
+# detail. `origin` is deliberately absent: it is provenance (the component, key
+# and method the step came from), identical for two generations of one
+# provider, so keying it would report a rename as behavioural change.
+COMPARED_FIELDS = ("kind", "label", "undo", "compensate")
+
+_INVERSE_FIELDS = {"undo": "inverse", "compensate": "compensation"}
+
+
+def _step_key(step) -> tuple:
+    """One recorded step's comparable content, aligned with ``COMPARED_FIELDS``.
+
+    The inverse is read from the step's `detail`, which is where `_walk_steps`
+    records it. A step kind that carries no inverse reports `None` for both
+    slots, so kinds that have none compare exactly as before.
+    """
+    detail = step.detail if isinstance(step.detail, dict) else {}
+    return (step.kind, step.label,
+            detail.get("undo"), detail.get("compensate"))
+
+
 def _expr_label(expr) -> str:
     """A canonical, generation-comparable label for one IR expression. Two
     generations that call the same host/service op with the same literal args
-    produce equal labels; any behavioural difference produces different ones."""
+    produce equal labels; a behavioural difference in the ACQUISITION produces
+    a different one. The label describes the acquisition alone — what a step
+    takes back lives in the step's `undo`/`compensate` detail and is compared
+    there (`_step_key`), not here."""
     if not isinstance(expr, dict):
         return repr(expr)
     kind = expr.get("kind")
@@ -183,22 +212,40 @@ def slice_timeline(ir: dict, provider: str):
 
 def compare_timelines(baseline, candidate) -> dict:
     """Attribute divergence between two recorded worlds. Walks both step lists
-    in lock-step and reports the first index whose `(kind, label)` differs — or
-    a length mismatch — as the divergence, in the terms the replay engine uses.
+    in lock-step and reports the first index whose compared key differs — or a
+    length mismatch — as the divergence, in the terms the replay engine uses.
     A clean comparison (`diverged: False`) is the evidence to promote.
+
+    The key is `_step_key`: the step's `(kind, label)` AND the inverse it
+    records. A candidate that acquires exactly what the baseline acquires and
+    then takes back something else has diverged — the inverse is behaviour, it
+    is what a promote hands to teardown, and it was already in the recorded
+    world, so comparing only `(kind, label)` reported a changed rollback as an
+    identical generation and recommended the promote.
     """
     b_steps, c_steps = baseline.steps, candidate.steps
     for i in range(min(len(b_steps), len(c_steps))):
         b, c = b_steps[i], c_steps[i]
-        if (b.kind, b.label) != (c.kind, c.label):
-            return {
-                "diverged": True,
-                "atIndex": i,
-                "baseline": {"kind": b.kind, "label": b.label},
-                "candidate": {"kind": c.kind, "label": c.label},
-                "reason": f"step {i} diverges: baseline `{b.kind} {b.label}` vs "
-                          f"candidate `{c.kind} {c.label}`",
-            }
+        b_key, c_key = _step_key(b), _step_key(c)
+        if b_key == c_key:
+            continue
+        field = next(name for name, bv, cv
+                     in zip(COMPARED_FIELDS, b_key, c_key) if bv != cv)
+        idx = COMPARED_FIELDS.index(field)
+        reason = (f"step {i} diverges on `{field}`: baseline "
+                  f"`{b.kind} {b.label}` vs candidate `{c.kind} {c.label}`")
+        if field in _INVERSE_FIELDS:
+            reason += (f" — the same recorded step with a different "
+                       f"{_INVERSE_FIELDS[field]}: `{b_key[idx]}` vs "
+                       f"`{c_key[idx]}`")
+        return {
+            "diverged": True,
+            "atIndex": i,
+            "field": field,
+            "baseline": {"kind": b.kind, "label": b.label, field: b_key[idx]},
+            "candidate": {"kind": c.kind, "label": c.label, field: c_key[idx]},
+            "reason": reason,
+        }
     if len(b_steps) != len(c_steps):
         longer, idx = ("candidate", len(b_steps)) if len(c_steps) > len(b_steps) \
             else ("baseline", len(c_steps))
@@ -206,6 +253,7 @@ def compare_timelines(baseline, candidate) -> dict:
         return {
             "diverged": True,
             "atIndex": idx,
+            "field": "length",
             "baseline": None if longer == "candidate" else {"kind": extra.kind, "label": extra.label},
             "candidate": {"kind": extra.kind, "label": extra.label} if longer == "candidate" else None,
             "reason": f"the {longer} generation records an extra step at index "

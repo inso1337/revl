@@ -60,6 +60,15 @@ component Writer requires kv: KV, log: Log {
 }
 """
 
+# A bare `emission` -- "any capability", the widest set. `component_reach`
+# spells that top `*` (`policy.UNBOUNDED`), which is not a capability NAME.
+BARE_EMISSION = """
+service KV { emission fn put(key: Str, value: Str) }
+component Store requires kv: KV {
+  emit kv.put("a", "b")
+}
+"""
+
 
 # ---------------------------------------------- host imports subset-of declared
 
@@ -178,3 +187,68 @@ def test_breach_message_wording_for_the_import_leg():
     m = b.message()
     assert "capabilities `fs`, `net`" in m
     assert "host imports subset-of declared caps FAILED" in m
+
+
+# ------------------------------------- `*` is the top of the lattice, not a name
+
+def test_unbounded_declared_reach_admits_every_import():
+    # `*` is `policy.UNBOUNDED` -- a bare `emission`, "any capability". A
+    # component whose reach carries it cannot have an import section that
+    # exceeds what it declared, so the leg is vacuous rather than unsatisfiable.
+    assert component_breaches(
+        "C", import_caps={"kv"}, declared_caps={"*"}, allow=None) == []
+    # the same reach beside a named capability, the shape a component with one
+    # scoped and one bare emission produces.
+    assert component_breaches(
+        "C", import_caps={"kv", "net"}, declared_caps={"kv", "*"},
+        allow=None) == []
+
+
+def test_unbounded_declared_reach_does_not_mask_a_real_import_breach():
+    # a NAMED-only declaration still catches an import outside it: the fix
+    # relaxes the top of the lattice, not the leg.
+    breaches = component_breaches(
+        "C", import_caps={"net"}, declared_caps={"kv"}, allow=None)
+    assert [b.leg for b in breaches] == ["import>declared"]
+    assert breaches[0].capabilities == ("net",)
+
+
+def test_bare_emission_component_is_not_refused_by_the_import_leg():
+    # end-to-end on a real emitted module: the component declares a bare
+    # `emission` and the module imports only `kv`, so the by-construction leg
+    # holds and the no-policy path `revl run --wasm` takes admits.
+    ir = compile_source(BARE_EMISSION)
+    modules, _ = _emit(ir)
+    assert wasm_import_capabilities(modules["Store"]) == {"kv"}
+    assert least_authority_breaches(ir, None, modules) == []
+    enforce_wasm_least_authority(ir, None, modules)  # does not raise
+
+
+def test_bare_emission_component_admits_under_an_unbounded_grant():
+    # the policy grants `*` itself, which is the only thing `_allowed` accepts
+    # for an unnameable reach -- and the composition is admitted.
+    ir = compile_source(BARE_EMISSION)
+    modules, _ = _emit(ir)
+    policy = parse_policy("component Store may reach *")
+    assert least_authority_breaches(ir, policy, modules) == []
+    enforce_wasm_least_authority(ir, policy, modules)  # does not raise
+
+
+def test_bare_emission_component_reports_the_policy_leg_not_the_import_leg():
+    # A named allow-list cannot prove an unbounded reach in-bounds, so the
+    # breach is `declared>policy` naming `*`. The import leg must not pre-empt
+    # it with a capability the unbounded declaration does cover: enforcement
+    # raises breaches[0], so the wrong leg means the operator is told a
+    # capability "it does not declare" and never sees the rule that refused.
+    ir = compile_source(BARE_EMISSION)
+    modules, _ = _emit(ir)
+    policy = parse_policy("component Store may reach kv")
+    breaches = least_authority_breaches(ir, policy, modules)
+    assert [b.leg for b in breaches] == ["declared>policy"]
+    assert breaches[0].capabilities == ("*",)
+
+    with pytest.raises(RevlError) as excinfo:
+        enforce_wasm_least_authority(ir, policy, modules)
+    msg = str(excinfo.value)
+    assert "declared caps subset-of policy-allowed FAILED" in msg
+    assert "import section exceeds" not in msg
