@@ -49,8 +49,14 @@ revl refuses.)
 - List element read is indexing (`xs[i]`), not a method. A **negative index
   FAULTS** on every tier — there is no wrap and no silent `undefined` (issue
   #549). python and TypeScript route the read through `_revl_index`/`revlIndex`
-  which raise on a negative index; go, rust and java fault natively. (Positive
-  out-of-range indexing is a separate case still under review.)
+  which raise on a negative index; go, rust and java fault natively. **A
+  positive index past the end is REFUSED AT COMPILE TIME when the checker can
+  see the list's length** (`["a"][5]`, or `xs[5]` with `let xs = ["a"]` in
+  scope) — `index 5 is out of range for a 1-element List`, coded `T1` (issue
+  #938). Every index the checker cannot bound statically — `xs[i]`,
+  `xs[f()]` — still faults at runtime, and that fault is what
+  `tests/test_cross_tier_execution.py` records as the residual divergence (ts
+  reads `undefined`, wasm reads `0`).
 - `slice(a, b)` bounds are **end-relative**: a negative bound counts from the
   end of the receiver (`len + bound`), then both bounds clamp into `[0, len]`
   and the slice is empty if `b < a` — the python/JS reading, on every tier

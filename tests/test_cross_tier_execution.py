@@ -729,10 +729,12 @@ DIVERGENCES = {
     #     would raise in `_observed` before any tier ran). Convert with
     #     `.to_str()` first.
     #   - a NEGATIVE LIST INDEX (py read the wrapped last element, ts read
-    #     `undefined`, go/rust/java faulted): now FAULTS on every tier — py/ts
-    #     route a List subscript through `_revl_index` / `revlIndex`, which
-    #     throws. Asserted to AGREE in AGREED_549 ("negative list index faults
-    #     everywhere", verdict "fail").
+    #     `undefined`, go/rust/java faulted): now REFUSED AT THE FRONTEND for
+    #     every index the checker can bound, and FAULTING on every tier
+    #     otherwise — py/ts route a List subscript through `_revl_index` /
+    #     `revlIndex`, which throws. Issue #938 (roadmap item 485) closed the
+    #     bound case statically, so the row moved out of AGREED_549 exactly as
+    #     `Str + Int` did; asserted in tests/test_list_index_bounds_938.py.
     #   - a NEGATIVE SLICE bound (py/ts sliced end-relative, go/rust/java clamped
     #     to 0): now END-RELATIVE on every tier — go/rust/java add the length to
     #     a negative bound before clamping. Asserted to AGREE in AGREED_549
@@ -767,14 +769,24 @@ DIVERGENCES = {
 #     value); their `revlListSlice`/`revlSlice`/`revl_slice` helpers now add the
 #     length to a negative bound first, then clamp — so every tier yields the
 #     same one element. Verdict "pass".
-#   - A NEGATIVE LIST INDEX FAULTS on every tier (the PO fallback for #549:
-#     end-relative indexing is disproportionate — it needs a bounds-checked
+#   - A NEGATIVE LIST INDEX was made to FAULT on every tier (the PO fallback for
+#     #549: end-relative indexing is disproportionate — it needs a bounds-checked
 #     indexer on the hottest read path of ts AND go/rust/java, and rust's index
 #     read is woven through its borrow/clone machinery — so the uniform close is
 #     the fault that go/rust/java already take and that the original reference
 #     names). python used to read the wrapped last element and ts read
-#     `undefined`; both now route a List subscript through `_revl_index` /
-#     `revlIndex`, which throws on a negative index. Verdict "fail".
+#     `undefined`; both then routed a List subscript through `_revl_index` /
+#     `revlIndex`, which throws on a negative index.
+#     **SUPERSEDED BY ISSUE #938 (roadmap item 485): it is now REFUSED AT THE
+#     FRONTEND** whenever the index and the list's length are both statically
+#     visible (`xs[0 - 1]`, `["a"][5]`), so the row moved out of this table
+#     exactly as `Str + Int` did — a compile rejection is tier-independent and
+#     `_run` below calls `compile_source` bare, so a runtime row would raise in
+#     `_observed` before any tier ran. Asserted in
+#     tests/test_list_index_bounds_938.py. The emitters' `_revl_index` /
+#     `revlIndex` guards stay, and stay the whole answer for the index the
+#     checker cannot bound (`xs[i]`), which is why the fault is still pinned
+#     below as a recorded, un-closable-here residual.
 AGREED_549 = {
     "split('') counts code points, not UTF-16 units": (
         'pub fn units() -> Int { return "\U0001F600".split("").length() }\n'
@@ -799,22 +811,25 @@ AGREED_549 = {
         'test "a negative slice yields one element" { assert n() == 1 }\n',
         "pass",
     ),
-    # #549 divergence 2: a negative list index faults on EVERY tier (go/rust/
-    # java already did; py/ts now throw through `_revl_index` / `revlIndex`).
-    "negative list index faults everywhere": (
-        'pub fn read() -> Int { let xs = [10, 20, 30]  return xs[0 - 1] }\n'
-        'test "a negative index faults" { assert read() == 30 }\n',
-        "fail",
-    ),
+    # #549 divergence 2 (a negative list index) is NOT here: issue #938 moved it
+    # to a FRONTEND refusal — `xs[0 - 1]` and `["a"][5]` are refused by the
+    # checker with a coded `T1`, so the row is asserted in
+    # tests/test_list_index_bounds_938.py instead (a compile rejection is
+    # tier-independent, and `_run` would raise before a tier ran).
 }
 
 # Divergences from #549 that are NOT pinned above, recorded so they are not
 # mistaken for closed — each needs machinery this executable pin cannot express:
-#   - `xs[5]` out of bounds: every executable tier FAULTS (the reference), and
-#     the divergence is ts (`undefined`) and wasm (`0`), which a value-equality
-#     assert cannot tell apart from the fault (both read back as a failing
-#     compare) and wasm is not in this file's runner set. Needs a static
-#     emitted-code guard per tier (the shape of `test_typescript_...` below).
+#   - `xs[i]` with a non-literal index: every executable tier FAULTS (the
+#     reference) and the divergence is ts (`undefined`) and wasm (`0`), which a
+#     value-equality assert cannot tell apart from the fault (both read back as
+#     a failing compare) and wasm is not in this file's runner set. Needs a
+#     static emitted-code guard per tier (the shape of `test_typescript_...`
+#     below). **Issue #938 narrowed this**: the LITERAL index is now refused at
+#     the frontend for a `List` whose length the checker can see
+#     (tests/test_list_index_bounds_938.py), so what stays open is exactly the
+#     index no static analysis can bound — `xs[i]`, `xs[f()]` — where the
+#     bounds are a runtime property by construction.
 #   - `Map.keys()` order with astral keys: ts sorts by UTF-16 code unit, so the
 #     divergence only shows at a BMP-vs-astral boundary where unit order and
 #     code-point order actually differ (e.g. U+FFFF vs U+10000); a lone emoji
@@ -825,10 +840,8 @@ AGREED_549 = {
 # FIXED (asserted to AGREE in AGREED_549 above): `split("")` on an astral
 # scalar (ts/java split by UTF-16 units, now code points), `"+7".to_int()`
 # (rust accepted the leading `+`, now `None`), `div_trunc(Int.MIN, -1)`
-# (java wrapped, now traps like every other tier), a NEGATIVE SLICE bound
-# (go/rust/java clamped to 0, now end-relative like py/ts), and a NEGATIVE
-# LIST INDEX (py read the last element and ts read `undefined`, now both fault
-# like go/rust/java).
+# (java wrapped, now traps like every other tier), and a NEGATIVE SLICE bound
+# (go/rust/java clamped to 0, now end-relative like py/ts).
 # FIXED (not pinned): `List[Int].join(sep)` crashed the py runtime while ts
 # coerced; it is now a compile error on every tier (typecheck.builtin_check
 # pins `join`'s receiver to `List[Str]`, matching docs/stdlib-2.0.md).
@@ -837,6 +850,11 @@ AGREED_549 = {
 # `Str + <non-Str>` in `_binop_type` (numeric included), so it is a compile
 # error on every tier — convert with `.to_str()` first. Asserted in
 # tests/test_typesafety.py::test_str_plus_int_rejected.
+# FIXED (not pinned): a NEGATIVE LIST INDEX, and a positive index past the end
+# of a `List` whose length is statically visible, used to fault at runtime on
+# py/go/rust/java while ts read `undefined` and wasm read `0`; issue #938 now
+# refuses both at the frontend (`check_list_index_bounds` in lower.py), a
+# compile error on every tier. Asserted in tests/test_list_index_bounds_938.py.
 
 
 def _observed(tier: str, source: str) -> str:
