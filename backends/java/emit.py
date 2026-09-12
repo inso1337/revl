@@ -456,6 +456,12 @@ _JAVA_RESERVED = {
 #   _revlRoot/_revlLoaded  the lifecycle driver's context and fiber registry
 #   Components       the outer class every top-level `fn` is a static method of;
 #                    a nested user type of the same simple name is a javac error
+#   Revl*            the prelude types the emitter nests in `Components`
+#                    (`RevlSecretShape` the redaction interface, `RevlResult`
+#                    the `Result` ADT, `RevlActivation` the lifecycle record);
+#                    a user type of the same simple name is the same javac
+#                    duplicate, and for `RevlSecretShape` it also suppresses the
+#                    interface the redaction path probes with `instanceof`
 #   java.lang names  the unqualified prelude types the emitted module names
 #                    (`String`, `Object`, `Long`, …); a user type of the same
 #                    simple name shadows java.lang across the whole file
@@ -465,7 +471,24 @@ _EMITTER_RESERVED = {
     "String", "Object", "Long", "Double", "Integer", "Float", "Boolean",
     "Byte", "Character", "Number", "Void", "Math", "System", "Thread",
     "Runnable", "Error", "Exception",
+    "RevlSecretShape", "RevlResult", "RevlActivation",
+    # The remaining prelude types the emitter nests in `Components`: the
+    # lifecycle `RevlFrame` (the resume/trampoline record) and the
+    # `RevlSpawnHandle` the spawn runtime hands back. Both were injected but
+    # absent from this set, so a user `type RevlFrame` emitted a second nested
+    # `RevlFrame` and javac rejected the file (#553 cluster-C, type-name half).
+    "RevlFrame", "RevlSpawnHandle",
 }
+
+# Host-runtime classes the emitter injects *and* names as bare tokens at host
+# call sites (`Map.new(..)`, `Pool.open(..)`, `Job.run(..)`), so they cannot go
+# into `_EMITTER_RESERVED`: refusing them would make a program that uses the
+# host root unportable for a spelling reason. They collide with a user *type*
+# of the same simple name, though -- `type Map = { .. }` emitted a second
+# nested `Map`, which javac rejects -- so they are escaped at the type-name
+# position only, the same posture rust takes with `_RUST_TYPE_RESERVED`. A
+# field, local, param or host call site of the same spelling is untouched.
+_JAVA_TYPE_RESERVED = frozenset({"Map", "Pool", "Job"})
 
 
 class EmitError(ValueError):
@@ -636,7 +659,7 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
-def _mangle(name: str) -> str:
+def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *Java*
     reserved word (`class`, `new`, `int`, `default`, …) so a valid revl
     identifier that happens to be a Java keyword emits and RUNS instead of
@@ -666,10 +689,16 @@ def _mangle(name: str) -> str:
 
     Only a name whose root is reserved can change, so no existing program that
     does not name a Java keyword changes its emitted output. Target keywords
-    only; the emitter scaffolding stays rejected in `_ident`."""
+    only; the emitter scaffolding stays rejected in `_ident`.
+
+    `extra` is an additional, position-specific reserved set folded into the
+    same injective ladder: a type name passes `_JAVA_TYPE_RESERVED` so the
+    host-runtime `Map`/`Pool`/`Job` classes cannot be shadowed by a user type of
+    the same simple name (`Map` -> `Map_`, `Map_` -> `Map__` stay distinct),
+    while every other position passes the empty set and is unchanged."""
     root = name
     while root:
-        if root in _JAVA_RESERVED:
+        if root in _JAVA_RESERVED or root in extra:
             return name + "_"
         if not root.endswith("_"):
             break
@@ -682,7 +711,8 @@ def _ident(name: object, role: str) -> str:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     if name in _EMITTER_RESERVED:
         raise EmitError(f"{role} identifier collides with Java/reserved name: {name!r}")
-    return _mangle(name)
+    extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
+    return _mangle(name, extra)
 
 
 def _fn_name(name: object) -> str:

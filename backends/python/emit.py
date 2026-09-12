@@ -375,8 +375,24 @@ _EMITTED_BUILTINS = frozenset({
     "tuple", "type",
 })
 
+# Type names the python emitter injects at module scope, which a user *type* of
+# the same spelling therefore cannot keep. `Ok`/`Err` are the built-in `Result`
+# ADT's constructors: `_emit_builtin_result` writes `class Ok:`/`class Err:` at
+# the top of the module, but its guard only skipped a name a user had claimed as
+# a *variant case*, so `type Ok = { a: Int }` emitted a SECOND module-scope
+# `class Ok` further down. Python class redefinition is silent and the later
+# class wins, so the runtime's constructor was gone: an accepted program that
+# built a `Result` then died at run time with `TypeError: Ok() takes no
+# arguments` (#553 cluster-C, type-name half — the only instance in the family
+# that breaks a RUNNING program rather than a build). `_RevlNoLiveWorker` and
+# `_RevlRouter` are the realm router's module-scope classes, and the `_ident`
+# scaffolding guard is case-sensitive on `_revl*`, so they were reachable too.
+# Escaped rather than refused, at the type-name position only, so the emitter's
+# own spelling keeps the bare name.
+_TYPE_RESERVED = frozenset({"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"})
 
-def _mangle(name: str) -> str:
+
+def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
     reserved word, so a valid revl identifier that happens to be a Python
     keyword (`from`, `class`, `lambda`, …) emits and RUNS instead of crashing
@@ -437,7 +453,7 @@ def _mangle(name: str) -> str:
     practice, since the builtins that are also `_CONTEXT_MEMBERS` are refused as
     provision keys upstream. Keyword escaping applies at every site regardless,
     since a Python keyword is illegal in any of them."""
-    return _mangle_escaping(name, _EMITTED_BUILTINS)
+    return _mangle_escaping(name, _EMITTED_BUILTINS | extra)
 
 
 def _mangle_kw(name: str) -> str:
@@ -511,7 +527,8 @@ def _ident(name: Any, what: str, *, attr: bool = False) -> str:
     # component/method binding path emits it verbatim like the rest.
     if name in _RESERVED or (name.startswith("_") and name.lstrip("_").startswith("revl")):
         raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
-    return _mangle_kw(name) if attr else _mangle(name)
+    extra = _TYPE_RESERVED if what == "type name" else frozenset()
+    return _mangle_kw(name) if attr else _mangle(name, extra)
 
 
 def _snake(name: str) -> str:

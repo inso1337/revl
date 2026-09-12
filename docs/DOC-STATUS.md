@@ -79,7 +79,7 @@ was corrected by hand and had drifted back within a day.
 <!-- docgen:doc-status begin -->
 | doc | status | em-dashes | tier-limit notes |
 |---|---|---|---|
-| README.md | needs-work | 48 |  |
+| README.md | needs-work | 50 |  |
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 69 |  |
@@ -105,7 +105,7 @@ was corrected by hand and had drifted back within a day.
 | composition-layers.md | needs-work | 20 |  |
 | composition-rows.md | needs-work | 23 |  |
 | conformance.md | needs-work | 0 |  |
-| contract-errata.md | needs-work | 23 | yes |
+| contract-errata.md | needs-work | 42 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
@@ -123,6 +123,7 @@ was corrected by hand and had drifted back within a day.
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 14 |  |
+| frontend-assets.md | needs-work | 11 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | needs-work | 28 |  |
@@ -196,6 +197,7 @@ was corrected by hand and had drifted back within a day.
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
 | wasm-capabilities.md | needs-work | 35 | yes |
+| webapp-competitiveness-report.md | needs-work | 27 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
