@@ -113,7 +113,26 @@ pub extern pure fn json_parse(s: Str) -> Any
     def _revl_reject_constant(name):
         raise ValueError("json_parse: " + name +
                          " is not valid JSON (RFC 8259 section 6)")
-    return json.loads(s, parse_constant=_revl_reject_constant)
+    def _revl_refuse_lone_surrogate(root):
+        stack = [root]
+        while stack:
+            v = stack.pop()
+            if isinstance(v, str):
+                if not v.isascii():
+                    for ch in v:
+                        if 0xD800 <= ord(ch) <= 0xDFFF:
+                            raise ValueError(
+                                "json_parse: a lone surrogate has no JSON"
+                                " representation")
+            elif isinstance(v, list):
+                stack.extend(v)
+            elif isinstance(v, dict):
+                for key, item in v.items():
+                    stack.append(key)
+                    stack.append(item)
+        return root
+    return _revl_refuse_lone_surrogate(
+        json.loads(s, parse_constant=_revl_reject_constant))
   }
   = @ts {
     // The builtin JSON.parse decodes every JSON number to a JS number (f64),
@@ -138,6 +157,22 @@ pub extern pure fn json_parse(s: Str) -> Any
     function fail(m: string): never {
       throw new SyntaxError("json_parse: " + m + " at index " + i);
     }
+    // A Str is a sequence of Unicode scalar values (docs/strings.md). An
+    // unpaired \uXXXX escape decodes to a lone UTF-16 code unit, which has no
+    // UTF-8 encoding and so no byte spelling at all; refuse it the way the
+    // frontend refuses one in a literal (docs/syntax-2.0.md) rather than hand
+    // back a Str that cannot be encoded. Iterating `v` walks by code point, so
+    // a well-formed pair reports its astral scalar and is not refused.
+    function scalarStr(v: string): string {
+      for (const ch of v) {
+        const cp = ch.codePointAt(0) as number;
+        if (cp >= 0xd800 && cp <= 0xdfff) {
+          throw new SyntaxError(
+            "json_parse: a lone surrogate has no JSON representation");
+        }
+      }
+      return v;
+    }
     function digits(): void {
       while (i < n) { const c = s.charCodeAt(i); if (c >= 48 && c <= 57) i++; else break; }
     }
@@ -156,7 +191,7 @@ pub extern pure fn json_parse(s: Str) -> Any
       let out = "";
       while (i < n) {
         const c = s[i++];
-        if (c === "\"") return out;
+        if (c === "\"") return scalarStr(out);
         if (c === "\\") {
           const e = s[i++];
           if (e === "\"" || e === "\\" || e === "/") out += e;
@@ -232,8 +267,69 @@ pub extern pure fn json_parse(s: Str) -> Any
   = @rs { Value::new(serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null)) }
   = @go {
     //revl:import encoding/json
+    // A Str is a sequence of Unicode scalar values (docs/strings.md). An
+    // unpaired \uXXXX escape has no UTF-8 encoding, and therefore no byte
+    // spelling at all; refuse it the way the frontend refuses one in a literal
+    // (docs/syntax-2.0.md). encoding/json silently substitutes U+FFFD here, so
+    // the text is scanned rather than the decoded value: a substituted rune is
+    // indistinguishable from one the document actually spelled.
+    revlHex4 := func(t string, p int) int {
+        if p+4 > len(t) {
+            return -1
+        }
+        v := 0
+        for k := 0; k < 4; k++ {
+            c := t[p+k]
+            switch {
+            case c >= '0' && c <= '9':
+                v = v*16 + int(c-'0')
+            case c >= 'a' && c <= 'f':
+                v = v*16 + int(c-'a') + 10
+            case c >= 'A' && c <= 'F':
+                v = v*16 + int(c-'A') + 10
+            default:
+                return -1
+            }
+        }
+        return v
+    }
+    revlLoneSurrogate := func(t string) bool {
+        for i := 0; i < len(t); {
+            if t[i] != '\\' {
+                i++
+                continue
+            }
+            if i+1 >= len(t) || t[i+1] != 'u' {
+                i += 2
+                continue
+            }
+            hi := revlHex4(t, i+2)
+            if hi < 0 {
+                i += 2
+                continue
+            }
+            if hi >= 0xdc00 && hi <= 0xdfff {
+                return true
+            }
+            if hi >= 0xd800 && hi <= 0xdbff {
+                lo := -1
+                if i+12 <= len(t) && t[i+6] == '\\' && t[i+7] == 'u' {
+                    lo = revlHex4(t, i+8)
+                }
+                if lo < 0xdc00 || lo > 0xdfff {
+                    return true
+                }
+                i += 12
+                continue
+            }
+            i += 6
+        }
+        return false
+    }
     var v any
-    _ = json.Unmarshal([]byte(s), &v)
+    if !revlLoneSurrogate(s) {
+        _ = json.Unmarshal([]byte(s), &v)
+    }
     return v
   }
 
@@ -359,7 +455,67 @@ pub extern pure fn json_try_parse(s: Str) -> Result[Any, Str]
     // `Result[Any, Str]` lowers to the two-value struct `RevlResult[any,
     // string]` (item 434 (d)): `Ok` discriminates, `OkV` carries the Ok payload
     // and `ErrV` the Err payload. A decode error routes into the Err channel
-    // rather than being swallowed to nil as json_parse's @go body does.
+    // rather than being swallowed to nil as json_parse's @go body does. An
+    // unpaired \uXXXX escape routes there too: it has no UTF-8 encoding, so it
+    // is a refusal rather than a value (docs/syntax-2.0.md), and
+    // encoding/json's silent U+FFFD substitution would otherwise hide it.
+    revlHex4 := func(t string, p int) int {
+        if p+4 > len(t) {
+            return -1
+        }
+        v := 0
+        for k := 0; k < 4; k++ {
+            c := t[p+k]
+            switch {
+            case c >= '0' && c <= '9':
+                v = v*16 + int(c-'0')
+            case c >= 'a' && c <= 'f':
+                v = v*16 + int(c-'a') + 10
+            case c >= 'A' && c <= 'F':
+                v = v*16 + int(c-'A') + 10
+            default:
+                return -1
+            }
+        }
+        return v
+    }
+    revlLoneSurrogate := func(t string) bool {
+        for i := 0; i < len(t); {
+            if t[i] != '\\' {
+                i++
+                continue
+            }
+            if i+1 >= len(t) || t[i+1] != 'u' {
+                i += 2
+                continue
+            }
+            hi := revlHex4(t, i+2)
+            if hi < 0 {
+                i += 2
+                continue
+            }
+            if hi >= 0xdc00 && hi <= 0xdfff {
+                return true
+            }
+            if hi >= 0xd800 && hi <= 0xdbff {
+                lo := -1
+                if i+12 <= len(t) && t[i+6] == '\\' && t[i+7] == 'u' {
+                    lo = revlHex4(t, i+8)
+                }
+                if lo < 0xdc00 || lo > 0xdfff {
+                    return true
+                }
+                i += 12
+                continue
+            }
+            i += 6
+        }
+        return false
+    }
+    if revlLoneSurrogate(s) {
+        return RevlResult[any, string]{
+            ErrV: "json_parse: a lone surrogate has no JSON representation"}
+    }
     var v any
     if err := json.Unmarshal([]byte(s), &v); err != nil {
         return RevlResult[any, string]{ErrV: err.Error()}
