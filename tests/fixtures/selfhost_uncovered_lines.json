@@ -830,8 +830,8 @@
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
-        "Concrete->Any boxing coercion (`_coerce_any_arg`): a concrete scalar flowing into an `Any`/`Value` parameter is boxed as `Value::new(serde_json::Value::from(..))` (native `compile_to`, #106/#98). The firing path is not reached by the byte-agreement corpus yet: a concrete->Any document would need the self-host `emit_rust.rvl` call renderer to mirror the same boxing (a tracked follow-up), or the two tiers diverge on it. Recorded until that mirror + corpus case land.": {
-          "_coerce_any_arg": 3
+        "Concrete->Any boxing coercion (`_coerce_any_arg`): a concrete scalar flowing into an `Any`/`Value` parameter is boxed as `Value::new(serde_json::Value::from(..))` (native `compile_to`, #106/#98). The firing path is not reached by the byte-agreement corpus yet: a concrete->Any document would need the self-host `emit_rust.rvl` call renderer to mirror the same boxing (a tracked follow-up), or the two tiers diverge on it. Recorded until that mirror + corpus case land. The count rose 3 -> 5 when the non-finite-`Float` arm was added: `serde_json::Value::from(f64)` maps a non-finite float to `Null` silently, so a `Float` argument boxes through a checked `serde_json::Number::from_f64` and refuses the `None` rather than substituting a different value. The `Some` arm is corpus-reachable in principle once the mirror lands. The `None` arm is structurally unreachable from ANY static corpus document: a non-finite `Float` has no literal spelling (the frontend refuses it, item 312) and arises only at runtime, through IEEE true division. Recorded rather than chased, because the corpus case cannot exist before the mirror does.": {
+          "_coerce_any_arg": 5
         },
         "Demand-selected formatting helpers: canonical Float interpolation and record/timer/teardown preambles are emitted only when those deferred runtime features are present. Ordinary string interpolation and checked arithmetic are covered without selecting these helper bodies.": {
           "_format": 20,
