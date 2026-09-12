@@ -83,6 +83,7 @@ was corrected by hand and had drifted back within a day.
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 69 |  |
+| attested-tee-placement.md | needs-work | 1 |  |
 | audit-diff.md | needs-work | 14 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
