@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
+from revl import run_go as run_go_module  # noqa: E402
 from revl import test as test_module  # noqa: E402
 
 needs_wasmtime = pytest.mark.skipif(
@@ -566,3 +567,98 @@ def test_report_tap_emits_tap_lines(tmp_path):
     assert lines[1] == "1..2"
     assert lines[2].startswith("ok 1 - a ")
     assert lines[3].startswith("ok 2 - b ")
+
+
+# --------------------------------------------------------------------------- #
+# the go tier's stc-go resolve: a cold module cache is not the document's fault #
+# --------------------------------------------------------------------------- #
+#
+# A document carrying a `lifecycle test` lowers onto the live stc-go runtime, so
+# `run_go` pins a `require` and resolves it OFFLINE (`GOPROXY=off`) — the honest
+# gate, and the reason a network hiccup cannot redden the tier. That is only
+# sound while the module is already in the local cache, and the cache is warmed
+# by whatever else the selection happened to run: `tests/test_run_go.py` warms
+# it for the `frontend` job by importing `revl.run_go` at module scope, and the
+# `conformance` validator warms it by executing the corpus. The
+# `root-suite-affected` job pulls in a lifecycle go case on a `stdlib/value.rvl`
+# diff and has neither warmer, so it failed the tier with `go test exited 1`
+# over a cold cache — which reads as a broken emitter and is not one. The runner
+# now asks `revl.run_go.go_runtime_reason` first (offline, then a networked
+# retry), so the verdict is a property of the machine rather than of the
+# collection order.
+
+_LIFECYCLE_GO = (
+    "service Greeter {\n"
+    "  fn hello() -> Int\n"
+    "}\n"
+    "component G provides greeter: Greeter {\n"
+    "  provide greeter {\n"
+    '    fn hello() = "abc".length\n'
+    "  }\n"
+    "}\n"
+    'lifecycle test "len_3" {\n'
+    "  load G\n"
+    "  let n = call greeter.hello()\n"
+    "  assert n == 3\n"
+    "  unload G\n"
+    "}\n"
+)
+
+
+def test_the_go_runner_resolves_stc_go_before_it_runs_the_module(monkeypatch):
+    """An unobtainable pinned module is reported as itself, not as `go test
+    exited 1` from a cold cache.
+
+    The verdict stays a FAILURE rather than the rust tier's `Absent` skip: `go`
+    is exempt from `REVL_REQUIRE_TIERS`
+    (tests/test_env_gated_skips_run_somewhere.py), so no job would catch the
+    skip, and a pinned module that cannot be obtained is a provisioning break
+    rather than an absent toolchain."""
+    monkeypatch.setattr(test_module, "_STC_GO_REASON", "")  # not probed yet
+    monkeypatch.setattr(test_module.shutil, "which", lambda _name: "/usr/bin/go")
+    monkeypatch.setattr(
+        run_go_module, "go_runtime_reason",
+        lambda: ("stc-go is not in the local module cache and proxy.golang.org "
+                 "is unreachable"))
+    outcome, message = test_module.RUNNERS["go"](compile_source(_LIFECYCLE_GO))
+    assert outcome == "fail"
+    assert message == (
+        "stc-go could not be resolved: stc-go is not in the local module cache "
+        "and proxy.golang.org is unreachable")
+
+
+def test_a_resolvable_stc_go_still_runs_the_emitted_module_offline(monkeypatch):
+    """The resolve probe decides only WHETHER the module is obtainable; the
+    emitted module is still resolved with `GOPROXY=off`, so a network hiccup
+    during the test run cannot change the answer the probe already gave."""
+    seen = {}
+
+    def _run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["goproxy"] = (kwargs.get("env") or {}).get("GOPROXY")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(test_module, "_STC_GO_REASON", None)  # resolvable
+    monkeypatch.setattr(test_module.shutil, "which", lambda _name: "/usr/bin/go")
+    monkeypatch.setattr(test_module.subprocess, "run", _run)
+    outcome, _message = test_module.RUNNERS["go"](compile_source(_LIFECYCLE_GO))
+    assert outcome == "pass"
+    assert seen["goproxy"] == "off"
+    assert seen["cmd"][:3] == ["/usr/bin/go", "test", "-vet=off"]
+
+
+def test_the_resolve_probe_is_asked_once_per_process(monkeypatch):
+    """The answer is a property of the machine, not of the document, so a suite
+    that runs many lifecycle go cases must not re-probe (and re-download) for
+    each one."""
+    calls = []
+
+    def _reason():
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(test_module, "_STC_GO_REASON", "")
+    monkeypatch.setattr(run_go_module, "go_runtime_reason", _reason)
+    assert test_module._stc_go_reason() is None
+    assert test_module._stc_go_reason() is None
+    assert len(calls) == 1

@@ -138,7 +138,12 @@ def _resolve_probe(tmp: Path) -> tuple[bool, str | None]:
     if offline.returncode == 0:
         return True, None
     blob = ((offline.stderr or "") + (offline.stdout or "")).lower()
-    if not any(marker in blob for marker in _DOWNLOAD_MARKERS):
+    # the haystack is folded to lower case, so the needles have to be too.
+    # `GOPROXY=off` is not: it is the signature of the offline refusal itself —
+    # the one phrase a cold cache always prints — so comparing it raw made this
+    # branch dead for the exact case it exists for, and a cold cache with a
+    # working network reported a hard failure instead of retrying.
+    if not any(marker.lower() in blob for marker in _DOWNLOAD_MARKERS):
         detail = (offline.stderr or "go build failed").strip().splitlines()
         return False, f"go build probe failed: {detail[-1] if detail else '?'}"
     if not _proxy_reachable():
