@@ -37,7 +37,11 @@
 //   * py  — the native object graph (dict / list / bool / int / float / str /
 //            None); executed by the test suite (tests/test_value_stdlib.py).
 //   * ts  — the JS value model (`any`/`unknown`): a record is a plain object, a
-//            list a JS array, an Int a `bigint`, a Float a `number`.
+//            list a JS array, an Int a `bigint`, a Float a `number`. A `Str`
+//            measures in CODE POINTS, never UTF-16 code units (docs/strings.md),
+//            so a body that needs a string's length decodes it first — the
+//            host's own `s.length` is never the answer (`revlCps`/`revlLen` on
+//            the Str-method path, `Array.from` here).
 //   * rs  — `Value` erases to `cordis::Value` (an `Arc<dyn Any>`), and the boxed
 //            concrete type is a `serde_json::Value`, EXACTLY as stdlib/json.rvl
 //            already boxes (`json_parse` hands back a `cordis::Value` wrapping a
@@ -365,8 +369,9 @@ pub extern pure fn value_children(v: Value) -> List[Value] =
     }
   }
 
-// The number of elements (list), fields (record), or characters (str); `0` for
-// a scalar or null. Total.
+// The number of elements (list), fields (record), or characters (str — CODE
+// POINTS, never UTF-16 code units or bytes, docs/strings.md); `0` for a scalar
+// or null. Total.
 pub extern pure fn value_len(v: Value) -> Int =
   @py {
     if isinstance(v, (list, tuple, dict, str)):
@@ -374,8 +379,17 @@ pub extern pure fn value_len(v: Value) -> Int =
     return 0
   }
   = @ts {
-    // returns a revl Int == JS bigint
-    if (typeof v === "string" || Array.isArray(v)) return BigInt(v.length);
+    // returns a revl Int == JS bigint. The string case must DECODE first:
+    // `s.length` is UTF-16 code units, so a lone astral scalar answers 2 where
+    // py `len` and rs `chars().count()` answer 1 — the cross-tier divergence
+    // docs/strings.md §"Why code points, and not the JS-prior UTF-16" forbids,
+    // and the same decode the Str methods get (`revlCps` / `revlLen`). It is
+    // spelled `Array.from` here rather than calling `revlLen` because the
+    // backend emits that helper only for a document that uses a Str method,
+    // and a document whose ONLY string work is `value_len` is exactly the case
+    // this accessor exists for.
+    if (typeof v === "string") return BigInt(Array.from(v).length);
+    if (Array.isArray(v)) return BigInt(v.length);
     if (v !== null && typeof v === "object") return BigInt(Object.keys(v).length);
     return 0n;
   }

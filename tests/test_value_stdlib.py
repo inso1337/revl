@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
+from revl.test import run_py, run_ts  # noqa: E402
 
 STDLIB = ROOT / "stdlib" / "value.rvl"
 
@@ -308,3 +309,74 @@ def test_ts_readers_consult_own_keys_only():
         # body comments is not this operative form.
         assert "(name in v)" not in ts, \
             f"{name} @ts must not use the prototype-walking `(name in v)`"
+
+
+# ------------------------------------- code-point length regression (ts unit)
+
+# A revl `Str` counts CODE POINTS on every tier (docs/strings.md §"Why code
+# points, and not the JS-prior UTF-16"), and the ts backend already rewrites the
+# Str methods that way (`revlCps`/`revlLen`, item 435). A hand-written `@ts`
+# extern body that reaches for the host's own `s.length` re-introduces the JS
+# unit instead: `value_len` answered 2 for the single scalar U+1F600 on ts where
+# py `len` and rs `chars().count()` answered 1 — one source with two meanings,
+# the divergence `syntax-2.0 §0` and docs/strings.md forbid, and a
+# tier-divergent answer to a length a policy check or a bound may size against.
+#
+# U+1F600 is reached through `json_parse` so the source stays ASCII: the lexer
+# refuses a non-ASCII literal and `str_char` stops at U+007E.
+CODEPOINT_CONSUMER = """\
+use "stdlib/json.rvl" { json_parse }
+use "stdlib/value.rvl" { value_len }
+
+pub fn astral_len() -> Int { return value_len(json_parse("\\"\\\\ud83d\\\\ude00\\"")) }
+pub fn padded_len() -> Int { return value_len(json_parse("\\"x\\\\ud83d\\\\ude00y\\"")) }
+pub fn bmp_len() -> Int { return value_len(json_parse("\\"\\\\u00e9\\"")) }
+
+test "value_len counts code points, not UTF-16 units" {
+  assert astral_len() == 1
+  assert padded_len() == 3
+  assert bmp_len() == 1
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def codepoint_ir(tmp_path_factory):
+    # value.rvl (the accessor under test) + json.rvl (the only pure-revl way to
+    # build a non-BMP scalar) beside the consumer, as a real `use` resolves them
+    d = tmp_path_factory.mktemp("value_codepoint")
+    (d / "stdlib").mkdir()
+    for name in ("value.rvl", "json.rvl"):
+        (d / "stdlib" / name).write_text(
+            (ROOT / "stdlib" / name).read_text(encoding="utf-8"),
+            encoding="utf-8")
+    main = d / "main.rvl"
+    main.write_text(CODEPOINT_CONSUMER, encoding="utf-8")
+    return compile_files([str(main)])
+
+
+def test_value_len_ts_body_decodes_a_str_before_counting():
+    """The `@ts` string branch must DECODE before it counts, so a `Str` and a
+    list cannot share one `v.length`. Pinned at the source level so node is not
+    required; the value itself is proven by the tier tests below."""
+    ir = compile_files([str(STDLIB)])
+    ts = {e["name"]: e["bodies"]["ts"] for e in ir["externs"]}["value_len"]
+    assert "Array.from(v).length" in ts, \
+        "value_len @ts must count a Str's code points (Array.from), not the " \
+        "host's UTF-16 code units"
+    assert 'typeof v === "string" || Array.isArray(v)' not in ts, \
+        "value_len @ts must not share one `v.length` between a Str and a list"
+
+
+def test_py_tier_value_len_counts_code_points(codepoint_ir):
+    verdict, detail = run_py(codepoint_ir)
+    assert verdict == "pass", detail
+
+
+def test_ts_tier_value_len_counts_code_points(codepoint_ir):
+    # the same assertions under vitest when the toolchain is present; a missing
+    # toolchain is a skip-with-reason, never a pass and never a fail (FR-5)
+    verdict, detail = run_ts(codepoint_ir)
+    if verdict == "skip":
+        pytest.skip(detail)
+    assert verdict == "pass", detail
