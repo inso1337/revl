@@ -42,9 +42,17 @@ Both generations' activations are recorded **worlds**: ordered timelines of
 effects, provisions and boundary crossings, in the same `replay.Step`
 vocabulary the backwards-replay engine records ([replay.md](replay.md)). The
 canary builds the slice provider's timeline for each generation and compares
-them step-for-step. Divergence is the **first step whose `(kind, label)`
-differs** — or a length mismatch — reported with the exact `(component, realm)`
-that produced it.
+them step-for-step. Divergence is the **first step that differs** — in its
+`(kind, label)`, **or in the inverse/compensation it records** — or a length
+mismatch, reported with the exact `(component, realm)` that produced it.
+
+The inverse is part of the comparison because it is part of the recorded world
+and part of the behaviour: an `effect … undo …` whose acquisition is unchanged
+and whose inverse is not takes back something different at teardown, and the
+inverse is exactly the half a promote hands to the rollback path. Comparing
+`(kind, label)` alone reported such a candidate as an identical generation and
+recommended the promote. The step's `origin` is deliberately not keyed: it is
+provenance, identical for two generations of one provider.
 
 This is deliberately not a threshold on a counter. "The candidate diverged" is a
 statement about the recorded world, attributed to a code site, in the terms a
