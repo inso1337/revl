@@ -4037,6 +4037,23 @@ _GO_RESERVED = {
     "fallthrough", "for", "func", "go", "goto", "if", "import", "interface",
     "map", "package", "range", "return", "select", "struct", "switch", "type",
     "var", "nil", "true", "false", "iota",
+    # The TYPE names the prelude declares at package scope (`RevlResult`/
+    # `RevlOpt` the ADTs, the lifecycle `RevlFrame`/`RevlTimer`/
+    # `RevlTeardownRecord`, the stream/event `Stream`/`Subscription`/
+    # `EventContract`, and the `RevlOk`/`RevlErr`/`RevlOpt` constructors). A
+    # user `type RevlResult` used to emit a SECOND package-scope declaration of
+    # the runtime type, so the package did not build; escaping it off the name
+    # is the same #553 cluster-C posture as the predeclared set below.
+    "RevlResult", "RevlOk", "RevlErr", "RevlOpt", "RevlFrame", "RevlTimer",
+    "RevlTeardownRecord", "Stream", "Subscription", "EventContract",
+    # `RevlSpawnHandle` is the spawn runtime's handle struct, declared at
+    # package scope by the live (stc-go) path. It was the one injected type
+    # name this set missed, so `type RevlSpawnHandle = { .. }` emitted a second
+    # package-scope declaration and the package did not build (#553 cluster-C,
+    # type-name half). Note this only bites programs that keep the live path
+    # (a `lifecycle test` or a stream); a pure typed-core program drops
+    # components and never emits the handle at all.
+    "RevlSpawnHandle",
     # Go's PREDECLARED identifiers (builtins and primitive type names) are not
     # keywords, but they live in the universe block, so a package-level
     # `func`/`type` decl OR a local/param of the same name shadows them for the

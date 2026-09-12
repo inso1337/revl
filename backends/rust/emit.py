@@ -105,8 +105,39 @@ _EMITTER_RESERVED = {"ctx", "config", "root", "plugin"}
 # (#552 B2). Reserved only at the type-name position (`role == "type name"`):
 # a field, local or param of the same spelling is fine and is left alone.
 # `Self` is already a keyword in `_RUST_RESERVED`.
-_RUST_TYPE_RESERVED = frozenset(
-    {"Vec", "String", "Box", "Option", "Send", "Value"})
+#
+# The same position also carries the type declarations the emitter injects at
+# module scope (#553 cluster-C, type-name half). The #553 fix covered the
+# injected *callables* and `_RUST_TYPE_RESERVED` covered the prelude names, but
+# the scaffolding structs the emitter writes itself -- the host-runtime
+# `Map`/`Pool`/`PoolState`/`Job`/`JobToken`/`JobHandle`, the stream and
+# subscription families, `EventContract`, and the `Revl*` operation structs --
+# were never reserved, so a user `type Map = { .. }` emitted a SECOND
+# `struct Map`, which rustc rejects as a duplicate definition. Escaping (not
+# refusing) is the right posture here: `Map`/`Pool`/`Job` are also live host
+# roots (`effect Map.new()`) that the emitter spells as bare tokens, so a
+# refusal would make those programs unportable for a spelling reason.
+# `_mangle`'s ladder keeps the escape injective (`Map` -> `Map_`,
+# `Map_` -> `Map__`).
+_RUST_TYPE_RESERVED = frozenset({
+    "Vec", "String", "Box", "Option", "Send", "Value",
+    # host runtime (emitted as `pub struct Map<V>`, `pub struct Pool`,
+    # `struct PoolState`, `pub struct Job`, `pub struct JobToken(..)`,
+    # `pub struct JobHandle`)
+    "Map", "Pool", "PoolState", "Job", "JobToken", "JobHandle",
+    # stream support (`StreamNext`, `StreamState`, `StreamInner`, `Stream`,
+    # `StreamRegistry`)
+    "StreamNext", "StreamState", "StreamInner", "Stream", "StreamRegistry",
+    # subscription support (`SubscriptionState`, `SubscriptionInner`,
+    # `Subscription`)
+    "SubscriptionState", "SubscriptionInner", "Subscription",
+    # event contracts
+    "EventContract",
+    # `Revl*` operation scaffolding
+    "RevlStrOps", "RevlStrListOps", "RevlListOps", "RevlListSearchOps",
+    "RevlTimer", "RevlClock", "RevlSpawnHandle", "RevlTeardown",
+    "RevlPendingCompensation", "RevlWal",
+})
 
 # Method names that collide with Rust's `Drop::drop` destructor must be renamed.
 _METHOD_RENAMES = {"drop": "drop_"}
