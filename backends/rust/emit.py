@@ -474,8 +474,14 @@ def _coerce_any_arg(arg_node: object, rendered: str, param_type: object,
     `Into<Value>`, so `f(String::from("x"))` against `fn f(v: Value)` fails to
     compile. Wrap it into the SAME representation the callee will recover:
     `Value::new(serde_json::Value::from(<arg>))`. `serde_json::Value` has a
-    `From` for each of these scalars (a non-finite `f64` maps to `Null`, which no
-    finite source literal produces), so one uniform wrap covers every case.
+    `From` for each of these scalars, so one uniform wrap covers every case —
+    with ONE exception: a non-finite `f64` maps to `Null` through `From`, so a
+    `Float` argument boxes through a checked `Number::from_f64` that refuses
+    the non-finite case outright (see the `Float` branch below). A non-finite
+    `Float` cannot come from a source literal (the frontend refuses it, item
+    312) but is ordinary at runtime — `/` is IEEE true division
+    (docs/arithmetic.md) — so the `From` mapping would have silently corrupted
+    it, which no other tier does.
 
     Bounded and precise: it fires ONLY when the callee's declared parameter erases
     to the opaque `Value` AND the argument's surface type is a known concrete
@@ -505,6 +511,21 @@ def _coerce_any_arg(arg_node: object, rendered: str, param_type: object,
         return rendered
     if erased != "Value":
         return rendered
+    if arg_ty == "Float":
+        # `serde_json::Value::from(f64)` maps a NON-FINITE float to `Null`
+        # silently — a substitution of a different value, and the one case the
+        # `From` impls do not carry faithfully. A non-finite `Float` is
+        # reachable at RUNTIME even though no non-finite literal is spellable:
+        # `/` is IEEE true division, so `1.0/0.0` is `inf` on every tier
+        # (docs/arithmetic.md, and the frontend refuses only the literal —
+        # item 312). Boxing through `from` would therefore hand the callee
+        # `Null` where py/ts keep `inf`/`nan`, a cross-tier divergence in the
+        # erased value itself. Refuse at the boxing site: the erased slot has
+        # no faithful representation for it.
+        return (f"Value::new(match serde_json::Number::from_f64({rendered}) {{"
+                f" Some(_n) => serde_json::Value::Number(_n),"
+                f' None => panic!("a non-finite Float has no representation '
+                f'in a dynamic value") }})')
     return f"Value::new(serde_json::Value::from({rendered}))"
 
 

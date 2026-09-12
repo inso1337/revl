@@ -146,6 +146,35 @@ self-consistency):
   `-0.25`) are byte-identical. A **whole-number float** (`1.0` vs `1`), `-0.0`,
   or an extreme-exponent float can still format differently between the two
   runtimes — canonicalize integral quantities as `Int`, not `Float`.
+- **A non-finite `Float` is refused, not encoded** (item 481). `inf`, `-inf`
+  and `nan` are *reachable values*, not exotic input: `/` is IEEE true
+  division on every tier (docs/arithmetic.md), so `1.0/0.0` is `inf` — the py
+  emitter's `_revl_div` manufactures exactly that so py matches the others.
+  A non-finite `Float` has no JSON spelling (RFC 8259 §6 has no
+  `NaN`/`Infinity` token), and the tiers disagreed four ways about what to do
+  with one: py's default `allow_nan=True` emitted the bare tokens
+  `Infinity`/`NaN` (**invalid JSON**), ts `JSON.stringify` silently substituted
+  `null`, rs mapped it to `null` through `serde_json::Value::from`, and go
+  discarded `Encoder.Encode`'s error and returned the **empty string**. Since
+  `json_stringify` is `pure`, that is a guarantee violation — and an
+  empty-string result is a signature over nothing. All four now **refuse**:
+  py `allow_nan=False`, the ts replacer throws, the @go body panics on
+  `Encode`'s error, and the rust emitter's `_coerce_any_arg` boxes a `Float`
+  through `serde_json::Number::from_f64` (which is `None` for a non-finite
+  input) rather than through the silent `From<f64>` mapping. This matches the
+  frontend's existing refusal of a non-finite `Float` **literal** (item 312);
+  the literal was refused while the runtime-computed value was not, which is
+  why the divergence survived.
+
+On the **parse** side the same constants are refused, and here only the py
+tier needed changing: `serde_json::from_str` and Go's `encoding/json` are
+strict and already reject `NaN`/`Infinity`/`-Infinity`, and the @ts
+recursive-descent parser has no `N`/`I` production, so all three already
+answered `Err`/`null`. Python's `json.loads` was the sole exception —
+`parse_constant` is unset by default, so `json_parse("NaN")` returned a float
+where three tiers returned a decode error. The @py body now passes a
+`parse_constant` that raises, so `json_parse` and `json_try_parse` agree
+across tiers (`json_try_parse("NaN")` is `Err` everywhere).
 
 **go record caveat** (a separate, deeper defect, not fixable in json.rvl's @go
 body): a revl record lowers to a Go struct whose fields are **unexported**
@@ -201,6 +230,20 @@ the executable round-trip is pinned per tier (`cargo test` / `go test`):
   field access (`let tc: ToolCall = json_parse(s); tc.name`) is still the
   erased-`Value` boundary — but a structured document survives
   `stringify∘parse`, which is what a wire protocol needs.
+
+  **Bounded residual — a *native container* argument is not this boundary**
+  (recorded, not closed). Only concrete **scalars** are boxed into the
+  `serde_json::Value` representation at the call site
+  (`backends/rust/emit.py::_coerce_any_arg`); a container argument is passed
+  as its native Rust type, so the body's `downcast::<serde_json::Value>()`
+  misses and `json_stringify` returns `""`. That is pre-existing and
+  **orthogonal to non-finiteness** — `json_stringify([1.5])` fails the same
+  way — and it is why the nested non-finite refusal is proved on py/ts/go
+  rather than on rust, where a *scalar* non-finite is what refuses. Closing it
+  means boxing containers through a checked `serde_json::to_value` (which
+  itself maps a non-finite `f64` to `Null` silently, so the check is not
+  free) across every `Any`-taking extern, and it is tracked as its own item
+  rather than folded into this one.
 - **go** — `Any` erases to Go's `any` (`interface{}`), exactly the shape
   `encoding/json` decodes into (`map[string]any`, `[]any`, `string`,
   `float64`, `bool`, `nil`). A verbatim extern body cannot spell its own
