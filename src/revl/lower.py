@@ -22,7 +22,9 @@ import re
 from collections import deque
 
 from . import holes, ownership
+from ._paths import stdlib_root
 from .errors import RevlError, RevlErrors
+from .hostfile import _contained
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
     CASES_KEY,
@@ -1398,6 +1400,109 @@ def _validate_declared_types(program: Program, filename: str) -> None:
     for ext in program.externs:
         if ext.config:
             _check_config(f"extern `{ext.name}`", ext.config)
+
+
+#: every identifier in a written type expression. Deliberately a lexical walk
+#: rather than `parse_type`, because a declared result may be an arrow type
+#: (`(Str) -> Principal`) or a nested generic, and the question here is only
+#: whether the word `Principal` occurs anywhere inside it.
+_TYPE_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _type_words(type_name: str | None) -> set[str]:
+    """Every identifier written in `type_name` (`Result[Principal, ApiError]`
+    yields `Result`, `Principal`, `ApiError`)."""
+    return set(_TYPE_WORD_RE.findall(type_name or ""))
+
+
+def _principal_mentioning_types(program: Program) -> set[str]:
+    """The declared record/variant types whose definition carries `Principal`,
+    directly or through another such type.
+
+    Transitive because a box produces a principal too: `type Box = { who:
+    Principal }` is a harmless consumer on its own, but a declaration whose
+    result is `Box` mints a principal exactly as surely as one whose result is
+    `Principal` spelled out."""
+    direct = {
+        decl.name: (
+            {w for fld in decl.fields for w in _type_words(fld.type)}
+            | {w for case in decl.cases for w in _type_words(case.payload)}
+        )
+        for decl in program.type_decls
+    }
+    mentioning: set[str] = set()
+    growing = True
+    while growing:
+        growing = False
+        for name, words in direct.items():
+            if name in mentioning:
+                continue
+            if PRINCIPAL in words or words & mentioning:
+                mentioning.add(name)
+                growing = True
+    return mentioning
+
+
+def _is_shipped_stdlib(file: str) -> bool:
+    """True when `file` is a module of the shipped, pinned `stdlib/`.
+
+    Containment, not a name match: a local `stdlib/auth.rvl` that shadows the
+    shipped one is an application module and does not qualify."""
+    try:
+        return _contained(os.path.realpath(file),
+                          os.path.realpath(str(stdlib_root())))
+    except (OSError, ValueError):
+        return False
+
+
+def _check_principal_producers(program: Program, filename: str) -> None:
+    """item 457 S2 (docs/design/457-endpoint-one-definition.md, "Authorization:
+    explicit, and not derivable"): `Auth.validate` is the SOLE producer of a
+    `Principal`, and that is what makes a dropped auth step a REFUSAL at
+    admission rather than a failure at runtime.
+
+    `_lower_type_decls` reserves the NAME, so `type Principal = ...` cannot hand
+    it a constructor. That alone is not the invariant: `Principal` is an
+    undeclared opaque nominal, so nothing objected to a *signature* that RETURNS
+    one. `extern pure fn mint() -> Result[Principal, ApiError]` compiled, and so
+    did a plain `fn mint() -> Result[Principal, ApiError]` wrapping such an
+    extern — a shape whose call site names no extern at all, and which therefore
+    reads to a reviewer as ordinary revl. Either hands a body a principal it
+    never authorized, which is precisely what the admission refusal exists to
+    make impossible.
+
+    So a result that carries `Principal` may be declared only in the shipped
+    `stdlib/auth.rvl` (the `Auth.validate` signature and the `host_validate`
+    extern behind it). Every other module — including a local `stdlib/` that
+    shadows the shipped one — is refused, and the refusal names the sole
+    producer so it reads as the missing authorization STEP."""
+    mentioning = _principal_mentioning_types(program)
+
+    def produces(returns: str | None) -> bool:
+        words = _type_words(returns)
+        return PRINCIPAL in words or bool(words & mentioning)
+
+    def check(decl, line: int, what: str, returns: str | None) -> None:
+        if not produces(returns):
+            return
+        file = program.decl_files.get(id(decl), filename)
+        if _is_shipped_stdlib(file):
+            return
+        raise RevlError(
+            file, line,
+            f"{what} declares a result carrying `Principal`, the reserved "
+            f"opaque authorization principal — only the shipped "
+            f"`Auth.validate` (stdlib/auth.rvl) may produce one, and a second "
+            f"producer hands a body an authorization it never obtained",
+            hint=PRINCIPAL_PRODUCER_HINT, code="G4", category="route")
+
+    for fn in program.fn_decls:
+        check(fn, fn.line, f"`fn {fn.name}`", fn.returns)
+    for ext in program.externs:
+        check(ext, ext.line, f"`extern {ext.name}`", ext.returns)
+    for svc in program.services:
+        for m in svc.methods.values():
+            check(svc, m.line, f"`{svc.name}.{m.name}`", m.returns)
 
 
 def _lower_type_decls(program: Program, filename: str) -> dict:
@@ -7282,6 +7387,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # type-check service/fn call sites (the sound-typing milestone)
     _resolve_type_aliases(program, program.filename)
     _validate_declared_types(program, program.filename)
+    _check_principal_producers(program, program.filename)
     types = _lower_type_decls(program, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)

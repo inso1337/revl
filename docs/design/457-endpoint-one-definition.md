@@ -176,9 +176,11 @@ The requirement is that generated metadata must never grant access, and that
 removing the explicit auth step denies the request. Both are met structurally,
 not by convention.
 
-`stdlib/auth.rvl` declares:
+`stdlib/auth.rvl` declares, and it is the only module that may: the same
+declaration written anywhere else is a second door to user data, so the
+compiler refuses it.
 
-```revl
+```revl reject G4
 pub type Bearer = { token: Opt[Str] }          // the credential as presented; a claim
 
 service Auth {
