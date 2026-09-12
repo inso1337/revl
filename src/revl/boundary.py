@@ -147,48 +147,59 @@ def _boundary(ir: dict) -> dict:
         walk(body)
         return found
 
+    def _call_emission_label(node):
+        """`{label: declared capabilities}` for a `call` node that crosses an
+        emission boundary through a `req` target or a provision-method call off
+        a spawn handle. `declared` is `None` for a bare `emission`.
+
+        The arrow-parameter seam is resolved inside `walk_expr` (it needs
+        `arrow_defs`) but feeds the same label space. Both `emissions` and
+        `compensated` are keyed off THIS, so the compensated set is a subset of
+        the emission labels by construction, not by two walks that happen to
+        agree (issue #940)."""
+        out: dict = {}
+        if not isinstance(node, dict) or node.get("kind") != "call":
+            return out
+        target = node.get("target")
+        if isinstance(target, dict) and target.get("kind") == "req":
+            service = (comp.get("requires") or {}).get(target.get("name"))
+            spec = (((ir.get("services") or {}).get(service) or {})
+                    .get("methods") or {}).get(node.get("method")) or {}
+            if spec.get("emission"):
+                out[f"{target['name']}.{node['method']}"] = spec.get("capabilities")
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            recv = callee.get("target")
+            if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                spec = (((ir.get("services") or {}).get(recv.get("service")) or {})
+                        .get("methods") or {}).get(callee.get("name")) or {}
+                if spec.get("emission"):
+                    out[f"{recv.get('key')}.{callee.get('name')}"] = spec.get("capabilities")
+        return out
+
     report: dict[str, dict] = {}
     for comp in ir.get("components") or []:
-        stats = {"emissions": set(), "compensated": 0, "awaits": 0, "capabilities": {}}
+        stats = {"emissions": set(), "compensated": set(),
+                 "compensatedHostEmissions": set(),
+                 "awaits": 0, "capabilities": {}}
         arrow_defs: dict = {}
         _collect_arrows(comp.get("body") or [], arrow_defs)
 
         def walk_expr(node, comp=comp, stats=stats, arrow_defs=arrow_defs):
             if isinstance(node, dict):
-                target = node.get("target")
-                if node.get("kind") == "call" and isinstance(target, dict) and target.get("kind") == "req":
-                    service = (comp.get("requires") or {}).get(target.get("name"))
-                    spec = (((ir.get("services") or {}).get(service) or {}).get("methods") or {}).get(node.get("method")) or {}
-                    if spec.get("emission"):
-                        label = f"{target['name']}.{node['method']}"
-                        stats["emissions"].add(label)
-                        # `*` = declared bare `emission`: no promise about where
-                        declared = spec.get("capabilities")
-                        stats["capabilities"][label] = (
-                            sorted(declared) if declared is not None else ["*"])
-                # the spawn/instance seam: a provision-method call read off a
-                # spawn handle (`s.<key>.<method>(...)`) carries no `req` target.
-                # The receiver is an `instance-get` reached through `callee`,
-                # not the `target` slot. Resolve the crossing to the spawned
-                # component's own service method the same way the `req` arm
-                # resolves a required method, so a granted-service emission
-                # routed through a spawned worker is still enumerated at C's
-                # boundary (item 246, G8 audit surface).
-                if node.get("kind") == "call":
-                    callee = node.get("callee")
-                    if isinstance(callee, dict) and callee.get("kind") == "field":
-                        recv = callee.get("target")
-                        if isinstance(recv, dict) and recv.get("kind") == "instance-get":
-                            service = recv.get("service")
-                            mname = callee.get("name")
-                            spec = (((ir.get("services") or {}).get(service) or {})
-                                    .get("methods") or {}).get(mname) or {}
-                            if spec.get("emission"):
-                                label = f"{recv.get('key')}.{mname}"
-                                stats["emissions"].add(label)
-                                declared = spec.get("capabilities")
-                                stats["capabilities"][label] = (
-                                    sorted(declared) if declared is not None else ["*"])
+                # the `req` arm and the spawn/instance seam. A provision-method
+                # call read off a spawn handle (`s.<key>.<method>(...)`) carries
+                # no `req` target: the receiver is an `instance-get` reached
+                # through `callee`, not the `target` slot. Resolve the crossing
+                # to the spawned component's own service method the same way the
+                # `req` arm resolves a required method, so a granted-service
+                # emission routed through a spawned worker is still enumerated
+                # at C's boundary (item 246, G8 audit surface).
+                for label, declared in _call_emission_label(node).items():
+                    stats["emissions"].add(label)
+                    # `*` = declared bare `emission`: no promise about where
+                    stats["capabilities"][label] = (
+                        sorted(declared) if declared is not None else ["*"])
                 # the arrow-parameter seam (GHSA-wg4v-r47x-52p2 residual): a
                 # provision handed in as an argument to a local arrow whose
                 # parameter is service-typed crosses the boundary through the
@@ -238,7 +249,23 @@ def _boundary(ir: dict) -> dict:
                 if kind == "await":
                     stats["awaits"] += 1
                 if kind == "emit" and step.get("compensate") is not None:
-                    stats["compensated"] += 1
+                    # issue #940: compensation is keyed off the SAME expression
+                    # the `emissions` enumeration above labels, so the
+                    # compensated set is a SUBSET of those labels: `k.g`
+                    # compensated at two sites is ONE compensated emission, not
+                    # two. This used to count emit STEPS, a different population
+                    # that could exceed the number of labels printed beside it.
+                    expr = step.get("expr")
+                    labels = _call_emission_label(expr)
+                    if labels:
+                        stats["compensated"] |= set(labels)
+                    elif isinstance(expr, dict) and isinstance(expr.get("name"), str):
+                        # an `emit` on an emitting HOST fn/extern crosses the
+                        # boundary but carries no `key.method` label, so it is
+                        # not one of the emissions this count is printed beside.
+                        # Recorded by name rather than dropped: the two
+                        # populations overlap, they are not the same.
+                        stats["compensatedHostEmissions"].add(expr["name"])
                 walk_expr(step)
                 if kind == "provide":
                     for method in step.get("methods") or []:
@@ -289,7 +316,9 @@ def _boundary(ir: dict) -> dict:
         report[comp["name"]] = {
             "emissions": sorted(stats["emissions"]),
             "capabilities": dict(sorted(stats["capabilities"].items())),
-            "compensated": stats["compensated"],
+            # an int, as it always was: `len` of the label set, so the number
+            # can never exceed the labels printed beside it (issue #940)
+            "compensated": len(stats["compensated"]),
             "awaits": stats["awaits"],
             "externs": [
                 {"name": _UNKNOWN_DISPATCH,
@@ -326,6 +355,15 @@ def _boundary(ir: dict) -> dict:
             # component touches taint, so a taint-free surface is byte-identical.
             **({"taint": comp["taint"]} if comp.get("taint") else {}),
         }
+        # issue #940: compensation on an emitting HOST extern (`emit boom()
+        # compensate boom()`) is real but carries no `key.method` label, so it is
+        # NOT among the emissions `compensated` is printed beside. Naming them
+        # keeps the report from reading as if every compensation were counted
+        # above. Absent when there is none, so every pre-#940 entry is
+        # byte-identical.
+        if stats["compensatedHostEmissions"]:
+            report[comp["name"]]["compensatedHostEmissions"] = sorted(
+                stats["compensatedHostEmissions"])
     return report
 
 
