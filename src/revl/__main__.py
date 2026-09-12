@@ -433,6 +433,15 @@ def _run_audit(args, ir: dict) -> int:
          # can name what a crossing is bounded to. Absent unless declared, so the
          # `--json` audit of every existing composition is byte-identical.
          **({"reach": ext["reach"]} if ext.get("reach") else {}),
+         # item 484: carry the `deferred` modifier onto the audit extern entry.
+         # The IR has always recorded it (`lower._lower_externs`), the surface
+         # syntax has always admitted it (`extern emission deferred fn`), and
+         # `revl.session_commit`/`revl.mcp.approval` have always branched on it —
+         # but the audit surface, the one a reviewer reads to enumerate the
+         # boundary, dropped it, so a deferrable crossing rendered
+         # byte-identically to an immediate one. Absent unless declared, so an
+         # immediate emission's entry stays byte-identical to today's.
+         **({"deferred": True} if ext.get("deferred") else {}),
          # item 396 option B: the ref provenance (`tier: "path#symbol"`), so a
          # review can see WHERE a crossing's implementation lives when it moved
          # out of the audited document. item 410 prefixes the root KIND
@@ -635,8 +644,16 @@ def _run_audit(args, ir: dict) -> int:
             reach = ext.get("reach")
             reach_str = (f"  reach: {reach['kind']}({reach['target']})"
                          if reach else "")
-            print(f"  {ext['name']}  [{ext['class']}]{reach_str}  backends: "
-                  f"{', '.join(ext['backends']) or '—'}")
+            # item 484: the `deferred` modifier reads INSIDE the bracket, in the
+            # same order the declaration is written (`extern emission deferred fn
+            # outbox_deliver`), so a deferrable crossing is distinguishable from
+            # an immediate one. `deferred` is emission-only (`lower.py` rule 1 of
+            # `_check_deferred_extern`), so the class word is always `emission`
+            # here. Absent unless declared — a bare emission prints exactly as
+            # before, byte-compatible.
+            deferred_str = " deferred" if ext.get("deferred") else ""
+            print(f"  {ext['name']}  [{ext['class']}{deferred_str}]{reach_str}  "
+                  f"backends: {', '.join(ext['backends']) or '—'}")
     if distribution:
         print("\ndistributability (interop-bridge §4: which services may cross a process seam):")
         width = max(len(name) for name in distribution)

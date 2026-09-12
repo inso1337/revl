@@ -188,6 +188,11 @@ The G8 boundary surface of a composition: which emissions each component can
 perform, the capabilities each may cross (`*` = unscoped), which are
 compensated, its iteration boundaries, and the host code it reaches.
 
+The declared-extern entries carry the `deferred` modifier on an emission
+declared `deferred` (item 484, issue #937): the crossing does not fire at the
+call site but is held and flushed at the commit prompt, and an abort drops the
+queue. The key is absent on an immediate emission.
+
 - Inputs: `source` / `files` / `modules`.
 
 ### `revl_tools`
