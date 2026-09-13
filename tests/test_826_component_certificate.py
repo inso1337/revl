@@ -870,6 +870,18 @@ def _drop_the_silence_member(document):
     document.pop("unrecorded")
 
 
+#: The catalogued codes `formal/STATUS.md` states no status and no silence for.
+#: Derived from the same two sources the certificate derives it from rather than
+#: pinned as a literal: a code added to the catalogue without a ledger row has to
+#: be named by the refusal, and a literal expectation cannot know that. It did
+#: not, when item 472 catalogued `G-RETAIN` and the expectation for
+#: `_empty_the_unrecorded` still said `T-UNRESOLVED` alone.
+_UNRECORDED = sorted(code for code in GUARANTEES if code not in _labelled_map_rows())
+
+assert _UNRECORDED, (
+    "every catalogued code now has a ledger row, so emptying the `unrecorded` "
+    "member would forge nothing and the case below would prove nothing")
+
 FORGERIES = [
     ("a promoted status", _promote_g1,
      "the recorded per-guarantee status changed for G1"),
@@ -944,7 +956,7 @@ FORGERIES = [
     ("every conditional row dropped", _drop_every_conditional_row,
      "states neither a status nor a silence for"),
     ("the stated silence emptied", _empty_the_unrecorded,
-     "states neither a status nor a silence for T-UNRESOLVED"),
+     "states neither a status nor a silence for " + ", ".join(_UNRECORDED)),
     ("a silence over a code that does not exist", _invent_an_unrecorded_code,
      "unrecorded names 'G-INVENTED', which the diagnostics catalogue does not define"),
     ("a reported code also called unrecorded", _claim_a_reported_code_is_unrecorded,
