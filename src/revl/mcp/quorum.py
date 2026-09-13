@@ -105,18 +105,58 @@ def _vote_rows(decision: dict) -> list:
         key=lambda row: row["voteId"])
 
 
-def _refusal_rows(records: list, request_id: str) -> list:
+def _refusal_rows(records: list, request_id: str,
+                  through_index: int | None = None) -> list:
     """Every cast or attempt this question REFUSED, from the graph's own
     `quorum-refused` rows. The refusals are part of the decision, not noise
     beside it: "two approvers said yes" reads differently when four were turned
     away first, and an audit that cannot see the turned-away casts cannot tell a
-    clean quorum from a probed one."""
+    clean quorum from a probed one.
+
+    `through_index` bounds the set to the refusals that are part of THIS decision
+    - every refusal up to and including the row that minted the authority the
+    receipt spent, i.e. :func:`_spend_bound`. A refusal is a fact about the graph
+    and stays on the graph, but one written AFTER the decision closed - a late
+    vote, a repeat probe - is a fact about the question's afterlife, not about
+    the decision that admitted, and folding it in would make a correctly spent
+    admission re-verify as forged the moment somebody probed it. `None` keeps the
+    whole history, which is what the live reader wants.
+
+    The bound is a POSITION in the record list and never a clock reading. The
+    session clock is ratcheted to a high-water floor, so two acts a microsecond
+    apart can carry the SAME `at`; a `row["at"] <= spend.consumedAt` test would
+    then fold a refusal that happened strictly after the spend back into the
+    receipt, which is the very defect this bounds. Positions have no ties."""
     return [
         {"action": row.get("action"), "reason": row.get("reason"),
          "voter": row.get("voter"), "counted": row.get("counted")}
-        for row in records
+        for index, row in enumerate(records)
         if row.get("record") == "quorum-refused"
-        and row.get("requestId") == request_id]
+        and row.get("requestId") == request_id
+        and (through_index is None or index <= through_index)
+    ]
+
+
+def _spend_bound(records: list, request_id: str) -> int | None:
+    """Where the decision ENDS and the question's afterlife begins: the position
+    of the `approval-granted` row that minted the authority this receipt's spend
+    consumed. It is written after the row that decided the question and before the
+    spend, so bounding the refusals through it keeps every cast the decision saw
+    and drops every act that came after - a late vote on the spent question, the
+    probe an auditor runs a week later.
+
+    Re-derived, never stored: it is a function of the durable rows and the entry
+    the receipt already names, so there is no second copy of the bound for a
+    forger to widen and none for the mint and the verifier to disagree about.
+
+    `None` (no grant row for this request id) is unreachable for a receipt -
+    `_mint_ticket_entry` writes the row for every authority that can be spent, so
+    a receipt whose entry has no row is a receipt for a spend nobody made."""
+    for index, row in enumerate(records):
+        if row.get("record") == "approval-granted" \
+                and row.get("requestId") == request_id:
+            return index
+    return None
 
 
 def _counted(decision: dict) -> int:
@@ -127,7 +167,13 @@ def _counted(decision: dict) -> int:
 def receipt_body(decision: dict, entry: dict, records: list) -> dict:
     """The receipt without its digest: the binding, the rule as written, and the
     decision graph in full. Pure over its inputs, so :func:`verify_receipt` can
-    rebuild it from the durable rows and compare byte for byte."""
+    rebuild it from the durable rows and compare byte for byte.
+
+    The refusal set is bounded by the decision rather than by the whole history
+    (see :func:`_refusal_rows` and :func:`_spend_bound`), and the bound is a
+    POSITION re-derived from `records` and `entry` on every call - the mint and
+    the verifier compute the same one from the same rows, so the receipt stays a
+    derivation of the graph rather than a second copy of it."""
     body = {
         "kind": RECEIPT_KIND,
         "version": RECEIPT_VERSION,
@@ -145,7 +191,9 @@ def receipt_body(decision: dict, entry: dict, records: list) -> dict:
             "openedAt": decision["openedAt"],
             "resolvedAt": decision["resolvedAt"],
             "votes": _vote_rows(decision),
-            "refusals": _refusal_rows(records, decision["requestId"]),
+            "refusals": _refusal_rows(
+                records, decision["requestId"],
+                _spend_bound(records, entry["requestId"])),
         },
     }
     if decision.get("override"):
@@ -160,7 +208,9 @@ def build_receipt(decision: dict, entry: dict, records: list, *,
     Called at the crossing, after the durable `approval-consumed` record and
     before the fire, so the receipt names an authority that was actually spent.
     `consumed_at` is the spend's own clock reading; it is inside the digest, so a
-    receipt cannot be re-dated."""
+    receipt cannot be re-dated. The refusal set is bounded by the decision's own
+    end (the `approval-granted` row for this request id), so a later refusal
+    cannot rewrite what this receipt says."""
     body = receipt_body(decision, entry, records)
     body["spend"] = {"requestId": entry["requestId"], "consumedAt": consumed_at}
     return {**body, "digest": _sha(_canon(body))}

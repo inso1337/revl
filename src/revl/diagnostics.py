@@ -38,6 +38,10 @@ GUARANTEES = {
                      "realm or an undeclared receiver); it crosses only at a "
                      "declared Secret[T] receiver and downgrades only at a "
                      "declared endorse[confidential]",
+    "G-RETAIN": "a Retained[T, P] value past P's retention deadline never "
+                "reaches a persistence sink (a db/fs/store/kv/blob/archive/"
+                "index/cache/queue/wal crossing), unless P declares a legal "
+                "hold, which overrides the deadline",
     "A1": "iteration boundaries exist only during activation",
     "A2": "no acquisition after a provision",
     "A3": "host-safe identifiers",
@@ -83,6 +87,11 @@ FIXES = {
                      "a `Trusted[T]` sink), and downgrades only at a declared, "
                      "audited `endorse[confidential](v, reason = \"...\")` - route "
                      "it through a declared receiver, or endorse it there",
+    "G-RETAIN": "the data is past the deadline its `retention` policy declares, "
+                "so it may not be written to durable storage - erase it (`revl "
+                "erase-report`, and a signed receipt over what was reached), "
+                "extend `until` if the retention basis really has changed, or "
+                "declare the `hold` that keeps it",
     "A1": "`await` is an iteration boundary and exists only during activation — "
           "move it into the component body",
     "A2": "acquire everything before the first `provide`",

@@ -17,13 +17,19 @@ package revl:gate@1.0.0;
 world gate {
   /// A verdict from the gate.
   ///
-  /// `admitted` is FALSE ON EVERY ARM. This gate is `crates/revl-gate` packaged
-  /// for wasm, and that gate decides the composition/guarantee layer
+  /// `admitted` is FALSE ON EVERY ARM. This world exports `crates/revl-gate`'s
+  /// VERDICT surface, and that surface decides the composition/guarantee layer
   /// (G1..G4, A1, PRELUDE, and parse failures as BAD) and NOT the reference
   /// type layer, so it has no admission to give. A host reading only the fixed
   /// {admitted, code, message} triple therefore reads this gate as "never
   /// admits" — the fail-closed reading — instead of mistaking a no-objection
   /// for an admission. The real signal is `kind`.
+  ///
+  /// The crate's separate ADMISSION surface (`issue_admission`, issue #346) is
+  /// deliberately NOT on this world: it leans on a `catch_unwind` fail-closed
+  /// path, and on wasm the panic strategy is `abort`, so that path does not
+  /// exist here. A `no-objection` from this world is "no verdict", never a
+  /// green.
   record verdict {
     /// Always false. See above.
     admitted: bool,

@@ -330,7 +330,7 @@ appear through a host extern. Naming a derivative the way the item asks would
 need a way to declare that a crossing *is* derived from a named value, which is
 the same missing vocabulary as residence and legal hold.
 
-## The retention half: prerequisites
+## The retention half: the prerequisites as they were measured
 
 A `Retained[T]` whose value past its deadline is refused at persistence sinks
 needs four things that do not exist, and each one is a change larger than this
@@ -358,6 +358,121 @@ retention guarantee in the language that the checker does not honour, which is
 exactly the failure the checker-as-admission-gate promise exists to prevent. The
 honest deliverable here is the note plus the half that is real.
 
+## The retention half, landed (`src/revl/retention.py`)
+
+That measurement stands, and the rule drawn from it stands too: a declaration
+nothing enforces is worse than no declaration. What changed is that two of the
+four prerequisites turn out to be reachable without a language redesign, and the
+other two are reachable in a narrower form that can be stated honestly. The
+qualifier ships with the refusal attached, so nothing below is an annotation
+waiting for a checker.
+
+**Prerequisite 1, a sink the type system owns: SUPPLIED, derived not invented.**
+`retention.PERSISTENCE_SINK_SCOPES` is the durable-storage counterpart of
+`taint._SINK_CLASS_SCOPES`, and it is read the same way: off the capability the
+crossing DECLARES (`db`, `fs`, `store`, `kv`, `blob`, `archive`, `index`,
+`cache`, `queue`, `wal`), never off an author qualifier, because the side that
+owns the store is the side that knows it is a store. The note's objection was
+that a `db` capability "is a resource scope, not a retention policy", and that is
+right: the scope says where the bytes go, and the POLICY says how long they may
+stay. The refusal needs both, and it now has both. `fs` is deliberately in this
+set and in `_SOURCE_CLASS_SCOPES` at once, because a filesystem crossing
+honestly is a provenance source on the way in and a persistence sink on the way
+out.
+
+**Prerequisite 2, a time fact: SUPPLIED at the policy's granularity, not the
+value's.** The checker still has no clock and no per-record creation instant, and
+nothing here invents one. What it has is ONE evaluation instant per compile
+(`retention.evaluation_instant`: `REVL_RETENTION_AS_OF` when set, so a build is
+reproducible and a test is deterministic, otherwise the compile's own UTC wall
+clock), compared against the DECLARED deadline. That makes the refusal a property
+of admission rather than of the source text: the same program is admitted before
+the deadline and refused after it. It is the weaker of the two readings the note
+contemplated, and it is the one a static checker can hold. It does not refuse an
+individual record on its own age, and `revl.retention`'s module docstring says so
+in those words.
+
+**Prerequisite 3, the residence and legal-hold vocabulary: SUPPLIED as a
+declaration.** `retention <name> { until, residence, hold, deleters,
+derivatives }` is a contextual-keyword declaration (the `secret` / `composition`
+/ `layer` discipline, so the self-hosted lexer's KEYWORDS table needs no sync),
+and `Retained[T, <policy>]` names one. A declared `hold` OVERRIDES the deadline,
+which is what a legal hold is: an instruction to keep data past the date it would
+otherwise be disposed of. The override is a declaration, so it is visible in the
+source, in the refusal's absence, and in every receipt issued under the policy,
+where it turns every row into `withheld:legal-hold` rather than something
+erasable. The residence is checked against the replica rows a caller supplies
+(`residence-mismatch`) and nothing more: no placement fact is derived, and
+nothing here can stop a host from writing bytes to a region it did not declare.
+
+**Prerequisite 4, the derivative relation: NOT supplied, and reported as
+declared rather than inferred.** The note is still correct that the taint
+machinery tracks where a value came from and not what was made from it. A policy
+therefore declares which CLASSES of derivative it covers, out of a CLOSED
+vocabulary (`summary`, `index`, `embedding`, `backup`, `export`, `cache`), and
+the receipt reports each derivative a caller enumerates against that
+declaration. Nothing proves that a particular crossing wrote a summary of a
+particular retained value. The vocabulary is closed on purpose: an open one would
+let a policy "cover" a class no erasure path can enumerate, which reads as a
+guarantee without being one.
+
+### The two refusals, and why there are two
+
+`G-RETAIN` fires in two places, off the same policy and the same evaluation
+instant:
+
+  * on the DECLARATION, when a crossing that declares a persistence capability
+    also declares a `Retained[T, P]` parameter and P has expired. No call site is
+    needed: the declaration is the statement that admitting this program admits
+    writing this data to durable storage, and the checker is the admission gate.
+  * on the FLOW, when a value carrying the `retained:P` origin reaches a
+    persistence-scoped crossing whose own parameter carries no qualifier at all.
+    The origin is minted where a `Secret[T]` origin is minted (an extern return,
+    a parameter, an interface-only service operation return) and propagates
+    through the walk that already exists, so the refusal follows the VALUE rather
+    than the spelling at the sink.
+
+The origin is `retained:<policy>`, kept disjoint from every `_ORIGIN_CLASSES`
+member by its prefix, and it deliberately does NOT participate in G9. Retention
+is a time-and-residence dimension orthogonal to 249's provenance dimension;
+collapsing them would refuse a `Retained[Str, P]` value at every `Trusted[T]`
+sink for a reason that has nothing to do with trust. A value that is both
+untrusted and retained keeps its untrusted origin and is still refused by G9.
+
+### The second receipt, and why it is not a version of the first
+
+`retention.make_receipt` signs a POLICY and the replicas and derivatives a
+caller can name under it; `erasure_receipt.make_receipt` signs a MEASUREMENT
+`erase_report` took of a realm. They are siblings with separate domain tags, not
+two revisions of one artifact, and they share `attest._canonical_bytes` and
+`attest.load_key` by calling them for the reason correction 2 and 3 above give.
+
+Neither is a proof of destruction. The retention receipt is an ENUMERATION plus a
+signature: it establishes which replicas and derivatives the system knows about,
+which policy they were held under, that the requester is a member of that
+policy's own `deleters`, and that the document has not been altered. revl cannot
+observe a remote replica's disks and nothing here asks a remote host whether it
+complied. A derivative the policy does not cover is listed as `not-covered` and
+carries, inside the signed body, the sentence that it is not claimed erased,
+because the honest answer to "was the embedding index deleted?" under a policy
+that never covered embeddings is "the policy does not reach it", never silence.
+`_envelope` checks each row's `covered` against the policy's own `derivatives`
+member, so an over-claim is refused even with an intact MAC.
+
+### What is still open
+
+  * No per-value age, so no refusal on an individual record's own lifetime
+    (prerequisite 2, in the weaker form above).
+  * No inferred derivative relation (prerequisite 4).
+  * No derived residence: a replica's region is what the caller says it is.
+  * The persistence refusal covers a crossing declared through an `extern` with
+    a durable-storage capability. A service operation carries no capability of
+    its own, so an operation that persists through a provider's extern is
+    refused at that extern, which is where the capability is declared.
+  * No CLI verb yet: the receipt is a library surface
+    (`revl.retention.make_receipt` / `verify_receipt`), the way
+    `erasure_receipt` was before `erase-report --receipt-key`.
+
 ## Verification
 
 The receipt is pinned by `tests/test_erasure_receipt.py` against
@@ -375,3 +490,13 @@ python3 -m pytest tests/ -q -k "erase or retention or secret or taint"
 python3 tools/docgen.py --check
 python3 tools/conformance.py --check-readme
 ```
+
+The retention half is pinned by `tests/test_retention_472.py` and by the corpus
+fixture `examples/rejections/gretain_expired_at_persistence_sink.rvl`, whose
+deadline is absolutely past so it refuses under any clock. The fixture's twin
+properties are tested beside it: the same program with a deadline that has not
+passed compiles, and so does the same expired program with a `hold` declared.
+`tools/build_gate_crate.py --check` reports in sync, because the qualifier is
+added in `taint.py` and `parser.py` and touches neither `typecheck.py` nor
+`lexer.py`, so no crate digest input moved and the emitted IR for a program
+using `Retained[T, P]` is byte-identical to the same program without it.
