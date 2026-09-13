@@ -588,6 +588,36 @@ fn close_brace(ts: List[Token], i: Int) -> Int {
   return 0 - 1
 }
 
+// Index just past a top-level `test` block's closing `}`, or -1 when the `test`
+// keyword is not in that shape.
+//
+// The reference SPELLS a test `test "<name>" { ... }` — parser.py `test_decl`
+// reads the keyword, then `expect("string")` for the name, then the body brace —
+// so the opening `{` sits TWO tokens past the keyword, not one. Reading only the
+// name-less `test {` shape left every named test block (the spelling the whole
+// corpus and every selfhost/*.rvl file actually uses) falling through to
+// `skip_line`, which advances past the header line and then walks the body's
+// statements as if they were top-level declarations: `BAD|unexpected
+// declaration` on a program the reference admits.
+//
+// The name-less `test {` shape is still recognised. The reference refuses it
+// (a missing name is a parse error there), so recognising it costs no admission
+// the reference would not already refuse out of this slice, and dropping it
+// would be a behaviour change unrelated to this parity slice.
+//
+// Every top-level walker routes its `test` branch through here, because a test
+// block is a checker-stage concern that admission reads nothing out of: the only
+// thing any walker does with one is step over it, and stepping over it WHOLE is
+// what keeps its body out of top-level dispatch.
+fn test_block_end(ts: List[Token], i: Int) -> Int {
+  if (!atw(ts, i, "test")) { return 0 - 1 }
+  if (atk(ts, i + 1, "{")) { return close_brace(ts, i + 1) }
+  if (atk(ts, i + 1, "string") && atk(ts, i + 2, "{")) {
+    return close_brace(ts, i + 2)
+  }
+  return 0 - 1
+}
+
 // ================================================================ list utils
 
 fn contains(xs: List[Str], s: Str) -> Bool { return xs.indexOf(s) != 0 - 1 }
@@ -2005,8 +2035,8 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   if (t.text == "use" || t.text == "test" || t.text == "type") {
     // frontend `use`, `test` blocks and type decls are checker-stage concerns;
     // admission reads none of them. Skip structurally (brace blocks included).
-    if (t.text == "test" && atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
+    if (t.text == "test") {
+      let e = test_block_end(ts, i)
       if (e != 0 - 1) { return p_top(ts, e, pg) }
     }
     return p_top(ts, skip_line(ts, i), pg)
@@ -5705,10 +5735,8 @@ fn cfg_owners_walk(ts: List[Token], i: Int, a: CfgAcc) -> CfgAcc {
   if (at_pub_prefix(ts, i)) { return cfg_owners_walk(ts, i + 1, a) }
   if (t.text == "use") { return cfg_owners_walk(ts, skip_line(ts, i), a) }
   if (t.text == "test") {
-    if (atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return cfg_owners_walk(ts, e, a) }
-    }
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return cfg_owners_walk(ts, e, a) }
     return cfg_owners_walk(ts, skip_line(ts, i), a)
   }
   if (t.text == "type") { return cfg_owners_walk(ts, cfg_one_type(ts, i).i, a) }
@@ -6487,10 +6515,8 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   if (at_pub_prefix(ts, i)) { return fb_refusal(ts, i + 1) }
   if (t.text == "use" || t.text == "type") { return fb_refusal(ts, skip_line(ts, i)) }
   if (t.text == "test") {
-    if (atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return fb_refusal(ts, e) }
-    }
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return fb_refusal(ts, e) }
     return fb_refusal(ts, skip_line(ts, i))
   }
   if (t.text == "extern") { return fb_refusal(ts, p_extern(ts, i, empty_prog()).i) }
@@ -8700,10 +8726,8 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
     return case_binds_walk(ts, d.i, d.a)
   }
   if (t.text == "test") {
-    if (atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return case_binds_walk(ts, e, a) }
-    }
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return case_binds_walk(ts, e, a) }
     return case_binds_walk(ts, skip_line(ts, i), a)
   }
   if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a) }
@@ -9864,10 +9888,8 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind]) -> Str {
   if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
   if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
   if (t.text == "test") {
-    if (atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return fns_walk(ts, e, acc, cases) }
-    }
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases) }
     return fns_walk(ts, skip_line(ts, i), acc, cases)
   }
   if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
@@ -10082,10 +10104,8 @@ fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
     return externs_walk(ts, ni, acc2, ok && ex.ok, decls)
   }
   if (t.text == "test") {
-    if (atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls) }
-    }
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls) }
     return externs_walk(ts, skip_line(ts, i), acc, ok, decls)
   }
   if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls) }
@@ -10207,10 +10227,8 @@ fn types_walk(ts: List[Token], i: Int, acc: Str) -> Str {
     return types_walk(ts, d.i, acc2)
   }
   if (t.text == "test") {
-    if (atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return types_walk(ts, e, acc) }
-    }
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return types_walk(ts, e, acc) }
     return types_walk(ts, skip_line(ts, i), acc)
   }
   if (t.text == "extern") { return types_walk(ts, p_extern(ts, i, empty_prog()).i, acc) }
@@ -10231,10 +10249,8 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
   if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a) }
   if (t.text == "test") {
     let na = mk_iracc(a.svcs, a.comps, true, a.v2)
-    if (atk(ts, i + 1, "{")) {
-      let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return ir_walk(ts, e, na) }
-    }
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return ir_walk(ts, e, na) }
     return ir_walk(ts, skip_line(ts, i), na)
   }
   if (t.text == "type") {
@@ -11416,6 +11432,33 @@ test "a statement-block match arm is not an arrow head" {
   // form. The scan stays off it (an under-refusal, not a wrong one).
   let v = admit_src("type S = A(Str) | B(Str) fn f(s: S) -> Int { return match s { A(x) => { let y = 1  y }, B(x) => 2, } }")
   assert v == ""
+}
+
+// -------------------------------------------- named `test` blocks (item 391)
+
+test "a named test block is stepped over, not read as declarations" {
+  // `test "<name>" {` is the reference's ONLY test spelling (parser.py
+  // `test_decl`), so the body brace is two tokens past the keyword. Reading the
+  // brace only at one token past it left the header line skipped and the body's
+  // statements walked as top-level declarations: `BAD|unexpected declaration`.
+  assert admit_src("""fn id(x: Int) -> Int { return x } test "id round trips" { assert id(1) == 1 }""") == ""
+}
+
+test "a declaration AFTER a named test block is still reached" {
+  // the skip has to land past the closing `}`: a line-based skip on the
+  // one-line spelling swallows whatever follows the block on the same line.
+  assert admit_src("""test "first" { let a = 1  assert a == 1 } fn id(x: Int) -> Int { return x }""") == ""
+}
+
+test "a named test body's statements draw no top-level verdict" {
+  assert admit_src("""test "locals" { let a = 1  var b = 2  b = a  assert b == 1 } fn id(x: Int) -> Int { return x }""") == ""
+}
+
+test "lower_to_ir keeps both fns around a one-line named test block" {
+  // fns_walk is one of the eight top-level walkers: before the skip covered the
+  // named spelling this dropped `two` from the IR entirely, silently.
+  assert lower_to_ir("""fn one() -> Int { return 1 } test "t" { assert one() == 1 } fn two() -> Int { return 2 }""")
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}]}"""
 }
 
 test "a destructuring let is read, not refused" {
