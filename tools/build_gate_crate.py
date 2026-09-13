@@ -201,6 +201,21 @@ MAX_LEVEL_ITEMS = 1024
 COVERED_LAYER = ("composition + guarantee layer (G1..G4, A1, PRELUDE) and "
                  "parse (BAD); NOT the reference type layer")
 
+# What the gate is willing to ADMIT, in one line, stamped into the crate's
+# `ADMITTED_LAYER`, its README and its provenance from this one constant.
+#
+# The admission arm is not the covered layer read optimistically: it is a far
+# SMALLER region, the one where the covered layer is the WHOLE question. A source
+# that declares only service method signatures and scalar type aliases carries no
+# term the reference type layer decides — no body, no expression, no generic
+# head, no alias off the scalar set — so `admit_src` raising no objection to it
+# is not a partial answer but the complete one. Measured, not assumed: 3_155
+# certified programs drawn over this surface, every one admitted by the
+# reference (`tests/test_gate_reference_census.py`).
+ADMITTED_LAYER = ("interface declarations only: service method signatures and "
+                  "scalar type aliases, over a closed scalar type vocabulary; "
+                  "no term the reference type layer decides")
+
 
 def _load_module(relpath: str, name: str):
     """Load a repo file by path, the way the backends' own tests load them, so
@@ -267,6 +282,75 @@ def frontier_tables() -> dict[str, list[str]]:
         "keywords": sorted(set(KEYWORDS) - _selfhost_keywords()),
         "builtins": sorted(set(_BUILTIN_SIG) - _selfhost_builtin_methods()),
     }
+
+
+# ------------------------------------------------------ the admission tables
+#
+# The ADMISSION SURFACE is the mirror image of the frontier table. The frontier
+# says where this gate may not REFUSE; the admission surface says where it may
+# ADMIT — the far smaller region in which a no-objection from the
+# composition/guarantee layer is the WHOLE answer, because the source carries no
+# term the reference type layer decides.
+#
+# The tables are derived from the reference compiler for the same reason the
+# frontier's are: the surface is defined by what the REFERENCE would check, and a
+# hand-listed copy of that would be free to go stale in the unsafe direction.
+
+
+def admission_tables() -> dict[str, list[str]]:
+    """`{"scalars": [...], "reserved": [...], "keywords": [...]}` — the closed
+    vocabularies the admission surface is written over, sorted so the generated
+    bytes are stable.
+
+    * ``scalars`` — the type names a certified signature may mention, taken from
+      the reference's own set of scalar data types
+      (`revl.typecheck._CONFIG_DATA_SCALARS`). Every one of them is a concrete
+      builtin with no type parameter and no erasure, so a signature written over
+      them resolves without a checker: no generic head to instantiate, no `Any`
+      to erase, no alias to follow off the surface.
+    * ``reserved`` — the type names a certified source may not DECLARE
+      (`revl.typecheck._BUILTIN_TYPE_NAMES` plus the reserved opaque
+      `Principal`). Shadowing one of these is the reference's business, not this
+      gate's, so a source that tries is not certified.
+    * ``keywords`` — the reference keyword set (`revl.lexer.KEYWORDS`). A
+      certified source's identifiers are checked against it, so the certifier
+      cannot mistake a keyword it does not know for a name.
+    """
+    from revl.lexer import KEYWORDS  # noqa: PLC0415
+    from revl.typecheck import (  # noqa: PLC0415
+        _BUILTIN_TYPE_NAMES, _CONFIG_DATA_SCALARS, _GENERIC_ARITY, PRINCIPAL)
+
+    scalars = sorted(_CONFIG_DATA_SCALARS)
+    reserved = sorted(set(_BUILTIN_TYPE_NAMES) | {PRINCIPAL})
+    keywords = sorted(KEYWORDS)
+    # Anchored the way the frontier extraction is. A scalar table that picked up
+    # a generic head, or that lost the names it is written over, would generate a
+    # certifier that admits signatures the reference still has work to do on —
+    # the one direction this crate may never drift in.
+    missing = {"Int", "Str", "Bool"} - set(scalars)
+    if missing or set(scalars) & set(_GENERIC_ARITY):
+        raise SystemExit(
+            f"build_gate_crate: the admission scalar table looks broken "
+            f"({scalars!r}); refusing to generate")
+    if not set(scalars) <= set(_BUILTIN_TYPE_NAMES):
+        raise SystemExit(
+            f"build_gate_crate: an admission scalar is not a reference builtin "
+            f"type name ({sorted(set(scalars) - set(_BUILTIN_TYPE_NAMES))!r}); "
+            f"refusing to generate")
+    if "service" not in keywords or len(keywords) < 20:
+        raise SystemExit(
+            f"build_gate_crate: the reference keyword table looks broken "
+            f"({len(keywords)} words); refusing to generate")
+    return {"scalars": scalars, "reserved": reserved, "keywords": keywords}
+
+
+def admission_surface_id(digest: str) -> str:
+    """`ADMISSION_SURFACE_ID` — an identifier of the region this gate is willing
+    to ADMIT in, versioned separately from `frontier_id` because the two answer
+    different questions: the frontier bounds the refusals, the admission surface
+    bounds the admissions. A consumer caching an admission compares this before
+    trusting it against a gate built from another tree."""
+    return f"admission-interface:{digest[:16]}"
 
 
 # ------------------------------------------------------ the IR-boundary tables
@@ -386,6 +470,494 @@ def _rust_pub_i64_array(name: str, values: list[int], doc: str) -> str:
     else:
         body = "&[]"
     return f"{doc}pub const {name}: &[i64] = {body};\n"
+
+
+ADMISSION_RS_TEMPLATE = r'''//! The ADMISSION SURFACE — GENERATED by `tools/build_gate_crate.py`.
+//! Do not edit; edit the generator and regenerate (`--check` is a CI gate).
+//!
+//! # The question this module answers
+//!
+//! `frontier.rs` bounds where this gate may REFUSE. This module bounds the far
+//! smaller region where it may ADMIT.
+//!
+//! The two bounds are not the same shape and must not be confused. The native
+//! gate decides the composition/guarantee layer and runs no type layer, so over
+//! the language at large a no-objection from it is a PARTIAL answer: the
+//! reference may still refuse the same bytes in a layer this gate never ran.
+//! That is why [`crate::Verdict`] has no admitting arm and why
+//! [`crate::Verdict::NoObjection`] is never a green.
+//!
+//! There is a region, though, in which the covered layer is the WHOLE question:
+//! a source that declares nothing but service method signatures and scalar type
+//! aliases carries NO TERM the reference type layer decides. No function body,
+//! no expression, no literal, no generic head to instantiate, no alias pointing
+//! off the scalar vocabulary. For such a source, "the composition/guarantee
+//! gate found nothing to refuse" and "the reference admits this" are the same
+//! statement, and the gate may say so.
+//!
+//! `certify` is the decision procedure for that region. It returns `Some(basis)`
+//! only when it has walked the ENTIRE source and accounted for every token; a
+//! single byte it cannot place returns `None`, and `None` means the caller falls
+//! back to the refusal surface. It never partially certifies, and it never skips
+//! what it does not understand — skipping is the wave-through this crate exists
+//! to prevent.
+//!
+//! # What is deliberately NOT in the surface
+//!
+//! Everything that carries a term: `fn` bodies, `component`, `provide`, `realm`,
+//! `use`, `pub`, attributes, literals, record and generic types, aliases of
+//! aliases. A source holding any of them is not certified, which costs a caller
+//! nothing but the fallback to `NoObjection` — the direction this crate is
+//! allowed to err in.
+//!
+//! # The manifest half
+//!
+//! [`certify_into`] is deliberately far narrower still, and the reason is a
+//! property of the item-186 row wire rather than a gap in this module: the wire
+//! carries component names, provision keys and realms, and NO SERVICE SHAPES.
+//! So a candidate declaring `service Store { ... }` cannot be certified against
+//! a running composition, because the running composition may already hold a
+//! DIFFERENT `Store` and the wire cannot say. Measured, not assumed: the
+//! reference refuses that exact pair with "service `Store` differs from the
+//! running manifest". A candidate that declares nothing can be certified, and
+//! nothing else can, until the wire carries the running shapes.
+
+@SCALAR_TYPES@
+@RESERVED_TYPE_NAMES@
+@REFERENCE_KEYWORDS@
+/// An identifier of the region this gate is willing to ADMIT in. Versioned
+/// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
+/// bounds the admissions, and a consumer caching an admission compares THIS
+/// before trusting it against a gate built from another tree.
+pub(crate) const SURFACE_ID: &str = "@ADMISSION_SURFACE_ID@";
+
+/// The tail every certificate carries, so the two halves of the basis line
+/// cannot drift apart.
+const BASIS_TAIL: &str =
+    "no term the reference type layer decides, and the composition/guarantee gate raised no objection";
+
+/// What a certified source turned out to contain. Counts only: the certificate
+/// is evidence that the walk ACCOUNTED for the whole source, and the counts are
+/// what make that evidence readable.
+struct Shape {
+    services: usize,
+    aliases: usize,
+    methods: usize,
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The source as tokens, or `None` when it holds a byte outside the surface's
+/// alphabet.
+///
+/// The alphabet is the point. A string literal, a number, an `@attribute`, an
+/// operator, a `[`, a non-ASCII byte — every one of them returns `None` here,
+/// which is how "carries no term the type layer decides" is enforced at the
+/// bottom rather than argued about at the top. Comments and whitespace are the
+/// only things dropped.
+fn tokens(source: &str) -> Option<Vec<&str>> {
+    let bytes = source.as_bytes();
+    let n = bytes.len();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        let byte = bytes[i];
+        if byte == b' ' || byte == b'\t' || byte == b'\r' || byte == b'\n' {
+            i += 1;
+            continue;
+        }
+        if byte == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if is_ident_start(byte) {
+            let start = i;
+            i += 1;
+            while i < n && is_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            out.push(&source[start..i]);
+            continue;
+        }
+        if byte == b'-' && i + 1 < n && bytes[i + 1] == b'>' {
+            out.push("->");
+            i += 2;
+            continue;
+        }
+        out.push(match byte {
+            b'{' => "{",
+            b'}' => "}",
+            b'(' => "(",
+            b')' => ")",
+            b',' => ",",
+            b':' => ":",
+            b'=' => "=",
+            _ => return None,
+        });
+        i += 1;
+    }
+    Some(out)
+}
+
+/// A token usable as a declared or bound NAME: an identifier that is not a
+/// reference keyword. Checked against the REFERENCE keyword set, not the
+/// self-host one, because the question is what the reference would make of the
+/// source.
+fn is_name(token: &str) -> bool {
+    match token.as_bytes().first() {
+        Some(&byte) if is_ident_start(byte) => !REFERENCE_KEYWORDS.contains(&token),
+        _ => false,
+    }
+}
+
+/// A name this source may DECLARE: a name that does not shadow a reference
+/// builtin type or the reserved opaque `Principal`.
+fn is_declarable(token: &str) -> bool {
+    is_name(token) && !RESERVED_TYPE_NAMES.contains(&token)
+}
+
+fn has_duplicate(names: &[&str]) -> bool {
+    for (i, name) in names.iter().enumerate() {
+        if names[i + 1..].contains(name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk the whole source, or refuse to certify it.
+///
+/// The walk is total by construction: every iteration either consumes a token
+/// and advances, or returns `None`. There is no "skip what I do not recognise"
+/// branch, which is the property that makes the certificate mean something.
+fn shape_of(source: &str) -> Option<Shape> {
+    let toks = tokens(source)?;
+    let n = toks.len();
+
+    // Pass one: the alias names, so a signature may name an alias declared
+    // further down the file. Pass two validates every one of them, so a name
+    // collected here that is not a real alias declaration still fails below.
+    let mut aliases: Vec<&str> = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        if *tok == "type" && i + 1 < n {
+            aliases.push(toks[i + 1]);
+        }
+    }
+    let known = |name: &str| SCALAR_TYPES.contains(&name) || aliases.contains(&name);
+
+    let mut services: Vec<&str> = Vec::new();
+    let mut methods_total = 0usize;
+    let mut declared_aliases = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        if toks[i] == "type" {
+            // `type <Name> = <Scalar>` — the right-hand side is a SCALAR and
+            // never another alias, so the alias graph is one level deep and a
+            // cycle (which the reference decides, and this gate does not) is
+            // unrepresentable rather than checked.
+            if i + 3 >= n || toks[i + 2] != "=" {
+                return None;
+            }
+            if !is_declarable(toks[i + 1]) || !SCALAR_TYPES.contains(&toks[i + 3]) {
+                return None;
+            }
+            declared_aliases += 1;
+            i += 4;
+            continue;
+        }
+        if toks[i] != "service" || i + 2 >= n {
+            return None;
+        }
+        if !is_declarable(toks[i + 1]) || toks[i + 2] != "{" {
+            return None;
+        }
+        services.push(toks[i + 1]);
+        i += 3;
+        let mut methods: Vec<&str> = Vec::new();
+        while i < n && toks[i] != "}" {
+            if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1]) {
+                return None;
+            }
+            methods.push(toks[i + 1]);
+            i += 2;
+            if i >= n || toks[i] != "(" {
+                return None;
+            }
+            i += 1;
+            let mut params: Vec<&str> = Vec::new();
+            while i < n && toks[i] != ")" {
+                if !is_name(toks[i]) || i + 2 >= n || toks[i + 1] != ":" {
+                    return None;
+                }
+                if !known(toks[i + 2]) {
+                    return None;
+                }
+                params.push(toks[i]);
+                i += 3;
+                if i < n && toks[i] == "," {
+                    i += 1;
+                }
+            }
+            if i >= n || has_duplicate(&params) {
+                return None;
+            }
+            i += 1; // the `)`
+            if i < n && toks[i] == "->" {
+                if i + 1 >= n || !known(toks[i + 1]) {
+                    return None;
+                }
+                i += 2;
+            }
+            methods_total += 1;
+        }
+        if i >= n || has_duplicate(&methods) {
+            return None;
+        }
+        i += 1; // the `}`
+    }
+    // The reference refuses a duplicate service and a duplicate method
+    // (`duplicate service `A``, `duplicate method `f` in service A`) and the
+    // native gate does not, so the certifier carries those two obligations
+    // itself. Without them the surface would admit two programs the reference
+    // refuses — measured, which is why they are here and not assumed away.
+    if has_duplicate(&services) || has_duplicate(&aliases) {
+        return None;
+    }
+    if declared_aliases != aliases.len() {
+        return None;
+    }
+    for alias in &aliases {
+        if services.contains(alias) {
+            return None;
+        }
+    }
+    Some(Shape {
+        services: services.len(),
+        aliases: aliases.len(),
+        methods: methods_total,
+    })
+}
+
+/// `Some(basis)` when `source` is inside the admission surface, `None`
+/// otherwise. The basis is the certificate's why-trace, for a log or a receipt;
+/// it is NOT on the admission wire, which is byte-identical to `revl.gate`'s.
+pub(crate) fn certify(source: &str) -> Option<String> {
+    let shape = shape_of(source)?;
+    Some(format!(
+        "admission surface {}: services={} aliases={} methods={}; {}",
+        SURFACE_ID, shape.services, shape.aliases, shape.methods, BASIS_TAIL
+    ))
+}
+
+/// `Some(basis)` when `source` may be admitted INTO the running composition
+/// `manifest`, `None` otherwise.
+///
+/// Narrow, and the reason is the wire rather than this module. An item-186 row
+/// carries a component name, a provision key and a realm; it does NOT carry the
+/// running composition's service shapes. A candidate declaring
+/// `service Store { ... }` may therefore collide with a `Store` the running
+/// composition already holds in a different shape, and the reference refuses
+/// exactly that ("service `Store` differs from the running manifest") where this
+/// gate cannot even see it. So against a NON-EMPTY manifest only a candidate
+/// that declares nothing at all is certified.
+///
+/// The empty manifest is the empty composition, and `crate::issue_admission_into`
+/// routes it to `crate::issue_admission` before this is reached.
+pub(crate) fn certify_into(source: &str, manifest: &str) -> Option<String> {
+    let shape = shape_of(source)?;
+    if shape.services > 0 || shape.aliases > 0 {
+        return None;
+    }
+    let (provisions, requirements) = manifest_shape(manifest)?;
+    Some(format!(
+        "admission surface {}: the candidate declares nothing, and the running composition's {} provision rows resolve its {} requirement rows; {}",
+        SURFACE_ID, provisions, requirements, BASIS_TAIL
+    ))
+}
+
+/// `(provisions, requirements)` for a manifest wire every one of whose rows the
+/// admission surface can account for, `None` otherwise.
+///
+/// Two obligations, both of them the wire's own: every row is a provision
+/// (`C/k/r`) or a requirement (`C<k`) — a `!halted` header, a replacement or a
+/// handoff row is not certifiable here even though the fold has its own answer
+/// for it — and every requirement key is provided by a provision row in the same
+/// wire. The second is what stops a bogus wire from being admitted into: the
+/// running composition is supposed to be one the reference already admitted, and
+/// a dangling requirement says it is not.
+fn manifest_shape(manifest: &str) -> Option<(usize, usize)> {
+    let mut provided: Vec<&str> = Vec::new();
+    let mut required: Vec<&str> = Vec::new();
+    for row in manifest.split(';') {
+        if row.is_empty() {
+            return None;
+        }
+        if let Some((component, key)) = row.split_once('<') {
+            if component.is_empty() || key.is_empty() {
+                return None;
+            }
+            if component.contains('/') || key.contains('/') || key.contains('=') {
+                return None;
+            }
+            if !is_name(component) || !is_name(key) {
+                return None;
+            }
+            required.push(key);
+            continue;
+        }
+        let mut parts = row.splitn(3, '/');
+        let component = parts.next()?;
+        let key = parts.next()?;
+        let realm = parts.next()?;
+        if component.is_empty() || key.is_empty() {
+            return None;
+        }
+        if !is_name(component) || !is_name(key) {
+            return None;
+        }
+        if !realm.is_empty() && !is_name(realm) {
+            return None;
+        }
+        provided.push(key);
+    }
+    for key in &required {
+        if !provided.contains(key) {
+            return None;
+        }
+    }
+    Some((provided.len(), required.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INTERFACE: &str = "service Store {\n  fn get(key: Str) -> Str\n  fn put(key: Str, value: Str)\n}\n";
+
+    #[test]
+    fn an_interface_only_source_is_certified() {
+        let basis = certify(INTERFACE).expect("an interface-only source is inside the surface");
+        assert!(basis.contains("services=1"), "{}", basis);
+        assert!(basis.contains("methods=2"), "{}", basis);
+        assert!(basis.contains(SURFACE_ID), "{}", basis);
+    }
+
+    #[test]
+    fn the_empty_source_is_the_empty_composition_and_is_certified() {
+        for source in ["", "   \n", "// just a note\n"] {
+            let basis = certify(source).expect("a source with no declarations is admissible");
+            assert!(basis.contains("services=0 aliases=0 methods=0"), "{}", basis);
+        }
+    }
+
+    #[test]
+    fn a_scalar_alias_is_certified_and_usable_in_a_signature() {
+        let source = "type Key = Str\nservice S {\n  fn get(k: Key) -> Key\n}\n";
+        assert!(certify(source).is_some());
+    }
+
+    #[test]
+    fn an_alias_of_an_alias_is_not_certified() {
+        // The alias graph is one level deep by construction, so a cycle cannot
+        // be written rather than having to be detected.
+        assert!(certify("type A = Str\ntype B = A\n").is_none());
+    }
+
+    #[test]
+    fn a_term_of_any_kind_leaves_the_surface() {
+        for source in [
+            "fn id(x: Int) -> Int { return x }",
+            "component C provides s: S {\n  provide s {\n    fn f(x) = x\n  }\n}\n",
+            "service S {\n  fn f(x: Str) -> Str\n}\nfn g() -> Int { return 1 }",
+            "type R = { id: Int }",
+            "service S {\n  fn f(x: List[Int]) -> Int\n}\n",
+            "use \"./other.rvl\" { S }\n",
+            "pub service S {\n  fn f(x: Int) -> Int\n}\n",
+        ] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+    }
+
+    #[test]
+    fn the_two_obligations_the_native_gate_does_not_carry() {
+        // The reference refuses both of these and `admit_src` raises no
+        // objection to either, so the certifier has to decide them itself or the
+        // surface would issue an admission the reference refuses.
+        assert!(certify("service A {\n  fn f(x: Int) -> Int\n}\nservice A {\n  fn g(x: Int) -> Int\n}\n").is_none());
+        assert!(certify("service A {\n  fn f(x: Int) -> Int\n  fn f(y: Int) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn a_declaration_may_not_shadow_a_reference_builtin_type() {
+        for source in ["service Int {\n}\n", "type Opt = Str\n", "type Principal = Str\n"] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+    }
+
+    #[test]
+    fn a_type_outside_the_scalar_vocabulary_leaves_the_surface() {
+        assert!(certify("service S {\n  fn f(x: Unknown) -> Int\n}\n").is_none());
+        assert!(certify("service S {\n  fn f(x: Any) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn a_non_ascii_byte_leaves_the_surface() {
+        assert!(tokens("service Ünicode {}").is_none());
+        assert!(certify("service S {\n  fn f(x: Str) -> Str // caf\u{e9}\n}\n").is_some());
+    }
+
+    #[test]
+    fn a_duplicate_parameter_name_leaves_the_surface() {
+        assert!(certify("service S {\n  fn f(x: Int, x: Int) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn an_unterminated_declaration_leaves_the_surface() {
+        for source in ["service S {", "service S {\n  fn f(x: Int\n}", "type A =", "service"] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+    }
+
+    // The manifest half.
+
+    #[test]
+    fn a_declaration_free_candidate_is_certified_into_a_running_composition() {
+        let basis = certify_into("// nothing to add\n", "Kv/store/;App/app/;App<store")
+            .expect("a candidate that declares nothing cannot collide with the running shapes");
+        assert!(basis.contains("2 provision rows"), "{}", basis);
+        assert!(basis.contains("1 requirement rows"), "{}", basis);
+    }
+
+    #[test]
+    fn an_interface_candidate_is_not_certified_into_a_running_composition() {
+        // The wire carries no service shapes, so a declared `Store` may or may
+        // not be the running one and this gate cannot tell. Not certified.
+        assert!(certify(INTERFACE).is_some());
+        assert!(certify_into(INTERFACE, "Kv/store/").is_none());
+    }
+
+    #[test]
+    fn a_row_the_surface_cannot_account_for_is_not_certified_into() {
+        for wire in ["!halted", "Kv/store/;-Kv/store/", "Kv/store=Int", "!wat", "Kv/store/;"] {
+            assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
+        }
+    }
+
+    #[test]
+    fn a_dangling_requirement_row_is_not_certified_into() {
+        assert!(certify_into("", "App/app/;App<store").is_none());
+        assert!(certify_into("", "Kv/store/;App<store").is_some());
+    }
+}
+'''
 
 
 FRONTIER_RS_TEMPLATE = r'''//! The covered-surface guard — GENERATED by `tools/build_gate_crate.py`.
@@ -685,14 +1257,15 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //!     // A definitive refusal. Byte-agreeing with the reference compiler on
 //!     // the covered corpus: stop here, and show the message as-is.
 //!     Verdict::Refused { code, message } => println!("refused ({}): {}", code, message),
-//!     // NOT an admission. See "This gate issues no admissions" below.
+//!     // NOT an admission. See "The verdict surface issues no admissions"
+//!     // below; ask `issue_admission` for a green.
 //!     Verdict::NoObjection => println!("nothing this gate can refuse"),
 //!     // The gate declined to decide at all.
 //!     Verdict::OutsideFrontier { reason } => println!("undecided: {}", reason),
 //! }
 //! ```
 //!
-//! # This gate issues no admissions
+//! # The verdict surface issues no admissions
 //!
 //! Read this before wiring the crate into anything.
 //!
@@ -704,26 +1277,67 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! `fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }`
 //! and `fn f() -> { }`; the self-host gate raises no objection to any of them.
 //!
-//! So there is no `Verdict::Admitted` arm, and no `is_admitted()`. The
-//! non-refusing outcome is [`Verdict::NoObjection`], which means exactly
-//! *"this gate found nothing it is able to refuse"* and never *"the reference
-//! would admit this"*. A host that must ADMIT — because it is about to run the
-//! program — still has to get a reference verdict (`revl compile`, or
-//! `revl.gate.admit` on py). What this crate buys is the other direction: a
-//! local, in-process, allocation-cheap REFUSAL that agrees with the reference
-//! byte for byte on the covered corpus, with no round trip and no Python.
+//! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
+//! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
+//! nothing it is able to refuse"* and never *"the reference would admit this"*,
+//! and [`Verdict::to_json`] emits `"admitted": false` for EVERY arm. A consumer
+//! written against the fixed `{admitted, code, message}` shape
+//! (`docs/design/332-embeddable-gate-api.md`) therefore reads the verdict
+//! surface as "never admits" rather than misreading a no-objection as an
+//! admission; the arm itself is carried in the extra `"verdict"` field.
 //!
 //! The two divergence directions are not symmetric, and this asymmetry is the
 //! whole design: refusing what the reference admits is an inconvenience;
 //! ADMITTING what the reference refuses is the defect class the admission-gate
-//! arc exists to prevent. A crate that cannot issue an admission cannot commit
-//! that defect.
+//! arc exists to prevent.
 //!
-//! On the wire, [`Verdict::to_json`] therefore emits `"admitted": false` for
-//! EVERY arm. A consumer written against the fixed `{admitted, code, message}`
-//! shape (`docs/design/332-embeddable-gate-api.md`) reads this gate as
-//! "never admits" rather than misreading a no-objection as an admission; the
-//! arm itself is carried in the extra `"verdict"` field.
+//! # The admission surface (issue #346)
+//!
+//! An admission is therefore a SECOND, separate question, asked through a
+//! separate type and a separate entry point: [`issue_admission`] returns an
+//! [`Admission`], not a [`Verdict`]. The split is the point. A host holding a
+//! [`Verdict`] cannot accidentally read it as a green — there is no arm to
+//! misread — and a host that wants a green has to ask for one explicitly and
+//! handle [`Admission::Withheld`].
+//!
+//! [`Admission::Admitted`] is reachable through exactly one path, and both of
+//! its conditions are necessary:
+//!
+//! 1. [`admit`] returned [`Verdict::NoObjection`] — the composition/guarantee
+//!    gate ran and found nothing to refuse. An admission is never issued over a
+//!    refusal or over a frontier gap.
+//! 2. the source is inside the ADMISSION SURFACE
+//!    ([`ADMISSION_SURFACE_ID`], `src/admission.rs`) — the region where the
+//!    covered layer is the WHOLE question, because the source carries no term
+//!    the reference type layer decides.
+//!
+//! The surface is deliberately tiny: `service` method signatures and scalar
+//! `type` aliases, over a closed scalar vocabulary derived from the reference's
+//! own table. No body, no expression, no literal, no generic head. That is not
+//! the covered layer read optimistically; it is the sliver of the covered layer
+//! where reading it as an admission is sound, and it is measured rather than
+//! argued — every certified program in the census corpus is a program the
+//! reference admits, and the `false-admission` bucket of
+//! `tools/gate_reference_census.py` reds on the first one that is not.
+//!
+//! A source OUTSIDE the surface is [`Admission::Withheld`] carrying the verdict
+//! verbatim, which is the same fail-closed answer the crate gave before the arm
+//! existed. Widening the surface is the self-host type layer's lane
+//! (`docs/design/457-selfhost-type-layer.md`): each slice it lands is a family
+//! the certifier can then account for.
+//!
+//! ```no_run
+//! use revl_gate::{issue_admission, Admission};
+//!
+//! match issue_admission("service Store { fn get(key: Str) -> Str }") {
+//!     // A real admission: `"admitted": true` on the wire, and the basis says
+//!     // on what ground.
+//!     Admission::Admitted { basis } => println!("admitted: {}", basis),
+//!     // No admission. The verdict inside is the refusal surface's answer, and
+//!     // a `NoObjection` there is still not a green.
+//!     Admission::Withheld { verdict } => println!("withheld: {:?}", verdict),
+//! }
+//! ```
 //!
 //! # Fail closed, always
 //!
@@ -783,7 +1397,8 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! match admit_into(candidate, running) {
 //!     // A refusal the reference agrees with: this candidate re-provides `store`.
 //!     Verdict::Refused { code, message } => println!("refused ({}): {}", code, message),
-//!     // NOT an admission. See "This gate issues no admissions" above.
+//!     // NOT an admission. See "The verdict surface issues no admissions"
+//!     // above; ask `issue_admission_into` for a green.
 //!     Verdict::NoObjection => println!("nothing this gate can refuse"),
 //!     // The gate declined to decide at all: a row it cannot honour, a frontier
 //!     // gap, or an aborted fold. Fail closed.
@@ -851,6 +1466,7 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 #[allow(non_snake_case, unused_braces, clippy::all)]
 mod selfhost;
 
+mod admission;
 mod frontier;
 pub mod ir;
 pub mod session;
@@ -875,11 +1491,26 @@ pub const LANGUAGE_VERSION: &str = "@LANGUAGE_VERSION@";
 pub const SYMBOLS_API_VERSION: &str = "0.1.0";
 
 /// What this gate actually decides, in one line. The reference type layer is
-/// deliberately absent — see the crate docs, "This gate issues no admissions".
+/// deliberately absent — see the crate docs, "The verdict surface issues no
+/// admissions", and [`ADMITTED_LAYER`] for the sliver it is sound to admit in.
 pub const COVERED_LAYER: &str = "@COVERED_LAYER@";
 
 /// The `code` a frontier gap reports on the wire.
 pub const FRONTIER_CODE: &str = "FRONTIER";
+
+/// An identifier of the region [`issue_admission`] is willing to ADMIT in.
+///
+/// Versioned apart from [`FRONTIER_ID`] because the two bound different things:
+/// the frontier bounds where this gate may REFUSE, this bounds where it may
+/// ADMIT. A host caching an admission compares THIS value before trusting the
+/// cached green against a gate built from another tree — two gates with
+/// different admission surfaces admitted under different rules.
+pub const ADMISSION_SURFACE_ID: &str = admission::SURFACE_ID;
+
+/// What [`issue_admission`] is willing to admit, in one line. Read it before
+/// treating an [`Admission::Withheld`] as a defect: outside this region the
+/// honest answer is to withhold.
+pub const ADMITTED_LAYER: &str = "@ADMITTED_LAYER@";
 
 /// The three values a host can branch on (design "Versioning").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -984,6 +1615,82 @@ impl Verdict {
         }
         out.push('}');
         out
+    }
+}
+
+/// The answer to the ADMISSION question (issue #346) — a different question
+/// from [`Verdict`], carried in a different type so the two cannot be confused.
+///
+/// [`Verdict`] answers *"is there something here I can refuse"*. This answers
+/// *"may this run"*, and only one of its arms says yes. A host that needs a
+/// green asks [`issue_admission`] and handles [`Admission::Withheld`]; a host
+/// that only wants a local refusal keeps using [`admit`] and never sees this
+/// type at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// The gate ISSUES an admission: [`admit`] raised no objection AND the
+    /// source is inside the admission surface, so the covered layer was the
+    /// whole question. `basis` is the certificate's why-trace — which surface,
+    /// and what it accounted for. It is not on the wire.
+    Admitted { basis: String },
+    /// No admission. `verdict` is the refusal surface's answer verbatim, and a
+    /// [`Verdict::NoObjection`] in here is still not a green: it means the gate
+    /// found nothing to refuse and was not entitled to admit either.
+    Withheld { verdict: Verdict },
+}
+
+impl Admission {
+    /// True only for an ISSUED admission. This is the one call a host may treat
+    /// as a green light, and only within [`ADMISSION_SURFACE_ID`].
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, Admission::Admitted { .. })
+    }
+
+    /// The certificate's why-trace for an issued admission.
+    pub fn basis(&self) -> Option<&str> {
+        match self {
+            Admission::Admitted { basis } => Some(basis),
+            Admission::Withheld { .. } => None,
+        }
+    }
+
+    /// The withheld answer's verdict; `None` for an issued admission.
+    pub fn verdict(&self) -> Option<&Verdict> {
+        match self {
+            Admission::Admitted { .. } => None,
+            Admission::Withheld { verdict } => Some(verdict),
+        }
+    }
+
+    /// The arm's stable wire name: `"admitted"`, or the withheld verdict's own
+    /// [`Verdict::kind`].
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Admission::Admitted { .. } => "admitted",
+            Admission::Withheld { verdict } => verdict.kind(),
+        }
+    }
+
+    /// The design's fixed `{"admitted", "code", "message"}` shape plus the
+    /// `"verdict"` arm name.
+    ///
+    /// An issued admission serialises `{"verdict":"admitted","admitted":true,
+    /// "code":null,"message":null}` — BYTE-IDENTICAL to what `revl.gate`'s own
+    /// `Verdict.to_json()` writes for a py admission, so a seam comparing the
+    /// two tiers' wires (item 337) compares equal bytes rather than two
+    /// spellings of the same yes. The basis is deliberately off the wire: it is
+    /// evidence for a log, not part of the contract.
+    ///
+    /// A withheld answer serialises the verdict verbatim, so switching a
+    /// consumer from [`admit`] to [`issue_admission`] changes nothing about the
+    /// bytes it already handled.
+    pub fn to_json(&self) -> String {
+        match self {
+            Admission::Admitted { .. } => String::from(
+                "{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}",
+            ),
+            Admission::Withheld { verdict } => verdict.to_json(),
+        }
     }
 }
 
@@ -1114,6 +1821,63 @@ pub fn admit_into(source: &str, manifest: &str) -> Verdict {
         }
     };
     verdict_from_wire(&wire)
+}
+
+/// The ADMISSION question for `source` (issue #346): may this run?
+///
+/// Two conditions, both necessary, and in this order:
+///
+/// 1. [`admit`] must return [`Verdict::NoObjection`]. A refusal or a frontier
+///    gap is withheld as it stands — an admission is never issued over the
+///    refusal surface's head.
+/// 2. `source` must be inside the ADMISSION SURFACE ([`ADMISSION_SURFACE_ID`]),
+///    the region where the covered layer is the WHOLE question because the
+///    source carries no term the reference type layer decides.
+///
+/// Outside that region the answer is [`Admission::Withheld`] carrying the
+/// verdict, which is exactly what a consumer of [`admit`] already handles. See
+/// [`ADMITTED_LAYER`] for what the region is, and the crate docs for why it is
+/// this small.
+pub fn issue_admission(source: &str) -> Admission {
+    let verdict = admit(source);
+    if verdict == Verdict::NoObjection {
+        if let Some(basis) = admission::certify(source) {
+            return Admission::Admitted { basis };
+        }
+    }
+    Admission::Withheld { verdict }
+}
+
+/// The ADMISSION question for `source` once it is admitted INTO the running
+/// composition `manifest` (issue #346) — the shape an agent loop actually needs.
+///
+/// The empty manifest is the empty composition, so `issue_admission_into(src,
+/// "")` is [`issue_admission`] byte for byte.
+///
+/// Against a NON-EMPTY manifest the surface is far narrower, and the reason is
+/// the item-186 row wire rather than a gap in the certifier: a row carries a
+/// component name, a provision key and a realm, and NO SERVICE SHAPES. A
+/// candidate declaring `service Store { ... }` may collide with a `Store` the
+/// running composition already holds in a different shape — the reference
+/// refuses that pair with "service `Store` differs from the running manifest"
+/// — and no amount of care on this side can see it in the wire. So only a
+/// candidate that declares nothing is certified against a running composition,
+/// and everything else is withheld with the fold's verdict.
+///
+/// Widening this is not the type layer alone: the WIRE has to carry the running
+/// composition's declared shapes first. That is the remaining half of issue
+/// #346, and naming it here is cheaper than rediscovering it.
+pub fn issue_admission_into(source: &str, manifest: &str) -> Admission {
+    if manifest.is_empty() {
+        return issue_admission(source);
+    }
+    let verdict = admit_into(source, manifest);
+    if verdict == Verdict::NoObjection {
+        if let Some(basis) = admission::certify_into(source, manifest) {
+            return Admission::Admitted { basis };
+        }
+    }
+    Admission::Withheld { verdict }
 }
 
 /// Parse the self-host gate's internal `"<TAG>|<message>"` protocol into the
@@ -1447,6 +2211,135 @@ component CacheLayer requires store: Store provides store: Store {\n\
             "fn id(x: Int) -> Int { return x }",
             &over
         )));
+    }
+
+    // The admission surface (issue #346).
+
+    /// A source inside the admission surface: interface declarations only.
+    const CERTIFIABLE: &str = "service Store {\n  fn get(key: Str) -> Str\n}\n";
+
+    #[test]
+    fn the_verdict_surface_still_has_no_admitting_arm() {
+        // The split is the whole safety story: a host holding a `Verdict` has no
+        // arm it could misread as a green, whatever the admission surface grows
+        // into.
+        for source in [CERTIFIABLE, "fn id(x: Int) -> Int { return x }", ""] {
+            let verdict = admit(source);
+            assert!(!verdict.is_refused());
+            assert_eq!(verdict, Verdict::NoObjection);
+            assert!(verdict.to_json().contains("\"admitted\":false"));
+        }
+    }
+
+    #[test]
+    fn an_interface_only_source_is_admitted_and_says_so_on_the_wire() {
+        let issued = issue_admission(CERTIFIABLE);
+        match &issued {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains(ADMISSION_SURFACE_ID), "{}", basis);
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        assert!(issued.is_admitted());
+        assert_eq!(issued.kind(), "admitted");
+        assert_eq!(
+            issued.to_json(),
+            "{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}"
+        );
+    }
+
+    #[test]
+    fn a_source_outside_the_surface_is_withheld_with_the_verdict_verbatim() {
+        // The type-layer gap, which is the whole reason the surface is this
+        // small: the reference refuses this and the covered layer cannot see it,
+        // so the honest answer is to withhold rather than to admit.
+        for source in [
+            "fn f() -> Int { return \"s\" }",
+            "fn f() -> Int { return undefined_name }",
+            "fn f() -> { }",
+        ] {
+            let issued = issue_admission(source);
+            assert!(!issued.is_admitted(), "must not admit {:?}", source);
+            assert_eq!(issued.to_json(), admit(source).to_json());
+            assert_eq!(issued.verdict(), Some(&admit(source)));
+        }
+    }
+
+    #[test]
+    fn an_admission_is_never_issued_over_a_refusal_or_a_frontier_gap() {
+        // Condition 1, held from the outside: every source the refusal surface
+        // does not answer `NoObjection` to is withheld, so the arm cannot be
+        // reached past a refusal however the surface is widened later.
+        let over_bound = "x".repeat(MAX_SOURCE_BYTES + 1);
+        // a G3 refusal, a BAD parse refusal, and a frontier gap
+        for source in [AMBIENT_CONFLICT, "service S { fn f(", over_bound.as_str()] {
+            let verdict = admit(source);
+            assert_ne!(verdict, Verdict::NoObjection, "{:?}", &source[..17.min(source.len())]);
+            assert_eq!(issue_admission(source), Admission::Withheld { verdict });
+        }
+    }
+
+    #[test]
+    fn an_empty_manifest_is_the_standalone_admission_question() {
+        for source in [CERTIFIABLE, AMBIENT_CONFLICT, "fn id(x: Int) -> Int { return x }"] {
+            assert_eq!(
+                issue_admission_into(source, ""),
+                issue_admission(source),
+                "an empty manifest is the empty composition on the admission surface too"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaring_candidate_is_withheld_against_a_running_composition() {
+        // The wire carries no service shapes, so the same bytes that are
+        // ADMITTED standalone are WITHHELD against a running composition. This
+        // is the remaining half of issue #346, and it is a refusal to guess
+        // rather than an oversight.
+        assert!(issue_admission(CERTIFIABLE).is_admitted());
+        let into = issue_admission_into(CERTIFIABLE, RUNNING);
+        assert!(!into.is_admitted());
+        assert_eq!(into.verdict(), Some(&Verdict::NoObjection));
+        assert!(into.to_json().contains("\"admitted\":false"));
+    }
+
+    #[test]
+    fn a_candidate_that_declares_nothing_is_admitted_into_a_running_composition() {
+        let into = issue_admission_into("// nothing to add\n", RUNNING);
+        match &into {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains("provision rows"), "{}", basis)
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        assert!(into.is_admitted());
+    }
+
+    #[test]
+    fn a_halted_or_deferred_manifest_row_is_never_admitted_into() {
+        for rows in ["!halted", "Kv/store/;-Kv/store/", "!paused", "Kv/store/;Kv/store=Int"] {
+            let into = issue_admission_into("// nothing to add\n", rows);
+            assert!(!into.is_admitted(), "must not admit into {:?}", rows);
+            assert!(into.to_json().contains("\"admitted\":false"));
+        }
+    }
+
+    #[test]
+    fn the_withheld_wire_is_the_verdict_wire_on_every_arm() {
+        // Switching a consumer from `admit` to `issue_admission` may only ADD
+        // the admitted wire; every other answer has to be byte-identical to what
+        // it already handled.
+        for source in [
+            "fn id(x: Int) -> Int { return x }",
+            AMBIENT_CONFLICT,
+            "component X provides { fn = }",
+            "service Store {\n  fn get(k: Str) -> Str\n  fn get(k: Str) -> Str\n}\n",
+        ] {
+            let issued = issue_admission(source);
+            if !issued.is_admitted() {
+                assert_eq!(issued.to_json(), admit(source).to_json(), "{:?}", source);
+            }
+        }
     }
 }
 '''
@@ -3446,7 +4339,7 @@ fn unparseable_source_is_refused_as_bad() {
     }
 }
 
-// --------------------------------------- the gate issues no admissions, ever
+// ------------------------------ the verdict surface issues no admissions
 
 #[test]
 fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
@@ -3456,7 +4349,8 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
     assert!(verdict.to_json().contains("\"admitted\":false"));
 }
 
-/// The measured reason `Verdict::Admitted` does not exist.
+/// The measured reason `Verdict` has no admitting arm, and the measured reason
+/// the admission surface is as narrow as it is.
 ///
 /// This gate decides the composition/guarantee layer, not the reference type
 /// layer, so every program below is one the REFERENCE compiler refuses and this
@@ -4539,7 +5433,7 @@ The crate builds with no Python on the machine. That is why the generated source
 is committed rather than produced at install time (items 336 and 338 depend on
 it).
 
-## This gate issues no admissions
+## The verdict surface issues no admissions
 
 Read this before wiring the crate into anything.
 
@@ -4555,24 +5449,67 @@ reference's type layer. Measured, not assumed: the reference refuses all of
 
 and the self-host gate raises no objection to any of them.
 
-So there is no `Verdict::Admitted` and no `is_admitted()`. The non-refusing arm
+So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
-refuse"* — never *"the reference would admit this"*. A host that must ADMIT,
-because it is about to run the program, still needs a reference verdict
-(`revl compile`, or `revl.gate.admit` on py). What this crate buys is the other
-direction: a local, in-process, Python-free REFUSAL that agrees with the
-reference byte for byte on the covered corpus.
+refuse"* — never *"the reference would admit this"*. On the wire, `to_json()`
+emits `"admitted": false` for **every** arm, so a consumer written against the
+design's fixed `{admitted, code, message}` shape reads the verdict surface as
+"never admits" rather than misreading a no-objection. The arm itself travels in
+the extra `"verdict"` field
+(`"refused"` / `"no_objection"` / `"outside_frontier"`).
 
 The asymmetry is the whole design: refusing what the reference admits is an
 inconvenience; **admitting what the reference refuses is the defect class the
-admission-gate arc exists to prevent.** A crate that cannot issue an admission
-cannot commit that defect.
+admission-gate arc exists to prevent.**
 
-On the wire, `to_json()` emits `"admitted": false` for **every** arm, so a
-consumer written against the design's fixed `{admitted, code, message}` shape
-reads this gate as "never admits" rather than misreading a no-objection. The
-arm itself travels in the extra `"verdict"` field
-(`"refused"` / `"no_objection"` / `"outside_frontier"`).
+## The admission surface (issue #346)
+
+An admission is a SECOND question, asked through a second type so the two cannot
+be confused: `issue_admission(source)` returns an `Admission`, not a `Verdict`.
+
+```rust
+match revl_gate::issue_admission("service Store { fn get(key: Str) -> Str }") {
+    revl_gate::Admission::Admitted { basis } => println!("admitted: {basis}"),
+    revl_gate::Admission::Withheld { verdict } => println!("withheld: {verdict:?}"),
+}
+```
+
+`Admission::Admitted` is reachable through exactly one path, and both conditions
+are necessary:
+
+1. `admit(source)` returned `Verdict::NoObjection` — the composition/guarantee
+   gate ran and found nothing to refuse. An admission is never issued over a
+   refusal or a frontier gap.
+2. the source is inside the ADMISSION SURFACE (`ADMISSION_SURFACE_ID`,
+   `src/admission.rs`) — the region where the covered layer is the WHOLE
+   question, because the source carries no term the type layer decides.
+
+The surface is deliberately tiny, and its one line is `ADMITTED_LAYER`:
+
+    @ADMITTED_LAYER@
+
+That is not the covered layer read optimistically; it is the sliver of it where
+reading a no-objection as an admission is sound. No body, no expression, no
+literal, no generic head. A source outside it is `Admission::Withheld` carrying
+the verdict verbatim, so switching a consumer from `admit` to `issue_admission`
+can only ADD the admitted wire — every other answer is byte-identical to the one
+it already handled. Widening the surface is the self-host type layer's lane
+(`docs/design/457-selfhost-type-layer.md`).
+
+`issue_admission_into(source, manifest)` asks the same question against a running
+composition. The empty manifest is the empty composition, so it is
+`issue_admission` byte for byte. Against a NON-EMPTY manifest only a candidate
+that DECLARES NOTHING is admitted, and the reason is the item-186 row wire rather
+than the certifier: a row carries a component name, a provision key and a realm,
+and no service shapes, so a declared `service Store` may collide with a `Store`
+the running composition already holds in a different shape and the wire cannot
+say. The reference refuses exactly that pair. Carrying the running shapes on the
+wire is the remaining half of issue #346.
+
+An issued admission serialises `{"verdict":"admitted","admitted":true,
+"code":null,"message":null}` — byte-identical to `revl.gate`'s own wire for a py
+admission, so a seam comparing the two tiers compares equal bytes. The basis is
+off the wire on purpose: it is evidence for a log, not part of the contract.
 
 ## Fail closed at the frontier
 
@@ -5077,7 +6014,8 @@ Cargo.lock
 
 
 def render_generated_json(digest: str, fid: str, language: str,
-                          tables: dict[str, list[str]], ir: dict) -> str:
+                          tables: dict[str, list[str]], ir: dict,
+                          admission: dict[str, list[str]]) -> str:
     payload = {
         "generator": "tools/build_gate_crate.py",
         "crate": "revl-gate",
@@ -5099,11 +6037,35 @@ def render_generated_json(digest: str, fid: str, language: str,
         "max_source_bytes": MAX_SOURCE_BYTES,
         "max_level_items": MAX_LEVEL_ITEMS,
         "layer": "1 (verdict surface), admit-only",
+        # The ADMISSION surface (issue #346), versioned apart from the frontier:
+        # the frontier bounds where the gate may REFUSE, this bounds where it may
+        # ADMIT. The tables are derived from the reference compiler's own, so a
+        # scalar the reference stops treating as a scalar cannot stay in the
+        # certifier's vocabulary silently.
+        "admission_surface": admission_surface_id(digest),
+        "admitted_layer": ADMITTED_LAYER,
+        "admission_scalar_types": admission["scalars"],
+        "admission_reserved_type_names": admission["reserved"],
         "symbols_api_version": SYMBOLS_API_VERSION,
         "navigation_surface": "revl_gate::symbols — declarations and their lines; issues no verdicts",
         "covered_layer": COVERED_LAYER,
-        "issues_admissions": False,
+        # The gate DOES issue admissions now, through `issue_admission` and its
+        # own `Admission` type — and only inside `admitted_layer`. The VERDICT
+        # surface still has no admitting arm, which is what keeps a host that
+        # holds a `Verdict` from reading one as a green.
+        "issues_admissions": True,
         "verdict_arms": ["refused", "no_objection", "outside_frontier"],
+        "admission_arms": ["admitted", "withheld"],
+        "admission_arm": (
+            "revl_gate::issue_admission(source) / issue_admission_into(source, "
+            "manifest) -> Admission. `Admitted` requires BOTH that `admit` "
+            "returned NoObjection and that the source is inside "
+            "admission_surface; everything else is `Withheld` carrying the "
+            "verdict verbatim. Against a non-empty manifest only a candidate "
+            "that declares nothing is admitted: the item-186 row wire carries no "
+            "service shapes, so a declared service may collide with a running "
+            "one and the wire cannot say."
+        ),
         "manifest_arm": (
             "revl_gate::admit_into(source, manifest) — the item-186 ambient gate "
             "as a binding: the union fold's G2/G3 legs. Refuses the deferred "
@@ -5113,11 +6075,14 @@ def render_generated_json(digest: str, fid: str, language: str,
         "note": ("Regenerate with `python3 tools/build_gate_crate.py`. The "
                  "source_digest is a pure function of digest_inputs, not a git "
                  "sha, so `--check` can verify the committed crate against the "
-                 "tree it was generated from. `issues_admissions` is false by "
-                 "construction: this gate decides the composition/guarantee "
-                 "layer, not the reference type layer, so its non-refusing arm "
-                 "is `no_objection` and never an admission — across the manifest "
-                 "boundary too (issue #346)."),
+                 "tree it was generated from. The VERDICT surface admits "
+                 "nothing, by construction: that surface decides "
+                 "the composition/guarantee layer, not the reference type layer, "
+                 "so its non-refusing arm is `no_objection` and never an "
+                 "admission — across the manifest boundary too. Admissions are "
+                 "issued only through the separate `Admission` surface, inside "
+                 "`admitted_layer`, where the covered layer is the whole "
+                 "question (issue #346)."),
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -5128,7 +6093,8 @@ DEFAULT_OUT = ROOT / "crates" / "revl-gate"
 
 
 def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
-           selfhost_rs: str, ir: dict) -> dict[str, str]:
+           selfhost_rs: str, ir: dict,
+           admission: dict[str, list[str]]) -> dict[str, str]:
     """Every generated file as {relpath: content}. Pure: same inputs, same
     bytes, which is what makes the drift gate meaningful."""
     keyword_line = (", ".join(f"`{k}`" for k in tables["keywords"])
@@ -5144,18 +6110,42 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
     return {
         "Cargo.toml": CARGO_TOML_TEMPLATE.replace("@CRATE_VERSION@", CRATE_VERSION),
         ".gitignore": GITIGNORE,
-        "GENERATED.json": render_generated_json(digest, fid, language, tables, ir),
+        "GENERATED.json": render_generated_json(digest, fid, language, tables, ir,
+                                               admission),
         "README.md": (README_TEMPLATE
                       .replace("@KEYWORD_LINE@", keyword_line)
                       .replace("@BUILTIN_LINE@", builtin_line)
                       .replace("@GATE_API_VERSION@", GATE_API_VERSION)
                       .replace("@LANGUAGE_VERSION@", language)
                       .replace("@COVERED_LAYER@", COVERED_LAYER)
+                      .replace("@ADMITTED_LAYER@", ADMITTED_LAYER)
                       .replace("@FRONTIER_ID@", fid)),
         "src/lib.rs": (LIB_RS_TEMPLATE
                        .replace("@GATE_API_VERSION@", GATE_API_VERSION)
                        .replace("@COVERED_LAYER@", COVERED_LAYER)
+                       .replace("@ADMITTED_LAYER@", ADMITTED_LAYER)
                        .replace("@LANGUAGE_VERSION@", language)),
+        "src/admission.rs": (ADMISSION_RS_TEMPLATE
+                             .replace("@ADMISSION_SURFACE_ID@",
+                                      admission_surface_id(digest))
+                             .replace("@SCALAR_TYPES@", _rust_str_array(
+                                 "SCALAR_TYPES", admission["scalars"],
+                                 "/// The type names a certified signature may mention. Derived from the\n"
+                                 "/// reference's own scalar data set (`revl.typecheck._CONFIG_DATA_SCALARS`):\n"
+                                 "/// every one is a concrete builtin with no type parameter and no erasure, so\n"
+                                 "/// a signature written over them resolves with no checker to run.\n"))
+                             .replace("@RESERVED_TYPE_NAMES@", _rust_str_array(
+                                 "RESERVED_TYPE_NAMES", admission["reserved"],
+                                 "/// The type names a certified source may not DECLARE. Derived from\n"
+                                 "/// `revl.typecheck._BUILTIN_TYPE_NAMES` plus the reserved opaque\n"
+                                 "/// `Principal`. Shadowing one of these is the reference's business, so a\n"
+                                 "/// source that tries is not certified here.\n"))
+                             .replace("@REFERENCE_KEYWORDS@", _rust_str_array(
+                                 "REFERENCE_KEYWORDS", admission["keywords"],
+                                 "/// The REFERENCE keyword set (`revl.lexer.KEYWORDS`), not the self-host one.\n"
+                                 "/// The question the certifier asks is what the REFERENCE would make of the\n"
+                                 "/// source, so a keyword the self-host has not ported must still not be\n"
+                                 "/// mistaken for a name.\n"))),
         "src/frontier.rs": (FRONTIER_RS_TEMPLATE
                             .replace("@FRONTIER_ID@", fid)
                             .replace("@MAX_SOURCE_BYTES@", str(MAX_SOURCE_BYTES))
@@ -5216,9 +6206,10 @@ def build() -> dict[str, str]:
     selfhost_rs = rustemit.emit(ir_document)
     tables = frontier_tables()
     ir = ir_tables()
+    admission = admission_tables()
     digest = source_digest()
     return render(tables, digest, frontier_id(digest), language_version(),
-                  selfhost_rs, ir)
+                  selfhost_rs, ir, admission)
 
 
 def generate(out: Path) -> dict[str, str]:

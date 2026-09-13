@@ -68,9 +68,8 @@
    "backends/go/scenarios/records.rvl",
    "backends/go/scenarios/secret_trace.rvl",
    "backends/go/scenarios/witnessed_teardown.rvl",
-   "backends/go/testdata/opt_gaps_280.rvl",
-   "backends/go/testdata/result_ctor_302.rvl",
    "backends/go/testdata/stream_event_130.rvl",
+   "backends/java/scenarios/stream_event_130.rvl",
    "backends/rust/scenarios/stream.rvl",
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
@@ -87,14 +86,14 @@
    "examples/uxprobe2_fault.rvl",
    "examples/uxprobe2_jobs.rvl",
    "examples/uxprobe_cache.rvl",
-   "selfhost/lexer.rvl",
    "stdlib/a2a.rvl",
    "stdlib/http.rvl",
    "stdlib/list.rvl",
    "stdlib/render.rvl"
   ],
   "false-reject/G1": [
-   "backends/go/testdata/stream_130.rvl"
+   "backends/go/testdata/stream_130.rvl",
+   "backends/java/scenarios/stream_130.rvl"
   ],
   "tag-mismatch/G4->BAD": [
    "examples/rejections/g4_spawn_widens_budget.rvl"
@@ -186,30 +185,6 @@
     "tag": ""
    }
   },
-  "backends/go/testdata/opt_gaps_280.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/go/testdata/result_ctor_302.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "backends/go/testdata/stream_130.rvl": {
    "bucket": "false-reject/G1",
    "gate": {
@@ -223,6 +198,30 @@
    }
   },
   "backends/go/testdata/stream_event_130.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/java/scenarios/stream_130.rvl": {
+   "bucket": "false-reject/G1",
+   "gate": {
+    "code": "G1",
+    "kind": "refused",
+    "message": "`sub` is not a declared requirement of Parked"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/java/scenarios/stream_event_130.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
@@ -984,18 +983,6 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected token at top level"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "selfhost/lexer.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
    },
    "reference": {
     "message": "",
