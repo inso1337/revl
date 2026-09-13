@@ -162,6 +162,11 @@ EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
 # "unknown expression kind" fall-through.
 EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
+# The reason a `Map` subscript miss faults (issue #957). Spelled identically on
+# every tier — python, typescript, go, rust and java — so one guarantee does not
+# read as five different bugs, the way `revl: Int overflow` already is.
+_MAP_MISS_MSG = "revl: map index: no entry for key"
+
 
 # ---------------------------------------------------------------- async (item 92)
 #
@@ -580,7 +585,8 @@ class _UsesScan:
 
     __slots__ = (
         "bounded_int", "bounded_int32", "i32_shl", "true_division",
-        "trunc_rem", "float_interp", "opt_to_int", "list_index", "builtins",
+        "trunc_rem", "float_interp", "opt_to_int", "list_index", "map_index",
+        "builtins",
     )
 
     def __init__(self) -> None:
@@ -592,6 +598,7 @@ class _UsesScan:
         self.float_interp = False
         self.opt_to_int = False
         self.list_index = False
+        self.map_index = False
         self.builtins: set = set()
 
 
@@ -658,11 +665,16 @@ def _scan_uses(root) -> _UsesScan:
                 # faults on a negative index (#549: every tier faults, python
                 # would otherwise read from the end). A string-LITERAL key is a
                 # host/`Any` property read, not a List subscript, so it stays a
-                # bare `[...]`.
-                idx = node.get("index")
-                if not (isinstance(idx, dict) and idx.get("kind") == "lit"
-                        and isinstance(idx.get("value"), str)):
-                    scan.list_index = True
+                # bare `[...]`. A `Map` subscript (issue #957) is neither: it
+                # routes through `_revl_map_index`, whose miss faults with the
+                # cross-tier reason.
+                if node.get("key_type") is not None:
+                    scan.map_index = True
+                else:
+                    idx = node.get("index")
+                    if not (isinstance(idx, dict) and idx.get("kind") == "lit"
+                            and isinstance(idx.get("value"), str)):
+                        scan.list_index = True
             stack.extend(node.values())
         elif isinstance(node, (list, tuple)):
             stack.extend(node)
@@ -1636,6 +1648,12 @@ class _ComponentEmitter:
                                opt=bool(expr.get("opt")), rereadable=atom)
         if kind == "index":
             idx = expr.get("index")
+            # A `Map` subscript reads by KEY (issue #957): `_revl_index` is the
+            # List guard and compares the index with 0, which raises a TypeError
+            # on a `Str` key even for a key that is present.
+            if expr.get("key_type") is not None:
+                return (f"_revl_map_index({self._expr(expr.get('target'), where)}, "
+                        f"{self._expr(idx, where)})")
             # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`),
             # not a List subscript — emit the bare `[...]` unchanged. A List
             # subscript routes through `_revl_index`, which faults on a negative
@@ -3607,6 +3625,9 @@ def _expr(node: dict) -> str:
                            opt=bool(node.get("opt")), rereadable=atom)
     if kind == "index":
         idx = node["index"]
+        # A `Map` subscript reads by KEY (issue #957), never positionally.
+        if node.get("key_type") is not None:
+            return f"_revl_map_index({_expr(node['target'])}, {_expr(idx)})"
         # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
         # List subscript — bare `[...]`. A List subscript routes through
         # `_revl_index`, which faults on a negative index so python agrees with
@@ -5262,6 +5283,20 @@ def emit(ir: dict) -> str:
         out.add(0, "    if i < 0:")
         out.add(0, "        raise IndexError('revl: negative list index')")
         out.add(0, "    return xs[i]")
+        out.add(0)
+    if _scan.map_index:
+        # A `Map` subscript reads by key and a MISS faults, on every tier
+        # (issue #957): `m[k]` is the partial form and `m.lookup(k)` the total
+        # one, the same split docs/stdlib-2.0.md §index already pins for the
+        # List. The reason is spelled identically on all five tiers so one
+        # guarantee does not read as five different bugs.
+        out.add(0, "def _revl_map_index(m, k):")
+        out.add(0, '    """A Map subscript reads by key; a MISS faults on every '
+                   'tier (#957)."""')
+        out.add(0, '    """`m.lookup(k)` is the total form."""')
+        out.add(0, "    if k not in m:")
+        out.add(0, f"        raise KeyError({_MAP_MISS_MSG!r})")
+        out.add(0, "    return m[k]")
         out.add(0)
     # The stdlib lowerings that need more than one expression: a MODULE-LEVEL
     # `def`, gated on use, rather than a lambda built and applied at every

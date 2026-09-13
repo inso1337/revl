@@ -2108,6 +2108,14 @@ def _expr(
         target = _expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        if node.get("key_type") is not None:
+            # A `Map` subscript reads by KEY (issue #957). The positional form
+            # below casts the index to `int`, which for a `Map[Str, V]` is
+            # "incompatible types: String cannot be converted to int" — the tier
+            # did not compile. `revlMapIndex` reads by key and faults on a miss
+            # rather than answering the `null` `Map.get` would.
+            return (f"revlMapIndex({target}, "
+                    f"{_expr(node['index'], ctx, rename, env)})")
         return f"{target}.get((int)({_expr(node['index'], ctx, rename, env)}))"
 
     if kind == "builtin":
@@ -2492,6 +2500,10 @@ def _value_map_write_type(node: object, var_types: dict,
     answered in this wrapper instead.
     """
     if isinstance(node, dict) and node.get("kind") == "index":
+        # a Map subscript answers the map's declared VALUE type (#957), so
+        # `m2.set(k, m[k])` writes the value type it actually carries
+        if node.get("value_type"):
+            return node["value_type"]
         target = _value_map_write_type(node.get("target"), var_types, ctx)
         if (isinstance(target, str) and target.startswith("List[")
                 and target.endswith("]")):
@@ -2767,6 +2779,9 @@ _CHECKED_HELPER = {
     "checked_mod": "revlCheckedMod",
 }
 _DIV_ZERO_MSG = "revl: division by zero"
+# The reason a `Map` subscript miss faults (issue #957), spelled identically on
+# every tier so one guarantee does not read as five different bugs.
+_MAP_MISS_MSG = "revl: map index: no entry for key"
 
 
 def _uses_checked_div(ir: dict) -> bool:
@@ -2782,6 +2797,45 @@ def _uses_checked_div(ir: dict) -> bool:
         return False
 
     return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
+
+
+def _uses_map_index(ir: dict) -> bool:
+    """True if the IR reads a `Map` subscript `m[k]` — gates the static helper
+    that read lowers to (issue #957). The frontend marks the node with the map's
+    declared `key_type`; nothing else carries it."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("kind") == "index" and node.get("key_type") is not None:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return (walk(ir.get("functions")) or walk(ir.get("tests"))
+            or walk(ir.get("components")))
+
+
+def _emit_map_index_helper() -> list[str]:
+    """The `Map` subscript read (issue #957).
+
+    A miss FAULTS, on every tier: `m[k]` is the partial form and `m.lookup(k)`
+    the total one, the same split docs/stdlib-2.0.md §index pins for the List.
+    `Map.get` answers `null` on a miss, which unboxes to a NullPointerException
+    at some later, unrelated line — so the read is guarded here and names its
+    own cause.
+    """
+    return [
+        "// a Map subscript reads by key; a MISS faults on every tier (#957),",
+        "// where `m.lookup(k)` is the total form that answers Opt.",
+        "private static <K, V> V revlMapIndex(java.util.Map<K, V> m, K k) {",
+        "    if (!m.containsKey(k)) {",
+        f'        throw new java.util.NoSuchElementException("{_MAP_MISS_MSG}");',
+        "    }",
+        "    return m.get(k);",
+        "}",
+        "",
+    ]
 
 
 def _emit_checked_div_helpers() -> list[str]:
@@ -7583,6 +7637,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
+    if _uses_map_index(ir):
+        out.extend(["    " + line if line else line for line in _emit_map_index_helper()])
     if externs:
         out.extend(["    " + line if line else line for line in _emit_v3_externs(externs)])
     if functions:
