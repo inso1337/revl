@@ -1,6 +1,6 @@
 # 439: the A2A Task lifecycle binding, and the first slice
 
-**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08
+**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1)
 
 ## What this note decides
 
@@ -148,10 +148,11 @@ second wire.
 | G4 | every synthesized op is `emission`; no inverse is synthesized (a peer's claim to have undone something is not a witness); cancel is a `compensate` |
 | G5 | the only bracket is the local listener, whose close is host-local and infallible |
 | G7 | intact: the stream bracket and the compensation are registered entries; the emissions are not, and there is nothing for G7 to miss |
-| G8 | the boundary surface is the four (or one) synthesized externs, enumerable by `revl audit` |
+| G8 | the boundary surface is the four (or one) synthesized externs, enumerable on the boundary surface `revl audit` renders, each carrying the folded `net.<host>` reach. True because a remote row synthesizes an ORDINARY provider holding ORDINARY externs, and pinned over the composition's compiled document for both forms by `tests/test_439_a2a_transport.py::test_the_a2a_crossing_is_on_the_g8_audit_surface` and `::test_all_four_task_crossings_are_on_the_g8_audit_surface`. The `revl audit` CLI itself compiles its arguments as modules, so it does not resolve a composition yet: `docs/design/439-a2a-transport-binding.md`'s scope limits name that gap |
 | G9 | every returned value and every stream element is `Untrusted[T]` with origin `net`; a flow into a sink is refused without `endorse` |
 | failure | `on_failure(withdraw)` by default: a transport fault on any of the four crossings, or a `Faulted` terminal on the feed, withdraws the provider (R2/R3); `on_failure(result)` keeps it wired and returns the `Err` |
-| trust | the card and every reply are claims; no re-admission (337), no badge (D-424c.8); every A2A provider is item 329's untrusted-author case |
+| trust | the card and every reply are claims; no re-admission (337), no badge (D-424c.8); every A2A provider is item 329's untrusted-author case. A reply is not read until it correlates: every crossing carries one identity as the JSON-RPC `id` and the `revl.correlation` metadata member, and a reply that is not a JSON object, does not claim JSON-RPC 2.0, or does not carry that identity back is a fault (slice B1, `src/revl/a2a_boundary.py`). On these four ops a reply that describes ANOTHER task is refused too: `_poll`/`_reply`/`_cancel` name a task they already hold |
+| failure text | the peer-authored text the boundary renders into our own fault (a JSON-RPC `error.code`, a task `state`, a reply `kind`) is funnelled through item 421 F5's call-argument scrub before the consumer sees it (slice B1); `docs/design/439-a2a-transport-binding.md` question (2) is the reasoning |
 | version | "A2A 1.0.0 over JSON-RPC 2.0" or "over HTTP+JSON", exact, never bare "A2A" |
 | operator halt | see Decision 6 |
 

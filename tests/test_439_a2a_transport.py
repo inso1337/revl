@@ -506,6 +506,23 @@ def test_no_marked_value_can_cross_the_a2a_wire(tmp_path, method, needle):
 
 # ---------------------------------------------- the generated crossing, executed
 
+def _answer(sent: bytes, reply, correlate: bool = True):
+    """What a COMPLIANT A2A 1.0.0 peer answers: the reply, carrying the request's
+    own JSON-RPC `id` (item 439, the correlation gate).
+
+    JSON-RPC 2.0 requires a response `id` to equal the request's, and the
+    crossing refuses a reply that does not carry the identity it sent, so the
+    stub replies below are written WITHOUT an id and this is where the
+    protocol's own rule is applied. `correlate=False` is a peer answering with
+    somebody else's id, which must be refused rather than read as a verdict.
+    """
+    if not isinstance(reply, dict) or "jsonrpc" not in reply:
+        return reply
+    if not correlate:
+        return {**reply, "id": "somebody-elses-id"}
+    return {**reply, "id": json.loads(sent).get("id")}
+
+
 class _Ok:
     def __init__(self, v):
         self.v = v
@@ -517,7 +534,8 @@ class _Err:
 
 
 def _run_row_body(reply, *, in_modality="text", out_modality="text",
-                  in_band=False, rest=False, status=200, arg="ping"):
+                  in_band=False, rest=False, status=200, arg="ping",
+                  correlate=True):
     """Execute a synthesized `through a2a[_rest]` `@py` body against a stubbed
     transport, the same technique `test_import_a2a._run_py_body` uses: the body
     is real code, so the file-part marshalling and the terminal-only refusal are
@@ -548,7 +566,8 @@ def _run_row_body(reply, *, in_modality="text", out_modality="text",
             if status >= 400:
                 raise urllib.request.HTTPError(
                     request.full_url, status, "err", {}, io.BytesIO(b""))
-            return _Resp(json.dumps(reply).encode())
+            return _Resp(json.dumps(
+                _answer(request.data, reply, correlate)).encode())
 
     ns = {"__name__": "generated", "Ok": _Ok, "Err": _Err}
     exec(compile(src, "<row-a2a-body>", "exec"), ns)
@@ -827,7 +846,8 @@ class _TaskOk:
         self.v = v
 
 
-def _run_task_body(kind, reply, *args, status=200, label="researcher"):
+def _run_task_body(kind, reply, *args, status=200, label="researcher",
+                   correlate=True):
     """Execute a synthesized four-op `@py` body against a stubbed transport, the
     technique `_run_row_body` uses — the vocabulary constructors and the pure
     `task_state_from_wire` gate are injected the way the emitted module carries
@@ -855,7 +875,8 @@ def _run_task_body(kind, reply, *args, status=200, label="researcher"):
             if status >= 400:
                 raise urllib.request.HTTPError(
                     request.full_url, status, "err", {}, io.BytesIO(b""))
-            return _Resp(json.dumps(reply).encode())
+            return _Resp(json.dumps(
+                _answer(request.data, reply, correlate)).encode())
 
     class _Ev:
         def __init__(self, tag, value=None):
@@ -941,5 +962,248 @@ def test_a_dead_peer_faults_and_names_the_crossing(kind, args):
         _run_task_body(kind, {}, *args, status=503)
     fault = excinfo.value
     assert getattr(fault, "_revl_transport_fault", False) is True
-    assert fault.revl_row == "researcher"
-    assert fault.revl_crossing == f"research_{kind}"
+    assert fault._revl_row == "researcher"
+    assert fault._revl_crossing == f"research_{kind}"
+
+
+# ==================================== the boundary gates (item 439, slice B1)
+# `docs/design/439-a2a-transport-binding.md` question (2)'s fourth layer, and
+# the correlation identity every crossing carries. Two rules, and the second is
+# the first one's consequence: a reply that does not carry back the identity the
+# crossing sent is not a verdict, and peer-authored text that IS read is
+# funnelled (item 421 F5) before it reaches the consumer. `revl.a2a_boundary`.
+
+def test_every_crossing_carries_one_correlation_identity():
+    """The envelope `id` and the `revl.correlation` metadata member are the SAME
+    value, so the identity the peer logs is the identity the reply is checked
+    against, and it is fresh per crossing."""
+    reply = {"jsonrpc": "2.0", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "pong"}]}}
+    _out, calls = _run_row_body(reply)
+    sent = json.loads(calls[0])
+    corr = sent["id"]
+    assert corr and sent["params"]["message"]["metadata"]["revl.correlation"] == corr
+    _out2, calls2 = _run_row_body(reply)
+    assert json.loads(calls2[0])["id"] != corr
+
+
+def test_a_reply_that_does_not_correlate_is_refused_not_read():
+    """The load-bearing refusal: a peer (or anything between us and it) that
+    answers with somebody else's id is a crossing that did not answer, never a
+    value. JSON-RPC 2.0 requires the response id to equal the request's, so this
+    refuses only a peer already off protocol."""
+    reply = {"jsonrpc": "2.0", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "pong"}]}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply, correlate=False)
+    assert "correlation id" in str(excinfo.value)
+    # and the peer's own id is NOT echoed into our fault text
+    assert "somebody-elses-id" not in str(excinfo.value)
+
+
+def test_an_uncorrelated_reply_is_an_err_under_on_failure_result():
+    """Same refusal, the other settlement: in band it is an `Err`, and it is
+    still never the peer's value."""
+    reply = {"jsonrpc": "2.0", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "pong"}]}}
+    out, _calls = _run_row_body(reply, in_band=True, correlate=False)
+    assert isinstance(out, _Err) and "correlation id" in out.e
+
+
+@pytest.mark.parametrize("reply,needle", [
+    ([1, 2, 3], "was not a JSON-RPC object"),
+    ("just a string", "was not a JSON-RPC object"),
+    ({"id": "x", "result": {"kind": "message", "parts": []}},
+     "did not claim JSON-RPC 2.0"),
+    ({"jsonrpc": "2.0", "result": "ok"}, "no result object"),
+])
+def test_an_unparseable_reply_refuses_rather_than_being_read(reply, needle):
+    """Fail-closed on SHAPE too: every member is read only after the reply is
+    known to be the object it claims to be. A peer that answers a JSON array, a
+    string, or a truthy non-object `result` is a crossing that failed, not an
+    `AttributeError` neither settlement classifies."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply)
+    assert needle in str(excinfo.value)
+    assert not isinstance(excinfo.value, AttributeError)
+
+
+def test_a_peer_cannot_echo_the_callers_argument_onto_our_error_channel():
+    """Question (2)'s fourth layer, the exit test: a peer-supplied `error.code`
+    that echoes the caller's own argument text is scrubbed the way the placement
+    seam's failure channel scrubs it (`backends/python/confidential.py`'s
+    `redact_call_text`, the funnel `backends/python/bridge.py` joins), and the
+    SHAPE of the failure survives so it is still worth reading."""
+    secret = "INV-4242-not-for-the-console"
+    reply = {"jsonrpc": "2.0", "error": {"code": f"rejected {secret}"}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply, arg=secret)
+    message = str(excinfo.value)
+    assert secret not in message
+    assert "<redacted:arg>" in message
+    assert message.startswith("a2a: JSON-RPC error rejected ")
+
+
+def test_the_funnel_matches_exactly_and_never_by_pattern():
+    """The negative exit test. The funnel is an EXACT match against this call's
+    own arguments, so a peer string that merely resembles one is left verbatim:
+    a pattern would shred diagnostics and would claim a confidentiality bound
+    nothing here can hold."""
+    reply = {"jsonrpc": "2.0", "error": {"code": "rejected INV-4242"}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply, arg="INV-4242-not-for-the-console")
+    assert "rejected INV-4242" in str(excinfo.value)
+    assert "<redacted:arg>" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("state", ["working", "failed"])
+def test_the_task_state_is_funnelled_too(state):
+    """A peer chooses its own `state` string, and the boundary renders it. Both
+    the non-terminal refusal and the terminal-but-not-done one go through the
+    funnel."""
+    secret = "INV-9001-not-for-the-console"
+    reply = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "id": "t", "status": {"state": f"{state} {secret}"}}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply, arg=secret)
+    assert secret not in str(excinfo.value)
+    assert "<redacted:arg>" in str(excinfo.value)
+
+
+def test_the_in_band_error_text_is_funnelled(   ):
+    """`on_failure(result)` hands the failure to the consumer IN BAND, which is
+    the same disclosure with a different shape, so it is funnelled identically."""
+    secret = "INV-4242-not-for-the-console"
+    reply = {"jsonrpc": "2.0", "error": {"code": f"rejected {secret}"}}
+    out, _calls = _run_row_body(reply, in_band=True, arg=secret)
+    assert isinstance(out, _Err)
+    assert secret not in out.e and "<redacted:arg>" in out.e
+
+
+def test_a_bytes_argument_is_funnelled_in_both_of_its_faces():
+    """A `Bytes` argument wears more renderings than a `Str`, and an encoder
+    renders one of them (`confidential._needles`), so both faces are needles."""
+    payload = b"INV-4242-not-for-the-console"
+    reply = {"jsonrpc": "2.0", "error": {
+        "code": "rejected " + payload.decode()}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply, in_modality="file", out_modality="file",
+                      arg=payload)
+    assert payload.decode() not in str(excinfo.value)
+    assert "<redacted:arg>" in str(excinfo.value)
+
+
+def test_the_rest_wire_carries_the_identity_one_way_and_still_gates_the_shape():
+    """A2A 1.0.0's REST reply is the bare `Task`/`Message` and echoes no
+    envelope, so the identity rides one-way (for the peer's log and ours) and
+    the shape gate is what stays. Nothing is claimed that the wire cannot
+    check."""
+    reply = {"kind": "message", "parts": [{"kind": "text", "text": "pong"}]}
+    out, calls = _run_row_body(reply, rest=True)
+    assert out == "pong"
+    metadata = json.loads(calls[0])["message"]["metadata"]
+    assert metadata["revl.correlation"]
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body([1, 2], rest=True)
+    assert "no result object" in str(excinfo.value)
+
+
+# ---------------------------------------- the same gates on the four-op wire
+
+def test_a_task_reply_about_another_task_is_refused():
+    """The Task-level correlation: the envelope gate says the reply answers THIS
+    crossing, and this one says it describes THIS task. A `tasks/get` answered
+    with another task's status would otherwise be read as a lifecycle event for
+    ours."""
+    other = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "id": "t-99", "status": {"state": "completed"}}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_task_body("poll", other, {"id": "t-42", "context": None})
+    assert "different task" in str(excinfo.value)
+
+
+def test_a_cancel_acknowledged_for_another_task_is_refused():
+    """`tasks/cancel` is best-effort (item 247) and a peer that answers is
+    honoured whatever state it reports, but a peer that answers about ANOTHER
+    task has not acknowledged ours."""
+    other = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "id": "t-99", "status": {"state": "canceled"}}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_task_body("cancel", other, {"id": "t-42", "context": None})
+    assert "different task" in str(excinfo.value)
+    # ...while an acknowledgement that names no task at all still lands
+    bare = {"jsonrpc": "2.0", "result": {"kind": "task",
+                                         "status": {"state": "canceled"}}}
+    out, _calls, _Ev = _run_task_body("cancel", bare,
+                                      {"id": "t-42", "context": None})
+    assert out is None
+
+
+def test_an_uncorrelated_task_reply_is_refused_on_every_op():
+    """All four crossings carry the identity and all four refuse a reply that
+    does not carry it back."""
+    reply = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "id": "t-42", "status": {"state": "working"}}}
+    for kind, args in (("start", ("x",)),
+                       ("poll", ({"id": "t-42", "context": None},)),
+                       ("reply", ({"id": "t-42", "context": None}, "m")),
+                       ("cancel", ({"id": "t-42", "context": None},))):
+        with pytest.raises(RuntimeError) as excinfo:
+            _run_task_body(kind, reply, *args, correlate=False)
+        assert "correlation id" in str(excinfo.value), kind
+
+
+def test_the_four_op_wire_funnels_the_peers_error_code():
+    """The funnel is on the four-op wire too, closing over whatever that op was
+    called with (a `TaskRef` as well as a message)."""
+    secret = "survey-INV-4242-not-for-the-console"
+    reply = {"jsonrpc": "2.0", "error": {"code": f"rejected {secret}"}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_task_body("reply", reply, {"id": "t-42", "context": None}, secret)
+    assert secret not in str(excinfo.value)
+    assert "<redacted:arg>" in str(excinfo.value)
+
+
+# ------------------------------------------------- G8: the boundary is visible
+
+def test_the_a2a_crossing_is_on_the_g8_audit_surface(tmp_path):
+    """`docs/design/439-a2a-task-lifecycle.md` decision 3 states G8 as "the
+    boundary surface is the four (or one) synthesized externs, enumerable by
+    `revl audit`". A remote row synthesizes an ORDINARY provider holding
+    ORDINARY externs, which is what makes that true; this pins it, so a future
+    change to the synthesized shape cannot take the boundary off the surface an
+    operator reads."""
+    from revl.audit_diff import audit_report  # noqa: PLC0415
+
+    # the taint fixture's sink is `Trusted[Str]`, which is refused on purpose
+    # (G9); the audit surface is about a composition that ADMITS, so this one
+    # takes the remote answer into an untrusted sink.
+    write(tmp_path, services=SINK_CONSUMER.replace("Trusted[Str]", "Str"),
+          base=TAINT_BASE)
+    report = audit_report(compile_composition(str(tmp_path / "base.rvl"),
+                                             str(tmp_path)))
+    provider = report["boundary"]["RemoteAgentProvider"]
+    crossing, = provider["externs"]
+    assert crossing["name"] == "remote_agent_ask"
+    assert crossing["class"] == "emission"
+    assert crossing["capabilities"] == ["net.agent_example"]
+
+
+def test_all_four_task_crossings_are_on_the_g8_audit_surface(tmp_path):
+    """The `long_running` form projects four crossings, and all four are on the
+    surface: an operator counting what leaves the process sees four, not one."""
+    from revl.audit_diff import audit_report  # noqa: PLC0415
+
+    _write_lr(tmp_path)
+    report = audit_report(compile_composition(str(tmp_path / "base.rvl"),
+                                              str(tmp_path)))
+    provider = report["boundary"]["RemoteResearcherProvider"]
+    assert sorted(e["name"] for e in provider["externs"]) == [
+        "remote_researcher_research_cancel",
+        "remote_researcher_research_poll",
+        "remote_researcher_research_reply",
+        "remote_researcher_research_start",
+    ]
+    assert {e["class"] for e in provider["externs"]} == {"emission"}
+    assert {tuple(e["capabilities"]) for e in provider["externs"]} == {
+        ("net.agent_example",)}
