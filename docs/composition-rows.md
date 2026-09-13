@@ -447,6 +447,36 @@ untrusted-author case by construction, and the version is claimed exactly as
 "A2A 1.0.0", never bare "A2A". This is the same subset `revl import a2a` binds,
 from the other entry point onto the protocol.
 
+##### What the boundary does with a reply
+
+Because the peer is a claim, a reply is not a verdict until it is established to
+be an answer to THIS crossing. Every crossing carries one correlation identity, a
+fresh value that is both the JSON-RPC 2.0 envelope `id` and the
+`revl.correlation` member of the A2A message metadata, so the identity the peer
+logs is the identity the reply is checked against. The generated body reads
+nothing out of a reply until three gates pass: the reply is a JSON object, it
+claims JSON-RPC `2.0`, and its `id` is exactly the one that was sent. A reply
+that fails any of them is the crossing's ordinary failure, which means a
+withdrawal by default and an `Err` under `on_failure(result)`. None of this asks
+anything of a compliant peer: JSON-RPC 2.0 already requires the response `id` to
+equal the request's, and the metadata member is additive.
+
+`through a2a_rest` carries the identity one-way, for the peer's log and yours: a
+REST reply is the bare `Task`/`Message` and echoes no envelope, so there is
+nothing for a client to check and none is pretended. The shape gate stays.
+
+Under `long_running`, `_poll`, `_reply` and `_cancel` name a task they already
+hold, so a reply that describes a DIFFERENT task is refused as well. A
+`tasks/cancel` acknowledgement that names no task at all is still honoured,
+because that op is best-effort (item 247).
+
+Peer-authored text that the boundary DOES render into your own failure text (a
+JSON-RPC `error.code`, a task `state`, a reply `kind`) is scrubbed of this call's
+own argument values first, by exact match, the way a placement seam's failure
+channel scrubs them (item 421 F5). A peer that reflects what you sent does not
+get to put it back on your error channel or on the operator console. The
+sentence and the shape of the failure survive; only your bytes are gone.
+
 ### Values are not tainted yet
 
 Item 424 D-424c.9 requires every value a remote provider returns to be
