@@ -122,6 +122,34 @@ Slice 3 is small, needs no type layer, and closes the one guarantee hole that
 is a soundness gap today (a cycle hidden by the manifest). The wave is deferred
 until the type layer lands, and this note is the spec it lands against.
 
+### Landed since this note was written
+
+**Slice 3 (2026-09-08 to 2026-09-11).** Requirement rows, G3 over the union
+graph, and the `manifest_wire(ir)` projection (`src/revl/manifest.py`).
+
+**The unmet-consumer refusal, reference side (2026-09-13).** The rule under
+"Replacement semantics" above is now enforced by the reference gate itself, not
+only predicted by `revl plan`: `compile_files(X, manifest=M, replacing=R)`
+refuses when `R` provided `(k, r)`, some retained component of `M \ R` requires
+`k` in `r`, and `X` does not provide `(k, r)`. The refusal names the withdrawn
+provider, the lost key with its realm, and the retained consumer, and it
+classifies as `(G2, admission)` like every other admission rejection.
+`src/revl/admission.py` holds the check (`_admit_provision_withdrawal`),
+`src/revl/compiler.py` supplies the withdrawn half of the ambient view
+(`ambient["withdrawn"]`, the running entries this admission drops), and
+`tests/test_withdrawn_provision_admission.py` pins both directions.
+
+Only the transition met to unmet is refused. A requirement that was already
+unmet before the admission stays admissible, because an incremental composition
+legitimately admits a consumer before its provider. A routed key is left to the
+link-time per-realm provider check of item 162, so one loss is never reported
+twice. Re-providing the key in a different realm does not satisfy a
+shared-realm consumer, which is the case a realm-blind check would have wrongly
+admitted.
+
+Still open for the wave: the `-C` and `C=k:T` row kinds on the wire, the same
+refusal inside `selfhost/lower.rvl`'s `admit_ambient`, and oracle B.
+
 ## Relation to the other decisions in this batch
 
 - The `host` rows of docs/design/457-endpoint-one-definition.md are ambient

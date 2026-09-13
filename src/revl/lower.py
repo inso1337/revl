@@ -7715,6 +7715,18 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # stateful running provider), so a fresh compile is unaffected.
     _collect(_admit_handoff_replacement, program, live_components, ambient)
 
+    # withdrawn-provision admission (roadmap item 186 / issue #86): a
+    # replacement that drops a provision a RETAINED running component still
+    # requires is refused, rather than admitted into a composition where that
+    # consumer deactivates into PENDING with no diagnostic. Runs over the FULL
+    # component list (stubs included) for the same reason `_link` does: a
+    # poisoned component's declared `provides` still counts as re-providing the
+    # key, so a body defect does not fabricate a second, spurious refusal about
+    # a provision that is in fact kept. No-op unless the ambient carries a
+    # withdrawal, so a cold compile and a pure addition are unaffected.
+    _collect(_admit_provision_withdrawal, program, components, ambient,
+             templates=spawn_reg["templates"])
+
     # G4/G6 across the spawn boundary: a spawner's declared emission upper
     # bound must cover what its spawned instances emit (decision 8). Checked
     # here, after every component's emission surface is known.
@@ -7973,6 +7985,7 @@ from .admission import (  # noqa: E402,F401
     _Drift,
     _Touchers,
     _admit_handoff_replacement,
+    _admit_provision_withdrawal,
     _admit_service_replacement,
     _caps_str,
     _caps_widen,

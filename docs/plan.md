@@ -110,9 +110,19 @@ This runs to a fixpoint, so it is transitive: withdraw the database and both
 the cache that requires it *and* the API in front of the cache are reported,
 the second one labelled as an upstream cascade rather than a direct loss.
 
-A diverted component does **not** leave the composition. It is admitted and
-linked; it simply cannot activate. Its emission surface stays on the audit
-but is unreachable while it is PENDING — the plan says so in its notes.
+A diverted component does **not** leave the composition. It is linked; it
+simply cannot activate. Its emission surface stays on the audit but is
+unreachable while it is PENDING — the plan says so in its notes.
+
+Since roadmap item 186 that state is no longer something an admission may
+*cause*. A candidate that withdraws a provision a retained running component
+still requires is **refused** by the gate (G2, naming the withdrawn provider,
+the lost key and the consumer), so a plan whose cascade reports a direct
+`diverted` also reports `"admissible": false`: what follows it is the
+prediction of what the admission *would* have done, not of what it will do.
+The counterfactual is still worth reading, and it is still what `--against` a
+drifted pre-state reports, but the swap that produces it does not happen. To
+retire a key, unload its consumers first.
 
 ## 3. Teardown order
 

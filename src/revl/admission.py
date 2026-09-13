@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from .errors import RevlError
 from .parser import Program, ServiceDecl
 from .typecheck import compatible
-from .why import SET, TraceStep, WhyTrace
+from .why import CHAIN, SET, TraceStep, WhyTrace
+
+#: An un-isolated key lives in the shared realm — mirrors `lower.SHARED_REALM`.
+_SHARED_REALM = ""
 
 
 def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
@@ -439,6 +442,133 @@ def _handoff_error(program: Program, comp: dict, key: str,
     ]
     why = WhyTrace(kind="state-handoff-drift", subject=key, shape=SET, steps=steps)
     return RevlError(program.filename, line, message, hint=hint, why=why)
+
+
+# ------------------------------- withdrawn provisions (§5, item 186 / issue #86)
+#
+# The replacement leg of ambient admission. `compile_files(X, manifest=M,
+# replacing=R)` withdraws `R` — plus every running component `X` redeclares by
+# name — from the running composition and links the remainder against `X`. G2
+# and G3 then run over `M \ R ∪ X`, which is the right union for CONFLICTS: two
+# providers of one key, a cycle that closes through the manifest. What that
+# union cannot see is a LOSS. A key `R` provided and nothing in `M \ R ∪ X`
+# provides again simply vanishes from the provider table, and a retained running
+# consumer of it produces no edge at all — the linker has nothing to complain
+# about, so the swap is admitted and the consumer deactivates into PENDING at
+# runtime, holding its resources, with no diagnostic anywhere in the admission.
+#
+# `revl plan` already PREDICTS that outcome (its `diverted` list: "a required
+# provision is withdrawn and nothing replaces it — the component deactivates and
+# stays PENDING"), which is the proof that the gate could see it and did not.
+#
+# docs/design/186-ambient-admission-guarantees.md decides the direction: "a
+# replacement that would leave a live consumer unmet is REFUSED by default …
+# there is no opt-in to strand consumers; a composition that wants a key gone
+# unloads the consumer first". That is item 460's rule (a documented refusal
+# with the running composition intact beats an apparently successful replacement
+# that quietly breaks it) and the row-level rule of docs/composition-rows.md (a
+# provision removed upstream is a refusal), applied at the admission gate.
+#
+# Scope, kept narrow on purpose. This refuses only a provision that the running
+# manifest HAD and this admission DROPS. A requirement that was already unmet
+# before the admission stays admissible — an incremental composition legitimately
+# admits a consumer before its provider, and the runtime holds it PENDING until
+# the provider arrives. Only the transition met -> unmet is a refusal, because
+# only that one is caused by the admission under review.
+
+
+def _realm_of(entry: dict, key: str) -> str:
+    """The realm `entry` isolates `key` into, shared when it isolates nothing.
+    Reads the manifest shape (`isolate`) that both a running entry and a freshly
+    lowered component carry."""
+    return (entry.get("isolate") or {}).get(key, _SHARED_REALM)
+
+
+def _admit_provision_withdrawal(program: Program, components: list[dict],
+                                ambient: dict,
+                                templates: set | None = None) -> None:
+    """Refuse an admission that withdraws a provision a RETAINED running
+    component still requires (§5, roadmap item 186).
+
+    `ambient["withdrawn"]` is what this admission drops from the running
+    manifest (`replacing=` plus every running component the candidate
+    redeclares by name); `ambient["components"]` is what it retains. A key the
+    withdrawn set provided, that neither the retained set nor the candidate
+    provides again in the same realm, is LOST — and a retained component that
+    requires a lost key is refused by name, against the candidate that dropped
+    it.
+
+    A routed key (`realms(...)`, item 162) is left to the link-time per-realm
+    provider check, which already refuses a route leg with no provider; checking
+    it here too would report one loss twice."""
+    withdrawn_entries = ambient.get("withdrawn") or []
+    if not withdrawn_entries:
+        return                      # a cold start or a pure addition: nothing lost
+    templates = templates or set()
+    retained = ambient.get("components") or []
+
+    # what the RESULTING composition provides, per (key, realm): the retained
+    # running entries plus the newly admitted components. A spawn template is
+    # not statically composed (each instance gets its own fresh local realm), so
+    # its provisions cannot stand in for a withdrawn static one.
+    after: set = set()
+    for entry in retained:
+        for key in entry.get("provides") or []:
+            after.add((key, _realm_of(entry, key)))
+    for comp in components:
+        if comp.get("name") in templates:
+            continue
+        for key in comp.get("provides") or []:
+            after.add((key, _realm_of(comp, key)))
+
+    lost: dict[tuple[str, str], str] = {}
+    for entry in withdrawn_entries:
+        for key in entry.get("provides") or []:
+            realm = _realm_of(entry, key)
+            if (key, realm) not in after:
+                lost.setdefault((key, realm), entry.get("name") or "")
+    if not lost:
+        return
+
+    for entry in retained:
+        routed = entry.get("routes") or {}
+        for key in entry.get("inject") or []:
+            if key in routed:
+                continue
+            realm = _realm_of(entry, key)
+            if (key, realm) in lost:
+                raise _withdrawal_error(program, components,
+                                        entry.get("name") or "a running component",
+                                        key, realm, lost[(key, realm)])
+
+
+def _withdrawal_error(program: Program, components: list[dict], consumer: str,
+                      key: str, realm: str, provider: str) -> RevlError:
+    # the candidate component that replaced the withdrawn provider carries the
+    # line; a withdrawal named only by `replacing=` has no source position in
+    # this text, so the refusal reports line 0 rather than inventing one.
+    line = next((c.line for c in program.components if c.name == provider), 0)
+    where = "" if realm == _SHARED_REALM else f" in realm `{realm}`"
+    message = (f"this admission withdraws the running provider of `{key}`{where} "
+               f"(`{provider}`) and nothing provides it again, but the running "
+               f"component `{consumer}` still requires it (G2)")
+    hint = ("a replacement must keep every provision a retained running component "
+            f"consumes: provide `{key}`{where} in this admission, or unload "
+            f"`{consumer}` first. Admitting it would deactivate `{consumer}` into "
+            "PENDING with its resources still held — a refusal with the running "
+            "composition intact is the better outcome (docs/design/"
+            "186-ambient-admission-guarantees.md)")
+    why = WhyTrace(
+        kind="unmet-requirement", subject=key, shape=CHAIN,
+        steps=[
+            TraceStep(provider, "provider", None, None,
+                      f"running provider of `{key}`{where}, withdrawn by this "
+                      f"admission"),
+            TraceStep(consumer, "consumer", None, None,
+                      f"retained running component, requires `{key}`{where}"),
+        ])
+    return RevlError(program.filename, line, message, hint=hint, why=why,
+                     code="G2", category="admission")
 
 
 # ------------------------------------------------------- boundary policy (§5)
