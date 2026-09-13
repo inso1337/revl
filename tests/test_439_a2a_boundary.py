@@ -25,7 +25,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import a2a_boundary  # noqa: E402
 from revl.a2a_task import task_body  # noqa: E402
-from revl.import_a2a import _py_a2a_body, _ts_body  # noqa: E402
+from revl.import_a2a import (  # noqa: E402
+    _py_a2a_body,
+    _ts_body,
+    _ts_body_rest,
+)
 from revl.synthesize import _py_body_a2a  # noqa: E402
 
 
@@ -111,11 +115,72 @@ def test_the_identity_gate_is_emitted_only_where_a_task_is_already_held():
 
 def test_the_ts_crossing_correlates_its_reply():
     """The importer's coloured `@ts` body is the only A2A crossing on another
-    tier, and it carries the same identity and the same three gates. The F5
-    funnel is py-tier first (recorded as remaining in the binding note)."""
+    tier, and it carries the same identity and the same three gates."""
     body = _ts_body("https://agent.example", "ask", follow_redirects=False)
     assert "const a2aCorr = crypto.randomUUID();" in body
     assert "id: a2aCorr," in body
     assert f'"{a2a_boundary.CORRELATION_KEY}": a2aCorr' in body
     assert 'if (rpc.id !== a2aCorr)' in body
     assert 'if (rpc.jsonrpc !== "2.0")' in body
+
+
+# ------------------------------------------- the funnel, on BOTH tiers
+
+def test_the_ts_placeholder_and_the_bound_match_the_seams_funnel():
+    """Same claim as the py pin one file over: the ts funnel is item 421 F5
+    joined at this boundary, not a second redaction with its own vocabulary.
+    Read off `backends/typescript/bridge.ts` as TEXT, because that file is the
+    node consumer's standalone module and imports nothing this test could."""
+    bridge = (ROOT / "backends" / "typescript" / "bridge.ts").read_text(
+        encoding="utf-8")
+    assert f"export const REDACTED_ARG = '{a2a_boundary.REDACTED_ARG}'" in bridge
+    assert (f"const MIN_MATCHABLE_ARG = {a2a_boundary.MIN_MATCHABLE_ARG}\n"
+            in bridge)
+
+    emitted = a2a_boundary.ts_funnel("[message]")
+    assert f'const A2A_REDACTED_ARG = "{a2a_boundary.REDACTED_ARG}";' in emitted
+    assert (f"const A2A_MIN_MATCHABLE_ARG = "
+            f"{a2a_boundary.MIN_MATCHABLE_ARG};") in emitted
+
+
+def test_every_generated_ts_crossing_carries_the_same_funnel():
+    """Two ts bodies reach a peer (`message/send` and the REST `message:send`),
+    and a funnel on one wire and not the other would be a boundary a peer could
+    pick by declaring a `preferredTransport`.
+
+    The four sites are the four peer-authored fields a reply renders into THIS
+    composition's fault text. `a2a: transport failure (HTTP ...)` is not among
+    them: a status code is the transport's, not the peer's prose.
+    """
+    sites = (
+        "throw new Error(a2aScrub(`a2a: JSON-RPC error ${rpc.error.code}`));",
+        "a2a: task returned non-terminal state '${state}'",
+        "throw new Error(a2aScrub(`a2a: task ended '${state}'`));",
+        "throw new Error(a2aScrub(`a2a: unexpected result kind '${kind}'`));",
+    )
+    jsonrpc = _ts_body("https://agent.example", "ask", follow_redirects=False)
+    rest = _ts_body_rest("https://agent.example", "ask", follow_redirects=False)
+
+    for body, name in ((jsonrpc, "message/send"), (rest, "message:send")):
+        assert "function a2aScrub(hostText: string): string {" in body, name
+        assert "a2aArgNeedles([message], needles);" in body, name
+        for site in sites:
+            if site.startswith("throw new Error(a2aScrub(`a2a: JSON-RPC"):
+                # A REST reply has no envelope, so it has no `error` member to
+                # unwrap: an A2A error arrives as a non-2xx status.
+                assert (site in body) is (name == "message/send"), (name, site)
+                continue
+            assert site in body, (name, site)
+        assert "a2aScrub(\n            `a2a: task returned" in body, name
+
+
+def test_the_ts_funnel_is_emitted_as_source_not_imported():
+    """Emitted, for the same reason the py funnel is: the rule is readable in
+    the file an operator reviews rather than applied from a runtime import the
+    generated file would have to trust. `bridge.ts` spells it a second time for
+    exactly this reason and says so."""
+    emitted = a2a_boundary.ts_funnel("[message]")
+    assert "function a2aArgNeedles(value: unknown, into: Set<string>): void {" \
+        in emitted
+    assert "import" not in emitted
+    assert "require(" not in emitted

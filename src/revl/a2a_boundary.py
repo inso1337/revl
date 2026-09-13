@@ -69,6 +69,12 @@ One message deliberately renders NOTHING of the peer's: the correlation
 refusal. Reporting the id a peer answered with would put peer-chosen text on
 the error channel in the very gate that exists because peer text cannot be
 trusted.
+
+Both rules hold on BOTH tiers. The importer's coloured `@ts` body is the only
+A2A crossing off the py tier, and it carries the same correlation identity
+(`TS_CORRELATION`), the same three envelope gates (`TS_ENVELOPE_GATES`) and
+the same funnel (`ts_funnel`). A boundary whose scrub depended on which tier
+answered would be a boundary a peer could pick.
 """
 
 from __future__ import annotations
@@ -242,11 +248,10 @@ def py_task_identity_gate(fault, indent: int = 4) -> str:
                     'crossing asked about"'))
 
 
-#: The ts counterpart of `py_correlation` + `py_envelope_gates`, for the
-#: importer's coloured `@ts` body (the only A2A body on another tier). The F5
-#: funnel is NOT mirrored here: it is the py tier first, exactly as the file
-#: `Part` and the async recolour are, and
-#: `docs/design/439-a2a-transport-binding.md` records it as remaining.
+#: The ts counterpart of `py_correlation`, for the importer's coloured `@ts`
+#: body (the only A2A body on another tier). `TS_ENVELOPE_GATES` and
+#: `ts_funnel` are the other two halves; between them the ts crossing now
+#: carries the same three rules the py bodies do.
 TS_CORRELATION = "      const a2aCorr = crypto.randomUUID();\n"
 
 TS_ENVELOPE_GATES = """      // item 439: the reply is checked BEFORE any member is read, and the
@@ -264,3 +269,76 @@ TS_ENVELOPE_GATES = """      // item 439: the reply is checked BEFORE any member
         throw new Error("a2a: reply did not carry this crossing's correlation id");
       }
 """
+
+
+def ts_funnel(args_expr: str, indent: int = 6) -> str:
+    """The F5 call-argument funnel on the ts tier, as source.
+
+    Same rule as `py_funnel`, same placeholder, same minimum length, spelled in
+    the shape `backends/typescript/bridge.ts` already spells it (`argNeedles` /
+    `seamFailure`) so an operator reading a scrubbed A2A fault beside a
+    scrubbed seam fault reads one mechanism, not two. It is emitted rather than
+    imported for the reason the module docstring gives: the generated file is
+    what an operator reviews, and it imports nothing from the runtime.
+
+    The needle walk omits `py_funnel`'s `bytes` branch, because it has nothing
+    to walk: the ts tier carries the `text` modality only (a file `Part` is
+    refused there, `docs/design/439-a2a-transport-binding.md`), so the only
+    argument a ts crossing is ever made with is a `Str`. The numeric, array and
+    object branches are kept for the same reason `bridge.ts` keeps them: they
+    cost nothing and a shape the emitter grows later is covered the day it
+    arrives rather than the day someone notices.
+
+    `args_expr` is a ts expression for this crossing's own arguments
+    (`[message]` in the importer's single-crossing body).
+    """
+    pad = " " * indent
+    lines = [
+        "// -- failure-channel funnel (item 421 F5 at the A2A boundary) -------",
+        "// A reply's peer-authored text (a JSON-RPC `error.code`, a task",
+        "// `state`, a reply `kind`) is rendered into THIS composition's fault",
+        "// text, so a peer that reflects what we sent would put the caller's",
+        "// own bytes back on our error channel. Mirror of",
+        "// `backends/typescript/bridge.ts`'s `seamFailure`/`REDACTED_ARG`, and",
+        "// of the py tier's `_scrub`: EXACT match against this call's",
+        "// arguments, longest needle first, so the sentence and the shape of",
+        "// the failure survive and only the caller's bytes are gone.",
+        f"const A2A_REDACTED_ARG = {json.dumps(REDACTED_ARG)};",
+        f"const A2A_MIN_MATCHABLE_ARG = {MIN_MATCHABLE_ARG};",
+        "function a2aArgNeedles(value: unknown, into: Set<string>): void {",
+        "  if (value === null || value === undefined "
+        '|| typeof value === "boolean") return;',
+        '  if (typeof value === "string") {',
+        "    if (value.length >= A2A_MIN_MATCHABLE_ARG) into.add(value);",
+        "    return;",
+        "  }",
+        '  if (typeof value === "number" || typeof value === "bigint") {',
+        "    const form = String(value);",
+        "    if (form.length >= A2A_MIN_MATCHABLE_ARG) into.add(form);",
+        "    return;",
+        "  }",
+        "  if (Array.isArray(value)) {",
+        "    for (const item of value) a2aArgNeedles(item, into);",
+        "    return;",
+        "  }",
+        '  if (typeof value === "object") {',
+        "    // Values only: a record's KEYS are field names the author wrote,",
+        "    // not the caller's data (`bridge.ts`).",
+        "    for (const item of Object.values(value as Record<string, unknown>)) {",
+        "      a2aArgNeedles(item, into);",
+        "    }",
+        "  }",
+        "}",
+        "function a2aScrub(hostText: string): string {",
+        "  const needles = new Set<string>();",
+        f"  a2aArgNeedles({args_expr}, needles);",
+        "  let out = hostText;",
+        "  for (const needle of [...needles].sort((a, b) => b.length - a.length)) {",
+        "    if (needle && out.includes(needle)) {",
+        "      out = out.split(needle).join(A2A_REDACTED_ARG);",
+        "    }",
+        "  }",
+        "  return out;",
+        "}",
+    ]
+    return "".join(f"{pad}{line}\n" if line else "\n" for line in lines)

@@ -148,6 +148,51 @@ service InvoiceAgent {
 extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(message: Str) -> Untrusted[Str]
   = @ts {
       // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.
+      // -- failure-channel funnel (item 421 F5 at the A2A boundary) -------
+      // A reply's peer-authored text (a JSON-RPC `error.code`, a task
+      // `state`, a reply `kind`) is rendered into THIS composition's fault
+      // text, so a peer that reflects what we sent would put the caller's
+      // own bytes back on our error channel. Mirror of
+      // `backends/typescript/bridge.ts`'s `seamFailure`/`REDACTED_ARG`, and
+      // of the py tier's `_scrub`: EXACT match against this call's
+      // arguments, longest needle first, so the sentence and the shape of
+      // the failure survive and only the caller's bytes are gone.
+      const A2A_REDACTED_ARG = "<redacted:arg>";
+      const A2A_MIN_MATCHABLE_ARG = 3;
+      function a2aArgNeedles(value: unknown, into: Set<string>): void {
+        if (value === null || value === undefined || typeof value === "boolean") return;
+        if (typeof value === "string") {
+          if (value.length >= A2A_MIN_MATCHABLE_ARG) into.add(value);
+          return;
+        }
+        if (typeof value === "number" || typeof value === "bigint") {
+          const form = String(value);
+          if (form.length >= A2A_MIN_MATCHABLE_ARG) into.add(form);
+          return;
+        }
+        if (Array.isArray(value)) {
+          for (const item of value) a2aArgNeedles(item, into);
+          return;
+        }
+        if (typeof value === "object") {
+          // Values only: a record's KEYS are field names the author wrote,
+          // not the caller's data (`bridge.ts`).
+          for (const item of Object.values(value as Record<string, unknown>)) {
+            a2aArgNeedles(item, into);
+          }
+        }
+      }
+      function a2aScrub(hostText: string): string {
+        const needles = new Set<string>();
+        a2aArgNeedles([message], needles);
+        let out = hostText;
+        for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
+          if (needle && out.includes(needle)) {
+            out = out.split(needle).join(A2A_REDACTED_ARG);
+          }
+        }
+        return out;
+      }
       const a2aCorr = crypto.randomUUID();
       const a2aPayload = JSON.stringify({
         jsonrpc: "2.0",
@@ -233,7 +278,7 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(
         throw new Error("a2a: reply did not carry this crossing's correlation id");
       }
       if (rpc.error) {
-        throw new Error(`a2a: JSON-RPC error ${rpc.error.code}`);
+        throw new Error(a2aScrub(`a2a: JSON-RPC error ${rpc.error.code}`));
       }
       const result = rpc.result;
       if (!result || typeof result !== "object") {
@@ -248,14 +293,14 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(
         if (!terminal.includes(state)) {
           // Item 439's open question: a task still in flight is a LIFECYCLE
           // this slice does not express. Refuse; never poll, never resume.
-          throw new Error(
-            `a2a: task returned non-terminal state '${state}' — this binding crosses once and does not poll`);
+          throw new Error(a2aScrub(
+            `a2a: task returned non-terminal state '${state}' — this binding crosses once and does not poll`));
         }
         if (state !== "completed") {
-          throw new Error(`a2a: task ended '${state}'`);
+          throw new Error(a2aScrub(`a2a: task ended '${state}'`));
         }
       } else if (kind !== "message") {
-        throw new Error(`a2a: unexpected result kind '${kind}'`);
+        throw new Error(a2aScrub(`a2a: unexpected result kind '${kind}'`));
       }
       // The reply is the peer's JSON and nothing about it is typed: `res.json()`
       // is `any` on every ts lib, so an unannotated `(p) => ...` here is an
@@ -282,6 +327,51 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(
 extern emission[net.billing_internal] async fn a2a_invoice_agent_draft_reminder(message: Str) -> Untrusted[Str]
   = @ts {
       // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.
+      // -- failure-channel funnel (item 421 F5 at the A2A boundary) -------
+      // A reply's peer-authored text (a JSON-RPC `error.code`, a task
+      // `state`, a reply `kind`) is rendered into THIS composition's fault
+      // text, so a peer that reflects what we sent would put the caller's
+      // own bytes back on our error channel. Mirror of
+      // `backends/typescript/bridge.ts`'s `seamFailure`/`REDACTED_ARG`, and
+      // of the py tier's `_scrub`: EXACT match against this call's
+      // arguments, longest needle first, so the sentence and the shape of
+      // the failure survive and only the caller's bytes are gone.
+      const A2A_REDACTED_ARG = "<redacted:arg>";
+      const A2A_MIN_MATCHABLE_ARG = 3;
+      function a2aArgNeedles(value: unknown, into: Set<string>): void {
+        if (value === null || value === undefined || typeof value === "boolean") return;
+        if (typeof value === "string") {
+          if (value.length >= A2A_MIN_MATCHABLE_ARG) into.add(value);
+          return;
+        }
+        if (typeof value === "number" || typeof value === "bigint") {
+          const form = String(value);
+          if (form.length >= A2A_MIN_MATCHABLE_ARG) into.add(form);
+          return;
+        }
+        if (Array.isArray(value)) {
+          for (const item of value) a2aArgNeedles(item, into);
+          return;
+        }
+        if (typeof value === "object") {
+          // Values only: a record's KEYS are field names the author wrote,
+          // not the caller's data (`bridge.ts`).
+          for (const item of Object.values(value as Record<string, unknown>)) {
+            a2aArgNeedles(item, into);
+          }
+        }
+      }
+      function a2aScrub(hostText: string): string {
+        const needles = new Set<string>();
+        a2aArgNeedles([message], needles);
+        let out = hostText;
+        for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
+          if (needle && out.includes(needle)) {
+            out = out.split(needle).join(A2A_REDACTED_ARG);
+          }
+        }
+        return out;
+      }
       const a2aCorr = crypto.randomUUID();
       const a2aPayload = JSON.stringify({
         jsonrpc: "2.0",
@@ -367,7 +457,7 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_draft_reminder(
         throw new Error("a2a: reply did not carry this crossing's correlation id");
       }
       if (rpc.error) {
-        throw new Error(`a2a: JSON-RPC error ${rpc.error.code}`);
+        throw new Error(a2aScrub(`a2a: JSON-RPC error ${rpc.error.code}`));
       }
       const result = rpc.result;
       if (!result || typeof result !== "object") {
@@ -382,14 +472,14 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_draft_reminder(
         if (!terminal.includes(state)) {
           // Item 439's open question: a task still in flight is a LIFECYCLE
           // this slice does not express. Refuse; never poll, never resume.
-          throw new Error(
-            `a2a: task returned non-terminal state '${state}' — this binding crosses once and does not poll`);
+          throw new Error(a2aScrub(
+            `a2a: task returned non-terminal state '${state}' — this binding crosses once and does not poll`));
         }
         if (state !== "completed") {
-          throw new Error(`a2a: task ended '${state}'`);
+          throw new Error(a2aScrub(`a2a: task ended '${state}'`));
         }
       } else if (kind !== "message") {
-        throw new Error(`a2a: unexpected result kind '${kind}'`);
+        throw new Error(a2aScrub(`a2a: unexpected result kind '${kind}'`));
       }
       // The reply is the peer's JSON and nothing about it is typed: `res.json()`
       // is `any` on every ts lib, so an unannotated `(p) => ...` here is an

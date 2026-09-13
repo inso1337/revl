@@ -27,6 +27,7 @@ and a non-terminal Task refused at the boundary instead of polled.
 """
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -982,3 +983,211 @@ def test_the_peers_error_code_cannot_echo_the_callers_argument():
     assert secret not in str(excinfo.value)
     assert "<redacted:arg>" in str(excinfo.value)
     assert str(excinfo.value).startswith("a2a: JSON-RPC error rejected ")
+
+
+# ============ 6. the F5 failure-channel funnel on the coloured `@ts` tier
+# The py half is `test_the_peers_error_code_cannot_echo_the_callers_argument`
+# above. The ts body is the only A2A crossing off the py tier, and a boundary
+# whose scrub depended on which tier answered would be a boundary a peer could
+# pick. So the same pair runs here, against the body the importer emits, over a
+# real loopback peer, under node.
+
+_TS_DRIVER = """
+async function crossing(message: string): Promise<string> {
+%s
+}
+
+crossing(process.argv[2] as string).then(
+  (text) => console.log(JSON.stringify({ ok: true, text })),
+  (error) => console.log(JSON.stringify({
+    ok: false, error: String((error && error.message) || error) })),
+);
+"""
+
+_TS_CARD = {
+    "protocolVersion": "1.0.0",
+    "name": "Funnel Probe",
+    "description": "one crossing",
+    "version": "1.0.0",
+    "capabilities": {},
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain"],
+    "skills": [{"id": "probe", "name": "probe", "description": "one crossing",
+                "tags": ["probe"]}],
+}
+
+
+@pytest.fixture
+def a2a_peer():
+    """A loopback A2A peer that answers each POST with whatever `reply` the
+    test hands it. Real HTTP, because the funnel is being asserted about the
+    body the importer emits and not about a stub of it."""
+    import threading  # noqa: PLC0415
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: PLC0415, E501
+
+    servers = []
+
+    def start(reply):
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("content-length") or 0)
+                sent = json.loads(self.rfile.read(length) or b"{}")
+                payload = json.dumps(reply(sent)).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def _ts_crossing(endpoint: str, *, transport: str = "JSONRPC") -> str:
+    """The ts host body the importer emits for `endpoint`, read off the IR."""
+    card = dict(_TS_CARD, url=endpoint, preferredTransport=transport)
+    source = import_a2a(card, filename="probe.json", backend="ts",
+                        allow_plaintext=True)
+    return compile_source(source, "probe.rvl")["externs"][0]["bodies"]["ts"]
+
+
+def _run_ts(body: str, message: str, tmp_path) -> dict:
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import textwrap  # noqa: PLC0415
+
+    module = tmp_path / "crossing.ts"
+    module.write_text(_TS_DRIVER % textwrap.indent(textwrap.dedent(body), "  "),
+                      encoding="utf-8")
+    # Node strips the type annotations natively; nothing here is transpiled, so
+    # what runs is the emitted body.
+    done = subprocess.run([shutil.which("node"), str(module), message],
+                          capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+_needs_node = pytest.mark.skipif(shutil.which("node") is None,
+                                 reason="node not on PATH")
+
+#: A peer that reflects the caller's own text into each of the four fields a
+#: generated ts body renders into ITS fault text.
+def _echo_error_code(secret):
+    return lambda sent: {"jsonrpc": "2.0", "id": sent["id"],
+                         "error": {"code": f"rejected {secret}"}}
+
+
+def _echo_task_state(secret):
+    return lambda sent: {"jsonrpc": "2.0", "id": sent["id"], "result": {
+        "kind": "task", "id": "t-1",
+        "status": {"state": f"failed:{secret}"}}}
+
+
+def _echo_reply_kind(secret):
+    return lambda sent: {"jsonrpc": "2.0", "id": sent["id"],
+                         "result": {"kind": f"weird:{secret}"}}
+
+
+def _answers(text):
+    return lambda sent: {"jsonrpc": "2.0", "id": sent["id"], "result": {
+        "kind": "message", "role": "agent", "messageId": "m-1",
+        "parts": [{"kind": "text", "text": text}]}}
+
+
+@_needs_node
+@pytest.mark.parametrize("reply_for,opening", [
+    (_echo_error_code, "a2a: JSON-RPC error rejected "),
+    (_echo_task_state, "a2a: task returned non-terminal state "),
+    (_echo_reply_kind, "a2a: unexpected result kind "),
+])
+def test_the_ts_crossing_scrubs_every_peer_authored_interpolation(
+        a2a_peer, tmp_path, reply_for, opening):
+    """Item 421 F5 on the ts tier. A peer that reflects what we sent into a
+    field this body renders into its OWN fault text does not get to put the
+    caller's bytes back on our error channel — and the sentence that makes the
+    fault worth reading survives, which is the whole point of an exact-match
+    funnel rather than a blanket one."""
+    secret = "INV-4242-not-for-the-console"
+    origin = a2a_peer(reply_for(secret))
+    got = _run_ts(_ts_crossing(f"{origin}/a2a"), secret, tmp_path)
+
+    assert got["ok"] is False
+    assert secret not in got["error"]
+    assert "<redacted:arg>" in got["error"]
+    assert got["error"].startswith(opening), got["error"]
+
+
+@_needs_node
+def test_the_ts_funnel_matches_exactly_and_never_by_pattern(a2a_peer, tmp_path):
+    """The negative exit test. The funnel is an EXACT match against this call's
+    own arguments, so a peer string that merely RESEMBLES the argument is left
+    verbatim. A scrub by pattern would shred ordinary diagnostics and would
+    claim a confidentiality property F5 does not have."""
+    secret = "INV-4242-not-for-the-console"
+    resembles = "INV-4243-not-for-the-console"
+    origin = a2a_peer(_echo_error_code(resembles))
+    got = _run_ts(_ts_crossing(f"{origin}/a2a"), secret, tmp_path)
+
+    assert got["ok"] is False
+    assert resembles in got["error"]
+    assert "<redacted:arg>" not in got["error"]
+
+
+@_needs_node
+def test_the_ts_funnel_leaves_a_legitimate_reply_untouched(a2a_peer, tmp_path):
+    """Non-vacuity. The funnel runs on the failure channel only: a crossing
+    that succeeds returns the peer's text unchanged, including text that
+    contains the caller's own argument, because a RESULT is not fault text."""
+    secret = "INV-4242-not-for-the-console"
+    origin = a2a_peer(_answers(f"{secret} is paid"))
+    got = _run_ts(_ts_crossing(f"{origin}/a2a"), secret, tmp_path)
+
+    assert got == {"ok": True, "text": f"{secret} is paid"}
+
+
+@_needs_node
+def test_the_ts_rest_wire_funnels_too(a2a_peer, tmp_path):
+    """The REST sub-transport carries its correlation identity one-way, because
+    a REST reply echoes no envelope. The funnel is NOT one-way: the peer still
+    authors the `state` and the `kind` this body renders."""
+    secret = "INV-4242-not-for-the-console"
+    origin = a2a_peer(lambda _sent: {
+        "kind": "task", "id": "t-1", "status": {"state": f"failed:{secret}"}})
+    body = _ts_crossing(origin, transport="HTTP+JSON")
+    assert "/v1/message:send" in body
+    got = _run_ts(body, secret, tmp_path)
+
+    assert got["ok"] is False
+    assert secret not in got["error"]
+    assert "<redacted:arg>" in got["error"]
+
+
+@_needs_node
+def test_the_ts_crossing_would_have_leaked_before_this_slice(a2a_peer, tmp_path):
+    """Executed non-vacuity for the FUNNEL itself, the way
+    `tests/test_crossing_redirect_policy.py` does it for the redirect policy:
+    put the pre-slice body back by the smallest edit that expresses it (drop
+    the `a2aScrub(...)` wrapper) and the caller's own bytes do reach the error
+    channel. If this stopped failing, the tests above would be asserting
+    nothing."""
+    secret = "INV-4242-not-for-the-console"
+    origin = a2a_peer(_echo_error_code(secret))
+    body = _ts_crossing(f"{origin}/a2a")
+    unwrapped = body.replace(
+        "throw new Error(a2aScrub(`a2a: JSON-RPC error ${rpc.error.code}`));",
+        "throw new Error(`a2a: JSON-RPC error ${rpc.error.code}`);")
+    assert unwrapped != body, "the emitted ts body no longer funnels its error"
+
+    got = _run_ts(unwrapped, secret, tmp_path)
+    assert got["ok"] is False
+    assert secret in got["error"]
