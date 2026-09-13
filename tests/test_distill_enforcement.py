@@ -89,6 +89,31 @@ def _src(sink: str, component: str = "Biller", tainted: bool = False) -> str:
     return src
 
 
+def _activation_src(sink: str, host: str = STRIPE) -> str:
+    """`_src` plus a `Boot` component whose ACTIVATION BODY emits the same
+    resource-scoped `gwsend(host=...)` crossing, so one composition exercises both
+    spend paths for one rule: `Biller` is the per-call path
+    (`_consume_auto_rule`) and `Boot` is the activation gate's two-phase path
+    (`_reserve_spend` then `_commit_spends`)."""
+    return _src(sink) + (
+        "component Boot {\n"
+        f'  emit gwsend("{host}", "boot")\n'
+        "}\n"
+    )
+
+
+def _budget(session, i: int = 0) -> tuple:
+    """(entry remainingUses, entry consumed, `_auto_spend` remainingUses,
+    `_auto_spend` consumed) — the live entry and the persisted budget side by
+    side. `_auto_rules` is DERIVED (rebuilt from `_auto_spend` on every
+    materialization), so the two must always agree or the next generation
+    re-arms a spent rule."""
+    entry = session._auto_rules[i]
+    spend = session._auto_spend[entry["key"]]
+    return (entry["remainingUses"], entry["consumed"],
+            spend["remainingUses"], spend["consumed"])
+
+
 def _session(rule: AutoApproveRule | None = None, *, operator: str | None = None,
              policy: object = "auto"):
     from revl.mcp.session import Session
@@ -399,6 +424,14 @@ def test_consume_before_fire_no_double_fire(sink, tmp_path):
 # spent or expired rule was re-armed by any swap — an over-authorization with no
 # review. The budget is persisted on the rule's canonical DSL (`_auto_spend`), the
 # same key and the same reason as the H1 review bind (`_auto_reviewed`).
+#
+# The budget has TWO spend paths, and BOTH have to persist it: the per-call one
+# (`_consume_auto_rule`) and the activation gate's two-phase one (`_reserve_spend`
+# then `_commit_spends`). The second one reserves on the DERIVED `_auto_rules`
+# entry rather than on a durable record — unlike its `approval`/`grant` arms,
+# which mutate `_ledger`/`_grants` — so a write-back that only the per-call path
+# performs leaves the activation spend discarded by the next materialization. The
+# tests below pin both paths and the single budget they share.
 
 @needs_cordis
 def test_exhausted_uses_budget_survives_a_swap(sink):
@@ -533,6 +566,75 @@ def test_unbounded_rule_still_auto_approves_across_a_swap(sink):
     assert session._auto_rules[0]["expiresAt"] is None
     assert session.call("gw", "send", [STRIPE, "two"])["result"] is None
     assert _lines(sink) == [f"send:{STRIPE}:{w}" for w in ("one", "two")]
+
+
+@needs_cordis
+def test_activation_gate_spend_is_carried_across_a_swap(sink):
+    """A spend made by the ACTIVATION gate is carried across a swap exactly like a
+    per-call one: `Boot`'s activation body spends the rule's first use at `load`
+    and its second at the first `swap`, so the third generation prompts.
+
+    The activation gate runs BEFORE the next materialization (swap gates at
+    `_enforce_activation_gate`, then re-installs the rules), so the reserved
+    counters live only on the derived entry by the time the walk clears. Without
+    the write-back in `_commit_spends` the next `_install_auto_approve_rules`
+    rebuilds the entry from an un-decremented `_auto_spend` and hands the budget
+    back: `uses 2` then fires on every swap, forever."""
+    ir = compile_source(_activation_src(sink), "boot.rvl")
+    session = _session(_rule(component="*", uses=2))
+    session.load(copy.deepcopy(ir), record=True)          # Boot: use 1 of 2
+    assert _budget(session) == (1, False, 1, False)
+
+    session.swap(copy.deepcopy(ir))                       # Boot: use 2 of 2
+    assert _budget(session) == (0, True, 0, True)
+
+    with pytest.raises(ApprovalRequired):                 # the bound is total
+        session.swap(copy.deepcopy(ir))
+    assert _lines(sink) == [f"send:{STRIPE}:boot"] * 2
+
+
+@needs_cordis
+def test_activation_gate_spend_is_carried_across_a_rollback(sink):
+    """`rollback` routes through `swap`, so it re-materializes the rules too. An
+    activation-gate spend survives that route as well: an operator cannot recover
+    a spent budget by rolling the generation back."""
+    ir = compile_source(_activation_src(sink), "boot.rvl")
+    session = _session(_rule(component="*", uses=3))
+    session.load(copy.deepcopy(ir), record=True)          # Boot: use 1 of 3
+    session.swap(copy.deepcopy(ir))                       # Boot: use 2 of 3
+    assert _budget(session) == (1, False, 1, False)
+
+    session.rollback()                                    # Boot: use 3 of 3
+
+    assert _budget(session) == (0, True, 0, True)
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "after"])
+    assert _lines(sink) == [f"send:{STRIPE}:boot"] * 3
+
+
+@needs_cordis
+def test_activation_and_per_call_spends_share_one_budget(sink):
+    """The two spend paths draw on ONE budget rather than one each: a `uses 3`
+    rule spends 1 from `Boot`'s activation body and 1 from a `gw.send` call,
+    leaving 1 — which the next swap spends, after which both the activation body
+    and the per-call path prompt. A per-path budget would leave 2 here."""
+    ir = compile_source(_activation_src(sink), "boot.rvl")
+    session = _session(_rule(component="*", uses=3))
+    session.load(copy.deepcopy(ir), record=True)          # Boot: use 1 of 3
+    assert _budget(session) == (2, False, 2, False)
+
+    assert session.call("gw", "send", [STRIPE, "call"])["result"] is None
+    assert _budget(session) == (1, False, 1, False)
+
+    session.swap(copy.deepcopy(ir))                       # Boot: use 3 of 3
+    assert _budget(session) == (0, True, 0, True)
+
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "after"])
+    with pytest.raises(ApprovalRequired):
+        session.swap(copy.deepcopy(ir))
+    assert _lines(sink) == [f"send:{STRIPE}:boot", f"send:{STRIPE}:call",
+                            f"send:{STRIPE}:boot"]
 
 
 # ---------------------------------------------------------------------------
