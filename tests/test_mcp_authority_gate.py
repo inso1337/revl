@@ -441,6 +441,8 @@ UNGATED = {
     "revl_state": "reports session state",
     "revl_estop_report": "reports a halt that already happened",
     "revl_distillation_offers": "proposes rules; installs none",
+    "revl_quorum": "reads one multi-party decision graph and its receipt; "
+                   "decides nothing and mints nothing (item 471)",
     "revl_query_reach": "static query",
     "revl_query_dependents": "static query",
     "revl_query_emitters": "static query",

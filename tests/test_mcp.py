@@ -231,6 +231,10 @@ def test_initialize_and_tools_list():
                           "revl_approve",
                           # early revocation of a standing grant (roadmap item 379)
                           "revl_revoke",
+                          # multi-party / quorum approval (roadmap item 471):
+                          # hand a stalled question up, break the glass under its
+                          # own `override` verb, and read the decision graph
+                          "revl_escalate", "revl_override", "revl_quorum",
                           # generation history + operator undo (docs/generation-history.md)
                           "revl_undo",
                           # component leases: the multi-agent workspace (item 61)

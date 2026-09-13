@@ -60,8 +60,9 @@ Grammar (blank lines and `#` comments ignored):
     operator <token> may     <verb>[, ...]                        # on *
 
 * **verbs** — `load`, `swap`, `edit`, `unload`, `restore`, `snapshot`, `undo`
-  (`rollback` is accepted as an alias for `undo`), `commit`, `approve`, `estop`,
-  `deploy`, `call`, `lease`, `fork`, and `replay`. `*` matches every verb.
+  (`rollback` is accepted as an alias for `undo`), `commit`, `approve`,
+  `override`, `estop`, `deploy`, `call`, `lease`, `fork`, and `replay`. `*`
+  matches every verb.
 * **subjects** — globs (`fnmatch`) matched against a target component's **name**
   *or* any **realm** it is isolated into. `tenant_a*` matches the realm
   `tenant_a` and the component `tenant_a_cache` alike; `*` matches anything.
@@ -144,6 +145,26 @@ The target set is computed **before** the action runs, from the session's IR:
   a component locally is not the same as being trusted to push the composition
   onto a second host and drive its teardown.
 
+* **approve** (items 246 / 344 / 379 / 251 / 471) — the crossing component the
+  approval names, resolved without running anything: the ticket `hash` against
+  the outstanding-ticket table, a proactive grant's `capability` against the live
+  class map, a distilled rule against the components its glob selects. So `may
+  approve on payments` is usable while other components are live. It covers
+  `revl_approve` (including a multi-party VOTE), `revl_revoke` (a standing grant
+  or a pending question), `revl_escalate`, and the two distillation verbs.
+* **override** (item 471) — the crossing component, exactly as `approve` is: an
+  override decides ONE question about one candidate, so it must not widen to the
+  whole composition. It is `revl_override`'s verb and nothing else's, and it is
+  deliberately NOT folded into `approve`. `require N of {...}` says that N
+  distinct named humans must answer, and an operator trusted to cast one of those
+  N is not thereby trusted to stand in for all of them — folding the override into
+  `approve` would hand every voter a one-operator bypass of the rule they vote
+  under. So `may approve on payments` authorizes votes on payments and no
+  override at all, and `may override on payments` is the separate address an
+  on-call operator holds to break the glass. The admission is recorded as
+  `satisfiedBy: "override"` with the count it actually had, so an audit never
+  reads it as the quorum it stood in for
+  ([471-quorum-approval.md](design/471-quorum-approval.md)).
 * **call** — the whole running composition, because the provided key is resolved
   by the live session and may dispatch through more than one component.
 * **lease** — the named component; an unknown or unloaded component fails closed

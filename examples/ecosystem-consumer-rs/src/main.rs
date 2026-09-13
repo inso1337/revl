@@ -196,7 +196,7 @@ fn run_prefilter(
             // NOT an acceptance. The reference toolchain decides; this project
             // has only established that the native gate had no refusal to make.
             _ => log(format!(
-                "ESCALATE {}  ({}: ask the reference gate — this crate issues no admissions)",
+                "ESCALATE {}  ({}: ask the reference gate — this crate's verdict surface issues no admissions)",
                 record.name, record.verdict
             )),
         }

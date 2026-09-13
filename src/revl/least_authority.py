@@ -23,6 +23,15 @@ unnameable token) decides `import subset-of declared`, and the predicate
 `declared subset-of policy`. This module only composes them over the emitted
 modules and names which leg failed, the offending capability, and the
 component.
+
+The two predicates disagree about how `*` is spelled, and this module is the
+only place that sees both spellings: `_allowed` reads `*` itself as the
+unnameable/unbounded token (`UNBOUNDED`), while `_caps_widen` spells the top of
+the lattice `None` and would treat a `*` handed to it as a capability NAME.
+`component_breaches` translates at the seam, so a component whose G8 reach
+carries `*` -- a bare `emission`, "any capability" -- has an unbounded declared
+set for the first leg rather than a one-element set that no import can be
+inside.
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from .admission import _caps_widen
 from .audit_diff import audit_report
 from .errors import RevlError
 from .policy import (
+    UNBOUNDED,
     Policy,
     _allow_for,
     _allowed,
@@ -147,13 +157,32 @@ def component_breaches(
     component's resolved allow-list, or ``None`` when no allow rule constrains
     it (then the policy leg is vacuous -- an unconstrained component reaches
     what it likes, exactly as `policy.evaluate` treats it).
+
+    ``declared_caps`` is the G8 reach token set, in which `*` (``UNBOUNDED``)
+    is the TOP of the lattice -- a bare ``emission``, "any capability" -- and
+    not a capability name. The first leg translates that to the ``None``
+    ``_caps_widen`` spells top as; see the note at the call.
     """
     breaches: list[LeastAuthorityBreach] = []
 
     declared = tuple(sorted(declared_caps))
     imports = tuple(sorted(import_caps))
     # `import subset-of declared`, via the same widen predicate admission uses.
-    if _caps_widen(declared, imports):
+    #
+    # `_caps_widen` spells the top of the lattice `None` ("a bare `emission` --
+    # 'any capability', the widest set"); the reach layer spells the same thing
+    # `*` (`policy.UNBOUNDED`, "the unnameable boundary, carried through
+    # verbatim", `component_reach`). Handing `*` to the predicate as though it
+    # were a capability NAME made this leg fire on every component that
+    # declares a bare `emission`: `{"kv"} <= {"*"}` is False, so a module
+    # importing only `kv` was reported as importing "host capability `kv` it
+    # does not declare" -- a capability the unbounded declaration does cover --
+    # and `enforce_wasm_least_authority` refused a composition the policy had
+    # granted. Translate at this seam rather than teaching `_caps_widen` a
+    # second spelling of top: its `None` reading is what `admission`'s drift
+    # comparison is written against.
+    declared_leg = None if UNBOUNDED in declared_caps else declared
+    if _caps_widen(declared_leg, imports):
         extra = tuple(sorted(set(imports) - set(declared)))
         breaches.append(LeastAuthorityBreach("import>declared", component, extra))
 

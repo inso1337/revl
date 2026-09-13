@@ -35,22 +35,56 @@ domain-separation prefix, so a ``revl.attestation``, a ``revl.peer-offer``, a
 ``revl.deploy.receipt`` and one of these records never verify as each other
 under a shared key.
 
-The property that makes the verification non-vacuous
-----------------------------------------------------
-Symmetric crypto has one sharp edge here: a MAC proves only that the holder of a
-key authored the record. If the PEER holds the attester key, the peer can mint
-its own "proof" that it runs a bundle it has never run, and the requirement
-degenerates into an assertion. So a requirement is enforced together with a key
-separation: :func:`tee_admits` refuses when the attester key is the peer's own
-offer key, and :func:`receipt_admits` refuses when the receipt key is. Neither
-can be checked without the peer's own offer key, so a caller that supplies none
-(the empty key included) is refused rather than compared against an empty key.
-In a real deployment the attester key belongs to whoever quotes the enclave
-(the hardware root, or the attestation service mediating it), and the
-requirement is meaningful exactly to the extent that the peer does not hold that
-key. The limitation is stated here rather than papered over: an asymmetric,
-hardware-rooted quote, checkable with a public key, is the follow-up, and the
-``sign_alg`` member exists so that migration is additive.
+Two roots, and only one of them is an attestation root
+-----------------------------------------------------
+A record's ``sign_alg`` says which verifier may decide it, and the two can never
+be crossed.
+
+**The attestation root** (``revl.tee_quote``, :class:`~revl.tee_quote.HardwareRoot`)
+decides a record whose ``sign_alg`` is a real quote format: an Intel TDX Quote v4
+(``tdx-quote-v4-ecdsa-p256``) or an AMD SEV-SNP attestation report
+(``sev-snp-report-v2-ecdsa-p384``). The bytes are parsed as the vendor defines
+them and verified with ECDSA up a chain that terminates in a public key the
+OPERATOR pinned out of band. The peer holds no part of that chain, so a forged
+quote has nothing to sign with and a replayed one answers the wrong challenge.
+Two bindings make the hardware signature cover the whole claim rather than only
+the hardware's own fields:
+
+* every claim the hardware does not measure — the peer, the bundle, the region,
+  the network posture, the validity window, the challenge — is digested into the
+  64-byte ``report_data``, the one field of either format that the workload
+  chooses (:func:`evidence_report_data`). Alter any member and the quote stops
+  matching;
+* the measurement the record STATES is compared against the measurement register
+  the hardware REPORTED (MRTD for a TD, the launch measurement for a SEV-SNP
+  guest), because ``report_data`` binds what the workload said and the register
+  is what the platform measured. Without that comparison an enclave running
+  anything at all could bind a body naming a permitted measurement.
+
+One honest limit, stated rather than papered over: ``bundle`` is a LABEL, and no
+hardware format measures it. What the hardware proves is the MEASUREMENT, and the
+requirement's permitted-measurement set is where the operator states which
+measurements correspond to the approved bundle. A permitted set that is
+re-attested as builds move, instead of baked into the requirement, is roadmap
+item 469.
+
+**The development verifier** (:class:`~revl.tee_quote.DevMacRoot`) decides a
+record whose ``sign_alg`` is ``hmac-sha256``. It is not an attestation root: a
+MAC proves only that the holder of a key authored the record, so if the PEER ever
+holds the attester key the requirement degenerates into an assertion. It is kept
+because callers holding only a shared secret would otherwise break, and it is
+fenced three ways — it reports ``is_production = False``, constructing one
+requires ``acknowledged_dev_only=True`` by name, and every verdict it reaches,
+admission included, carries ``tee_quote.DEV_ROOT_NOTE`` in its own reason text.
+``tee_admits(..., require_hardware_root=True)`` refuses it outright.
+
+The key separation survives both. :func:`tee_admits` refuses when the attester key
+is the peer's own offer key, when the record names that key as the platform that
+signed its quote, and when no peer key is supplied at all (the empty key
+included), because a separation that cannot be checked is not a separation.
+:func:`receipt_admits` refuses on the same ground for a receipt key; wiring
+receipts into the composition's call path is the other half of this item and is
+still open.
 
 Fail-closed, everywhere
 -----------------------
@@ -83,6 +117,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, MutableSet, Optional
 
 from .attest import NotCanonicalizable, _canonical_bytes, canonical_hash, key_id
+from .tee_quote import (
+    DEV_ROOT_NOTE,
+    QUOTE_SIGN_ALGS,
+    SIGN_ALG_SEV_SNP,
+    SIGN_ALG_TDX,
+    AttestationRoot,
+    DevMacRoot,
+    HardwareRoot,
+    QuoteFormatError,
+    RootError,
+    build_sev_snp_report,
+    build_tdx_quote,
+    require_production_root,
+    verify_quote,
+)
 
 # The two envelope identities. Same discipline as `attest`/`peer_offer`: a
 # self-identifying kind plus a MAJOR.MINOR line, additive within a MAJOR.
@@ -91,9 +140,36 @@ EVIDENCE_VERSION = "1.0"
 RECEIPT_KIND = "revl.tee-receipt"
 RECEIPT_VERSION = "1.0"
 
-# One signature algorithm today; the member is VALIDATED, not merely recorded,
-# so an asymmetric upgrade is an additive change.
+# The DEVELOPMENT signature algorithm, and it is named twice on purpose: `SIGN_ALG`
+# is what it has always been called and what a pre-root record carries, and
+# `DEV_SIGN_ALG` is what it IS. A record carrying it is decided by the
+# symmetric-MAC verifier, which is not an attestation root (`tee_quote`
+# `DevMacRoot`): it proves that the holder of a key authored the record, so it is
+# a development and test verifier and every verdict reached through it says so.
 SIGN_ALG = "hmac-sha256"
+DEV_SIGN_ALG = SIGN_ALG
+
+#: The hardware-rooted algorithms, from `tee_quote`. An evidence carrying one of
+#: these is decided by parsing a real vendor quote and verifying it against a key
+#: the OPERATOR pinned, which the peer does not hold.
+EVIDENCE_SIGN_ALGS = (SIGN_ALG, SIGN_ALG_TDX, SIGN_ALG_SEV_SNP)
+
+#: Domain separation for the 64 bytes a quote must carry. `report_data` is the
+#: only field of a TDX quote or a SEV-SNP report that the workload chooses, so it
+#: is where every claim the hardware does not itself measure gets bound: the
+#: digest is taken over the evidence's whole canonical body, which makes the
+#: hardware signature cover the peer, the bundle, the region, the posture, the
+#: window and above all the CHALLENGE. SHA-512 is not a taste: its 64-byte digest
+#: is exactly the width both formats give the field, so no truncation or padding
+#: decision exists to get wrong.
+EVIDENCE_BIND_DOMAIN = b"revl.tee-evidence.report-data/v1\x00"
+
+#: Where a hardware quote rides in the evidence record, hex-encoded. It REPLACES
+#: `signature`: the quote is the signature.
+QUOTE_FIELD = "quote"
+#: The optional vendor endorsement that lets a pinned vendor root speak for a
+#: platform key the operator has not pinned directly.
+ENDORSEMENT_FIELD = "platform_endorsement"
 
 #: Domain-separation prefixes. The evidence and the receipt are two protocols,
 #: and both differ from `attest.SIGN_DOMAIN`, `peer_offer.SIGN_DOMAIN` and the
@@ -346,9 +422,20 @@ class EnclaveEvidence:
                 f"{', '.join(repr(p) for p in _OUTBOUND_POSTURES)}, got "
                 f"{self.outbound_network!r}")
 
-    def body(self) -> dict:
-        """The signed body: every member except the signature, in a shape whose
-        canonical bytes are a pure function of the evidence's content."""
+    def body(self, sign_alg: str = SIGN_ALG) -> dict:
+        """The signed body: every member except the signature (or the quote), in a
+        shape whose canonical bytes are a pure function of the evidence's content
+        and the algorithm that will cover it.
+
+        ``sign_alg`` is part of the body rather than appended to it, so a record
+        cannot be re-presented as though a different verifier had decided it: the
+        bytes a hardware quote binds and the bytes a MAC covers differ in this
+        member, and each refuses the other's."""
+        if sign_alg not in EVIDENCE_SIGN_ALGS:
+            raise TeeError(
+                f"sign_alg must be one of "
+                f"{', '.join(repr(a) for a in EVIDENCE_SIGN_ALGS)}, got "
+                f"{sign_alg!r}")
         return {
             "kind": EVIDENCE_KIND,
             "version": EVIDENCE_VERSION,
@@ -360,7 +447,7 @@ class EnclaveEvidence:
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
             "outbound_network": self.outbound_network,
-            "sign_alg": SIGN_ALG,
+            "sign_alg": sign_alg,
         }
 
 
@@ -379,14 +466,168 @@ def sign_evidence(evidence: EnclaveEvidence, attester_key: bytes) -> dict:
     return body
 
 
-def _validate_evidence(record: Mapping) -> str:
+def evidence_report_data(body: Mapping) -> bytes:
+    """The 64 bytes a hardware quote must carry for this evidence body.
+
+    A TDX quote and a SEV-SNP report each measure what is RUNNING; nothing in
+    either format knows about a peer id, a bundle label, a region, a network
+    posture or a placement's challenge. The one field the workload controls is
+    the 64-byte ``report_data``, so that is where those claims are bound: this
+    digest covers the evidence's whole canonical body, and the hardware signature
+    covers the digest. Change any member and the quote no longer matches, which
+    is what makes a replayed or re-purposed quote refuse.
+
+    Raises :class:`TeeError` for a body with no canonical spelling, so a caller
+    with an ``(ok, reason)`` contract refuses rather than crashing."""
+    try:
+        return hashlib.sha512(
+            EVIDENCE_BIND_DOMAIN + _canonical_bytes(_public_quote_members(body))
+        ).digest()
+    except NotCanonicalizable as error:
+        raise TeeError(f"the evidence body has no canonical spelling: {error}") from error
+
+
+def _public_quote_members(record: Mapping) -> dict:
+    """The members a quote's ``report_data`` digest covers: everything except the
+    quote itself, its endorsement, and the MAC field. Those three are the
+    envelope around the claim, not part of it."""
+    skip = (SIGNATURE_FIELD, QUOTE_FIELD, ENDORSEMENT_FIELD)
+    return {k: v for k, v in record.items() if k not in skip}
+
+
+def quote_evidence(evidence: EnclaveEvidence, *, sign_alg: str, quote: bytes,
+                   platform_key_id: str,
+                   endorsement: Optional[Mapping] = None) -> dict:
+    """Assemble a HARDWARE-rooted evidence record: the body, the fingerprint of
+    the platform key that signed the quote, and the quote itself.
+
+    There is no MAC. The quote is the signature, and it is only a signature over
+    this evidence because the quote's ``report_data`` is
+    :func:`evidence_report_data` of the body — which the caller building the
+    quote is responsible for having done, and which :func:`verify_evidence`
+    re-derives and compares rather than trusts.
+
+    ``platform_key_id`` names WHICH pinned key the verifier should ask its root
+    for. It is a hint, not an authority: the root decides whether it holds that
+    key, and a fingerprint it does not hold is a refusal."""
+    if sign_alg not in QUOTE_SIGN_ALGS:
+        raise TeeError(
+            f"a hardware-rooted evidence carries a quote format, one of "
+            f"{', '.join(repr(a) for a in QUOTE_SIGN_ALGS)}; got {sign_alg!r}")
+    if not isinstance(quote, (bytes, bytearray)) or not quote:
+        raise TeeError("the quote must be non-empty bytes")
+    if not isinstance(platform_key_id, str) or not _KEY_ID_RE.fullmatch(platform_key_id):
+        raise TeeError(
+            f"platform_key_id must be a key fingerprint (16 lowercase hex "
+            f"digits), got {platform_key_id!r}")
+    body = evidence.body(sign_alg)
+    body["key_id"] = platform_key_id
+    if endorsement is not None:
+        if not isinstance(endorsement, Mapping):
+            raise TeeError(
+                f"the platform endorsement must be an object or absent, got "
+                f"{type(endorsement).__name__}")
+        body[ENDORSEMENT_FIELD] = dict(endorsement)
+    body[QUOTE_FIELD] = bytes(quote).hex()
+    return body
+
+
+def attester_report_data(evidence: EnclaveEvidence, *, sign_alg: str,
+                         platform_key_id: str) -> bytes:
+    """The 64 bytes an attester must put in a quote's ``report_data`` for this
+    evidence. The attester's half of :func:`evidence_report_data`: the verifier
+    re-derives the same digest from the record it receives, so the two agree by
+    construction rather than by convention."""
+    body = evidence.body(sign_alg)
+    body["key_id"] = platform_key_id
+    return evidence_report_data(body)
+
+
+def build_tdx_evidence(evidence: EnclaveEvidence, *, attest_private_key: int,
+                       platform_private_key: int, platform_key_id: str,
+                       endorsement: Optional[Mapping] = None,
+                       **quote_fields) -> dict:
+    """The reference TDX attester: quote this evidence and wrap it in a record.
+
+    ``evidence.measurement`` IS the MRTD, so it must be a 48-byte hex digest and
+    it goes into the quote rather than beside it: a record whose stated
+    measurement is not the register the quote carries is refused by
+    :func:`verify_evidence`, and building it any other way would produce exactly
+    that refusal. Extra keyword arguments reach
+    :func:`~revl.tee_quote.build_tdx_quote`, so a test can build a quote that is
+    wrong in one way and right in every other."""
+    mrtd = bytes.fromhex(evidence.measurement)
+    if len(mrtd) != 48:
+        raise TeeError(
+            f"a TDX MRTD is 48 bytes (96 hex digits); this evidence's measurement "
+            f"is {len(mrtd)} bytes, so it cannot be the register a TD quote "
+            f"carries")
+    report_data = attester_report_data(
+        evidence, sign_alg=SIGN_ALG_TDX, platform_key_id=platform_key_id)
+    quote = build_tdx_quote(report_data=report_data, mrtd=mrtd,
+                            attest_private_key=attest_private_key,
+                            platform_private_key=platform_private_key,
+                            **quote_fields)
+    return quote_evidence(evidence, sign_alg=SIGN_ALG_TDX, quote=quote,
+                          platform_key_id=platform_key_id,
+                          endorsement=endorsement)
+
+
+def build_sev_snp_evidence(evidence: EnclaveEvidence, *, vcek_private_key: int,
+                           platform_key_id: str,
+                           endorsement: Optional[Mapping] = None,
+                           **report_fields) -> dict:
+    """The reference SEV-SNP attester. ``evidence.measurement`` is the guest's
+    48-byte launch measurement, on the same terms as
+    :func:`build_tdx_evidence`."""
+    measurement = bytes.fromhex(evidence.measurement)
+    if len(measurement) != 48:
+        raise TeeError(
+            f"a SEV-SNP launch measurement is 48 bytes (96 hex digits); this "
+            f"evidence's measurement is {len(measurement)} bytes")
+    report_data = attester_report_data(
+        evidence, sign_alg=SIGN_ALG_SEV_SNP, platform_key_id=platform_key_id)
+    report = build_sev_snp_report(report_data=report_data,
+                                 measurement=measurement,
+                                 vcek_private_key=vcek_private_key,
+                                 **report_fields)
+    return quote_evidence(evidence, sign_alg=SIGN_ALG_SEV_SNP, quote=report,
+                          platform_key_id=platform_key_id,
+                          endorsement=endorsement)
+
+
+def _resolve_root(root: Any, attester_key: Any) -> tuple[Optional[AttestationRoot], str]:
+    """The root a verification runs against, or a refusal reason.
+
+    Exactly one of the two ways in. ``root`` is the attestation root proper.
+    ``attester_key`` is the pre-root spelling and resolves to the development
+    symmetric-MAC verifier, which is not an attestation root; it is accepted so
+    that callers holding only a shared secret keep working, and every verdict it
+    reaches is labelled."""
+    if root is not None and attester_key not in (None, b""):
+        return None, ("both an attestation root and an attester key were "
+                      "supplied, and they can disagree; pass one")
+    if root is not None:
+        if not isinstance(root, AttestationRoot):
+            return None, (f"an attestation root is a tee_quote.AttestationRoot, "
+                          f"got {type(root).__name__}")
+        return root, ""
+    key = _key_bytes(attester_key)
+    if not key:
+        return None, ("no attestation root and no attester key provided, so there "
+                      "is nothing to verify the evidence against; an unverifiable "
+                      "proof is refused rather than admitted")
+    return DevMacRoot(key, acknowledged_dev_only=True), ""
+
+
+def _validate_evidence(record: Mapping, sign_alg: str) -> str:
     """Is this authentic record even an enclave evidence of the shape we accept?
-    Returns a refusal reason, or ``""`` when well formed. A MAC proves
+    Returns a refusal reason, or ``""`` when well formed. A signature proves
     authorship, not that what was authored means what a reader assumes, so every
     fixed-meaning member is checked here (mirrors ``peer_offer._validate_envelope``)."""
     for member, expected in (("kind", EVIDENCE_KIND),
                              ("version", EVIDENCE_VERSION),
-                             ("sign_alg", SIGN_ALG)):
+                             ("sign_alg", sign_alg)):
         if record.get(member) != expected:
             return (f"envelope refused: {member} is {record.get(member)!r}, "
                     f"expected {expected!r}")
@@ -427,39 +668,125 @@ def _validate_evidence(record: Mapping) -> str:
     return ""
 
 
-def verify_evidence(record: Mapping, attester_key: bytes) -> tuple[bool, str]:
-    """Check a signed evidence record with the attester's key. Returns
+def verify_evidence(record: Mapping, attester_key: Optional[bytes] = None, *,
+                    root: Optional[AttestationRoot] = None,
+                    now: Optional[datetime] = None) -> tuple[bool, str]:
+    """Check a signed evidence record against an attestation root. Returns
     ``(ok, reason)`` and refuses rather than raises on a malformed proof; the
     module docstring records the one inherited exception (a non-ASCII
-    ``signature`` string).
+    ``signature`` string, on the MAC path only).
 
-    Order mirrors ``peer_offer.verify_offer``: prove authenticity (the MAC)
-    FIRST, then validate the envelope. A record from another protocol signed with
-    this key fails the MAC here (domain separation) rather than being read as
-    enclave evidence. This function checks the record's OWN consistency; whether
-    it satisfies a placement is :func:`tee_admits`."""
-    if not isinstance(attester_key, (bytes, bytearray)) or not attester_key:
-        return False, "no attester key provided"
+    Two roots, and the record's own ``sign_alg`` chooses which one may decide it,
+    so the two can never be crossed:
+
+    * a :class:`~revl.tee_quote.HardwareRoot` decides a record whose ``sign_alg``
+      is a quote format. The chain runs from a key the OPERATOR pinned down to
+      the quote, and the quote's ``report_data`` must be
+      :func:`evidence_report_data` of this record's own body, so the hardware
+      signature covers every claim the record makes. The measurement the record
+      states is additionally compared against the measurement register the
+      hardware reported, because ``report_data`` binds what the workload SAID and
+      the register is what the platform MEASURED;
+    * a :class:`~revl.tee_quote.DevMacRoot` decides a record whose ``sign_alg`` is
+      ``hmac-sha256``, and says so in the reason. It is the pre-root verifier,
+      kept so callers holding only a shared secret still work.
+
+    Order mirrors ``peer_offer.verify_offer``: prove authenticity FIRST, then
+    validate the envelope. A record from another protocol signed with this key
+    fails the MAC here (domain separation) rather than being read as enclave
+    evidence. This function checks the record's OWN consistency; whether it
+    satisfies a placement is :func:`tee_admits`."""
     if not isinstance(record, Mapping):
         return False, "enclave evidence is not an object"
+    try:
+        resolved, problem = _resolve_root(root, attester_key)
+    except RootError as error:
+        return False, f"the attestation root is unusable: {error}"
+    if resolved is None:
+        return False, problem
+    declared = record.get("sign_alg")
+    if isinstance(resolved, HardwareRoot):
+        if declared not in QUOTE_SIGN_ALGS:
+            return False, (
+                f"a hardware attestation root decides a hardware quote, but this "
+                f"evidence declares sign_alg {declared!r}; a symmetric-MAC record "
+                f"is not evidence against a hostile peer and is refused here "
+                f"rather than verified with the wrong primitive")
+        return _verify_quote_evidence(record, resolved, declared, now)
+    if declared not in (SIGN_ALG, None):
+        return False, (
+            f"this evidence declares sign_alg {declared!r}, which needs a hardware "
+            f"attestation root; the development symmetric-MAC verifier cannot "
+            f"decide a quote {DEV_ROOT_NOTE}")
+    key = resolved.key  # type: ignore[union-attr]
     given = record.get(SIGNATURE_FIELD)
     if not isinstance(given, str):
         return False, "enclave evidence carries no attestation signature"
     try:
-        expected = _sign(record, attester_key, EVIDENCE_SIGN_DOMAIN)
+        expected = _sign(record, key, EVIDENCE_SIGN_DOMAIN)
     except NotCanonicalizable as error:
         return False, f"enclave evidence cannot be verified: {error}"
     if not hmac.compare_digest(expected, given):
         return False, ("attestation signature mismatch: wrong attester key, or the "
                        "evidence was tampered with after it was issued")
-    envelope = _validate_evidence(record)
+    envelope = _validate_evidence(record, SIGN_ALG)
     if envelope:
         return False, envelope
-    return True, "valid: enclave evidence is authentic and well formed"
+    return True, f"valid: enclave evidence is authentic and well formed {DEV_ROOT_NOTE}"
+
+
+def _verify_quote_evidence(record: Mapping, root: HardwareRoot, sign_alg: str,
+                           now: Optional[datetime]) -> tuple[bool, str]:
+    """The hardware half of :func:`verify_evidence`.
+
+    Every step refuses rather than raises. The order matters: the quote's own
+    chain to the pinned root is proven before anything the record says is read as
+    meaningful, and the measurement cross-check comes last because it is the one
+    comparison that needs both halves."""
+    raw = record.get(QUOTE_FIELD)
+    if not isinstance(raw, str) or not raw:
+        return False, (
+            f"the evidence declares the hardware format {sign_alg!r} but carries "
+            f"no {QUOTE_FIELD!r}, so there is nothing for the attestation root to "
+            f"verify")
+    try:
+        blob = bytes.fromhex(raw)
+    except ValueError:
+        return False, f"the evidence's {QUOTE_FIELD!r} member is not hex"
+    try:
+        expect = evidence_report_data(record)
+    except TeeError as error:
+        return False, f"enclave evidence cannot be verified: {error}"
+    endorsement = record.get(ENDORSEMENT_FIELD)
+    if endorsement is not None and not isinstance(endorsement, Mapping):
+        return False, (f"the evidence's {ENDORSEMENT_FIELD!r} member is not an "
+                       f"object")
+    try:
+        verdict = verify_quote(
+            blob, sign_alg=sign_alg, root=root, expect_report_data=expect,
+            platform_key_id=record.get("key_id"), endorsement=endorsement, now=now)
+    except QuoteFormatError as error:
+        return False, f"the attestation root refused the quote: {error}"
+    if not verdict.ok:
+        return False, f"the attestation root refused the quote: {verdict.reason}"
+    envelope = _validate_evidence(record, sign_alg)
+    if envelope:
+        return False, envelope
+    if record["measurement"] != verdict.measurement:
+        return False, (
+            f"the evidence states measurement {record['measurement']}, but the "
+            f"quote's own measurement register reads {verdict.measurement}: the "
+            f"enclave that signed this quote is not the enclave the evidence "
+            f"describes")
+    return True, (f"valid: {verdict.reason}, and the evidence's claims are the "
+                  f"claims that quote binds")
 
 
 def tee_admits(record: Mapping, requirement: TeeRequirement, *,
-               peer_id: str, peer_key: bytes, attester_key: bytes,
+               peer_id: str, peer_key: bytes,
+               attester_key: Optional[bytes] = None,
+               root: Optional[AttestationRoot] = None,
+               require_hardware_root: bool = False,
                now: Optional[datetime] = None,
                replay_ledger: Optional[MutableSet[tuple[str, str]]] = None
                ) -> tuple[bool, str]:
@@ -470,10 +797,15 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
 
     The gates, in order:
 
-    1. **key separation** — an evidence verified with the peer's own offer key
-       proves nothing (the peer could have written it), so it is refused before
-       anything else is even read;
-    2. **authenticity** — the MAC under the attester key, then the envelope;
+    1. **key separation** — an evidence verified with the peer's own offer key,
+       or naming that key as the platform that signed its quote, proves nothing
+       (the peer could have written it), so it is refused before anything else is
+       even read;
+    2. **authenticity** — the attestation root, then the envelope. Pass ``root``
+       for a hardware-rooted verdict (a real TDX or SEV-SNP quote, chained to a
+       key the operator pinned) or ``attester_key`` for the development
+       symmetric-MAC verifier, which is not an attestation root and labels every
+       verdict it reaches. Passing neither refuses;
     3. **the peer** the evidence names, which must be the peer being placed;
     4. **the bundle** the enclave runs, which must be the approved one;
     5. **the measurement**, which must be in the permitted set;
@@ -487,22 +819,46 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
     ``replay_ledger`` is the caller's ledger of ``(nonce, peer_id)`` pairs. It is
     required (a proof with no ledger cannot be checked for replay, so it is
     refused) and it is MUTATED on success only: a refused proof does not burn the
-    challenge, so an honest peer can still answer it."""
+    challenge, so an honest peer can still answer it.
+
+    ``require_hardware_root=True`` refuses before gate 1 unless ``root`` is a
+    production attestation root, so a caller that must not be satisfied by the
+    development symmetric-MAC verifier says so once instead of inspecting the
+    verdict's reason text afterwards."""
     if not isinstance(record, Mapping):
         return False, "enclave evidence is not an object"
+    if require_hardware_root:
+        try:
+            require_production_root(root)
+        except RootError as error:
+            return False, f"no production attestation root: {error}"
     peer = _key_bytes(peer_key)
     if not peer:
         return False, (
             "no peer key provided, so the key separation cannot be checked: "
             "without the peer's own offer key a proof the peer signed itself "
             "would be accepted, and an unchecked separation is not a separation")
-    if _key_bytes(attester_key) == peer:
+    if attester_key is not None and _key_bytes(attester_key) == peer:
         return False, (
             "the evidence is verified with the peer's own offer key, so it proves "
             "nothing: a peer that signs its own attestation can attest any bundle "
             "it never ran. Verify the evidence against the attestation authority's "
             "key, which the peer does not hold")
-    ok, reason = verify_evidence(record, attester_key)
+    # The same separation on the hardware path, and scoped to it. The peer cannot
+    # hold the private half of a pinned root key by construction, but it CAN name
+    # its own offer key as the platform that signed: the fingerprint construction
+    # is shared (`attest.key_id`), so the two are comparable. A root that does not
+    # hold that fingerprint refuses anyway; this gate is what refuses a root
+    # MISCONFIGURED to pin it, and it gives the sharper reason either way. On the
+    # MAC path the separation is `attester_key != peer_key` above, and the
+    # signature covers `key_id`, so a swapped fingerprint is caught there instead.
+    if (record.get("sign_alg") in QUOTE_SIGN_ALGS
+            and record.get("key_id") == key_id(peer)):
+        return False, (
+            "the evidence names the peer's own offer key as the platform that "
+            "signed its quote, so the chain terminates inside the peer: an "
+            "attestation root is a key the peer does not hold")
+    ok, reason = verify_evidence(record, attester_key, root=root, now=now)
     if not ok:
         return False, reason
 
@@ -555,9 +911,15 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
                        f"for peer {peer_id!r}, so this is a captured proof presented "
                        f"a second time")
     replay_ledger.add(consumed)
-    return True, ("admitted: the evidence proves the approved bundle in a permitted "
-                  "enclave and region, with outbound network forbidden, fresh and "
-                  "unconsumed")
+    verdict = ("admitted: the evidence proves the approved bundle in a permitted "
+               "enclave and region, with outbound network forbidden, fresh and "
+               "unconsumed")
+    if record.get("sign_alg") not in QUOTE_SIGN_ALGS:
+        # The whole point of labelling the admission and not only the refusals: an
+        # operator reading this line has to be able to see that nothing hardware
+        # rooted was checked.
+        return True, f"{verdict} {DEV_ROOT_NOTE}"
+    return True, verdict
 
 
 # --------------------------------------------------------------------------

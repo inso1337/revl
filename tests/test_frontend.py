@@ -359,6 +359,13 @@ REJECTIONS = {
     # unit can no longer disclose the token into an ordinary sink.
     "gsecret_service_return_discloses.rvl":
         "a Secret[T] value flows into an extern host call (a disclosure sink)",
+    # roadmap item 472: the RETENTION dimension of the same qualifier family. A
+    # `Retained[T, P]` value past P's deadline may not reach a persistence sink
+    # (a crossing whose declared capability scope means durable storage). The
+    # deadline in the fixture is absolutely past, so the file refuses under any
+    # clock; a declared legal hold on the policy would override it.
+    "gretain_expired_at_persistence_sink.rvl":
+        "data past its retention deadline may not be written to durable storage",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     # roadmap item 129: closures capture BY VALUE (syntax-2.0 §3.5). A closure
     # that ASSIGNS to a captured binding is reference capture, which would break

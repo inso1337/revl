@@ -85,7 +85,7 @@ component environment as a top-level emission, which buys the audit for free:
 $ revl audit examples/heartbeat.rvl
 component Heartbeat  (examples/heartbeat.rvl)
   requires: log
-  boundary: emissions: log.write (0 compensated); capabilities: *
+  boundary: emissions: log.write (0 of them compensated); capabilities: *
 ```
 
 The `log.write` on that line is the timer's firing — audited, not hidden.

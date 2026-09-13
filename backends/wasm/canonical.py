@@ -1303,17 +1303,29 @@ def wasmtime_binary() -> str | None:
     return str(fallback) if fallback.is_file() else None
 
 
-def run_component(component_path: pathlib.Path, invoke: str) -> str:
+def run_component(component_path: pathlib.Path, invoke: str, *,
+                  fuel: int | None = None) -> str:
     """Invoke `invoke` (a WAVE call expr, e.g. ``make("x", 5)``) on the
     component under wasmtime's COMPONENT MODEL (``wasmtime run --invoke``, which
     only accepts a component here) and return wasmtime's WAVE-formatted result
-    line. Proves the canonical round trip end to end."""
+    line. Proves the canonical round trip end to end.
+
+    ``fuel`` bounds the guest by *work* (wasm instructions) rather than by
+    elapsed time: when the budget is spent wasmtime traps with "all fuel
+    consumed by WebAssembly" and exits non-zero, which reads as an ordinary
+    contained trap. Without it the only bound on a boundary function that never
+    returns is the wall-clock ``timeout`` below, so a guest that loops forever
+    is killed as a ``subprocess.TimeoutExpired`` — a Python exception, not a
+    trap — which is the wrong shape for a caller that grades traps. Callers
+    that invoke an untrusted candidate should pass a budget."""
     binary = wasmtime_binary()
     if binary is None:
         raise EmitError("wasmtime not found")
-    result = subprocess.run(
-        [binary, "run", "--invoke", invoke, str(component_path)],
-        capture_output=True, text=True, timeout=120)
+    argv = [binary, "run"]
+    if fuel is not None:
+        argv += ["-W", f"fuel={fuel}"]
+    argv += ["--invoke", invoke, str(component_path)]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise EmitError(f"component invocation failed: {result.stderr.strip()}")
     return result.stdout.strip()
@@ -1325,7 +1337,8 @@ def run_component(component_path: pathlib.Path, invoke: str) -> str:
 ARGV_STR_LIMIT = 100_000
 
 
-def run_component_str(component_path: pathlib.Path, func: str, arg: str) -> str:
+def run_component_str(component_path: pathlib.Path, func: str, arg: str, *,
+                      fuel: int | None = None) -> str:
     """`func(arg)` for a ``string``-returning export — unquotes the WAVE result.
 
     The argument rides in ONE argv entry (`--invoke 'func("...")'`), and Linux
@@ -1337,13 +1350,17 @@ def run_component_str(component_path: pathlib.Path, func: str, arg: str) -> str:
     codegen failure, which is exactly how it was read once (issue #183: both
     over-a-page heap tests had never run in CI, and reported `Errno 7` on the
     first Linux run of a suite that was green on macOS, where only the TOTAL
-    `ARG_MAX` of 1 MiB applies)."""
+    `ARG_MAX` of 1 MiB applies).
+
+    ``fuel`` is forwarded to :func:`run_component`; pass a budget when the
+    candidate is untrusted, so a non-terminating boundary function traps
+    instead of stalling the runtime until the wall-clock timeout."""
     if len(arg) > ARGV_STR_LIMIT:
         raise EmitError(
             f"argument of {len(arg)} bytes exceeds what one argv entry can "
             f"carry ({ARGV_STR_LIMIT}); drive it through "
             f"call_str_export_in_memory() instead of the wasmtime CLI")
-    out = run_component(component_path, f'{func}("{arg}")')
+    out = run_component(component_path, f'{func}("{arg}")', fuel=fuel)
     if len(out) >= 2 and out[0] == '"' and out[-1] == '"':
         return out[1:-1]
     return out

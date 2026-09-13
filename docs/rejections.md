@@ -44,6 +44,7 @@ to the diagnostic; see docs/why-traces.md.
 | G9 | untrusted data cannot create authority without a declared declassification | lower (taint flow) |
 | G-SECRET | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) |
 | G-SECRET-FLOW | a Secret[T] value never reaches a disclosure sink (a log, a serialization, an LLM prompt, an MCP return, an unapproved realm or an undeclared receiver); it crosses only at a declared Secret[T] receiver and downgrades only at a declared endorse[confidential] | lower (taint flow) |
+| G-RETAIN | a Retained[T, P] value past P's retention deadline never reaches a persistence sink (a db/fs/store/kv/blob/archive/index/cache/queue/wal crossing), unless P declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) |
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |

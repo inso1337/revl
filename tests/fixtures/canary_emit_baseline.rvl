@@ -1,0 +1,33 @@
+// Fixture for tests/test_canary.py — a slice provider that BOTH provides `kv`
+// and crosses the boundary itself: every `set` acquires the entry and then
+// emits a commit to a `Sink`, compensated by a rollback naming the same line.
+// The provider is the slice's recorded world, so its emissions are steps in the
+// timeline the canary compares — including the compensation each one records.
+// Paired with canary_emit_candidates.rvl, whose variants acquire identically
+// and differ ONLY in that compensation.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  // `emission` because this provider's `set` crosses the boundary itself (G4):
+  // a service declaration bounds what its providers may do.
+  emission fn set(k: Str, v: Str)
+}
+
+service Sink {
+  emission fn commit(line: Str)
+  emission fn rollback(line: Str)
+}
+
+component TenantAStore requires sink: Sink provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  isolate sink in realm("tenant_a")
+  let cells = effect Map.new() undo cells.drop()
+  provide kv {
+    fn get(k) = cells.get(k)
+    fn set(k, v) {
+      effect cells.insert(k, v)
+      undo   cells.remove(k)
+      emit sink.commit(v) compensate sink.rollback(v)
+    }
+  }
+}

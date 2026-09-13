@@ -29,13 +29,14 @@ Ordered by how much they matter.
   ``false-admission``
       THE ISSUED-ADMISSION DIRECTION, the most dangerous class the gate guards
       against: the gate ISSUES an admission (`"admitted": true` on the wire) for
-      a program the reference refuses for ANY reason. Empty today by construction
-      — no gate arm admits anything (`Verdict` has no `Admitted`) — so it is a
-      SCAFFOLD held ahead of the self-host type layer (docs/design/457, the
-      frontier tracked by issue #346): the day a gate begins to issue admissions,
-      a wrong one reds this census on the same PR. Zero tolerance: no named-list
-      allowance, never baselined. Distinct from `false-admit`, which is a failure
-      to REFUSE (a no-objection), not a wrongly issued admission.
+      a program the reference refuses for ANY reason. This is a LIVE guard, not a
+      scaffold: the gate has an admission arm (`revl_gate::issue_admission`,
+      issue #346), both engines below exercise it, and `ADMISSION_PROGRAMS` puts
+      real certified programs and one-token-outside near misses in the corpus so
+      the bucket is measured on every run rather than only in principle. Zero
+      tolerance: no named-list allowance, never baselined. Distinct from
+      `false-admit`, which is a failure to REFUSE (a no-objection), not a wrongly
+      issued admission.
 
   ``false-admit/<tag>``
       THE BYPASS DIRECTION. The reference refuses under a guarantee this gate
@@ -58,8 +59,11 @@ Ordered by how much they matter.
 
   ``no-objection-out-of-slice``
       The reference refuses for a reason outside the covered layer — the type
-      layer, mostly. Documented, by design, not a defect: see the crate's "This
-      gate issues no admissions".
+      layer, mostly. Documented, by design, not a defect: see the crate's "The
+      verdict surface issues no admissions". A no-objection is not a green, so an
+      out-of-slice reference refusal against one is forgiven here; the same
+      reference refusal against an ISSUED admission is not, and lands in
+      ``false-admission`` above.
 
   ``refuse-out-of-slice/<tag>`` / ``agree-*`` / ``frontier-declined``
       The rest. Both refuse for unrelated reasons; both agree; or the frontier
@@ -71,13 +75,16 @@ Two engines, same buckets:
 
   ``--engine selfhost`` (default) runs `selfhost/lower.rvl`'s `admit_src`
       through the python backend, preceded by a python mirror of the crate's
-      `frontier::scan` whose TABLES ARE IMPORTED from
+      `frontier::scan` and followed by a python mirror of its
+      `admission::certify`, both of whose TABLES ARE IMPORTED from
       `tools/build_gate_crate.py`. Seconds, no toolchain, so it can run on
-      every PR.
+      every PR. The admission mirror is what makes the `false-admission` bucket
+      above a live guard in the job that has no cargo.
 
-  ``--engine crate`` builds the real crate and asks it, through the same
-      standalone consumer `tests/test_gate_crate_admit.py` uses. Slow and needs
-      cargo; it is what proves the fast engine is not lying.
+  ``--engine crate`` builds the real crate and asks it `issue_admission`, which
+      is the verdict wire verbatim wherever it withholds and the admission wire
+      where it does not. Slow and needs cargo; it is what proves the fast engine
+      is not lying.
 
 `tests/test_gate_crate_admit.py::test_the_two_engines_agree` pins the two
 against each other so the cheap one stays honest.
@@ -311,6 +318,152 @@ def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
     return scan
 
 
+def build_admission_certify():
+    """A python mirror of `crates/revl-gate/src/admission.rs::certify`.
+
+    The ADMISSION half of the fast engine, and the reason the `false-admission`
+    bucket is a live guard rather than a scaffold: the crate's `issue_admission`
+    upgrades a no-objection to an ISSUED admission exactly where this returns a
+    basis, so the cheap engine that runs on every PR sees the same admissions the
+    shipped crate issues.
+
+    Its TABLES are imported from the generator that writes the rust, so the two
+    cannot be written over different vocabularies; only the walk is restated, and
+    `tests/test_gate_reference_census.py` holds it against the cases
+    `admission.rs`'s own unit tests cover. The BASIS TEXT is deliberately not
+    mirrored — it is off the wire, so the crate engine cannot see it either and a
+    wording difference is not a divergence.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "census_build_gate_crate_admission", ROOT / "tools" / "build_gate_crate.py")
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    return make_admission_certify(generator.admission_tables())
+
+
+def make_admission_certify(tables):
+    """The certifier itself, over the given tables. Split out so a test can drive
+    it with the rust's own table values.
+
+    Returns `certify(source) -> bool`: True when the source is inside the
+    admission surface. The walk is total by construction — every step either
+    consumes a token or returns False — because "skip what I do not recognise" is
+    the wave-through the surface exists to prevent."""
+    scalars = frozenset(tables["scalars"])
+    reserved = frozenset(tables["reserved"])
+    keywords = frozenset(tables["keywords"])
+
+    def tokens(source: str):
+        """The source as tokens, or None for a byte outside the alphabet. A
+        literal, a number, an operator, a `[`, an `@` or a non-ASCII byte all
+        return None, which is how "carries no term the type layer decides" is
+        enforced at the bottom rather than argued at the top."""
+        out = []
+        i, n = 0, len(source)
+        while i < n:
+            ch = source[i]
+            if ch in " \t\r\n":
+                i += 1
+                continue
+            if ch == "/" and i + 1 < n and source[i + 1] == "/":
+                while i < n and source[i] != "\n":
+                    i += 1
+                continue
+            if ch == "_" or ("a" <= ch <= "z") or ("A" <= ch <= "Z"):
+                start = i
+                i += 1
+                while i < n and (source[i] == "_" or source[i].isascii()
+                                 and source[i].isalnum()):
+                    i += 1
+                out.append(source[start:i])
+                continue
+            if ch == "-" and i + 1 < n and source[i + 1] == ">":
+                out.append("->")
+                i += 2
+                continue
+            if ch in "{}(),:=":
+                out.append(ch)
+                i += 1
+                continue
+            return None
+        return out
+
+    def is_name(token: str) -> bool:
+        head = token[:1]
+        if not (head == "_" or ("a" <= head <= "z") or ("A" <= head <= "Z")):
+            return False
+        return token not in keywords
+
+    def is_declarable(token: str) -> bool:
+        return is_name(token) and token not in reserved
+
+    def certify(source: str) -> bool:
+        toks = tokens(source)
+        if toks is None:
+            return False
+        n = len(toks)
+        aliases = [toks[i + 1] for i, tok in enumerate(toks)
+                   if tok == "type" and i + 1 < n]
+        known = scalars | set(aliases)
+        services: list[str] = []
+        declared_aliases = 0
+        i = 0
+        while i < n:
+            if toks[i] == "type":
+                if i + 3 >= n or toks[i + 2] != "=":
+                    return False
+                if not is_declarable(toks[i + 1]) or toks[i + 3] not in scalars:
+                    return False
+                declared_aliases += 1
+                i += 4
+                continue
+            if toks[i] != "service" or i + 2 >= n:
+                return False
+            if not is_declarable(toks[i + 1]) or toks[i + 2] != "{":
+                return False
+            services.append(toks[i + 1])
+            i += 3
+            methods: list[str] = []
+            while i < n and toks[i] != "}":
+                if toks[i] != "fn" or i + 1 >= n or not is_name(toks[i + 1]):
+                    return False
+                methods.append(toks[i + 1])
+                i += 2
+                if i >= n or toks[i] != "(":
+                    return False
+                i += 1
+                params: list[str] = []
+                while i < n and toks[i] != ")":
+                    if not is_name(toks[i]) or i + 2 >= n or toks[i + 1] != ":":
+                        return False
+                    if toks[i + 2] not in known:
+                        return False
+                    params.append(toks[i])
+                    i += 3
+                    if i < n and toks[i] == ",":
+                        i += 1
+                if i >= n or len(set(params)) != len(params):
+                    return False
+                i += 1  # the `)`
+                if i < n and toks[i] == "->":
+                    if i + 1 >= n or toks[i + 1] not in known:
+                        return False
+                    i += 2
+            if i >= n or len(set(methods)) != len(methods):
+                return False
+            i += 1  # the `}`
+        # The reference refuses a duplicate service and a duplicate method and
+        # the native gate does not, so the certifier carries those two
+        # obligations itself.
+        if len(set(services)) != len(services):
+            return False
+        if len(set(aliases)) != len(aliases) or declared_aliases != len(aliases):
+            return False
+        return not (set(services) & set(aliases))
+
+    return certify
+
+
 class SelfhostEngine:
     """`admit_src` behind the crate's frontier guard, in-process."""
 
@@ -319,6 +472,7 @@ class SelfhostEngine:
     def __init__(self):
         self._scan = build_frontier_scan()
         self._admit = build_selfhost_admit()
+        self._certify = build_admission_certify()
 
     def verdicts(self, sources):
         for src in sources:
@@ -335,7 +489,15 @@ class SelfhostEngine:
                 yield ("fault", f"{type(exc).__name__}: {exc}"[:200])
                 continue
             if wire == "":
-                yield ("no_objection", "")
+                # The crate's `issue_admission` upgrades a no-objection to an
+                # ISSUED admission exactly here, so the fast engine does too:
+                # otherwise the `false-admission` bucket would be blind to the
+                # arm on every PR. The payload is the wire's — an issued
+                # admission carries no code and no message.
+                if self._certify(src):
+                    yield ("admitted", ("", ""))
+                else:
+                    yield ("no_objection", "")
             elif "|" in wire:
                 code, message = wire.split("|", 1)
                 yield ("refused", (code, message))
@@ -351,7 +513,12 @@ fn main() {
     let mut blob = String::new();
     std::io::stdin().read_to_string(&mut blob).expect("read stdin");
     for source in blob.split('\0') {
-        println!("{}", revl_gate::admit(source).to_json());
+        // The ADMISSION question, not just the refusal one. `issue_admission`
+        // returns the verdict's own wire verbatim wherever it withholds, so this
+        // is a superset of `admit(...).to_json()`: same bytes everywhere except
+        // the sources the gate actually admits, which is the direction the
+        // `false-admission` bucket exists to measure.
+        println!("{}", revl_gate::issue_admission(source).to_json());
     }
 }
 '''
@@ -451,10 +618,56 @@ def _read(path: Path):
         return None
 
 
+# The ADMISSION-SURFACE programs (issue #346), hand-written for the same reason
+# the oracle's are: nothing in the tree sits ON this boundary. Every real `.rvl`
+# in the repo declares a component or an `fn` body, so a census over the tree
+# alone measures the admission arm on ZERO inputs — a live guard that never
+# fires, which is indistinguishable from the scaffold it replaced.
+#
+# Each entry is either INSIDE the surface (the gate must issue an admission, and
+# the reference must admit it, or the `false-admission` bucket reds) or a NEAR
+# MISS chosen to sit one token outside it. The near misses are the load-bearing
+# half: `duplicate_service` and `duplicate_method` are refused by the reference
+# and drawn no objection by the native gate, so a certifier that skipped its own
+# two obligations would issue an admission the reference refuses and this census
+# would say so by name.
+#
+# They are deliberately NOT files under `examples/` or `tests/fixtures/`: those
+# trees are walked by other suites with their own contracts, and a census corpus
+# entry has no business changing what they hold.
+ADMISSION_PROGRAMS = (
+    ("empty_composition", ""),
+    ("comment_only", "// nothing to declare\n"),
+    ("interface_one_service",
+     "service Store {\n  fn get(key: Str) -> Str\n  fn put(key: Str, value: Str)\n}\n"),
+    ("interface_two_services",
+     "service Clock {\n  fn now() -> Int\n}\n\nservice Log {\n  fn write(line: Str)\n}\n"),
+    ("interface_scalar_alias",
+     "type Key = Str\ntype Size = Int32\n\nservice Cache {\n"
+     "  fn read(k: Key) -> Size\n}\n"),
+    ("interface_empty_service", "service Marker {\n}\n"),
+    # --- near misses: one token outside the surface each ---
+    ("near_miss_duplicate_service",
+     "service Dup {\n  fn a(x: Int) -> Int\n}\nservice Dup {\n  fn b(x: Int) -> Int\n}\n"),
+    ("near_miss_duplicate_method",
+     "service Dup {\n  fn a(x: Int) -> Int\n  fn a(y: Int) -> Int\n}\n"),
+    ("near_miss_fn_body", "service S {\n  fn a(x: Int) -> Int\n}\n"
+                          "fn twice(x: Int) -> Int { return x + x }\n"),
+    ("near_miss_generic_type", "service S {\n  fn all() -> List[Int]\n}\n"),
+    ("near_miss_record_alias", "type Row = { id: Int }\n"),
+    ("near_miss_shadows_builtin", "type Int = Str\n"),
+    ("near_miss_unknown_type", "service S {\n  fn a(x: Mystery) -> Int\n}\n"),
+    ("near_miss_component",
+     "service S {\n  fn a(x: Int) -> Int\n}\n"
+     "component C provides s: S {\n  provide s {\n    fn a(x) = x\n  }\n}\n"),
+)
+
+
 def load_corpus(oracle, *, everything: bool = False):
     """`[(case_id, source)]` — every `.rvl` in the census directories, plus the
     oracle's own hand-written programs, which are the only inputs in the tree
-    that were WRITTEN to sit on a guarantee boundary."""
+    that were WRITTEN to sit on a guarantee boundary, plus `ADMISSION_PROGRAMS`,
+    which are the only ones written to sit on the ADMISSION boundary."""
     cases: list[tuple[str, str]] = []
     for sub in CORPUS_DIRS + (EXTRA_DIRS if everything else ()):
         base = ROOT / sub
@@ -470,6 +683,8 @@ def load_corpus(oracle, *, everything: bool = False):
         cases.append((f"oracle-accept:{name}", src))
     for entry in oracle.REJECTED_PROGRAMS:
         cases.append((f"oracle-reject:{entry[0]}", entry[1]))
+    for name, src in ADMISSION_PROGRAMS:
+        cases.append((f"admission:{name}", src))
     return cases
 
 
@@ -503,17 +718,16 @@ def load_fuzz(count: int, seed: int, corpus):
 # every entry it adds or removes.
 HARD = "false-admit"
 
-# The ISSUED-ADMISSION bypass, distinct from `false-admit`. Today no gate arm
-# admits anything (`Verdict` has no `Admitted`; `to_json` reports
-# `"admitted": false` on every arm), so this bucket is EMPTY by construction and
-# stays a scaffold. It exists ahead of the self-host type layer (docs/design/
-# 457-selfhost-type-layer.md, the frontier tracked by issue #346) so the moment
-# a gate begins to ISSUE an admission — the direction the whole crate exists to
-# guard — an admission the reference refuses for ANY reason reds this census on
-# the same PR that opens the arm, rather than being discovered later. It is the
-# most dangerous class the gate guards against: a host reading a rust admission
-# as a green and running code the reference never admitted. Unlike `false-admit`
-# it has NO named-list allowance and is NEVER baselined: zero tolerance.
+# The ISSUED-ADMISSION bypass, distinct from `false-admit`. The gate HAS an
+# admission arm now (`revl_gate::issue_admission`, issue #346): it upgrades a
+# no-objection to an issued admission where the source is inside the admission
+# surface, which is the region carrying no term the reference type layer decides.
+# So this bucket is a LIVE guard on every run, and the thing it guards is the most
+# dangerous class the gate can commit: a host reading a rust admission as a green
+# and running code the reference never admitted. Both engines exercise the arm and
+# `ADMISSION_PROGRAMS` keeps real certified programs in the corpus, so an empty
+# bucket here is a measurement rather than a vacuum. Unlike `false-admit` it has
+# NO named-list allowance and is NEVER baselined: zero tolerance.
 ADMISSION = "false-admission"
 
 # Buckets `--record` must never write, so their allowance can never grow to one.

@@ -1,6 +1,6 @@
 # 530 — the webui-entry surface: enabling slice and the decision the full close needs
 
-**Roadmap:** item 459 (issue #722), part of the 462 web-platform arc · **Builds on:** docs/design/526-webui-asset-alignment.md · **Status:** DECISION A RESOLVED (ambient coeffect, shipped) · B FOLDED INTO 457 · FULL CLOSE 462-GATED
+**Roadmap:** item 459 (issue #722), part of the 462 web-platform arc · **Builds on:** docs/design/526-webui-asset-alignment.md · **Status:** DECISION A RESOLVED (ambient coeffect, shipped) · B RESOLVED AND SHIPPED (typed `data` channel + `--face webui`) · FULL CLOSE 462-GATED
 
 ## What shipped (the enabling slice)
 
@@ -8,7 +8,7 @@
 
 `examples/webui-entry/` is the canonical shape for that boundary, built with only reviewed language surface:
 
-- `console.rvl` contributes a frontend by naming external asset files and handing them to Cordis WebUI's `addEntry`.
+- `console.rvl` contributes a frontend by naming external asset files and handing them to Cordis WebUI's `addEntry`, together with the typed reactive channel (Decision B below).
 - The binding is one real TypeScript module, `webui_host.ts`, reached through the item-396/410 host-ref door (`= @ts ref webuiAddEntry from "./webui_host.ts"`), the same door `stdlib/fs.rvl` uses to reach `backends/typescript/revl_fs_ts.ts`.
 - The frontend entry `frontend/entry.client.ts` is a normal Cordis WebUI client module (Vite/Vue), referenced by path.
 
@@ -31,14 +31,21 @@ The two candidate surfaces that were weighed:
 
 Recommendation: option 1, because it makes the entry's published surface an enumerable declared coeffect (the property 526 argues revl adds over the untyped `data: T`), and because 457's "one definition" work will want the same ambient-service treatment for `ctx.server` and `ctx.sso`.
 
-### Decision B — the typed reactive-state / RPC contract
+### Decision B — the typed reactive-state / RPC contract — RESOLVED: declared in revl, projected to TS
 
-Cordis `addEntry(files, data)` takes an untyped `data: T` that becomes both the reactive state broadcast to the browser and, for each function on it, an RPC method the browser can call (526). 459's typed-boundary requirement is that this surface be a typed contract shared between the revl component and the TS client, so the browser's `useRpc<T>()` type and the server's published fields are one declaration. That is the same "one definition" idea as 457 applied to the console channel, and should be designed alongside 457 rather than invented here. The slice publishes an empty `data` surface deliberately.
+**Resolved and shipped as 457 slice S4.** Cordis `addEntry(files, data)` takes an untyped `data: T` that becomes both the reactive state broadcast to the browser and, for each function on it, an RPC method the browser can call (526). 459's typed-boundary requirement is that this surface be a typed contract shared between the revl component and the TS client, so the browser's `useRpc<T>()` type and the server's published fields are one declaration. It now is, with each half declared exactly once on reviewed language surface:
+
+- **The reactive state** is the record type of a new `data` parameter on `add_entry`. The component publishes a record literal, which the compiler checks against that declared type, so the published fields and the declared ones cannot drift.
+- **The RPC method set** is the services the component `provides` — 526's "an entry's exposed methods are exactly the component's declared provisions", the same surface `revl audit` reports as G1.
+
+`revl export client --lang ts --face webui --component NAME` projects both into `<Component>State`, `<Component>Rpc` and `<Component>Channel`, the type the client extension reads with `useRpc<T>()`. `examples/app/frontend/contract.ts` is that generated artifact, the way `notes.client.ts` is the generated REST client; `examples/webui-entry/` carries the reference shape and `examples/webui-entry/webui_host.ts` adapts it to Cordis (the state passes through as the reactive object, the provision's methods are attached to it so Cordis exposes them as RPC). This closes gap G3 of `docs/design/525-webapp-slice4-frontend.md` and deferrals F5 and F7 of the 459 note.
+
+What it does not decide: a MUTATION path driven from revl (the component publishes the initial record; later deltas are Cordis' own `Entry.mutate` on the host side), and F1's typed asset handles.
 
 ## Requested of the architect
 
 1. ~~Pick Decision A's surface (ambient-service coeffect vs. blessed stdlib module) so the ambient `ctx.webui` binding stops being a `globalThis` bridge.~~ RESOLVED: the ambient-service coeffect (option 1), shipped — see Decision A above.
-2. Confirm Decision B is folded into 457's "one definition" scope (typed reactive-state/RPC as a shared declaration) rather than a separate surface.
+2. ~~Confirm Decision B is folded into 457's "one definition" scope (typed reactive-state/RPC as a shared declaration) rather than a separate surface.~~ RESOLVED: folded into 457 as slice S4 and shipped — see Decision B above.
 3. With A and B decided, 459 closes as part of 462: the exemplary frontend is a Vite/Vue project registered through the chosen boundary, and this reference is the shape it copies.
 
 No roadmap edit is made here (the roadmap is architect-owned); this note records the shipped slice and the exact decisions the close waits on.

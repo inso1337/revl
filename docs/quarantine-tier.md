@@ -65,7 +65,11 @@ reuses the gauntlet verbatim, then adds the substrate battery:
 
    A probe that **returns** is a clean round trip. A probe that **traps** is
    caught here — wasmtime exits non-zero, the host was never touched — and
-   recorded with the runtime's own failure detail. It is never re-raised.
+   recorded with the runtime's own failure detail. A probe that **times out**
+   is likewise recorded, not raised: the guest is bounded by a fuel budget, so
+   a boundary function that does not terminate is graded (`timeout`), and the
+   battery stops at the first such probe rather than paying the wall-clock
+   budget for every remaining one. Neither is ever re-raised.
 
 ### Verdicts
 
@@ -73,6 +77,7 @@ reuses the gauntlet verbatim, then adds the substrate battery:
 |---|---|---|
 | `passed` | admissible, and every substrate probe returned cleanly | eligible |
 | `trapped` | admissible, but a probe **trapped in the sandbox** — contained, host untouched | **not** eligible |
+| `timeout` | admissible, but a probe **outran the runtime's budget** — the guest never terminated; still contained, host untouched | **not** eligible |
 | `rejected` | admission refused; the candidate never reached the substrate | — |
 | `deferred` | no canonical-ABI-emittable boundary function: every boundary signature carries a type the canonical boundary still cannot lower (Float, Map, resource, function-value) | — |
 | `unavailable` | `wasm-tools`/`wasmtime` absent; grade + lowering still ran | — |
@@ -137,7 +142,7 @@ revl quarantine candidate.rvl --policy quarantine.txt   # + admission decision
 ```
 
 Exit status: `0` when the candidate passed (or was deferred/unavailable —
-nothing to fail on), `1` when it was trapped or rejected, and — with
+nothing to fail on), `1` when it was trapped, timed out, or rejected, and — with
 `--require-runtime` — `3` when the toolchain is absent so the candidate could
 not actually be proven.
 

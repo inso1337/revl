@@ -11,18 +11,15 @@
    "examples/rejections/g4_spawn_widens_parameter.rvl"
   ],
   "false-admit/G6": [
-   "examples/rejections/g6_closure_mutates_capture.rvl",
    "examples/rejections/g6_method_local_shadows_component.rvl",
-   "examples/rejections/shadowed_module_fn_call.rvl",
-   "examples/rejections/v2_compound_assign_on_let.rvl",
-   "examples/rejections/v2_duplicate_let_block_scope.rvl",
-   "examples/rejections/v2_let_reassignment.rvl"
+   "examples/rejections/shadowed_module_fn_call.rvl"
   ],
   "false-admit/HOST-METHOD": [
    "examples/rejections/host_method_not_on_surface.rvl",
    "examples/rejections/t24_opaque_receiver_builtin.rvl"
   ],
   "false-admit/T1": [
+   "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
    "examples/rejections/g4_extern_undo_wrong_arg_type.rvl",
    "examples/rejections/t10_call_arity.rvl",
    "examples/rejections/t11_field_through_opt.rvl",
@@ -37,6 +34,8 @@
    "examples/rejections/t23_int32_remainder.rvl",
    "examples/rejections/t26_anon_record_update_wrong_type.rvl",
    "examples/rejections/t28_bitwise_non_int32.rvl",
+   "examples/rejections/t29_field_read_on_any.rvl",
+   "examples/rejections/t30_field_read_on_any_provide_method.rvl",
    "examples/rejections/t31_index_non_int_provide_method.rvl",
    "examples/rejections/t32_arrow_value_result_flows.rvl",
    "examples/rejections/t33_arrow_value_arity.rvl",
@@ -69,9 +68,8 @@
    "backends/go/scenarios/records.rvl",
    "backends/go/scenarios/secret_trace.rvl",
    "backends/go/scenarios/witnessed_teardown.rvl",
-   "backends/go/testdata/opt_gaps_280.rvl",
-   "backends/go/testdata/result_ctor_302.rvl",
    "backends/go/testdata/stream_event_130.rvl",
+   "backends/java/scenarios/stream_event_130.rvl",
    "backends/rust/scenarios/stream.rvl",
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
@@ -85,31 +83,23 @@
    "examples/model_store_sqlite.rvl",
    "examples/prop_test.rvl",
    "examples/regressions/fuzz_go_letbind_valuetype.rvl",
-   "examples/ts_host_body.rvl",
    "examples/uxprobe2_fault.rvl",
    "examples/uxprobe2_jobs.rvl",
    "examples/uxprobe_cache.rvl",
-   "selfhost/lexer.rvl",
    "stdlib/a2a.rvl",
-   "stdlib/crypto.rvl",
    "stdlib/http.rvl",
-   "stdlib/json.rvl",
    "stdlib/list.rvl",
-   "stdlib/render.rvl",
-   "stdlib/value.rvl",
-   "tests/fixtures/v2_math_lib.rvl"
+   "stdlib/render.rvl"
   ],
   "false-reject/G1": [
-   "backends/go/testdata/stream_130.rvl"
+   "backends/go/testdata/stream_130.rvl",
+   "backends/java/scenarios/stream_130.rvl"
   ],
   "tag-mismatch/G4->BAD": [
    "examples/rejections/g4_spawn_widens_budget.rvl"
   ],
   "tag-mismatch/T1->BAD": [
-   "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
-   "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
-   "examples/rejections/t29_field_read_on_any.rvl",
-   "examples/rejections/t30_field_read_on_any_provide_method.rvl"
+   "examples/rejections/t25_explicit_tparam_heuristic_off.rvl"
   ]
  },
  "corpus_dirs": [
@@ -195,30 +185,6 @@
     "tag": ""
    }
   },
-  "backends/go/testdata/opt_gaps_280.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/go/testdata/result_ctor_302.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "backends/go/testdata/stream_130.rvl": {
    "bucket": "false-reject/G1",
    "gate": {
@@ -243,6 +209,30 @@
     "tag": ""
    }
   },
+  "backends/java/scenarios/stream_130.rvl": {
+   "bucket": "false-reject/G1",
+   "gate": {
+    "code": "G1",
+    "kind": "refused",
+    "message": "`sub` is not a declared requirement of Parked"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/java/scenarios/stream_event_130.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
   "backends/rust/scenarios/stream.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
@@ -256,11 +246,11 @@
    }
   },
   "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl": {
-   "bucket": "tag-mismatch/T1->BAD",
+   "bucket": "false-admit/T1",
    "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
    },
    "reference": {
     "message": "field read `.function` on a value of type `Any` \u2014 an erased value has no known fields",
@@ -481,18 +471,6 @@
    "reference": {
     "message": "`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` \u2014 a spawn may narrow a child's capabilities, never widen them",
     "tag": "G4"
-   }
-  },
-  "examples/rejections/g6_closure_mutates_capture.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "a closure cannot assign to `n`: captures are by value, not by reference (G6)",
-    "tag": "G6"
    }
   },
   "examples/rejections/g6_method_local_shadows_component.rvl": {
@@ -748,11 +726,11 @@
    }
   },
   "examples/rejections/t29_field_read_on_any.rvl": {
-   "bucket": "tag-mismatch/T1->BAD",
+   "bucket": "false-admit/T1",
    "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
    },
    "reference": {
     "message": "field read `.kind` on a value of type `Any` \u2014 an erased value has no known fields",
@@ -772,11 +750,11 @@
    }
   },
   "examples/rejections/t30_field_read_on_any_provide_method.rvl": {
-   "bucket": "tag-mismatch/T1->BAD",
+   "bucket": "false-admit/T1",
    "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
    },
    "reference": {
     "message": "field read `.kind` on a value of type `Any` \u2014 an erased value has no known fields",
@@ -927,42 +905,6 @@
     "tag": "T1"
    }
   },
-  "examples/rejections/v2_compound_assign_on_let.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "cannot reassign `n` \u2014 it is `let` (single-assignment)",
-    "tag": "G6"
-   }
-  },
-  "examples/rejections/v2_duplicate_let_block_scope.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`y` is already declared in this function",
-    "tag": "G6"
-   }
-  },
-  "examples/rejections/v2_let_reassignment.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "cannot reassign `n` \u2014 it is `let` (single-assignment)",
-    "tag": "G6"
-   }
-  },
   "examples/rejections/v2_map_set_value_mismatch.rvl": {
    "bucket": "false-admit/T1",
    "gate": {
@@ -1011,18 +953,6 @@
     "tag": "G1"
    }
   },
-  "examples/ts_host_body.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "examples/uxprobe2_fault.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
@@ -1059,36 +989,12 @@
     "tag": ""
    }
   },
-  "selfhost/lexer.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "stdlib/a2a.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/crypto.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
@@ -1100,19 +1006,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/json.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
@@ -1136,31 +1030,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/value.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "tests/fixtures/v2_math_lib.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
+    "message": "expected { after fn signature"
    },
    "reference": {
     "message": "",

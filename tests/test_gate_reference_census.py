@@ -126,13 +126,18 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # BOTH lists and the census baseline is re-recorded.
 KNOWN_BYPASSES = {
     # -- fn-body binding rules (G1/G6) --
+    # The ASSIGNMENT half landed with item 391's binding-discipline slice (the
+    # `let`/`var`/parameter scope walk over a module `fn` body, plus the
+    # arrow-body write form): `v2_let_reassignment`,
+    # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
+    # `g6_closure_mutates_capture` now refuse with the reference's message
+    # byte-for-byte and are struck from this list. What remains needs machinery
+    # this slice deliberately does not build: resolving a name READ against the
+    # whole callable universe (the two G1 rows below), and the whole-body
+    # callable-shadowing scan over every fn, component and test block.
     "examples/rejections/g1_template_undeclared.rvl",
     "examples/rejections/v2_undeclared_fn_var.rvl",
-    "examples/rejections/v2_let_reassignment.rvl",
-    "examples/rejections/v2_compound_assign_on_let.rvl",
-    "examples/rejections/v2_duplicate_let_block_scope.rvl",
     "examples/rejections/shadowed_module_fn_call.rvl",
-    "examples/rejections/g6_closure_mutates_capture.rvl",
     # -- expression typing (T1/T2) --
     "examples/rejections/t2_null_in_expression.rvl",
     "examples/rejections/t11_field_through_opt.rvl",
@@ -145,6 +150,22 @@ KNOWN_BYPASSES = {
     "examples/rejections/t26_anon_record_update_wrong_type.rvl",
     "examples/rejections/t27_anon_record_update_undeclared_field.rvl",
     "examples/rejections/t36_float_literal_range.rvl",
+    # The field-read-on-`Any` family. These three were ALREADY type-layer
+    # false-admits; they were merely hidden behind a `pub extern` parse refusal
+    # ("unexpected declaration"), which made the census file them as
+    # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. `p_top`
+    # now accepts `pub` before every declaration form the reference accepts it
+    # before, so the parse reaches the body and the real state of the gate shows:
+    # the reference refuses "field read `.x` on a value of type `Any`" in its
+    # TYPE layer and the gate runs no type layer. Nothing new is admitted that
+    # was not already outside the covered surface.
+    "examples/rejections/t29_field_read_on_any.rvl",
+    "examples/rejections/t30_field_read_on_any_provide_method.rvl",
+    # the same `Any` field read, reached through a backend fixture rather than a
+    # rejection fixture. It is the one entry on this list that has no row in
+    # `TYPE_LAYER_GAP`: that pin addresses its fixtures by bare name under
+    # `examples/rejections/`, and this program does not live there.
+    "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
     # -- calls and signatures --
     "examples/rejections/t10_call_arity.rvl",
     "examples/rejections/t15_generic_call_site.rvl",
@@ -208,12 +229,15 @@ def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):
         "re-record the census baseline:\n  " + "\n  ".join(fixed))
 
 
-# --- the false-admission scaffold (docs/design/457, issue #346) --------------
+# --- the false-admission guard (docs/design/457, issue #346) -----------------
 #
-# The gate has no `Admitted` arm yet, so nothing lands in `false-admission`
-# today. These pin the CLASSIFIER and the zero-tolerance handling so the bucket
-# is a working guard the day the arm opens, not a line that has to be wired up
-# under pressure while the dangerous direction is already live.
+# The gate HAS an admission arm now (`revl_gate::issue_admission`): it upgrades a
+# no-objection to an ISSUED admission where the source is inside the admission
+# surface, and both census engines exercise it. So `false-admission` is a live
+# release-blocking guard rather than a scaffold, and the tests below hold three
+# separate things: the CLASSIFIER routes an issued admission correctly, the
+# zero-tolerance handling cannot be baselined away, and the bucket is empty over
+# a corpus that actually contains issued admissions.
 
 
 def test_an_issued_admission_the_reference_refuses_is_a_false_admission(census):
@@ -300,14 +324,130 @@ def test_run_routes_an_admitted_gate_kind_to_false_admission(census):
     assert details["bad_inslice"]["reference"]["tag"] == "G3"
 
 
-def test_the_false_admission_scaffold_is_empty_today(measured):
-    """No gate arm issues an admission yet, so the bucket is empty over the whole
-    census corpus. When it stops being empty, the arm has opened and the exit
-    tests in tests/test_inprocess_gate_rust.py take over."""
+def test_no_issued_admission_is_one_the_reference_refuses(measured):
+    """THE release-blocking direction, measured over the whole census corpus.
+
+    Every admission the gate ISSUES must be one the reference admits. A single
+    entry here means a host could read a rust admission as a green and run code
+    the reference never admitted, which is the defect class the whole
+    admission-gate arc exists to prevent. Never baselined, never allowed by
+    name."""
     _, (buckets, _) = measured
     assert buckets.get("false-admission", []) == [], (
         "a gate ISSUED an admission the reference refuses — this is the "
         "release-blocking direction; see docs/design/457 / issue #346")
+
+
+def test_the_admission_arm_actually_fires_over_the_corpus(census, measured):
+    """The other half of the guard above, and the one that keeps it from being a
+    vacuum.
+
+    A bucket that is empty because NOTHING is ever admitted proves nothing: that
+    was the state before the arm opened, and it read exactly the same. So the arm
+    is measured for non-vacuity too — the engine must issue real admissions over
+    the corpus, and every one of them must land in `agree-admit`.
+
+    `ADMISSION_PROGRAMS` is why there are any: every real `.rvl` in the tree
+    declares a component or an `fn` body and so sits outside the admission
+    surface, which would leave the arm exercised on zero inputs."""
+    cases, (buckets, _) = measured
+    engine = census.SelfhostEngine()
+    issued = [case_id for (case_id, _), verdict
+              in zip(cases, engine.verdicts(src for _, src in cases))
+              if verdict[0] == "admitted"]
+    assert len(issued) >= 6, (
+        "the admission arm issued nothing over the census corpus, so the "
+        f"false-admission guard measured nothing: {issued}")
+    agreed = set(buckets.get("agree-admit", []))
+    assert set(issued) <= agreed, (
+        "an issued admission did not land in `agree-admit`:\n  "
+        + "\n  ".join(sorted(set(issued) - agreed)))
+
+
+def test_the_admission_near_misses_are_withheld(census):
+    """The near misses in `ADMISSION_PROGRAMS` sit one token outside the surface,
+    and two of them are the certifier's OWN obligations: the reference refuses a
+    duplicate service and a duplicate method, and the native gate raises no
+    objection to either, so a certifier that skipped them would issue an
+    admission the reference refuses. Held here directly, by name, rather than
+    only through the bucket — a corpus edit that dropped them would otherwise
+    make the guard quietly weaker."""
+    certify = census.build_admission_certify()
+    programs = dict(census.ADMISSION_PROGRAMS)
+    near_misses = [name for name in programs if name.startswith("near_miss_")]
+    assert len(near_misses) >= 8, near_misses
+    for name in near_misses:
+        assert not certify(programs[name]), (
+            f"{name} is a NEAR MISS and must not be certified")
+    inside = [name for name in programs if not name.startswith("near_miss_")]
+    for name in inside:
+        assert certify(programs[name]), (
+            f"{name} is inside the surface and must be certified")
+
+
+def test_the_admission_mirror_matches_the_rust(census):
+    """The census's fast engine reads the crate's admission arm through a python
+    mirror of `crates/revl-gate/src/admission.rs::certify`. Its TABLES are
+    imported from the generator, so only the WALK can drift — held here against
+    the cases `admission.rs`'s own unit tests state, plus the derived
+    vocabularies the walk is written over."""
+    admission_rs = (ROOT / "crates" / "revl-gate" / "src" / "admission.rs") \
+        .read_text(encoding="utf-8")
+    assert "fn certify(" in admission_rs and "fn certify_into(" in admission_rs, \
+        "admission.rs no longer has the certifier this mirror was written against"
+
+    certify = census.build_admission_certify()
+    # `an_interface_only_source_is_certified`
+    assert certify("service Store {\n  fn get(key: Str) -> Str\n"
+                   "  fn put(key: Str, value: Str)\n}\n")
+    # `the_empty_source_is_the_empty_composition_and_is_certified`
+    for source in ("", "   \n", "// just a note\n"):
+        assert certify(source)
+    # `a_scalar_alias_is_certified_and_usable_in_a_signature`
+    assert certify("type Key = Str\nservice S {\n  fn get(k: Key) -> Key\n}\n")
+    # `an_alias_of_an_alias_is_not_certified`
+    assert not certify("type A = Str\ntype B = A\n")
+    # `a_term_of_any_kind_leaves_the_surface`
+    for source in (
+        "fn id(x: Int) -> Int { return x }",
+        "component C provides s: S {\n  provide s {\n    fn f(x) = x\n  }\n}\n",
+        "type R = { id: Int }",
+        "service S {\n  fn f(x: List[Int]) -> Int\n}\n",
+        'use "./other.rvl" { S }\n',
+        "pub service S {\n  fn f(x: Int) -> Int\n}\n",
+    ):
+        assert not certify(source), source
+    # `the_two_obligations_the_native_gate_does_not_carry`
+    assert not certify("service A {\n  fn f(x: Int) -> Int\n}\n"
+                       "service A {\n  fn g(x: Int) -> Int\n}\n")
+    assert not certify("service A {\n  fn f(x: Int) -> Int\n"
+                       "  fn f(y: Int) -> Int\n}\n")
+    # `a_declaration_may_not_shadow_a_reference_builtin_type`
+    for source in ("service Int {\n}\n", "type Opt = Str\n", "type Principal = Str\n"):
+        assert not certify(source), source
+    # `a_type_outside_the_scalar_vocabulary_leaves_the_surface`
+    assert not certify("service S {\n  fn f(x: Unknown) -> Int\n}\n")
+    assert not certify("service S {\n  fn f(x: Any) -> Int\n}\n")
+    # `a_non_ascii_byte_leaves_the_surface`
+    assert not certify("service \u00dcnicode {}")
+    assert certify("service S {\n  fn f(x: Str) -> Str // caf\u00e9\n}\n")
+    # `a_duplicate_parameter_name_leaves_the_surface`
+    assert not certify("service S {\n  fn f(x: Int, x: Int) -> Int\n}\n")
+    # `an_unterminated_declaration_leaves_the_surface`
+    for source in ("service S {", "service S {\n  fn f(x: Int\n}", "type A =", "service"):
+        assert not certify(source), source
+
+    # and the tables the walk is written over are the generator's own, carried
+    # into the rust verbatim
+    spec = importlib.util.spec_from_file_location(
+        "census_generator_admission", ROOT / "tools" / "build_gate_crate.py")
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    tables = generator.admission_tables()
+    assert "Int" in tables["scalars"] and "Opt" not in tables["scalars"]
+    for name in tables["scalars"]:
+        assert f'    "{name}",' in admission_rs
+    assert generator.admission_surface_id(generator.source_digest()) in admission_rs
 
 
 def test_the_frontier_mirror_matches_the_rust(census):

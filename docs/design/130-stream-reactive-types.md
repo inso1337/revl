@@ -9,12 +9,13 @@ and `Stream[T, State]`, the subscribe/next/close bracket with the
 cancellation-first `next` and rule 3.6, `map`/`filter`/`take` with the declared
 backpressure policies and the drain clock, the `merge` fan-in with the go/rust
 blocking lowerings, `every … in` async iteration, and typed events; §4.5
-(`replay`) and §6b (events) record inline what each slice shipped. Still open: the
-iteration/handler forms on java (the only tier that still refuses them; wasm
-refuses the whole stream surface by design), the
-`replay(n)`/`replay(from: <durable>)` declaration, and the reconstructible
-crash-recovery case. Rust graduated S5 (`on … as`): py, ts, go and rust
-now lower both forms.
+(`replay`) and §6b (events) record inline what each slice shipped. Java
+graduated the whole v1 surface (S1-S5), so every tier but wasm — which refuses
+streams by design, having no async host seam — now lowers the type, the
+subscribe/next/close bracket, `merge`, `every … in` and `on … as`. Still open:
+the `replay(n)`/`replay(from: <durable>)` declaration, the reconstructible
+crash-recovery case, and the required-`Stream[T]` coeffect wiring that would let
+`on E as e { … }` drop its `in <sub>` clause.
 
 Base: `origin/main` @ `e513772`. Every `file:line` anchor below was read at
 that sha. Every "admitted"/"refused" claim about *today's* checker is a claim
@@ -297,7 +298,7 @@ one item or a terminal), `close` (trip the cancel token, release the listener).
 | **py** | reference. `next` awaits an `asyncio.Queue` get raced against a cancel future; the body becomes the `async def` generator the async family already emits (backends/python/emit.py); the bracket `yield`s `lambda: sub.close()` |
 | **ts** | same shape on the `async function*` fiber body; `next` awaits a queue-vs-cancel race; the frame's bracket entry carries `close` |
 | **go** | erases async: `next` is a two-case `select` on the item channel and the cancel channel; `close` closes the cancel channel. Blocking, occupies the goroutine (A1 family 2) |
-| **java** | erases: `next` is a `BlockingQueue.poll` interruptible by the cancel signal; `close` interrupts and drains |
+| **java** | erases: `next` parks on a lock condition that the cancel flag also signals, and probes the flag ahead of the buffer; `close` trips the flag and signals, never waiting for the park to drain. Blocking, occupies the thread (A1 family 2). A `Faulted` is a thrown `CordisException`, the shape the activation's own A8 self-revert already reverts on |
 | **rust** | erases: `next` is a `crossbeam` `select!` on the item and cancel receivers; `close` drops the sender |
 | **wasm** | **REFUSES.** wasm has no async host seam (backends/wasm/emit.py:1251 already refuses awaited effect steps; lifecycle.py:134 refuses `advance`). A `subscribe`/`next` lowered here refuses with the same honest `EmitError`: "a stream subscription suspends a fiber; this tier awaits only `Job.run(name)`; streams live on the hosted and blocking backends (py/ts/go/java/rust)." |
 
@@ -472,11 +473,14 @@ event program would have emitted a bare struct and silently never subscribed.
 That path now refuses a dropped component that holds a stream, by name.
 
 Still open on §6: the `replay(...)` row (§4.5), the reconstructible
-crash-recovery case (§4.9), and the iteration/handler forms on java.
-Rust graduated the typed-event handler: it lowers to the same blocking
-`next` loop the plain `every … in` emits, plus the additive
-`Stream::contract` gate, against the cordis-rs `Stream` the Slice 3/4
-protocol already ships.
+crash-recovery case (§4.9), and the required-`Stream[T]` coeffect wiring that
+would let a handler drop its `in <sub>` clause. Rust and then java graduated the
+typed-event handler: each lowers to the same blocking `next` loop the plain
+`every … in` emits, plus the additive contract gate. Java constructs the
+validated item into the event's record class field by field, the JDK shipping no
+JSON binder the way go's `encoding/json` and rust's `serde` do; an event field
+shape that reading does not cover (a union, `Opt`, `Map` or `Bytes`) is refused
+by name rather than bound approximately.
 
 ## 7. Slices
 

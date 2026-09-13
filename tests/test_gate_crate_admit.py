@@ -219,6 +219,33 @@ fn main() {
         }
         return;
     }
+    // `--admission` is the ADMISSION question (issue #346), driven from the SAME
+    // standalone binary: `issue_admission(source)` for each source. Its wire is
+    // the verdict's own verbatim wherever it withholds, so this mode is a
+    // superset of the default one and the two can be compared directly.
+    if mode.as_deref() == Some("--admission") {
+        for source in blob.split('\0') {
+            println!("{}", revl_gate::issue_admission(source).to_json());
+        }
+        return;
+    }
+    // `--admission-into <manifest>` is the manifest half of the same question.
+    if mode.as_deref() == Some("--admission-into") {
+        let manifest = match argv.next() {
+            Some(value) => value,
+            None => {
+                eprintln!("--admission-into needs a manifest wire");
+                std::process::exit(2);
+            }
+        };
+        for source in blob.split('\0') {
+            println!(
+                "{}",
+                revl_gate::issue_admission_into(source, &manifest).to_json()
+            );
+        }
+        return;
+    }
     for source in blob.split('\0') {
         println!("{}", revl_gate::admit(source).to_json());
     }
@@ -307,12 +334,14 @@ def consumer(tmp_path_factory) -> Path:
     return binary
 
 
-def _crate_verdicts(binary: Path, sources: list[str]) -> list[dict]:
+def _crate_verdicts(binary: Path, sources: list[str],
+                    *mode: str) -> list[dict]:
     """Run every source through the crate in ONE process and return the parsed
-    verdicts, in order."""
+    verdicts, in order. `mode` selects a consumer mode (`"--admission"`, or
+    `"--admission-into", wire`); the default mode is the refusal surface."""
     env = {k: v for k, v in os.environ.items()
            if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
-    run = subprocess.run([str(binary)], input="\0".join(sources), text=True,
+    run = subprocess.run([str(binary), *mode], input="\0".join(sources), text=True,
                          capture_output=True, timeout=900, env=env, check=False)
     assert run.returncode == 0, (
         "the consumer binary exited nonzero:\n"
@@ -351,15 +380,17 @@ def agreement(consumer) -> list[tuple[str, str, tuple[str, str], dict]]:
 # --------------------------------------------- the release-blocking direction
 
 
-def test_the_crate_issues_no_admission_for_anything_in_the_corpus(agreement):
-    """THE security clause.
+def test_the_verdict_surface_issues_no_admission_for_anything_in_the_corpus(agreement):
+    """THE security clause, on the surface a consumer of `admit` holds.
 
     A native gate that refuses a program the reference admits is an
     inconvenience. A native gate that ADMITS a program the reference refuses is
-    the defect class this arc exists to prevent — so the crate ships no
-    admission at all, and this holds that over every corpus program: the wire
+    the defect class this arc exists to prevent — so the VERDICT surface issues
+    no admission at all, and this holds that over every corpus program: the wire
     `admitted` flag is false everywhere, and the only arms are `refused`,
-    `no_objection` and `outside_frontier`.
+    `no_objection` and `outside_frontier`. The crate's separate admission
+    surface (issue #346) is held by `test_every_admission_the_crate_issues_is_a_
+    real_reference_admission` below; it cannot be reached through this one.
     """
     offenders = [(name, verdict) for name, _src, _ref, verdict in agreement
                  if verdict["admitted"] is not False
@@ -368,6 +399,130 @@ def test_the_crate_issues_no_admission_for_anything_in_the_corpus(agreement):
     assert not offenders, (
         "the crate produced something a consumer could read as an admission:\n  "
         + "\n  ".join(f"{name}: {verdict}" for name, verdict in offenders))
+
+
+# ------------------------------------------- the admission surface (#346)
+
+
+@pytest.fixture(scope="module")
+def admissions(consumer) -> list[tuple[str, str, tuple[str, str], dict]]:
+    """The same corpus through `issue_admission` — (name, source, reference
+    verdict, admission wire), computed in a single invocation."""
+    wires = _crate_verdicts(consumer, [src for _, src in CORPUS], "--admission")
+    return [(name, src, _reference(src), wire)
+            for (name, src), wire in zip(CORPUS, wires)]
+
+
+# Programs INSIDE the crate's admission surface (`crates/revl-gate/src/
+# admission.rs`), and near misses one token outside it. The oracle corpus above
+# contains none of either: every program in it declares a component or an `fn`
+# body, so without these the admission arm would be exercised on zero inputs and
+# the tests below would pass by measuring nothing.
+INSIDE_THE_ADMISSION_SURFACE = (
+    ("empty", ""),
+    ("comment_only", "// nothing to declare\n"),
+    ("one_service", "service Store {\n  fn get(key: Str) -> Str\n}\n"),
+    ("scalar_alias", "type Key = Str\nservice S {\n  fn get(k: Key) -> Key\n}\n"),
+)
+
+OUTSIDE_THE_ADMISSION_SURFACE = (
+    # the two the certifier has to decide ITSELF: the reference refuses both and
+    # the native gate raises no objection to either
+    ("duplicate_service",
+     "service A {\n  fn f(x: Int) -> Int\n}\nservice A {\n  fn g(x: Int) -> Int\n}\n"),
+    ("duplicate_method",
+     "service A {\n  fn f(x: Int) -> Int\n  fn f(y: Int) -> Int\n}\n"),
+    # the type layer, which is the whole reason the surface is this small
+    ("type_error", 'fn f() -> Int { return "s" }'),
+    ("undefined_name", "fn f() -> Int { return undefined_name }"),
+    ("generic_type", "service S {\n  fn all() -> List[Int]\n}\n"),
+    ("record_alias", "type Row = { id: Int }\n"),
+)
+
+
+def test_every_admission_the_crate_issues_is_a_real_reference_admission(admissions):
+    """THE release-blocking direction for the admission surface (issue #346),
+    over the whole oracle corpus.
+
+    An admission the reference refuses is a host running code the reference never
+    admitted. There is no allowance for one, on any layer, for any reason."""
+    false_admissions = [
+        (name, ref_tag, wire) for name, _src, (ref_tag, _msg), wire in admissions
+        if wire.get("admitted") is True and ref_tag != ""
+    ]
+    assert not false_admissions, (
+        "the crate ISSUED an admission for a program the reference REFUSES:\n  "
+        + "\n  ".join(f"{name}: reference {tag}, wire {wire}"
+                       for name, tag, wire in false_admissions))
+
+
+def test_the_admission_arm_is_exercised_and_agrees_with_the_reference(consumer):
+    """The arm is real, and non-vacuously so.
+
+    A test that only checks "no bad admission" passes trivially on a gate that
+    admits nothing — which is what the crate did before this arm existed, and it
+    read exactly the same. So the programs INSIDE the surface must actually be
+    admitted, the reference must admit them too, and the near misses must be
+    withheld."""
+    inside = [src for _, src in INSIDE_THE_ADMISSION_SURFACE]
+    outside = [src for _, src in OUTSIDE_THE_ADMISSION_SURFACE]
+    wires = _crate_verdicts(consumer, inside + outside, "--admission")
+    names = ([name for name, _ in INSIDE_THE_ADMISSION_SURFACE]
+             + [name for name, _ in OUTSIDE_THE_ADMISSION_SURFACE])
+    for name, src, wire in zip(names[:len(inside)], inside, wires[:len(inside)]):
+        assert wire["admitted"] is True, f"{name} must be admitted: {wire}"
+        assert wire["verdict"] == "admitted", wire
+        assert _reference(src) == ("", ""), (
+            f"{name} is admitted by the crate; the reference must admit it too")
+    for name, wire in zip(names[len(inside):], wires[len(inside):]):
+        assert wire["admitted"] is False, f"{name} must be withheld: {wire}"
+
+
+def test_a_withheld_admission_is_the_verdict_wire_verbatim(consumer):
+    """Switching a consumer from `admit` to `issue_admission` may only ADD the
+    admitted wire. Every other answer has to be byte-identical to the one it
+    already handled, or the two surfaces are two gates."""
+    sources = ([src for _, src in OUTSIDE_THE_ADMISSION_SURFACE]
+               + [src for _, src in CORPUS[:40]])
+    verdicts = _crate_verdicts(consumer, sources)
+    issued = _crate_verdicts(consumer, sources, "--admission")
+    drift = [(src[:60], v, a) for src, v, a in zip(sources, verdicts, issued)
+             if a.get("admitted") is not True and v != a]
+    assert not drift, (
+        "a withheld admission did not carry the verdict wire verbatim:\n  "
+        + "\n  ".join(f"{s!r}: admit {v}, issue_admission {a}" for s, v, a in drift))
+
+
+def test_the_manifest_admission_arm_reads_its_manifest(consumer):
+    """`issue_admission_into` against a RUNNING composition.
+
+    The empty manifest is the empty composition, so it must answer exactly what
+    the standalone arm answers. A non-empty one must NOT: the item-186 row wire
+    carries no service shapes, so a candidate that DECLARES a service cannot be
+    certified against a running composition even though the same bytes are
+    admitted standalone. That gap is issue #346's remaining half, and it is held
+    here so it cannot be closed by guessing."""
+    declaring = "service Store {\n  fn get(key: Str) -> Str\n}\n"
+    silent = "// nothing to add\n"
+    running = "Kv/store/;App/app/;App<store"
+
+    empty = _crate_verdicts(consumer, [declaring, silent],
+                            "--admission-into", "")
+    standalone = _crate_verdicts(consumer, [declaring, silent], "--admission")
+    assert empty == standalone, (
+        "an empty manifest must be the empty composition on the admission "
+        f"surface too:\n  into: {empty}\n  standalone: {standalone}")
+
+    into = _crate_verdicts(consumer, [declaring, silent],
+                           "--admission-into", running)
+    assert into[0]["admitted"] is False, (
+        "a candidate that DECLARES a service must not be admitted into a running "
+        f"composition the wire cannot describe: {into[0]}")
+    assert into[1]["admitted"] is True, (
+        f"a candidate that declares nothing must still be admitted: {into[1]}")
+    halted = _crate_verdicts(consumer, [silent], "--admission-into",
+                             "Kv/store/;!halted")
+    assert halted[0]["admitted"] is False, halted
 
 
 def test_every_refusal_the_crate_issues_is_a_real_reference_refusal(agreement):
@@ -1107,13 +1262,23 @@ def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
           f"{len(skipped)} excluded for cost (#333): {', '.join(skipped)}")
     sources = [src for _, src in cases]
     fast = list(census.SelfhostEngine().verdicts(sources))
-    crate = _crate_verdicts(consumer, sources)
+    # The census asks the crate the ADMISSION question (issue #346), because
+    # that is the surface whose `false-admission` bucket is the release blocker.
+    # `issue_admission` is the verdict wire verbatim wherever it withholds, so
+    # this is the refusal comparison plus the admission one, in one pass.
+    crate = _crate_verdicts(consumer, sources, "--admission")
 
     mismatches = []
     for (case_id, _src), got, want in zip(cases, fast, crate):
         kind, payload = got
         if kind == "refused":
             mine = ("refused", payload[0], payload[1])
+        elif kind == "admitted":
+            # An ISSUED admission. Its wire carries no code and no message, so
+            # the comparison is the arm alone — and the arm is the whole claim:
+            # the cheap engine must admit exactly what the crate admits, or the
+            # census's release-blocking bucket is measuring a different gate.
+            mine = ("admitted", None, None)
         elif kind == "no_objection":
             mine = ("no_objection", "", "")
         elif kind == "frontier":
@@ -1129,6 +1294,9 @@ def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
         elif mine[0] == "refused" and mine[1:] != theirs[1:]:
             mismatches.append(
                 f"{case_id}: census {mine[1:]!r}, crate {theirs[1:]!r}")
+        elif mine[0] == "admitted" and want.get("admitted") is not True:
+            mismatches.append(
+                f"{case_id}: the crate's admitted arm did not set admitted:true")
     assert not mismatches, (
         f"the census's fast engine and the crate disagree on "
         f"{len(mismatches)} of {len(cases)} programs:\n  "

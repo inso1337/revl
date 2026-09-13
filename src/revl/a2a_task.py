@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 
+from . import a2a_boundary
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 
 #: The four suffixes the projection speaks, in the LIFO-sane order the design
@@ -96,7 +97,13 @@ def transport_fault_class(label: str, op: str, indent: int = 4) -> str:
     (never class identity, so the exec'd module and the runtime share one
     contract without an import), plus the row label and the crossing that
     failed. It subclasses `RuntimeError` so a caller catching `RuntimeError`
-    still sees it."""
+    still sees it.
+
+    The two accounting attributes are spelled `_revl_row` / `_revl_crossing`
+    because that is what reads them: `run.py`'s withdrawal record and the
+    runtime's own declared `TransportFault` (`backends/python/runtime.py`). A
+    four-op fault spelled them without the leading underscore, so its
+    withdrawal was recorded with no row and no crossing."""
     pad = " " * indent
     rq, oq = json.dumps(label), json.dumps(op)
     return (
@@ -104,8 +111,8 @@ def transport_fault_class(label: str, op: str, indent: int = 4) -> str:
         f"{pad}    # item 439 T0/T1: a crossing fault under `on_failure(withdraw)`\n"
         f"{pad}    # WITHDRAWS the provider (the runtime keys on the marker).\n"
         f"{pad}    _revl_transport_fault = True\n"
-        f"{pad}    revl_row = {rq}\n"
-        f"{pad}    revl_crossing = {oq}\n")
+        f"{pad}    _revl_row = {rq}\n"
+        f"{pad}    _revl_crossing = {oq}\n")
 
 
 def _message_obj(skill_ref: str, *, with_task_id: bool) -> str:
@@ -113,14 +120,13 @@ def _message_obj(skill_ref: str, *, with_task_id: bool) -> str:
     `message/send` + `taskId` (`_reply`) carries. `_message` is the one text
     `Part`; the op name rides as `revl.skill`; `_reply` also carries the running
     task's id so the peer routes the answer to the same task."""
-    sid = json.dumps(skill_ref)
     task_id = '        "taskId": _task["id"],\n' if with_task_id else ""
     return (
         '{\n'
         '        "role": "user",\n'
         '        "messageId": str(_uuid.uuid4()),\n'
         '        "parts": [{"kind": "text", "text": _message}],\n'
-        f'        "metadata": {{"revl.skill": {sid}}},\n'
+        f'        "metadata": {a2a_boundary.py_metadata(skill_ref)},\n'
         f'{task_id}'
         '    }')
 
@@ -151,7 +157,7 @@ def _event_from_result(fault) -> str:
         '        _text = "".join(p.get("text", "") for p in (_result.get("parts") or [])\n'
         '                        if p.get("kind") == "text" and isinstance(p.get("text"), str))\n'
         '        return Message(_text)\n'
-        + fault(4, '"a2a: unexpected result kind %r" % (_kind,)'))
+        + fault(4, '_scrub("a2a: unexpected result kind %r" % (_kind,))'))
 
 
 def task_body(kind: str, endpoint: str, base_or_skill: str, *,
@@ -197,7 +203,7 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     payload = (
         '{\n'
         '        "jsonrpc": "2.0",\n'
-        '        "id": str(_uuid.uuid4()),\n'
+        '        "id": _corr,\n'
         f'        "method": {json.dumps(method)},\n'
         f'        "params": {params},\n'
         '    }')
@@ -206,8 +212,8 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     if kind == "start":
         handle = (
             '    if _result.get("kind") != "task":\n'
-            + fault(8, '"a2a: _start expected a Task handle, got kind %r" '
-                       '% (_result.get("kind"),)')
+            + fault(8, '_scrub("a2a: _start expected a Task handle, got '
+                       'kind %r" % (_result.get("kind"),))')
             + '    _tid = _result.get("id")\n'
             '    if not isinstance(_tid, str) or not _tid:\n'
             + fault(8, '"a2a: _start reply carried no task id"')
@@ -215,15 +221,32 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     elif kind == "cancel":
         # tasks/cancel is BEST-EFFORT (item 247): a 2xx with any result is
         # enough. A transport fault still withdraws (it is a crossing that did
-        # not answer); a peer that answers is honoured whatever state it reports.
+        # not answer); a peer that answers is honoured whatever state it
+        # reports, but NOT if it answered about another task (the identity gate
+        # above already refused that).
         handle = "    return None\n"
     else:  # poll / reply
         handle = _event_from_result(fault)
 
+    # Item 439: the boundary's own gates, shared with the terminal wire and
+    # the importer (`a2a_boundary`) so a peer cannot be read differently
+    # depending on which entry point generated the client.
+    funnel = a2a_boundary.py_funnel("_args")
+    correlation = a2a_boundary.py_correlation()
+    gates = (a2a_boundary.py_envelope_gates(fault)
+             + '    if _rpc.get("error"):\n'
+             + fault(8, '_scrub("a2a: JSON-RPC error %s"'
+                        ' % (_rpc["error"].get("code"),))')
+             + '    _result = _rpc.get("result")\n'
+             + a2a_boundary.py_result_gate(fault)
+             # `_start` mints the task identity; the other three name one they
+             # already hold, so their reply must describe THAT task.
+             + ("" if kind == "start"
+                else a2a_boundary.py_task_identity_gate(fault)))
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-{faults}    # A2A 1.0.0 JSON-RPC 2.0, task op `{kind}`. ONE crossing.
+{faults}{funnel}{correlation}    # A2A 1.0.0 JSON-RPC 2.0, task op `{kind}`. ONE crossing.
 {bind}    _payload = _json.dumps({payload}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
@@ -236,7 +259,4 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
         # endpoint, re-raised so it is never flattened into a feed event.
         raise
     except Exception as _exc:
-{fault(8, '"a2a: transport failure"', cause="_exc")}    if _rpc.get("error"):
-{fault(8, '"a2a: JSON-RPC error %s" % (_rpc["error"].get("code"),)')}    _result = _rpc.get("result")
-    if not _result:
-{fault(8, '"a2a: response carried no result"')}{handle}    """
+{fault(8, '"a2a: transport failure"', cause="_exc")}{gates}{handle}    """

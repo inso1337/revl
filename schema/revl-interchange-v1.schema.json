@@ -113,9 +113,14 @@
           }
         },
         "compensated": {
-          "description": "How many of this component's emissions carry a compensating undo.",
+          "description": "How many of the `emissions` labels above carry a compensating undo. Counted over distinct labels, never over emit steps, so it can never exceed the number of `emissions` and a label compensated at more than one site counts once. Compensation reached through an emitting host extern has no `key.method` label and is therefore absent from this count; it is named in `compensatedHostEmissions` instead.",
           "type": "integer",
           "minimum": 0
+        },
+        "compensatedHostEmissions": {
+          "description": "Names of emitting host externs this component compensates. They cross the boundary but carry no `key.method` label, so they are absent from both `emissions` and `compensated`. Present only when there is one, so a boundary entry with no host-extern compensation is byte-identical to before this field existed.",
+          "type": "array",
+          "items": { "type": "string" }
         },
         "awaits": {
           "description": "Iteration/await boundaries in this component's body.",

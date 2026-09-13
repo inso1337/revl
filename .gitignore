@@ -24,6 +24,11 @@ examples/ecosystem-consumer-rs/Cargo.lock
 examples/ecosystem-consumer-js/dist/
 examples/ecosystem-consumer-js/package-lock.json
 
+# the exemplary web app's Vite output (docs/frontend-assets.md). `package-lock.json`
+# IS committed next to it: `revl dev` spawns `npm run dev`, so the frontend half of
+# the one dev command is only reproducible if its tree is pinned (item 461).
+examples/app/frontend/dist/
+
 # stray localhost access log (item 110a)
 .srv.log
 *.srv.log

@@ -11,23 +11,35 @@
 // It registers one page at `/notes` (the route the coeffect declares) rendering
 // the `NotesConsole.vue` screen, and reads the server's synced reactive state /
 // RPC surface through `useRpc<NotesConsoleChannel>()` — the typed contract in
-// `./contract.ts`. Until the server projects that surface (457 S4, the filed gap
-// in `./contract.ts`), `useRpc` resolves to an empty object and the page drives
-// note state through the typed REST routes instead; the type is already the
-// one-declaration shape so no rewrite is needed when the projection lands.
+// `./contract.ts`, which is GENERATED from the `NotesConsole` declaration by
+// `revl export client --lang ts --face webui --component NotesConsole`. The
+// server's published fields and this type are therefore one declaration, the way
+// `./notes.client.ts` is one declaration with `NotesApi`. Note state still flows
+// over the typed REST routes; the channel carries the ranker's live surface and
+// the two RPC methods the console provides.
 
+import { defineComponent, h } from 'vue'
 import { defineExtension, useRpc } from '@cordisjs/client'
 import NotesConsole from './NotesConsole.vue'
 import type { NotesConsoleChannel } from './contract'
+
+// `useRpc` is a COMPOSABLE: it injects the shell context and reads the entry's
+// reactive `data`, so it has to run inside a component's own `setup`, not in the
+// registration call. This one-line page wrapper is where it runs, which keeps
+// `NotesConsole.vue` a plain props-driven screen that also renders standalone
+// (a unit test, a Storybook-style harness) outside a Cordis WebUI host.
+const NotesPage = defineComponent({
+  name: 'NotesPage',
+  setup() {
+    const channel = useRpc<NotesConsoleChannel>()
+    return () => h(NotesConsole, { channel: channel.value })
+  },
+})
 
 export default defineExtension((ctx) => {
   ctx.page({
     path: '/notes',
     name: 'Notes',
-    component: NotesConsole,
-    // The synced server channel, typed against the shared contract. `useRpc`
-    // returns a ref onto the reactive `data` the server published through
-    // `webui.add_entry`; the console binds it as the `channel` prop.
-    fields: () => ({ channel: useRpc<NotesConsoleChannel>() }),
+    component: NotesPage,
   })
 })

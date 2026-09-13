@@ -155,11 +155,19 @@ def test_the_world_imports_nothing():
 def test_the_component_ships_no_admission_at_all():
     """The security clause, pinned in source.
 
-    The wasm gate is `crates/revl-gate` packaged, and that gate decides the
-    composition/guarantee layer and NOT the reference type layer, so it has no
-    admission to give. The shim closes the false-admit direction structurally:
-    `admitted` is written as the literal `false` at every construction site, and
-    there is no expression anywhere that could set it from a verdict.
+    This world exports `crates/revl-gate`'s VERDICT surface, and that surface
+    decides the composition/guarantee layer and NOT the reference type layer, so
+    it has no admission to give. The shim closes the false-admit direction
+    structurally: `admitted` is written as the literal `false` at every
+    construction site, and there is no expression anywhere that could set it from
+    a verdict.
+
+    The crate's separate admission surface (`revl_gate::issue_admission`, issue
+    #346) is deliberately not on this world, and this test is what holds that cut
+    in place: the arm leans on the crate's `catch_unwind` fail-closed path, and on
+    wasm the panic strategy is `abort`, so the path it depends on does not exist
+    here. `tools/build_gate_wasm.py` refuses to generate if the crate's VERDICT
+    arms ever gain an admitting one.
     """
     lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
     code = "\n".join(line for line in lib_rs.splitlines()
@@ -198,7 +206,7 @@ def test_the_covered_layer_is_stated_identically_everywhere():
     assert "NOT the reference type layer" in meta["covered_layer"]
     readme = (CRATE / "README.md").read_text(encoding="utf-8")
     assert meta["covered_layer"] in readme
-    assert "This gate issues no admissions" in readme
+    assert "This world issues no admissions" in readme
 
 
 def test_the_binding_generator_is_pinned_exactly():

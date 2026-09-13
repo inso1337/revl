@@ -1,0 +1,26 @@
+// Fixture for tests/test_canary.py — the CANDIDATE generation of tenant_a's
+// store, admitted against the baseline (canary_tenants.rvl) with
+// `replacing=(TenantAStore,)`. Same interface, same key, same realm, same
+// activation, and the `set` method ACQUIRES exactly what the baseline acquires
+// (`store.insert(k, v)` with the same args) — but its INVERSE is different: the
+// baseline takes the entry back with `store.remove(k)`, this generation removes
+// a key it never wrote. The recorded world therefore differs even though every
+// acquisition is byte-identical, and the canary must revert rather than promote
+// a generation whose rollback takes back different state.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove("some-other-key")
+    }
+  }
+}

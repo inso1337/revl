@@ -369,6 +369,39 @@ def _movable_for_iterables(body: object, multi_use: "set[str]") -> "set[int]":
     return movable
 
 
+def _boxed_field_read(node: object, ctx: "_V3Ctx") -> bool:
+    """Whether the `field` read `node` reads a struct field the boxing pass put
+    behind a `Box` (issue #919).
+
+    A recursive struct-field edge is declared `Box<T>` (E0072), and Rust does
+    NOT auto-deref a `Box` field in value position — `fn chain(n: Node) ->
+    Option<Node> { n.next }` with `next: Box<Option<Node>>` is an E0308. So the
+    read site has to unbox, which is what makes boxing a struct field costlier
+    than boxing an enum payload (a payload is unboxed once, in the match arm).
+
+    The owner is resolved exactly as `_by_value_field_clone` resolves a field's
+    type — walk the `base.f1.f2..` chain to its root BINDING and follow the
+    declared field types down — so a nested read (`c.ctx_.caps`) agrees with the
+    declaration. An unresolvable chain (an index/call root, a loop binding the
+    emitter did not type) reports `False`: the conservative answer, since
+    `boxed_fields` is empty unless a recursive struct-field edge exists at all."""
+    if not ctx.boxed_fields:
+        return False
+    chain: list[str] = []
+    cur: object = node
+    while isinstance(cur, dict) and cur.get("kind") == "field":
+        chain.append(cur.get("name"))
+        cur = cur.get("target")
+    if not (isinstance(cur, dict) and cur.get("kind") in ("var", "name", "req")):
+        return False
+    root = cur.get("id") or cur.get("name")
+    owner: object = ctx.var_types.get(root) if root else None
+    for field in reversed(chain[1:]):
+        owner = (ctx.record_field_types(owner).get(field)
+                 if isinstance(owner, str) else None)
+    return isinstance(owner, str) and (owner, chain[0]) in ctx.boxed_fields
+
+
 def _by_value_field_clone(arg_node: object, rendered: str,
                           ctx: "_V3Ctx") -> str | None:
     """`f"{rendered}.clone()"` when the by-value argument is a non-Copy field
@@ -6214,7 +6247,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             place = target[: -len(".clone()")]
             if node.get("sized_length"):
                 return f"{place}.revl_length()"
-            return f"{place}.{_ident(node.get('name'), 'field')}.clone()"
+            field = _ident(node.get("name"), "field")
+            if _boxed_field_read(node, ctx):
+                # issue #919: the declaration holds this recursive field as a
+                # `Box`, so the read has to unbox it back to the declared type.
+                return f"(*{place}.{field}).clone()"
+            return f"{place}.{field}.clone()"
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
         if node.get("sized_length"):
@@ -6223,7 +6261,13 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # via the helper trait (`String::len` is bytes), the same as the
             # `len` node, NOT a struct field access.
             return f"{target}.revl_length()"
-        return f"{target}.{_ident(node.get('name'), 'field')}"
+        field = _ident(node.get("name"), "field")
+        if _boxed_field_read(node, ctx):
+            # issue #919: a `Box` struct field is a place, not the declared
+            # value, and Rust does not auto-deref it in value position. Unbox
+            # into the place `_by_value_*` then clones at a by-value reuse site.
+            return f"(*{target}.{field})"
+        return f"{target}.{field}"
 
     if kind == "index":
         target_node = node.get("target")
@@ -7235,6 +7279,52 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 
 
 
+def _inline_cycle_target(ftype: object, types: dict) -> str | None:
+    """The bare user type a declared field/case type reaches with NO heap
+    indirection in between, or ``None`` when the type cannot make its owner
+    infinite-size.
+
+    Rust stores `Vec<T>`/`HashMap<K, V>` payloads on the heap, so a `List[T]` or
+    `Map[K, T]` field already breaks a containment cycle. `Option<T>` and
+    `Result<T, E>` store their payload INLINE, so `Opt[Node]` is exactly as
+    infinite as a bare `Node` field — the rust boxing pass used to count an edge
+    only for a bare name (a KEY of `types`), so it saw no cycle in
+    `type Node = { val: Str, next: Opt[Node] }` and emitted an infinite-size
+    struct (issue #919, `cargo` E0072/E0391). A wrapper chain is unwrapped all
+    the way down (`Opt[Opt[Node]]` is `Option<Option<Node>>`, still inline) and
+    the first heap-backed wrapper on the way stops the walk: `Opt[List[Node]]`
+    is `Option<Vec<Node>>` and is finite.
+
+    Returns the RAW name as it appears in `types`, matching the keys of
+    ``boxed_cases``/``boxed_fields``.
+    """
+    seen = 0
+    while isinstance(ftype, str):
+        generic = re.match(r"^(\w+)\[(.+)\]$", ftype)
+        if not generic:
+            # A bare name: direct containment exactly when it is a declared
+            # type. (An unknown scalar/`Any` is not.)
+            return ftype if ftype in types else None
+        head, inner = generic.group(1), generic.group(2)
+        if head == "Opt":
+            ftype = inner.strip()
+        elif head == "Result":
+            # Both payloads are inline; an edge exists if EITHER one recurses.
+            for part in _split_generic(inner):
+                target = _inline_cycle_target(part, types)
+                if target is not None:
+                    return target
+            return None
+        else:
+            # `List`/`Map`/anything else: heap-backed (or unknown), so no
+            # infinite-size containment edge.
+            return None
+        seen += 1
+        if seen > 64:  # a pathological `Opt[Opt[..]]` chain; give up safely
+            return None
+    return None
+
+
 def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
     """Return ``(boxed_cases, boxed_fields)`` — the enum-variant payload edges
     and record-field edges that must be ``Box``-indirected so a recursive ADT is
@@ -7244,15 +7334,18 @@ def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
     revl admits recursive datatypes (a self-host AST `Expr` whose cases carry
     per-case structs — `BinN`, `IfN`, ... — that again contain `Expr` fields).
     Rust requires a heap indirection on some edge of every containment *cycle* or
-    the type has infinite size. `Vec`/`Opt`/`Map`/`Box` already ARE indirection,
-    so only a *direct* (bare) user-type field/payload can be recursive; a
-    `List[Expr]` field never is. We break every cycle with the fewest boxes,
-    preferring an ENUM-variant payload edge over a struct field: boxing an enum
-    payload needs no read-site change (`Box<T>` auto-derefs for field access and
-    a field can be moved out of the box), whereas a boxed struct field would
-    force a deref at every read. Keys are the RAW type/member names (exactly as
-    they appear in `types`), so the declaration site, the constructor, and the
-    record literal all agree without threading the mangled idents.
+    the type has infinite size. `Vec`/`HashMap` ARE that indirection — their
+    payload lives on the heap — but `Option`/`Result` are NOT: `Option<T>` and
+    `Result<T, E>` store their payload INLINE, so an `Opt[T]` (or `Result[.., T]`)
+    field is exactly as infinite as a bare `T` field (issue #919). Only the
+    wrappers `_inline_cycle_target` rejects are the ones that cannot recurse. We
+    break every cycle with the fewest boxes, preferring an ENUM-variant payload
+    edge over a struct field: boxing an enum payload needs no read-site change (a
+    field can be moved out of the box and the match arm unboxes it), whereas a
+    boxed struct field forces a deref at every read (`_boxed_field_read`). Keys
+    are the RAW type/member names (exactly as they appear in `types`), so the
+    declaration site, the constructor, and the record literal all agree without
+    threading the mangled idents.
     """
     adj: dict[str, list[tuple[str, str, str]]] = {}
     enum_edges: list[tuple[str, str, str]] = []   # (owner, case, target)
@@ -7261,18 +7354,16 @@ def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
         edges: list[tuple[str, str, str]] = []
         if spec.get("kind") == "record":
             for field, ftype in (spec.get("fields") or {}).items():
-                # a *bare* user-type name is direct containment; a generic
-                # (`List[..]`/`Opt[..]`/`Map[..]`) is not in `types`, so it is
-                # already indirection and cannot make the type infinite.
-                if isinstance(ftype, str) and ftype in types:
-                    edges.append(("field", field, ftype))
-                    field_edges.append((name, field, ftype))
+                target = _inline_cycle_target(ftype, types)
+                if target is not None:
+                    edges.append(("field", field, target))
+                    field_edges.append((name, field, target))
         elif spec.get("kind") == "variant":
             for case in spec.get("cases") or []:
-                payload = case.get("payload")
-                if isinstance(payload, str) and payload in types:
-                    edges.append(("case", case.get("name"), payload))
-                    enum_edges.append((name, case.get("name"), payload))
+                target = _inline_cycle_target(case.get("payload"), types)
+                if target is not None:
+                    edges.append(("case", case.get("name"), target))
+                    enum_edges.append((name, case.get("name"), target))
         adj[name] = edges
 
     boxed_cases: set = set()

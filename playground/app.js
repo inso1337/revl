@@ -262,7 +262,13 @@ function renderAudit(data) {
     const externs = b.externs || [];
     if (emis.length) {
       bnd += emis.map((e) => `<span class="pill emit">emit ${esc(e)}</span>`).join(" ");
-      bnd += ` <span class="detail" style="color:var(--muted);font-size:12px">(${b.compensated || 0} compensated)</span>`;
+      bnd += ` <span class="detail" style="color:var(--muted);font-size:12px">(${b.compensated || 0} of them compensated)</span>`;
+    }
+    // issue #940: compensation on an emitting host extern carries no emission
+    // label, so it is not in the count above. Named rather than dropped.
+    const hostComp = b.compensatedHostEmissions || [];
+    if (hostComp.length) {
+      bnd += ` <span class="detail" style="color:var(--muted);font-size:12px">(host compensated: ${esc(hostComp.join(", "))})</span>`;
     }
     if (externs.length) {
       bnd += externs.map((e) => `<span class="pill emit">host ${esc(e.name)}</span>`).join(" ");

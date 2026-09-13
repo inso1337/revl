@@ -194,6 +194,29 @@ def test_crate_to_json_layout_has_not_drifted_from_py():
 
 @pytest.mark.skipif(not _CRATE_LIB.is_file(),
                     reason="the revl-gate crate is not in this tree")
+def test_the_crates_admitted_wire_is_the_py_admitted_wire_byte_for_byte():
+    """The crate has an admission arm now (issue #346,
+    `revl_gate::issue_admission`), and its wire must be the SAME BYTES py writes
+    for an admission — not a second spelling of the same yes.
+
+    That matters at a seam (item 337): two tiers whose admissions differ by a
+    byte cannot be compared by comparing them. The crate writes the wire as one
+    literal precisely so this test can hold it against py's rendering rather than
+    against a restatement of it."""
+    py_wire = Verdict.from_native("").to_json()
+    assert py_wire == (
+        '{"verdict":"admitted","admitted":true,"code":null,"message":null}')
+    src = _CRATE_LIB.read_text(encoding="utf-8")
+    # the rust source escapes the quotes; unescape to compare the BYTES emitted
+    literal = r'"{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}"'
+    assert literal in src, (
+        "the crate's admitted wire literal changed; re-sync it with "
+        f"revl.gate.Verdict.to_json, which writes {py_wire}")
+    assert literal.replace('\\"', '"')[1:-1] == py_wire
+
+
+@pytest.mark.skipif(not _CRATE_LIB.is_file(),
+                    reason="the revl-gate crate is not in this tree")
 def test_crate_json_string_escape_set_matches_py():
     """The crate's `json_string` handles exactly the escapes py's `_json_string`
     does — the named `"`, `\\`, `\\n`, `\\r`, `\\t` plus the `\\u{:04x}` control

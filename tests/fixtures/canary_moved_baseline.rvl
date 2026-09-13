@@ -1,0 +1,63 @@
+// Fixture for tests/test_canary.py — the baseline of the MOVED-STEP canary
+// pair (roadmap item 496). Same N = 3 tenant composition as
+// canary_tenants.rvl, with one difference: the store's service exposes a
+// read-through `get(k, v)` — read `k`, seeding it with `v` — so the same
+// acquisition can be written inside either entry point. Every store here keeps
+// the acquisition on the WRITE path, where a consumer expects it.
+
+service Kv {
+  fn get(k: Str, v: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k, v) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantAApp requires kv: Kv {
+  isolate kv in realm("tenant_a")
+  effect kv.set("who", "A") undo kv.set("who", "")
+}
+
+component TenantBStore provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k, v) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantBApp requires kv: Kv {
+  isolate kv in realm("tenant_b")
+  effect kv.set("who", "B") undo kv.set("who", "")
+}
+
+component TenantCStore provides kv: Kv {
+  isolate kv in realm("tenant_c")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k, v) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantCApp requires kv: Kv {
+  isolate kv in realm("tenant_c")
+  effect kv.set("who", "C") undo kv.set("who", "")
+}
+

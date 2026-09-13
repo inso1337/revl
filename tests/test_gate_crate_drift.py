@@ -167,16 +167,20 @@ def test_the_crate_is_admit_only_and_says_so():
         "a later slice, and until then a non-refusal fails closed, not admits")
 
 
-def test_the_crate_ships_no_admission_at_all():
+def test_the_verdict_surface_still_issues_no_admission():
     """The security clause, pinned in source.
 
     `selfhost/lower.rvl`'s `admit_src` decides the composition/guarantee layer
     (G1..G4, A1, PRELUDE, BAD) and runs NO type layer, so a non-refusal from it
     can never mean "the reference would admit this"
     (`tests/test_gate_crate_admit.py::TYPE_LAYER_GAP` measures it). The crate
-    closes the false-admit direction structurally rather than by discipline:
-    there is no `Admitted` arm, no `is_admitted()`, and the wire shape says
-    `admitted: false` on every arm.
+    grew an ADMISSION surface for issue #346, and this is the half of that change
+    that must NOT have moved: `Verdict` still has no admitting arm, and
+    `Verdict::to_json` still reports `admitted: false` on every one of its arms.
+
+    That is what keeps the old guarantee true. A host holding a `Verdict` has no
+    arm it could misread as a green, whatever the admission surface grows into;
+    an admission has to be asked for by name, through a different type.
     """
     lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
     # doc comments explain at length why the arm is absent; the CODE is what
@@ -186,16 +190,87 @@ def test_the_crate_ships_no_admission_at_all():
     assert "OutsideFrontier { reason: String }" in code
     assert "NoObjection," in code
     assert "Verdict::Admitted" not in code, (
-        "the crate must not have an `Admitted` arm: this gate does not run the "
-        "reference type layer, so it cannot issue an admission")
-    assert "fn is_admitted" not in code, (
-        "no `is_admitted()` — a caller must not be able to ask this gate for an "
-        "admission it cannot give")
+        "`Verdict` must not gain an admitting arm: a consumer of the refusal "
+        "surface must have nothing it could read as a green. An admission is a "
+        "separate type, asked for by name (`issue_admission`)")
+    assert "pub fn admit(source: &str) -> Verdict" in code
+    assert "pub fn admit_into(source: &str, manifest: &str) -> Verdict" in code
     assert r'",\"admitted\":false,\"code\":"' in code, (
-        "`to_json` must report `admitted: false` on every arm, so a consumer of "
-        "the fixed {admitted, code, message} shape fails closed")
+        "`Verdict::to_json` must report `admitted: false` on every arm, so a "
+        "consumer of the fixed {admitted, code, message} shape fails closed")
     assert "catch_unwind" in code, \
         "a native gate abort must become OutsideFrontier, never a verdict"
+
+
+def test_the_admission_arm_is_reachable_only_behind_the_refusal_gate():
+    """The shape of the admission arm (issue #346), pinned in source.
+
+    The arm is the dangerous direction, so the two things that make it sound are
+    pinned here rather than left to a reading of the docs:
+
+    * an `Admission::Admitted` is constructed at exactly TWO sites — one per
+      entry point — and each one sits inside a `verdict == Verdict::NoObjection`
+      guard, so an admission can never be issued over a refusal or a frontier
+      gap however the certifier is widened later;
+    * the certifier itself is a separate generated module with its own DERIVED
+      vocabularies and its own surface id, and it is the only thing either entry
+      point consults.
+    """
+    lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
+    # the shipped code only: the `#[cfg(test)]` module below it exercises the arm
+    # and naming it there is not a construction site a consumer can reach.
+    code = "\n".join(line for line in lib_rs.split("#[cfg(test)]")[0].splitlines()
+                     if not line.lstrip().startswith(("//!", "///", "//")))
+    assert "mod admission;" in code, \
+        "the certifier must be its own generated module, not inline in the shim"
+    assert "pub enum Admission {" in code
+    assert "Admitted { basis: String }," in code
+    assert "Withheld { verdict: Verdict }," in code
+    assert "pub fn issue_admission(source: &str) -> Admission" in code
+    assert ("pub fn issue_admission_into(source: &str, manifest: &str) -> Admission"
+            in code)
+    assert "pub const ADMISSION_SURFACE_ID: &str = admission::SURFACE_ID;" in code
+    # Every construction of the admitting arm, and the guard it sits behind.
+    assert code.count("return Admission::Admitted { basis };") == 2, (
+        "the admitting arm must be constructed at exactly the two entry points; "
+        "a third site is a path that has not been reviewed")
+    guarded = code.count(
+        "if verdict == Verdict::NoObjection {\n        if let Some(basis) = admission::")
+    assert guarded == 2, (
+        "each admission must be issued only where the REFUSAL surface answered "
+        "NoObjection: an admission over a refusal or a frontier gap is the "
+        "wave-through this crate exists to prevent")
+
+    admission_rs = (CRATE / "src" / "admission.rs").read_text(encoding="utf-8")
+    assert "pub(crate) fn certify(source: &str) -> Option<String>" in admission_rs
+    assert ("pub(crate) fn certify_into(source: &str, manifest: &str) -> "
+            "Option<String>" in admission_rs)
+    for table in ("SCALAR_TYPES", "RESERVED_TYPE_NAMES", "REFERENCE_KEYWORDS"):
+        assert f"pub(crate) const {table}: &[&str]" in admission_rs, table
+    assert "pub(crate) const SURFACE_ID: &str" in admission_rs
+
+
+def test_the_admission_tables_are_derived_not_hand_written():
+    """The certifier's vocabularies are the REFERENCE compiler's own tables, so a
+    scalar the reference stops treating as a scalar cannot stay in the surface
+    silently — it changes the generated bytes and reds the drift gate in the same
+    wave, exactly as the frontier table does."""
+    meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
+    tables = GEN.admission_tables()
+    assert meta["admission_scalar_types"] == tables["scalars"]
+    assert meta["admission_reserved_type_names"] == tables["reserved"]
+    assert meta["admission_surface"] == \
+        GEN.admission_surface_id(meta["source_digest"])
+    assert meta["admitted_layer"] == GEN.ADMITTED_LAYER
+    admission_rs = (CRATE / "src" / "admission.rs").read_text(encoding="utf-8")
+    for name in tables["scalars"]:
+        assert f'    "{name}",' in admission_rs
+    # a generic head is not a scalar, and must never be admitted as one
+    for head in ("Opt", "List", "Map", "Result", "Any", "Never", "Value"):
+        assert head not in tables["scalars"], head
+        assert head in tables["reserved"], head
+    lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert f'pub const ADMITTED_LAYER: &str = "{GEN.ADMITTED_LAYER}";' in lib_rs
 
 
 def test_the_navigation_surface_issues_no_verdict_and_is_versioned_apart():
@@ -232,12 +307,18 @@ def test_the_covered_layer_is_stated_identically_everywhere():
     stamped into the rust source, the README and the provenance from a single
     generator constant, so the three cannot disagree."""
     meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
-    assert meta["issues_admissions"] is False
+    # The gate DOES issue admissions now (issue #346) — but only through the
+    # separate `Admission` surface, and only inside `admitted_layer`. The VERDICT
+    # arms are unchanged, which is the property a consumer of `admit` relies on.
+    assert meta["issues_admissions"] is True
     assert meta["verdict_arms"] == ["refused", "no_objection", "outside_frontier"]
-    # The manifest arm (issue #346) did not add an arm: `admit_into` returns one
-    # of the same three, so `issues_admissions` stays false and the provenance
-    # says which surface answers the manifest question rather than implying a new
-    # power. A new arm here would be the admission this crate may not issue.
+    assert meta["admission_arms"] == ["admitted", "withheld"]
+    assert "issue_admission" in meta["admission_arm"]
+    assert "NoObjection" in meta["admission_arm"]
+    # The manifest arm (issue #346) added no VERDICT arm: `admit_into` returns one
+    # of the same three, and the provenance says which surface answers the
+    # manifest question rather than implying a new power. An admitting arm on
+    # `Verdict` would be the admission this surface may not issue.
     assert "admit_into" in meta["manifest_arm"]
     assert "issues no admission" in meta["manifest_arm"]
     assert "manifest" in meta["note"]
@@ -247,12 +328,14 @@ def test_the_covered_layer_is_stated_identically_everywhere():
     assert f'pub const COVERED_LAYER: &str = "{GEN.COVERED_LAYER}";' in lib_rs
     readme = (CRATE / "README.md").read_text(encoding="utf-8")
     assert GEN.COVERED_LAYER in readme
-    assert "This gate issues no admissions" in readme
+    assert "The verdict surface issues no admissions" in readme
+    assert GEN.ADMITTED_LAYER in readme
 
 
 @pytest.mark.parametrize("relpath", [
     "Cargo.toml", "GENERATED.json", "README.md",
-    "src/lib.rs", "src/frontier.rs", "src/ir.rs", "src/selfhost.rs",
+    "src/lib.rs", "src/admission.rs", "src/frontier.rs", "src/ir.rs",
+    "src/selfhost.rs",
     "src/session.rs", "src/symbols.rs",
     "tests/admit.rs", "tests/ir.rs", "tests/symbols.rs",
 ])

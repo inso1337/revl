@@ -1040,12 +1040,24 @@ def build_parser() -> argparse.ArgumentParser:
     exp_client.add_argument("--lang", default="ts", choices=("ts",),
                             help="target language for the generated client "
                                  "(default: ts)")
+    exp_client.add_argument("--face", default="rest", choices=("rest", "webui"),
+                            help="which typed boundary to project: `rest` (the "
+                                 "default) is the remote client over the "
+                                 "canonical encoding; `webui` is a component's "
+                                 "Cordis WebUI channel — the reactive state it "
+                                 "publishes through `webui.add_entry` plus the "
+                                 "RPC methods it provides, the surface the "
+                                 "browser reads with `useRpc<T>()` "
+                                 "(docs/frontend-assets.md, item 457 S4)")
     exp_client_group = exp_client.add_mutually_exclusive_group(required=True)
     exp_client_group.add_argument("--service", default=None, metavar="NAME",
                                   help="export a client for a single service by name")
     exp_client_group.add_argument("--composition", action="store_true",
                                   help="export a client for every service the "
                                        "composition provides")
+    exp_client_group.add_argument("--component", default=None, metavar="NAME",
+                                  help="with `--face webui`: export the browser "
+                                       "channel of this component")
     exp_client.add_argument("-o", "--output", default=None,
                             help="output path (default: stdout)")
     exp_client.add_argument("--json-diagnostics", action="store_true",

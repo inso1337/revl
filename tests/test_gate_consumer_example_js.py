@@ -79,7 +79,8 @@ PKG = _packager()
 # --------------------------------------------------------------------------- #
 
 def test_the_example_never_invents_an_acceptance():
-    """This tier has no admission arm, so a consumer of it has no local
+    """This tier's verdict surface has no admission arm, so a consumer of it has
+    no local
     "accept" decision to make. The example's decisions are REJECT (on a
     refusal) and ESCALATE (on everything else), and a third decision word in
     the code would be exactly the overclaim the arc exists to prevent."""

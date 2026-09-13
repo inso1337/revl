@@ -201,6 +201,21 @@ MAX_LEVEL_ITEMS = 1024
 COVERED_LAYER = ("composition + guarantee layer (G1..G4, A1, PRELUDE) and "
                  "parse (BAD); NOT the reference type layer")
 
+# What the gate is willing to ADMIT, in one line, stamped into the crate's
+# `ADMITTED_LAYER`, its README and its provenance from this one constant.
+#
+# The admission arm is not the covered layer read optimistically: it is a far
+# SMALLER region, the one where the covered layer is the WHOLE question. A source
+# that declares only service method signatures and scalar type aliases carries no
+# term the reference type layer decides — no body, no expression, no generic
+# head, no alias off the scalar set — so `admit_src` raising no objection to it
+# is not a partial answer but the complete one. Measured, not assumed: 3_155
+# certified programs drawn over this surface, every one admitted by the
+# reference (`tests/test_gate_reference_census.py`).
+ADMITTED_LAYER = ("interface declarations only: service method signatures and "
+                  "scalar type aliases, over a closed scalar type vocabulary; "
+                  "no term the reference type layer decides")
+
 
 def _load_module(relpath: str, name: str):
     """Load a repo file by path, the way the backends' own tests load them, so
@@ -267,6 +282,75 @@ def frontier_tables() -> dict[str, list[str]]:
         "keywords": sorted(set(KEYWORDS) - _selfhost_keywords()),
         "builtins": sorted(set(_BUILTIN_SIG) - _selfhost_builtin_methods()),
     }
+
+
+# ------------------------------------------------------ the admission tables
+#
+# The ADMISSION SURFACE is the mirror image of the frontier table. The frontier
+# says where this gate may not REFUSE; the admission surface says where it may
+# ADMIT — the far smaller region in which a no-objection from the
+# composition/guarantee layer is the WHOLE answer, because the source carries no
+# term the reference type layer decides.
+#
+# The tables are derived from the reference compiler for the same reason the
+# frontier's are: the surface is defined by what the REFERENCE would check, and a
+# hand-listed copy of that would be free to go stale in the unsafe direction.
+
+
+def admission_tables() -> dict[str, list[str]]:
+    """`{"scalars": [...], "reserved": [...], "keywords": [...]}` — the closed
+    vocabularies the admission surface is written over, sorted so the generated
+    bytes are stable.
+
+    * ``scalars`` — the type names a certified signature may mention, taken from
+      the reference's own set of scalar data types
+      (`revl.typecheck._CONFIG_DATA_SCALARS`). Every one of them is a concrete
+      builtin with no type parameter and no erasure, so a signature written over
+      them resolves without a checker: no generic head to instantiate, no `Any`
+      to erase, no alias to follow off the surface.
+    * ``reserved`` — the type names a certified source may not DECLARE
+      (`revl.typecheck._BUILTIN_TYPE_NAMES` plus the reserved opaque
+      `Principal`). Shadowing one of these is the reference's business, not this
+      gate's, so a source that tries is not certified.
+    * ``keywords`` — the reference keyword set (`revl.lexer.KEYWORDS`). A
+      certified source's identifiers are checked against it, so the certifier
+      cannot mistake a keyword it does not know for a name.
+    """
+    from revl.lexer import KEYWORDS  # noqa: PLC0415
+    from revl.typecheck import (  # noqa: PLC0415
+        _BUILTIN_TYPE_NAMES, _CONFIG_DATA_SCALARS, _GENERIC_ARITY, PRINCIPAL)
+
+    scalars = sorted(_CONFIG_DATA_SCALARS)
+    reserved = sorted(set(_BUILTIN_TYPE_NAMES) | {PRINCIPAL})
+    keywords = sorted(KEYWORDS)
+    # Anchored the way the frontier extraction is. A scalar table that picked up
+    # a generic head, or that lost the names it is written over, would generate a
+    # certifier that admits signatures the reference still has work to do on —
+    # the one direction this crate may never drift in.
+    missing = {"Int", "Str", "Bool"} - set(scalars)
+    if missing or set(scalars) & set(_GENERIC_ARITY):
+        raise SystemExit(
+            f"build_gate_crate: the admission scalar table looks broken "
+            f"({scalars!r}); refusing to generate")
+    if not set(scalars) <= set(_BUILTIN_TYPE_NAMES):
+        raise SystemExit(
+            f"build_gate_crate: an admission scalar is not a reference builtin "
+            f"type name ({sorted(set(scalars) - set(_BUILTIN_TYPE_NAMES))!r}); "
+            f"refusing to generate")
+    if "service" not in keywords or len(keywords) < 20:
+        raise SystemExit(
+            f"build_gate_crate: the reference keyword table looks broken "
+            f"({len(keywords)} words); refusing to generate")
+    return {"scalars": scalars, "reserved": reserved, "keywords": keywords}
+
+
+def admission_surface_id(digest: str) -> str:
+    """`ADMISSION_SURFACE_ID` — an identifier of the region this gate is willing
+    to ADMIT in, versioned separately from `frontier_id` because the two answer
+    different questions: the frontier bounds the refusals, the admission surface
+    bounds the admissions. A consumer caching an admission compares this before
+    trusting it against a gate built from another tree."""
+    return f"admission-interface:{digest[:16]}"
 
 
 # ------------------------------------------------------ the IR-boundary tables
@@ -386,6 +470,494 @@ def _rust_pub_i64_array(name: str, values: list[int], doc: str) -> str:
     else:
         body = "&[]"
     return f"{doc}pub const {name}: &[i64] = {body};\n"
+
+
+ADMISSION_RS_TEMPLATE = r'''//! The ADMISSION SURFACE — GENERATED by `tools/build_gate_crate.py`.
+//! Do not edit; edit the generator and regenerate (`--check` is a CI gate).
+//!
+//! # The question this module answers
+//!
+//! `frontier.rs` bounds where this gate may REFUSE. This module bounds the far
+//! smaller region where it may ADMIT.
+//!
+//! The two bounds are not the same shape and must not be confused. The native
+//! gate decides the composition/guarantee layer and runs no type layer, so over
+//! the language at large a no-objection from it is a PARTIAL answer: the
+//! reference may still refuse the same bytes in a layer this gate never ran.
+//! That is why [`crate::Verdict`] has no admitting arm and why
+//! [`crate::Verdict::NoObjection`] is never a green.
+//!
+//! There is a region, though, in which the covered layer is the WHOLE question:
+//! a source that declares nothing but service method signatures and scalar type
+//! aliases carries NO TERM the reference type layer decides. No function body,
+//! no expression, no literal, no generic head to instantiate, no alias pointing
+//! off the scalar vocabulary. For such a source, "the composition/guarantee
+//! gate found nothing to refuse" and "the reference admits this" are the same
+//! statement, and the gate may say so.
+//!
+//! `certify` is the decision procedure for that region. It returns `Some(basis)`
+//! only when it has walked the ENTIRE source and accounted for every token; a
+//! single byte it cannot place returns `None`, and `None` means the caller falls
+//! back to the refusal surface. It never partially certifies, and it never skips
+//! what it does not understand — skipping is the wave-through this crate exists
+//! to prevent.
+//!
+//! # What is deliberately NOT in the surface
+//!
+//! Everything that carries a term: `fn` bodies, `component`, `provide`, `realm`,
+//! `use`, `pub`, attributes, literals, record and generic types, aliases of
+//! aliases. A source holding any of them is not certified, which costs a caller
+//! nothing but the fallback to `NoObjection` — the direction this crate is
+//! allowed to err in.
+//!
+//! # The manifest half
+//!
+//! [`certify_into`] is deliberately far narrower still, and the reason is a
+//! property of the item-186 row wire rather than a gap in this module: the wire
+//! carries component names, provision keys and realms, and NO SERVICE SHAPES.
+//! So a candidate declaring `service Store { ... }` cannot be certified against
+//! a running composition, because the running composition may already hold a
+//! DIFFERENT `Store` and the wire cannot say. Measured, not assumed: the
+//! reference refuses that exact pair with "service `Store` differs from the
+//! running manifest". A candidate that declares nothing can be certified, and
+//! nothing else can, until the wire carries the running shapes.
+
+@SCALAR_TYPES@
+@RESERVED_TYPE_NAMES@
+@REFERENCE_KEYWORDS@
+/// An identifier of the region this gate is willing to ADMIT in. Versioned
+/// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
+/// bounds the admissions, and a consumer caching an admission compares THIS
+/// before trusting it against a gate built from another tree.
+pub(crate) const SURFACE_ID: &str = "@ADMISSION_SURFACE_ID@";
+
+/// The tail every certificate carries, so the two halves of the basis line
+/// cannot drift apart.
+const BASIS_TAIL: &str =
+    "no term the reference type layer decides, and the composition/guarantee gate raised no objection";
+
+/// What a certified source turned out to contain. Counts only: the certificate
+/// is evidence that the walk ACCOUNTED for the whole source, and the counts are
+/// what make that evidence readable.
+struct Shape {
+    services: usize,
+    aliases: usize,
+    methods: usize,
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The source as tokens, or `None` when it holds a byte outside the surface's
+/// alphabet.
+///
+/// The alphabet is the point. A string literal, a number, an `@attribute`, an
+/// operator, a `[`, a non-ASCII byte — every one of them returns `None` here,
+/// which is how "carries no term the type layer decides" is enforced at the
+/// bottom rather than argued about at the top. Comments and whitespace are the
+/// only things dropped.
+fn tokens(source: &str) -> Option<Vec<&str>> {
+    let bytes = source.as_bytes();
+    let n = bytes.len();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        let byte = bytes[i];
+        if byte == b' ' || byte == b'\t' || byte == b'\r' || byte == b'\n' {
+            i += 1;
+            continue;
+        }
+        if byte == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if is_ident_start(byte) {
+            let start = i;
+            i += 1;
+            while i < n && is_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            out.push(&source[start..i]);
+            continue;
+        }
+        if byte == b'-' && i + 1 < n && bytes[i + 1] == b'>' {
+            out.push("->");
+            i += 2;
+            continue;
+        }
+        out.push(match byte {
+            b'{' => "{",
+            b'}' => "}",
+            b'(' => "(",
+            b')' => ")",
+            b',' => ",",
+            b':' => ":",
+            b'=' => "=",
+            _ => return None,
+        });
+        i += 1;
+    }
+    Some(out)
+}
+
+/// A token usable as a declared or bound NAME: an identifier that is not a
+/// reference keyword. Checked against the REFERENCE keyword set, not the
+/// self-host one, because the question is what the reference would make of the
+/// source.
+fn is_name(token: &str) -> bool {
+    match token.as_bytes().first() {
+        Some(&byte) if is_ident_start(byte) => !REFERENCE_KEYWORDS.contains(&token),
+        _ => false,
+    }
+}
+
+/// A name this source may DECLARE: a name that does not shadow a reference
+/// builtin type or the reserved opaque `Principal`.
+fn is_declarable(token: &str) -> bool {
+    is_name(token) && !RESERVED_TYPE_NAMES.contains(&token)
+}
+
+fn has_duplicate(names: &[&str]) -> bool {
+    for (i, name) in names.iter().enumerate() {
+        if names[i + 1..].contains(name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk the whole source, or refuse to certify it.
+///
+/// The walk is total by construction: every iteration either consumes a token
+/// and advances, or returns `None`. There is no "skip what I do not recognise"
+/// branch, which is the property that makes the certificate mean something.
+fn shape_of(source: &str) -> Option<Shape> {
+    let toks = tokens(source)?;
+    let n = toks.len();
+
+    // Pass one: the alias names, so a signature may name an alias declared
+    // further down the file. Pass two validates every one of them, so a name
+    // collected here that is not a real alias declaration still fails below.
+    let mut aliases: Vec<&str> = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        if *tok == "type" && i + 1 < n {
+            aliases.push(toks[i + 1]);
+        }
+    }
+    let known = |name: &str| SCALAR_TYPES.contains(&name) || aliases.contains(&name);
+
+    let mut services: Vec<&str> = Vec::new();
+    let mut methods_total = 0usize;
+    let mut declared_aliases = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        if toks[i] == "type" {
+            // `type <Name> = <Scalar>` — the right-hand side is a SCALAR and
+            // never another alias, so the alias graph is one level deep and a
+            // cycle (which the reference decides, and this gate does not) is
+            // unrepresentable rather than checked.
+            if i + 3 >= n || toks[i + 2] != "=" {
+                return None;
+            }
+            if !is_declarable(toks[i + 1]) || !SCALAR_TYPES.contains(&toks[i + 3]) {
+                return None;
+            }
+            declared_aliases += 1;
+            i += 4;
+            continue;
+        }
+        if toks[i] != "service" || i + 2 >= n {
+            return None;
+        }
+        if !is_declarable(toks[i + 1]) || toks[i + 2] != "{" {
+            return None;
+        }
+        services.push(toks[i + 1]);
+        i += 3;
+        let mut methods: Vec<&str> = Vec::new();
+        while i < n && toks[i] != "}" {
+            if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1]) {
+                return None;
+            }
+            methods.push(toks[i + 1]);
+            i += 2;
+            if i >= n || toks[i] != "(" {
+                return None;
+            }
+            i += 1;
+            let mut params: Vec<&str> = Vec::new();
+            while i < n && toks[i] != ")" {
+                if !is_name(toks[i]) || i + 2 >= n || toks[i + 1] != ":" {
+                    return None;
+                }
+                if !known(toks[i + 2]) {
+                    return None;
+                }
+                params.push(toks[i]);
+                i += 3;
+                if i < n && toks[i] == "," {
+                    i += 1;
+                }
+            }
+            if i >= n || has_duplicate(&params) {
+                return None;
+            }
+            i += 1; // the `)`
+            if i < n && toks[i] == "->" {
+                if i + 1 >= n || !known(toks[i + 1]) {
+                    return None;
+                }
+                i += 2;
+            }
+            methods_total += 1;
+        }
+        if i >= n || has_duplicate(&methods) {
+            return None;
+        }
+        i += 1; // the `}`
+    }
+    // The reference refuses a duplicate service and a duplicate method
+    // (`duplicate service `A``, `duplicate method `f` in service A`) and the
+    // native gate does not, so the certifier carries those two obligations
+    // itself. Without them the surface would admit two programs the reference
+    // refuses — measured, which is why they are here and not assumed away.
+    if has_duplicate(&services) || has_duplicate(&aliases) {
+        return None;
+    }
+    if declared_aliases != aliases.len() {
+        return None;
+    }
+    for alias in &aliases {
+        if services.contains(alias) {
+            return None;
+        }
+    }
+    Some(Shape {
+        services: services.len(),
+        aliases: aliases.len(),
+        methods: methods_total,
+    })
+}
+
+/// `Some(basis)` when `source` is inside the admission surface, `None`
+/// otherwise. The basis is the certificate's why-trace, for a log or a receipt;
+/// it is NOT on the admission wire, which is byte-identical to `revl.gate`'s.
+pub(crate) fn certify(source: &str) -> Option<String> {
+    let shape = shape_of(source)?;
+    Some(format!(
+        "admission surface {}: services={} aliases={} methods={}; {}",
+        SURFACE_ID, shape.services, shape.aliases, shape.methods, BASIS_TAIL
+    ))
+}
+
+/// `Some(basis)` when `source` may be admitted INTO the running composition
+/// `manifest`, `None` otherwise.
+///
+/// Narrow, and the reason is the wire rather than this module. An item-186 row
+/// carries a component name, a provision key and a realm; it does NOT carry the
+/// running composition's service shapes. A candidate declaring
+/// `service Store { ... }` may therefore collide with a `Store` the running
+/// composition already holds in a different shape, and the reference refuses
+/// exactly that ("service `Store` differs from the running manifest") where this
+/// gate cannot even see it. So against a NON-EMPTY manifest only a candidate
+/// that declares nothing at all is certified.
+///
+/// The empty manifest is the empty composition, and `crate::issue_admission_into`
+/// routes it to `crate::issue_admission` before this is reached.
+pub(crate) fn certify_into(source: &str, manifest: &str) -> Option<String> {
+    let shape = shape_of(source)?;
+    if shape.services > 0 || shape.aliases > 0 {
+        return None;
+    }
+    let (provisions, requirements) = manifest_shape(manifest)?;
+    Some(format!(
+        "admission surface {}: the candidate declares nothing, and the running composition's {} provision rows resolve its {} requirement rows; {}",
+        SURFACE_ID, provisions, requirements, BASIS_TAIL
+    ))
+}
+
+/// `(provisions, requirements)` for a manifest wire every one of whose rows the
+/// admission surface can account for, `None` otherwise.
+///
+/// Two obligations, both of them the wire's own: every row is a provision
+/// (`C/k/r`) or a requirement (`C<k`) — a `!halted` header, a replacement or a
+/// handoff row is not certifiable here even though the fold has its own answer
+/// for it — and every requirement key is provided by a provision row in the same
+/// wire. The second is what stops a bogus wire from being admitted into: the
+/// running composition is supposed to be one the reference already admitted, and
+/// a dangling requirement says it is not.
+fn manifest_shape(manifest: &str) -> Option<(usize, usize)> {
+    let mut provided: Vec<&str> = Vec::new();
+    let mut required: Vec<&str> = Vec::new();
+    for row in manifest.split(';') {
+        if row.is_empty() {
+            return None;
+        }
+        if let Some((component, key)) = row.split_once('<') {
+            if component.is_empty() || key.is_empty() {
+                return None;
+            }
+            if component.contains('/') || key.contains('/') || key.contains('=') {
+                return None;
+            }
+            if !is_name(component) || !is_name(key) {
+                return None;
+            }
+            required.push(key);
+            continue;
+        }
+        let mut parts = row.splitn(3, '/');
+        let component = parts.next()?;
+        let key = parts.next()?;
+        let realm = parts.next()?;
+        if component.is_empty() || key.is_empty() {
+            return None;
+        }
+        if !is_name(component) || !is_name(key) {
+            return None;
+        }
+        if !realm.is_empty() && !is_name(realm) {
+            return None;
+        }
+        provided.push(key);
+    }
+    for key in &required {
+        if !provided.contains(key) {
+            return None;
+        }
+    }
+    Some((provided.len(), required.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INTERFACE: &str = "service Store {\n  fn get(key: Str) -> Str\n  fn put(key: Str, value: Str)\n}\n";
+
+    #[test]
+    fn an_interface_only_source_is_certified() {
+        let basis = certify(INTERFACE).expect("an interface-only source is inside the surface");
+        assert!(basis.contains("services=1"), "{}", basis);
+        assert!(basis.contains("methods=2"), "{}", basis);
+        assert!(basis.contains(SURFACE_ID), "{}", basis);
+    }
+
+    #[test]
+    fn the_empty_source_is_the_empty_composition_and_is_certified() {
+        for source in ["", "   \n", "// just a note\n"] {
+            let basis = certify(source).expect("a source with no declarations is admissible");
+            assert!(basis.contains("services=0 aliases=0 methods=0"), "{}", basis);
+        }
+    }
+
+    #[test]
+    fn a_scalar_alias_is_certified_and_usable_in_a_signature() {
+        let source = "type Key = Str\nservice S {\n  fn get(k: Key) -> Key\n}\n";
+        assert!(certify(source).is_some());
+    }
+
+    #[test]
+    fn an_alias_of_an_alias_is_not_certified() {
+        // The alias graph is one level deep by construction, so a cycle cannot
+        // be written rather than having to be detected.
+        assert!(certify("type A = Str\ntype B = A\n").is_none());
+    }
+
+    #[test]
+    fn a_term_of_any_kind_leaves_the_surface() {
+        for source in [
+            "fn id(x: Int) -> Int { return x }",
+            "component C provides s: S {\n  provide s {\n    fn f(x) = x\n  }\n}\n",
+            "service S {\n  fn f(x: Str) -> Str\n}\nfn g() -> Int { return 1 }",
+            "type R = { id: Int }",
+            "service S {\n  fn f(x: List[Int]) -> Int\n}\n",
+            "use \"./other.rvl\" { S }\n",
+            "pub service S {\n  fn f(x: Int) -> Int\n}\n",
+        ] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+    }
+
+    #[test]
+    fn the_two_obligations_the_native_gate_does_not_carry() {
+        // The reference refuses both of these and `admit_src` raises no
+        // objection to either, so the certifier has to decide them itself or the
+        // surface would issue an admission the reference refuses.
+        assert!(certify("service A {\n  fn f(x: Int) -> Int\n}\nservice A {\n  fn g(x: Int) -> Int\n}\n").is_none());
+        assert!(certify("service A {\n  fn f(x: Int) -> Int\n  fn f(y: Int) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn a_declaration_may_not_shadow_a_reference_builtin_type() {
+        for source in ["service Int {\n}\n", "type Opt = Str\n", "type Principal = Str\n"] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+    }
+
+    #[test]
+    fn a_type_outside_the_scalar_vocabulary_leaves_the_surface() {
+        assert!(certify("service S {\n  fn f(x: Unknown) -> Int\n}\n").is_none());
+        assert!(certify("service S {\n  fn f(x: Any) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn a_non_ascii_byte_leaves_the_surface() {
+        assert!(tokens("service Ünicode {}").is_none());
+        assert!(certify("service S {\n  fn f(x: Str) -> Str // caf\u{e9}\n}\n").is_some());
+    }
+
+    #[test]
+    fn a_duplicate_parameter_name_leaves_the_surface() {
+        assert!(certify("service S {\n  fn f(x: Int, x: Int) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn an_unterminated_declaration_leaves_the_surface() {
+        for source in ["service S {", "service S {\n  fn f(x: Int\n}", "type A =", "service"] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+    }
+
+    // The manifest half.
+
+    #[test]
+    fn a_declaration_free_candidate_is_certified_into_a_running_composition() {
+        let basis = certify_into("// nothing to add\n", "Kv/store/;App/app/;App<store")
+            .expect("a candidate that declares nothing cannot collide with the running shapes");
+        assert!(basis.contains("2 provision rows"), "{}", basis);
+        assert!(basis.contains("1 requirement rows"), "{}", basis);
+    }
+
+    #[test]
+    fn an_interface_candidate_is_not_certified_into_a_running_composition() {
+        // The wire carries no service shapes, so a declared `Store` may or may
+        // not be the running one and this gate cannot tell. Not certified.
+        assert!(certify(INTERFACE).is_some());
+        assert!(certify_into(INTERFACE, "Kv/store/").is_none());
+    }
+
+    #[test]
+    fn a_row_the_surface_cannot_account_for_is_not_certified_into() {
+        for wire in ["!halted", "Kv/store/;-Kv/store/", "Kv/store=Int", "!wat", "Kv/store/;"] {
+            assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
+        }
+    }
+
+    #[test]
+    fn a_dangling_requirement_row_is_not_certified_into() {
+        assert!(certify_into("", "App/app/;App<store").is_none());
+        assert!(certify_into("", "Kv/store/;App<store").is_some());
+    }
+}
+'''
 
 
 FRONTIER_RS_TEMPLATE = r'''//! The covered-surface guard — GENERATED by `tools/build_gate_crate.py`.
@@ -685,14 +1257,15 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //!     // A definitive refusal. Byte-agreeing with the reference compiler on
 //!     // the covered corpus: stop here, and show the message as-is.
 //!     Verdict::Refused { code, message } => println!("refused ({}): {}", code, message),
-//!     // NOT an admission. See "This gate issues no admissions" below.
+//!     // NOT an admission. See "The verdict surface issues no admissions"
+//!     // below; ask `issue_admission` for a green.
 //!     Verdict::NoObjection => println!("nothing this gate can refuse"),
 //!     // The gate declined to decide at all.
 //!     Verdict::OutsideFrontier { reason } => println!("undecided: {}", reason),
 //! }
 //! ```
 //!
-//! # This gate issues no admissions
+//! # The verdict surface issues no admissions
 //!
 //! Read this before wiring the crate into anything.
 //!
@@ -704,26 +1277,67 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! `fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }`
 //! and `fn f() -> { }`; the self-host gate raises no objection to any of them.
 //!
-//! So there is no `Verdict::Admitted` arm, and no `is_admitted()`. The
-//! non-refusing outcome is [`Verdict::NoObjection`], which means exactly
-//! *"this gate found nothing it is able to refuse"* and never *"the reference
-//! would admit this"*. A host that must ADMIT — because it is about to run the
-//! program — still has to get a reference verdict (`revl compile`, or
-//! `revl.gate.admit` on py). What this crate buys is the other direction: a
-//! local, in-process, allocation-cheap REFUSAL that agrees with the reference
-//! byte for byte on the covered corpus, with no round trip and no Python.
+//! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
+//! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
+//! nothing it is able to refuse"* and never *"the reference would admit this"*,
+//! and [`Verdict::to_json`] emits `"admitted": false` for EVERY arm. A consumer
+//! written against the fixed `{admitted, code, message}` shape
+//! (`docs/design/332-embeddable-gate-api.md`) therefore reads the verdict
+//! surface as "never admits" rather than misreading a no-objection as an
+//! admission; the arm itself is carried in the extra `"verdict"` field.
 //!
 //! The two divergence directions are not symmetric, and this asymmetry is the
 //! whole design: refusing what the reference admits is an inconvenience;
 //! ADMITTING what the reference refuses is the defect class the admission-gate
-//! arc exists to prevent. A crate that cannot issue an admission cannot commit
-//! that defect.
+//! arc exists to prevent.
 //!
-//! On the wire, [`Verdict::to_json`] therefore emits `"admitted": false` for
-//! EVERY arm. A consumer written against the fixed `{admitted, code, message}`
-//! shape (`docs/design/332-embeddable-gate-api.md`) reads this gate as
-//! "never admits" rather than misreading a no-objection as an admission; the
-//! arm itself is carried in the extra `"verdict"` field.
+//! # The admission surface (issue #346)
+//!
+//! An admission is therefore a SECOND, separate question, asked through a
+//! separate type and a separate entry point: [`issue_admission`] returns an
+//! [`Admission`], not a [`Verdict`]. The split is the point. A host holding a
+//! [`Verdict`] cannot accidentally read it as a green — there is no arm to
+//! misread — and a host that wants a green has to ask for one explicitly and
+//! handle [`Admission::Withheld`].
+//!
+//! [`Admission::Admitted`] is reachable through exactly one path, and both of
+//! its conditions are necessary:
+//!
+//! 1. [`admit`] returned [`Verdict::NoObjection`] — the composition/guarantee
+//!    gate ran and found nothing to refuse. An admission is never issued over a
+//!    refusal or over a frontier gap.
+//! 2. the source is inside the ADMISSION SURFACE
+//!    ([`ADMISSION_SURFACE_ID`], `src/admission.rs`) — the region where the
+//!    covered layer is the WHOLE question, because the source carries no term
+//!    the reference type layer decides.
+//!
+//! The surface is deliberately tiny: `service` method signatures and scalar
+//! `type` aliases, over a closed scalar vocabulary derived from the reference's
+//! own table. No body, no expression, no literal, no generic head. That is not
+//! the covered layer read optimistically; it is the sliver of the covered layer
+//! where reading it as an admission is sound, and it is measured rather than
+//! argued — every certified program in the census corpus is a program the
+//! reference admits, and the `false-admission` bucket of
+//! `tools/gate_reference_census.py` reds on the first one that is not.
+//!
+//! A source OUTSIDE the surface is [`Admission::Withheld`] carrying the verdict
+//! verbatim, which is the same fail-closed answer the crate gave before the arm
+//! existed. Widening the surface is the self-host type layer's lane
+//! (`docs/design/457-selfhost-type-layer.md`): each slice it lands is a family
+//! the certifier can then account for.
+//!
+//! ```no_run
+//! use revl_gate::{issue_admission, Admission};
+//!
+//! match issue_admission("service Store { fn get(key: Str) -> Str }") {
+//!     // A real admission: `"admitted": true` on the wire, and the basis says
+//!     // on what ground.
+//!     Admission::Admitted { basis } => println!("admitted: {}", basis),
+//!     // No admission. The verdict inside is the refusal surface's answer, and
+//!     // a `NoObjection` there is still not a green.
+//!     Admission::Withheld { verdict } => println!("withheld: {:?}", verdict),
+//! }
+//! ```
 //!
 //! # Fail closed, always
 //!
@@ -783,7 +1397,8 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! match admit_into(candidate, running) {
 //!     // A refusal the reference agrees with: this candidate re-provides `store`.
 //!     Verdict::Refused { code, message } => println!("refused ({}): {}", code, message),
-//!     // NOT an admission. See "This gate issues no admissions" above.
+//!     // NOT an admission. See "The verdict surface issues no admissions"
+//!     // above; ask `issue_admission_into` for a green.
 //!     Verdict::NoObjection => println!("nothing this gate can refuse"),
 //!     // The gate declined to decide at all: a row it cannot honour, a frontier
 //!     // gap, or an aborted fold. Fail closed.
@@ -816,15 +1431,22 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! Its own fail-closed rule is the mirror of this one: it answers only what it
 //! can answer EXACTLY, and every uncertainty is an absence rather than a guess.
 //!
-//! # Layer 2: the session surface (item 334 slice 1)
+//! # Layer 2: the session surface (item 334 slices 1-2)
 //!
-//! See [`session`]. [`session::Session`] is the foundational first slice of the
-//! rust host: the generation state machine, the untrusted-author admission entry
-//! (`propose`/`admit`, reusing this crate's [`admit`]), and the item-245
-//! witnessed-call recording path (`call`/`commit`/`abort`/`unload`). The ACCEPT
-//! half of `propose` (activate + health-gate + swap), the witnessed-effect
-//! runtime, the WAL, and the approver callback are the remaining slices; a
-//! candidate the native gate does not refuse is fail-closed, never waved through.
+//! See [`session`]. [`session::Session`] is the rust host: the generation state
+//! machine, the untrusted-author admission entry (`propose`/`admit`, reusing
+//! this crate's [`admit`]), and the item-245 call path
+//! (`call`/`commit`/`abort`/`unload`) over a WITNESSED-EFFECT runtime. The host
+//! declares its externs in a [`session::Externs`] registry, where the item-243
+//! pair rules are checked — a witnessed effect cannot be declared before its
+//! inverse, an emission cannot stand in as an undo, an undo slot cannot go on
+//! the call surface — and a `call` runs the real body while `abort` runs the
+//! real inverses, LIFO. `AbortReport::residue_free` is therefore a measurement:
+//! an inverse that FAILED is residue, not a clean revert.
+//!
+//! The ACCEPT half of `propose` (activate + health-gate + swap), the item-322
+//! WAL, and the approver callback are the remaining slices; a candidate the
+//! native gate does not refuse is fail-closed, never waved through.
 //!
 //! # Two host obligations
 //!
@@ -844,6 +1466,7 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 #[allow(non_snake_case, unused_braces, clippy::all)]
 mod selfhost;
 
+mod admission;
 mod frontier;
 pub mod ir;
 pub mod session;
@@ -868,11 +1491,26 @@ pub const LANGUAGE_VERSION: &str = "@LANGUAGE_VERSION@";
 pub const SYMBOLS_API_VERSION: &str = "0.1.0";
 
 /// What this gate actually decides, in one line. The reference type layer is
-/// deliberately absent — see the crate docs, "This gate issues no admissions".
+/// deliberately absent — see the crate docs, "The verdict surface issues no
+/// admissions", and [`ADMITTED_LAYER`] for the sliver it is sound to admit in.
 pub const COVERED_LAYER: &str = "@COVERED_LAYER@";
 
 /// The `code` a frontier gap reports on the wire.
 pub const FRONTIER_CODE: &str = "FRONTIER";
+
+/// An identifier of the region [`issue_admission`] is willing to ADMIT in.
+///
+/// Versioned apart from [`FRONTIER_ID`] because the two bound different things:
+/// the frontier bounds where this gate may REFUSE, this bounds where it may
+/// ADMIT. A host caching an admission compares THIS value before trusting the
+/// cached green against a gate built from another tree — two gates with
+/// different admission surfaces admitted under different rules.
+pub const ADMISSION_SURFACE_ID: &str = admission::SURFACE_ID;
+
+/// What [`issue_admission`] is willing to admit, in one line. Read it before
+/// treating an [`Admission::Withheld`] as a defect: outside this region the
+/// honest answer is to withhold.
+pub const ADMITTED_LAYER: &str = "@ADMITTED_LAYER@";
 
 /// The three values a host can branch on (design "Versioning").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -977,6 +1615,82 @@ impl Verdict {
         }
         out.push('}');
         out
+    }
+}
+
+/// The answer to the ADMISSION question (issue #346) — a different question
+/// from [`Verdict`], carried in a different type so the two cannot be confused.
+///
+/// [`Verdict`] answers *"is there something here I can refuse"*. This answers
+/// *"may this run"*, and only one of its arms says yes. A host that needs a
+/// green asks [`issue_admission`] and handles [`Admission::Withheld`]; a host
+/// that only wants a local refusal keeps using [`admit`] and never sees this
+/// type at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// The gate ISSUES an admission: [`admit`] raised no objection AND the
+    /// source is inside the admission surface, so the covered layer was the
+    /// whole question. `basis` is the certificate's why-trace — which surface,
+    /// and what it accounted for. It is not on the wire.
+    Admitted { basis: String },
+    /// No admission. `verdict` is the refusal surface's answer verbatim, and a
+    /// [`Verdict::NoObjection`] in here is still not a green: it means the gate
+    /// found nothing to refuse and was not entitled to admit either.
+    Withheld { verdict: Verdict },
+}
+
+impl Admission {
+    /// True only for an ISSUED admission. This is the one call a host may treat
+    /// as a green light, and only within [`ADMISSION_SURFACE_ID`].
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, Admission::Admitted { .. })
+    }
+
+    /// The certificate's why-trace for an issued admission.
+    pub fn basis(&self) -> Option<&str> {
+        match self {
+            Admission::Admitted { basis } => Some(basis),
+            Admission::Withheld { .. } => None,
+        }
+    }
+
+    /// The withheld answer's verdict; `None` for an issued admission.
+    pub fn verdict(&self) -> Option<&Verdict> {
+        match self {
+            Admission::Admitted { .. } => None,
+            Admission::Withheld { verdict } => Some(verdict),
+        }
+    }
+
+    /// The arm's stable wire name: `"admitted"`, or the withheld verdict's own
+    /// [`Verdict::kind`].
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Admission::Admitted { .. } => "admitted",
+            Admission::Withheld { verdict } => verdict.kind(),
+        }
+    }
+
+    /// The design's fixed `{"admitted", "code", "message"}` shape plus the
+    /// `"verdict"` arm name.
+    ///
+    /// An issued admission serialises `{"verdict":"admitted","admitted":true,
+    /// "code":null,"message":null}` — BYTE-IDENTICAL to what `revl.gate`'s own
+    /// `Verdict.to_json()` writes for a py admission, so a seam comparing the
+    /// two tiers' wires (item 337) compares equal bytes rather than two
+    /// spellings of the same yes. The basis is deliberately off the wire: it is
+    /// evidence for a log, not part of the contract.
+    ///
+    /// A withheld answer serialises the verdict verbatim, so switching a
+    /// consumer from [`admit`] to [`issue_admission`] changes nothing about the
+    /// bytes it already handled.
+    pub fn to_json(&self) -> String {
+        match self {
+            Admission::Admitted { .. } => String::from(
+                "{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}",
+            ),
+            Admission::Withheld { verdict } => verdict.to_json(),
+        }
     }
 }
 
@@ -1107,6 +1821,63 @@ pub fn admit_into(source: &str, manifest: &str) -> Verdict {
         }
     };
     verdict_from_wire(&wire)
+}
+
+/// The ADMISSION question for `source` (issue #346): may this run?
+///
+/// Two conditions, both necessary, and in this order:
+///
+/// 1. [`admit`] must return [`Verdict::NoObjection`]. A refusal or a frontier
+///    gap is withheld as it stands — an admission is never issued over the
+///    refusal surface's head.
+/// 2. `source` must be inside the ADMISSION SURFACE ([`ADMISSION_SURFACE_ID`]),
+///    the region where the covered layer is the WHOLE question because the
+///    source carries no term the reference type layer decides.
+///
+/// Outside that region the answer is [`Admission::Withheld`] carrying the
+/// verdict, which is exactly what a consumer of [`admit`] already handles. See
+/// [`ADMITTED_LAYER`] for what the region is, and the crate docs for why it is
+/// this small.
+pub fn issue_admission(source: &str) -> Admission {
+    let verdict = admit(source);
+    if verdict == Verdict::NoObjection {
+        if let Some(basis) = admission::certify(source) {
+            return Admission::Admitted { basis };
+        }
+    }
+    Admission::Withheld { verdict }
+}
+
+/// The ADMISSION question for `source` once it is admitted INTO the running
+/// composition `manifest` (issue #346) — the shape an agent loop actually needs.
+///
+/// The empty manifest is the empty composition, so `issue_admission_into(src,
+/// "")` is [`issue_admission`] byte for byte.
+///
+/// Against a NON-EMPTY manifest the surface is far narrower, and the reason is
+/// the item-186 row wire rather than a gap in the certifier: a row carries a
+/// component name, a provision key and a realm, and NO SERVICE SHAPES. A
+/// candidate declaring `service Store { ... }` may collide with a `Store` the
+/// running composition already holds in a different shape — the reference
+/// refuses that pair with "service `Store` differs from the running manifest"
+/// — and no amount of care on this side can see it in the wire. So only a
+/// candidate that declares nothing is certified against a running composition,
+/// and everything else is withheld with the fold's verdict.
+///
+/// Widening this is not the type layer alone: the WIRE has to carry the running
+/// composition's declared shapes first. That is the remaining half of issue
+/// #346, and naming it here is cheaper than rediscovering it.
+pub fn issue_admission_into(source: &str, manifest: &str) -> Admission {
+    if manifest.is_empty() {
+        return issue_admission(source);
+    }
+    let verdict = admit_into(source, manifest);
+    if verdict == Verdict::NoObjection {
+        if let Some(basis) = admission::certify_into(source, manifest) {
+            return Admission::Admitted { basis };
+        }
+    }
+    Admission::Withheld { verdict }
 }
 
 /// Parse the self-host gate's internal `"<TAG>|<message>"` protocol into the
@@ -1441,11 +2212,141 @@ component CacheLayer requires store: Store provides store: Store {\n\
             &over
         )));
     }
+
+    // The admission surface (issue #346).
+
+    /// A source inside the admission surface: interface declarations only.
+    const CERTIFIABLE: &str = "service Store {\n  fn get(key: Str) -> Str\n}\n";
+
+    #[test]
+    fn the_verdict_surface_still_has_no_admitting_arm() {
+        // The split is the whole safety story: a host holding a `Verdict` has no
+        // arm it could misread as a green, whatever the admission surface grows
+        // into.
+        for source in [CERTIFIABLE, "fn id(x: Int) -> Int { return x }", ""] {
+            let verdict = admit(source);
+            assert!(!verdict.is_refused());
+            assert_eq!(verdict, Verdict::NoObjection);
+            assert!(verdict.to_json().contains("\"admitted\":false"));
+        }
+    }
+
+    #[test]
+    fn an_interface_only_source_is_admitted_and_says_so_on_the_wire() {
+        let issued = issue_admission(CERTIFIABLE);
+        match &issued {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains(ADMISSION_SURFACE_ID), "{}", basis);
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        assert!(issued.is_admitted());
+        assert_eq!(issued.kind(), "admitted");
+        assert_eq!(
+            issued.to_json(),
+            "{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}"
+        );
+    }
+
+    #[test]
+    fn a_source_outside_the_surface_is_withheld_with_the_verdict_verbatim() {
+        // The type-layer gap, which is the whole reason the surface is this
+        // small: the reference refuses this and the covered layer cannot see it,
+        // so the honest answer is to withhold rather than to admit.
+        for source in [
+            "fn f() -> Int { return \"s\" }",
+            "fn f() -> Int { return undefined_name }",
+            "fn f() -> { }",
+        ] {
+            let issued = issue_admission(source);
+            assert!(!issued.is_admitted(), "must not admit {:?}", source);
+            assert_eq!(issued.to_json(), admit(source).to_json());
+            assert_eq!(issued.verdict(), Some(&admit(source)));
+        }
+    }
+
+    #[test]
+    fn an_admission_is_never_issued_over_a_refusal_or_a_frontier_gap() {
+        // Condition 1, held from the outside: every source the refusal surface
+        // does not answer `NoObjection` to is withheld, so the arm cannot be
+        // reached past a refusal however the surface is widened later.
+        let over_bound = "x".repeat(MAX_SOURCE_BYTES + 1);
+        // a G3 refusal, a BAD parse refusal, and a frontier gap
+        for source in [AMBIENT_CONFLICT, "service S { fn f(", over_bound.as_str()] {
+            let verdict = admit(source);
+            assert_ne!(verdict, Verdict::NoObjection, "{:?}", &source[..17.min(source.len())]);
+            assert_eq!(issue_admission(source), Admission::Withheld { verdict });
+        }
+    }
+
+    #[test]
+    fn an_empty_manifest_is_the_standalone_admission_question() {
+        for source in [CERTIFIABLE, AMBIENT_CONFLICT, "fn id(x: Int) -> Int { return x }"] {
+            assert_eq!(
+                issue_admission_into(source, ""),
+                issue_admission(source),
+                "an empty manifest is the empty composition on the admission surface too"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaring_candidate_is_withheld_against_a_running_composition() {
+        // The wire carries no service shapes, so the same bytes that are
+        // ADMITTED standalone are WITHHELD against a running composition. This
+        // is the remaining half of issue #346, and it is a refusal to guess
+        // rather than an oversight.
+        assert!(issue_admission(CERTIFIABLE).is_admitted());
+        let into = issue_admission_into(CERTIFIABLE, RUNNING);
+        assert!(!into.is_admitted());
+        assert_eq!(into.verdict(), Some(&Verdict::NoObjection));
+        assert!(into.to_json().contains("\"admitted\":false"));
+    }
+
+    #[test]
+    fn a_candidate_that_declares_nothing_is_admitted_into_a_running_composition() {
+        let into = issue_admission_into("// nothing to add\n", RUNNING);
+        match &into {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains("provision rows"), "{}", basis)
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        assert!(into.is_admitted());
+    }
+
+    #[test]
+    fn a_halted_or_deferred_manifest_row_is_never_admitted_into() {
+        for rows in ["!halted", "Kv/store/;-Kv/store/", "!paused", "Kv/store/;Kv/store=Int"] {
+            let into = issue_admission_into("// nothing to add\n", rows);
+            assert!(!into.is_admitted(), "must not admit into {:?}", rows);
+            assert!(into.to_json().contains("\"admitted\":false"));
+        }
+    }
+
+    #[test]
+    fn the_withheld_wire_is_the_verdict_wire_on_every_arm() {
+        // Switching a consumer from `admit` to `issue_admission` may only ADD
+        // the admitted wire; every other answer has to be byte-identical to what
+        // it already handled.
+        for source in [
+            "fn id(x: Int) -> Int { return x }",
+            AMBIENT_CONFLICT,
+            "component X provides { fn = }",
+            "service Store {\n  fn get(k: Str) -> Str\n  fn get(k: Str) -> Str\n}\n",
+        ] {
+            let issued = issue_admission(source);
+            if !issued.is_admitted() {
+                assert_eq!(issued.to_json(), admit(source).to_json(), "{:?}", source);
+            }
+        }
+    }
 }
 '''
 
 
-SESSION_RS = r'''//! Layer 2, the session surface — item 334 slice 1, the foundational runtime.
+SESSION_RS = r'''//! Layer 2, the session surface — item 334 slices 1-2, the foundational runtime
+//! and the witnessed-effect runtime over it.
 //!
 //! GENERATED by `tools/build_gate_crate.py`. Do not edit by hand.
 //!
@@ -1461,7 +2362,7 @@ SESSION_RS = r'''//! Layer 2, the session surface — item 334 slice 1, the foun
 //!
 //! # What slice 1 is
 //!
-//! This is the FOUNDATIONAL first slice of roadmap item 334's rust host: a real
+//! The FOUNDATIONAL first slice of roadmap item 334's rust host: a real
 //! [`Session`] state machine over one live composition in one process, carrying
 //!
 //! * the GENERATION state ([`Session::load`], [`Session::generation`]): a fresh
@@ -1473,37 +2374,79 @@ SESSION_RS = r'''//! Layer 2, the session surface — item 334 slice 1, the foun
 //!   [`crate::admit`] (and, across a composition boundary, [`crate::admit_into`])
 //!   for that last step, so a refusal is the reference why-trace returned as
 //!   DATA and the live composition is untouched;
-//! * the WITNESSED-CALL recording path ([`Session::call`], [`Session::commit`],
-//!   [`Session::abort`], [`Session::unload`]): the item-245 three-way effect
-//!   split (class (a) witnessed with a checked inverse, class (b) a deferred
-//!   tail, class (c) an irreversible emission gated on the approver) recorded
-//!   into the session frame, with `abort` replaying the witnessed inverses LIFO
-//!   residue-free and `commit` discharging the deferrals.
+//! * the item-245 frame machinery ([`Session::call`], [`Session::commit`],
+//!   [`Session::abort`], [`Session::unload`]): the three-way effect split
+//!   (class (a) witnessed with a checked inverse, class (b) a deferred tail,
+//!   class (c) an irreversible emission gated on the approver), with `abort`
+//!   replaying the witnessed inverses LIFO and `commit` discharging the
+//!   deferrals.
 //!
-//! # What slice 1 is NOT (the honest boundary, item 445)
+//! # What slice 2 is
+//!
+//! Slice 1 took the effect CLASSIFICATION as caller data: a `call` was handed a
+//! class and a pair of strings, nothing fired, and `abort` reported the inverses
+//! it *would* replay. The residue-free claim was therefore a claim about a
+//! report rather than about the world — which is precisely the failure shape
+//! item 246 cannot tolerate, because class (a) is auto-approved on the strength
+//! of its checked inverse (see the item-334 note on out-of-order replay: a
+//! runtime that reports `noResidue` while the tree is wrong is worse than an
+//! emission that prompts).
+//!
+//! Slice 2 makes the runtime real. The host DECLARES its externs up front in an
+//! [`Externs`] registry and BINDS them to the call surface; a [`Session::call`]
+//! resolves the crossing from that registry and actually RUNS the host body, and
+//! [`Session::abort`] actually RUNS the recorded inverses, LIFO, against the
+//! world. So:
+//!
+//! * the item-243 PAIR RULES are enforced at declaration time, which is the
+//!   "checked" in checked inverse: [`Externs::witnessed`] refuses an inverse that
+//!   is not already registered (`UNKNOWN_INVERSE` — an effect whose undo does not
+//!   exist is never escrowed), and refuses one that is not an
+//!   [`ExternClass::Inverse`] (`INVERSE_NOT_LOCAL` — G5's no-emission-in-undo);
+//!   [`Externs::bind`] refuses to put an undo slot on the call surface
+//!   (`INVERSE_NOT_CALLABLE` — an inverse is not a tool);
+//! * [`AbortReport::residue_free`] is MEASURED, not asserted: an inverse whose
+//!   body reports failure lands in [`AbortReport::residue`], so a revert that did
+//!   not revert says so;
+//! * a class-(b) tail does not fire at call time and fires at `commit`, and a
+//!   tail that fails at commit is ENUMERATED ([`CommitReport::deferrals_failed`])
+//!   rather than swallowed;
+//! * a class-(a) body that reports FAILURE still owes its inverse: the escrow
+//!   entry is recorded and then the call errors, because a host effect that
+//!   failed part-way through is exactly the case an owed undo exists for.
+//!
+//! # What is NOT here yet (the honest boundary, item 445)
 //!
 //! Layer 1 issues NO admission ([`crate::Verdict`] has no `Admitted` arm — the
-//! native gate does not run the reference type layer), and this tier has no
-//! cordis runtime, no WAL and no approver CALLBACK yet. So the ACCEPT half of
-//! `propose` — compile the candidate to a runnable composition, activate it, run
-//! the item-334 post-activation health gate, and hot-swap generation N+1 into
-//! the live process — is NOT here: a candidate the native gate does not REFUSE
-//! is fail-closed (`admitted = false`, `code = "NO_ADMISSION"`), never waved
-//! through. The remaining slices, in order:
+//! native gate does not run the reference type layer), and this tier has no WAL
+//! and no approver CALLBACK. So the ACCEPT half of `propose` — compile the
+//! candidate to a runnable composition, activate it, run the item-334
+//! post-activation health gate, and hot-swap generation N+1 into the live
+//! process — is NOT here: a candidate the native gate does not REFUSE is
+//! fail-closed (`admitted = false`, `code = "NO_ADMISSION"`), never waved
+//! through.
 //!
-//! * slice 2 — the rust witnessed-effect runtime the [`Crossing`] classes model
-//!   here as data: real host externs paired with checked inverses over cordis-rs;
+//! Slice 2's externs are host closures the EMBEDDER registers, and the pair
+//! rules are checked over that registry. They are not yet derived from an
+//! emitted cordis-rs component body: that needs [`crate::compile_to`], which is
+//! still unimplemented on this tier (the self-host emitters carry `@py`-only
+//! helper externs), so the step from "the host declares a witnessed pair" to
+//! "the pair comes out of a `witnessed[fs]` extern in the candidate's source"
+//! rides the same lane. The remaining slices, in order:
+//!
 //! * slice 3 — the health-gated swap (`_abort_swap` back to generation N on a
 //!   FAILED/PENDING successor) and live-state migration across the swap;
 //! * slice 4 — the item-322 WAL and `revl.gate.recover`, the crash half of the
-//!   revert guarantee;
-//! * slice 5 — the item-246 approver seam as a host callback (slice 1 gates
-//!   class (c) on a caller-supplied boolean and fails closed without it).
+//!   revert guarantee (slice 2 reverts in-process only: a crash mid-frame
+//!   strands the escrow exactly as [`Session::unload`] does);
+//! * slice 5 — the item-246 approver seam as a host callback (slice 2 gates
+//!   class (c) on [`Session::approve_irreversible`] and fails closed without it).
 //!
 //! Until those land, [`crate::admit`] is the entitled decision this session can
 //! make, and `Session` fails closed on everything it cannot yet do.
 
 use crate::{admit, admit_into, Verdict};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The service names that reach the decider — the admit/swap/owner-state control
@@ -1555,47 +2498,259 @@ impl Composition {
     }
 }
 
-/// A witnessed host effect paired with its checked inverse (items 243/244). The
-/// inverse is what [`Session::abort`] replays to undo the effect residue-free.
+/// A host extern's body: it takes the crossing's arguments and returns either
+/// what the host observed or the host's own failure text.
+///
+/// A body is `FnMut` and not `Fn` because a real host extern owns mutable state
+/// (a workspace handle, a connection, a garbage directory). It is not `Send`:
+/// layer 2 is address-space-bound by the design's own split, and the py
+/// reference session is single-threaded too.
+pub type ExternBody = Box<dyn FnMut(&[String]) -> Result<String, String>>;
+
+/// How a registered host extern crosses the boundary — the item-245 three-way
+/// split, plus the undo half of a class-(a) pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternClass {
+    /// Class (a): a witnessed effect, paired with the NAME of its registered
+    /// inverse. Escrowed at call time; replayed by [`Session::abort`], made
+    /// permanent (and its witness released) by [`Session::commit`].
+    Witnessed {
+        /// The registered [`ExternClass::Inverse`] that undoes this effect.
+        inverse: String,
+    },
+    /// The undo half of a class-(a) pair. Host-LOCAL by construction: it may be
+    /// named as an `inverse` and replayed by `abort`, and it may never be bound
+    /// to the call surface — G5's no-emission-in-undo read from the other side,
+    /// an undo slot is not a tool.
+    Inverse,
+    /// Class (b): a deferrable irreversible tail. It does NOT fire at call time;
+    /// it fires at [`Session::commit`] and is DROPPED unfired by
+    /// [`Session::abort`].
+    Deferred,
+    /// Class (c): an irreversible emission with no inverse. It fires only with
+    /// the approver's yes ([`Session::approve_irreversible`], the slice-5
+    /// stand-in) and is then enumerable residue neither verb can undo.
+    Irreversible,
+}
+
+struct Registered {
+    class: ExternClass,
+    body: ExternBody,
+}
+
+/// The host's extern surface for one generation: the externs it declares, the
+/// item-243 pair rules checked over them, and the bindings that put them on the
+/// call surface.
+///
+/// The registry is where "checked inverse" is checked. A witnessed extern cannot
+/// be declared before its inverse exists, and an emission can never stand in as
+/// an undo — so by the time an effect is escrowed, the thing that undoes it is
+/// already in hand and is host-local.
+#[derive(Default)]
+pub struct Externs {
+    table: BTreeMap<String, Registered>,
+    /// `"<key>.<method>"` to extern name.
+    bindings: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for Externs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Bodies are opaque closures; the SHAPE is what a host wants to see.
+        f.debug_struct("Externs")
+            .field(
+                "externs",
+                &self.table.iter().map(|(n, r)| (n, &r.class)).collect::<Vec<_>>(),
+            )
+            .field("bindings", &self.bindings)
+            .finish()
+    }
+}
+
+impl Externs {
+    /// An empty host surface.
+    pub fn new() -> Self {
+        Externs::default()
+    }
+
+    /// Declare the UNDO half of a class-(a) pair. Declare it before the witnessed
+    /// effect that names it: [`Externs::witnessed`] refuses a name it cannot
+    /// already resolve.
+    pub fn inverse(
+        &mut self,
+        name: &str,
+        body: impl FnMut(&[String]) -> Result<String, String> + 'static,
+    ) -> Result<(), SessionError> {
+        self.insert(name, ExternClass::Inverse, Box::new(body))
+    }
+
+    /// Declare a class-(a) WITNESSED effect paired with `inverse`.
+    ///
+    /// Refuses (item 243's pair rules, the "checked" in checked inverse):
+    ///
+    /// * `UNKNOWN_INVERSE` — `inverse` is not registered. An effect whose undo
+    ///   does not exist must never be escrowed, because `abort` would then have
+    ///   nothing to replay while reporting a clean revert.
+    /// * `INVERSE_NOT_LOCAL` — `inverse` is registered, but not as an
+    ///   [`ExternClass::Inverse`]. G5: the undo slot may not reach an emission.
+    pub fn witnessed(
+        &mut self,
+        name: &str,
+        inverse: &str,
+        body: impl FnMut(&[String]) -> Result<String, String> + 'static,
+    ) -> Result<(), SessionError> {
+        match self.table.get(inverse) {
+            None => {
+                return Err(SessionError::new(
+                    "UNKNOWN_INVERSE",
+                    format!(
+                        "witnessed extern {name:?} names inverse {inverse:?}, which is \
+                         not declared. Declare the inverse first: an effect whose undo \
+                         does not exist cannot be escrowed, and escrowing it anyway is \
+                         how `abort` comes to report a revert it never performed \
+                         (items 243/244)."
+                    ),
+                ))
+            }
+            Some(entry) if entry.class != ExternClass::Inverse => {
+                return Err(SessionError::new(
+                    "INVERSE_NOT_LOCAL",
+                    format!(
+                        "witnessed extern {name:?} names inverse {inverse:?}, which is \
+                         declared as {:?} rather than as an undo slot. The inverse must \
+                         be host-LOCAL: G5 keeps emissions out of the undo path, so a \
+                         deferred tail or an irreversible emission cannot stand in as \
+                         one (item 243).",
+                        entry.class
+                    ),
+                ))
+            }
+            Some(_) => {}
+        }
+        self.insert(name, ExternClass::Witnessed { inverse: inverse.to_string() }, Box::new(body))
+    }
+
+    /// Declare a class-(b) DEFERRED tail: it fires at `commit`, never at `call`.
+    pub fn deferred(
+        &mut self,
+        name: &str,
+        body: impl FnMut(&[String]) -> Result<String, String> + 'static,
+    ) -> Result<(), SessionError> {
+        self.insert(name, ExternClass::Deferred, Box::new(body))
+    }
+
+    /// Declare a class-(c) IRREVERSIBLE emission: it has no inverse and fires
+    /// only with the approver's yes.
+    pub fn irreversible(
+        &mut self,
+        name: &str,
+        body: impl FnMut(&[String]) -> Result<String, String> + 'static,
+    ) -> Result<(), SessionError> {
+        self.insert(name, ExternClass::Irreversible, Box::new(body))
+    }
+
+    /// Put a declared extern on the call surface as `key.method`.
+    ///
+    /// Refuses `UNKNOWN_EXTERN` for a name that is not declared,
+    /// `INVERSE_NOT_CALLABLE` for an undo slot (an inverse is replayed by
+    /// `abort`, never called as a tool), and `DUPLICATE_BINDING` for a
+    /// `key.method` that is already bound.
+    pub fn bind(&mut self, key: &str, method: &str, extern_name: &str) -> Result<(), SessionError> {
+        match self.table.get(extern_name) {
+            None => {
+                return Err(SessionError::new(
+                    "UNKNOWN_EXTERN",
+                    format!(
+                        "cannot bind {key}.{method} to extern {extern_name:?}: it is not \
+                         declared on this host surface"
+                    ),
+                ))
+            }
+            Some(entry) if entry.class == ExternClass::Inverse => {
+                return Err(SessionError::new(
+                    "INVERSE_NOT_CALLABLE",
+                    format!(
+                        "cannot bind {key}.{method} to extern {extern_name:?}: it is an \
+                         undo slot. An inverse is replayed by `abort` against an escrowed \
+                         effect; putting it on the call surface would let a caller run an \
+                         undo with arguments no effect ever witnessed (item 243, G5)."
+                    ),
+                ))
+            }
+            Some(_) => {}
+        }
+        let slot = binding_slot(key, method);
+        if self.bindings.contains_key(&slot) {
+            return Err(SessionError::new(
+                "DUPLICATE_BINDING",
+                format!("{key}.{method} is already bound on this host surface"),
+            ));
+        }
+        self.bindings.insert(slot, extern_name.to_string());
+        Ok(())
+    }
+
+    /// The class of a declared extern, if it is declared.
+    pub fn class_of(&self, name: &str) -> Option<&ExternClass> {
+        self.table.get(name).map(|e| &e.class)
+    }
+
+    /// The extern bound to `key.method`, if one is.
+    pub fn bound(&self, key: &str, method: &str) -> Option<&str> {
+        self.bindings.get(&binding_slot(key, method)).map(|s| s.as_str())
+    }
+
+    fn insert(
+        &mut self,
+        name: &str,
+        class: ExternClass,
+        body: ExternBody,
+    ) -> Result<(), SessionError> {
+        if self.table.contains_key(name) {
+            return Err(SessionError::new(
+                "DUPLICATE_EXTERN",
+                format!("extern {name:?} is already declared on this host surface"),
+            ));
+        }
+        self.table.insert(name.to_string(), Registered { class, body });
+        Ok(())
+    }
+
+    /// Run a declared extern's body. `None` when the name is not declared, which
+    /// the session treats as residue rather than as a clean revert.
+    fn perform(&mut self, name: &str, args: &[String]) -> Option<Result<String, String>> {
+        self.table.get_mut(name).map(|entry| (entry.body)(args))
+    }
+}
+
+fn binding_slot(key: &str, method: &str) -> String {
+    format!("{key}.{method}")
+}
+
+/// An escrowed witnessed effect (items 243/244): what fired, the checked inverse
+/// that undoes it, and the arguments the undo is owed.
+///
+/// [`Session::abort`] replays these in REVERSE order. The order is load-bearing
+/// and not cosmetic: class (a) is auto-approved on the strength of the inverse
+/// (item 246), so an out-of-order replay is a silently-wrong world rather than a
+/// visible refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WitnessedEffect {
-    /// The effect that fired (its identity, for the teardown log).
+    /// The extern that fired.
     pub effect: String,
     /// The checked inverse that undoes it.
     pub inverse: String,
+    /// The arguments the inverse is replayed with — the forward call's own, which
+    /// is the item-243 argument rule (`_check_inverse_args` on the reference).
+    pub args: Vec<String>,
 }
 
-/// What a [`Session::call`] crossing does, in the item-245 three-way split.
-///
-/// This is the classification the witnessed runtime (slice 2) will derive from a
-/// real emission; slice 1 takes it as data so the frame machinery — the star of
-/// this slice — can be built and tested ahead of the runtime.
+/// A queued class-(b) tail: the extern that will fire at `commit`, and with what.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Crossing {
-    /// Class (a): a witnessed effect with a checked inverse. Recorded to the
-    /// frame's LIFO inverse stack; reverted on `abort`, made permanent on `commit`.
-    Witnessed {
-        /// The effect that fired.
-        effect: String,
-        /// Its checked inverse.
-        inverse: String,
-    },
-    /// Class (b): a deferrable irreversible tail. It does NOT fire now — it is
-    /// queued and fires only at `commit`; `abort` DROPS the queue unfired.
-    Deferred {
-        /// A description of the tail, for the commit enumeration.
-        tail: String,
-    },
-    /// Class (c): an irreversible emission that must be approved per crossing.
-    /// `approved` is the caller's stand-in for the item-246 approver callback
-    /// (slice 5): a `false` here fails the call CLOSED. An approved crossing is
-    /// recorded as enumerable residue — `abort` names it, it does not undo it.
-    Irreversible {
-        /// The emission that crossed.
-        emission: String,
-        /// Whether the (stand-in) approver said yes. `false` fails closed.
-        approved: bool,
-    },
+pub struct Deferral {
+    /// The deferred extern.
+    pub tail: String,
+    /// The arguments it will fire with.
+    pub args: Vec<String>,
 }
 
 /// The item-245 session owner/frame: the witnessed-effect escrow and the
@@ -1606,7 +2761,7 @@ struct Frame {
     /// in REVERSE (LIFO).
     witnessed: Vec<WitnessedEffect>,
     /// Class-(b) deferred tails, fired at `commit`, dropped at `abort`.
-    deferrals: Vec<String>,
+    deferrals: Vec<Deferral>,
     /// Class-(c) irreversible emissions the approver let through — enumerable
     /// residue that neither `commit` nor `abort` can undo.
     irreversible: Vec<String>,
@@ -1723,7 +2878,7 @@ impl ProposeOutcome {
     }
 }
 
-/// What a single [`Session::call`] recorded into the frame.
+/// What a single [`Session::call`] did and recorded into the frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallReport {
     /// The key that was called.
@@ -1732,35 +2887,59 @@ pub struct CallReport {
     pub method: String,
     /// The effect class recorded: `"witnessed"`, `"deferred"`, or `"irreversible"`.
     pub class: &'static str,
+    /// The host extern the binding resolved to.
+    pub extern_name: String,
+    /// What the host body returned. `None` for a class-(b) tail, which has NOT
+    /// fired — that is the whole point of deferring it.
+    pub result: Option<String>,
 }
 
 /// The result of [`Session::commit`]: the item-245 discharge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReport {
-    /// How many witnessed effects were made permanent.
+    /// How many witnessed effects were made permanent (their witnesses released).
     pub witnessed_committed: usize,
-    /// The class-(b) deferred tails fired at commit, in queue order.
+    /// The class-(b) deferred tails that FIRED at commit, in queue order.
     pub deferrals_fired: Vec<String>,
+    /// The class-(b) tails whose body reported failure at commit, as
+    /// `"<tail>: <host failure>"`. Enumerated rather than swallowed: a tail that
+    /// did not discharge is residue the operator has to see, and commit fires the
+    /// rest of the queue regardless.
+    pub deferrals_failed: Vec<String>,
     /// The class-(c) irreversible emissions this session performed — enumerated,
     /// not undone.
     pub irreversible: Vec<String>,
 }
 
+impl CommitReport {
+    /// Whether every queued tail discharged.
+    pub fn fully_discharged(&self) -> bool {
+        self.deferrals_failed.is_empty()
+    }
+}
+
 /// The result of [`Session::abort`]: the item-245 revert (EDGE 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbortReport {
-    /// The witnessed inverses replayed, in LIFO order (last effect first).
+    /// The witnessed inverses that RAN and reported success, in LIFO order (last
+    /// effect first).
     pub inverses_replayed: Vec<String>,
     /// How many deferred tails were DROPPED unfired.
     pub deferrals_dropped: usize,
-    /// The class-(c) irreversible residue that could not be reverted (each was
-    /// approved when it fired). Empty means the revert was residue-free.
+    /// What the abort could NOT revert. Two sources, and both are measured rather
+    /// than assumed: a class-(c) emission the approver let through (there is no
+    /// inverse to run), and a class-(a) inverse whose body reported FAILURE (there
+    /// was one, and it did not work). Empty means the revert was residue-free.
     pub residue: Vec<String>,
 }
 
 impl AbortReport {
-    /// Whether the abort left the world residue-free — the item-245 R4 property
-    /// for a session that only ever used classes (a) and (b).
+    /// Whether the abort left the world residue-free — the item-245 R4 property.
+    ///
+    /// This is a MEASURED property in slice 2: every inverse actually ran, and one
+    /// that reported failure is in [`AbortReport::residue`]. A `true` here is the
+    /// runtime saying the undos it owed all succeeded, not the runtime saying it
+    /// only used revertible classes.
     pub fn residue_free(&self) -> bool {
         self.residue.is_empty()
     }
@@ -1777,19 +2956,60 @@ pub struct UnloadReport {
 }
 
 /// One live composition, driven step by step — the rust mirror of
-/// `revl.mcp.session.Session` (item 334 slice 1).
+/// `revl.mcp.session.Session` (item 334 slices 1-2).
 #[derive(Debug, Default)]
 pub struct Session {
     generation: u64,
     ir: Option<Composition>,
     frame: Frame,
     halted: Option<String>,
+    externs: Externs,
+    approver_yes: bool,
 }
 
 impl Session {
-    /// A fresh session: generation 0, nothing loaded, not halted.
+    /// A fresh session: generation 0, nothing loaded, not halted, no host
+    /// surface, and the class-(c) approver saying NO (fail-closed).
     pub fn new() -> Self {
         Session::default()
+    }
+
+    /// A fresh session over a host extern surface.
+    pub fn with_externs(externs: Externs) -> Self {
+        Session { externs, ..Session::default() }
+    }
+
+    /// Install (or replace) the host extern surface.
+    ///
+    /// Refuses `ESCROW_OPEN` while the item-245 frame is non-baseline. Replacing
+    /// the surface under an open escrow would take the inverses this session owes
+    /// out from under it: `abort` would then find the names unregistered and the
+    /// world would stay mutated. A host swaps its surface between frames, never
+    /// inside one.
+    pub fn install_externs(&mut self, externs: Externs) -> Result<(), SessionError> {
+        if !self.frame.is_baseline() {
+            return Err(SessionError::new(
+                "ESCROW_OPEN",
+                "install_externs refused: this generation's frame still holds \
+                 escrowed inverses, queued tails or enumerated residue. Replacing \
+                 the host surface now would strand the undos this session owes \
+                 (item 245); commit or abort the frame first.",
+            ));
+        }
+        self.externs = externs;
+        Ok(())
+    }
+
+    /// The host extern surface, for inspection.
+    pub fn externs(&self) -> &Externs {
+        &self.externs
+    }
+
+    /// The item-246 approver STAND-IN (slice 5 replaces it with a host callback):
+    /// whether a class-(c) irreversible crossing may fire. Defaults to `false`, so
+    /// a session that never sets it fails closed on every emission.
+    pub fn approve_irreversible(&mut self, yes: bool) {
+        self.approver_yes = yes;
     }
 
     /// Which generation is live: 0 before the first `load`, then 1, and every
@@ -1997,18 +3217,33 @@ impl Session {
         }
     }
 
-    /// Record a witnessed crossing an in-flight call to `key.method` performed,
-    /// into this generation's item-245 frame. Class (a) is escrowed with its
-    /// inverse, class (b) is queued, class (c) is admitted only with the
-    /// (stand-in) approver's yes and otherwise fails CLOSED.
+    /// Run the crossing bound to `key.method` and record it into this
+    /// generation's item-245 frame.
     ///
-    /// Refuses if nothing is loaded, if halted, or if `key` is not one the live
-    /// generation provides (the py `AdmitHandle.call` key check).
+    /// The class comes from the host extern surface ([`Externs`]), not from the
+    /// caller, and the body actually RUNS:
+    ///
+    /// * class (a) — the body fires, and the effect is ESCROWED with its checked
+    ///   inverse and this call's arguments. A body that reports FAILURE is
+    ///   escrowed too and then the call errors `EFFECT_FAILED`: a host effect that
+    ///   failed part-way is exactly what an owed undo is for, and dropping the
+    ///   escrow there is how a partial mutation becomes invisible residue;
+    /// * class (b) — the body does NOT fire. The tail is queued for `commit` and
+    ///   dropped unfired by `abort`;
+    /// * class (c) — the body fires only with the approver's yes
+    ///   ([`Session::approve_irreversible`]); without it the call fails CLOSED
+    ///   (`APPROVER_REQUIRED`) and nothing fires. An emission that DID fire is
+    ///   recorded as enumerable residue whether or not its body reported success,
+    ///   because a failed reach-out is not a proof that nothing crossed.
+    ///
+    /// Refuses if nothing is loaded, if halted, if `key` is not one the live
+    /// generation provides (the py `AdmitHandle.call` key check), or if
+    /// `key.method` is not bound on the host surface (`NO_BINDING`).
     pub fn call(
         &mut self,
         key: &str,
         method: &str,
-        crossing: Crossing,
+        args: &[&str],
     ) -> Result<CallReport, SessionError> {
         self.require_loaded("call")?;
         if let Some(reason) = &self.halted {
@@ -2032,68 +3267,198 @@ impl Session {
                 ),
             ));
         }
-        let class = match crossing {
-            Crossing::Witnessed { effect, inverse } => {
-                self.frame.witnessed.push(WitnessedEffect { effect, inverse });
-                "witnessed"
+        let extern_name = match self.externs.bound(key, method) {
+            Some(name) => name.to_string(),
+            None => {
+                return Err(SessionError::new(
+                    "NO_BINDING",
+                    format!(
+                        "call refused: {key}.{method} is not bound on this host \
+                         extern surface. A crossing's class comes from the declared \
+                         extern (item 245), so an unbound method has no class and \
+                         cannot be recorded; declare the extern and `bind` it."
+                    ),
+                ));
             }
-            Crossing::Deferred { tail } => {
-                self.frame.deferrals.push(tail);
-                "deferred"
+        };
+        let class = self
+            .externs
+            .class_of(&extern_name)
+            .expect("a binding resolves to a declared extern")
+            .clone();
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+
+        match class {
+            ExternClass::Witnessed { inverse } => {
+                let outcome = self
+                    .externs
+                    .perform(&extern_name, &owned)
+                    .expect("a binding resolves to a declared extern");
+                // Escrow BEFORE deciding what to return: a failed body may have
+                // mutated part-way, and the undo is owed either way.
+                self.frame.witnessed.push(WitnessedEffect {
+                    effect: extern_name.clone(),
+                    inverse,
+                    args: owned,
+                });
+                match outcome {
+                    Ok(result) => Ok(CallReport {
+                        key: key.to_string(),
+                        method: method.to_string(),
+                        class: "witnessed",
+                        extern_name,
+                        result: Some(result),
+                    }),
+                    Err(why) => Err(SessionError::new(
+                        "EFFECT_FAILED",
+                        format!(
+                            "call failed: the witnessed extern {extern_name:?} reported \
+                             {why:?}. Its checked inverse stays ESCROWED and owed, \
+                             because a host effect that failed part-way through is what \
+                             an owed undo exists for; `abort` will replay it."
+                        ),
+                    )),
+                }
             }
-            Crossing::Irreversible { emission, approved } => {
-                if !approved {
+            ExternClass::Deferred => {
+                // It does NOT fire here. That is the class.
+                self.frame.deferrals.push(Deferral { tail: extern_name.clone(), args: owned });
+                Ok(CallReport {
+                    key: key.to_string(),
+                    method: method.to_string(),
+                    class: "deferred",
+                    extern_name,
+                    result: None,
+                })
+            }
+            ExternClass::Irreversible => {
+                if !self.approver_yes {
                     return Err(SessionError::new(
                         "APPROVER_REQUIRED",
                         format!(
-                            "call refused: the crossing {emission:?} is an \
+                            "call refused: the crossing {extern_name:?} is an \
                              irreversible (class c) emission and needs the host's \
-                             approver yes; none was given, so the gate fails \
-                             closed (item 246). No effect fired."
+                             approver yes; none was given, so the gate fails closed \
+                             (item 246). No effect fired."
                         ),
                     ));
                 }
-                self.frame.irreversible.push(emission);
-                "irreversible"
+                let outcome = self
+                    .externs
+                    .perform(&extern_name, &owned)
+                    .expect("a binding resolves to a declared extern");
+                // Residue either way: a class-(c) body that reported failure is not
+                // a proof that nothing crossed the boundary.
+                self.frame.irreversible.push(extern_name.clone());
+                match outcome {
+                    Ok(result) => Ok(CallReport {
+                        key: key.to_string(),
+                        method: method.to_string(),
+                        class: "irreversible",
+                        extern_name,
+                        result: Some(result),
+                    }),
+                    Err(why) => Err(SessionError::new(
+                        "EFFECT_FAILED",
+                        format!(
+                            "call failed: the irreversible extern {extern_name:?} \
+                             reported {why:?}. It is recorded as residue anyway: there \
+                             is no inverse, and a failed emission is not evidence that \
+                             nothing crossed."
+                        ),
+                    )),
+                }
             }
-        };
-        Ok(CallReport { key: key.to_string(), method: method.to_string(), class })
+            ExternClass::Inverse => Err(SessionError::new(
+                "INVERSE_NOT_CALLABLE",
+                format!(
+                    "call refused: {key}.{method} resolves to the undo slot \
+                     {extern_name:?}. An inverse is replayed by `abort` against an \
+                     escrowed effect, never called as a tool (item 243, G5)."
+                ),
+            )),
+        }
     }
 
-    /// The item-245 session commit: make the witnessed effects permanent, FIRE
-    /// the deferred tails, and enumerate the irreversible residue. Clears the
-    /// frame back to baseline.
+    /// The item-245 session commit: make the witnessed effects permanent (their
+    /// witnesses released), FIRE the deferred tails in queue order, and enumerate
+    /// the irreversible residue. Clears the frame back to baseline.
+    ///
+    /// A tail whose body reports failure is enumerated in
+    /// [`CommitReport::deferrals_failed`] and the rest of the queue still fires:
+    /// the commit point owes the operator the WHOLE residue picture, and stopping
+    /// at the first failure would hide the tails behind it.
     pub fn commit(&mut self) -> Result<CommitReport, SessionError> {
         self.require_loaded("commit")?;
         let witnessed_committed = self.frame.witnessed.len();
-        let deferrals_fired = std::mem::take(&mut self.frame.deferrals);
+        let queued = std::mem::take(&mut self.frame.deferrals);
         let irreversible = std::mem::take(&mut self.frame.irreversible);
         self.frame.witnessed.clear();
-        Ok(CommitReport { witnessed_committed, deferrals_fired, irreversible })
+
+        let mut deferrals_fired = Vec::new();
+        let mut deferrals_failed = Vec::new();
+        for Deferral { tail, args } in queued {
+            match self.externs.perform(&tail, &args) {
+                Some(Ok(_)) => deferrals_fired.push(tail),
+                Some(Err(why)) => deferrals_failed.push(format!("{tail}: {why}")),
+                None => deferrals_failed.push(format!(
+                    "{tail}: the tail is no longer declared on the host surface"
+                )),
+            }
+        }
+        Ok(CommitReport {
+            witnessed_committed,
+            deferrals_fired,
+            deferrals_failed,
+            irreversible,
+        })
     }
 
-    /// The item-245 session abort (EDGE 2): replay the witnessed inverses LIFO,
-    /// DROP the deferral queue unfired, and surface any approved-class-(c)
-    /// residue. Clears the frame back to baseline. The process stays alive.
+    /// The item-245 session abort (EDGE 2): REPLAY the witnessed inverses LIFO
+    /// against the world, DROP the deferral queue unfired, and surface what could
+    /// not be reverted. Clears the frame back to baseline. The process stays alive.
+    ///
+    /// The inverses actually run here, so the report is a measurement: an inverse
+    /// whose body fails (or whose extern is no longer declared) lands in
+    /// [`AbortReport::residue`] instead of in `inverses_replayed`, and
+    /// [`AbortReport::residue_free`] is then false. LIFO is not cosmetic — class
+    /// (a) is auto-approved on the strength of the inverse, so replaying out of
+    /// order silently wrongs the world (item 334's note on the out-of-order replay
+    /// bug).
     pub fn abort(&mut self) -> AbortReport {
-        let inverses_replayed: Vec<String> = self
-            .frame
-            .witnessed
-            .iter()
-            .rev()
-            .map(|w| w.inverse.clone())
-            .collect();
+        let owed = std::mem::take(&mut self.frame.witnessed);
         let deferrals_dropped = self.frame.deferrals.len();
-        let residue = std::mem::take(&mut self.frame.irreversible);
-        self.frame.witnessed.clear();
         self.frame.deferrals.clear();
-        debug_assert!(self.frame.is_baseline() || !residue.is_empty());
+        let approved_residue = std::mem::take(&mut self.frame.irreversible);
+
+        let mut inverses_replayed = Vec::new();
+        let mut residue = Vec::new();
+        for effect in owed.into_iter().rev() {
+            match self.externs.perform(&effect.inverse, &effect.args) {
+                Some(Ok(_)) => inverses_replayed.push(effect.inverse),
+                Some(Err(why)) => residue.push(format!(
+                    "{}: inverse `{}` failed: {why}",
+                    effect.effect, effect.inverse
+                )),
+                None => residue.push(format!(
+                    "{}: inverse `{}` is no longer declared on the host surface",
+                    effect.effect, effect.inverse
+                )),
+            }
+        }
+        residue.extend(approved_residue);
+        debug_assert!(self.frame.is_baseline());
         AbortReport { inverses_replayed, deferrals_dropped, residue }
     }
 
     /// Tear the composition down, STRANDING rather than unwinding: outstanding
-    /// witnessed effects are left owed and not discharged (the py `unload`
+    /// witnessed effects are left owed and NOT replayed (the py `unload`
     /// contract). Returns the session to generation 0.
+    ///
+    /// This is the one verb that does not touch the world, and deliberately: a
+    /// stranded escrow is what the item-322 WAL (slice 4) exists to recover, and
+    /// quietly reverting here would make the crash path and the unload path
+    /// disagree about what a generation left behind.
     pub fn unload(&mut self) -> UnloadReport {
         let report = UnloadReport {
             stranded_witnessed: self.frame.witnessed.len(),
@@ -2214,6 +3579,123 @@ fn json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A tiny observable WORLD the test externs mutate for real, so the revert
+    /// claims are checked against it rather than against a report.
+    ///
+    /// `files` is a key/value store (the shape a witnessed `write`/`rm` pair
+    /// works over); `journal` is an ORDER-SENSITIVE stack, which is what makes the
+    /// LIFO test non-vacuous: its inverse pops the top and refuses if the top is
+    /// not the entry it witnessed, so a FIFO replay reports residue instead of
+    /// quietly succeeding.
+    #[derive(Default)]
+    struct World {
+        files: BTreeMap<String, String>,
+        /// The item-244 WITNESS stack: what `write` saved before it mutated, so
+        /// `unwrite` can restore it. Host-side state, exactly as the reference's
+        /// clonefile preimage is — the inverse's arguments name the key, the
+        /// witness supplies the old bytes.
+        witnesses: Vec<(String, Option<String>)>,
+        journal: Vec<String>,
+        sent: Vec<String>,
+        flushed: Vec<String>,
+    }
+
+    type Shared = Rc<RefCell<World>>;
+
+    /// The host surface the runtime tests drive: a witnessed `write`/`unwrite`
+    /// pair, a witnessed `push`/`pop` pair over the order-sensitive journal, a
+    /// class-(b) `flush` tail, and a class-(c) `send` emission.
+    fn host(world: &Shared) -> Externs {
+        let mut ex = Externs::new();
+
+        let w = Rc::clone(world);
+        ex.inverse("unwrite", move |args| {
+            let key = args[0].clone();
+            let mut world = w.borrow_mut();
+            let witness = match world.witnesses.pop() {
+                Some(witness) => witness,
+                None => return Err(format!("no witness held for {key:?}")),
+            };
+            if witness.0 != key {
+                // Put it back and refuse: the undo is being replayed against an
+                // effect it did not witness.
+                world.witnesses.push(witness);
+                return Err(format!("the held witness is not {key:?}"));
+            }
+            match witness.1 {
+                Some(preimage) => world.files.insert(key, preimage),
+                None => world.files.remove(&key),
+            };
+            Ok("restored".to_string())
+        })
+        .unwrap();
+
+        let w = Rc::clone(world);
+        ex.witnessed("write", "unwrite", move |args| {
+            let (key, value) = (args[0].clone(), args[1].clone());
+            let mut world = w.borrow_mut();
+            // Take the witness BEFORE mutating — item 244's whole shape.
+            let preimage = world.files.get(&key).cloned();
+            world.witnesses.push((key.clone(), preimage));
+            world.files.insert(key, value);
+            Ok("written".to_string())
+        })
+        .unwrap();
+
+        let w = Rc::clone(world);
+        ex.inverse("pop", move |args| {
+            let expected = &args[0];
+            let mut world = w.borrow_mut();
+            match world.journal.pop() {
+                Some(top) if &top == expected => Ok("popped".to_string()),
+                Some(top) => {
+                    // Put it back and refuse: an out-of-order replay must be
+                    // visible residue, never a quiet success.
+                    world.journal.push(top.clone());
+                    Err(format!("top is {top:?}, not {expected:?}"))
+                }
+                None => Err("journal is empty".to_string()),
+            }
+        })
+        .unwrap();
+
+        let w = Rc::clone(world);
+        ex.witnessed("push", "pop", move |args| {
+            w.borrow_mut().journal.push(args[0].clone());
+            Ok("pushed".to_string())
+        })
+        .unwrap();
+
+        let w = Rc::clone(world);
+        ex.deferred("flush", move |args| {
+            w.borrow_mut().flushed.push(args[0].clone());
+            Ok("flushed".to_string())
+        })
+        .unwrap();
+
+        let w = Rc::clone(world);
+        ex.irreversible("send", move |args| {
+            w.borrow_mut().sent.push(args[0].clone());
+            Ok("sent".to_string())
+        })
+        .unwrap();
+
+        ex.bind("tool", "write", "write").unwrap();
+        ex.bind("tool", "push", "push").unwrap();
+        ex.bind("tool", "flush", "flush").unwrap();
+        ex.bind("tool", "send", "send").unwrap();
+        ex
+    }
+
+    /// A loaded session over the host surface above.
+    fn live(world: &Shared) -> Session {
+        let mut s = Session::with_externs(host(world));
+        s.load(base()).unwrap();
+        s
+    }
 
     // A composition helper: two components providing one key `tool`.
     fn base() -> Composition {
@@ -2435,127 +3917,346 @@ fn put(key, value) { return value } } }";
         assert_eq!(out.code.as_deref(), Some("NO_ADMISSION"));
     }
 
+    // ---------------------------------------------------------------------
+    // Slice 2: the host extern surface and its item-243 pair rules.
+    // ---------------------------------------------------------------------
+
     #[test]
-    fn call_records_a_witnessed_effect() {
-        let mut s = Session::new();
-        s.load(base()).unwrap();
-        let report = s
-            .call(
-                "tool",
-                "run",
-                Crossing::Witnessed {
-                    effect: "write(/tmp/x)".to_string(),
-                    inverse: "rm(/tmp/x)".to_string(),
-                },
-            )
-            .unwrap();
+    fn a_witnessed_extern_needs_its_inverse_declared_first() {
+        let mut ex = Externs::new();
+        let err = ex.witnessed("write", "unwrite", |_| Ok(String::new())).unwrap_err();
+        assert_eq!(err.code, "UNKNOWN_INVERSE");
+        assert!(err.message.contains("unwrite"));
+        // And nothing was declared: the refusal is not half-applied.
+        assert!(ex.class_of("write").is_none());
+    }
+
+    #[test]
+    fn an_emission_may_not_stand_in_as_an_undo_slot() {
+        // G5: no emission in the undo path. Neither a class-(c) emission nor a
+        // class-(b) tail can be an inverse.
+        for (name, declare) in [("send", 0), ("flush", 1)] {
+            let mut ex = Externs::new();
+            if declare == 0 {
+                ex.irreversible(name, |_| Ok(String::new())).unwrap();
+            } else {
+                ex.deferred(name, |_| Ok(String::new())).unwrap();
+            }
+            let err = ex.witnessed("write", name, |_| Ok(String::new())).unwrap_err();
+            assert_eq!(err.code, "INVERSE_NOT_LOCAL", "{name}");
+        }
+    }
+
+    #[test]
+    fn an_undo_slot_may_not_be_bound_to_the_call_surface() {
+        let mut ex = Externs::new();
+        ex.inverse("unwrite", |_| Ok(String::new())).unwrap();
+        let err = ex.bind("tool", "unwrite", "unwrite").unwrap_err();
+        assert_eq!(err.code, "INVERSE_NOT_CALLABLE");
+    }
+
+    #[test]
+    fn binding_an_undeclared_extern_is_refused() {
+        let mut ex = Externs::new();
+        let err = ex.bind("tool", "write", "write").unwrap_err();
+        assert_eq!(err.code, "UNKNOWN_EXTERN");
+    }
+
+    #[test]
+    fn a_duplicate_declaration_or_binding_is_refused() {
+        let mut ex = Externs::new();
+        ex.deferred("flush", |_| Ok(String::new())).unwrap();
+        assert_eq!(
+            ex.deferred("flush", |_| Ok(String::new())).unwrap_err().code,
+            "DUPLICATE_EXTERN"
+        );
+        ex.bind("tool", "flush", "flush").unwrap();
+        assert_eq!(
+            ex.bind("tool", "flush", "flush").unwrap_err().code,
+            "DUPLICATE_BINDING"
+        );
+    }
+
+    #[test]
+    fn the_class_comes_from_the_declaration_not_from_the_caller() {
+        let world = Shared::default();
+        let s = live(&world);
+        assert_eq!(
+            s.externs().class_of("write"),
+            Some(&ExternClass::Witnessed { inverse: "unwrite".to_string() })
+        );
+        assert_eq!(s.externs().class_of("flush"), Some(&ExternClass::Deferred));
+        assert_eq!(s.externs().class_of("send"), Some(&ExternClass::Irreversible));
+        assert_eq!(s.externs().bound("tool", "write"), Some("write"));
+        assert_eq!(s.externs().bound("tool", "nope"), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Slice 2: the effects actually fire, and the reverts actually revert.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_witnessed_call_actually_runs_the_host_body() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        let report = s.call("tool", "write", &["a", "one"]).unwrap();
         assert_eq!(report.class, "witnessed");
+        assert_eq!(report.extern_name, "write");
+        assert_eq!(report.result.as_deref(), Some("written"));
+        assert_eq!(world.borrow().files.get("a").map(String::as_str), Some("one"));
+    }
+
+    #[test]
+    fn abort_actually_undoes_the_world_and_reports_it_residue_free() {
+        // The R4 property MEASURED against the world, not against the report:
+        // two witnessed writes, one abort, and the store is byte-identical to
+        // what it held before the frame.
+        let world = Shared::default();
+        world.borrow_mut().files.insert("kept".to_string(), "untouched".to_string());
+        let before = world.borrow().files.clone();
+
+        let mut s = live(&world);
+        s.call("tool", "write", &["a", "one"]).unwrap();
+        s.call("tool", "write", &["b", "two"]).unwrap();
+        assert_eq!(world.borrow().files.len(), 3);
+
+        let report = s.abort();
+        assert_eq!(report.inverses_replayed, vec!["unwrite".to_string(), "unwrite".to_string()]);
+        assert!(report.residue_free());
+        assert_eq!(world.borrow().files, before);
+        // And no witness was leaked behind the revert (item 273's GC shape).
+        assert!(world.borrow().witnesses.is_empty());
+    }
+
+    #[test]
+    fn abort_replays_the_inverses_lifo_observably() {
+        // The journal's inverse refuses unless the top is the entry it witnessed,
+        // so LIFO is checked against an order-SENSITIVE world: a FIFO replay
+        // would land in `residue` rather than in `inverses_replayed`.
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.call("tool", "push", &["first"]).unwrap();
+        s.call("tool", "push", &["second"]).unwrap();
+        assert_eq!(world.borrow().journal, vec!["first".to_string(), "second".to_string()]);
+
+        let report = s.abort();
+        assert_eq!(report.inverses_replayed, vec!["pop".to_string(), "pop".to_string()]);
+        assert!(report.residue_free(), "{:?}", report.residue);
+        assert!(world.borrow().journal.is_empty());
+    }
+
+    #[test]
+    fn a_failing_inverse_is_reported_as_residue_rather_than_as_a_clean_revert() {
+        // The hole this slice closes: slice 1 reported the inverses it WOULD
+        // replay, so a revert that could not revert still read as residue-free.
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.call("tool", "push", &["only"]).unwrap();
+        // Something outside the session takes the entry away, so the inverse
+        // cannot do its job.
+        world.borrow_mut().journal.clear();
+
+        let report = s.abort();
+        assert!(report.inverses_replayed.is_empty());
+        assert!(!report.residue_free());
+        assert_eq!(report.residue.len(), 1);
+        assert!(report.residue[0].contains("inverse `pop` failed"), "{:?}", report.residue);
+    }
+
+    #[test]
+    fn a_failing_witnessed_body_still_owes_its_inverse() {
+        let world = Shared::default();
+        let mut ex = Externs::new();
+        let w = Rc::clone(&world);
+        ex.inverse("undo_half", move |args| {
+            w.borrow_mut().files.remove(&args[0]);
+            Ok("undone".to_string())
+        })
+        .unwrap();
+        let w = Rc::clone(&world);
+        ex.witnessed("half", "undo_half", move |args| {
+            // A host effect that mutated and THEN failed — the case an owed undo
+            // exists for.
+            w.borrow_mut().files.insert(args[0].clone(), "partial".to_string());
+            Err("disk full".to_string())
+        })
+        .unwrap();
+        ex.bind("tool", "half", "half").unwrap();
+
+        let mut s = Session::with_externs(ex);
+        s.load(base()).unwrap();
+        let err = s.call("tool", "half", &["a"]).unwrap_err();
+        assert_eq!(err.code, "EFFECT_FAILED");
+        assert!(err.message.contains("ESCROWED"));
+        assert_eq!(world.borrow().files.len(), 1);
+
+        let report = s.abort();
+        assert_eq!(report.inverses_replayed, vec!["undo_half".to_string()]);
+        assert!(report.residue_free());
+        assert!(world.borrow().files.is_empty());
+    }
+
+    #[test]
+    fn a_deferred_tail_does_not_fire_until_commit() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        let report = s.call("tool", "flush", &["queue-1"]).unwrap();
+        assert_eq!(report.class, "deferred");
+        assert!(report.result.is_none(), "a deferred tail has not fired, so it has no result");
+        assert!(world.borrow().flushed.is_empty());
+
+        let commit = s.commit().unwrap();
+        assert_eq!(commit.deferrals_fired, vec!["flush".to_string()]);
+        assert!(commit.fully_discharged());
+        assert_eq!(world.borrow().flushed, vec!["queue-1".to_string()]);
+    }
+
+    #[test]
+    fn abort_drops_a_deferred_tail_unfired() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.call("tool", "flush", &["queue-1"]).unwrap();
+        let report = s.abort();
+        assert_eq!(report.deferrals_dropped, 1);
+        assert!(report.residue_free());
+        assert!(world.borrow().flushed.is_empty(), "abort must DROP the tail, not fire it");
+    }
+
+    #[test]
+    fn commit_fires_the_tails_in_queue_order_and_releases_the_witnesses() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.call("tool", "write", &["a", "one"]).unwrap();
+        s.call("tool", "flush", &["first"]).unwrap();
+        s.call("tool", "flush", &["second"]).unwrap();
+
+        let report = s.commit().unwrap();
+        assert_eq!(report.witnessed_committed, 1);
+        assert_eq!(report.deferrals_fired, vec!["flush".to_string(), "flush".to_string()]);
+        assert_eq!(world.borrow().flushed, vec!["first".to_string(), "second".to_string()]);
+        // The witness is released: a later abort has nothing owed, and the
+        // committed write SURVIVES it.
+        let after = s.abort();
+        assert!(after.inverses_replayed.is_empty());
+        assert_eq!(world.borrow().files.get("a").map(String::as_str), Some("one"));
+    }
+
+    #[test]
+    fn a_failing_tail_is_enumerated_and_the_rest_of_the_queue_still_fires() {
+        let world = Shared::default();
+        let mut ex = Externs::new();
+        let w = Rc::clone(&world);
+        ex.deferred("bad_flush", |_| Err("sink closed".to_string())).unwrap();
+        ex.deferred("good_flush", move |args| {
+            w.borrow_mut().flushed.push(args[0].clone());
+            Ok("flushed".to_string())
+        })
+        .unwrap();
+        ex.bind("tool", "bad", "bad_flush").unwrap();
+        ex.bind("tool", "good", "good_flush").unwrap();
+
+        let mut s = Session::with_externs(ex);
+        s.load(base()).unwrap();
+        s.call("tool", "bad", &["x"]).unwrap();
+        s.call("tool", "good", &["y"]).unwrap();
+
+        let report = s.commit().unwrap();
+        assert!(!report.fully_discharged());
+        assert_eq!(report.deferrals_fired, vec!["good_flush".to_string()]);
+        assert_eq!(report.deferrals_failed.len(), 1);
+        assert!(report.deferrals_failed[0].contains("sink closed"));
+        // The tail BEHIND the failure still fired: commit owes the whole picture.
+        assert_eq!(world.borrow().flushed, vec!["y".to_string()]);
+    }
+
+    #[test]
+    fn an_unapproved_irreversible_crossing_does_not_fire_at_all() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        let err = s.call("tool", "send", &["payroll"]).unwrap_err();
+        assert_eq!(err.code, "APPROVER_REQUIRED");
+        assert!(world.borrow().sent.is_empty(), "nothing may cross without the approver's yes");
+        // And nothing was recorded either: a refusal is not residue.
+        assert!(s.abort().residue_free());
+    }
+
+    #[test]
+    fn an_approved_irreversible_crossing_fires_and_is_residue() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.approve_irreversible(true);
+        let report = s.call("tool", "send", &["wire-transfer"]).unwrap();
+        assert_eq!(report.class, "irreversible");
+        assert_eq!(world.borrow().sent, vec!["wire-transfer".to_string()]);
+
+        let abort = s.abort();
+        assert!(!abort.residue_free());
+        assert_eq!(abort.residue, vec!["send".to_string()]);
+        // It is enumerated, never undone.
+        assert_eq!(world.borrow().sent, vec!["wire-transfer".to_string()]);
     }
 
     #[test]
     fn call_rejects_an_unknown_key() {
-        let mut s = Session::new();
-        s.load(base()).unwrap();
-        let err = s
-            .call("nope", "run", Crossing::Deferred { tail: "t".to_string() })
-            .unwrap_err();
+        let world = Shared::default();
+        let mut s = live(&world);
+        let err = s.call("nope", "write", &["a", "one"]).unwrap_err();
         assert_eq!(err.code, "NO_SUCH_KEY");
     }
 
     #[test]
-    fn call_fails_closed_on_an_unapproved_irreversible_crossing() {
-        let mut s = Session::new();
-        s.load(base()).unwrap();
-        let err = s
-            .call(
-                "tool",
-                "send",
-                Crossing::Irreversible { emission: "email".to_string(), approved: false },
-            )
-            .unwrap_err();
-        assert_eq!(err.code, "APPROVER_REQUIRED");
+    fn call_rejects_an_unbound_method() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        let err = s.call("tool", "unbound", &[]).unwrap_err();
+        assert_eq!(err.code, "NO_BINDING");
     }
 
     #[test]
-    fn abort_replays_inverses_lifo_and_is_residue_free() {
-        let mut s = Session::new();
-        s.load(base()).unwrap();
-        s.call(
-            "tool",
-            "a",
-            Crossing::Witnessed { effect: "e1".to_string(), inverse: "i1".to_string() },
-        )
-        .unwrap();
-        s.call(
-            "tool",
-            "b",
-            Crossing::Witnessed { effect: "e2".to_string(), inverse: "i2".to_string() },
-        )
-        .unwrap();
-        s.call("tool", "c", Crossing::Deferred { tail: "tail".to_string() }).unwrap();
-        let report = s.abort();
-        // LIFO: the last effect's inverse replays first.
-        assert_eq!(report.inverses_replayed, vec!["i2".to_string(), "i1".to_string()]);
-        assert_eq!(report.deferrals_dropped, 1);
-        assert!(report.residue_free());
+    fn installing_a_host_surface_is_refused_while_the_escrow_is_open() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.call("tool", "write", &["a", "one"]).unwrap();
+        let err = s.install_externs(Externs::new()).unwrap_err();
+        assert_eq!(err.code, "ESCROW_OPEN");
+        // The owed inverse is still there, and still works.
+        assert!(s.abort().residue_free());
+        assert!(world.borrow().files.is_empty());
+        // With a baseline frame the surface may be replaced.
+        s.install_externs(Externs::new()).unwrap();
+        assert!(s.externs().bound("tool", "write").is_none());
     }
 
     #[test]
-    fn abort_enumerates_approved_irreversible_residue() {
-        let mut s = Session::new();
-        s.load(base()).unwrap();
-        s.call(
-            "tool",
-            "send",
-            Crossing::Irreversible { emission: "wire-transfer".to_string(), approved: true },
-        )
-        .unwrap();
-        let report = s.abort();
-        assert!(!report.residue_free());
-        assert_eq!(report.residue, vec!["wire-transfer".to_string()]);
-    }
-
-    #[test]
-    fn commit_discharges_deferrals_and_counts_witnessed() {
-        let mut s = Session::new();
-        s.load(base()).unwrap();
-        s.call(
-            "tool",
-            "a",
-            Crossing::Witnessed { effect: "e1".to_string(), inverse: "i1".to_string() },
-        )
-        .unwrap();
-        s.call("tool", "b", Crossing::Deferred { tail: "flush".to_string() }).unwrap();
-        let report = s.commit().unwrap();
-        assert_eq!(report.witnessed_committed, 1);
-        assert_eq!(report.deferrals_fired, vec!["flush".to_string()]);
-        // A subsequent abort has nothing to replay: the frame is baseline.
-        assert!(s.abort().inverses_replayed.is_empty());
-    }
-
-    #[test]
-    fn unload_strands_and_resets_to_generation_zero() {
-        let mut s = Session::new();
-        s.load(base()).unwrap();
-        s.call(
-            "tool",
-            "a",
-            Crossing::Witnessed { effect: "e1".to_string(), inverse: "i1".to_string() },
-        )
-        .unwrap();
+    fn unload_strands_the_owed_inverses_and_resets_to_generation_zero() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.call("tool", "write", &["a", "one"]).unwrap();
         let report = s.unload();
         assert_eq!(report.stranded_witnessed, 1);
         assert!(!s.loaded());
         assert_eq!(s.generation(), 0);
+        // STRANDED, not reverted: the mutation is still there, which is what the
+        // item-322 WAL (slice 4) recovers.
+        assert_eq!(world.borrow().files.get("a").map(String::as_str), Some("one"));
     }
 
     #[test]
     fn call_refuses_when_not_loaded() {
-        let mut s = Session::new();
-        let err = s
-            .call("tool", "run", Crossing::Deferred { tail: "t".to_string() })
-            .unwrap_err();
+        let world = Shared::default();
+        let mut s = Session::with_externs(host(&world));
+        let err = s.call("tool", "write", &["a", "one"]).unwrap_err();
         assert_eq!(err.code, "NOT_LOADED");
+    }
+
+    #[test]
+    fn call_refuses_on_a_halted_session() {
+        let world = Shared::default();
+        let mut s = live(&world);
+        s.estop("operator halt");
+        let err = s.call("tool", "write", &["a", "one"]).unwrap_err();
+        assert_eq!(err.code, "HALTED");
+        assert!(world.borrow().files.is_empty());
     }
 
     #[test]
@@ -2638,7 +4339,7 @@ fn unparseable_source_is_refused_as_bad() {
     }
 }
 
-// --------------------------------------- the gate issues no admissions, ever
+// ------------------------------ the verdict surface issues no admissions
 
 #[test]
 fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
@@ -2648,7 +4349,8 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
     assert!(verdict.to_json().contains("\"admitted\":false"));
 }
 
-/// The measured reason `Verdict::Admitted` does not exist.
+/// The measured reason `Verdict` has no admitting arm, and the measured reason
+/// the admission surface is as narrow as it is.
 ///
 /// This gate decides the composition/guarantee layer, not the reference type
 /// layer, so every program below is one the REFERENCE compiler refuses and this
@@ -3731,7 +5433,7 @@ The crate builds with no Python on the machine. That is why the generated source
 is committed rather than produced at install time (items 336 and 338 depend on
 it).
 
-## This gate issues no admissions
+## The verdict surface issues no admissions
 
 Read this before wiring the crate into anything.
 
@@ -3747,24 +5449,67 @@ reference's type layer. Measured, not assumed: the reference refuses all of
 
 and the self-host gate raises no objection to any of them.
 
-So there is no `Verdict::Admitted` and no `is_admitted()`. The non-refusing arm
+So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
-refuse"* — never *"the reference would admit this"*. A host that must ADMIT,
-because it is about to run the program, still needs a reference verdict
-(`revl compile`, or `revl.gate.admit` on py). What this crate buys is the other
-direction: a local, in-process, Python-free REFUSAL that agrees with the
-reference byte for byte on the covered corpus.
+refuse"* — never *"the reference would admit this"*. On the wire, `to_json()`
+emits `"admitted": false` for **every** arm, so a consumer written against the
+design's fixed `{admitted, code, message}` shape reads the verdict surface as
+"never admits" rather than misreading a no-objection. The arm itself travels in
+the extra `"verdict"` field
+(`"refused"` / `"no_objection"` / `"outside_frontier"`).
 
 The asymmetry is the whole design: refusing what the reference admits is an
 inconvenience; **admitting what the reference refuses is the defect class the
-admission-gate arc exists to prevent.** A crate that cannot issue an admission
-cannot commit that defect.
+admission-gate arc exists to prevent.**
 
-On the wire, `to_json()` emits `"admitted": false` for **every** arm, so a
-consumer written against the design's fixed `{admitted, code, message}` shape
-reads this gate as "never admits" rather than misreading a no-objection. The
-arm itself travels in the extra `"verdict"` field
-(`"refused"` / `"no_objection"` / `"outside_frontier"`).
+## The admission surface (issue #346)
+
+An admission is a SECOND question, asked through a second type so the two cannot
+be confused: `issue_admission(source)` returns an `Admission`, not a `Verdict`.
+
+```rust
+match revl_gate::issue_admission("service Store { fn get(key: Str) -> Str }") {
+    revl_gate::Admission::Admitted { basis } => println!("admitted: {basis}"),
+    revl_gate::Admission::Withheld { verdict } => println!("withheld: {verdict:?}"),
+}
+```
+
+`Admission::Admitted` is reachable through exactly one path, and both conditions
+are necessary:
+
+1. `admit(source)` returned `Verdict::NoObjection` — the composition/guarantee
+   gate ran and found nothing to refuse. An admission is never issued over a
+   refusal or a frontier gap.
+2. the source is inside the ADMISSION SURFACE (`ADMISSION_SURFACE_ID`,
+   `src/admission.rs`) — the region where the covered layer is the WHOLE
+   question, because the source carries no term the type layer decides.
+
+The surface is deliberately tiny, and its one line is `ADMITTED_LAYER`:
+
+    @ADMITTED_LAYER@
+
+That is not the covered layer read optimistically; it is the sliver of it where
+reading a no-objection as an admission is sound. No body, no expression, no
+literal, no generic head. A source outside it is `Admission::Withheld` carrying
+the verdict verbatim, so switching a consumer from `admit` to `issue_admission`
+can only ADD the admitted wire — every other answer is byte-identical to the one
+it already handled. Widening the surface is the self-host type layer's lane
+(`docs/design/457-selfhost-type-layer.md`).
+
+`issue_admission_into(source, manifest)` asks the same question against a running
+composition. The empty manifest is the empty composition, so it is
+`issue_admission` byte for byte. Against a NON-EMPTY manifest only a candidate
+that DECLARES NOTHING is admitted, and the reason is the item-186 row wire rather
+than the certifier: a row carries a component name, a provision key and a realm,
+and no service shapes, so a declared `service Store` may collide with a `Store`
+the running composition already holds in a different shape and the wire cannot
+say. The reference refuses exactly that pair. Carrying the running shapes on the
+wire is the remaining half of issue #346.
+
+An issued admission serialises `{"verdict":"admitted","admitted":true,
+"code":null,"message":null}` — byte-identical to `revl.gate`'s own wire for a py
+admission, so a seam comparing the two tiers compares equal bytes. The basis is
+off the wire on purpose: it is evidence for a log, not part of the contract.
 
 ## Fail closed at the frontier
 
@@ -3842,15 +5587,25 @@ Two honest limits, both fail-closed:
 * **The deferred manifest rows.** Replacement and handoff rows are refused, for
   the reason in the section above: they need the type layer.
 * **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
-  foundational first slice: the generation state machine, the untrusted-author
-  admission entry (`propose`/`admit`/`admit_into`), and the item-245
-  witnessed-call recording path (`call`/`commit`/`abort`/`unload`). The
-  accept-and-swap half, the witnessed-effect runtime, the WAL and the approver
-  callback are later slices; a candidate the native gate does not refuse is
-  fail-closed, never admitted. `Session::admit_into` takes the manifest wire as
-  a PARAMETER, not as a projection of the loaded composition: a manifest also
-  needs requirements and realms, and synthesising rows out of what the session
-  holds would be inventing a running composition.
+  rust host, slices 1-2: the generation state machine, the untrusted-author
+  admission entry (`propose`/`admit`/`admit_into`), and the item-245 call path
+  (`call`/`commit`/`abort`/`unload`) over a witnessed-effect runtime. The host
+  declares its externs in a `session::Externs` registry, which is where the
+  item-243 pair rules are checked (a witnessed effect may not be declared before
+  its inverse, an emission may not be an undo slot, an undo slot may not be bound
+  to the call surface); a `call` runs the real host body and `abort` runs the real
+  inverses LIFO, so `AbortReport::residue_free` reports what the inverses actually
+  did rather than what the classification promised. The accept-and-swap half, the
+  WAL and the approver callback are later slices; a candidate the native gate does
+  not refuse is fail-closed, never admitted. `Session::admit_into` takes the
+  manifest wire as a PARAMETER, not as a projection of the loaded composition: a
+  manifest also needs requirements and realms, and synthesising rows out of what
+  the session holds would be inventing a running composition.
+* **Layer 2's externs are the HOST's.** A witnessed pair is registered by the
+  embedder, not derived from a `witnessed[fs]` extern in the candidate's source:
+  that step needs `compile_to`, which this tier does not have. The pair rules are
+  enforced over the registry, and the runtime is real; what is not yet real is the
+  path from admitted source to a running body.
 
 ## Host obligations
 
@@ -4259,7 +6014,8 @@ Cargo.lock
 
 
 def render_generated_json(digest: str, fid: str, language: str,
-                          tables: dict[str, list[str]], ir: dict) -> str:
+                          tables: dict[str, list[str]], ir: dict,
+                          admission: dict[str, list[str]]) -> str:
     payload = {
         "generator": "tools/build_gate_crate.py",
         "crate": "revl-gate",
@@ -4281,11 +6037,35 @@ def render_generated_json(digest: str, fid: str, language: str,
         "max_source_bytes": MAX_SOURCE_BYTES,
         "max_level_items": MAX_LEVEL_ITEMS,
         "layer": "1 (verdict surface), admit-only",
+        # The ADMISSION surface (issue #346), versioned apart from the frontier:
+        # the frontier bounds where the gate may REFUSE, this bounds where it may
+        # ADMIT. The tables are derived from the reference compiler's own, so a
+        # scalar the reference stops treating as a scalar cannot stay in the
+        # certifier's vocabulary silently.
+        "admission_surface": admission_surface_id(digest),
+        "admitted_layer": ADMITTED_LAYER,
+        "admission_scalar_types": admission["scalars"],
+        "admission_reserved_type_names": admission["reserved"],
         "symbols_api_version": SYMBOLS_API_VERSION,
         "navigation_surface": "revl_gate::symbols — declarations and their lines; issues no verdicts",
         "covered_layer": COVERED_LAYER,
-        "issues_admissions": False,
+        # The gate DOES issue admissions now, through `issue_admission` and its
+        # own `Admission` type — and only inside `admitted_layer`. The VERDICT
+        # surface still has no admitting arm, which is what keeps a host that
+        # holds a `Verdict` from reading one as a green.
+        "issues_admissions": True,
         "verdict_arms": ["refused", "no_objection", "outside_frontier"],
+        "admission_arms": ["admitted", "withheld"],
+        "admission_arm": (
+            "revl_gate::issue_admission(source) / issue_admission_into(source, "
+            "manifest) -> Admission. `Admitted` requires BOTH that `admit` "
+            "returned NoObjection and that the source is inside "
+            "admission_surface; everything else is `Withheld` carrying the "
+            "verdict verbatim. Against a non-empty manifest only a candidate "
+            "that declares nothing is admitted: the item-186 row wire carries no "
+            "service shapes, so a declared service may collide with a running "
+            "one and the wire cannot say."
+        ),
         "manifest_arm": (
             "revl_gate::admit_into(source, manifest) — the item-186 ambient gate "
             "as a binding: the union fold's G2/G3 legs. Refuses the deferred "
@@ -4295,11 +6075,14 @@ def render_generated_json(digest: str, fid: str, language: str,
         "note": ("Regenerate with `python3 tools/build_gate_crate.py`. The "
                  "source_digest is a pure function of digest_inputs, not a git "
                  "sha, so `--check` can verify the committed crate against the "
-                 "tree it was generated from. `issues_admissions` is false by "
-                 "construction: this gate decides the composition/guarantee "
-                 "layer, not the reference type layer, so its non-refusing arm "
-                 "is `no_objection` and never an admission — across the manifest "
-                 "boundary too (issue #346)."),
+                 "tree it was generated from. The VERDICT surface admits "
+                 "nothing, by construction: that surface decides "
+                 "the composition/guarantee layer, not the reference type layer, "
+                 "so its non-refusing arm is `no_objection` and never an "
+                 "admission — across the manifest boundary too. Admissions are "
+                 "issued only through the separate `Admission` surface, inside "
+                 "`admitted_layer`, where the covered layer is the whole "
+                 "question (issue #346)."),
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -4310,7 +6093,8 @@ DEFAULT_OUT = ROOT / "crates" / "revl-gate"
 
 
 def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
-           selfhost_rs: str, ir: dict) -> dict[str, str]:
+           selfhost_rs: str, ir: dict,
+           admission: dict[str, list[str]]) -> dict[str, str]:
     """Every generated file as {relpath: content}. Pure: same inputs, same
     bytes, which is what makes the drift gate meaningful."""
     keyword_line = (", ".join(f"`{k}`" for k in tables["keywords"])
@@ -4326,18 +6110,42 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
     return {
         "Cargo.toml": CARGO_TOML_TEMPLATE.replace("@CRATE_VERSION@", CRATE_VERSION),
         ".gitignore": GITIGNORE,
-        "GENERATED.json": render_generated_json(digest, fid, language, tables, ir),
+        "GENERATED.json": render_generated_json(digest, fid, language, tables, ir,
+                                               admission),
         "README.md": (README_TEMPLATE
                       .replace("@KEYWORD_LINE@", keyword_line)
                       .replace("@BUILTIN_LINE@", builtin_line)
                       .replace("@GATE_API_VERSION@", GATE_API_VERSION)
                       .replace("@LANGUAGE_VERSION@", language)
                       .replace("@COVERED_LAYER@", COVERED_LAYER)
+                      .replace("@ADMITTED_LAYER@", ADMITTED_LAYER)
                       .replace("@FRONTIER_ID@", fid)),
         "src/lib.rs": (LIB_RS_TEMPLATE
                        .replace("@GATE_API_VERSION@", GATE_API_VERSION)
                        .replace("@COVERED_LAYER@", COVERED_LAYER)
+                       .replace("@ADMITTED_LAYER@", ADMITTED_LAYER)
                        .replace("@LANGUAGE_VERSION@", language)),
+        "src/admission.rs": (ADMISSION_RS_TEMPLATE
+                             .replace("@ADMISSION_SURFACE_ID@",
+                                      admission_surface_id(digest))
+                             .replace("@SCALAR_TYPES@", _rust_str_array(
+                                 "SCALAR_TYPES", admission["scalars"],
+                                 "/// The type names a certified signature may mention. Derived from the\n"
+                                 "/// reference's own scalar data set (`revl.typecheck._CONFIG_DATA_SCALARS`):\n"
+                                 "/// every one is a concrete builtin with no type parameter and no erasure, so\n"
+                                 "/// a signature written over them resolves with no checker to run.\n"))
+                             .replace("@RESERVED_TYPE_NAMES@", _rust_str_array(
+                                 "RESERVED_TYPE_NAMES", admission["reserved"],
+                                 "/// The type names a certified source may not DECLARE. Derived from\n"
+                                 "/// `revl.typecheck._BUILTIN_TYPE_NAMES` plus the reserved opaque\n"
+                                 "/// `Principal`. Shadowing one of these is the reference's business, so a\n"
+                                 "/// source that tries is not certified here.\n"))
+                             .replace("@REFERENCE_KEYWORDS@", _rust_str_array(
+                                 "REFERENCE_KEYWORDS", admission["keywords"],
+                                 "/// The REFERENCE keyword set (`revl.lexer.KEYWORDS`), not the self-host one.\n"
+                                 "/// The question the certifier asks is what the REFERENCE would make of the\n"
+                                 "/// source, so a keyword the self-host has not ported must still not be\n"
+                                 "/// mistaken for a name.\n"))),
         "src/frontier.rs": (FRONTIER_RS_TEMPLATE
                             .replace("@FRONTIER_ID@", fid)
                             .replace("@MAX_SOURCE_BYTES@", str(MAX_SOURCE_BYTES))
@@ -4398,9 +6206,10 @@ def build() -> dict[str, str]:
     selfhost_rs = rustemit.emit(ir_document)
     tables = frontier_tables()
     ir = ir_tables()
+    admission = admission_tables()
     digest = source_digest()
     return render(tables, digest, frontier_id(digest), language_version(),
-                  selfhost_rs, ir)
+                  selfhost_rs, ir, admission)
 
 
 def generate(out: Path) -> dict[str, str]:

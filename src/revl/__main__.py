@@ -531,7 +531,8 @@ def _run_audit(args, ir: dict) -> int:
         if stats is None:
             continue
         host = stats.get("externs") or []
-        if stats["emissions"] or stats["awaits"] or host:
+        if stats["emissions"] or stats["awaits"] or host \
+                or stats.get("compensatedHostEmissions"):
             detail = []
             if stats["emissions"]:
                 caps = stats.get("capabilities") or {}
@@ -545,10 +546,21 @@ def _run_audit(args, ir: dict) -> int:
                 # reach"; `*` in it means some dependency's declaration
                 # makes no promise, which is the thing worth seeing
                 reach = sorted({c for scope in caps.values() for c in scope})
+                # issue #940: `compensated` is a count of the LABELS in this
+                # list that carry a compensating undo, so "of them" is the
+                # claim the number actually supports — it can never exceed the
+                # list, and a label compensated at two sites counts once.
                 detail.append(f"emissions: {', '.join(_scoped(e) for e in stats['emissions'])}"
-                              f" ({stats['compensated']} compensated)")
+                              f" ({stats['compensated']} of them compensated)")
                 if reach:
                     detail.append(f"capabilities: {', '.join(reach)}")
+            # issue #940: compensation reached through an emitting HOST fn or
+            # extern has no `key.method` label, so it is not in the list above
+            # and not in that count. Naming it keeps the two from reading as
+            # one population.
+            if stats.get("compensatedHostEmissions"):
+                detail.append("compensated host emissions: "
+                              + ", ".join(stats["compensatedHostEmissions"]))
             if stats["awaits"]:
                 detail.append(f"iteration boundaries: {stats['awaits']}")
             if host:

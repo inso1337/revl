@@ -210,6 +210,77 @@ def test_boundary_counts_forward_position_emissions():
     assert _boundary(ir)["Quiet"]["emissions"] == ["bus.send"]
 
 
+# --------------------- the compensated count is a subset of the list (#940)
+
+_TWO_SITES_ONE_LABEL = """
+service S { emission fn g(a: Str) -> Int }
+component Provider provides p: S {
+  provide p { fn g(a: Str) -> Int = 1 }
+}
+component Consumer requires k: S {
+  emit k.g("x") compensate k.g("undo")
+  emit k.g("y") compensate k.g("undo2")
+}
+"""
+
+
+def test_boundary_compensated_counts_labels_not_emit_steps():
+    """Issue #940, the motivating case: two `emit k.g(...) compensate k.g(...)`
+    sites name ONE emission. The report used to print the count of emit STEPS
+    (2) in parentheses beside a list of one label, so the number read as a
+    subset of the list printed next to it and was not one. It is now the count
+    of distinct compensated LABELS, which is what the render claims.
+
+    The divergence IS the observable: the step count and the label count differ
+    exactly here, so a test that only pinned a case where they agree would prove
+    nothing."""
+    stats = _boundary(compile_source(_TWO_SITES_ONE_LABEL))["Consumer"]
+    assert stats["emissions"] == ["k.g"], "two sites, one distinct label"
+    assert stats["compensated"] == 1, "two emit steps, one compensated label"
+    assert stats["compensated"] <= len(stats["emissions"])
+
+
+def test_audit_render_prints_the_count_as_a_subset(tmp_path, capsys):
+    """The printed value, not just the field: the parenthetical must say what it
+    counts, because the two readings differ on this program (1, not 2)."""
+    src = tmp_path / "two_sites.rvl"
+    src.write_text(_TWO_SITES_ONE_LABEL)
+    assert main(["audit", str(src)]) == 0
+    out = capsys.readouterr().out
+    assert "emissions: k.g (1 of them compensated)" in out
+    assert "2 compensated" not in out
+
+
+def test_boundary_compensated_host_emission_is_named_not_counted():
+    """`emissions` and compensation are OVERLAPPING populations, not the same
+    one. An `emit` on an emitting HOST extern crosses the boundary but carries
+    no `key.method` label, so it is in neither the list nor the count beside it.
+    Reporting 0 and saying nothing would be a false-safe in the other direction,
+    so it is named in its own field."""
+    stats = _boundary(compile_source(
+        """
+        service Svc { emission fn run() -> Int }
+        extern emission fn boom() -> Int = @py { return 1 }
+        component C provides svc: Svc {
+          provide svc { fn run() -> Int {
+            emit boom() compensate boom()
+            return 0 } }
+        }
+        """
+    ))["C"]
+    assert stats["emissions"] == []
+    assert stats["compensated"] == 0
+    assert stats["compensatedHostEmissions"] == ["boom"]
+
+
+def test_boundary_omits_the_host_compensation_key_when_there_is_none():
+    """Additive: a component with no host-extern compensation carries no key, so
+    every boundary entry written before #940 stays byte-identical."""
+    boundary = _boundary(compile_files([str(EXAMPLES / "user_cache.rvl")]))
+    assert "compensatedHostEmissions" not in boundary["UserCache"]
+    assert boundary["UserCache"]["compensated"] == 0
+
+
 # ---------------------------------------------- _audit_document invariants (#380)
 
 def test_audit_document_does_not_mutate_input_ir():

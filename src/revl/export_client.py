@@ -40,6 +40,17 @@ over this same canonical encoding, so the generated `httpTransport` below drops
 onto it directly. The remoteness LANGUAGE constructs (`remote` rows, the G4
 admissibility check, per-realm peers) are C2, which waits on item 426 S1's row
 table; this slice is codegen and transport only, no language change.
+
+The second FACE: `--face webui`
+-------------------------------
+`--face webui --component NAME` projects a different typed boundary from the same
+IR: the Cordis WebUI channel of one component (item 457 slice S4, design note
+530 Decision B, docs/frontend-assets.md). The reactive state is the record type of
+the `data` parameter the component publishes through `webui.add_entry`, and the
+RPC method set is the services the component `provides` — the surface `revl audit`
+reports as G1 — so the browser's `useRpc<T>()` type and the server's published
+fields are one declaration. It emits no transport: Cordis WebUI owns the WebSocket
+seam. See `_WebuiFaceExporter` below.
 """
 
 from __future__ import annotations
@@ -486,24 +497,275 @@ class _ClientExporter:
         ])
 
 
+# -------------------------------------------- the webui face (457 S4 / 459)
+
+#: the emission a component uses to contribute a frontend to the ambient WebUI
+#: service, and the parameter on it that carries the reactive channel. Both names
+#: are the Cordis WebUI shape design note 526 recorded (`addEntry(files, data)`),
+#: so a revl `service WebUI` that declares them is projectable without a flag.
+_WEBUI_EMISSION = "add_entry"
+_WEBUI_DATA_PARAM = "data"
+
+
+class _WebuiFaceExporter(_ClientExporter):
+    """Project a component's Cordis WebUI channel into its TypeScript contract.
+
+    This is the `--face webui` projection (design note 530 Decision B, item 457
+    slice S4). Cordis WebUI's `addEntry(files, data)` publishes `data` as a
+    reactive object the server mutates and the browser reads with `useRpc<T>()`,
+    and any function on that object is an RPC method the browser may call
+    (docs/design/526-webui-asset-alignment.md). Untyped on the raw JS API, the
+    two halves are DECLARED in revl and read from one place each:
+
+      * the reactive STATE is the record type of the `data` parameter on the
+        component's `webui.add_entry` emission — the value the component actually
+        publishes, so the published fields and the browser's type cannot drift;
+      * the RPC METHOD SET is exactly the services the component `provides`
+        (526's "an entry's exposed methods are exactly the component's declared
+        provisions"), the enumerable boundary `revl audit` already reports as G1.
+
+    Nothing is restated on the TS side: the emitted `<C>State`, `<C>Rpc` and
+    `<C>Channel` are a projection of those declarations, the same way
+    `revl export client --lang ts --service NAME` projects the REST client.
+    """
+
+    def _component(self, name: str) -> dict:
+        for comp in self.ir.get("components") or []:
+            if comp.get("name") == name:
+                return comp
+        known = ", ".join(
+            sorted(c.get("name", "") for c in self.ir.get("components") or [])
+        ) or "(none)"
+        raise RevlError("<ir>", 0,
+                        f"no component named `{name}` in this IR",
+                        hint=f"known components: {known}")
+
+    def _channel_state_type(self, comp: dict) -> tuple[str, str]:
+        """`(webui service name, the `data` parameter's declared type)`.
+
+        The webui requirement is found by its CONTRACT, not by its key name: the
+        required service that declares `add_entry` with a `data` parameter. A
+        component with no such requirement has no channel to project, and a
+        component whose `add_entry` takes no `data` is the pre-projection surface
+        the gap note named; both are refused here rather than emitted empty.
+        """
+        candidates = []
+        for key, sname in (comp.get("requires") or {}).items():
+            method = ((self.services.get(sname) or {}).get("methods")
+                      or {}).get(_WEBUI_EMISSION)
+            if method is not None:
+                candidates.append((key, sname, method))
+        if not candidates:
+            raise RevlError(
+                "<ir>", 0,
+                f"component `{comp['name']}` has no webui channel to project",
+                hint=f"a webui face needs a `requires` on a service declaring "
+                     f"`emission fn {_WEBUI_EMISSION}(...)` — the ambient WebUI "
+                     f"coeffect (docs/frontend-assets.md)")
+        key, sname, method = candidates[0]
+        for param in method.get("params") or []:
+            if param.get("name") == _WEBUI_DATA_PARAM:
+                state = param.get("type")
+                spec = self.types.get(state or "")
+                if not spec or spec.get("kind") != "record":
+                    raise RevlError(
+                        "<ir>", 0,
+                        f"`{sname}.{_WEBUI_EMISSION}`'s `{_WEBUI_DATA_PARAM}` "
+                        f"parameter is `{state}`, which is not a declared record "
+                        f"type, so the reactive state has no fields to project",
+                        hint="the reactive channel is a record: its fields are "
+                             "the state the browser reads through `useRpc`")
+                reason = self._inexpressible_reason(state)
+                if reason is not None:
+                    raise RevlError(
+                        "<ir>", 0,
+                        f"cannot project the webui channel of "
+                        f"`{comp['name']}`: its reactive state {reason}")
+                return sname, state
+        raise RevlError(
+            "<ir>", 0,
+            f"`{sname}.{_WEBUI_EMISSION}` declares no `{_WEBUI_DATA_PARAM}` "
+            f"parameter, so this component publishes no typed reactive channel",
+            hint=f"add `{_WEBUI_DATA_PARAM}: <RecordType>` to "
+                 f"`{_WEBUI_EMISSION}` and publish it from the `emit`")
+
+    def _rpc_methods(self, comp: dict) -> list[tuple[str, str, dict]]:
+        """`(provision key, service name, methods)` for every service the
+        component provides — the RPC surface, in declaration order."""
+        out = []
+        for key, sname in (comp.get("provides") or {}).items():
+            methods = (self.services.get(sname) or {}).get("methods") or {}
+            out.append((key, sname, methods))
+        if not out:
+            raise RevlError(
+                "<ir>", 0,
+                f"component `{comp['name']}` provides nothing, so its webui "
+                f"channel has no RPC surface to project",
+                hint="the browser-callable methods are exactly the component's "
+                     "declared provisions; declare one with `provides`")
+        return out
+
+    def _rpc_signature(self, cname: str, op_name: str, spec: dict) -> str:
+        params = spec.get("params") or []
+        for param in params:
+            reason = self._inexpressible_reason(param.get("type"))
+            if reason is not None:
+                raise RevlError(
+                    "<ir>", 0,
+                    f"cannot project the webui channel of `{cname}`: RPC "
+                    f"parameter `{param.get('name')}` of `{op_name}` {reason}")
+        returns = spec.get("returns")
+        reason = self._inexpressible_reason(returns)
+        if reason is not None:
+            raise RevlError(
+                "<ir>", 0,
+                f"cannot project the webui channel of `{cname}`: the result of "
+                f"RPC `{op_name}` {reason}")
+        sig = ", ".join(
+            f"{p['name']}: {self.ts_type(p.get('type'))}" for p in params)
+        ret = self.ts_type(returns) if returns and returns != "Unit" else "void"
+        return f"  {op_name}({sig}): Promise<{ret}>;"
+
+    def emit_face(self, cname: str) -> str:
+        self._referenced: set[str] = set()
+        comp = self._component(cname)
+        webui_service, state_type = self._channel_state_type(comp)
+        rpc = self._rpc_methods(comp)
+
+        state_spec = self.types[state_type]
+        state_lines = [
+            "/** The reactive state the server publishes to the browser over "
+            "Cordis WebUI's",
+            f" *  `data` channel. Projected from `{state_type}`, the declared "
+            f"type of the",
+            f" *  `{_WEBUI_DATA_PARAM}` parameter `{cname}` publishes through",
+            f" *  `{webui_service}.{_WEBUI_EMISSION}`, so the published fields "
+            "and this type are ONE",
+            " *  declaration. Read-only: the browser observes the synced state "
+            "and changes",
+            " *  it through the RPC surface. */",
+            f"export interface {cname}State {{",
+        ]
+        for fname, ftype in (state_spec.get("fields") or {}).items():
+            state_lines.append(f"  readonly {fname}: {self.ts_type(ftype)};")
+        state_lines.append("}")
+
+        provisions = ", ".join(f"`{key}: {sname}`" for key, sname, _ in rpc)
+        rpc_lines = [
+            "/** The RPC methods the browser may call on the server: exactly the "
+            "provisions",
+            f" *  `{cname}` declares, the enumerable boundary `revl audit` "
+            "reports as G1",
+            f" *  ({provisions}). Every call is asynchronous: it crosses the "
+            "WebSocket",
+            " *  seam Cordis WebUI opens for the entry. */",
+            f"export interface {cname}Rpc {{",
+        ]
+        for _key, _sname, methods in rpc:
+            for op_name, spec in methods.items():
+                rpc_lines.append(self._rpc_signature(cname, op_name, spec))
+        rpc_lines.append("}")
+
+        closure = self._type_closure(set(self._referenced))
+        type_decls = [self._type_decl(name) for name in self.types
+                      if name in closure and name != state_type]
+
+        parts = [self._face_header(cname, webui_service, state_type, rpc)]
+        if type_decls:
+            parts.append("\n\n".join(type_decls))
+        parts.append("\n".join(state_lines))
+        parts.append("\n".join(rpc_lines))
+        parts.append(
+            f"/** The whole typed channel `useRpc<{cname}Channel>()` reads in the\n"
+            f" *  client extension: the synced reactive state and the callable "
+            f"RPC\n *  surface, one declaration each. */\n"
+            f"export type {cname}Channel = {cname}State & {cname}Rpc;")
+        return "\n\n".join(parts) + "\n"
+
+    def _face_header(self, cname: str, webui_service: str, state_type: str,
+                     rpc: list[tuple[str, str, dict]]) -> str:
+        provisions = ", ".join(f"{key}: {sname}" for key, sname, _ in rpc)
+        return "\n".join([
+            "// Generated by `revl export client --lang ts --face webui` — the "
+            "typed",
+            "// reactive-state / RPC channel of a revl component's Cordis WebUI "
+            "entry",
+            "// (docs/frontend-assets.md; design notes 526 and 530 Decision B, "
+            "item 457 S4).",
+            "//",
+            f"// Component: {cname}",
+            f"// Reactive state: {state_type} (the `{_WEBUI_DATA_PARAM}` "
+            f"parameter of `{webui_service}.{_WEBUI_EMISSION}`)",
+            f"// RPC surface:   {provisions} (the component's declared "
+            f"provisions)",
+            "//",
+            "// DO NOT EDIT. Regenerate it from the declaration instead: the "
+            "point of the",
+            "// projection is that the server's published fields and the "
+            "browser's `useRpc`",
+            "// type are one declaration, so a hand edit here is a second, "
+            "unchecked one.",
+            "//",
+            "// LOCAL CONTRACT ONLY, like every generated client: it is typed and "
+            "bounded on",
+            "// THIS side and makes no claim about what the peer runs (item 337's "
+            "seam",
+            "// invariant — only the receiver re-admits).",
+        ])
+
+
 # --------------------------------------------------------------- public API
 
 _LANGS = ("ts",)
 
+#: the projection faces. `rest` is the slice-C1 remote client (the canonical
+#: encoding over a transport); `webui` is the Cordis WebUI reactive-state / RPC
+#: channel of one component (item 457 slice S4, design note 530 Decision B).
+_FACES = ("rest", "webui")
+
 
 def export_client(ir: dict, *, lang: str = "ts", service: str | None = None,
-                  composition: bool = False) -> str:
-    """Render a compiled revl IR as a typed remote client.
+                  composition: bool = False, face: str = "rest",
+                  component: str | None = None) -> str:
+    """Render a compiled revl IR as a typed client for a non-revl consumer.
 
-    Exactly one of `service` (a single service by name) or `composition`
-    (every service the composition provides) selects what to export. `lang`
-    is the target language; `ts` is the slice-C1 target.
+    `face` picks WHICH typed boundary is projected:
+
+    * `rest` (the default) is the remote client: exactly one of `service` (a
+      single service by name) or `composition` (every service the composition
+      provides) selects what to export.
+    * `webui` is the browser channel of one `component`: the reactive state it
+      publishes through its `webui.add_entry` emission and the RPC methods it
+      provides, the surface `useRpc<T>()` reads (docs/frontend-assets.md).
+
+    `lang` is the target language; `ts` is the slice-C1 target.
     """
     if lang not in _LANGS:
         raise RevlError("<ir>", 0,
                         f"unknown client language `{lang}` "
                         f"(supported: {', '.join(_LANGS)})")
+    if face not in _FACES:
+        raise RevlError("<ir>", 0,
+                        f"unknown client face `{face}` "
+                        f"(supported: {', '.join(_FACES)})")
     services = ir.get("services") or {}
+    if face == "webui":
+        if service is not None or composition:
+            raise RevlError(
+                "<ir>", 0,
+                "the `webui` face projects a COMPONENT's browser channel, not a "
+                "service: pass `--component NAME`",
+                hint="the channel is one component's published state plus its "
+                     "declared provisions, so a service name does not name it")
+        if component is None:
+            raise RevlError("<ir>", 0,
+                            "select what to export: `--component NAME`")
+        return _WebuiFaceExporter(ir).emit_face(component)
+    if component is not None:
+        raise RevlError(
+            "<ir>", 0,
+            "`--component` selects a `--face webui` channel; the default rest "
+            "face exports a service or a composition")
     if service is not None and composition:
         raise RevlError("<ir>", 0,
                         "choose one of `--service` or `--composition`, not both")

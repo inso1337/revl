@@ -717,3 +717,54 @@ def test_a_replay_of_an_attested_placement_refuses_rather_than_degrading():
     assert decision.disposition is lawful_retry.Disposition.REFUSE
     assert decision.peer_id is None
     assert "attestation:" in decision.reason
+
+
+# ------------------- the placement FILE spells the same demand (item 475)
+
+
+def placement_spelling(**table_overrides) -> dict:
+    """The demand as a PLACEMENT FILE spells it: `requires = "attested_tee"`
+    rather than a Python `TeeRequirement`. This is the follow-up slice #859
+    deferred, and it exists so an operator can demand what this module checks."""
+    table = {"requires": "attested_tee", "bundle": BUNDLE,
+             "measurements": [MEASUREMENT], "region": REGION, "nonce": NONCE}
+    table.update(table_overrides)
+    return {"processes": {"worker": {"components": ["Worker"], "attest": table}}}
+
+
+def test_a_placement_file_spelling_the_demand_refuses_a_non_attesting_peer():
+    """Fail-before, pass-after, with the demand spelled in a FILE: the same
+    offer that is refused against a Python-built slot is refused against the
+    placement's own spelling, because the file's demand reaches THIS gate and
+    not a second one written for it."""
+    from revl import placement as plc
+    file = placement_spelling()
+    ledger: set = set()
+    before, reason = plc.admit_peer_for_process(
+        file, "worker", make_offer(trust="attested"), offer_key=PEER_KEY,
+        attester_key=ATTESTER_KEY, tee_ledger=ledger, now=NOW)
+    assert not before and "attestation:" in reason and "no enclave evidence" in reason
+    assert ledger == set(), "a refusal must not burn the peer's challenge"
+    after, reason = plc.admit_peer_for_process(
+        file, "worker", make_offer(proof=make_proof()), offer_key=PEER_KEY,
+        attester_key=ATTESTER_KEY, tee_ledger=ledger, now=NOW)
+    assert after, reason
+
+
+def test_the_files_demand_is_this_modules_requirement():
+    """The two spellings are one demand: what the file parses to is what
+    `make_requirement` builds, so a test of one is a test of the other."""
+    from revl import placement as plc
+    requirement, problem = plc.parse_tee_requirement(placement_spelling(), "worker")
+    assert problem is None
+    assert requirement == make_requirement()
+
+
+def test_a_placement_file_cannot_spell_a_demand_that_permits_anything():
+    """Fail-closed at the surface: an `[attest]` table that names no measurement
+    admits any enclave, so it is refused when the file is read and never reaches
+    this gate as a requirement that would accept everything."""
+    from revl import placement as plc
+    requirement, problem = plc.parse_tee_requirement(
+        placement_spelling(measurements=[]), "worker")
+    assert requirement is None and "admits any enclave" in problem

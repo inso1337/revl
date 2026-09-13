@@ -148,16 +148,17 @@ service InvoiceAgent {
 extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(message: Str) -> Untrusted[Str]
   = @ts {
       // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.
+      const a2aCorr = crypto.randomUUID();
       const a2aPayload = JSON.stringify({
         jsonrpc: "2.0",
-        id: crypto.randomUUID(),
+        id: a2aCorr,
         method: "message/send",
         params: {
           message: {
             role: "user",
             messageId: crypto.randomUUID(),
             parts: [{ kind: "text", text: message }],
-            metadata: { "revl.skill": "invoice-lookup" },
+            metadata: { "revl.skill": "invoice-lookup", "revl.correlation": a2aCorr },
           },
         },
       });
@@ -217,12 +218,26 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(
         throw new Error(`a2a: transport failure (HTTP ${res.status})`);
       }
       const rpc = await res.json();
-      if (rpc && rpc.error) {
+      // item 439: the reply is checked BEFORE any member is read, and the
+      // envelope `id` must be the correlation identity this crossing sent.
+      // An unparseable or unattributable reply is a FAULT, never a verdict.
+      if (!rpc || typeof rpc !== "object") {
+        throw new Error("a2a: reply was not a JSON-RPC object");
+      }
+      if (rpc.jsonrpc !== "2.0") {
+        throw new Error("a2a: reply did not claim JSON-RPC 2.0");
+      }
+      if (rpc.id !== a2aCorr) {
+        // The id the peer DID answer with is not reported: it is peer-chosen
+        // text, and this is the gate that exists because peer text is a claim.
+        throw new Error("a2a: reply did not carry this crossing's correlation id");
+      }
+      if (rpc.error) {
         throw new Error(`a2a: JSON-RPC error ${rpc.error.code}`);
       }
-      const result = rpc ? rpc.result : undefined;
-      if (!result) {
-        throw new Error("a2a: response carried no result");
+      const result = rpc.result;
+      if (!result || typeof result !== "object") {
+        throw new Error("a2a: response carried no result object");
       }
       // A direct Message reply is already terminal; a Task is terminal only in
       // the states A2A 1.0.0 says are.
@@ -267,16 +282,17 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(
 extern emission[net.billing_internal] async fn a2a_invoice_agent_draft_reminder(message: Str) -> Untrusted[Str]
   = @ts {
       // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.
+      const a2aCorr = crypto.randomUUID();
       const a2aPayload = JSON.stringify({
         jsonrpc: "2.0",
-        id: crypto.randomUUID(),
+        id: a2aCorr,
         method: "message/send",
         params: {
           message: {
             role: "user",
             messageId: crypto.randomUUID(),
             parts: [{ kind: "text", text: message }],
-            metadata: { "revl.skill": "draft-reminder" },
+            metadata: { "revl.skill": "draft-reminder", "revl.correlation": a2aCorr },
           },
         },
       });
@@ -336,12 +352,26 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_draft_reminder(
         throw new Error(`a2a: transport failure (HTTP ${res.status})`);
       }
       const rpc = await res.json();
-      if (rpc && rpc.error) {
+      // item 439: the reply is checked BEFORE any member is read, and the
+      // envelope `id` must be the correlation identity this crossing sent.
+      // An unparseable or unattributable reply is a FAULT, never a verdict.
+      if (!rpc || typeof rpc !== "object") {
+        throw new Error("a2a: reply was not a JSON-RPC object");
+      }
+      if (rpc.jsonrpc !== "2.0") {
+        throw new Error("a2a: reply did not claim JSON-RPC 2.0");
+      }
+      if (rpc.id !== a2aCorr) {
+        // The id the peer DID answer with is not reported: it is peer-chosen
+        // text, and this is the gate that exists because peer text is a claim.
+        throw new Error("a2a: reply did not carry this crossing's correlation id");
+      }
+      if (rpc.error) {
         throw new Error(`a2a: JSON-RPC error ${rpc.error.code}`);
       }
-      const result = rpc ? rpc.result : undefined;
-      if (!result) {
-        throw new Error("a2a: response carried no result");
+      const result = rpc.result;
+      if (!result || typeof result !== "object") {
+        throw new Error("a2a: response carried no result object");
       }
       // A direct Message reply is already terminal; a Task is terminal only in
       // the states A2A 1.0.0 says are.

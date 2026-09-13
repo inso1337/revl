@@ -800,11 +800,12 @@ def _run_quarantine(args) -> int:
     then compile it to a standard wasm component and run its lifecycle + fault
     battery in wasmtime's component-model sandbox — where an escape is a trap.
 
-    Prints the verdict (passed | trapped | rejected | deferred | unavailable)
-    and, with --policy, the admission decision. Exit status: 0 when the
-    candidate passed (or was deferred/unavailable — nothing to fail on), 1 when
-    it was trapped or rejected, and (with --require-runtime) 3 when the substrate
-    toolchain is absent so the candidate could not be proven."""
+    Prints the verdict (passed | trapped | timeout | rejected | deferred |
+    unavailable) and, with --policy, the admission decision. Exit status: 0 when
+    the candidate passed (or was deferred/unavailable — nothing to fail on), 1
+    when it was trapped, timed out, or rejected, and (with --require-runtime) 3
+    when the substrate toolchain is absent so the candidate could not be
+    proven."""
     from ..mcp import quarantine as _quarantine  # noqa: PLC0415
     from ..mcp.session import Session  # noqa: PLC0415
 
@@ -830,7 +831,7 @@ def _run_quarantine(args) -> int:
         print(_render_quarantine(report))
 
     verdict = report.get("verdict")
-    if verdict in ("trapped", "rejected"):
+    if verdict in ("trapped", "timeout", "rejected"):
         return 1
     if verdict == "unavailable" and getattr(args, "require_runtime", False):
         return 3
@@ -841,8 +842,9 @@ def _render_quarantine(report: dict) -> str:
     """A compact human render of the quarantine report (mirrors the dossier
     verbs' text output; the full structure is under --json)."""
     verdict = report.get("verdict")
-    glyph = {"passed": "PASS", "trapped": "TRAP", "rejected": "REJECT",
-             "deferred": "DEFER", "unavailable": "SKIP"}.get(verdict, "?")
+    glyph = {"passed": "PASS", "trapped": "TRAP", "timeout": "TIMEOUT",
+             "rejected": "REJECT", "deferred": "DEFER",
+             "unavailable": "SKIP"}.get(verdict, "?")
     lines = [f"quarantine: {glyph}  ({verdict})", f"  {report.get('note', '')}"]
     sub = report.get("substrate") or {}
     counts = sub.get("counts") or {}
@@ -850,11 +852,16 @@ def _render_quarantine(report: dict) -> str:
         lines.append(f"  substrate: {sub.get('runtime')}")
         lines.append(f"    probes={counts.get('probes')} "
                      f"returned={counts.get('returned')} "
-                     f"trapped={counts.get('trapped')}")
+                     f"trapped={counts.get('trapped')}"
+                     + (f" timeout={counts['timeout']}"
+                        if counts.get("timeout") else ""))
         for probe in sub.get("probes") or []:
             if probe.get("outcome") == "trapped":
                 lines.append(f"    TRAP {probe['function']}("
                              f"{probe['input']!r}): {probe.get('trap')}")
+            elif probe.get("outcome") == "timeout":
+                lines.append(f"    TIMEOUT {probe['function']}("
+                             f"{probe['input']!r})")
     elif sub.get("reason"):
         lines.append(f"  substrate: not run — {sub.get('reason')}")
     admission = report.get("admission") or {}

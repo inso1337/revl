@@ -865,6 +865,19 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "extern", index) not in emitted_keys:
                 merged.externs.append(decl)
                 emitted_keys.add(declaration_key(module, "extern", index))
+        # item 472: a `retention` policy rides with the DECLARATION CLOSURE
+        # rather than with the composition's own modules, because the thing that
+        # names it is a type qualifier (`Retained[T, <policy>]`) on an extern or
+        # a service operation, and those are imported. Dropping it here is the
+        # multi-file twin of the item-256 defect where `compile_files` lost
+        # `program.secrets`: the single-source path admitted the program and the
+        # CLI path refused it for naming a policy "this program does not
+        # declare". Same per-module declaration-key discipline as every list
+        # above, so an imported policy cannot be carried twice.
+        for index, decl in enumerate(getattr(module.program, "retentions", ())):
+            if declaration_key(module, "retention", index) not in emitted_keys:
+                merged.retentions.append(decl)
+                emitted_keys.add(declaration_key(module, "retention", index))
         for index, decl in enumerate(module.program.tests):
             if declaration_key(module, "test", index) not in emitted_keys:
                 merged.tests.append(decl)

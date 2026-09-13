@@ -58,8 +58,12 @@ from revl.parser import Parser  # noqa: E402
 from revl.synthesize import synthesize_provider  # noqa: E402
 
 # The reply both peers give when they answer rather than redirect. The `text`
-# is how a test tells WHICH peer's answer was consumed.
-_A2A_OK = {"jsonrpc": "2.0", "id": "1", "result": {
+# is how a test tells WHICH peer's answer was consumed. The `id` is filled in
+# from the request: a crossing refuses a reply that does not carry back the
+# correlation identity it sent (item 439, `revl.a2a_boundary`), so a peer that
+# answers at all has to be a compliant one, or every test here would be
+# measuring that refusal instead of the redirect policy.
+_A2A_OK = {"jsonrpc": "2.0", "result": {
     "kind": "message", "role": "agent", "messageId": "m-1",
     "parts": [{"kind": "text", "text": "PEER"}]}}
 
@@ -121,6 +125,11 @@ def _answer(text: str):
     def respond(peer, method, path, body):
         reply = json.loads(json.dumps(_A2A_OK))
         reply["result"]["parts"][0]["text"] = text
+        # JSON-RPC 2.0's own rule: the response `id` is the request's.
+        try:
+            reply["id"] = json.loads(body).get("id")
+        except (TypeError, ValueError):
+            reply["id"] = None
         return 200, {"content-type": "application/json"}, json.dumps(reply).encode()
     return respond
 
@@ -268,8 +277,15 @@ def test_py_a2a_would_have_followed_before_the_fix(peers):
     """Non-vacuity. The same two peers, with urllib's default put back.
 
     This is the defect, executed: the POST is re-issued as a GET, the body is
-    dropped, it lands on a host the declaration never named, and the extern
-    consumes that host's reply as the A2A result.
+    dropped, and it LANDS ON A HOST THE DECLARATION NEVER NAMED. The reach is
+    the defect and it has already happened by the time anything can be checked,
+    which is why the policy is a policy and not a reply check.
+
+    What the crossing then does with that host's reply changed with item 439's
+    correlation gate: a peer that was handed a GET with no body cannot echo the
+    identity the crossing sent, so the reply is refused instead of consumed.
+    That is a second line of defence, not a substitute: the request left the
+    process either way, carrying every header on it.
     """
     elsewhere = peers(_answer("ELSEWHERE"))
     declared = peers(_redirect_to(302, f"{elsewhere.origin}/elsewhere",
@@ -277,7 +293,10 @@ def test_py_a2a_would_have_followed_before_the_fix(peers):
 
     body = _following_restored(_a2a_py_body(f"{declared.origin}/a2a",
                                             follow=False))
-    assert _run_py(body, message="ping") == "ELSEWHERE"
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_py(body, message="ping")
+    assert "correlation id" in str(excinfo.value)
+    # the load-bearing half: the undeclared host WAS reached, as a bodiless GET
     assert [(m, b) for m, _p, b in elsewhere.seen] == [("GET", b"")]
 
 
@@ -467,8 +486,11 @@ def test_ts_a2a_would_have_followed_before_the_fix(peers, tmp_path):
     """Non-vacuity, ts. `redirect: "manual"` back to the Fetch default.
 
     With `follow` restored the runtime chases the `Location` itself, the loop
-    below never sees a 3xx, and the crossing consumes the other host's reply —
-    the POST having become a GET on the way.
+    below never sees a 3xx, and the request lands on the other host — the POST
+    having become a GET on the way. As on the py tier, item 439's correlation
+    gate then refuses that host's reply (it never saw the id, because it never
+    saw the body), so the defect this pins is the REACH, which the reply check
+    cannot undo.
     """
     elsewhere = peers(_answer("ELSEWHERE"))
     declared = peers(_redirect_to(302, f"{elsewhere.origin}/elsewhere",
@@ -479,7 +501,8 @@ def test_ts_a2a_would_have_followed_before_the_fix(peers, tmp_path):
     assert restored != body, "the emitted body no longer pins redirect handling"
 
     got = _run_ts(restored, tmp_path)
-    assert got == {"ok": True, "text": "ELSEWHERE"}
+    assert got["ok"] is False
+    assert "correlation id" in got["error"]
     assert [(m, b) for m, _p, b in elsewhere.seen] == [("GET", b"")]
 
 

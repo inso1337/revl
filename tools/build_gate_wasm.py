@@ -47,15 +47,25 @@ vector requires zero of them).
 
 What this gate can say
 ----------------------
-Exactly what `crates/revl-gate` can say, which is: nothing that admits. The
-self-host gate decides the composition/guarantee layer (G1..G4, A1, PRELUDE,
-and parse failures as BAD) and does NOT run the reference type layer, so its
-non-refusing arm is `no_objection` and never an admission
+Exactly what `crates/revl-gate`'s VERDICT surface can say, which is: nothing
+that admits. The self-host gate decides the composition/guarantee layer
+(G1..G4, A1, PRELUDE, and parse failures as BAD) and does NOT run the reference
+type layer, so its non-refusing arm is `no_objection` and never an admission
 (`tools/build_gate_crate.py`, "The security clause"). The WIT `verdict` record
 therefore reports `admitted: false` on every arm and carries the arm name in
 `kind`, so a host reading only the design's fixed `{admitted, code, message}`
 triple reads this gate as "never admits" — the fail-closed reading — rather than
 mistaking a no-objection for an admission.
+
+The crate grew a separate ADMISSION surface for issue #346
+(`revl_gate::issue_admission`, a different type from `Verdict`), and this world
+DOES NOT EXPORT IT. That is a deliberate cut, not an omission: the admission
+surface's soundness rests on the crate's `catch_unwind` fail-closed path, and on
+wasm the panic strategy is `abort`, so the path the arm depends on is exactly the
+one this target cannot honour. Carrying admissions to the edge is its own slice,
+and it starts by giving this target a fail-closed story for a trap. Until then
+every arm on this world reports `admitted: false`, and a host must read a
+`no-objection` as "no verdict", never as a green.
 
 `admit-into` is the crate's manifest arm (item 186's ambient gate, issue #346)
 carried to the edge: the union fold's G2/G3 legs, over the item-186 row wire.
@@ -186,13 +196,19 @@ package %(package)s;
 world %(world)s {
   /// A verdict from the gate.
   ///
-  /// `admitted` is FALSE ON EVERY ARM. This gate is `crates/revl-gate` packaged
-  /// for wasm, and that gate decides the composition/guarantee layer
+  /// `admitted` is FALSE ON EVERY ARM. This world exports `crates/revl-gate`'s
+  /// VERDICT surface, and that surface decides the composition/guarantee layer
   /// (G1..G4, A1, PRELUDE, and parse failures as BAD) and NOT the reference
   /// type layer, so it has no admission to give. A host reading only the fixed
   /// {admitted, code, message} triple therefore reads this gate as "never
   /// admits" — the fail-closed reading — instead of mistaking a no-objection
   /// for an admission. The real signal is `kind`.
+  ///
+  /// The crate's separate ADMISSION surface (`issue_admission`, issue #346) is
+  /// deliberately NOT on this world: it leans on a `catch_unwind` fail-closed
+  /// path, and on wasm the panic strategy is `abort`, so that path does not
+  /// exist here. A `no-objection` from this world is "no verdict", never a
+  /// green.
   record verdict {
     /// Always false. See above.
     admitted: bool,
@@ -330,13 +346,20 @@ LIB_TEMPLATE = r'''//! `revl-gate-wasm` — the revl admission gate as a WASI-P2
 //! deterministic function of its arguments, and that is provable from the
 //! artifact's import section rather than promised in prose.
 //!
-//! # This gate issues no admissions
+//! # This world issues no admissions
 //!
-//! `admitted` is `false` on every arm, exactly as in the rust crate. The
-//! self-host gate decides the composition/guarantee layer and not the reference
-//! type layer, so its non-refusing arm means *"this gate found nothing it is
-//! able to refuse"* and never *"the reference would admit this"*. See the crate
-//! docs for the measurement behind that.
+//! `admitted` is `false` on every arm, exactly as on the rust crate's VERDICT
+//! surface. The self-host gate decides the composition/guarantee layer and not
+//! the reference type layer, so its non-refusing arm means *"this gate found
+//! nothing it is able to refuse"* and never *"the reference would admit this"*.
+//! See the crate docs for the measurement behind that.
+//!
+//! The crate's separate admission surface (`revl_gate::issue_admission`, issue
+//! #346) is deliberately NOT exported here. It leans on the crate's
+//! `catch_unwind` fail-closed path, and on wasm the panic strategy is `abort`,
+//! so that path does not exist on this target: the one thing an admission arm
+//! must be able to do is refuse to answer, and here it cannot. Giving this
+//! target a fail-closed story for a trap comes first.
 //!
 //! # Panics trap; they do not become verdicts
 //!
@@ -510,7 +533,7 @@ function, a CDN node.
     selfhost/lower.rvl -> crates/revl-gate -> rustc %(target)s
       -> wasm-tools component new -> revl_gate.wasm
 
-## This gate issues no admissions
+## This world issues no admissions
 
 Read this before wiring the component into anything.
 
@@ -530,8 +553,15 @@ covered corpus, with no round trip and no cold-start interpreter.
 
 The two divergence directions are not symmetric, and that asymmetry is the whole
 design: refusing what the reference admits is an inconvenience; ADMITTING what
-the reference refuses is the defect class this arc exists to prevent. A gate that
-cannot issue an admission cannot commit that defect.
+the reference refuses is the defect class this arc exists to prevent. A world
+with no arm that could carry an admission cannot commit that defect.
+
+The rust crate does have an admission surface (`revl_gate::issue_admission`,
+issue #346), and this world deliberately does not export it. The arm's soundness
+rests on the crate's `catch_unwind` fail-closed path, and on this target the rust
+panic strategy is `abort`, so that path is absent: an admission arm whose only
+honest answer in the hard case is "I will not answer" cannot keep that promise
+here. A fail-closed story for a trap comes first, and it is its own slice.
 
 ## The interface
 
@@ -697,13 +727,27 @@ def build() -> dict[str, str]:
             f"build_gate_wasm: gate api semver mismatch — crates/revl-gate says "
             f"{meta['gate_api_version']!r}, this generator says "
             f"{GATE_API_VERSION!r}.")
-    if meta["issues_admissions"]:
+    # This shim lifts the crate's VERDICT surface and nothing else, and it
+    # hard-codes `admitted: false` on every arm it lifts. That is sound exactly
+    # as long as `Verdict` has no admitting arm.
+    #
+    # The crate DOES issue admissions since issue #346 — through a separate
+    # `Admission` type and `issue_admission`, which this world does not export.
+    # So `issues_admissions` alone is not the thing to gate on: the thing to gate
+    # on is whether the surface this shim lifts grew an arm the hard-coded
+    # `false` would misreport. If `verdict_arms` ever carries an admitting arm,
+    # the shim, its WIT docs and its README all have to be revisited before the
+    # component can carry an admission to the edge.
+    admitting_verdict_arms = [arm for arm in meta["verdict_arms"]
+                              if "admit" in arm]
+    if admitting_verdict_arms:
         raise SystemExit(
-            "build_gate_wasm: crates/revl-gate now reports that it issues "
-            "admissions. This shim hard-codes `admitted: false` on every arm "
-            "and its README says the gate cannot admit; both have to be "
-            "revisited deliberately before the component can carry an "
-            "admission to the edge.")
+            f"build_gate_wasm: crates/revl-gate's VERDICT surface now carries "
+            f"{admitting_verdict_arms!r}. This shim lifts that surface and "
+            f"hard-codes `admitted: false` on every arm, and its README says the "
+            f"verdict surface cannot admit; all three have to be revisited "
+            f"deliberately before the component can carry an admission to the "
+            f"edge.")
     digest = source_digest()
     return {
         "Cargo.toml": render_cargo_toml(),
