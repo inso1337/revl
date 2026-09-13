@@ -1,11 +1,14 @@
 # 470: Intent-vs-action refinement verification
 
 Filed against GitHub issue [#822](https://github.com/inso1337/revl/issues/822)
-("Intent-vs-action refinement verification"), roadmap item 470. Design plus two
-slices of the semantic kernel `src/revl/intent.py` (the `Intent` record, the
-`Action` record, and `refine`), with unit coverage in
-`tests/test_470_intent_refinement.py`. Nothing is wired to it yet; section 3
-names the two landed lines and section 4 names the four stages that stay open.
+("Intent-vs-action refinement verification"), roadmap item 470. Design plus
+three slices: the semantic kernel `src/revl/intent.py` (the `Intent` record, the
+`Action` record, and `refine`, with unit coverage in
+`tests/test_470_intent_refinement.py`), and the source surface that finally
+holds a declaration and compares a crossing against it (the `within` and
+`acting` clauses, with coverage in `tests/test_470_intent_surface.py`). Section
+3 names the three landed lines and section 4 names the three stages that stay
+open.
 
 Companion docs: [441-goal-contracts.md](441-goal-contracts.md),
 [442-typed-delegation.md](442-typed-delegation.md),
@@ -111,8 +114,9 @@ place that split is defined.
 `Intent`, `Action`, `Refusal`, `Violation`, `ceiling_params` and `refine`, with
 `tests/test_470_intent_refinement.py` covering each dimension and each
 fail-closed asymmetry. It is a leaf module: it imports `cap_order` and nothing
-else in the tree imports it. No checker rule, no approval gate, no lease path and
-no operator profile changes, so no existing program changes its verdict.
+else. As of slice 1 nothing in the tree imported it either, and slice 3 is what
+gives it its first caller. No approval gate, no lease path and no operator
+profile changes, so no existing program changes its verdict.
 
 The kernel is worth landing alone because of the one property the whole feature
 turns on. The roadmap fixates on the *wider* cases (higher amount, different
@@ -215,26 +219,84 @@ by field, which is exactly where the object valuation and the spend drift apart.
 `cap_order.split_ceilings`, so one spelling read as an intent and read as an
 action is the identity refinement.
 
+### 3.3 Slice 3: the checker-visible rule
+
+**Landed: the source surface, and the refusal that names the intent.** Slices 1
+and 2 are a decision with nothing to decide about. The part the roadmap's exit
+criterion actually turns on is a DECLARATION held across time and a crossing
+compared against it at the moment it fires, and that is what this slice adds:
+
+- `within { object: …, verbs: [ … ], ceilings: { … }, tenant: …, related: [ … ],
+  scopes: { … } }` trails a service operation's return type and is the intent the
+  operation DECLARES. `object` and `verbs` are required, because they are the two
+  dimensions with no honest default; the rest are optional and their omission is
+  the narrow reading the kernel already spells out. The clause is built straight
+  into an `intent.Intent` at parse, through `Intent.from_cap`, so the record's own
+  construction rules are the surface's validity rules and there is no second
+  vocabulary to keep in step.
+- `acting { verb: …, tenant: …, scopes: { … } }` trails an `emit` step and states
+  what that one crossing does. It carries only the three dimensions a capability
+  spelling cannot: the OBJECT and the AMOUNT are read off the crossing's own
+  spelling (`_emit_crossed_caps`, the same per-crossing resolution the approval
+  obligation uses) through `Action.from_cap`. That is the typed link doing real
+  work rather than decorating: one spelling read as an intent and read as an
+  action is the identity refinement, so the declaration and the crossing cannot
+  drift apart by being written twice.
+
+The two meet in a provide-method body, which is the only place a declared
+operation and a real crossing are both in hand: a service operation is an
+interface, its providers are the bodies, and the declaration is an upper bound
+every provider inherits exactly as `emission[...]` already is. `lower`'s
+`_check_intent_refinement` runs `refine` over each crossed token and raises the
+refusal with the declared value in the message and the `within` clause's line in
+the hint, which is the roadmap's "refused with the intent it violated" for a
+source program.
+
+Both OMISSIONS are refused, in both directions, because each of them is a hole
+rather than a convenience:
+
+- An `acting` clause with no `within` to check it against would read as a check
+  and perform none. Nothing here invents the missing intent (that is the
+  roadmap's own scope note), so the clause is refused.
+- A crossing with no `acting` clause inside a body whose operation DOES declare
+  an intent is the dangerous direction, and it is the one that would have made
+  the feature vacuous: a body could declare `within` and then reach anything at
+  all through an unannotated `emit`. Every crossing under a declaration must
+  state what it does.
+
+A crossing whose capability set the per-crossing resolution cannot name is
+refused for the same reason. That covers a bare `emission` callee (which names
+no capability at all), the `*` token, and the shapes where the resolution
+returns nothing, such as a provision call off a spawn handle or a crossing
+through a service-typed parameter. No declared object can be SHOWN to cover any
+of them, and reading the unnameable as the declared one is exactly the direction
+slice 1 was built to close: an empty capability set is "nothing to compare", not
+"nothing to check".
+
+Both clauses are CONTEXTUAL, recognised only in the one slot each occupies (the
+post-return-type slot of a service operation, which the `cache` clause already
+uses, and the trailing slot of an `emit` step). The lexer's `KEYWORDS` set is
+untouched, so a program using `within` or `acting` as an ordinary name still
+compiles, and both AST fields default to `None`, so a method and an emit that
+write neither clause lower to byte-identical IR. The check lives entirely in
+lower, keyed off the declaration, and contributes no IR key of its own.
+
 ## 4. Explicit non-goals for this note
 
-Four stages are named and deliberately not started; each is a separate,
+Three stages are named and deliberately not started; each is a separate,
 independently reviewable change:
 
-1. **The checker-visible rule.** A surface where a declaration carries its
-   intent and a crossing is checked against it before execution. This is the
-   stage that produces the roadmap's "refused with the intent it violated" for a
-   *source* program. It is not wired here.
-2. **The class-(c) approval gate.** Today the gate compares the grant against the
+1. **The class-(c) approval gate.** Today the gate compares the grant against the
    request with `_grant_covers` / `_grant_within`. Routing that comparison
    through `refine` would make the amount-scoped and `uses: n` approval cases
    that `246-auto-approve.md` leaves undesigned expressible against a stated
    intent. Touching the gate changes shipped, tested semantics and belongs in its
    own slice.
-3. **The lease path.** A runtime crossing carrying its intent so the lease check
+2. **The lease path.** A runtime crossing carrying its intent so the lease check
    is an intent refinement rather than an authority-versus-request comparison.
    `cap_order`'s ceiling erasure into `remainingUses` interacts with this and
    must be settled there, not here.
-4. **The operator profile.** A surface that declares an operator's intent so the
+3. **The operator profile.** A surface that declares an operator's intent so the
    `TOOL_VERB` management actions can be checked against it.
 
 Also explicitly out of scope for this item, not merely deferred:

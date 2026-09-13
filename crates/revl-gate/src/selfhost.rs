@@ -7645,6 +7645,21 @@ fn infer_index(t: String) -> String {
     return String::from("");
 }
 
+fn map_index_tags(t: String) -> String {
+    if (parse_head(t.clone()) != "Map") {
+        return String::from("");
+    }
+    let a = type_args(&t);
+    if (a.revl_length() == 0i64) {
+        return String::from("");
+    }
+    let keyed = String::from(",\"key_type\":").revl_concat(&jstr(&(a)[(0i64) as usize]));
+    if (a.revl_length() == 1i64) {
+        return keyed;
+    }
+    return (keyed.revl_concat(",\"value_type\":")).revl_concat(&jstr(&(a)[(1i64) as usize]));
+}
+
 fn infer_method(recv: Expr, method: &str, env: &[Bind]) -> String {
     let recvHostRoot = match recv.clone() {
     Expr::Var(n) => is_host_root(&n),
@@ -8213,7 +8228,7 @@ fn lir_expr(e: Expr, env: Vec<Bind>) -> String {
     Expr::Field(f) => { let f = *f; lir_field(f.clone(), env.clone()) },
     Expr::OptField(f) => { let f = *f; (((String::from("{\"kind\":\"optfield\",\"target\":").revl_concat(&lir_expr(f.target.clone(), env.clone()))).revl_concat(",\"name\":")).revl_concat(&jstr(&f.name))).revl_concat("}") },
     Expr::OptCall(c) => { let c = *c; (((((String::from("{\"kind\":\"optcall\",\"target\":").revl_concat(&lir_expr(c.target.clone(), env.clone()))).revl_concat(",\"method\":")).revl_concat(&jstr(&c.name))).revl_concat(",\"args\":[")).revl_concat(&lir_args(c.args.clone(), env.clone()))).revl_concat("]}") },
-    Expr::Index(x) => { let x = *x; (((String::from("{\"kind\":\"index\",\"target\":").revl_concat(&lir_expr(x.target.clone(), env.clone()))).revl_concat(",\"index\":")).revl_concat(&lir_expr(x.idx.clone(), env.clone()))).revl_concat("}") },
+    Expr::Index(x) => { let x = *x; ((((String::from("{\"kind\":\"index\",\"target\":").revl_concat(&lir_expr(x.target.clone(), env.clone()))).revl_concat(",\"index\":")).revl_concat(&lir_expr(x.idx.clone(), env.clone()))).revl_concat(&map_index_tags(infer(x.target.clone(), &env)))).revl_concat("}") },
     Expr::If(f) => { let f = *f; (((((String::from("{\"kind\":\"if\",\"cond\":").revl_concat(&lir_expr(f.cond.clone(), env.clone()))).revl_concat(",\"then\":")).revl_concat(&lir_expr(f.then_.clone(), env.clone()))).revl_concat(",\"else\":")).revl_concat(&lir_expr(f.els.clone(), env.clone()))).revl_concat("}") },
     Expr::Rec(r) => (String::from("{\"kind\":\"record\",\"fields\":[").revl_concat(&lir_fields(r.fields, env.clone()))).revl_concat("]}"),
     Expr::Lst(l) => (String::from("{\"kind\":\"list\",\"items\":[").revl_concat(&lir_args(l.items, env.clone()))).revl_concat("]}"),
@@ -12062,6 +12077,11 @@ fn a_named_test_body_s_statements_draw_no_top_level_verdict() {
 #[test]
 fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
     assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}]}"));
+}
+
+#[test]
+fn a_map_subscript_carries_the_declared_key_and_value_type__issue__957_() {
+    assert!((lower_to_ir(String::from("fn keyed(m: Map[Str, Int], k: Str) -> Int { return m[k] } fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"keyed\",\"params\":[{\"name\": \"m\", \"type\": \"Map[Str, Int]\"}, {\"name\": \"k\", \"type\": \"Str\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"m\"},\"index\":{\"kind\":\"var\",\"name\":\"k\"},\"key_type\":\"Str\",\"value_type\":\"Int\"}}]},{\"name\":\"positional\",\"params\":[{\"name\": \"xs\", \"type\": \"List[Int]\"}, {\"name\": \"i\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"xs\"},\"index\":{\"kind\":\"var\",\"name\":\"i\"}}}]}]}"));
 }
 
 #[test]
