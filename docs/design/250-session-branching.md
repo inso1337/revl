@@ -195,7 +195,11 @@ revl_fork_confirm(hash)                # step 2: perform
                                         the shared workspace, Decision 4/5)
   5. snapshot() the step-k state       (item 15 re-admission recipe)
   6. mint branch identity: new session_id + new WAL; standing approvals do
-     NOT carry across (246 invariant 5); restore the snapshot into the branch
+     NOT carry across (246 invariant 5); restore the snapshot into the branch.
+     The branch DOES inherit the parent's applied distilled auto-approve rules
+     together with their spent budget and reviewed blast set — the fork mints
+     no authority the parent had not already granted itself, and a rule the
+     parent exhausted stays exhausted on the branch
   7. write fork-begin / fork-complete WAL bracket naming parent, k, crossed set,
      and the parent freeze
 ```
