@@ -10,7 +10,7 @@ function, a CDN node.
     selfhost/lower.rvl -> crates/revl-gate -> rustc wasm32-unknown-unknown
       -> wasm-tools component new -> revl_gate.wasm
 
-## This gate issues no admissions
+## This world issues no admissions
 
 Read this before wiring the component into anything.
 
@@ -30,8 +30,15 @@ covered corpus, with no round trip and no cold-start interpreter.
 
 The two divergence directions are not symmetric, and that asymmetry is the whole
 design: refusing what the reference admits is an inconvenience; ADMITTING what
-the reference refuses is the defect class this arc exists to prevent. A gate that
-cannot issue an admission cannot commit that defect.
+the reference refuses is the defect class this arc exists to prevent. A world
+with no arm that could carry an admission cannot commit that defect.
+
+The rust crate does have an admission surface (`revl_gate::issue_admission`,
+issue #346), and this world deliberately does not export it. The arm's soundness
+rests on the crate's `catch_unwind` fail-closed path, and on this target the rust
+panic strategy is `abort`, so that path is absent: an admission arm whose only
+honest answer in the hard case is "I will not answer" cannot keep that promise
+here. A fail-closed story for a trap comes first, and it is its own slice.
 
 ## The interface
 

@@ -10,7 +10,9 @@ Sections one to five below are the py wheel (`pip install revl`, then
 `from revl.gate import admit, gate_version, ...`), which is the full
 reference compiler and can both refuse and admit.
 ["The rust tier"](#the-rust-tier-the-revl-gate-crate) is the native
-`revl-gate` crate, which can only REFUSE — it issues no admissions at all.
+`revl-gate` crate, whose verdict surface can only REFUSE. It does issue
+admissions, but through a separate type and only inside a narrow certified
+surface (issue #346); a `NoObjection` is never one of them.
 ["The wasm tier"](#the-wasm-tier-the-gate-in-a-browser-a-worker-a-cdn-node)
 is that same crate packaged as a component for a browser, an edge worker or
 `wasmtime`, with the same contract and the same absent admitting arm. The
@@ -146,7 +148,8 @@ Everything above describes the py wheel. There is a second dependency form —
 the SAME asymmetric contract with the asymmetry taken further. Read this
 before depending on it, because the difference is not a detail:
 
-**The rust gate issues no admissions at all.** It is `selfhost/lower.rvl`'s
+**The rust gate's verdict surface issues no admissions at all.** It is
+`selfhost/lower.rvl`'s
 `admit_src` compiled to rust: the composition and guarantee layer (`G1`..`G4`,
 `A1`, `PRELUDE`, and parse failures as `BAD`), and **not** the reference type
 layer. A type-incorrect program is not something it can refuse. So its
@@ -177,7 +180,45 @@ in-process, **Python-free refusal** that byte-agrees with the reference on the
 covered corpus: a cheap pre-filter in front of an expensive authoritative
 check. Refusing what the reference admits would be an inconvenience; admitting
 what the reference refuses is the defect class this arc exists to prevent, and
-a gate with no admission arm cannot commit it.
+the verdict surface has no arm that could commit it.
+
+### The admission surface, and how narrow it is
+
+`revl_gate::issue_admission(source)` returns an `Admission`, not a `Verdict`,
+and `Admission::Admitted` is a real admission: `"admitted": true` on the wire,
+byte-identical to the py tier's admission wire for the same program. It is a
+separate type on purpose. A consumer holding a `Verdict` has no arm it could
+misread, and a consumer that wants a green has to ask for one by name.
+
+Two conditions are both necessary, and the first is the structural one:
+`admit(source)` must have returned `NoObjection`, so an admission is never
+issued over a refusal or a frontier gap; and the source must be inside the
+ADMISSION SURFACE named by `ADMISSION_SURFACE_ID`, described in one line by
+`ADMITTED_LAYER`, and implemented in the crate's generated `src/admission.rs`.
+
+That surface is deliberately tiny: interface declarations only, meaning
+`service` method signatures and scalar `type` aliases over a closed scalar
+vocabulary derived from the reference's own table. It holds no function body,
+no expression, no literal and no generic head, which is exactly why a
+no-objection over it is the whole answer rather than a partial one. Anything
+else is `Admission::Withheld`, carrying the verdict verbatim, so switching from
+`admit` to `issue_admission` can only ADD the admitted wire.
+
+`issue_admission_into(source, manifest)` asks the same question against a
+running composition. The empty manifest is the empty composition and reduces to
+the standalone question. Against a non-empty one, only a candidate that
+declares nothing is admitted, and the reason is the item-186 row wire rather
+than the certifier: a row carries a component name, a provision key and a
+realm, and no service shapes, so a declared `service Store` may collide with a
+`Store` the running composition already holds in a different shape and no
+amount of care on the gate's side can see it. The reference refuses that pair
+by name. Carrying the running shapes on the wire is the remaining half of
+issue #346.
+
+Two obligations for a consumer of an admission, both from the ASYMMETRIC clause:
+an admission is a compile-time judgment scoped to `gate_version().frontier` and
+`ADMISSION_SURFACE_ID`, not runtime confinement; and a cached admission may
+never be served to a reader whose gate reports a different value for either.
 
 Also absent, deliberately: `admit_into` (admission into a running composition
 spans a manifest the self-host pipeline has no parameter for), `compile_to`
