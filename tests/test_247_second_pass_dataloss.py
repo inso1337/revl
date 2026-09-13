@@ -25,6 +25,15 @@ offset on a clean commit) and the pre-existing mid-activation LIFO behaviour.
     the sort key collapsed to a constant): overlapping idempotent-total inverses
     destroyed pre-session data. Fix: a monotonic `stamp` tiebreaker so LIFO holds
     with and without a WAL.
+  * F6 (probe6/probe6b) — a hot-swap ORPHANS the session DEFERRAL QUEUE: the
+    same `_install_session_owner` carry block that F2 taught to transfer the
+    escrow never transferred `_queue`, so a pre-swap class-(b) emission was
+    stranded in the replaced owner — it never flushed, `commit` enumerated an
+    EMPTY manifest, and both the live `noResidue: True` verdict and
+    `revl recover`'s activation-complete short-circuit certified the session
+    clean over a silently lost send (item-245 Decision 3 says the queue is owned
+    by "the same owner as the escrow" and its entries survive the withdrawal).
+    Fix: transfer the queue too — a MOVE, never a copy.
 
 F4 is fixed by F1 (the same lost-offset root cause on the frame-abort path).
 """
@@ -443,3 +452,188 @@ def test_regression_witnessed_mutation_persists_on_clean_commit(artifact):
     assert report["unloaded"]
     assert _mutated(artifact), "a clean unload wrongly reverted the deliverable"
     assert report["noResidue"], report["checks"]
+
+
+# ===========================================================================
+# F6 — a hot swap ORPHANS the session DEFERRAL QUEUE (the same hole as F2, in
+# the other half of `_install_session_owner`'s carry block). Item-245 Decision 3
+# puts the queue on "the same owner as the escrow", so its entries "survive the
+# withdrawal of the activation that enqueued them (a swapped-out tool
+# component's queued send still flushes at commit, and still drops on abort)".
+# Pre-fix the successor generation's fresh owner started with an EMPTY queue, so
+# a pre-swap class-(b) emission was orphaned in the replaced owner: it never
+# flushed, `commit` enumerated an EMPTY manifest, and both the live
+# `noResidue: True` verdict and `revl recover`'s activation-complete
+# short-circuit certified the session clean over a silently lost send.
+# ===========================================================================
+
+# (a) a per-call witnessed rename; (b) a `deferred` emission that appends
+# `deliver:<msg>` to a sink at FLUSH (never at the call).
+_QUEUE = (
+    "type Stash = { path: Str, bak: Str }\n"
+    "type FsError = { code: Str }\n"
+    "extern pure fn unstash(w: Stash) -> Unit = @py {\n"
+    "    import os\n"
+    "    if os.path.exists(w['bak']):\n"
+    "        os.replace(w['bak'], w['path'])\n"
+    "    return\n"
+    "}\n"
+    "extern witnessed[fs] fn stash_path(p: Str) -> Result[Stash, FsError]"
+    " undo unstash(result) = @py {\n"
+    "    import os\n"
+    "    bak = p + '.bak'\n"
+    "    os.replace(p, bak)\n"
+    "    return Ok({'path': p, 'bak': bak})\n"
+    "}\n"
+    "extern emission deferred fn deliver(sink: Str, msg: Str) = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('deliver:' + msg + chr(10))\n"
+    "    return\n"
+    "}\n"
+    "service Ops {\n"
+    "  emission fn stash(p: Str)\n"
+    "  emission fn enqueue(sink: Str, msg: Str)\n"
+    "}\n"
+    "component Agent provides ops: Ops {\n"
+    "  provide ops {\n"
+    "    fn stash(p) { effect stash_path(p) }\n"
+    "    fn enqueue(sink, msg) { emit deliver(sink, msg) }\n"
+    "  }\n"
+    "}\n"
+)
+_QUEUE_BASE = compile_source(_QUEUE, "queue.rvl")
+
+
+def _queue_ir() -> dict:
+    return copy.deepcopy(_QUEUE_BASE)
+
+
+@pytest.fixture
+def sink(tmp_path):
+    return str(tmp_path / "sink.log")
+
+
+def _lines(sink: str) -> list:
+    if not os.path.exists(sink):
+        return []
+    return Path(sink).read_text(encoding="utf-8").splitlines()
+
+
+@needs_cordis
+def test_F6_probe6_queued_send_survives_the_swap(sink):
+    """probe6: a deferred emission enqueued in gen1, then a hot-swap to gen2 —
+    the descriptor is CARRIED onto the successor owner, so the send still fires
+    at commit. Pre-fix the queue was orphaned in the replaced owner, the send
+    never fired, and `commit` certified the session residue-free over an empty
+    manifest."""
+    session = _session()
+    session.load(_queue_ir(), record=True)
+
+    session.call("ops", "enqueue", [sink, "q0"])     # PRE-swap class (b)
+    assert _lines(sink) == [], "a deferred emission fired before the commit"
+    assert len(session._owner._queue) == 1
+
+    session.swap(_queue_ir())                        # withdraw gen1 -> queue
+
+    assert len(session._owner._queue) == 1, (
+        "the pre-swap deferral descriptor was orphaned by the swap — the "
+        "successor owner has an empty queue (the F6 data-loss hole)")
+
+    manifest = session.commit()
+    assert manifest["summary"] == [{"group": "deliver.deliver", "count": 1}], (
+        "the commit manifest did not enumerate the pre-swap queued send")
+    result = session.commit_confirm(manifest["hash"])
+    assert result["committed"]
+    assert _lines(sink) == ["deliver:q0"], (
+        "the pre-swap queued send did NOT flush at commit — it was silently "
+        "lost (the F6 queue-orphaning data-loss bug)")
+    assert result["noResidue"], result["checks"]
+
+
+@needs_cordis
+def test_F6_the_carry_is_a_move_not_a_copy(sink):
+    """The descriptor is MOVED onto the successor owner, never left behind in the
+    dead one: a replaced owner that still held it would let a later abort path
+    report the same entry twice."""
+    session = _session()
+    session.load(_queue_ir())
+    session.call("ops", "enqueue", [sink, "q0"])
+
+    dead = session._owner
+    session.swap(_queue_ir())
+
+    assert session._owner is not dead
+    assert session._owner._queue, "the successor owner did not carry the queue"
+    assert dead._queue == [], (
+        "the descriptor was COPIED rather than moved — the replaced owner still "
+        "holds it and a later abort path could report it twice")
+
+
+@needs_cordis
+def test_F6_abort_after_a_swap_drops_the_queued_send(sink):
+    """The carried descriptor still DROPS on abort (Decision 3: "still drops on
+    abort"), and the drop is REPORTED. Pre-fix the abort of a post-swap session
+    under-reported `droppedDeferred` because the entry was already gone."""
+    session = _session()
+    session.load(_queue_ir())
+    session.call("ops", "enqueue", [sink, "q0"])
+    session.swap(_queue_ir())
+
+    result = session.abort()
+    assert result["aborted"]
+    assert _lines(sink) == [], "an abort flushed a deferred emission"
+    assert result["droppedDeferred"] == 1, (
+        "the abort dropped the carried descriptor without reporting it")
+
+
+@needs_cordis
+def test_F6_probe6b_the_queue_and_the_escrow_survive_together(artifact, sink):
+    """probe6b: the F2 escrow and the F6 queue are ONE hole in two halves of the
+    carry block. A single swap must carry BOTH; pre-fix the witnessed entry
+    survived and the queue did not, which is what made the loss invisible."""
+    session = _session()
+    session.load(_queue_ir(), record=True)
+    session.call("ops", "stash", [artifact])         # (a) witnessed
+    session.call("ops", "enqueue", [sink, "q0"])     # (b) deferred
+    assert _mutated(artifact)
+
+    session.swap(_queue_ir())
+
+    assert session._owner._escrow, "the witnessed escrow was orphaned (F2)"
+    assert session._owner._queue, "the deferral queue was orphaned (F6)"
+
+    manifest = session.commit()
+    result = session.commit_confirm(manifest["hash"])
+    assert result["committed"]
+    assert _mutated(artifact), (
+        "the commit wrongly reverted the pre-swap witnessed deliverable")
+    assert _lines(sink) == ["deliver:q0"]
+    assert result["noResidue"], result["checks"]
+
+
+@needs_cordis
+def test_F6_commit_records_the_carried_send_as_flushed(sink, tmp_path, monkeypatch):
+    """Durability half: the carried descriptor's `deferred-emission` WAL record is
+    matched by a `flushed` record on commit, so `revl recover` reads the session
+    as rolled-forward for the RIGHT reason. Pre-fix the WAL carried a
+    `deferred-emission` with no `flushed` — an owed crossing — while both
+    `commit_confirm` and `recover` reported the session residue-free."""
+    wal_path = str(tmp_path / "session.wal")
+    _open_wal_once(monkeypatch, wal_path)
+
+    session = _session()
+    session.load(_queue_ir(), record=True)
+    session.call("ops", "enqueue", [sink, "q0"])
+    session.swap(_queue_ir())
+
+    manifest = session.commit()
+    confirm = session.commit_confirm(manifest["hash"])
+    assert confirm["committed"] is True
+
+    written = replay.WriteAheadLog.read(wal_path)
+    kinds = [r["record"] for r in written["records"]]
+    assert "deferred-emission" in kinds, (
+        "the carried send never reached the WAL at all")
+    assert "flushed" in kinds, (
+        "the carried send's `deferred-emission` record has no matching `flushed` "
+        "— an owed crossing that `revl recover` would report as clean")
