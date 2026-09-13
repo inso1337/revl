@@ -536,6 +536,144 @@ def test_unbounded_rule_still_auto_approves_across_a_swap(sink):
 
 
 # ---------------------------------------------------------------------------
+# the teardown boundary: `unload`+`load` is not a fresh grant of authority
+# ---------------------------------------------------------------------------
+#
+# `_auto_spend` (the spent budget) and `_auto_reviewed` (the H1 review bind) are
+# keyed by the rule's canonical DSL and belong to the RULE, which lives in the
+# serve-time `self.sandbox` policy binding. `_reset` preserves that binding, the
+# same way it preserves `approval_policy`, so it must preserve these with it.
+# Clearing them there made `revl_unload` + `revl_load` re-arm a rule the operator
+# had exhausted and re-snapshot the blast set it was reviewed against - and that
+# pair is UNGATED (unload is advertised as the residue proof an agent is
+# encouraged to call). A fresh budget therefore came from a teardown rather than
+# from the `approve`-gated apply/revoke path, which is the only path that may
+# grant one (see the control at the end of this block).
+
+@needs_cordis
+def test_exhausted_uses_budget_survives_an_unload_and_reload(sink):
+    """A `uses 1` rule that spent its one use stays exhausted across `unload` +
+    `load`: tearing the composition down is not a fresh grant of authority, so the
+    crossing after the reload still prompts and nothing is emitted."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(_rule(uses=1))
+    session.load(copy.deepcopy(ir), record=True)
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_rules[0]["consumed"] is True
+
+    session.unload()
+    session.load(copy.deepcopy(ir), record=True)
+
+    assert session._auto_rules[0]["remainingUses"] == 0
+    assert session._auto_rules[0]["consumed"] is True
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "two"])
+    assert _lines(sink) == [f"send:{STRIPE}:one"]
+
+
+@needs_cordis
+def test_partial_uses_budget_is_carried_across_an_unload_and_reload(sink):
+    """The dual of the exhausted case: a `uses 3` rule that spent 1 comes back with
+    2 left, not 3 - the bound is total over the session, not per-teardown."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(_rule(uses=3))
+    session.load(copy.deepcopy(ir), record=True)
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_rules[0]["remainingUses"] == 2
+
+    session.unload()
+    session.load(copy.deepcopy(ir), record=True)
+
+    assert session._auto_rules[0]["remainingUses"] == 2
+    assert session.call("gw", "send", [STRIPE, "two"])["result"] is None
+    assert session.call("gw", "send", [STRIPE, "three"])["result"] is None
+    assert session._auto_rules[0]["remainingUses"] == 0
+    with pytest.raises(ApprovalRequired):        # the third use was the last
+        session.call("gw", "send", [STRIPE, "four"])
+    assert _lines(sink) == [f"send:{STRIPE}:{w}"
+                            for w in ("one", "two", "three")]
+
+
+@needs_cordis
+def test_lapsed_ttl_is_not_resurrected_by_an_unload_and_reload(sink):
+    """A lapsed `ttl` deadline is not moved forward by a teardown: it is fixed when
+    the rule is first materialized, never recomputed from `now` on the next load."""
+    rule = AutoApproveRule(component="Biller*",
+                           caps=(f'gwsend(host="{STRIPE}")',),
+                           realm=None, admitting=frozenset(), ttl_ms=1)
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(rule)
+    session.load(copy.deepcopy(ir), record=True)
+    deadline = session._auto_rules[0]["expiresAt"]
+    assert deadline is not None
+
+    time.sleep(0.02)                             # let the 1ms window lapse
+
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "a"])
+
+    session.unload()
+    session.load(copy.deepcopy(ir), record=True)
+
+    assert session._auto_rules[0]["expiresAt"] == deadline
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "b"])
+    assert _lines(sink) == []
+
+
+@needs_cordis
+def test_h1_review_bind_survives_an_unload_and_reload(sink):
+    """The H1 review bind is not re-snapshotted by a teardown: a component that
+    ENTERED the glob and was never reviewed stays unreviewed, so the rule is still
+    suspended and the new member prompts rather than being silently approved."""
+    ir_invoice = compile_source(_src(sink, "BillerInvoice"), "invoice.rvl")
+    ir_refund = compile_source(_src(sink, "BillerRefund"), "refund.rvl")
+    session = _session(_rule(component="Biller*"))
+    session.load(copy.deepcopy(ir_invoice), record=True)
+    assert session.call("gw", "send", [STRIPE, "a"])["result"] is None
+    assert session._auto_reviewed[_rule(component="Biller*").to_dsl()] \
+        == frozenset({"BillerInvoice"})
+
+    session.swap(copy.deepcopy(ir_refund))       # a member that entered the glob
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "b"])
+
+    session.unload()
+    session.load(copy.deepcopy(ir_refund), record=True)
+
+    # the reviewed set is the one the operator reviewed, not the new glob.
+    assert session._auto_reviewed[_rule(component="Biller*").to_dsl()] \
+        == frozenset({"BillerInvoice"})
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "c"])
+    assert _lines(sink) == [f"send:{STRIPE}:a"]
+
+
+@needs_cordis
+def test_revoke_drops_the_spent_budget_so_a_reapply_starts_clean(sink):
+    """The CONTROL for the teardown tests above: the budget is not immortal.
+    `revoke_distillation` - an item-55 `approve`-gated verb - drops the rule's
+    spent budget with the rule, so a later re-apply of the identical text is a
+    fresh operator review with a fresh budget. That gated path may renew one;
+    `unload`/`load` may not."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    rule = _rule(uses=1)
+    key = rule.to_dsl()
+    session = _session(rule)
+    session.load(copy.deepcopy(ir), record=True)
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_spend[key]["remainingUses"] == 0
+
+    session.revoke_distillation(key)
+
+    assert key not in session._auto_spend          # dropped with the rule
+    assert session._auto_rules == []
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "two"])
+    assert _lines(sink) == [f"send:{STRIPE}:one"]
+
+
+# ---------------------------------------------------------------------------
 # byte-identity: a composition with no distilled rule is unchanged
 # ---------------------------------------------------------------------------
 
