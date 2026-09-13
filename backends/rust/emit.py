@@ -3799,11 +3799,13 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
         return _expr(steps[0]["expr"], env, rename)
 
     return " ".join(_rust_render_pure_stmts(steps, env, dict(rename),
-                                             method.get("name")))
+                                             method.get("name"),
+                                             params=method.get("params") or ()))
 
 
 def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
-                            method_name: str | None = None) -> list[str]:
+                            method_name: str | None = None,
+                            params=()) -> list[str]:
     """Render a PURE provide-method step list (issue #548) as Rust statement
     strings: bindings, assignments, `return`, and the control-flow forms whose
     bodies are themselves pure. Shared by the pure-method fast path and the
@@ -3829,17 +3831,20 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
         elif kind == "if":
             cond = _expr(step["cond"], env, scope)
             then = " ".join(_rust_render_pure_stmts(
-                step.get("then") or [], env, dict(scope), method_name))
+                step.get("then") or [], env, dict(scope), method_name,
+                params=params))
             s = f"if {cond} {{ {then} }}"
             if step.get("else"):
                 els = " ".join(_rust_render_pure_stmts(
-                    step["else"], env, dict(scope), method_name))
+                    step["else"], env, dict(scope), method_name,
+                    params=params))
                 s += f" else {{ {els} }}"
             parts.append(s)
         elif kind == "while":
             cond = _expr(step["cond"], env, scope)
             body = " ".join(_rust_render_pure_stmts(
-                step.get("body") or [], env, dict(scope), method_name))
+                step.get("body") or [], env, dict(scope), method_name,
+                params=params))
             parts.append(f"while {cond} {{ {body} }}")
         elif kind == "for":
             bind = _ident(step["bind"], "loop binding")
@@ -3851,8 +3856,26 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
             # element is always `Clone` on this tier.
             iterable = _expr(step["iterable"], env, scope)
             body = " ".join(_rust_render_pure_stmts(
-                step.get("body") or [], env, inner, method_name))
+                step.get("body") or [], env, inner, method_name,
+                params=params))
             parts.append(f"for {bind} in {iterable}.iter().cloned() {{ {body} }}")
+        elif kind == "emit":
+            # item 458 / issue #721: a BARE `emit` inside an `if`/`else` arm of a
+            # provide method. The crossing registers nothing on the activation
+            # frame, so it renders exactly as the effectful renderer's bare-emit
+            # arm does (`let _ = <call>;`) — params clone into the call so an
+            # emission argument does not move a value the rest of the body still
+            # reads (E0382, item 114). `emit ... compensate ...` never reaches
+            # here: a conditional compensation is refused at lowering, because it
+            # WOULD register.
+            if step.get("compensate") is not None:  # pragma: no cover
+                raise EmitError(
+                    f"{env.name}.{method_name}: a conditional `emit ... "
+                    f"compensate ...` is not lowerable in the Rust backend")
+            arg_scope = dict(scope)
+            for param in params:
+                arg_scope[param] = f"{param}.clone()"
+            parts.append(f"let _ = {_expr(step['expr'], env, arg_scope)};")
         elif kind == "break":
             parts.append("break;")
         elif kind == "continue":
@@ -3877,16 +3900,33 @@ def _method_body_pure_new(env: _Env, method: dict) -> str:
     return _pure_method_statements(env, method, _method_scope_rename(env))
 
 
+_RUST_EFFECTFUL_STEPS = ("effect", "emit", "let-effect")
+
+
+def _iter_method_steps(steps):
+    """Every step of a provide-method body, descending the `if`/`while`/`for`
+    arms issue #548 admits. item 458 put a bare `emit` inside an `if` arm, so a
+    scan that reads only the top level would miss it and take the pure path."""
+    for step in steps or []:
+        yield step
+        kind = step.get("step")
+        if kind == "if":
+            yield from _iter_method_steps(step.get("then") or [])
+            yield from _iter_method_steps(step.get("else") or [])
+        elif kind in ("while", "for"):
+            yield from _iter_method_steps(step.get("body") or [])
+
+
 def _component_has_effectful_methods(component: dict) -> bool:
     for step in component.get("body") or []:
         if step.get("step") != "provide":
             continue
         for method in step.get("methods") or []:
-            for body_step in method.get("body") or []:
-                # `let-effect` (item 397: a method-body host CAS) is effectful
-                # too — it registers a guarded inverse on the activation frame.
-                if body_step.get("step") in ("effect", "emit", "let-effect"):
-                    return True
+            # `let-effect` (item 397: a method-body host CAS) is effectful
+            # too — it registers a guarded inverse on the activation frame.
+            if any(body_step.get("step") in _RUST_EFFECTFUL_STEPS
+                   for body_step in _iter_method_steps(method.get("body"))):
+                return True
     return False
 
 
@@ -3955,8 +3995,8 @@ def _emit_config_application(component: dict, config_ty: str, indent: int) -> li
 
 def _method_has_effectful_steps(method: dict) -> bool:
     return any(
-        body_step.get("step") in ("effect", "emit", "let-effect")
-        for body_step in method.get("body") or []
+        body_step.get("step") in _RUST_EFFECTFUL_STEPS
+        for body_step in _iter_method_steps(method.get("body"))
     )
 
 
@@ -4221,7 +4261,8 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             # pure renderer produces them; a Rust expression-block statement is
             # whitespace-insensitive, so the single-line form is valid at `pad`.
             for line in _rust_render_pure_stmts([step], env, dict(rename),
-                                                method.get("name")):
+                                                method.get("name"),
+                                                params=method.get("params") or ()):
                 out.append(f"{pad}{line}")
         else:
             raise EmitError(f"unsupported method body step in Rust backend: {kind!r}")

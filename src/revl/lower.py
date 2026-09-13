@@ -11441,6 +11441,15 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         #     so python's function-scope aliasing cannot make two branches share
         #     a slot.
         used_safe: set[str] = set()
+        # item 458 / issue #721: how many `while`/`for` bodies enclose the
+        # statement being lowered. A bare `emit` is admitted inside an `if`/
+        # `else` arm (below) but not inside a loop, because item 379's
+        # frame-neutrality invariant is enforced whole-IR
+        # (`_validate_no_loop_scoped_registration`) and per-tier
+        # (`_guard_frame_neutral_loop` in all six emitters) over the `emit` STEP
+        # kind regardless of whether it carries a compensation. Refusing here
+        # gives that case the accurate message instead of the whole-IR one.
+        loop_depth = [0]
 
         def _alloc_safe(name: str) -> str:
             safe = _safe_name(
@@ -11560,7 +11569,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 if cond_t is not None and cond_t != "Bool":
                     raise mismatch(filename, ms.line, "`while` condition", "Bool", cond_t)
                 loop_body: list = []
-                _lower_scoped_block(ms.body, loop_body)
+                loop_depth[0] += 1
+                try:
+                    _lower_scoped_block(ms.body, loop_body)
+                finally:
+                    loop_depth[0] -= 1
                 out.append({"step": "while", "cond": cond, "body": loop_body})
             elif isinstance(ms, ForStmt):
                 iter_node = _lower_expr(ms.iterable, env, mode="setup")
@@ -11576,6 +11589,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 saved_locals = dict(method_locals)
                 env.params = dict(saved_params)
                 env.type_env = dict(saved_tenv)
+                loop_depth[0] += 1
                 try:
                     safe = _alloc_safe(ms.bind)
                     method_locals[ms.bind] = safe
@@ -11593,6 +11607,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                         if isinstance(s, ReturnStmt):
                             inner_returned = True
                 finally:
+                    loop_depth[0] -= 1
                     env.params = saved_params
                     env.type_env = saved_tenv
                     method_locals.clear()
@@ -11603,20 +11618,66 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 out.append({"step": "break", "line": ms.line})
             elif isinstance(ms, ContinueStmt):
                 out.append({"step": "continue", "line": ms.line})
-            elif isinstance(ms, (LetEffect, EffectStmt, EmitStmt, AwaitStmt,
+            elif isinstance(ms, EmitStmt):
+                # item 458 / issue #721: a BARE `emit` (no `compensate`) is an
+                # irreversible CROSSING, not a teardown registration — it fires
+                # the emission and puts nothing on the activation frame's
+                # teardown accumulator (`_lower_emit_step`: the accumulator entry
+                # is the `compensate` slot, and only that slot). The same
+                # crossing in VALUE position — `let v = emit …`, `x = emit …`,
+                # `return emit …` — has always been admitted inside a
+                # provide-method `if` arm and lowers on all six tiers, so
+                # refusing only the STATEMENT spelling taxed authors who do not
+                # want the value: they either bound a value they never read or
+                # hoisted the crossing into a module `fn` taking an emitting
+                # arrow (the harness's `maybe_run`/`maybe_ship` shape). Admit it
+                # through the SAME `_lower_emit_step` the method's top level
+                # uses, so one IR step reaches every tier's method renderer.
+                #
+                # Two cases stay refused, because both really do register:
+                #   * `emit … compensate …` — the compensation is a first-class
+                #     entry on the activation frame (item 247), so a conditional
+                #     one is the deferred teardown-contract question;
+                #   * any `emit` inside a `while`/`for` body — item 379's
+                #     frame-neutrality invariant is enforced over the `emit` STEP
+                #     kind whole-IR and in all six emitters, so admitting it here
+                #     would only move the refusal.
+                if loop_depth[0] > 0:
+                    raise RevlError(
+                        filename, ms.line,
+                        "an `emit` step may not appear inside a provide-method "
+                        "`while`/`for` body",
+                        hint="`break`/`continue` are frame-neutral only because "
+                             "loops and teardown registration never meet "
+                             "(docs/design/379-break-continue.md); lift the "
+                             "crossing out of the loop, or compute the value in "
+                             "the loop and emit once after it")
+                if ms.compensate is not None:
+                    raise RevlError(
+                        filename, ms.line,
+                        "an `emit ... compensate ...` step is not allowed inside "
+                        "a provide-method `if`/`while`/`for` body",
+                        hint="a compensation is registered on the activation "
+                             "frame and drained in teardown Phase 2 (item 247), "
+                             "so a CONDITIONAL one needs the teardown contract "
+                             "amended (docs/design/478-component-author-"
+                             "ergonomics.md §Group 3). A bare `emit` — the "
+                             "crossing alone — is allowed here")
+                out.append(_lower_emit_step(ms, env))
+            elif isinstance(ms, (LetEffect, EffectStmt, AwaitStmt,
                                  LetApprovalStmt, TimerStmt)):
                 raise RevlError(
                     filename, ms.line,
-                    "a teardown-registering step (`effect`/`emit`/`let-effect`/"
+                    "a teardown-registering step (`effect`/`let-effect`/"
                     "`await`) is not allowed inside a provide-method `if`/`while`/"
                     "`for` body",
                     hint="the activation frame owns every inverse and registers "
                          "it at the method's top level; a conditional or looped "
                          "acquisition would need the teardown contract amended "
                          "(issue #548, docs/design/478-component-author-"
-                         "ergonomics.md §Group 3). Keep the effect/emit at the "
-                         "method's top level and let the control flow compute only "
-                         "values")
+                         "ergonomics.md §Group 3). Keep the effect at the "
+                         "method's top level and let the control flow compute "
+                         "values and bare `emit` crossings")
             else:  # pragma: no cover — the parser admits nothing else here
                 raise RevlError(filename, getattr(ms, "line", method.line),
                                 "unexpected statement in method control-flow body")
