@@ -914,6 +914,13 @@ def gate_rollout(*, ir: Mapping | None, receipt: Mapping | None = None,
                           "`revl.slo-receipt`")
         return report
     report["basis"] = WITNESSED
+    # Whether the MAC was actually checked, stated rather than implied. With no
+    # key there is nothing to verify against, and the two directions are not
+    # symmetric: REFUSING on an unchecked receipt is the conservative error, and
+    # ADMITTING on one is no weaker than the `no-evidence` admission a caller
+    # would get by presenting nothing. So a keyless gate still runs, and says
+    # exactly what it did not do.
+    report["macChecked"] = bool(key)
     report["generation"] = receipt.get("generation")
     report["composition"] = receipt.get("composition")
     verdicts = receipt.get("verdicts") or {}
@@ -952,6 +959,9 @@ def gate_rollout(*, ir: Mapping | None, receipt: Mapping | None = None,
         report["note"] = (
             "the generation this rollout replaces measurably breached an "
             "objective the candidate still declares")
+    if not key:
+        report["note"] = (report.get("note", "") + " (the receipt's signature "
+                          "was NOT checked: no key was given)").strip()
     return report
 
 
@@ -978,7 +988,9 @@ def render_gate(report: Mapping) -> str:
         return "error: not an SLO rollout verdict"
     head = ("SLO ROLLOUT GATE: admitted" if report.get("admitted")
             else "SLO ROLLOUT GATE: REFUSED")
-    out = [f"{head}  (basis: {report.get('basis')})"]
+    unchecked = ("" if report.get("macChecked", True)
+                 else ", signature UNCHECKED")
+    out = [f"{head}  (basis: {report.get('basis')}{unchecked})"]
     if report.get("generation") is not None:
         out.append(f"  witness: generation {report['generation']}"
                    + (f" of {report['composition']}"
