@@ -3328,11 +3328,19 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
-        # item 251 Slice 2: distilled-rule materialization, its H1 review bind and
-        # its persisted budget (all three die with the session, invariant 5).
+        # item 251 Slice 2: the MATERIALIZED rules die with the generation - the
+        # next `load` rebuilds them from the bound policy. The H1 review bind and
+        # the spent budget do NOT die with it: both are keyed by the rule's
+        # canonical DSL and belong to the rule, which lives in the serve-time
+        # `self.sandbox` binding this method deliberately preserves (see the
+        # `approval_policy` note above). Clearing them here would re-arm a rule the
+        # operator had exhausted and re-snapshot the blast set it was reviewed
+        # against, so `unload`+`load` - an ungated verb pair - would renew the
+        # authority that only the `approve`-gated apply/revoke path may grant. The
+        # budget is STATE, not a function of the rule text (see
+        # `_install_auto_approve_rules`), so it must outlive the generation that
+        # materialized it exactly as the rule it bounds does.
         self._auto_rules = []
-        self._auto_reviewed = {}
-        self._auto_spend = {}
         self._approval_records = []
         # roadmap item 471: the multi-party decision graph dies with the session
         # exactly as the ledger it keys into does, so a vote cannot outlive the
