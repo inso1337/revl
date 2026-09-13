@@ -294,8 +294,8 @@ def test_every_body_raises_a_marked_transport_fault_never_an_err():
         body = a2a_task.task_body(kind, "https://h", "research", label="agent")
         assert "class TransportFault(RuntimeError):" in body
         assert "_revl_transport_fault = True" in body
-        assert 'revl_row = "agent"' in body
-        assert f'revl_crossing = "research_{kind}"' in body
+        assert '_revl_row = "agent"' in body
+        assert f'_revl_crossing = "research_{kind}"' in body
         assert "return Err(" not in body
 
 

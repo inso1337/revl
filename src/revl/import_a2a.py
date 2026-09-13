@@ -162,7 +162,7 @@ from __future__ import annotations
 import json
 import re
 
-from . import a2a_task
+from . import a2a_boundary, a2a_task
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy, ts_policy
 from .errors import RevlError
 from .lexer import KEYWORDS
@@ -655,16 +655,16 @@ def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
                        send="a2aSend")
     return f"""
       // A2A {A2A_VERSION}, JSON-RPC 2.0 `message/send`. ONE crossing.
-      const a2aPayload = JSON.stringify({{
+{a2a_boundary.TS_CORRELATION}      const a2aPayload = JSON.stringify({{
         jsonrpc: "2.0",
-        id: crypto.randomUUID(),
+        id: a2aCorr,
         method: "message/send",
         params: {{
           message: {{
             role: "user",
             messageId: crypto.randomUUID(),
             parts: [{{ kind: "text", text: message }}],
-            metadata: {{ "revl.skill": {sid} }},
+            metadata: {{ "revl.skill": {sid}, "revl.correlation": a2aCorr }},
           }},
         }},
       }});
@@ -682,12 +682,12 @@ def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
         throw new Error(`a2a: transport failure (HTTP ${{res.status}})`);
       }}
       const rpc = await res.json();
-      if (rpc && rpc.error) {{
+{a2a_boundary.TS_ENVELOPE_GATES}      if (rpc.error) {{
         throw new Error(`a2a: JSON-RPC error ${{rpc.error.code}}`);
       }}
-      const result = rpc ? rpc.result : undefined;
-      if (!result) {{
-        throw new Error("a2a: response carried no result");
+      const result = rpc.result;
+      if (!result || typeof result !== "object") {{
+        throw new Error("a2a: response carried no result object");
       }}
       // A direct Message reply is already terminal; a Task is terminal only in
       // the states A2A {A2A_VERSION} says are.
@@ -751,8 +751,17 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
     even when it is on (`revl.crossing_redirect`).
     """
     url = json.dumps(_httpjson_endpoint(endpoint) if rest else endpoint)
-    sid = json.dumps(skill_id)
     terminal = json.dumps(list(_TERMINAL_STATES))
+    # Item 439: the boundary gates this body shares with the `remote` row's two
+    # wires, so a peer cannot be read differently per entry point. The funnel
+    # closes over this crossing's own argument, which the emitted signature
+    # always names `message`.
+    funnel = a2a_boundary.py_funnel("(message,)")
+    correlation = a2a_boundary.py_correlation()
+
+    def fault(indent: int, expr: str) -> str:
+        return " " * indent + f"raise RuntimeError({expr})\n"
+
     policy = py_policy("a2a", follow=follow_redirects)
     wire = ("HTTP+JSON/REST `POST /v1/message:send`" if rest
             else "JSON-RPC 2.0 `message/send`")
@@ -776,7 +785,7 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
         '        "role": "user",\n'
         '        "messageId": str(_uuid.uuid4()),\n'
         '        "parts": [_sent_part],\n'
-        f'        "metadata": {{"revl.skill": {sid}}},\n'
+        f'        "metadata": {a2a_boundary.py_metadata(skill_id)},\n'
         '    }')
     if rest:
         payload = f'{{"message": {message_obj}}}'
@@ -789,17 +798,18 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
     else:
         payload = ('{\n'
                    '        "jsonrpc": "2.0",\n'
-                   '        "id": str(_uuid.uuid4()),\n'
+                   '        "id": _corr,\n'
                    '        "method": "message/send",\n'
                    f'        "params": {{"message": {message_obj}}},\n'
                    '    }')
         unwrap = (f"        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) "
                   "as _resp:\n            _rpc = _json.loads(_resp.read())\n")
         error_branch = (
-            '    if _rpc.get("error"):\n'
-            '        raise RuntimeError("a2a: JSON-RPC error %s"'
-            ' % _rpc["error"].get("code"))\n'
-            '    _result = _rpc.get("result")\n')
+            a2a_boundary.py_envelope_gates(fault)
+            + '    if _rpc.get("error"):\n'
+            + fault(8, '_scrub("a2a: JSON-RPC error %s"'
+                       ' % (_rpc["error"].get("code"),))')
+            + '    _result = _rpc.get("result")\n')
 
     if out_modality == "file":
         extract = (
@@ -830,7 +840,7 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-    # A2A {A2A_VERSION}, {wire}. ONE crossing.
+{funnel}{correlation}    # A2A {A2A_VERSION}, {wire}. ONE crossing.
 {send_prep}    _payload = _json.dumps({payload}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
@@ -843,25 +853,23 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
     except Exception as _exc:
         # A transport failure is a FAULT, never a quietly-empty result.
         raise RuntimeError("a2a: transport failure") from _exc
-{error_branch}    if not _result:
-        raise RuntimeError("a2a: response carried no result")
-    _kind = _result.get("kind")
+{error_branch}{a2a_boundary.py_result_gate(fault)}    _kind = _result.get("kind")
     if _kind == "task":
         _state = (_result.get("status") or {{}}).get("state")
         if _state not in {terminal}:
             # Item 439's open question: a task still in flight is a LIFECYCLE
             # this slice does not express. Refuse; never poll, never resume.
-            raise RuntimeError(
+            raise RuntimeError(_scrub(
                 "a2a: task returned non-terminal state %r - this binding "
-                "crosses once and does not poll" % (_state,))
+                "crosses once and does not poll" % (_state,)))
         if _state != "completed":
-            raise RuntimeError("a2a: task ended %r" % (_state,))
+            raise RuntimeError(_scrub("a2a: task ended %r" % (_state,)))
         _parts = [p for a in (_result.get("artifacts") or [])
                   for p in (a.get("parts") or [])]
     elif _kind == "message":
         _parts = _result.get("parts") or []
     else:
-        raise RuntimeError("a2a: unexpected result kind %r" % (_kind,))
+        raise RuntimeError(_scrub("a2a: unexpected result kind %r" % (_kind,)))
 {extract}    """
 
 
@@ -905,12 +913,16 @@ def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
                        send="a2aSend")
     return f"""
       // A2A {A2A_VERSION}, HTTP+JSON/REST `POST /v1/message:send`. ONE crossing.
-      const a2aPayload = JSON.stringify({{
+      // The correlation identity rides ONE-WAY here: a REST reply is the bare
+      // `Task`/`Message` and echoes nothing a client could check, so this wire
+      // carries the identity for the peer's log and ours and gets the shape
+      // gate alone (item 439, `revl.a2a_boundary`).
+{a2a_boundary.TS_CORRELATION}      const a2aPayload = JSON.stringify({{
         message: {{
           role: "user",
           messageId: crypto.randomUUID(),
           parts: [{{ kind: "text", text: message }}],
-          metadata: {{ "revl.skill": {sid} }},
+          metadata: {{ "revl.skill": {sid}, "revl.correlation": a2aCorr }},
         }},
       }});
       const a2aSend = (u: string) => fetch(u, {{
@@ -930,8 +942,8 @@ def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
       // The REST reply is the `Task`/`Message` object directly — no JSON-RPC
       // envelope to unwrap.
       const result = await res.json();
-      if (!result) {{
-        throw new Error("a2a: response carried no result");
+      if (!result || typeof result !== "object") {{
+        throw new Error("a2a: response carried no result object");
       }}
       // A direct Message reply is already terminal; a Task is terminal only in
       // the states A2A {A2A_VERSION} says are.

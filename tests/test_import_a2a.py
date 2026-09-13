@@ -519,8 +519,25 @@ def test_cli_allow_plaintext(tmp_path):
 
 # ------------------------------- the generated crossing, executed (py backend)
 
+def _answer(sent: bytes, reply, correlate: bool = True):
+    """What a COMPLIANT A2A 1.0.0 peer answers: the reply, carrying the
+    request's own JSON-RPC `id` (item 439, the correlation gate).
+
+    JSON-RPC 2.0 requires a response `id` to equal the request's, and the
+    crossing refuses a reply that does not carry the identity it sent, so the
+    stub replies below are written WITHOUT an id and this is where the
+    protocol's own rule is applied. `correlate=False` is a peer answering with
+    somebody else's id, which must be refused rather than read as a verdict.
+    """
+    if not isinstance(reply, dict) or "jsonrpc" not in reply:
+        return reply
+    if not correlate:
+        return {**reply, "id": "somebody-elses-id"}
+    return {**reply, "id": json.loads(sent).get("id")}
+
+
 def _run_py_body(reply: dict, *, backend_source: str | None = None,
-                 arg: object = "ping"):
+                 arg: object = "ping", correlate: bool = True):
     """Execute the generated python host body against a stubbed transport.
 
     The body is real code, not a stub, so the slice's load-bearing refusal — a
@@ -554,7 +571,8 @@ def _run_py_body(reply: dict, *, backend_source: str | None = None,
 
         def open(self, request, *args, **kwargs):
             calls.append(request.data)
-            return _Resp(json.dumps(reply).encode())
+            return _Resp(json.dumps(
+                _answer(request.data, reply, correlate)).encode())
 
     namespace = {"__name__": "generated"}
     exec(compile(f"def _crossing(message):\n{body}\n", "<a2a-body>", "exec"),
@@ -908,3 +926,59 @@ def test_streaming_note_points_at_the_buildable_lifecycle():
     assert "emission fn research_start(" not in source  # not projected
     assert "--long-running" in source
     assert "item 439's open question" in source
+
+
+# ------------------------- the boundary gates, shared with the `remote` row
+# `src/revl/a2a_boundary.py` (item 439, slice B1). The importer and the `remote
+# row` are two entry points onto one protocol, so what they do with a peer's
+# reply is one thing in one place: a correlation identity on every crossing, a
+# reply refused unless it carries that identity back, and the F5 funnel over
+# the peer-authored text the boundary renders. `tests/test_439_a2a_boundary.py`
+# pins the shared contract; these execute the importer's own body.
+
+def test_the_generated_crossing_carries_a_correlation_identity():
+    """The envelope `id` and the `revl.correlation` metadata member are the same
+    value, fresh per crossing, so a peer's log joins to the call that made it."""
+    reply = {"jsonrpc": "2.0", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "paid"}]}}
+    _text, calls = _run_py_body(reply)
+    sent = json.loads(calls[0])
+    assert sent["id"]
+    assert sent["params"]["message"]["metadata"]["revl.correlation"] == sent["id"]
+
+
+def test_an_uncorrelated_reply_is_refused_by_the_generated_crossing():
+    """A reply that does not carry back the identity this crossing sent is a
+    crossing that did not answer. The card is a claim and so is the reply, so an
+    unattributable one is never read as a verdict."""
+    reply = {"jsonrpc": "2.0", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "paid"}]}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_py_body(reply, correlate=False)
+    assert "correlation id" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("reply,needle", [
+    ([1, 2, 3], "was not a JSON-RPC object"),
+    ({"result": {"kind": "message", "parts": []}}, "did not claim JSON-RPC 2.0"),
+    ({"jsonrpc": "2.0", "result": "ok"}, "no result object"),
+])
+def test_an_unparseable_reply_is_refused_by_the_generated_crossing(reply, needle):
+    """Fail-closed on shape: no member of a reply is read before the reply is
+    known to be the object it claims to be."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_py_body(reply)
+    assert needle in str(excinfo.value)
+
+
+def test_the_peers_error_code_cannot_echo_the_callers_argument():
+    """Item 421 F5 at this boundary: a peer that reflects what we sent into its
+    `error.code` does not get to put the caller's own bytes on our error channel.
+    The sentence survives; the argument does not."""
+    secret = "INV-4242-not-for-the-console"
+    reply = {"jsonrpc": "2.0", "error": {"code": f"rejected {secret}"}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_py_body(reply, arg=secret)
+    assert secret not in str(excinfo.value)
+    assert "<redacted:arg>" in str(excinfo.value)
+    assert str(excinfo.value).startswith("a2a: JSON-RPC error rejected ")
