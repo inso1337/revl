@@ -75,7 +75,12 @@ from typing import Mapping, MutableSet, Optional
 
 from . import cap_order
 from .attest import NotCanonicalizable, _canonical_bytes, key_id
-from .tee_attestation import TeeRequirement, tee_admits
+from .tee_attestation import (
+    AttestedRun,
+    TeeRequirement,
+    open_attested_run,
+    tee_admits,
+)
 from .tee_quote import AttestationRoot
 
 # The peer-offer envelope identity (mirrors `attest`'s kind/version idea: a
@@ -426,10 +431,81 @@ def offer_eligible(record: Mapping, slot: PlacementSlot, key: bytes, *,
     proof it cannot check for replay.
 
     Never raises: an unparseable slot grant is reported as ineligible, so a
-    caller iterating candidate peers cannot be crashed by one bad slot."""
+    caller iterating candidate peers cannot be crashed by one bad slot.
+
+    :func:`offer_admission` is the same gates with the result half attached: it
+    returns the :class:`~revl.tee_attestation.AttestedRun` a result must arrive
+    through, instead of only the verdict."""
+    _, ok, reason = _offer_gates(
+        record, slot, key, enclave_key=None, attester_key=attester_key,
+        root=root, require_hardware_root=require_hardware_root,
+        require_bound_receipt_key=False, tee_ledger=tee_ledger, now=now)
+    return ok, reason
+
+
+def offer_admission(record: Mapping, slot: PlacementSlot, key: bytes, *,
+                    enclave_key: bytes,
+                    attester_key: Optional[bytes] = None,
+                    root: Optional[AttestationRoot] = None,
+                    require_hardware_root: bool = False,
+                    require_bound_receipt_key: bool = True,
+                    tee_ledger: Optional[MutableSet[tuple[str, str]]] = None,
+                    now: Optional[datetime] = None
+                    ) -> tuple[Optional[AttestedRun], str]:
+    """:func:`offer_eligible` for a slot that DEMANDS an attested TEE, returning
+    the run a result must come back through. ``(run, reason)`` on admission,
+    ``(None, reason)`` on every refusal, and it never raises.
+
+    Every gate `offer_eligible` applies applies here, with the same reason text,
+    and the run is returned only when ALL of them pass: an offer that is admitted
+    by the attestation and then fails on trust, region, resources or the grant
+    ceiling yields no run, so the delivery path a composition holds is only ever
+    one it was fully eligible for.
+
+    A slot that demands no attested TEE is refused rather than given a run that
+    checks nothing: the delivery gate means something only because an admission
+    decided the peer, the bundle and the challenge it is bound to. Use
+    :func:`offer_eligible` for those.
+
+    ``enclave_key`` is the key the composition checks returned results against,
+    and :func:`~revl.tee_attestation.open_attested_run` refuses a run whose
+    results could never be checked — no key, the peer's own key, or a key the
+    attestation did not name — BEFORE the worker is asked to run anything."""
+    if slot.attested_tee is None:
+        return None, ("the slot demands no attested TEE, so there is no attested "
+                      "run for a result to arrive through: a delivery gate is "
+                      "only meaningful for a run an attestation admitted")
+    run, ok, reason = _offer_gates(
+        record, slot, key, enclave_key=enclave_key, attester_key=attester_key,
+        root=root, require_hardware_root=require_hardware_root,
+        require_bound_receipt_key=require_bound_receipt_key,
+        tee_ledger=tee_ledger, now=now)
+    if not ok:
+        return None, reason
+    return run, reason
+
+
+def _offer_gates(record: Mapping, slot: PlacementSlot, key: bytes, *,
+                 enclave_key: Optional[bytes],
+                 attester_key: Optional[bytes],
+                 root: Optional[AttestationRoot],
+                 require_hardware_root: bool,
+                 require_bound_receipt_key: bool,
+                 tee_ledger: Optional[MutableSet[tuple[str, str]]],
+                 now: Optional[datetime]
+                 ) -> tuple[Optional[AttestedRun], bool, str]:
+    """The gates both entry points share, and the single place their verdicts are
+    decided, so `offer_eligible` and `offer_admission` cannot disagree about
+    whether a peer is eligible.
+
+    `enclave_key` is `None` for `offer_eligible`, which reaches `tee_admits`
+    directly and produces no run; when it is supplied the attestation gate is
+    `open_attested_run` instead, whose refusal reasons on the shared gates are
+    `tee_admits`' own, verbatim."""
+    run: Optional[AttestedRun] = None
     ok, reason = verify_offer(record, key)
     if not ok:
-        return False, f"signature: {reason}"
+        return None, False, f"signature: {reason}"
 
     # Gate (a), second half: a signed offer proves WHO is speaking, which is all a
     # placement needs until it needs a confidential worker. This runs only for a
@@ -439,48 +515,63 @@ def offer_eligible(record: Mapping, slot: PlacementSlot, key: bytes, *,
     if slot.attested_tee is not None:
         proof = record.get("tee_proof")
         if not isinstance(proof, Mapping):
-            return False, ("attestation: the slot requires an attested TEE but the "
-                           "offer carries no enclave evidence, so there is nothing "
-                           "to check the requirement against")
-        admitted, reason = tee_admits(
-            proof, slot.attested_tee,
-            peer_id=record.get("peer_id", ""),
-            peer_key=key,
-            attester_key=attester_key,
-            root=root,
-            require_hardware_root=require_hardware_root,
-            now=now,
-            replay_ledger=tee_ledger)
+            return None, False, ("attestation: the slot requires an attested TEE but the "
+                                 "offer carries no enclave evidence, so there is nothing "
+                                 "to check the requirement against")
+        if enclave_key is None:
+            admitted, reason = tee_admits(
+                proof, slot.attested_tee,
+                peer_id=record.get("peer_id", ""),
+                peer_key=key,
+                attester_key=attester_key,
+                root=root,
+                require_hardware_root=require_hardware_root,
+                now=now,
+                replay_ledger=tee_ledger)
+        else:
+            run, reason = open_attested_run(
+                proof, slot.attested_tee,
+                peer_id=record.get("peer_id", ""),
+                peer_key=key,
+                enclave_key=enclave_key,
+                attester_key=attester_key,
+                root=root,
+                require_hardware_root=require_hardware_root,
+                require_bound_receipt_key=require_bound_receipt_key,
+                now=now,
+                replay_ledger=tee_ledger)
+            admitted = run is not None
         if not admitted:
-            return False, f"attestation: {reason}"
+            return None, False, f"attestation: {reason}"
 
     att = record["attestation"]
     if _trust_rank(att["trust"]) < _trust_rank(slot.trust_floor):
-        return False, (f"trust {att['trust']!r} is below the slot floor "
-                       f"{slot.trust_floor!r}")
+        return None, False, (f"trust {att['trust']!r} is below the slot floor "
+                             f"{slot.trust_floor!r}")
     if slot.regions is not None and att.get("region", "") not in slot.regions:
-        return False, (f"region {att.get('region', '')!r} not in the slot's "
-                       f"allowed set {sorted(slot.regions)}")
+        return None, False, (f"region {att.get('region', '')!r} not in the "
+                             f"slot's allowed set {sorted(slot.regions)}")
     if slot.hardware is not None and att.get("hardware", "") not in slot.hardware:
-        return False, (f"hardware {att.get('hardware', '')!r} not in the slot's "
-                       f"allowed set {sorted(slot.hardware)}")
+        return None, False, (f"hardware {att.get('hardware', '')!r} not in the "
+                             f"slot's allowed set {sorted(slot.hardware)}")
     ro = att["resource_offer"]
     offered = ResourceOffer(int(ro["cores"]), int(ro["memory_bytes"]),
                             float(ro["max_time_s"]))
     if not offered.satisfies(slot.need):
-        return False, (f"resource offer {offered.as_dict()} does not meet the "
-                       f"slot need cores>={slot.need.cores}, "
-                       f"memory_bytes>={slot.need.memory_bytes}, "
-                       f"max_time_s>={slot.need.max_time_s}")
+        return None, False, (f"resource offer {offered.as_dict()} does not meet "
+                             f"the slot need cores>={slot.need.cores}, "
+                             f"memory_bytes>={slot.need.memory_bytes}, "
+                             f"max_time_s>={slot.need.max_time_s}")
 
     try:
         ceiling = [cap_order.parse_cap(c) for c in record["grant_ceiling"]]
         wanted = slot.grant_caps()
     except cap_order.CapError as error:
-        return False, f"a capability spelling is unparseable: {error}"
+        return None, False, f"a capability spelling is unparseable: {error}"
     uncovered = cap_order.covers_set(ceiling, wanted)
     if uncovered:
         names = ", ".join(sorted(f"`{c.to_str()}`" for c in uncovered))
-        return False, (f"the slot grant exceeds the peer's advertised ceiling: "
-                       f"{names} not covered by grant_ceiling")
-    return True, "eligible: signature verifies, facets satisfy, ceiling covers the grant"
+        return None, False, (f"the slot grant exceeds the peer's advertised "
+                             f"ceiling: {names} not covered by grant_ceiling")
+    return run, True, ("eligible: signature verifies, facets satisfy, ceiling "
+                       "covers the grant")
