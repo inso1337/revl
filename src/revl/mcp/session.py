@@ -29,6 +29,7 @@ from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..taint import REDACTED_SECRET
 from ..typecheck import compatible
+from . import quorum as _quorum
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
@@ -429,6 +430,13 @@ class Session:
         # mirror of the `quorum-*` WAL records, so an in-process reader can audit
         # the graph without reopening the log. Reset per session (invariant 5).
         self._quorums: dict = {}
+        # roadmap item 471 Slice 2: the ADMISSION receipts, keyed by the same
+        # round-scoped `requestId`. One per spend of a multi-party decision's
+        # authority, minted where the token is consumed rather than where the
+        # votes closed the question (a satisfied quorum no crossing ever spent
+        # authorized nothing). Derived from the `quorum-*` rows and the ledger
+        # entry, never a second durable copy of them (`revl.mcp.quorum`).
+        self._quorum_receipts: dict = {}
         # how many per-call class-(c) crossings auto-approved against a distilled
         # rule, and the offers/revokes applied this session (attribution + metrics).
         self._auto_consumed: int = 0
@@ -3311,6 +3319,7 @@ class Session:
         # exactly as the ledger it keys into does, so a vote cannot outlive the
         # session that recorded it (invariant 5).
         self._quorums = {}
+        self._quorum_receipts = {}
         self._auto_consumed = 0
         self._distillation_seq = 0
         # item 310: the seam-method cache is session-scoped, exactly as the ledger
@@ -4359,6 +4368,7 @@ class Session:
         wal = self._approval_wal()
         if wal is not None:
             wal.record_approval_consumed(entry["requestId"])
+        self._mint_admission_receipt(entry)
 
     # -- item 204: the two-phase spend the activation gate walks under --------
     #
@@ -4447,6 +4457,12 @@ class Session:
                 self._auto_consumed += 1
             if wal is not None:
                 wal.record_approval_consumed(record["requestId"])
+            if release["kind"] == "approval":
+                # item 471 Slice 2: the activation gate's two-phase spend is a
+                # spend, so it mints the admission receipt too. Without this the
+                # ONE path that admits a quorum-gated `effect lease` would be the
+                # one path with no receipt behind it.
+                self._mint_admission_receipt(record)
             if spent_out is not None:
                 spent_out.append(record["requestId"])
         plan.clear()
@@ -5428,13 +5444,12 @@ class Session:
         overridable.
 
         A reason is required and a missing one is refused: an override without a
-        stated reason is an unattributable act. NOTE (honest bound, see
-        `docs/design/471-quorum-approval.md` Decision 4): this method is NOT
-        reachable from the MCP transport in this slice. There is no `revl_override`
-        tool, and the `override` / `escalate` / `revoke` / `quorum_state` entries
-        are called only from `tests/test_471_quorum_approval.py`. Who may override
-        in process is therefore the caller, and the operator-verb gate the design
-        note assigns to it lands with the Slice 2 verbs."""
+        stated reason is an unattributable act. Slice 2 gave this its transport:
+        `revl_override` reaches it, gated by its OWN `override` operator verb and
+        never by `approve` (`revl.mcp.quorum.override`). The separate verb is the
+        authority statement - an operator trusted to cast one of N votes is not
+        thereby trusted to stand in for all of them - and it is what a profile
+        addresses when it grants or withholds the emergency path."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -5565,9 +5580,11 @@ class Session:
                 "by": actor, "counted": self._counted(record),
                 "require": record["require"], "outcome": "escalated",
                 "how_to_resolve": ("the vote path is closed and the crossing "
-                                   "stays refused: no verb reachable from the "
-                                   "transport can still admit it (the `override` "
-                                   "operator verb is Slice 2, design only)")}
+                                   "stays refused: the only path that can still "
+                                   "admit it is `revl_override`, which is gated by "
+                                   "the `override` operator verb and records the "
+                                   "admission as an override, never as a quorum "
+                                   "of votes (roadmap item 471)")}
 
     def revoke_ticket(self, ticket_hash: str, *, reason: str | None = None,
                       as_token: str | None = None) -> dict:
@@ -5670,6 +5687,54 @@ class Session:
                 "refusals": refusals,
                 **({"override": record["override"]}
                    if record.get("override") else {})}
+
+    # -- item 471 Slice 2: the admission receipt -------------------------------
+    #
+    # The decision graph says how the question closed. The RECEIPT says which
+    # crossing spent the authority that closing minted, and carries the whole
+    # graph with it in one hash-bound artifact. It is derived from the durable
+    # rows rather than written as a tenth row (`revl.mcp.quorum` says why), so it
+    # can be re-derived and refuted; nothing here is a second source of truth.
+
+    def _mint_admission_receipt(self, entry: dict) -> dict | None:
+        """Mint the admission receipt for a spend of `entry`, or None when the
+        spend was not a multi-party decision's (a single-party yes, a grant, a
+        distilled rule). Called from the two durable spend sites, after the
+        `approval-consumed` record and before the fire.
+
+        Idempotent per request id: consume-before-fire spends an entry exactly
+        once, and a second call for the same id keeps the receipt the first one
+        minted rather than re-dating it."""
+        request_id = entry.get("requestId")
+        decision = self._quorums.get(request_id)
+        if decision is None or decision.get("outcome") != "satisfied":
+            return None
+        existing = self._quorum_receipts.get(request_id)
+        if existing is not None:
+            return existing
+        receipt = _quorum.build_receipt(
+            decision, entry, self._approval_records,
+            consumed_at=self._now_ms())
+        self._quorum_receipts[request_id] = receipt
+        return receipt
+
+    def quorum_receipt(self, ticket_hash: str) -> dict | None:
+        """The admission receipt for this ticket's current round, or None when the
+        decision's authority has not been spent at a crossing yet. Read-only."""
+        return self._quorum_receipts.get(self._quorum_request_id(ticket_hash))
+
+    def verify_quorum_receipt(self, receipt: dict) -> dict:
+        """Re-derive `receipt` from this session's decision graph and ledger and
+        report the verdict (`{"ok", "reasons"}`). A receipt whose binding, rule or
+        decision disagrees with the rows it claims to summarize is REFUSED, which
+        is what makes a derived receipt safe to hand out: it cannot assert a
+        candidate hash, a vote or an outcome the record does not carry."""
+        request_id = (receipt.get("binding") or {}).get("requestId")
+        entry = next((e for e in self._ledger
+                      if e.get("requestId") == request_id), None)
+        return _quorum.verify_receipt(
+            receipt, self._quorums.get(request_id), entry,
+            self._approval_records)
 
     def _mint_ticket_entry(self, ticket: dict, *, operator: str | None = None,
                            quorum: dict | None = None) -> dict:
