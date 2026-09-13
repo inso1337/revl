@@ -83,6 +83,7 @@ was corrected by hand and had drifted back within a day.
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 69 |  |
+| attested-tee-placement.md | needs-work | 1 |  |
 | audit-diff.md | needs-work | 14 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
@@ -123,10 +124,10 @@ was corrected by hand and had drifted back within a day.
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 14 |  |
-| frontend-assets.md | needs-work | 11 |  |
+| frontend-assets.md | needs-work | 12 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
-| gate-dependency-contract.md | needs-work | 28 |  |
+| gate-dependency-contract.md | needs-work | 27 |  |
 | gauntlet.md | needs-work | 18 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
@@ -150,14 +151,14 @@ was corrected by hand and had drifted back within a day.
 | network-path.md | needs-work | 24 |  |
 | network-placement.md | needs-work | 4 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 35 |  |
+| operator-capabilities.md | needs-work | 38 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
 | process.md | needs-work | 5 |  |
 | prompt-injection-resistance.md | needs-work | 37 |  |
 | prop-test.md | needs-work | 23 |  |
-| quarantine-tier.md | needs-work | 24 |  |
+| quarantine-tier.md | needs-work | 25 |  |
 | queries.md | needs-work | 43 |  |
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
@@ -188,16 +189,17 @@ was corrected by hand and had drifted back within a day.
 | strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 19 |  |
 | syntax-2.0.md | needs-work | 10 |  |
+| tee-attestation-root.md | current | 0 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
 | truc.md | needs-work | 56 |  |
 | ts-runtime-contract.md | needs-work | 2 |  |
-| verified-canary.md | needs-work | 22 |  |
+| verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
 | wasm-capabilities.md | needs-work | 35 | yes |
-| webapp-competitiveness-report.md | needs-work | 27 |  |
+| webapp-competitiveness-report.md | needs-work | 28 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |

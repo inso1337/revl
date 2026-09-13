@@ -29,6 +29,7 @@ from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..taint import REDACTED_SECRET
 from ..typecheck import compatible
+from . import quorum as _quorum
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
@@ -415,6 +416,16 @@ class Session:
         # swap's re-materialize. Reset per session.
         self._auto_rules: list = []
         self._auto_reviewed: dict = {}
+        # the rule's SPENT budget (`remainingUses`/`expiresAt`/`consumed`),
+        # persisted on the same key and for the same reason as `_auto_reviewed`:
+        # a rule is re-materialized each generation, and re-deriving the budget
+        # from the rule text on each of those would RENEW it — silently turning
+        # `uses N` into "N per generation" and resurrecting a rule whose `ttl` had
+        # already lapsed. A 344 grant is immune by construction (its
+        # `candidateHash` pin self-invalidates it on a swap); a 251 rule must
+        # persist across swaps, so its budget has to persist with it. Reset per
+        # session, exactly as the review bind is.
+        self._auto_spend: dict = {}
         # the in-memory mirror of the `approval-granted` / `approval-denied`
         # records this session produced, WITH the item-251 shape-key fields, so
         # `distillation_offers` folds the live ledger without re-reading the WAL.
@@ -429,6 +440,13 @@ class Session:
         # mirror of the `quorum-*` WAL records, so an in-process reader can audit
         # the graph without reopening the log. Reset per session (invariant 5).
         self._quorums: dict = {}
+        # roadmap item 471 Slice 2: the ADMISSION receipts, keyed by the same
+        # round-scoped `requestId`. One per spend of a multi-party decision's
+        # authority, minted where the token is consumed rather than where the
+        # votes closed the question (a satisfied quorum no crossing ever spent
+        # authorized nothing). Derived from the `quorum-*` rows and the ledger
+        # entry, never a second durable copy of them (`revl.mcp.quorum`).
+        self._quorum_receipts: dict = {}
         # how many per-call class-(c) crossings auto-approved against a distilled
         # rule, and the offers/revokes applied this session (attribution + metrics).
         self._auto_consumed: int = 0
@@ -769,6 +787,33 @@ class Session:
             out[name] = cm.candidate_hash(closure)
         return out
 
+    def _settle_approval_spend(self, prev) -> None:
+        """Carry a spent `Approval[C]` back onto the session's own record (item
+        246, Decision 3).
+
+        `SessionOwner.grant_approval` stores a COPY of each grant and the frame
+        check spends that copy (`SessionOwner.consume_approval`), so a crossing
+        left the session's `_approval_grants` entry reading `consumed: False`.
+        Seeding the next generation's owner from an unspent-looking entry
+        therefore re-armed a token that had already been spent: a single-use
+        approval fired again on `unload`/`load`, on `swap` and on `rollback` —
+        each one an irreversible class-(c) crossing the operator approved
+        exactly once. The generation boundary is the only place the two records
+        meet, so it is where the spend is settled.
+
+        An entry only ever moves from unspent to spent, so this narrows what a
+        crossing may do and can never widen it."""
+        if prev is None or not self._approval_grants:
+            return
+        spent = {e.get("requestId")
+                 for e in getattr(prev, "approval_ledger", None) or []
+                 if e.get("consumed")}
+        if not spent:
+            return
+        for grant in self._approval_grants:
+            if grant.get("requestId") in spent:
+                grant["consumed"] = True
+
     def _install_session_owner(self, ir: dict) -> None:
         """Create a FRESH session commit-state owner for the generation about to
         load, seed its typed-approval state, and make it the process-global owner
@@ -812,6 +857,11 @@ class Session:
             self._owner.prompts = prev.prompts
             self._owner.flush_residue = prev.flush_residue
             self._owner.approvals = prev.approvals
+            # …and settle any typed approval the predecessor generation already
+            # spent, BEFORE the seeding below can hand it to the successor as an
+            # unspent token (a single-use approval must not re-arm across a
+            # generation boundary).
+            self._settle_approval_spend(prev)
         # item 246, Slice 3: seed the SessionOwner with the typed-approval state
         # BEFORE the activation body runs, so a `with a` crossing in the activation
         # body checks and consumes its token against the live ledger (the runtime
@@ -1603,8 +1653,15 @@ class Session:
     def rollback(self) -> dict:
         if self.previous is None:
             raise SessionError("no previous generation to roll back to")
-        restored, self.previous = self.previous, None
-        restored_origin, self.previous_origin = self.previous_origin, None
+        # The pointers are deliberately NOT cleared here. `swap` saves them
+        # itself and reinstates the *current* generation as `previous` once it
+        # completes, so clearing them first would only make the value it saves
+        # None — and a rollback `swap` has to abort would then restore
+        # `previous` to None, destroying the target. That loses the recovery
+        # path precisely when a rollback was refused, which is the moment an
+        # operator retries it (item 372's activation health gate refuses a
+        # rollback to a generation that no longer activates).
+        restored, restored_origin = self.previous, self.previous_origin
         # rollback restores the *code* of the previous generation; it keeps
         # today's teardown semantics for instances (no cross-generation state
         # migration back), so it stays byte-identical to the pre-item-10 path.
@@ -3280,6 +3337,12 @@ class Session:
         if _reflect_bridge.current() is self:
             _reflect_bridge.bind(None)
         self._driver = None
+        # the teardown boundary is the last generation boundary this session will
+        # see, so settle any approval the outgoing generation spent before the
+        # owner that recorded the spend is dropped — otherwise a fresh `load`
+        # seeds the next owner from an entry still reading `consumed: False` and
+        # a single-use approval re-arms across the unload.
+        self._settle_approval_spend(self._owner)
         self._owner = None
         self.ir = None
         self.previous = None
@@ -3303,14 +3366,17 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
-        # item 251 Slice 2: distilled-rule materialization and its H1 review bind.
+        # item 251 Slice 2: distilled-rule materialization, its H1 review bind and
+        # its persisted budget (all three die with the session, invariant 5).
         self._auto_rules = []
         self._auto_reviewed = {}
+        self._auto_spend = {}
         self._approval_records = []
         # roadmap item 471: the multi-party decision graph dies with the session
         # exactly as the ledger it keys into does, so a vote cannot outlive the
         # session that recorded it (invariant 5).
         self._quorums = {}
+        self._quorum_receipts = {}
         self._auto_consumed = 0
         self._distillation_seq = 0
         # item 310: the seam-method cache is session-scoped, exactly as the ledger
@@ -4359,6 +4425,7 @@ class Session:
         wal = self._approval_wal()
         if wal is not None:
             wal.record_approval_consumed(entry["requestId"])
+        self._mint_admission_receipt(entry)
 
     # -- item 204: the two-phase spend the activation gate walks under --------
     #
@@ -4447,6 +4514,12 @@ class Session:
                 self._auto_consumed += 1
             if wal is not None:
                 wal.record_approval_consumed(record["requestId"])
+            if release["kind"] == "approval":
+                # item 471 Slice 2: the activation gate's two-phase spend is a
+                # spend, so it mints the admission receipt too. Without this the
+                # ONE path that admits a quorum-gated `effect lease` would be the
+                # one path with no receipt behind it.
+                self._mint_admission_receipt(record)
             if spent_out is not None:
                 spent_out.append(record["requestId"])
         plan.clear()
@@ -5181,12 +5254,37 @@ class Session:
     def _lapse_quorum(self, record: dict) -> bool:
         """Whether the question's deadline has passed, latching the timeout the
         first time it has (the same dead latch `_expired` applies to a grant, so a
-        clock that moves backwards cannot revive an answerable question)."""
+        clock that moves backwards cannot revive an answerable question).
+
+        A question that was already ANSWERED or WITHDRAWN must be ruled out by the
+        caller BEFORE this runs. The deadline bounds the VOTES, not the answer:
+        overwriting a `satisfied` record with `expired` retracts an authority after
+        the fact - the entry it minted stays live and spendable while the graph
+        says its decision is gone - and desynchronises the admission receipt
+        minted at that spend from the decision graph the receipt claims to
+        summarize. The three call sites therefore ask `_closed_reason` first and
+        let an already-decided question refuse on its own terms; only an `expired`
+        record (whose outcome this cannot change) falls through to the lapse, so
+        the pinned `lapsed` message is preserved. No refusal is widened: every
+        outcome that was refused before is still refused, only the rewrite and the
+        reason change.
+
+        The deadline still REFUSES a decided question that reaches here - one
+        outcome, `escalated`, does, because `override_ticket` carves escalation
+        out of its closed check: after escalation the override is the only path
+        left, so the carve-out has to reach this call. What it must not do is
+        re-answer: the timeout is not a second, contradictory decision, so a
+        record that already names an outcome returns True (refused) without
+        writing `expired` over the outcome an operator actually chose. The two
+        early returns above are untouched, so the `expired` path is
+        byte-identical and its `quorum-expired` row is written exactly once."""
         if record["outcome"] == "expired":
             return True
         if record["expiredAt"] is not None:
             return True
         if self._expired(record):
+            if record["outcome"] is not None:
+                return True
             record["outcome"] = "expired"
             record["resolvedAt"] = record["expiredAt"]
             self._record_quorum("quorum-expired", {
@@ -5215,14 +5313,28 @@ class Session:
         return {"satisfied": "closed-decision", "denied": "closed-decision"}.get(
             outcome, outcome)
 
+    def _refusal_row(self, record: dict, action: str, reason: str,
+                     voter: str) -> dict:
+        """One `quorum-refused` row: the binding, the act, the reason and WHO was
+        turned away. `at` is the refusal's own clock reading, so the graph can be
+        read in time order. `at` does NOT scope a receipt's refusal set
+        (`quorum._refusal_rows`): the session clock is ratcheted to a high-water
+        floor, so two acts a microsecond apart can carry the same millisecond, and
+        a refusal that happened strictly after the spend would then read as if it
+        preceded it. The receipt bounds its refusals by the POSITION of the row
+        that minted the authority, which has no ties."""
+        return {**self._quorum_binding(record), "action": action,
+                "reason": reason, "voter": voter,
+                "counted": self._counted(record),
+                "require": record["require"], "proposer": record["proposer"],
+                "at": self._now_ms()}
+
     def _refuse_vote(self, record: dict, reason: str, message: str, voter: str) -> None:
         """Record a vote that was NOT counted and refuse it. Every refusal is
         written down before it is raised: a quorum whose failures are invisible is
         a quorum an attacker can probe without a trace."""
-        self._record_quorum("quorum-refused", {
-            **self._quorum_binding(record), "action": "vote", "reason": reason,
-            "voter": voter, "counted": self._counted(record),
-            "require": record["require"], "proposer": record["proposer"]})
+        self._record_quorum("quorum-refused",
+                            self._refusal_row(record, "vote", reason, voter))
         raise SessionError(message)
 
     def _cast_vote(self, ticket: dict, rule, *, vote: str, as_token: str | None,
@@ -5264,6 +5376,13 @@ class Session:
                 f"unparseable vote {vote!r} on ticket {ticket['hash']}: a vote is "
                 f"`approve` or `deny` (roadmap item 471, fail closed on an "
                 f"unparseable vote)", voter)
+        closed = self._closed_reason(record)
+        if closed is not None and closed != "expired":
+            self._refuse_vote(
+                record, closed,
+                f"ticket {ticket['hash']} is already {record['outcome']}: its "
+                f"decision is made and a late vote is not counted (roadmap item "
+                f"471)", voter)
         if self._lapse_quorum(record):
             self._refuse_vote(
                 record, "expired",
@@ -5271,13 +5390,6 @@ class Session:
                 f"approval ttl ran out before the quorum answered, so no vote can "
                 f"be counted against it. Re-issue the call for a fresh ticket "
                 f"(roadmap item 471)", voter)
-        closed = self._closed_reason(record)
-        if closed is not None:
-            self._refuse_vote(
-                record, closed,
-                f"ticket {ticket['hash']} is already {record['outcome']}: its "
-                f"decision is made and a late vote is not counted (roadmap item "
-                f"471)", voter)
         if record["candidateHash"] != ticket["candidateHash"] \
                 or record["component"] != ticket["component"]:
             self._refuse_vote(
@@ -5428,13 +5540,12 @@ class Session:
         overridable.
 
         A reason is required and a missing one is refused: an override without a
-        stated reason is an unattributable act. NOTE (honest bound, see
-        `docs/design/471-quorum-approval.md` Decision 4): this method is NOT
-        reachable from the MCP transport in this slice. There is no `revl_override`
-        tool, and the `override` / `escalate` / `revoke` / `quorum_state` entries
-        are called only from `tests/test_471_quorum_approval.py`. Who may override
-        in process is therefore the caller, and the operator-verb gate the design
-        note assigns to it lands with the Slice 2 verbs."""
+        stated reason is an unattributable act. Slice 2 gave this its transport:
+        `revl_override` reaches it, gated by its OWN `override` operator verb and
+        never by `approve` (`revl.mcp.quorum.override`). The separate verb is the
+        authority statement - an operator trusted to cast one of N votes is not
+        thereby trusted to stand in for all of them - and it is what a profile
+        addresses when it grants or withholds the emergency path."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -5457,25 +5568,24 @@ class Session:
             record = self._open_quorum(ticket, rule)
         actor = as_token if as_token is not None else self._operator_token()
         if not reason or not str(reason).strip():
-            self._record_quorum("quorum-refused", {
-                **self._quorum_binding(record), "action": "override",
-                "reason": "no-reason", "voter": actor,
-                "counted": self._counted(record), "require": record["require"],
-                "proposer": record["proposer"]})
+            self._record_quorum(
+                "quorum-refused",
+                self._refusal_row(record, "override", "no-reason", actor))
             raise SessionError(
                 f"an override of ticket {ticket_hash} must state a reason: an "
                 f"emergency override is an act someone is accountable for, and "
                 f"the record has to say why (roadmap item 471)")
+        closed = self._closed_reason(record)
+        if closed is not None and closed != "expired" \
+                and record["outcome"] != "escalated":
+            raise SessionError(
+                f"ticket {ticket_hash} is already {record['outcome']}, so it "
+                f"cannot be overridden (roadmap item 471)")
         if self._lapse_quorum(record):
             raise SessionError(
                 f"ticket {ticket_hash} lapsed at {record['expiresAt']} and cannot "
                 f"be overridden: re-issue the call for a fresh ticket (roadmap "
                 f"item 471)")
-        closed = self._closed_reason(record)
-        if closed is not None and record["outcome"] != "escalated":
-            raise SessionError(
-                f"ticket {ticket_hash} is already {record['outcome']}, so it "
-                f"cannot be overridden (roadmap item 471)")
         now = self._now_ms()
         record["override"] = {"by": actor, "reason": str(reason).strip(),
                               "at": now,
@@ -5532,24 +5642,22 @@ class Session:
         actor = as_token if as_token is not None else self._operator_token()
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
-            self._record_quorum("quorum-refused", {
-                **self._quorum_binding(record), "action": "escalate",
-                "reason": "unknown-approver", "voter": actor,
-                "counted": self._counted(record), "require": record["require"],
-                "proposer": record["proposer"]})
+            self._record_quorum(
+                "quorum-refused",
+                self._refusal_row(record, "escalate", "unknown-approver", actor))
             raise SessionError(
                 f"`{actor or 'nobody'}` cannot escalate ticket {ticket_hash}: only "
                 f"an approver this crossing names ({', '.join(record['approvers'])}) "
                 f"or the proposer may hand it up (roadmap item 471, fail closed)")
+        closed = self._closed_reason(record)
+        if closed is not None and closed != "expired":
+            raise SessionError(
+                f"ticket {ticket_hash} is already {record['outcome']}, so it cannot "
+                f"be escalated (roadmap item 471)")
         if self._lapse_quorum(record):
             raise SessionError(
                 f"ticket {ticket_hash} lapsed at {record['expiresAt']}, so there is "
                 f"nothing left to escalate (roadmap item 471)")
-        closed = self._closed_reason(record)
-        if closed is not None:
-            raise SessionError(
-                f"ticket {ticket_hash} is already {record['outcome']}, so it cannot "
-                f"be escalated (roadmap item 471)")
         now = self._now_ms()
         record["outcome"] = "escalated"
         record["resolvedAt"] = now
@@ -5565,9 +5673,11 @@ class Session:
                 "by": actor, "counted": self._counted(record),
                 "require": record["require"], "outcome": "escalated",
                 "how_to_resolve": ("the vote path is closed and the crossing "
-                                   "stays refused: no verb reachable from the "
-                                   "transport can still admit it (the `override` "
-                                   "operator verb is Slice 2, design only)")}
+                                   "stays refused: the only path that can still "
+                                   "admit it is `revl_override`, which is gated by "
+                                   "the `override` operator verb and records the "
+                                   "admission as an override, never as a quorum "
+                                   "of votes (roadmap item 471)")}
 
     def revoke_ticket(self, ticket_hash: str, *, reason: str | None = None,
                       as_token: str | None = None) -> dict:
@@ -5595,11 +5705,9 @@ class Session:
         actor = as_token if as_token is not None else self._operator_token()
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
-            self._record_quorum("quorum-refused", {
-                **self._quorum_binding(record), "action": "revoke",
-                "reason": "unknown-approver", "voter": actor,
-                "counted": self._counted(record), "require": record["require"],
-                "proposer": record["proposer"]})
+            self._record_quorum(
+                "quorum-refused",
+                self._refusal_row(record, "revoke", "unknown-approver", actor))
             raise SessionError(
                 f"`{actor or 'nobody'}` cannot revoke ticket {ticket_hash}: only "
                 f"the proposer or an approver this crossing names "
@@ -5670,6 +5778,54 @@ class Session:
                 "refusals": refusals,
                 **({"override": record["override"]}
                    if record.get("override") else {})}
+
+    # -- item 471 Slice 2: the admission receipt -------------------------------
+    #
+    # The decision graph says how the question closed. The RECEIPT says which
+    # crossing spent the authority that closing minted, and carries the whole
+    # graph with it in one hash-bound artifact. It is derived from the durable
+    # rows rather than written as a tenth row (`revl.mcp.quorum` says why), so it
+    # can be re-derived and refuted; nothing here is a second source of truth.
+
+    def _mint_admission_receipt(self, entry: dict) -> dict | None:
+        """Mint the admission receipt for a spend of `entry`, or None when the
+        spend was not a multi-party decision's (a single-party yes, a grant, a
+        distilled rule). Called from the two durable spend sites, after the
+        `approval-consumed` record and before the fire.
+
+        Idempotent per request id: consume-before-fire spends an entry exactly
+        once, and a second call for the same id keeps the receipt the first one
+        minted rather than re-dating it."""
+        request_id = entry.get("requestId")
+        decision = self._quorums.get(request_id)
+        if decision is None or decision.get("outcome") != "satisfied":
+            return None
+        existing = self._quorum_receipts.get(request_id)
+        if existing is not None:
+            return existing
+        receipt = _quorum.build_receipt(
+            decision, entry, self._approval_records,
+            consumed_at=self._now_ms())
+        self._quorum_receipts[request_id] = receipt
+        return receipt
+
+    def quorum_receipt(self, ticket_hash: str) -> dict | None:
+        """The admission receipt for this ticket's current round, or None when the
+        decision's authority has not been spent at a crossing yet. Read-only."""
+        return self._quorum_receipts.get(self._quorum_request_id(ticket_hash))
+
+    def verify_quorum_receipt(self, receipt: dict) -> dict:
+        """Re-derive `receipt` from this session's decision graph and ledger and
+        report the verdict (`{"ok", "reasons"}`). A receipt whose binding, rule or
+        decision disagrees with the rows it claims to summarize is REFUSED, which
+        is what makes a derived receipt safe to hand out: it cannot assert a
+        candidate hash, a vote or an outcome the record does not carry."""
+        request_id = (receipt.get("binding") or {}).get("requestId")
+        entry = next((e for e in self._ledger
+                      if e.get("requestId") == request_id), None)
+        return _quorum.verify_receipt(
+            receipt, self._quorums.get(request_id), entry,
+            self._approval_records)
 
     def _mint_ticket_entry(self, ticket: dict, *, operator: str | None = None,
                            quorum: dict | None = None) -> dict:
@@ -5943,6 +6099,10 @@ class Session:
         members it is REVIEWED against (the H1 bind). The reviewed set is snapshot
         the first time a rule is seen and PERSISTS across a swap (`_auto_reviewed`),
         so a swap that moves a new component into the glob is detected as growth.
+        The spent BUDGET persists the same way (`_auto_spend`): re-materializing a
+        rule is not a fresh grant of authority, so an exhausted `uses` bound stays
+        exhausted and a lapsed `ttl` stays lapsed across the generations that did
+        not re-review the rule.
 
         Inert when the policy names no `auto-approve` rule (`self._auto_rules`
         stays empty), so a composition with no distilled rule is byte-identical."""
@@ -5961,20 +6121,32 @@ class Session:
                 caps = [cap_order.parse_cap(c) for c in rule.caps]
             except cap_order.CapError:
                 continue  # a malformed rule cannot admit anything (fail-closed)
+            spend = self._auto_spend.get(key)
+            if spend is None:
+                # first materialization: the budget is the rule's own and its
+                # `ttl` window opens now. From here on the budget is STATE, not a
+                # function of the rule text (see `_auto_spend`).
+                spend = {
+                    "remainingUses": rule.uses,
+                    "expiresAt": (now + rule.ttl_ms) if rule.ttl_ms is not None
+                    else None,
+                    "consumed": False,
+                }
+                self._auto_spend[key] = spend
             self._auto_rules.append({
                 "requestId": "auto:" + hashlib.sha256(
                     key.encode("utf-8")).hexdigest()[:16],
                 "kind": "auto-approve-rule",
+                "key": key,
                 "rule": rule,
                 "glob": rule.component,
                 "realm": rule.realm,
                 "caps": caps,
                 "admitting": rule.admitting,
                 "reviewedComponents": reviewed,
-                "remainingUses": rule.uses,
-                "expiresAt": (now + rule.ttl_ms) if rule.ttl_ms is not None
-                else None,
-                "consumed": False,
+                "remainingUses": spend["remainingUses"],
+                "expiresAt": spend["expiresAt"],
+                "consumed": spend["consumed"],
                 "suspended": False,
             })
 
@@ -6074,12 +6246,23 @@ class Session:
         decrements `remainingUses` and marks `consumed` at zero, so an applied rule
         cannot double-fire and a crash between this `approval-consumed` record and
         the fire re-prompts (fail-closed). An unbounded rule records the spend for
-        the audit join without a counter."""
+        the audit join without a counter.
+
+        The decremented counter is written back into `_auto_spend`, the budget's
+        persistent home, so the next generation's re-materialization carries the
+        spend forward instead of renewing it. Without that write-back the
+        `approval-consumed` record is durable while the counter it records is not,
+        and any swap (or `rollback`/`undo`, which route through it) re-arms a rule
+        the operator had exhausted."""
         remaining = entry.get("remainingUses")
         if remaining is not None:
             entry["remainingUses"] = remaining - 1
             if entry["remainingUses"] <= 0:
                 entry["consumed"] = True
+        spend = self._auto_spend.get(entry.get("key"))
+        if spend is not None:
+            spend["remainingUses"] = entry["remainingUses"]
+            spend["consumed"] = entry["consumed"]
         self._auto_consumed += 1
         wal = self._approval_wal()
         if wal is not None:
@@ -6532,6 +6715,11 @@ class Session:
         reviewed = frozenset(nc.component for nc in offer.blast.not_covered) \
             | self._glob_members(rule.component)
         self._auto_reviewed[rule.to_dsl()] = reviewed
+        # a freshly applied rule is a fresh operator review, so it starts with its
+        # own budget: drop any spend left behind by a previous apply/revoke cycle
+        # of the identical rule text (a re-applied rule is re-reviewed, not
+        # re-armed from a stale counter).
+        self._auto_spend.pop(rule.to_dsl(), None)
         self._install_auto_approve_rules()
         now = self._now_ms()
         me = self._operator_token()
@@ -6580,6 +6768,10 @@ class Session:
         if removed and pol is not None:
             self.sandbox = dataclasses.replace(pol,
                                                auto_approve_rules=tuple(kept))
+            # a revoked rule's budget is spent authority with no rule to hold it;
+            # drop it so a later re-apply of the same text starts clean.
+            for dsl in removed:
+                self._auto_spend.pop(dsl, None)
             self._install_auto_approve_rules()
             me = self._operator_token()
             wal = self._approval_wal()

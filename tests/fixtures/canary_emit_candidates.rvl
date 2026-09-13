@@ -1,0 +1,56 @@
+// Fixture for tests/test_canary.py — two CANDIDATE generations of the slice
+// provider in canary_emit_baseline.rvl. Both acquire exactly what the baseline
+// acquires (the same `cells.insert(k, v)` and the same `sink.commit(v)`
+// emission), so every `(kind, label)` step is identical to the baseline's. What
+// differs is the COMPENSATION each emission records:
+//
+//   * `EmitChangedCompensation` compensates the commit by rolling back a line
+//     it never committed;
+//   * `EmitDroppedCompensation` drops the compensation entirely, leaving a
+//     one-way boundary crossing where the baseline had a reversible one.
+//
+// Both are divergences: the compensation is the half a promote hands to
+// teardown, and it is already in the recorded world.
+//
+// The two variants sit in different realms only so one file can hold both —
+// G2 forbids two providers of one key in one realm. The test reads each one's
+// recorded world directly with `slice_timeline`, so neither realm is served.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  // `emission` because these providers' `set` crosses the boundary itself (G4).
+  emission fn set(k: Str, v: Str)
+}
+
+service Sink {
+  emission fn commit(line: Str)
+  emission fn rollback(line: Str)
+}
+
+component EmitChangedCompensation requires sink: Sink provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  isolate sink in realm("tenant_a")
+  let cells = effect Map.new() undo cells.drop()
+  provide kv {
+    fn get(k) = cells.get(k)
+    fn set(k, v) {
+      effect cells.insert(k, v)
+      undo   cells.remove(k)
+      emit sink.commit(v) compensate sink.rollback("an-unrelated-line")
+    }
+  }
+}
+
+component EmitDroppedCompensation requires sink: Sink provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  isolate sink in realm("tenant_b")
+  let cells = effect Map.new() undo cells.drop()
+  provide kv {
+    fn get(k) = cells.get(k)
+    fn set(k, v) {
+      effect cells.insert(k, v)
+      undo   cells.remove(k)
+      emit sink.commit(v)
+    }
+  }
+}

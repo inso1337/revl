@@ -399,7 +399,9 @@ def _run_export(args) -> int:
         from ..export_client import export_client  # noqa: PLC0415
         try:
             source = export_client(ir, lang=args.lang, service=args.service,
-                                   composition=args.composition)
+                                   composition=args.composition,
+                                   face=getattr(args, "face", "rest"),
+                                   component=getattr(args, "component", None))
         except RevlError as error:
             print(f"error: {error}", file=sys.stderr)
             return 1

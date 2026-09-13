@@ -23,11 +23,15 @@ reviewed language surface (`service` + `requires`). It asserts:
   PATHS, and the artifact carries ZERO inline HTML/CSS/JS blob;
 - `revl audit` reports the crossing on the component's boundary: the `webui`
   requirement (G1) and the `webui.add_entry` emission (the trusted host
-  boundary, G8), with no untyped extern door in the surface.
+  boundary, G8), with no untyped extern door in the surface;
+- the reactive channel is DECLARED and PROJECTED: `add_entry` takes a `data`
+  parameter whose type is a declared record, the RPC surface is the component's
+  declared provision, and `revl export client --lang ts --face webui` renders both
+  as the TypeScript the browser reads with `useRpc<T>()` (design note 530
+  Decision B, item 457 slice S4).
 
-The full close (the typed reactive-state/RPC `data` contract, folded into item
-457, and the exemplary frontend, item 462) is still app-gated; see design note
-530. This slice guards the coeffect boundary that close builds on.
+The exemplary frontend that 459's stated exit is gated on is item 462; see design
+note 530. This reference is the shape it copies.
 """
 
 from __future__ import annotations
@@ -78,15 +82,36 @@ def test_component_declares_webui_coeffect(ir):
     (`requires webui: WebUI`), and `WebUI` is a declared service — the typed
     boundary the whole slice is about, expressed on reviewed surface only."""
     console = next(c for c in ir["components"] if c["name"] == "ConsoleUI")
+    # WebUI itself is never re-provided by a revl component: it is host-provided
+    # (ambient), and re-providing it would be the parallel-framework anti-pattern
+    # 526 argues against. What the component provides is the entry's own RPC
+    # surface, which is what makes the browser-callable set enumerable.
     assert (console.get("requires") or {}) == {"webui": "WebUI"}
-    # the component provides nothing: the service is host-provided (ambient),
-    # not re-provided by a revl component (that would be the parallel-framework
-    # anti-pattern 526 argues against).
-    assert not (console.get("provides") or {})
+    assert (console.get("provides") or {}) == {"console": "ConsoleRpc"}
     services = ir.get("services") or []
     names = [s["name"] if isinstance(s, dict) else s for s in services] \
         if isinstance(services, list) else list(services)
     assert "WebUI" in names
+    assert "ConsoleRpc" in names
+
+
+def test_the_reactive_channel_is_declared_and_projected(ir):
+    """`add_entry`'s `data` parameter is a declared record (the reactive state,
+    typed rather than Cordis' untyped `T`), and `--face webui` projects that state
+    plus the component's provision into the browser's contract."""
+    from revl.export_client import export_client
+
+    add_entry = ir["services"]["WebUI"]["methods"]["add_entry"]
+    data = next(p for p in add_entry["params"] if p["name"] == "data")
+    assert data["type"] == "ConsoleState"
+    assert ir["types"]["ConsoleState"]["kind"] == "record"
+
+    face = export_client(ir, lang="ts", face="webui", component="ConsoleUI")
+    assert "export interface ConsoleUIState {" in face
+    assert "readonly title: string;" in face
+    assert "readonly ready: boolean;" in face
+    assert "ping(nonce: string): Promise<string>;" in face
+    assert "export type ConsoleUIChannel = ConsoleUIState & ConsoleUIRpc;" in face
 
 
 def test_no_ts_ref_extern_door(ir):
@@ -191,7 +216,7 @@ def test_audit_surfaces_the_coeffect_boundary(capsys):
     comps = {c["name"]: c for c in audit["manifest"]["components"]}
     assert "ConsoleUI" in comps
     assert comps["ConsoleUI"]["inject"] == ["webui"]
-    assert comps["ConsoleUI"]["provides"] == []
+    assert comps["ConsoleUI"]["provides"] == ["console"]
 
     boundary = audit["boundary"]["ConsoleUI"]
     assert "webui.add_entry" in boundary["emissions"]

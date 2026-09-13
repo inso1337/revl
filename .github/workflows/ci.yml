@@ -1034,6 +1034,16 @@ jobs:
       # is toolchain-gated, so it rides this job or it executes nowhere (the
       # item-445 rule: a skip is not a pass).
       - run: pytest tests/test_gate_consumer_example_rs.py -q
+      # item 335: the wasm gate's drift gate. It needs no toolchain (the .wasm
+      # itself is not committed, only the crate source), so the frontend job's
+      # plain `pytest tests/ -q` does collect it — but that job is not a required
+      # check. #956 changed backends/rust/emit.py, regenerated crates/revl-gate
+      # and left crates/revl-gate-wasm stale, and merged on required checks alone
+      # while this gate was red on the full suite. The component inherits its
+      # frontier id from crates/revl-gate's provenance rather than restating it,
+      # so it moves with every emitter change that rewrites the rust crate. It
+      # rides a REQUIRED job so a stale wasm component cannot land again.
+      - run: pytest tests/test_gate_wasm_drift.py -q
       # item 336 slice 1: the rust LSP binary's byte-identity agreement against
       # `python -m revl.lsp`. REVL_LSP_PYTHON points it at this job's python.
       - run: PYTHONPATH=src REVL_LSP_PYTHON=$(which python) cargo test --manifest-path crates/revl-lsp/Cargo.toml

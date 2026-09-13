@@ -4,7 +4,7 @@
 **Builds on:** docs/design/526-webui-asset-alignment.md,
 docs/design/530-webui-entry-surface.md,
 docs/design/525-webapp-slice4-frontend.md ·
-**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · REMAINDER NAMED BELOW · FULL CLOSE 462-GATED
+**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · REMAINDER NAMED BELOW · FULL CLOSE 462-GATED
 
 ## Purpose
 
@@ -176,22 +176,28 @@ author writes `attr="{{html:x}}"`).
 - **F4 - the exemplary app.** Issue #725 (blocked on #724) and the slice-4
   frontend gap G3 (`docs/design/525-webapp-slice4-frontend.md`). Item 459's
   stated exit is app-gated on 462 and cannot close before it.
-- **F5 - the typed reactive-state/RPC contract.** Decision B of
-  `docs/design/530-webui-entry-surface.md`, folded into item 457 rather than
-  invented here.
+- **F5 - the typed reactive-state/RPC contract. LANDED.** Decision B of
+  `docs/design/530-webui-entry-surface.md`, folded into item 457 and shipped as
+  457 slice S4: `add_entry` takes a `data` parameter whose type is a declared
+  record (the reactive state), the RPC surface is the component's declared
+  provisions, and `revl export client --lang ts --face webui --component NAME`
+  projects both into the TypeScript the browser reads with `useRpc<T>()`.
 - **F6 - tiers.** Anything disk-backed (F1) will start at `py`/`ts`, the
   precedent set by `stdlib/fs.rvl` and `stdlib/shell.rvl`. `stdlib/template.rvl`
   itself is pure and is not tier-limited.
-- **F7 - a `--face webui` CLI verb.** No asset-emitting CLI verb exists; the
-  entry is contributed through the coeffect, not through a compiler flag.
+- **F7 - a `--face webui` CLI verb. LANDED.** `revl export client --lang ts
+  --face webui --component NAME` renders a component's channel contract. It emits
+  no ASSET: the entry is still contributed through the coeffect, and the verb
+  projects the typed channel the assets consume.
 
 ## What stage 1 does not claim
 
-Stage 1 does not make the console an external asset, does not read a template
-from disk, does not emit a source map, and does not add a typed asset handle at
-the toolchain boundary. It makes the insertion-site model and its per-context
-escaping rule a landed, tested, app-neutral primitive, which is the thing F1,
-F2 and F4 consume.
+Stage 1 does not read a template from disk, does not emit a source map, and does
+not add a typed asset handle at the toolchain boundary. It makes the
+insertion-site model and its per-context escaping rule a landed, tested,
+app-neutral primitive, which is the thing F1, F2 and F4 consume. The webui asset
+model and the typed channel (F5, F7) are a separate landed slice on top of it;
+what they still do not claim is F1's typed handles and F2's insertion-site map.
 
 ## Verification
 

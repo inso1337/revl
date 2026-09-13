@@ -150,9 +150,6 @@
       ]
     },
     "unported": {
-      "`Float` receiver builtins (e.g. `Float.to_str()`) were added to the reference by item 548 / PR #703 (typecheck.py/lower.py plus the reference java backend). The item-199 Path B self-host (selfhost/lower.rvl and the self-host java emitter selfhost/emit_java.rvl) does not port Float-receiver lowering yet; no corpus document reaches a `recv=Float` construct, so every byte-agreement oracle stays green while the ledger would otherwise flag it as an untracked blind construct. It remains a named unported baseline until the self-host ports Float receivers (tracked under self-host parity #106).": [
-        "recv=Float"
-      ],
       "Existing built-in Result boundary: _v3_match_expr emits Ok/Err switch arms and _uses_builtin_result inspects cases/patterns; the port has no Result runtime. Strict result_ctor_302.rvl preserves the family divergence.": [
         "case=Err",
         "case=Ok",
@@ -201,6 +198,13 @@
       ],
       "Reference refusal, not successful output: _refuse_holes.walk detects holes and _refuse_holes raises before assembly; a kind=hole cannot enter an agreeing successful-byte corpus.": [
         "kind=hole"
+      ],
+      "`Float` receiver builtins (e.g. `Float.to_str()`) were added to the reference by item 548 / PR #703 (typecheck.py/lower.py plus the reference java backend). The item-199 Path B self-host (selfhost/lower.rvl and the self-host java emitter selfhost/emit_java.rvl) does not port Float-receiver lowering yet; no corpus document reaches a `recv=Float` construct, so every byte-agreement oracle stays green while the ledger would otherwise flag it as an untracked blind construct. It remains a named unported baseline until the self-host ports Float receivers (tracked under self-host parity #106).": [
+        "recv=Float"
+      ],
+      "item 130 landed the `Stream[T]` surface on the reference java backend (backends/java/emit.py: the emitted `Stream`/`Subscription`/`EventContract` runtime, the `subscribe` acquisition and the `stream-iter` loop that lowers `every … in` / `on … as`). The item-199 Path B self-host java emitter (selfhost/emit_java.rvl) does not port any of it — the go and rust ports do not either — and no corpus document holds a stream, so every byte-agreement oracle stays green. A corpus document reaching a stream would emit the whole runtime from the reference and nothing from the port, so it stays a named unported baseline until the port grows a stream lowering (tracked under self-host parity #106).": [
+        "step=stream-iter",
+        "subscribe=<true>"
       ]
     }
   },

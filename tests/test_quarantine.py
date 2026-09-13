@@ -15,6 +15,8 @@ Two layers, mirroring the wasm tier's existing policy (test_canonical_abi.py):
 
 import os
 import shutil
+import subprocess
+import time
 
 import pytest
 
@@ -47,6 +49,11 @@ FAULTING = (
 # after the aggregate merge landed scalars/records/lists/variants). It compiles
 # and passes admission, but has no boundary function to present -> deferred.
 UNLOWERABLE = 'fn scale(x: Float) -> Float { return x * 2.0 }'
+
+# a boundary function that never returns. `while` is unbounded in the language,
+# so this is expressible by any candidate — the probe has to bound it, not the
+# candidate.
+SPINNING = 'fn spin(s: Str) -> Str { while (1 == 1) { } return s }'
 
 # does not compile — admission refuses it before the substrate.
 BROKEN = 'fn nope(s: Str) -> Str { return t }'
@@ -255,3 +262,80 @@ def test_swap_gate_lets_a_clean_candidate_through():
     session = Session()
     session.sandbox = parse_policy("quarantine required")
     assert Q.gate_swap(session, {"source": CLEAN}) is None
+
+
+# --------------------------------------------------------------------------- #
+# The probe budget — a candidate that never returns still gets a VERDICT.
+# --------------------------------------------------------------------------- #
+
+def test_non_terminating_candidate_is_bounded_and_graded():
+    """A boundary function that never returns is bounded by the PROBE budget, so
+    it is GRADED — never a `subprocess.TimeoutExpired` escaping the battery, and
+    never a full wall-clock stall per probe on the (serial) MCP server.
+
+    `while` is unbounded in the language, so this candidate is expressible by any
+    untrusted author, and `revl_quarantine` needs no operator authority."""
+    _need_toolchain()
+    started = time.monotonic()
+    report = Q.run(Session(), {"source": SPINNING, "service": "Spinner"})
+    elapsed = time.monotonic() - started
+
+    # a verdict, not an exception
+    assert report["verdict"] in ("trapped", "timeout"), report["substrate"]
+    # and the budget is a budget: the guest cannot hold the caller for the
+    # runtime's whole wall-clock timeout once per probe
+    assert elapsed < 60, f"the probe budget did not bound it ({elapsed:.1f}s)"
+
+    sub = report["substrate"]
+    assert sub["ran"] is True
+    assert sub["counts"]["returned"] == 0
+    # every probe is accounted for — trapped (the fuel budget) or timed out (the
+    # wall-clock backstop) — and nothing is silently dropped
+    assert sub["counts"]["trapped"] + sub["counts"]["timeout"] > 0
+    assert (sub["counts"]["trapped"] + sub["counts"]["timeout"]
+            == sub["counts"]["probes"] - sub["counts"]["skipped"])
+    probe = sub["probes"][0]
+    assert probe["outcome"] in ("trapped", "timeout")
+    assert probe.get("trap") or probe.get("timeout")
+
+
+def test_a_probe_that_outruns_the_runtime_is_graded_not_raised(monkeypatch):
+    """The wall-clock backstop behind the fuel budget: a probe raising
+    `subprocess.TimeoutExpired` must be RECORDED as an outcome.
+
+    It used to escape `_run_substrate`'s `except EmitError` — and `run`'s
+    `except RevlError` — and reach the MCP dispatcher as a `category: internal`
+    fault, violating the module's documented "never a raised error" contract. A
+    stub stands in for a guest the runtime cannot stop in time."""
+    _need_toolchain()
+    canonical = Q._load_canonical()
+    assert canonical is not None
+
+    def _never_returns(component, func, arg, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="wasmtime", timeout=120)
+
+    monkeypatch.setattr(canonical, "run_component_str", _never_returns)
+    ir = Q._standalone_ir({"source": CLEAN}, False)
+    service = Q._service_name(ir, {"source": CLEAN})
+
+    substrate = Q._run_substrate(canonical, ir, service)  # must not raise
+
+    assert substrate["status"] == "timeout"
+    assert substrate["counts"]["returned"] == 0
+    assert substrate["counts"]["timeout"] == 1
+    # the budget is paid ONCE, not once per probe
+    assert substrate["counts"]["skipped"] == substrate["counts"]["probes"] - 1
+    assert substrate["probes"][0]["outcome"] == "timeout"
+    assert substrate["probes"][-1]["outcome"] == "skipped"
+
+
+def test_swap_gate_refuses_a_non_terminating_candidate():
+    """The security hook: under a requiring policy a candidate that never returns
+    is refused before any hot-swap, the running system untouched."""
+    _need_toolchain()
+    session = Session()
+    session.sandbox = parse_policy("quarantine required")
+    refusal = Q.gate_swap(session, {"source": SPINNING})
+    assert refusal is not None
+    assert refusal["swapped"] is False and refusal["admitted"] is False
+    assert refusal["quarantine"]["verdict"] in ("trapped", "timeout")

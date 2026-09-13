@@ -75,6 +75,12 @@ _LIFECYCLE_MODE = False
 # Set by `emit()`; empty for the v1/v2 dialects, which do not use that renderer.
 _V3_DECLARED_TYPES: frozenset[str] = frozenset()
 
+# item 130 Slice 4/5: per-emit counter for the `every … in` / `on … as` loop
+# locals (`_revlStreamItem1`, `_revlEvent1`, `_revlEventObj1`), so two
+# iterations in one document do not collide. Reset by `emit()`, mirroring
+# backends/go/emit.py's `_STREAM_ITER_COUNTER`.
+_STREAM_ITER_COUNTER = 0
+
 # The placeholder a confidential witness is written as in the durable WAL. Must
 # equal `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the
 # log's on-disk contract, and `revl recover` reads it back to refuse a replay it
@@ -423,13 +429,11 @@ _HOST_STUBS = {
     "Job": {
         "run": ("Job", ["String"]),
     },
+    # item 130: the `Stream[T]` provider. `subscribe`/`next`/`close` are not
+    # host builtins (they are their own IR kinds), so only the provider
+    # constructor and the provider's own verbs appear here.
     "Stream": {
-        # `source()` is the only `Stream.*` builtin a program names directly;
-        # `merge`/`subscribe` reach the runtime through the `stream-merge` and
-        # `subscribe` node kinds, never as host calls. The entry exists so the
-        # dispatch loop in `_emit_host_stubs` sees the root and splices
-        # `_emit_stream_runtime`; its value side is not read.
-        "source": ("Stream", []),
+        "source": ("Self", []),
     },
 }
 
@@ -508,7 +512,7 @@ _EMITTER_RESERVED = {
 # nested `Map`, which javac rejects -- so they are escaped at the type-name
 # position only, the same posture rust takes with `_RUST_TYPE_RESERVED`. A
 # field, local, param or host call site of the same spelling is untouched.
-_JAVA_TYPE_RESERVED = frozenset({"Map", "Pool", "Job", "Stream", "Subscription"})
+_JAVA_TYPE_RESERVED = frozenset({"Map", "Pool", "Job"})
 
 
 class EmitError(ValueError):
@@ -529,6 +533,38 @@ def _finite_float(value):
         raise EmitError(
             f"non-finite Float literal {value!r} has no representation in this tier")
     return value
+
+
+def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
+    """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
+
+    A byte-for-byte mirror of `backends/go/emit.py` and `backends/rust/emit.py`:
+    Slice 2 shipped `map`/`filter`/`take` and the three non-default backpressure
+    policies on the py reference tier only, while the blocking tiers lower
+    subscribe / next / close and the `merge` fan-in. Emitting a subscription that
+    SILENTLY dropped a combinator chain, a lossy policy or a drain window would
+    be the worst outcome available: the program would run and quietly disagree
+    with the reference. Refuse by name instead."""
+    if node.get("stages"):
+        raise EmitError(
+            "a stream combinator chain (`map`/`filter`/`take`) is not lowered "
+            "on the %s tier; the derived-stream chain runs on the py reference "
+            "tier (item 130 Slice 2) while this tier lowers subscribe / next / "
+            "close and `merge` (Slice 3) — try `--backend py`" % tier)
+    policy = node.get("policy") or "error"
+    if policy != "error":
+        raise EmitError(
+            "backpressure policy `%s` is not lowered on the %s tier; this tier "
+            "lowers the default `error` policy (a full bounded buffer faults "
+            "with `Faulted(overflow)` and closes, no silent loss). "
+            "`drop_newest`/`drop_oldest`/`block` run on the py reference tier "
+            "(item 130 §4.4) — try `--backend py`" % (policy, tier))
+    if node.get("drain") is not None:
+        raise EmitError(
+            "a `drain` window is the `block`-policy drain interval and is not "
+            "lowered on the %s tier; it fires on the deterministic test clock, "
+            "which lives on the py reference tier (item 130 §8) — try "
+            "`--backend py`" % tier)
 
 
 # Dispatcher conformance (roadmap item 76a). This tier converged to ONE
@@ -889,13 +925,13 @@ _HOST_ROOTS = {"Pool", "Map", "Job", "Stream"}
 # only ever writes a class for a root in `_HOST_STUBS`, so a call on any other
 # root lowered to a bare `Stream.source()` naming a type the generated file
 # never declares — the emitter was happy and javac was not. That is a SILENT
-# EMIT where the design promises a refusal.
+# EMIT where the design promises a refusal, so an unimplemented root is refused
+# by name here instead.
 #
-# The table is EMPTY as of item 130 Slice 6: java was the last tier that emitted
-# no `Stream` runtime class, and it now does, so every root the frontend can
-# produce has a stub. The mechanism stays — it is the named home for the next
-# root a future tier limit cannot emit, and `_refuse_missing_host_root` is the
-# one place that refusal is spelled — rather than being deleted and re-invented.
+# item 130: `Stream` LEFT this table — the tier now carries a real `Stream`
+# runtime class (`_emit_stream_runtime`) and lowers subscribe / next / close,
+# `merge`, `every … in` and the `on … as` typed-event handler. The table (and
+# the guard below) stay: they are the mechanism, not the entry.
 _UNIMPLEMENTED_HOST_ROOTS: dict[str, str] = {}
 
 
@@ -2185,84 +2221,38 @@ def _expr(
     if kind == "instance-get":
         return _v3_instance_get(node, ctx, rename, env)
 
-    if kind == "stream-merge":
-        # item 130 Slice 3: the fan-in head. A merged stream is DERIVED — it is
-        # owned by the subscription opened on it, so `merge(a, b)` is an
-        # argument to `Subscription.subscribe`, never a bracket of its own.
-        # That is what keeps multi-source teardown on the ONE bracket.
-        args = ", ".join(
-            _expr(src, ctx, rename, env) for src in node.get("sources") or []
-        )
-        return f"Stream.merge({args})"
-
     if kind == "subscribe":
+        # item 130 Slice 3 (design §4.6, the java row): this tier ERASES the
+        # async color, exactly as go and rust do. `next` is a blocking park on a
+        # lock condition that the CANCEL flag also signals, and `close` trips
+        # that flag synchronously — so the bracket inverse is reachable off the
+        # teardown thread even while a `next` is parked, and teardown never has
+        # to wait for the provider (§9 Part A).
         _refuse_unlowered_stream_surface(node)
-        # `subscribe <stream> [buffer N]` — the bracket the `every … in` loop
-        # parks in and the object `undo sub.close()` names. `capacity <= 0` is
-        # the tier's default bound (there is no unbounded buffer), so it is
-        # passed through as `0` and resolved by the runtime.
-        head = _stream_head(node.get("stream"), ctx, rename, env)
+        stream = _stream_head(node.get("stream") or {}, ctx, rename, env)
         policy = node.get("policy") or "error"
         capacity = int(node.get("buffer") or 0)
-        return f"Subscription.subscribe({head}, {_string(policy)}, {capacity})"
+        return "Stream.subscribe(%s, %s, %d)" % (
+            stream, _string(policy), capacity)
+
+    if kind == "stream-merge":
+        # A bare `merge(a, b)` outside a `subscribe` head cannot reach here (the
+        # frontend refuses it), so this is the recursive nested-merge case.
+        return _stream_head(node, ctx, rename, env)
 
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
 
-def _refuse_unlowered_stream_surface(node: dict) -> None:
-    """Refuse the item-130 Slice 2 surface the java tier does not lower.
-
-    Slice 2 shipped `map`/`filter`/`take` and the three non-default backpressure
-    policies on the py reference tier only. Emitting a subscription that
-    SILENTLY dropped a combinator chain, a lossy policy or a drain window would
-    be the worst outcome available: the program would run and quietly disagree
-    with the reference tier. Refuse by name instead, the same call the wasm tier
-    makes for the whole surface.
-    """
-    if node.get("stages"):
-        raise EmitError(
-            "a stream combinator chain (`map`/`filter`/`take`) is not lowered "
-            "on the java tier; the derived-stream chain runs on the py "
-            "reference tier (item 130 Slice 2) while this tier lowers "
-            "subscribe / next / close and `merge` (Slice 3) — try "
-            "`--backend py`"
-        )
-    policy = node.get("policy") or "error"
-    if policy != "error":
-        raise EmitError(
-            f"backpressure policy `{policy}` is not lowered on the java tier; "
-            "this tier lowers the default `error` policy (a full bounded buffer "
-            "faults with `Faulted(overflow)` and closes, no silent loss). "
-            "`drop_newest`/`drop_oldest`/`block` run on the py reference tier "
-            "(item 130 §4.4) — try `--backend py`"
-        )
-    if node.get("drain") is not None:
-        raise EmitError(
-            "a `drain` window is the `block`-policy drain interval and is not "
-            "lowered on the java tier; it fires on the deterministic test "
-            "clock, which lives on the py reference tier (item 130 §8) — try "
-            "`--backend py`"
-        )
-
-
-def _stream_head(
-    node: object,
-    ctx: "_V3Ctx | None",
-    rename: dict[str, str] | None,
-    env: "_Env | None",
-) -> str:
-    """The stream a `subscribe` acquires (item 130 Slice 3).
-
-    Recursive: a merged stream is itself a stream, so a nested fan-in renders
-    as a nested `Stream.merge(...)` argument. Every link is a DERIVED stream
-    OWNED by the subscription, so `close` unwinds the whole chain off the ONE
-    bracket the subscribe registers while each plain source stays on its own.
-    """
+def _stream_head(node, ctx, rename, env) -> str:
+    """The stream a `subscribe` acquires: a plain source, or a `merge(a, b)`
+    fan-in (item 130 Slice 3). Recursive — a merged stream is itself a stream.
+    Every link is a DERIVED stream OWNED by the subscription, so `close` unwinds
+    the whole chain off the ONE bracket the subscribe registers and each plain
+    source is left to its own. Mirrors `backends/go/emit.py::_stream_head`."""
     if isinstance(node, dict) and node.get("kind") == "stream-merge":
-        args = ", ".join(
-            _stream_head(src, ctx, rename, env) for src in node.get("sources") or []
-        )
-        return f"Stream.merge({args})"
+        args = ", ".join(_stream_head(src, ctx, rename, env)
+                         for src in node.get("sources") or [])
+        return "Stream.merge(%s)" % args
     return _expr(node, ctx, rename, env)
 
 
@@ -3669,6 +3659,13 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 walk(value)
 
     walk(ir)
+    # item 130: a `subscribe` bracket and a `stream-iter` body step are their own
+    # IR shapes, not `host` nodes, so the walk above cannot see them. Every such
+    # document also opens a provider (`Stream.source()`), but flagging the root
+    # off the stream shapes themselves keeps the runtime tied to what needs it
+    # rather than to one incidental spelling.
+    if _document_holds_stream(ir):
+        used.add("Stream")
     out: list[str] = []
     for host in sorted(used & _HOST_STUBS.keys()):
         if host == "Map":
@@ -3679,11 +3676,12 @@ def _emit_host_stubs(ir: dict) -> list[str]:
             out.extend(_emit_job_runtime())
         elif host == "Stream":
             out.extend(_emit_stream_runtime())
-    # The typed-event contract rides the stream runtime it decorates: it is the
-    # schema-and-dedup half of `on <Event> as <e> in <sub>` and has no meaning
-    # without a subscription, so it is spliced on the same trigger.
-    if _STREAM_EVENT_MODE:
-        out.extend(_emit_stream_event_runtime())
+            # The `EventContract` half (the derived-schema validator and the
+            # bounded dedup window) is pulled in only by a document with an
+            # `on … as` handler, so a plain `every … in` program emits without
+            # it — the same gating go and ts apply.
+            if _document_holds_stream_event(ir):
+                out.extend(_emit_stream_event_runtime())
     return out
 
 
@@ -3695,6 +3693,1044 @@ def _r1_lines(lines: list[str]) -> list[str]:
     hooks out of its emission leaves every existing golden byte-identical.
     """
     return list(lines) if _LIFECYCLE_MODE else []
+
+
+# item 130 — the java `Stream[T]` runtime, emitted only for a document that holds
+# a stream (`_emit_host_stubs`). The two `//@R1-INC` / `//@R1-DEC` marker lines
+# are the R1 live-resource accounting: substituted for the counter statement
+# under a lifecycle test and DROPPED otherwise, so a document without one emits
+# exactly the runtime it needs and nothing more (the same posture
+# `_emit_map_runtime` takes through `_r1_lines`).
+_STREAM_RUNTIME = r'''// ---- Stream[T] reactive host (item 130, docs/design/130-stream-reactive-types.md)
+// The blocking-tier lowering (design §4.6, the java row): `next` parks on a lock
+// condition that the CANCEL flag also signals, and `close` trips that flag
+// synchronously. Unloading the subscription owner runs `close` (the bracket
+// inverse), which resolves a parked `next` as the `Closed` terminal — the core
+// guarantee, delivered by the same LIFO teardown any bracket rides. A faithful
+// mirror of the go and rust runtimes (a cancel-channel `select` / a cancel-select
+// there), spelt with the JDK's own concurrency primitives.
+public static final class Stream {
+    // The `Closed` terminal is a VALUE, mirroring the py reference tier's
+    // STREAM_CLOSED sentinel. A `Faulted` terminal is a thrown CordisException
+    // instead, so the two outcomes cannot be confused at a call site.
+    private static final class ClosedT {
+        private ClosedT() {}
+    }
+    public static final Object CLOSED = new ClosedT();
+
+    public static boolean isClosed(Object value) {
+        return value instanceof ClosedT;
+    }
+
+    // The bounded buffer every subscription gets: there are no unbounded buffers
+    // (design §4.4). Overflow under the default `error` policy is a
+    // Faulted(overflow) terminal — deterministic, never a silent drop.
+    public static final int BUFFER_CAPACITY = 8;
+
+    private static final Object REGISTRY = new Object();
+    private static final java.util.List<Stream> STREAMS = new java.util.ArrayList<>();
+    private static final java.util.List<Subscription> SUBSCRIPTIONS = new java.util.ArrayList<>();
+    private static final java.util.List<String> MARKS = new java.util.ArrayList<>();
+
+    // The host trace: one mark per provider/consumer transition, so a collapsed
+    // duplicate or an overflow fault is observable rather than silent.
+    static void record(String mark) {
+        synchronized (REGISTRY) {
+            MARKS.add(mark);
+        }
+    }
+
+    private final String kind; // "source" | "merge"
+    private final java.util.List<Subscription> subs = new java.util.ArrayList<>();
+    private final java.util.List<Stream> down = new java.util.ArrayList<>();
+    private java.util.List<Stream> up = new java.util.ArrayList<>();
+    private int pending; // upstream sources not yet terminal (merged only)
+    private String state = "open"; // "open" | "closed" | "faulted"
+    private String faultReason = "";
+    private boolean released = false;
+
+    private Stream(String kind, int pending) {
+        this.kind = kind;
+        this.pending = pending;
+    }
+
+    // Open a provider. It takes a live-resource slot; `close` returns it, so a
+    // source that outlives its owner shows up as residue.
+    public static Stream source() {
+        Stream stream = new Stream("source", 0);
+        synchronized (REGISTRY) {
+            STREAMS.add(stream);
+        }
+        record("stream.source open");
+        //@R1-INC
+        return stream;
+    }
+
+    // The fan-in behind `subscribe merge(a, b)` (design §1). The merged stream is
+    // NOT a bracket of its own: it is DERIVED, owned by the subscription opened
+    // on it, so multi-source teardown rides the ONE bracket the `subscribe`
+    // registers. The subscription's close closes the merge; closing the merge
+    // detaches it from both sources; each source is left to its own bracket.
+    public static Stream merge(Stream a, Stream b) {
+        Stream merged = new Stream("merge", 2);
+        merged.up.add(a);
+        merged.up.add(b);
+        synchronized (REGISTRY) {
+            STREAMS.add(merged);
+        }
+        record("stream.merge open");
+        //@R1-INC
+        a.attachDown(merged);
+        b.attachDown(merged);
+        return merged;
+    }
+
+    private void attachDown(Stream merged) {
+        String terminal;
+        String reason;
+        synchronized (this) {
+            if (state.equals("open")) {
+                down.add(merged);
+                return;
+            }
+            terminal = state;
+            reason = faultReason;
+        }
+        merged.upstreamTerminal(terminal, reason);
+    }
+
+    private synchronized void detachDown(Stream merged) {
+        down.remove(merged);
+    }
+
+    private synchronized void detach(Subscription sub) {
+        subs.remove(sub);
+    }
+
+    // Deliver one item to the single consumer (and into any merged stream fed by
+    // this provider). A no-op once terminal.
+    public boolean emit(String item) {
+        synchronized (this) {
+            if (!state.equals("open")) {
+                return false;
+            }
+        }
+        record("stream.emit " + item);
+        forward(item);
+        return true;
+    }
+
+    private void forward(String item) {
+        java.util.List<Subscription> targets;
+        java.util.List<Stream> downs;
+        synchronized (this) {
+            if (!state.equals("open")) {
+                return;
+            }
+            targets = new java.util.ArrayList<>(subs);
+            downs = new java.util.ArrayList<>(down);
+        }
+        for (Subscription sub : targets) {
+            sub.deliver(item);
+        }
+        for (Stream derived : downs) {
+            derived.forward(item);
+        }
+    }
+
+    // The provider's terminal-delivering inverse (§9 Part B) and, for a merged
+    // stream, its detach from both upstreams. Idempotent, and the live-resource
+    // slot is released exactly once — so a provider that FAULTED and is then
+    // unloaded still leaves no residue.
+    public boolean close() {
+        boolean first;
+        boolean release;
+        java.util.List<Subscription> targets;
+        java.util.List<Stream> downs;
+        java.util.List<Stream> ups;
+        synchronized (this) {
+            first = state.equals("open");
+            if (first) {
+                state = "closed";
+            }
+            release = !released;
+            released = true;
+            targets = new java.util.ArrayList<>(subs);
+            downs = new java.util.ArrayList<>(down);
+            ups = new java.util.ArrayList<>(up);
+            up = new java.util.ArrayList<>();
+        }
+        if (first) {
+            for (Subscription sub : targets) {
+                sub.terminate("closed", "");
+            }
+            for (Stream derived : downs) {
+                derived.upstreamTerminal("closed", "");
+            }
+        }
+        // A merged stream leaves its upstreams on the way out. A DERIVED upstream
+        // (a nested `merge`) is owned by this one, so it closes with it; a plain
+        // source is left to its own bracket.
+        for (Stream upstream : ups) {
+            upstream.detachDown(this);
+            if (!upstream.kind.equals("source")) {
+                upstream.close();
+            }
+        }
+        if (release) {
+            record("stream." + kind + " close");
+            //@R1-DEC
+        }
+        return first;
+    }
+
+    // A provider abort: every outstanding `next` resolves to `Faulted`, never a
+    // silent pending (design §4.3). It does not release the slot — the bracket
+    // inverse `close` still runs on teardown and releases it there.
+    public boolean fault(String reason) {
+        java.util.List<Subscription> targets;
+        java.util.List<Stream> downs;
+        synchronized (this) {
+            if (!state.equals("open")) {
+                return false;
+            }
+            state = "faulted";
+            faultReason = reason;
+            targets = new java.util.ArrayList<>(subs);
+            downs = new java.util.ArrayList<>(down);
+        }
+        record("stream." + kind + " fault " + reason);
+        for (Subscription sub : targets) {
+            sub.terminate("faulted", reason);
+        }
+        for (Stream derived : downs) {
+            derived.upstreamTerminal("faulted", reason);
+        }
+        return true;
+    }
+
+    // How a merged stream learns one of its sources is done. A FAULT propagates
+    // at once (no silent loss). An orderly CLOSE only counts down: the fan-in
+    // stays live while any source is, so one source's death never strands a
+    // consumer the other source can still feed — and when the LAST source closes,
+    // the merged stream delivers its own `Closed`, so a parked `next` is
+    // terminated rather than left waiting on a dead fan-in.
+    private void upstreamTerminal(String terminal, String reason) {
+        String delivered = terminal;
+        java.util.List<Subscription> targets;
+        java.util.List<Stream> downs;
+        synchronized (this) {
+            if (!state.equals("open")) {
+                return;
+            }
+            if (terminal.equals("faulted")) {
+                state = "faulted";
+                faultReason = reason;
+            } else {
+                pending = pending - 1;
+                if (pending > 0) {
+                    return;
+                }
+                state = "closed";
+                delivered = "closed";
+            }
+            targets = new java.util.ArrayList<>(subs);
+            downs = new java.util.ArrayList<>(down);
+        }
+        for (Subscription sub : targets) {
+            sub.terminate(delivered, reason);
+        }
+        for (Stream derived : downs) {
+            derived.upstreamTerminal(delivered, reason);
+        }
+    }
+
+    // Open the single-consumer subscription a `subscribe` bracket binds.
+    // `capacity` is the declared `buffer` (0 = the default); every buffer is
+    // BOUNDED either way, since there are no unbounded buffers (design §4.4).
+    // Subscribing to an already-terminal provider terminates immediately, so the
+    // first `next` cannot park on a provider that is already gone.
+    public static Subscription subscribe(Stream src, String policy, int capacity) {
+        int bound = capacity <= 0 ? BUFFER_CAPACITY : capacity;
+        Subscription sub = new Subscription(src, policy, bound);
+        boolean terminal;
+        String state;
+        String reason;
+        synchronized (src) {
+            src.subs.add(sub);
+            terminal = !src.state.equals("open");
+            state = src.state;
+            reason = src.faultReason;
+        }
+        synchronized (REGISTRY) {
+            SUBSCRIPTIONS.add(sub);
+        }
+        record("stream.subscribe");
+        //@R1-INC
+        if (terminal) {
+            sub.terminate(state, reason);
+        }
+        return sub;
+    }
+
+    // The residue probe: unreleased providers plus live (un-closed)
+    // subscriptions. Zero after a clean unload proves every bracket inverse ran
+    // and no host listener outlived its owner.
+    public static int pendingResources() {
+        java.util.List<Stream> streams;
+        java.util.List<Subscription> subs;
+        synchronized (REGISTRY) {
+            streams = new java.util.ArrayList<>(STREAMS);
+            subs = new java.util.ArrayList<>(SUBSCRIPTIONS);
+        }
+        int live = 0;
+        for (Stream stream : streams) {
+            synchronized (stream) {
+                if (!stream.released) {
+                    live = live + 1;
+                }
+            }
+        }
+        for (Subscription sub : subs) {
+            if (!sub.isLive()) {
+                continue;
+            }
+            live = live + 1;
+        }
+        return live;
+    }
+
+    // The harness handle on this unit's providers in opening order, so a scenario
+    // can drive one (emit/close/fault) from ANOTHER thread — the java mirror of
+    // the py reference's `Stream.sources()`.
+    public static java.util.List<Stream> providers() {
+        synchronized (REGISTRY) {
+            return new java.util.ArrayList<>(STREAMS);
+        }
+    }
+
+    // Subscriptions whose `close` has not run.
+    public static int liveSubscriptions() {
+        java.util.List<Subscription> subs;
+        synchronized (REGISTRY) {
+            subs = new java.util.ArrayList<>(SUBSCRIPTIONS);
+        }
+        int live = 0;
+        for (Subscription sub : subs) {
+            if (!sub.isLive()) {
+                continue;
+            }
+            live = live + 1;
+        }
+        return live;
+    }
+
+    public static java.util.List<String> marks() {
+        synchronized (REGISTRY) {
+            return new java.util.ArrayList<>(MARKS);
+        }
+    }
+
+    // Clear the provider/subscription registry (call between scenarios).
+    public static void reset() {
+        synchronized (REGISTRY) {
+            STREAMS.clear();
+            SUBSCRIPTIONS.clear();
+            MARKS.clear();
+        }
+    }
+}
+
+// The CONSUMER side: a single-consumer acquisition whose inverse is `close`.
+// `items` is the bounded buffer, `cancelled` is the flag teardown trips, `termed`
+// carries a provider terminal. One lock guards all three, and its condition is
+// what a parked `next` waits on — so the cancel and an arriving item wake the
+// same park and the priority between them is spelled out rather than left to a
+// scheduler.
+public static final class Subscription {
+    private final Stream src;
+    private final String policy;
+    private final int capacity;
+    private final java.util.ArrayDeque<String> items = new java.util.ArrayDeque<>();
+    private final java.util.concurrent.locks.ReentrantLock lock =
+        new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.concurrent.locks.Condition ready = lock.newCondition();
+    private String terminalKind = ""; // "" | "closed" | "faulted"
+    private String terminalReason = "";
+    private boolean cancelled = false;
+    private boolean termed = false;
+    private boolean closed = false;
+
+    Subscription(Stream src, String policy, int capacity) {
+        this.src = src;
+        this.policy = policy;
+        this.capacity = capacity;
+    }
+
+    void deliver(String item) {
+        boolean overflow = false;
+        lock.lock();
+        try {
+            if (closed || termed) {
+                return;
+            }
+            if (items.size() < capacity) {
+                items.addLast(item);
+                ready.signalAll();
+            } else if (policy.isEmpty() || policy.equals("error")) {
+                overflow = true;
+            } else {
+                throw new IllegalStateException(
+                    "revl: backpressure policy " + policy
+                    + " is not lowered on the cordis4j tier");
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (overflow) {
+            Stream.record("stream.overflow");
+            terminate("faulted", "overflow");
+        }
+    }
+
+    void terminate(String kind, String reason) {
+        lock.lock();
+        try {
+            if (closed || termed) {
+                return;
+            }
+            termed = true;
+            terminalKind = kind;
+            terminalReason = reason;
+            ready.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // Park until an item, a provider terminal, or the cancel flag. Returns the
+    // item; `Stream.CLOSED` on a `Closed` terminal (an orderly provider close, or
+    // the owner's own `close` tripping the flag); THROWS on a `Faulted` one.
+    //
+    // CANCELLATION-FIRST (§9 Part A): the cancel flag is probed BEFORE the
+    // buffer, so a `close` racing a buffered item still wins. The park is a
+    // condition wait, and `close` signals it from ANOTHER thread — the reason a
+    // parked `next` can never make the bracket inverse unreachable.
+    public Object next() {
+        lock.lock();
+        try {
+            while (true) {
+                if (cancelled) {
+                    return Stream.CLOSED;
+                }
+                if (!items.isEmpty()) {
+                    return items.removeFirst();
+                }
+                if (termed) {
+                    return terminal();
+                }
+                try {
+                    ready.await();
+                } catch (InterruptedException interrupted) {
+                    // An interrupt is another way the owner ends the park. Restore
+                    // the flag and report the `Closed` terminal a cancel reports,
+                    // so an interrupted consumer still leaves the loop by the one
+                    // door the guarantee is proved through.
+                    Thread.currentThread().interrupt();
+                    return Stream.CLOSED;
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private Object terminal() {
+        if (terminalKind.equals("faulted")) {
+            String why = terminalReason.isEmpty() ? "faulted" : terminalReason;
+            throw new CordisException("stream faulted: " + why);
+        }
+        return Stream.CLOSED;
+    }
+
+    // The bracket inverse: trip the cancel flag synchronously, detach the
+    // listener, release the slot. Infallible, idempotent, and it NEVER waits for
+    // a parked `next` to drain — signalling the condition is what resolves that
+    // park.
+    //
+    // A DERIVED upstream (a `merge(a, b)` fan-in) is owned by this subscription
+    // rather than by a bracket of its own, so closing here closes it too — and
+    // closing a merge is what detaches it from both sources. The sources stay on
+    // their own brackets, which keeps the LIFO close-order proof exact.
+    public boolean close() {
+        lock.lock();
+        try {
+            if (closed) {
+                return false;
+            }
+            closed = true;
+            cancelled = true;
+            ready.signalAll();
+        } finally {
+            lock.unlock();
+        }
+        src.detach(this);
+        Stream.record("stream.close");
+        //@R1-DEC
+        if (!src.kind.equals("source")) {
+            src.close();
+        }
+        return true;
+    }
+
+    boolean isLive() {
+        lock.lock();
+        try {
+            return !closed;
+        } finally {
+            lock.unlock();
+        }
+    }
+}'''
+
+# The typed-EVENT half (item 130 Slice 5, design §6): the derived-schema
+# validator and the bounded dedup window. Emitted only for a document with an
+# `on … as` handler, so a plain `every … in` program is untouched.
+_STREAM_EVENT_RUNTIME = r'''// ---- typed events: the schema-and-dedup contract (item 130 Slice 5, §6) ----
+// A faithful mirror of backends/python/runtime.py's `EventContract` /
+// `_json_schema_error`, backends/typescript/runtime.ts's and the go/rust ones,
+// spelt for the JVM. Emitted only for a document with an `on … as` handler, so a
+// plain `every … in` program is untouched.
+//
+// An event is a `Stream[T]` element with a contract, so this holds exactly the
+// two things events add over the stream protocol and nothing else: the SCHEMA
+// every delivered item is validated against before the body runs, and the
+// bounded window of recently admitted KEYS that collapses a redelivery.
+// Everything else — the subscription bracket, the cancellation-first `next`, the
+// terminal handling, the LIFO teardown — is the Slice 3/4 machinery, untouched.
+//
+// The JDK ships no JSON binder, so `RevlJson` below is the minimal parser,
+// renderer and derived-schema validator this contract needs. It covers exactly
+// the JSON-Schema subset the revl mapping emits (item 257 §3): primitive `type`,
+// `const`, `enum`, `nullable`, `properties`/`required`/`additionalProperties`
+// (bool or schema), `items`, and a discriminated `oneOf`. No `$ref` (cyclic types
+// are refused), so the walk is finite.
+static final class RevlJson {
+    private final String text;
+    private int at = 0;
+
+    private RevlJson(String text) {
+        this.text = text;
+    }
+
+    static Object parse(String text) {
+        RevlJson reader = new RevlJson(text);
+        reader.ws();
+        Object value = reader.value();
+        reader.ws();
+        if (reader.at != text.length()) {
+            throw new IllegalStateException("trailing text at offset " + reader.at);
+        }
+        return value;
+    }
+
+    private void ws() {
+        while (at < text.length() && Character.isWhitespace(text.charAt(at))) {
+            at = at + 1;
+        }
+    }
+
+    private Object value() {
+        ws();
+        if (at >= text.length()) {
+            throw new IllegalStateException("unexpected end of input");
+        }
+        char head = text.charAt(at);
+        if (head == '{') {
+            return object();
+        }
+        if (head == '[') {
+            return array();
+        }
+        if (head == '"') {
+            return string();
+        }
+        if (text.startsWith("true", at)) {
+            at = at + 4;
+            return Boolean.TRUE;
+        }
+        if (text.startsWith("false", at)) {
+            at = at + 5;
+            return Boolean.FALSE;
+        }
+        if (text.startsWith("null", at)) {
+            at = at + 4;
+            return null;
+        }
+        return number();
+    }
+
+    private java.util.Map<String, Object> object() {
+        java.util.Map<String, Object> fields = new java.util.LinkedHashMap<>();
+        at = at + 1;
+        ws();
+        if (at < text.length() && text.charAt(at) == '}') {
+            at = at + 1;
+            return fields;
+        }
+        while (true) {
+            ws();
+            String key = string();
+            ws();
+            if (at >= text.length() || text.charAt(at) != ':') {
+                throw new IllegalStateException("expected ':' at offset " + at);
+            }
+            at = at + 1;
+            fields.put(key, value());
+            ws();
+            if (at < text.length() && text.charAt(at) == ',') {
+                at = at + 1;
+                continue;
+            }
+            if (at >= text.length() || text.charAt(at) != '}') {
+                throw new IllegalStateException("expected '}' at offset " + at);
+            }
+            at = at + 1;
+            return fields;
+        }
+    }
+
+    private java.util.List<Object> array() {
+        java.util.List<Object> items = new java.util.ArrayList<>();
+        at = at + 1;
+        ws();
+        if (at < text.length() && text.charAt(at) == ']') {
+            at = at + 1;
+            return items;
+        }
+        while (true) {
+            items.add(value());
+            ws();
+            if (at < text.length() && text.charAt(at) == ',') {
+                at = at + 1;
+                continue;
+            }
+            if (at >= text.length() || text.charAt(at) != ']') {
+                throw new IllegalStateException("expected ']' at offset " + at);
+            }
+            at = at + 1;
+            return items;
+        }
+    }
+
+    private String string() {
+        if (at >= text.length() || text.charAt(at) != '"') {
+            throw new IllegalStateException("expected a string at offset " + at);
+        }
+        StringBuilder built = new StringBuilder();
+        at = at + 1;
+        while (true) {
+            if (at >= text.length()) {
+                throw new IllegalStateException("unterminated string");
+            }
+            char ch = text.charAt(at);
+            at = at + 1;
+            if (ch == '"') {
+                return built.toString();
+            }
+            if (ch != '\\') {
+                built.append(ch);
+                continue;
+            }
+            if (at >= text.length()) {
+                throw new IllegalStateException("unterminated escape");
+            }
+            char escaped = text.charAt(at);
+            at = at + 1;
+            if (escaped == 'n') {
+                built.append('\n');
+            } else if (escaped == 't') {
+                built.append('\t');
+            } else if (escaped == 'r') {
+                built.append('\r');
+            } else if (escaped == 'b') {
+                built.append('\b');
+            } else if (escaped == 'f') {
+                built.append('\f');
+            } else if (escaped == 'u') {
+                built.append((char) Integer.parseInt(text.substring(at, at + 4), 16));
+                at = at + 4;
+            } else {
+                built.append(escaped);
+            }
+        }
+    }
+
+    // An integral literal parses to a `Long` and everything else to a `Double`,
+    // so `integer` can be checked without a float round-trip.
+    private Object number() {
+        int start = at;
+        boolean fractional = false;
+        while (at < text.length()) {
+            char ch = text.charAt(at);
+            if (ch == '-' || ch == '+' || (ch >= '0' && ch <= '9')) {
+                at = at + 1;
+                continue;
+            }
+            if (ch == '.' || ch == 'e' || ch == 'E') {
+                fractional = true;
+                at = at + 1;
+                continue;
+            }
+            break;
+        }
+        String literal = text.substring(start, at);
+        if (literal.isEmpty()) {
+            throw new IllegalStateException("expected a number at offset " + start);
+        }
+        if (fractional) {
+            return Double.valueOf(literal);
+        }
+        return Long.valueOf(literal);
+    }
+
+    // The canonical rendering of a decoded value: the error-message text, and the
+    // comparison `equal` below is defined on it (total, where `==` on an
+    // arbitrary `Object` is not).
+    static String render(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof String text) {
+            StringBuilder built = new StringBuilder("\"");
+            for (int i = 0; i < text.length(); i++) {
+                char ch = text.charAt(i);
+                if (ch == '"' || ch == '\\') {
+                    built.append('\\').append(ch);
+                } else if (ch == '\n') {
+                    built.append("\\n");
+                } else if (ch < 0x20) {
+                    built.append(String.format("\\u%04x", (int) ch));
+                } else {
+                    built.append(ch);
+                }
+            }
+            return built.append('"').toString();
+        }
+        if (value instanceof java.util.List<?> items) {
+            StringBuilder built = new StringBuilder("[");
+            for (int i = 0; i < items.size(); i++) {
+                if (i > 0) {
+                    built.append(',');
+                }
+                built.append(render(items.get(i)));
+            }
+            return built.append(']').toString();
+        }
+        if (value instanceof java.util.Map<?, ?> fields) {
+            StringBuilder built = new StringBuilder("{");
+            boolean first = true;
+            for (java.util.Map.Entry<?, ?> entry : fields.entrySet()) {
+                if (!first) {
+                    built.append(',');
+                }
+                first = false;
+                built.append(render(String.valueOf(entry.getKey())));
+                built.append(':');
+                built.append(render(entry.getValue()));
+            }
+            return built.append('}').toString();
+        }
+        return String.valueOf(value);
+    }
+
+    static boolean equal(Object left, Object right) {
+        return render(left).equals(render(right));
+    }
+
+    static String typeName(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof java.util.List<?>) {
+            return "array";
+        }
+        if (value instanceof java.util.Map<?, ?>) {
+            return "object";
+        }
+        if (value instanceof String) {
+            return "string";
+        }
+        if (value instanceof Boolean) {
+            return "boolean";
+        }
+        if (value instanceof Number) {
+            return "number";
+        }
+        return "unknown";
+    }
+
+    static boolean typeOk(Object value, String jsonType) {
+        if (jsonType.equals("object")) {
+            return value instanceof java.util.Map<?, ?>;
+        }
+        if (jsonType.equals("array")) {
+            return value instanceof java.util.List<?>;
+        }
+        if (jsonType.equals("string")) {
+            return value instanceof String;
+        }
+        if (jsonType.equals("integer")) {
+            if (value instanceof Long) {
+                return true;
+            }
+            if (value instanceof Double fractional) {
+                return !fractional.isNaN() && !fractional.isInfinite()
+                    && fractional.doubleValue() == Math.floor(fractional.doubleValue());
+            }
+            return false;
+        }
+        if (jsonType.equals("number")) {
+            if (value instanceof Long) {
+                return true;
+            }
+            if (value instanceof Double fractional) {
+                return !fractional.isNaN();
+            }
+            return false;
+        }
+        if (jsonType.equals("boolean")) {
+            return value instanceof Boolean;
+        }
+        if (jsonType.equals("null")) {
+            return value == null;
+        }
+        return true;
+    }
+
+    private static java.util.List<Object> asArray(Object value) {
+        if (value instanceof java.util.List<?> items) {
+            java.util.List<Object> copy = new java.util.ArrayList<>();
+            for (Object item : items) {
+                copy.add(item);
+            }
+            return copy;
+        }
+        return new java.util.ArrayList<>();
+    }
+
+    // The FIRST violation of *schema* by *value*, or "" when the value conforms.
+    static String schemaError(Object value, Object schema, String path) {
+        if (!(schema instanceof java.util.Map<?, ?> raw)) {
+            return "";
+        }
+        java.util.Map<String, Object> spec = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<?, ?> entry : raw.entrySet()) {
+            spec.put(String.valueOf(entry.getKey()), entry.getValue());
+        }
+        if (spec.containsKey("const")) {
+            Object want = spec.get("const");
+            if (!equal(value, want)) {
+                return path + ": expected const " + render(want) + ", got " + render(value);
+            }
+            return "";
+        }
+        if (spec.containsKey("enum")) {
+            for (Object arm : asArray(spec.get("enum"))) {
+                if (equal(value, arm)) {
+                    return "";
+                }
+            }
+            return path + ": " + render(value) + " is not one of " + render(spec.get("enum"));
+        }
+        if (spec.containsKey("oneOf")) {
+            int matches = 0;
+            for (Object arm : asArray(spec.get("oneOf"))) {
+                if (schemaError(value, arm, path).isEmpty()) {
+                    matches = matches + 1;
+                }
+            }
+            if (matches == 1) {
+                return "";
+            }
+            if (matches == 0) {
+                return path + ": value matches no arm of the union (a well-formed"
+                    + " value names exactly one constructor)";
+            }
+            return path + ": value is ambiguous, matching " + matches + " union arms";
+        }
+        if (Boolean.TRUE.equals(spec.get("nullable")) && value == null) {
+            return "";
+        }
+        String jsonType = spec.get("type") instanceof String named ? named : "";
+        if (!jsonType.isEmpty() && !typeOk(value, jsonType)) {
+            return path + ": expected type \"" + jsonType + "\", got " + typeName(value);
+        }
+        if (value instanceof java.util.Map<?, ?> fields) {
+            java.util.Map<String, Object> properties = new java.util.LinkedHashMap<>();
+            if (spec.get("properties") instanceof java.util.Map<?, ?> declared) {
+                for (java.util.Map.Entry<?, ?> entry : declared.entrySet()) {
+                    properties.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+            }
+            for (Object required : asArray(spec.get("required"))) {
+                String name = String.valueOf(required);
+                if (!fields.containsKey(name)) {
+                    return path + ": missing required property \"" + name + "\"";
+                }
+            }
+            boolean hasExtra = spec.containsKey("additionalProperties");
+            Object extra = spec.get("additionalProperties");
+            for (java.util.Map.Entry<?, ?> entry : fields.entrySet()) {
+                String name = String.valueOf(entry.getKey());
+                if (properties.containsKey(name)) {
+                    String nested = schemaError(entry.getValue(), properties.get(name),
+                        path + "." + name);
+                    if (!nested.isEmpty()) {
+                        return nested;
+                    }
+                } else if (hasExtra) {
+                    if (extra instanceof Boolean allowed) {
+                        if (!allowed.booleanValue()) {
+                            return path + ": unexpected property \"" + name + "\"";
+                        }
+                    } else if (extra instanceof java.util.Map<?, ?>) {
+                        String nested = schemaError(entry.getValue(), extra,
+                            path + "." + name);
+                        if (!nested.isEmpty()) {
+                            return nested;
+                        }
+                    }
+                }
+            }
+        }
+        if (jsonType.equals("array") && value instanceof java.util.List<?> items
+                && spec.get("items") instanceof java.util.Map<?, ?> element) {
+            for (int i = 0; i < items.size(); i++) {
+                String nested = schemaError(items.get(i), element, path + "[" + i + "]");
+                if (!nested.isEmpty()) {
+                    return nested;
+                }
+            }
+        }
+        return "";
+    }
+}
+
+// The contract half of a typed event (design §6). The dedup memory is a
+// fixed-size LRU of key values, CONSTANT per handler, so it is not the per-item
+// accumulation §4.7 refuses; being bounded also bounds what it claims — a
+// redelivery further apart than the window runs the handler again (a collapse,
+// not a durable exactly-once claim, which needs §4.5).
+public static final class EventContract {
+    private final String name;
+    private final Object schema;
+    private final String key;
+    private final int window;
+    private final java.util.List<Object> seen = new java.util.ArrayList<>();
+
+    // One per handler, built ONCE before the loop — never per delivered item,
+    // which is what keeps the dedup memory constant in the length of the stream.
+    // The schema arrives as its JSON text and is decoded once here.
+    public EventContract(String name, String schemaJson, String key, int window) {
+        this.name = name;
+        this.schema = RevlJson.parse(schemaJson);
+        this.key = key;
+        this.window = window < 1 ? 1 : window;
+    }
+
+    // Check one delivered item against the contract: the decoded object to run
+    // the body on, `null` to collapse a duplicate, and a thrown CordisException
+    // to FAULT on a schema violation. (go spells the three outcomes
+    // `(bool, error)` and rust `Result<bool, _>`; java, like py and ts, raises,
+    // and an uncaught raise out of the iteration boundary fails the activation so
+    // the prefix reverts LIFO with the subscription bracket on it — §6, A8.)
+    //
+    // Validation comes FIRST: the key read below is only sound because the schema
+    // already proved the item is an object carrying that field, so no malformed
+    // item reaches the dedup table (or the body).
+    public synchronized java.util.Map<String, Object> admit(Object item, String where) {
+        if (!(item instanceof String raw)) {
+            throw new CordisException(
+                where + ": event " + name + " item is not a delivered value");
+        }
+        Object decoded;
+        try {
+            decoded = RevlJson.parse(raw);
+        } catch (RuntimeException malformed) {
+            throw new CordisException(
+                where + ": event " + name + " item is not decodable JSON: "
+                + malformed.getMessage());
+        }
+        String violation = RevlJson.schemaError(decoded, schema, "$");
+        if (!violation.isEmpty()) {
+            throw new CordisException(
+                where + ": event " + name + " item failed its schema: " + violation);
+        }
+        java.util.Map<String, Object> fields = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<?, ?> entry
+                : ((java.util.Map<?, ?>) decoded).entrySet()) {
+            fields.put(String.valueOf(entry.getKey()), entry.getValue());
+        }
+        Object identity = fields.get(key);
+        for (int i = 0; i < seen.size(); i++) {
+            if (RevlJson.equal(seen.get(i), identity)) {
+                // move-to-end: most-recently seen.
+                seen.remove(i);
+                seen.add(identity);
+                Stream.record("event." + name + " duplicate");
+                return null;
+            }
+        }
+        seen.add(identity);
+        while (seen.size() > window) {
+            seen.remove(0);
+        }
+        Stream.record("event." + name + " admit");
+        return fields;
+    }
+}'''
+
+
+def _r1_marker_lines(template: str) -> list[str]:
+    """*template* with its `//@R1-INC` / `//@R1-DEC` markers resolved.
+
+    Under a lifecycle test each marker becomes the live-resource counter
+    statement `assert no_residue` reads; otherwise the marker line is dropped.
+    Keeps the marker's own indentation, so the substitution is invisible in the
+    emitted source either way.
+    """
+    out: list[str] = []
+    for line in template.splitlines():
+        stripped = line.strip()
+        if stripped in ("//@R1-INC", "//@R1-DEC"):
+            if not _LIFECYCLE_MODE:
+                continue
+            pad = line[: len(line) - len(line.lstrip())]
+            verb = "increment" if stripped == "//@R1-INC" else "decrement"
+            out.append(f"{pad}REVL_LIVE_HOST_RESOURCES.{verb}AndGet();")
+            continue
+        out.append(line)
+    return out
+
+
+def _emit_stream_runtime() -> list[str]:
+    """The `Stream[T]` provider/consumer runtime (item 130 Slices 1/3/4).
+
+    The java row of design §4.6: this tier ERASES the async color exactly as go
+    and rust do. `next` parks on a lock condition that the cancel flag also
+    signals; `close` trips that flag synchronously from the teardown thread, so
+    the bracket inverse is reachable while a `next` is parked and teardown never
+    waits on the provider (§9 Part A).
+    """
+    return _r1_marker_lines(_STREAM_RUNTIME)
+
+
+def _emit_stream_event_runtime() -> list[str]:
+    """The typed-event contract runtime (item 130 Slice 5, design §6): the
+    derived-schema validator every delivered item passes before the body runs,
+    and the bounded window of admitted keys that collapses a redelivery."""
+    return _STREAM_EVENT_RUNTIME.splitlines()
 
 
 def _emit_map_runtime() -> list[str]:
@@ -3996,1031 +5032,6 @@ def _emit_job_runtime() -> list[str]:
     ]
 
 
-
-# ---------------------------------------------------------------------------
-# item 130 — `Stream[T]`: the java tier's blocking stream runtime.
-#
-# The design's own words for this tier are "a `BlockingQueue.poll` interruptible
-# by the cancel signal", so that is the shape: a bounded queue per subscription,
-# and `close` INTERRUPTS the parked thread instead of parking one thread per
-# subscription. There is no `select` and no async here, so a terminal is not a
-# channel: `Closed` is an ordinary value that ends the loop, and a fault is a
-# thrown `CordisException` that ends the activation — the same "faulted
-# propagates UNCAUGHT" shape every other blocking tier owes (§4.6, §9).
-#
-# Spliced only for a document that opens a stream (`_HOST_STUBS`/`_HOST_ROOTS`
-# carry the dispatch), so a stream-free program keeps its historical bytes.
-# ---------------------------------------------------------------------------
-
-_STREAM_MODE = False
-# True for a document carrying an `on <Event> as <e> in <sub>` handler, which
-# additionally pulls in the schema-and-dedup contract and the JSON reader.
-_STREAM_EVENT_MODE = False
-# Event name -> record field name -> revl type, for the event types a handler
-# names. `e.order_id` is typed through this, so a handler body reads a record
-# field rather than an untyped lookup into the decoded item.
-_STREAM_EVENT_TYPES: dict[str, dict[str, str]] = {}
-
-
-def _document_holds_stream(ir: dict) -> bool:
-    """True when any component body carries a stream step (item 130)."""
-    for comp in ir.get("components") or []:
-        for step in comp.get("body") or []:
-            if step.get("step") == "stream-iter" or step.get("subscribe"):
-                return True
-    return False
-
-
-def _document_holds_stream_event(ir: dict) -> bool:
-    """True when any stream step carries the additive `event` contract."""
-    for comp in ir.get("components") or []:
-        for step in comp.get("body") or []:
-            if step.get("step") == "stream-iter" and step.get("event"):
-                return True
-    return False
-
-
-def _stream_event_types(ir: dict) -> dict[str, dict[str, str]]:
-    """The declared record fields of every event a handler names."""
-    out: dict[str, dict[str, str]] = {}
-    types = ir.get("types") or {}
-    for comp in ir.get("components") or []:
-        for step in comp.get("body") or []:
-            event = step.get("event")
-            if not isinstance(event, dict):
-                continue
-            name = event.get("name")
-            declared = types.get(name)
-            if not name or not isinstance(declared, dict):
-                continue
-            out[name] = dict(declared.get("fields") or {})
-    return out
-
-
-def _stream_event_bind(env: _Env) -> tuple[str, str] | None:
-    """`(bind, event name)` for the component's one event-keyed stream loop."""
-    if env is None or not _STREAM_EVENT_MODE:
-        return None
-    for step in (env.component or {}).get("body") or []:
-        event = step.get("event")
-        if isinstance(event, dict) and step.get("step") == "stream-iter":
-            return step.get("bind"), event.get("name")
-    return None
-
-
-def _stream_field_type(env: _Env, field: str) -> str | None:
-    """The revl type of `<event bind>.<field>`, or None when unresolvable.
-
-    Only the component's own event-keyed loop resolves; anything else falls
-    back to the historical untyped path.
-    """
-    found = _stream_event_bind(env)
-    if found is None:
-        return None
-    _, name = found
-    fields = _STREAM_EVENT_TYPES.get(name) or {}
-    return fields.get(field)
-
-
-def _emit_stream_runtime() -> list[str]:
-    """The java `Stream`/`Subscription` runtime (item 130, the blocking tier)."""
-    return [
-        "// ---- Stream[T] / Subscription — the blocking-tier runtime (item 130) ----",
-        "//",
-        "// The design's own words for this tier are \"a `BlockingQueue.poll`",
-        "// interruptible by the cancel signal\", so that is the shape: a bounded",
-        "// queue per subscription, and `close` INTERRUPTS the parked thread",
-        "// instead of parking one thread per subscription. A `Closed` terminal is",
-        "// an ordinary value that ends the loop; a fault is thrown and propagates",
-        "// uncaught, so the activation fails and the accumulated prefix reverts",
-        "// LIFO with the subscription bracket on it.",
-        "public static final class Stream {",
-        "    // The buffer is bounded, never unbounded: a provider that outruns its",
-        "    // consumer must FAULT under the `error` policy rather than be absorbed",
-        "    // silently, so the overflow is a terminal the program can observe.",
-        "    public static final int BUFFER_CAPACITY = 8;",
-        "    // `Subscription.close`/`terminate` run on the teardown thread, never on",
-        "    // the thread parked in `next`, so the lock guarding the subscriber list",
-        "    // and the terminal lives on the provider and is shared.",
-        "    static final Object LOCK = new Object();",
-        "    // The `Closed` terminal. It is an ORDINARY VALUE, not an error and not a",
-        "    // body item: validating it or handing it to the handler body would be",
-        "    // the silent data invention the design forbids (§4.6).",
-        "    static final Object CLOSED = new Object();",
-        "    private static final java.util.List<Stream> PROVIDERS =",
-        "        java.util.Collections.synchronizedList(new java.util.ArrayList<>());",
-        "    private static final java.util.List<Subscription> SUBSCRIPTIONS =",
-        "        java.util.Collections.synchronizedList(new java.util.ArrayList<>());",
-        "    private final String kind;",
-        "    private final java.util.List<Subscription> subs =",
-        "        java.util.Collections.synchronizedList(new java.util.ArrayList<>());",
-        "    private final java.util.List<Stream> upstream =",
-        "        java.util.Collections.synchronizedList(new java.util.ArrayList<>());",
-        "    // The DOWNSTREAM merges this stream feeds. A `merge(a, b)` is fed by its",
-        "    // sources through this list, so a source that never learns about the",
-        "    // fan-in would leave it permanently empty — the fan-in is DERIVED, and",
-        "    // deriving it is exactly this edge.",
-        "    private final java.util.List<Stream> down =",
-        "        java.util.Collections.synchronizedList(new java.util.ArrayList<>());",
-        "    private volatile int pending;",
-        "    private volatile String state = \"open\";",
-        "    private volatile String faultReason = \"\";",
-        "    private boolean released;",
-        "    private Stream(String kind) {",
-        "        this.kind = kind;",
-        "        PROVIDERS.add(this);",
-        "    }",
-        "    // `Stream.source()` — the one `Stream.*` builtin a program names directly.",
-        "    public static Stream source() {",
-    ] + _r1_lines([
-        "        REVL_LIVE_HOST_RESOURCES.incrementAndGet();",
-    ]) + [
-        "        return new Stream(\"source\");",
-        "    }",
-        "    // `merge(a, b, …)` — a DERIVED stream, not a bracket of its own: the",
-        "    // subscription opened on it owns it, so multi-source teardown rides the",
-        "    // ONE bracket `subscribe` registers.",
-        "    public static Stream merge(Stream... sources) {",
-    ] + _r1_lines([
-        "        REVL_LIVE_HOST_RESOURCES.incrementAndGet();",
-    ]) + [
-        "        Stream merged = new Stream(\"merge\");",
-        "        for (Stream source : sources) {",
-        "            merged.upstream.add(source);",
-        "            merged.pending++;",
-        "            // The DERIVED edge: without it a source's deliveries would never",
-        "            // reach the fan-in and `merge` would park forever.",
-        "            source.attachDown(merged);",
-        "        }",
-        "        return merged;",
-        "    }",
-        "    // The program names a stream as `src.close()`, so this is the revl-facing",
-        "    // inverse. First-only and infallible; `Stream` deliberately does NOT",
-        "    // implement `AutoCloseable`, so there is no overload to confuse it with.",
-        "    public boolean close() {",
-        "        boolean first;",
-        "        java.util.List<Subscription> live;",
-        "        java.util.List<Stream> downs;",
-        "        java.util.List<Stream> ups;",
-        "        synchronized (LOCK) {",
-        "            first = \"open\".equals(state);",
-        "            if (first) {",
-        "                state = \"closed\";",
-        "            }",
-        "            live = new java.util.ArrayList<>(subs);",
-        "            subs.clear();",
-        "            downs = new java.util.ArrayList<>(down);",
-        "            down.clear();",
-        "            ups = new java.util.ArrayList<>(upstream);",
-        "            upstream.clear();",
-        "        }",
-        "        release();",
-        "        if (first) {",
-        "            // Every live subscription hears the terminal BEFORE the upstream",
-        "            // walk: they are this stream's own, and terminating them cannot",
-        "            // depend on how many providers are left to detach.",
-        "            for (Subscription sub : live) {",
-        "                sub.terminate(\"closed\", \"\");",
-        "            }",
-        "            // The fan-out in the other direction: a merge fed by this stream",
-        "            // is over for THIS source, and has to hear it now rather than at",
-        "            // the next delivery that will never come.",
-        "            for (Stream d : downs) {",
-        "                d.upstreamTerminal(\"closed\", \"\");",
-        "            }",
-        "        }",
-        "        // Detach from each upstream and close a DERIVED one, so a nested",
-        "        // fan-in unwinds from its leaves. The sources stay on their own",
-        "        // brackets — that is what keeps the LIFO close order exact.",
-        "        for (Stream up : ups) {",
-        "            up.detachDown(this);",
-        "            if (!\"source\".equals(up.kind)) {",
-        "                up.close();",
-        "            }",
-        "        }",
-        "        return first;",
-        "    }",
-        "    // Attach a DERIVED fan-in to this stream. A source that is ALREADY",
-        "    // terminal hands the terminal over at once: the fan-in was derived from a",
-        "    // stream that is over, and nothing will ever deliver to it again.",
-        "    void attachDown(Stream m) {",
-        "        String reached;",
-        "        String why;",
-        "        synchronized (LOCK) {",
-        "            reached = state;",
-        "            why = faultReason;",
-        "            if (\"open\".equals(reached)) {",
-        "                down.add(m);",
-        "            }",
-        "        }",
-        "        if (!\"open\".equals(reached)) {",
-        "            m.upstreamTerminal(reached, why);",
-        "        }",
-        "    }",
-        "    void detachDown(Stream m) {",
-        "        down.remove(m);",
-        "    }",
-        "    // The abort path. It is reached from `open()` only, so it is the ONE",
-        "    // place that may fault a stream, and it does NOT release the resource",
-        "    // slot: the bracket inverse still has to run.",
-        "    public void fault(String reason) {",
-        "        java.util.List<Subscription> live;",
-        "        java.util.List<Stream> downs;",
-        "        synchronized (LOCK) {",
-        "            if (!\"open\".equals(state)) {",
-        "                return;",
-        "            }",
-        "            state = \"faulted\";",
-        "            faultReason = reason == null || reason.isEmpty() ? \"faulted\" : reason;",
-        "            live = new java.util.ArrayList<>(subs);",
-        "            downs = new java.util.ArrayList<>(down);",
-        "        }",
-        "        for (Subscription sub : live) {",
-        "            sub.terminate(\"faulted\", faultReason);",
-        "        }",
-        "        for (Stream d : downs) {",
-        "            d.upstreamTerminal(\"faulted\", faultReason);",
-        "        }",
-        "        upstreamTerminal(\"faulted\", faultReason);",
-        "    }",
-        "    // Hand `item` to every live subscription, then to every derived fan-in.",
-        "    // Both lists are SNAPSHOT under the lock and the deliveries happen",
-        "    // OUTSIDE it, so a delivery that faults a stream (an overflow) can take",
-        "    // the lock again.",
-        "    //",
-        "    // Public because it is a HARNESS drive point, exactly like `providers()`",
-        "    // and `reset()`: a revl program reaches a stream only through the",
-        "    // `Stream.*` builtins, and the probe that drives a provider from another",
-        "    // thread lives outside this package.",
-        "    public void deliver(Object item) {",
-        "        java.util.List<Subscription> live;",
-        "        java.util.List<Stream> downs;",
-        "        synchronized (LOCK) {",
-        "            live = new java.util.ArrayList<>(subs);",
-        "            downs = new java.util.ArrayList<>(down);",
-        "        }",
-        "        for (Subscription sub : live) {",
-        "            sub.deliver(item);",
-        "        }",
-        "        for (Stream d : downs) {",
-        "            d.deliver(item);",
-        "        }",
-        "    }",
-        "    void detach(Subscription sub) {",
-        "        subs.remove(sub);",
-        "    }",
-        "    // A terminal arriving from upstream. A fault propagates at once; a close",
-        "    // is a COUNT, because a merge with several upstreams is only over when",
-        "    // the last of them is.",
-        "    private void upstreamTerminal(String kind, String reason) {",
-        "        java.util.List<Subscription> live = null;",
-        "        java.util.List<Stream> downs = null;",
-        "        String why = \"\";",
-        "        synchronized (LOCK) {",
-        "            if (!\"open\".equals(state)) {",
-        "                return;",
-        "            }",
-        "            if (\"faulted\".equals(kind)) {",
-        "                state = \"faulted\";",
-        "                faultReason = reason == null || reason.isEmpty() ? \"faulted\" : reason;",
-        "                why = faultReason;",
-        "                live = new java.util.ArrayList<>(subs);",
-        "                downs = new java.util.ArrayList<>(down);",
-        "            } else {",
-        "                pending--;",
-        "                if (pending <= 0) {",
-        "                    state = \"closed\";",
-        "                    live = new java.util.ArrayList<>(subs);",
-        "                    downs = new java.util.ArrayList<>(down);",
-        "                }",
-        "            }",
-        "        }",
-        "        if (live == null) {",
-        "            return;",
-        "        }",
-        "        for (Subscription sub : live) {",
-        "            sub.terminate(kind, why);",
-        "        }",
-        "        // A terminal propagates THROUGH a nested fan-in as well as into it.",
-        "        for (Stream d : downs) {",
-        "            d.upstreamTerminal(kind, why);",
-        "        }",
-        "    }",
-        "    private void release() {",
-        "        synchronized (LOCK) {",
-        "            if (released) {",
-        "                return;",
-        "            }",
-        "            released = true;",
-        "        }",
-    ] + _r1_lines([
-        "        REVL_LIVE_HOST_RESOURCES.decrementAndGet();",
-    ]) + [
-        "    }",
-        "    public static boolean isClosed(Object item) {",
-        "        return item == CLOSED;",
-        "    }",
-        "    // The residue probe: unreleased providers plus live (un-closed)",
-        "    // subscriptions. Zero after a clean unload proves every bracket inverse",
-        "    // ran and no host listener outlived its owner.",
-        "    public static int pending() {",
-        "        int n = 0;",
-        "        for (Stream provider : PROVIDERS) {",
-        "            synchronized (LOCK) {",
-        "                if (!provider.released) {",
-        "                    n++;",
-        "                }",
-        "            }",
-        "        }",
-        "        for (Subscription sub : SUBSCRIPTIONS) {",
-        "            if (!sub.cancelled) {",
-        "                n++;",
-        "            }",
-        "        }",
-        "        return n;",
-        "    }",
-        "    // The harness handle on this document's providers in opening order, so a",
-        "    // scenario can drive one (deliver/close/fault) from ANOTHER thread while",
-        "    // the activation is parked in `next`.",
-        "    public static java.util.List<Stream> providers() {",
-        "        synchronized (PROVIDERS) {",
-        "            return new java.util.ArrayList<>(PROVIDERS);",
-        "        }",
-        "    }",
-        "    public static int liveSubscriptions() {",
-        "        int n = 0;",
-        "        for (Subscription sub : SUBSCRIPTIONS) {",
-        "            if (!sub.cancelled) {",
-        "                n++;",
-        "            }",
-        "        }",
-        "        return n;",
-        "    }",
-        "    // Between scenarios: forget the registry so a residue probe cannot see",
-        "    // the previous run's providers.",
-        "    public static void reset() {",
-        "        PROVIDERS.clear();",
-        "        SUBSCRIPTIONS.clear();",
-        "    }",
-        "}",
-        "",
-        "// The `subscribe` bracket. It is what the program's `undo sub.close()`",
-        "// names, and it is where the whole protocol is owed: a cancellation-first",
-        "// `next`, a terminal that is either an ordinary value or an error, and a",
-        "// `close` that never waits on the provider.",
-        "public static final class Subscription {",
-        "    private static final java.util.concurrent.atomic.AtomicLong SEQ =",
-        "        new java.util.concurrent.atomic.AtomicLong();",
-        "    // The park is a bounded re-poll rather than an indefinite one so that a",
-        "    // cancel that lands without an interrupt is still noticed promptly.",
-        "    private static final long POLL_MILLIS = 50L;",
-        "    final String id = \"sub\" + SEQ.incrementAndGet();",
-        "    private final Stream source;",
-        "    private final String policy;",
-        "    private final java.util.concurrent.ArrayBlockingQueue<Object> items;",
-        "    private final java.util.concurrent.CountDownLatch term =",
-        "        new java.util.concurrent.CountDownLatch(1);",
-        "    private volatile boolean cancelled;",
-        "    private volatile boolean termed;",
-        "    private volatile String kind = \"\";",
-        "    private volatile String reason = \"\";",
-        "    private boolean released;",
-        "    // A parked `next` blocks its thread, and the cancel signal has to reach",
-        "    // it FROM the teardown thread. `interrupt()` is that signal on this tier:",
-        "    // it makes `BlockingQueue.poll` throw, which `next` answers as `Closed`.",
-        "    // Without it a parked activation could never be unloaded — teardown would",
-        "    // have to wait on the provider instead of the provider never blocking it.",
-        "    // It lives HERE, on the subscription, not on the provider: several",
-        "    // subscriptions may park on one source, and a provider-side slot would",
-        "    // let the last parker clobber the thread the first one's teardown needs.",
-        "    private volatile Thread parked;",
-        "    private Subscription(Stream source, String policy, int capacity) {",
-        "        this.source = source;",
-        "        this.policy = policy;",
-        "        // `capacity <= 0` is \"the tier's default\", and there is no unbounded",
-        "        // option: a bounded buffer that overflows under the `error` policy is",
-        "        // a `Faulted(overflow)` terminal — deterministic and observable —",
-        "        // where an unbounded one would silently absorb a runaway provider.",
-        "        this.items = new java.util.concurrent.ArrayBlockingQueue<>(",
-        "            capacity <= 0 ? Stream.BUFFER_CAPACITY : capacity);",
-        "    }",
-        "    // `subscribe <stream> [buffer N]`.",
-        "    static Subscription subscribe(Stream source, String policy, int capacity) {",
-        "        Subscription sub = new Subscription(source, policy, capacity);",
-    ] + _r1_lines([
-        "        REVL_LIVE_HOST_RESOURCES.incrementAndGet();",
-    ]) + [
-        "        source.subs.add(sub);",
-        "        Stream.SUBSCRIPTIONS.add(sub);",
-        "        // A subscription opened on an ALREADY-terminal stream terminates at",
-        "        // once; otherwise `next` would park on a latch nobody will count down.",
-        "        String state = source.state;",
-        "        if (!\"open\".equals(state)) {",
-        "            sub.terminate(state, \"faulted\".equals(state) ? source.faultReason : \"\");",
-        "        }",
-        "        return sub;",
-        "    }",
-        "    // Hand `item` to this subscription's buffer. A full buffer under the",
-        "    // `error` policy FAULTS the stream rather than dropping the item: the",
-        "    // overflow is a terminal the program observes, never a silent loss.",
-        "    void deliver(Object item) {",
-        "        if (cancelled || termed) {",
-        "            return;",
-        "        }",
-        "        if (items.offer(item)) {",
-        "            return;",
-        "        }",
-        "        if (policy.isEmpty() || \"error\".equals(policy)) {",
-        "            terminate(\"faulted\", \"overflow\");",
-        "            return;",
-        "        }",
-        "        throw new CordisException(\"stream buffer overflow under policy \" + policy);",
-        "    }",
-        "    // First terminal wins, so a `close` racing a fault cannot rewrite which",
-        "    // one the parked `next` will report.",
-        "    void terminate(String kind, String reason) {",
-        "        synchronized (this) {",
-        "            if (termed) {",
-        "                return;",
-        "            }",
-        "            termed = true;",
-        "            this.kind = kind;",
-        "            this.reason = reason == null ? \"\" : reason;",
-        "        }",
-        "        term.countDown();",
-        "    }",
-        "    // The bracket inverse: trip the cancel signal, detach the listener,",
-        "    // release the slot. Infallible, idempotent, and it NEVER waits for a",
-        "    // parked `next` to drain — the interrupt is what resolves that park.",
-        "    //",
-        "    // A DERIVED upstream (a `merge(a, b)` fan-in) is owned by this",
-        "    // subscription rather than by a bracket of its own, so closing here",
-        "    // closes it too, and closing a merge is what detaches it from both",
-        "    // sources. The sources stay on their own brackets.",
-        "    public boolean close() {",
-        "        synchronized (this) {",
-        "            if (cancelled) {",
-        "                return false;",
-        "            }",
-        "            cancelled = true;",
-        "        }",
-        "        release();",
-        "        source.detach(this);",
-        "        Thread waiter = parked;",
-        "        if (waiter != null) {",
-        "            waiter.interrupt();",
-        "        }",
-        "        if (!\"source\".equals(source.kind)) {",
-        "            source.close();",
-        "        }",
-        "        return true;",
-        "    }",
-        "    private void release() {",
-        "        synchronized (this) {",
-        "            if (released) {",
-        "                return;",
-        "            }",
-        "            released = true;",
-        "        }",
-    ] + _r1_lines([
-        "        REVL_LIVE_HOST_RESOURCES.decrementAndGet();",
-    ]) + [
-        "    }",
-        "    // The blocking `next` the `every … in` loop is built on.",
-        "    public Object next() {",
-        "        // The cancel signal is checked FIRST, ahead of anything that could",
-        "        // hand back a value: a queue wakes ready waiters in FIFO order, so",
-        "        // an item that arrived before the cancel would otherwise reach a",
-        "        // handler body the teardown has already decided to end.",
-        "        if (cancelled) {",
-        "            return Stream.CLOSED;",
-        "        }",
-        "        Object ready = items.poll();",
-        "        if (ready != null) {",
-        "            return ready;",
-        "        }",
-        "        if (term.getCount() == 0L) {",
-        "            return terminal();",
-        "        }",
-        "        parked = Thread.currentThread();",
-        "        try {",
-        "            while (true) {",
-        "                Object item = items.poll(",
-        "                    POLL_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);",
-        "                if (item != null) {",
-        "                    // A cancel that landed while this item was in flight wins:",
-        "                    // the teardown has already ended the loop.",
-        "                    return cancelled ? Stream.CLOSED : item;",
-        "                }",
-        "                if (cancelled) {",
-        "                    return Stream.CLOSED;",
-        "                }",
-        "                if (term.getCount() == 0L) {",
-        "                    return terminal();",
-        "                }",
-        "            }",
-        "        } catch (InterruptedException cancelledPark) {",
-        "            // `close` interrupted this thread. The interrupt is CONSUMED by",
-        "            // the throw, so it does not leak into whatever the caller does",
-        "            // next, and the park resolves as the ordinary `Closed` value.",
-        "            return Stream.CLOSED;",
-        "        } finally {",
-        "            parked = null;",
-        "        }",
-        "    }",
-        "    // A terminal read as a value: `closed` is the ordinary `Closed`, a fault",
-        "    // is thrown so the activation fails and the prefix reverts LIFO.",
-        "    private Object terminal() {",
-        "        if (\"faulted\".equals(kind)) {",
-        "            throw new CordisException(\"stream faulted: \"",
-        "                + (reason.isEmpty() ? \"faulted\" : reason));",
-        "        }",
-        "        return Stream.CLOSED;",
-        "    }",
-        "}",
-        "",
-    ]
-
-
-def _emit_stream_event_runtime() -> list[str]:
-    """The typed-event schema-and-dedup contract (item 130 Slice 5, §6).
-
-    An event is a `Stream[T]` element with a contract, so this holds exactly the
-    two things events add over the stream protocol: the SCHEMA every delivered
-    item is validated against before the body runs, and the bounded window of
-    recently admitted KEYS that collapses a redelivery. Everything else — the
-    subscription bracket, the cancellation-first `next`, the terminal handling,
-    the LIFO teardown — is the Slice 3/4 machinery, untouched.
-    """
-    return [
-        "// ---- typed events: the schema-and-dedup contract (item 130 Slice 5, §6) ----",
-        "//",
-        "// The provider delivers JSON text, so the schema half needs a reader. This",
-        "// is a small hand-written one over exactly the JSON subset the derived",
-        "// schema describes (objects, arrays, strings, numbers, booleans, null):",
-        "// the tier has no JSON library, and the alternative — reflecting over the",
-        "// emitted record's public fields — would make the contract depend on field",
-        "// ORDER rather than on the declared names.",
-        "public static final class RevlJSON {",
-        "    private RevlJSON() {}",
-        "    public static Object parse(String text) {",
-        "        Reader reader = new Reader(text);",
-        "        Object value = reader.read();",
-        "        reader.end();",
-        "        return value;",
-        "    }",
-        "    public static String render(Object value) {",
-        "        if (value == null) {",
-        "            return \"null\";",
-        "        }",
-        "        if (value instanceof String) {",
-        "            return quote((String) value);",
-        "        }",
-        "        if (value instanceof java.util.List) {",
-        "            StringBuilder out = new StringBuilder(\"[\");",
-        "            java.util.List<?> items = (java.util.List<?>) value;",
-        "            for (int i = 0; i < items.size(); i++) {",
-        "                out.append(i == 0 ? \"\" : \",\").append(render(items.get(i)));",
-        "            }",
-        "            return out.append(\"]\").toString();",
-        "        }",
-        "        if (value instanceof java.util.Map) {",
-        "            StringBuilder out = new StringBuilder(\"{\");",
-        "            boolean first = true;",
-        "            for (java.util.Map.Entry<?, ?> entry",
-        "                    : ((java.util.Map<?, ?>) value).entrySet()) {",
-        "                out.append(first ? \"\" : \",\");",
-        "                first = false;",
-        "                out.append(quote(String.valueOf(entry.getKey())));",
-        "                out.append(\":\").append(render(entry.getValue()));",
-        "            }",
-        "            return out.append(\"}\").toString();",
-        "        }",
-        "        if (value instanceof Double) {",
-        "            double number = (Double) value;",
-        "            if (number == Math.floor(number) && !Double.isInfinite(number)) {",
-        "                return String.valueOf((long) number);",
-        "            }",
-        "            return String.valueOf(number);",
-        "        }",
-        "        return String.valueOf(value);",
-        "    }",
-        "    // The JSON type NAME, which is what the `type` clause reports against.",
-        "    public static String typeName(Object value) {",
-        "        if (value == null) {",
-        "            return \"null\";",
-        "        }",
-        "        if (value instanceof String) {",
-        "            return \"string\";",
-        "        }",
-        "        if (value instanceof Boolean) {",
-        "            return \"boolean\";",
-        "        }",
-        "        if (value instanceof Double) {",
-        "            return \"number\";",
-        "        }",
-        "        if (value instanceof java.util.List) {",
-        "            return \"array\";",
-        "        }",
-        "        return \"object\";",
-        "    }",
-        "    static String quote(String text) {",
-        "        StringBuilder out = new StringBuilder();",
-        "        out.append('\"');",
-        "        for (int i = 0; i < text.length(); i++) {",
-        "            char c = text.charAt(i);",
-        "            if (c == '\"' || c == (char) 92) {",
-        "                out.append((char) 92).append(c);",
-        "            } else if (c == (char) 10) {",
-        "                out.append((char) 92).append('n');",
-        "            } else if (c == (char) 13) {",
-        "                out.append((char) 92).append('r');",
-        "            } else if (c == (char) 9) {",
-        "                out.append((char) 92).append('t');",
-        "            } else {",
-        "                out.append(c);",
-        "            }",
-        "        }",
-        "        return out.append('\"').toString();",
-        "    }",
-        "    // The reader proper. It is a strict subset reader: trailing input, a",
-        "    // truncated value and a bare token are all errors rather than best-effort",
-        "    // parses, because a lenient reader would let a malformed delivery reach",
-        "    // the schema check as a DIFFERENT value than the provider sent.",
-        "    private static final class Reader {",
-        "        private final String text;",
-        "        private int at;",
-        "        Reader(String text) {",
-        "            this.text = text;",
-        "        }",
-        "        Object read() {",
-        "            Object value = value();",
-        "            return value;",
-        "        }",
-        "        void end() {",
-        "            space();",
-        "            if (at != text.length()) {",
-        "                throw new IllegalArgumentException(\"trailing input at \" + at);",
-        "            }",
-        "        }",
-        "        private void space() {",
-        "            while (at < text.length() && Character.isWhitespace(text.charAt(at))) {",
-        "                at++;",
-        "            }",
-        "        }",
-        "        private char peek() {",
-        "            if (at >= text.length()) {",
-        "                throw new IllegalArgumentException(\"unexpected end of input\");",
-        "            }",
-        "            return text.charAt(at);",
-        "        }",
-        "        private void expect(char want) {",
-        "            if (peek() != want) {",
-        "                throw new IllegalArgumentException(\"expected '\" + want + \"' at \" + at);",
-        "            }",
-        "            at++;",
-        "        }",
-        "        private void word(String want) {",
-        "            if (!text.startsWith(want, at)) {",
-        "                throw new IllegalArgumentException(\"expected \" + want + \" at \" + at);",
-        "            }",
-        "            at += want.length();",
-        "        }",
-        "        private Object value() {",
-        "            space();",
-        "            char c = peek();",
-        "            if (c == '{') {",
-        "                return object();",
-        "            }",
-        "            if (c == '[') {",
-        "                return array();",
-        "            }",
-        "            if (c == '\"') {",
-        "                return string();",
-        "            }",
-        "            if (c == 't') {",
-        "                word(\"true\");",
-        "                return Boolean.TRUE;",
-        "            }",
-        "            if (c == 'f') {",
-        "                word(\"false\");",
-        "                return Boolean.FALSE;",
-        "            }",
-        "            if (c == 'n') {",
-        "                word(\"null\");",
-        "                return null;",
-        "            }",
-        "            return number();",
-        "        }",
-        "        private java.util.Map<String, Object> object() {",
-        "            expect('{');",
-        "            java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();",
-        "            space();",
-        "            if (peek() == '}') {",
-        "                at++;",
-        "                return out;",
-        "            }",
-        "            while (true) {",
-        "                space();",
-        "                String key = string();",
-        "                space();",
-        "                expect(':');",
-        "                out.put(key, value());",
-        "                space();",
-        "                char c = peek();",
-        "                if (c == ',') {",
-        "                    at++;",
-        "                    continue;",
-        "                }",
-        "                expect('}');",
-        "                return out;",
-        "            }",
-        "        }",
-        "        private java.util.List<Object> array() {",
-        "            expect('[');",
-        "            java.util.List<Object> out = new java.util.ArrayList<>();",
-        "            space();",
-        "            if (peek() == ']') {",
-        "                at++;",
-        "                return out;",
-        "            }",
-        "            while (true) {",
-        "                out.add(value());",
-        "                space();",
-        "                char c = peek();",
-        "                if (c == ',') {",
-        "                    at++;",
-        "                    continue;",
-        "                }",
-        "                expect(']');",
-        "                return out;",
-        "            }",
-        "        }",
-        "        private String string() {",
-        "            expect('\"');",
-        "            StringBuilder out = new StringBuilder();",
-        "            while (true) {",
-        "                char c = text.charAt(at++);",
-        "                if (c == '\"') {",
-        "                    return out.toString();",
-        "                }",
-        "                if (c != (char) 92) {",
-        "                    out.append(c);",
-        "                    continue;",
-        "                }",
-        "                char esc = text.charAt(at++);",
-        "                if (esc == 'n') {",
-        "                    out.append((char) 10);",
-        "                } else if (esc == 't') {",
-        "                    out.append((char) 9);",
-        "                } else if (esc == 'r') {",
-        "                    out.append((char) 13);",
-        "                } else if (esc == 'b') {",
-        "                    out.append((char) 8);",
-        "                } else if (esc == 'f') {",
-        "                    out.append((char) 12);",
-        "                } else if (esc == 'u') {",
-        "                    out.append((char) Integer.parseInt(text.substring(at, at + 4), 16));",
-        "                    at += 4;",
-        "                } else {",
-        "                    out.append(esc);",
-        "                }",
-        "            }",
-        "        }",
-        "        private Object number() {",
-        "            int start = at;",
-        "            while (at < text.length()",
-        "                    && \"-+.eE0123456789\".indexOf(text.charAt(at)) >= 0) {",
-        "                at++;",
-        "            }",
-        "            if (start == at) {",
-        "                throw new IllegalArgumentException(\"expected a value at \" + at);",
-        "            }",
-        "            return Double.valueOf(text.substring(start, at));",
-        "        }",
-        "    }",
-        "}",
-        "",
-        "// The contract gate: validate the delivered item against the derived",
-        "// schema, then collapse an in-window redelivery of the same key. A schema",
-        "// violation is the SAME shape a `Faulted` from `next` takes — thrown, so",
-        "// the loop returns it uncaught and the prefix reverts LIFO with the",
-        "// subscription bracket on it (§6, A8) — and a duplicate is the `false` the",
-        "// loop `continue`s on.",
-        "public static final class StreamContract {",
-        "    private final String name;",
-        "    private final Object schema;",
-        "    private final String key;",
-        "    private final int window;",
-        "    // The dedup window is a bounded LRU over recently admitted keys:",
-        "    // `LinkedHashMap` with `accessOrder` moves a hit to the tail, so eviction",
-        "    // from the head is exactly 'the key least recently admitted'. It is built",
-        "    // ONCE above the loop, so the window is constant in the length of the",
-        "    // stream — a per-item scan would make the dedup cost grow with it.",
-        "    private final java.util.LinkedHashMap<Object, Boolean> seen =",
-        "        new java.util.LinkedHashMap<>(16, 0.75f, true);",
-        "    public StreamContract(String name, String schema, String key, long window) {",
-        "        this.name = name;",
-        "        this.schema = RevlJSON.parse(schema);",
-        "        this.key = key;",
-        "        this.window = window < 1L ? 1 : (int) window;",
-        "    }",
-        "    public java.util.Map<?, ?> admit(Object item, String where) {",
-        "        // The delivered value is JSON text (the provider's wire form), so it",
-        "        // is decoded once here and the decoded object is handed back to the",
-        "        // caller's record construction — the schema proof and the decode are",
-        "        // then over the SAME value, never two reads of a mutable buffer.",
-        "        Object value = item;",
-        "        if (item instanceof String) {",
-        "            value = RevlJSON.parse((String) item);",
-        "        }",
-        "        // Validation comes FIRST: a duplicate is only a duplicate of a",
-        "        // well-formed value, so a redelivery that also violates the schema",
-        "        // must still fault.",
-        "        String problem = schemaError(schema, value, \"$\");",
-        "        if (problem != null) {",
-        "            throw new CordisException((where.isEmpty() ? \"\" : where + \": \")",
-        "                + \"event \" + name + \" item failed its schema: \" + problem);",
-        "        }",
-        "        java.util.Map<?, ?> fields = value instanceof java.util.Map",
-        "            ? (java.util.Map<?, ?>) value : java.util.Collections.emptyMap();",
-        "        Object id = fields.get(key);",
-        "        if (seen.containsKey(id)) {",
-        "            seen.remove(id);",
-        "            seen.put(id, Boolean.TRUE);",
-        "            return null;",
-        "        }",
-        "        seen.put(id, Boolean.TRUE);",
-        "        while (seen.size() > window) {",
-        "            seen.remove(seen.keySet().iterator().next());",
-        "        }",
-        "        return fields;",
-        "    }",
-        "    // The derived-schema subset py/ts/go share: `const`, `enum`, `oneOf`,",
-        "    // `nullable`, a primitive `type`, then `properties`/`required`/",
-        "    // `additionalProperties` on objects and `items` on arrays. No `$ref`.",
-        "    private static String schemaError(Object schema, Object value, String path) {",
-        "        if (!(schema instanceof java.util.Map)) {",
-        "            return null;",
-        "        }",
-        "        java.util.Map<?, ?> rule = (java.util.Map<?, ?>) schema;",
-        "        if (rule.containsKey(\"const\")",
-        "                && !same(rule.get(\"const\"), value)) {",
-        "            return path + \": expected const \" + RevlJSON.render(rule.get(\"const\"))",
-        "                + \", got \" + RevlJSON.render(value);",
-        "        }",
-        "        if (rule.get(\"enum\") instanceof java.util.List) {",
-        "            boolean found = false;",
-        "            for (Object arm : (java.util.List<?>) rule.get(\"enum\")) {",
-        "                if (same(arm, value)) {",
-        "                    found = true;",
-        "                    break;",
-        "                }",
-        "            }",
-        "            if (!found) {",
-        "                return path + \": \" + RevlJSON.render(value) + \" is not one of \"",
-        "                    + RevlJSON.render(rule.get(\"enum\"));",
-        "            }",
-        "        }",
-        "        if (rule.get(\"oneOf\") instanceof java.util.List) {",
-        "            int matched = 0;",
-        "            for (Object arm : (java.util.List<?>) rule.get(\"oneOf\")) {",
-        "                if (schemaError(arm, value, path) == null) {",
-        "                    matched++;",
-        "                }",
-        "            }",
-        "            if (matched == 0) {",
-        "                return path + \": value matches no arm of the union\"",
-        "                    + \" (a well-formed value names exactly one constructor)\";",
-        "            }",
-        "            if (matched > 1) {",
-        "                return path + \": value is ambiguous, matching \" + matched",
-        "                    + \" union arms\";",
-        "            }",
-        "        }",
-        "        if (Boolean.TRUE.equals(rule.get(\"nullable\")) && value == null) {",
-        "            return null;",
-        "        }",
-        "        Object type = rule.get(\"type\");",
-        "        if (type instanceof String && !typeOk((String) type, value)) {",
-        "            return path + \": expected type \" + RevlJSON.render(type) + \", got \"",
-        "                + RevlJSON.typeName(value);",
-        "        }",
-        "        if (value instanceof java.util.Map) {",
-        "            java.util.Map<?, ?> fields = (java.util.Map<?, ?>) value;",
-        "            if (rule.get(\"required\") instanceof java.util.List) {",
-        "                for (Object name : (java.util.List<?>) rule.get(\"required\")) {",
-        "                    if (!fields.containsKey(String.valueOf(name))) {",
-        "                        return path + \": missing required property \"",
-        "                            + RevlJSON.render(name);",
-        "                    }",
-        "                }",
-        "            }",
-        "            Object extra = rule.get(\"additionalProperties\");",
-        "            java.util.Map<?, ?> properties = rule.get(\"properties\")",
-        "                instanceof java.util.Map ? (java.util.Map<?, ?>) rule.get(\"properties\")",
-        "                : java.util.Collections.emptyMap();",
-        "            for (Object raw : fields.keySet()) {",
-        "                String field = String.valueOf(raw);",
-        "                if (properties.containsKey(field)) {",
-        "                    String problem = schemaError(properties.get(field),",
-        "                        fields.get(field), path + \".\" + field);",
-        "                    if (problem != null) {",
-        "                        return problem;",
-        "                    }",
-        "                } else if (Boolean.FALSE.equals(extra)) {",
-        "                    return path + \": unexpected property \" + RevlJSON.render(field);",
-        "                } else if (extra instanceof java.util.Map) {",
-        "                    String problem = schemaError(extra, fields.get(field),",
-        "                        path + \".\" + field);",
-        "                    if (problem != null) {",
-        "                        return problem;",
-        "                    }",
-        "                }",
-        "            }",
-        "        }",
-        "        if (value instanceof java.util.List && rule.get(\"items\") != null) {",
-        "            java.util.List<?> items = (java.util.List<?>) value;",
-        "            for (int i = 0; i < items.size(); i++) {",
-        "                String problem = schemaError(rule.get(\"items\"), items.get(i),",
-        "                    path + \"[\" + i + \"]\");",
-        "                if (problem != null) {",
-        "                    return problem;",
-        "                }",
-        "            }",
-        "        }",
-        "        return null;",
-        "    }",
-        "    private static boolean typeOk(String type, Object value) {",
-        "        if (\"null\".equals(type)) {",
-        "            return value == null;",
-        "        }",
-        "        if (\"object\".equals(type)) {",
-        "            return value instanceof java.util.Map;",
-        "        }",
-        "        if (\"array\".equals(type)) {",
-        "            return value instanceof java.util.List;",
-        "        }",
-        "        if (\"string\".equals(type)) {",
-        "            return value instanceof String;",
-        "        }",
-        "        if (\"boolean\".equals(type)) {",
-        "            return value instanceof Boolean;",
-        "        }",
-        "        if (\"integer\".equals(type)) {",
-        "            return value instanceof Double && ((Double) value) == Math.floor((Double) value);",
-        "        }",
-        "        if (\"number\".equals(type)) {",
-        "            return value instanceof Double && !((Double) value).isNaN();",
-        "        }",
-        "        return true;",
-        "    }",
-        "    private static boolean same(Object a, Object b) {",
-        "        return a == null ? b == null : a.equals(b);",
-        "    }",
-        "}",
-        "",
-    ]
-
-
-def _emit_stream_event_decode(record: str, bind: str, fields: dict,
-                              source: str, pad: str) -> list[str]:
-    """Decode a validated JSON object into the emitted event record class.
-
-    `source` is the `java.util.Map` the contract's `admit` handed back, so the
-    value being constructed is the SAME value the schema proved — never a
-    second read. The record's fields are public finals set by its all-args
-    constructor in DECLARED order, so the construction is in that order with
-    each value narrowed from its JSON scalar to the field's Java type.
-    """
-    names = list(fields)
-    args = [
-        _json_to_java(f"{source}.get({_string(name)})", fields[name])
-        for name in names
-    ]
-    out = [f"{pad}{record} {bind} = new {record}("]
-    for i, arg in enumerate(args):
-        out.append(f"{pad}    {arg}{',' if i < len(args) - 1 else ''}")
-    out.append(f"{pad});")
-    return out
-
-
-def _json_to_java(access: str, surface: object) -> str:
-    """Narrow a decoded JSON scalar to the Java type of a record field."""
-    java = _java_v3_type(surface, boxed=True)
-    if java == "String":
-        return f"String.valueOf({access})"
-    if java in ("java.lang.Long", "long"):
-        return f"((Number) {access}).longValue()"
-    if java in ("java.lang.Integer", "int"):
-        return f"((Number) {access}).intValue()"
-    if java in ("java.lang.Double", "double"):
-        return f"((Number) {access}).doubleValue()"
-    if java in ("java.lang.Boolean", "boolean"):
-        return f"Boolean.TRUE.equals({access})"
-    return f"({java}) {access}"
-
-
 def _binds(component: dict) -> list[str]:
     return [s["bind"] for s in component.get("body") or [] if s.get("step") == "let-effect"]
 
@@ -5034,9 +5045,10 @@ def _host_of(component: dict, bind: str) -> str:
             # provide-method that captured it can call `.dispose()`.
             if acquire.get("kind") == "spawn":
                 return "RevlSpawnHandle"
-            # item 130: a `subscribe` acquisition binds the subscription
-            # bracket itself — the object whose `next()` the loop parks in and
-            # whose `close()` the bracket inverse names — not a host root.
+            # item 130: a `subscribe` acquisition binds the single-consumer
+            # Subscription whose inverse is `close`. It carries no `fn`, so
+            # without this arm the bind fell back to `Object` and the emitted
+            # `sub.next()`/`sub.close()` named methods `Object` does not have.
             if acquire.get("kind") == "subscribe":
                 return "Subscription"
             return (acquire.get("fn") or "").split(".")[0] or "Object"
@@ -5460,13 +5472,12 @@ def _component_needs_modern(component: dict) -> bool:
             return True
         if step.get("step") in {"if", "fail", "await", "return"}:
             return True
-        # item 130: a `stream-iter` loop is only renderable on the modern path —
-        # it is a java loop over the subscription's `next`, and the legacy
-        # renderer has no arm for it (it would fall through to the setup
-        # renderer). The modern path is also what carries the A8 try/catch
-        # revert tail, which is the half of "a failed handler does not leave a
-        # subscription active" that the uncaught `Faulted` throw relies on.
-        if step.get("step") == "stream-iter":
+        # item 130: a stream-holding component needs the modern path. The legacy
+        # renderer has no `stream-iter` arm at all (it would raise "unsupported
+        # component step"), and a subscription's bracket has to register through
+        # the same `fx`/frame accumulator every other bracket rides so its
+        # `close` is reachable LIFO on teardown.
+        if step.get("step") == "stream-iter" or step.get("subscribe"):
             return True
         # An `emit` carrying a `compensate` MUST take the modern path: the
         # simple renderer emits the emission but silently drops its
@@ -6041,13 +6052,56 @@ def _core_imports(ir: dict) -> list[str]:
     # `bench/codegen/java/cases/router` surfaced.
     if any(component.get("routes") for component in ir.get("components") or []):
         names.add("CordisException")
-    # item 130: the stream runtime throws `CordisException` for a buffer
-    # overflow under a policy that does not fault, and for a `Faulted`
-    # terminal surfacing out of a parked `next` — neither of which is a
-    # `fail` step, so without this arm the emitted unit does not compile.
+    # item 130: the `Stream` runtime's two terminal-bearing paths throw
+    # `CordisException` — a `Faulted` out of `next` and an event-contract schema
+    # violation out of `admit`. Both are how a stream terminal fails the
+    # activation so the prefix reverts LIFO with the subscription bracket on it
+    # (the java spelling of go's error return and rust's `Err`), and a document
+    # can reach them with no `fail` step anywhere.
     if _document_holds_stream(ir):
         names.add("CordisException")
     return [f"import io.cordis4j.core.{name};" for name in sorted(names)]
+
+
+def _document_holds_stream(ir: dict) -> bool:
+    """True when a component in this document holds a stream — a `subscribe`
+    bracket or a `stream-iter` (`every … in` / `on … as`) body step (item 130).
+    Mirrors `backends/go/emit.py::_document_holds_stream`."""
+    for component in ir.get("components") or []:
+        if _body_holds_stream(component.get("body")):
+            return True
+    return False
+
+
+def _body_holds_stream(node) -> bool:
+    if isinstance(node, dict):
+        if node.get("step") == "stream-iter" or node.get("subscribe"):
+            return True
+        return any(_body_holds_stream(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_body_holds_stream(value) for value in node)
+    return False
+
+
+def _document_holds_stream_event(ir: dict) -> bool:
+    """True when some `stream-iter` step carries an `event` contract — the
+    typed-event handler `on <Event> as <e> in <sub>` (item 130 Slice 5). Only
+    such a document pulls in the `EventContract` half of the stream runtime, so
+    a plain `every … in` program emits without it."""
+    for component in ir.get("components") or []:
+        if _body_holds_stream_event(component.get("body")):
+            return True
+    return False
+
+
+def _body_holds_stream_event(node) -> bool:
+    if isinstance(node, dict):
+        if node.get("step") == "stream-iter" and node.get("event"):
+            return True
+        return any(_body_holds_stream_event(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_body_holds_stream_event(value) for value in node)
+    return False
 
 
 def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx,
@@ -6529,112 +6583,6 @@ def _emit_component_stmts(
                     map_values, witnessed, frame_expr,
                 )
             out.append(f"{pad}}}")
-        elif kind == "stream-iter":
-            # item 130 Slice 4: `every <x> in <sub> { … }` on this blocking tier
-            # is a plain java loop over the cancel-signalled `next` (design §4.6,
-            # the java row). It adds NO runtime primitive: `next` and
-            # `Stream.isClosed` are the Slice 1/3 protocol this tier already
-            # lowers. Each turn:
-            #
-            #   * `next` parks in a bounded `poll` that re-checks the cancel
-            #     flag. A `Closed` terminal — an orderly provider close, OR the
-            #     owner's own teardown tripping the cancel signal — is an
-            #     ordinary value that ENDS the loop. It is not an item and never
-            #     enters the body (running the effectful callback on it would be
-            #     the silent-data invention §1 forbids);
-            #   * a `Faulted` terminal is THROWN by `next`, not returned. It is
-            #     NOT caught here: it unwinds the activation method, so the
-            #     accumulated prefix reverts LIFO with the subscription bracket
-            #     on it and the stream is closed. That is the "a failed handler
-            #     does not leave a subscription active" obligation (A8, §4.7),
-            #     delivered by not catching anything.
-            #
-            # The core guarantee (§0) rides the `subscribe` bracket ABOVE the
-            # loop exactly as Slice 1 proved it: unloading the owner trips the
-            # cancel signal, the parked `next` resolves as `Closed`, the loop
-            # exits, and `close` runs on the same LIFO disposer stack — teardown
-            # never waits on the provider (§9 Part A). Nested acquisitions in the
-            # body are refused by the frontend (§4.7), so the body is emissions
-            # only, each rendered through the same path a top-level `emit`
-            # takes. `stream-iter` is deliberately NOT in
-            # `_LOOP_REGISTERING_STEPS`: it is a java loop, not a revl `while`
-            # step, so an `emit` inside it is frame-neutral by construction and
-            # needs no registration (item 379).
-            #
-            # Slice 5's typed-event handler (`on <Event> as <e> in <sub>`) is
-            # THIS loop with one gate added between the terminal test and the
-            # body — the specialization §6 calls for, not a second lowering
-            # (mirrors the py reference `_ComponentEmitter._stream_iter` and the
-            # ts emitter). The contract is built ONCE above the loop, so the
-            # dedup memory is constant in the length of the stream; the gate sits
-            # AFTER the `next` and after the terminal test, so the `Closed` still
-            # ends the loop unvalidated and the iteration boundary the guarantee
-            # rests on does not move. `admit` raises on a schema violation — the
-            # same shape a `Faulted` from `next` takes — which unwinds the
-            # activation and reverts the prefix LIFO with the subscription
-            # bracket on it (§6, A8); a duplicate is the `null` that `continue`s
-            # and pulls the next item. The plain `every … in` carries no `event`
-            # contract and lowers byte-identically to before.
-            global _STREAM_MODE, _STREAM_EVENT_MODE
-            _STREAM_MODE = True
-            n = v3_ctx.next_gensym()
-            itemvar = f"_revlStreamItem{n}"
-            subject = _expr(step["subject"], v3_ctx, None, env)
-            bind = _ident(step.get("bind"), "loop binding")
-            body = step.get("body") or []
-            if not body:  # pragma: no cover — the parser rejects an empty body
-                raise EmitError("an `every … in` body is empty")
-            contract = step.get("event")
-            gate = None
-            if contract is not None:
-                _STREAM_EVENT_MODE = True
-                # name/key stay RAW in the gate (validated, never mangled): the
-                # key indexes the delivered item's raw JSON field and the
-                # schema's properties are keyed the same way, so a mangle would
-                # break the lookup. The event NAME is the emitted record class on
-                # this tier, so it goes through `_ident` to name the record the
-                # item decodes into.
-                ename = _ident(contract.get("name"), "type name")
-                window = contract.get("window")
-                if not isinstance(window, int) or window < 1:
-                    raise EmitError(
-                        f"event {contract.get('name')!r} has a non-positive dedup "
-                        f"window {window!r} — the window is bounded by construction"
-                    )
-                gate = f"_revlEvent{n}"
-                out.append(
-                    f"{pad}StreamContract {gate} = new StreamContract("
-                    f"{_string(contract.get('name'))}, "
-                    f"{_string(json.dumps(contract.get('schema')))}, "
-                    f"{_string(contract.get('key'))}, {window});"
-                )
-            inner = pad + "    "
-            out.append(f"{pad}while (true) {{")
-            out.append(f"{inner}Object {itemvar} = {subject}.next();")
-            out.append(f"{inner}if (Stream.isClosed({itemvar})) {{ break; }}")
-            if gate is not None:
-                fields_var = f"_revlEventFields{n}"
-                where = f"{component.get('name')}: on {contract.get('name')}"
-                out.append(
-                    f"{inner}java.util.Map<?, ?> {fields_var} = "
-                    f"{gate}.admit({itemvar}, {_string(where)});"
-                )
-                out.append(f"{inner}if ({fields_var} == null) {{ continue; }}")
-                out.extend(_emit_stream_event_decode(
-                    ename, bind,
-                    _STREAM_EVENT_TYPES.get(contract.get("name")) or {},
-                    fields_var, inner,
-                ))
-            else:
-                # java stream items are strings on this tier, exactly as the go
-                # reference's buffer is `chan string`, so the delivered `Object`
-                # is recovered as one.
-                out.append(f"{inner}String {bind} = (String) {itemvar};")
-            _emit_component_stmts(
-                component, env, v3_ctx, cname, out, body, inner,
-                map_values, witnessed, frame_expr,
-            )
-            out.append(f"{pad}}}")
         elif kind == "fail":
             message = _expr(step["message"], v3_ctx, None, env)
             out.append(
@@ -6651,12 +6599,176 @@ def _emit_component_stmts(
             return
         elif kind == "await":
             out.append(f"{pad}{_await_join(step['expr'], env, v3_ctx)};")
+        elif kind == "stream-iter":
+            _emit_stream_iter(component, env, v3_ctx, cname, out, step, pad,
+                              map_values, witnessed, frame_expr)
         elif kind == "return":
             raise EmitError("return steps are only allowed inside method bodies")
         else:
             _emit_setup_stmt(env, v3_ctx, step, out, pad)
 
 
+
+
+def _emit_stream_iter(
+    component: dict,
+    env: _Env,
+    v3_ctx: _V3Ctx,
+    cname: str,
+    out: list[str],
+    step: dict,
+    pad: str,
+    map_values: dict[str, str] | None,
+    witnessed: dict[str, dict] | None,
+    frame_expr: str | None,
+) -> None:
+    """item 130 Slice 4/5 — `every <x> in <sub> { … }` and its typed-event
+    specialization `on <Event> as <e> in <sub> { … }` on the cordis4j tier.
+
+    A byte-for-byte semantic mirror of `backends/go/emit.py` and
+    `backends/rust/emit.py`: a plain loop over the cancellation-first `next` the
+    Slice 1/3 protocol already ships, with no new runtime. The three properties
+    the guarantee rests on are each one line:
+
+      * a `Faulted` terminal is the `CordisException` `next` throws. It is NOT
+        caught: it fails the activation, so the accumulated prefix reverts LIFO
+        with the subscription bracket on it and the stream is closed. That is the
+        "a failed handler does not leave a subscription active" obligation (A8,
+        §4.7), delivered by not catching anything. (go returns an `error` and
+        rust an `Err`; java, like py and ts, raises.)
+      * a `Closed` terminal — an orderly provider close, OR the owner's own
+        teardown tripping the cancel flag — is an ordinary value that ENDS the
+        loop. It is not an item and never enters the body.
+      * the item enters the body only after both, on the same
+        LIFO-teardown-reachable bracket Slice 1 proved.
+
+    Slice 5's typed-event handler is THIS loop with ONE gate added between the
+    terminal test and the body — the specialization §6 calls for, not a second
+    lowering. The contract is built ONCE above the loop, so the dedup memory is
+    constant in the length of the stream, and the gate sits AFTER the terminal
+    test, so the `Closed` still ends the loop unvalidated and the iteration
+    boundary does not move. A plain `every … in` carries no `event` contract and
+    lowers exactly as it did before Slice 5.
+    """
+    global _STREAM_ITER_COUNTER
+    _STREAM_ITER_COUNTER += 1
+    n = _STREAM_ITER_COUNTER
+    itemvar = "_revlStreamItem%d" % n
+    subject = _expr(step.get("subject"), v3_ctx, None, env)
+    bind = _ident(step.get("bind"), "loop binding")
+    body = step.get("body") or []
+    if not body:  # pragma: no cover — the parser rejects an empty body
+        raise EmitError("an `every … in` body is empty")
+    contract = step.get("event")
+    gate = None
+    if contract is not None:
+        ename = _ident(contract.get("name"), "event name")
+        window = contract.get("window")
+        if not isinstance(window, int) or window < 1:
+            raise EmitError(
+                "event %r has a non-positive dedup window %r — the window is "
+                "bounded by construction" % (contract.get("name"), window))
+        # The key and the schema property names stay RAW (they index the
+        # delivered item's own JSON), while the event NAME is the emitted record
+        # class the validated item is constructed into.
+        # The java spelling of go's `StreamContract(..)` / rust's
+        # `Stream::contract(..)` / ts's `host.Stream.contract(..)`: one
+        # constructor call, above the loop, once per handler.
+        gate = "_revlEvent%d" % n
+        out.append("%sEventContract %s = new EventContract(%s, %s, %s, %d);" % (
+            pad, gate, _string(contract.get("name")),
+            _string(json.dumps(contract.get("schema"), separators=(",", ":"))),
+            _string(contract.get("key")), window))
+    out.append("%swhile (true) {" % pad)
+    inner = pad + "    "
+    out.append("%sObject %s = %s.next();" % (inner, itemvar, subject))
+    out.append("%sif (Stream.isClosed(%s)) {" % (inner, itemvar))
+    out.append("%s    break;" % inner)
+    out.append("%s}" % inner)
+    if gate is None:
+        # A stream item is a delivered `String` on the blocking tiers (the
+        # host runtime's bounded buffer holds the emitted text), so the
+        # delivered `Object` is recovered as one for the body.
+        out.append("%sString %s = (String) %s;" % (inner, bind, itemvar))
+    else:
+        objvar = "_revlEventObj%d" % n
+        where = "%s: on %s" % (component.get("name"), contract.get("name"))
+        out.append("%sjava.util.Map<String, Object> %s = %s.admit(%s, %s);" % (
+            inner, objvar, gate, itemvar, _string(where)))
+        out.append("%sif (%s == null) {" % (inner, objvar))
+        out.append("%s    continue;" % inner)
+        out.append("%s}" % inner)
+        # The validated item is constructed into the event's record class, so the
+        # body reads `e.<field>` as an ordinary typed field access. `admit`
+        # already proved the shape against the derived schema, so every read
+        # below is sound — the schema is what makes the casts total.
+        fields = ((v3_ctx.types if v3_ctx else {}).get(contract.get("name"))
+                  or {}).get("fields") or {}
+        args = ", ".join(
+            _java_event_field(ftype, "%s.get(%s)" % (objvar, _string(fname)),
+                              v3_ctx, contract.get("name"), fname)
+            for fname, ftype in fields.items())
+        out.append("%s%s %s = new %s(%s);" % (inner, ename, bind, ename, args))
+    _emit_component_stmts(
+        component, env, v3_ctx, cname, out, body, inner,
+        map_values, witnessed, frame_expr,
+    )
+    out.append("%s}" % pad)
+
+
+# The JSON shapes a validated event item arrives as. The derived schema already
+# proved the value's type, so each cast below is total: a `Str` field is a
+# `String`, every `Int`/`Int32`/`Float` a `Number` (the parser hands back a
+# `Long` for an integral literal and a `Double` otherwise), a `Bool` a `Boolean`.
+_EVENT_FIELD_SCALARS = {
+    "Str": "(String) %s",
+    "Int": "((Number) %s).longValue()",
+    "Int32": "((Number) %s).intValue()",
+    "Float": "((Number) %s).doubleValue()",
+    "Bool": "((Boolean) %s).booleanValue()",
+}
+
+
+def _java_event_field(ftype: object, value: str, v3_ctx: _V3Ctx | None,
+                      event: object, field: object) -> str:
+    """One event field, read out of the validated JSON object (item 130 §6).
+
+    go and rust decode the whole item with `encoding/json` / `serde`; the JDK
+    ships no JSON binder, so this tier reads each field by name and constructs
+    the record. Recursive over a nested record and over `List[T]`, because a
+    validated item's shape is exactly what the derived schema describes.
+
+    A field shape this tier cannot read back is REFUSED by name rather than
+    decoded approximately: an event whose handler silently mis-binds a field is
+    the worst outcome available (the body would run on invented data), and §6
+    makes the boundary validation the whole point of a typed event.
+    """
+    if isinstance(ftype, str) and ftype in _EVENT_FIELD_SCALARS:
+        return _EVENT_FIELD_SCALARS[ftype] % value
+    types = (v3_ctx.types if v3_ctx else {}) or {}
+    if isinstance(ftype, str) and ftype.startswith("List[") and ftype.endswith("]"):
+        element = ftype[len("List["):-1]
+        inner = _java_event_field(element, "_revlItem", v3_ctx, event, field)
+        return ("((java.util.List<Object>) %s).stream()"
+                ".map(_revlItem -> %s).toList()" % (value, inner))
+    spec = types.get(ftype) if isinstance(ftype, str) else None
+    if isinstance(spec, dict) and spec.get("kind") == "record":
+        nested = "((java.util.Map<String, Object>) %s)" % value
+        fields = spec.get("fields") or {}
+        args = ", ".join(
+            _java_event_field(t, "%s.get(%s)" % (nested, _string(name)),
+                              v3_ctx, event, name)
+            for name, t in fields.items())
+        return "new %s(%s)" % (_ident(ftype, "event field type"), args)
+    raise EmitError(
+        "event `%s` field `%s` has type `%s`, which the %s tier cannot read "
+        "back out of a validated item: this tier constructs the event record "
+        "field by field (the JDK ships no JSON binder, unlike go's "
+        "`encoding/json` and rust's `serde`), so it covers the scalars, a "
+        "nested record and `List[T]` over those. A union-, `Opt`-, `Map`- or "
+        "`Bytes`-valued event field runs on the py reference tier — try "
+        "`--backend py` (item 130 §6)"
+        % (event, field, ftype, CRATE))
 
 
 def _await_join(node: dict, env: _Env, v3_ctx: _V3Ctx | None = None) -> str:
@@ -7685,25 +7797,16 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
     _refuse_fault_tests(ir)
 
     global _RECORD_MODE, _LIFECYCLE_MODE, _V3_DECLARED_TYPES, _SECRET_MODE
-    global _STREAM_MODE, _STREAM_EVENT_MODE, _STREAM_EVENT_TYPES
+    global _STREAM_ITER_COUNTER
+    _STREAM_ITER_COUNTER = 0
     saved = _RECORD_MODE
     saved_lifecycle = _LIFECYCLE_MODE
     saved_types = _V3_DECLARED_TYPES
     saved_secret = _SECRET_MODE
-    saved_stream = _STREAM_MODE
-    saved_stream_event = _STREAM_EVENT_MODE
-    saved_stream_event_types = _STREAM_EVENT_TYPES
     _RECORD_MODE = record
     _SECRET_MODE = _declares_secret(ir)
     _LIFECYCLE_MODE = any(t.get("lifecycle") for t in (ir.get("tests") or []))
     _V3_DECLARED_TYPES = frozenset(ir.get("types") or {})
-    # item 130: the stream runtime is emitted only for a document that carries a
-    # stream step, so every non-stream document stays byte-identical. The
-    # event-type table is the same channel the `field` expr renderer reads to
-    # type `e.<field>`, so it must be set before any component body is emitted.
-    _STREAM_MODE = _document_holds_stream(ir)
-    _STREAM_EVENT_MODE = _document_holds_stream_event(ir)
-    _STREAM_EVENT_TYPES = _stream_event_types(ir) if _STREAM_EVENT_MODE else {}
     try:
         version = ir.get("ir_version")
         if version == 1:
@@ -7723,9 +7826,6 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
         _LIFECYCLE_MODE = saved_lifecycle
         _V3_DECLARED_TYPES = saved_types
         _SECRET_MODE = saved_secret
-        _STREAM_MODE = saved_stream
-        _STREAM_EVENT_MODE = saved_stream_event
-        _STREAM_EVENT_TYPES = saved_stream_event_types
 
 
 def _main(argv: list[str]) -> int:

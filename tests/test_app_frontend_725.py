@@ -22,14 +22,21 @@ itself, mirroring tests/test_webui_entry_asset_ref_459.py but on the app:
   typed routes through the `revl export client` client (item 457 artifact 5);
 * `revl audit` reports the crossing on `NotesConsole`'s boundary (G1/G8).
 
-The typed reactive-state/RPC `data` projection (design note 530 Decision B, 457
-slice S4 `--face webui`) is the filed gap G3 in the slice-4 note; the REST half
-of the boundary is real and typed today, and this suite guards it.
+The reactive half of the boundary is typed too, and this suite guards it: the
+`data` parameter of `webui.add_entry` carries a declared record of reactive state,
+the RPC surface is the console's declared provision, and
+`revl export client --lang ts --face webui --component NotesConsole` PROJECTS both
+into `contract.ts` (design note 530 Decision B, item 457 slice S4) — so the
+server's published fields and the browser's `useRpc<T>()` type are one
+declaration, the way `notes.client.ts` is one declaration with `NotesApi`. That
+closes the filed gap G3 of docs/design/525-webapp-slice4-frontend.md.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +56,29 @@ SCREEN = FRONTEND / "NotesConsole.vue"
 CONTRACT = FRONTEND / "contract.ts"
 CLIENT = FRONTEND / "notes.client.ts"
 VITE = FRONTEND / "vite.config.ts"
+PKG = FRONTEND / "package.json"
+LOCK = FRONTEND / "package-lock.json"
+HAND_WRITTEN = ("entry.client.ts", "NotesConsole.vue", "contract.ts")
+
+#: `npm ci` in `examples/app/frontend` is what makes the real Vite/Vue toolchain
+#: available; without it the asset-shape assertions above still hold but nothing
+#: can be built or typechecked, so the toolchain legs skip rather than fail. Same
+#: gating shape as the cordis-py legs of tests/test_app_notes_725.py.
+_npm = shutil.which("npm")
+needs_frontend_toolchain = pytest.mark.skipif(
+    _npm is None or not (FRONTEND / "node_modules" / "vite").is_dir(),
+    reason="needs the frontend node toolchain: run "
+           "`npm ci` in examples/app/frontend",
+)
+
+#: The ONE diagnostic the checked-in frontend still carries, recorded as gap G4 in
+#: docs/webapp-competitiveness-report.md: `revl export client` emits
+#: `private readonly transport` on a fully routed client, which the strict
+#: tsconfig (`noUnusedLocals`) reports as unread. It is a generator gap owned by
+#: item 457, not something this app can fix in an asset it regenerates, so it is
+#: filtered by NAME here — if the generator stops emitting it, this test keeps
+#: passing and G4 closes.
+_G4 = "notes.client.ts(66,63): error TS6138"
 
 
 @pytest.fixture(scope="module")
@@ -75,17 +105,48 @@ def test_frontend_asset_files_exist():
 
 def test_console_declares_webui_coeffect(ir):
     """`NotesConsole` declares the coeffect on the ambient WebUI service
-    (`requires webui: WebUI`), provides nothing (the service is host-ambient),
-    and `WebUI` is a declared service — the typed boundary, reviewed surface
-    only."""
+    (`requires webui: WebUI`) plus the `ranking` service its channel reports, and
+    provides the console's RPC surface — the typed boundary, on reviewed surface
+    only (`service` + `requires` + `provides`)."""
     console = next(c for c in ir["components"] if c["name"] == "NotesConsole")
-    assert (console.get("requires") or {}) == {"webui": "WebUI"}
-    assert not (console.get("provides") or {})
+    assert (console.get("requires") or {}) == {
+        "webui": "WebUI", "ranking": "Ranker"}
+    assert (console.get("provides") or {}) == {"console": "NotesConsoleRpc"}
     services = ir.get("services") or []
     names = list(services) if isinstance(services, dict) else [
         s["name"] if isinstance(s, dict) else s for s in services
     ]
     assert "WebUI" in names
+    assert "NotesConsoleRpc" in names
+
+
+def test_add_entry_declares_a_typed_data_channel(ir):
+    """`WebUI.add_entry` takes a `data` parameter whose type is a DECLARED record:
+    the reactive state the entry publishes is typed in revl, not an untyped `T`
+    handed to Cordis (the property design note 526 argues revl adds)."""
+    add_entry = ir["services"]["WebUI"]["methods"]["add_entry"]
+    data = next(p for p in add_entry["params"] if p["name"] == "data")
+    assert data["type"] == "NotesConsoleState"
+    state = ir["types"]["NotesConsoleState"]
+    assert state["kind"] == "record"
+    assert state["fields"] == {"strategy": "Str", "signals": "Int"}
+
+
+def test_the_console_publishes_the_typed_state_it_declares(ir):
+    """The `emit` hands `add_entry` a record built from the ranking service the
+    console requires, so the published fields are the declared ones — the value
+    and the type are the same declaration, not two."""
+    console = next(c for c in ir["components"] if c["name"] == "NotesConsole")
+    emit = next(s for s in console["body"] if s.get("step") == "emit")
+    assert emit["expr"]["method"] == "add_entry"
+    data = emit["expr"]["args"][3]
+    assert data["kind"] == "record"
+    published = {name: value for name, value in data["fields"]}
+    assert set(published) == {"strategy", "signals"}
+    for name, value in published.items():
+        assert value["kind"] == "call"
+        assert value["target"] == {"kind": "req", "name": "ranking"}
+        assert value["method"] == name
 
 
 def test_no_extern_door_for_the_binding(ir):
@@ -99,9 +160,14 @@ def test_no_extern_door_for_the_binding(ir):
 
 def test_emitted_ts_resolves_webui_through_inject(ts):
     """The artifact resolves `webui` through Cordis' own `inject` (the ambient
-    host-provided service), and the activation body reaches it as `ctx.webui`."""
-    assert 'inject: ["webui"]' in ts
+    host-provided service), and the activation body reaches it as `ctx.webui`,
+    passing the typed reactive state as the `data` argument."""
+    assert 'inject: ["webui", "ranking"]' in ts
     assert "ctx.webui.add_entry(" in ts
+    assert "{strategy: ctx.ranking.strategy(), signals: ctx.ranking.signals()}" in ts
+    # the RPC half is the declared provision, registered on the same Context
+    assert 'provide: ["console"]' in ts
+    assert 'ctx.provide("console"' in ts
 
 
 def test_no_globalthis_bridge_in_the_artifact(ts):
@@ -179,15 +245,39 @@ def test_frontend_consumes_the_notes_typed_routes():
     assert regenerated.strip() == client_text.strip()
 
 
-def test_contract_is_the_typed_channel_shared_with_the_client():
+def test_contract_is_projected_from_the_declaration():
     """`contract.ts` is the typed reactive-state/RPC channel `useRpc<T>()` reads,
-    re-exporting the route wire types from the generated client so there is one
-    source of truth (design note 530 Decision B shape; the filed gap G3 is that
-    revl does not yet PROJECT it)."""
+    and it is a GENERATED artifact: `revl export client --lang ts --face webui
+    --component NotesConsole` reproduces the checked-in file byte-for-byte. So the
+    server's published fields and the browser's type are one declaration (design
+    note 530 Decision B, item 457 slice S4), not two hand-kept ones."""
+    from revl.export_client import export_client
+
     text = CONTRACT.read_text(encoding="utf-8")
-    assert "NotesConsoleState" in text
-    assert "NotesConsoleRpc" in text
-    assert "from './notes.client'" in text
+    assert "--face webui" in text.splitlines()[0]
+    assert "readonly strategy: string;" in text
+    assert "readonly signals: number;" in text
+    assert "score(id: string): Promise<number>;" in text
+    assert "bump(id: string): Promise<void>;" in text
+    assert ("export type NotesConsoleChannel = NotesConsoleState & "
+            "NotesConsoleRpc;") in text
+
+    regenerated = export_client(
+        compile_files([str(APP)]), lang="ts", face="webui",
+        component="NotesConsole",
+    )
+    assert regenerated.strip() == text.strip()
+
+
+def test_the_projected_channel_is_what_the_frontend_consumes():
+    """The client extension reads the projected channel with `useRpc<T>()` and the
+    screen calls only its RPC half, so the browser's reachable server surface is
+    exactly the console's declared provision."""
+    entry = ENTRY.read_text(encoding="utf-8")
+    assert "useRpc<NotesConsoleChannel>()" in entry
+    screen = SCREEN.read_text(encoding="utf-8")
+    assert "channel.bump(" in screen
+    assert "channel.score(" in screen
 
 
 def test_vite_build_emits_source_maps_and_manifest():
@@ -210,10 +300,93 @@ def test_audit_surfaces_the_coeffect_boundary(capsys):
     audit = json.loads(capsys.readouterr().out)
     comps = {c["name"]: c for c in audit["manifest"]["components"]}
     assert "NotesConsole" in comps
-    assert comps["NotesConsole"]["inject"] == ["webui"]
-    assert comps["NotesConsole"]["provides"] == []
+    assert sorted(comps["NotesConsole"]["inject"]) == ["ranking", "webui"]
+    assert comps["NotesConsole"]["provides"] == ["console"]
 
     boundary = audit["boundary"]["NotesConsole"]
     assert "webui.add_entry" in boundary["emissions"]
     assert boundary.get("externs") == []
     assert "WebUI" in audit["distributability"]
+
+
+# -- the toolchain really runs: build, source maps, typecheck ----------------
+
+@needs_frontend_toolchain
+def test_the_frontend_really_builds_and_maps_to_the_originals(tmp_path):
+    """459's "source maps pointing at the original files", proven by building
+    rather than by reading `vite.config.ts`: the real Vite build emits a bundle
+    whose map names `entry.client.ts`, `NotesConsole.vue` and `notes.client.ts`,
+    and writes the `.vite/manifest.json` the `webui` coeffect declares as the
+    production entry."""
+    out = tmp_path / "dist"
+    result = subprocess.run(
+        [_npm, "run", "build", "--", "--outDir", str(out)],
+        cwd=FRONTEND, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    manifest = json.loads((out / ".vite" / "manifest.json").read_text("utf-8"))
+    # the manifest is keyed by the SAME path the component names through
+    # `webui.add_entry`, which is how a production host resolves the dev source
+    # to its built asset.
+    assert "entry.client.ts" in manifest
+    assert manifest["entry.client.ts"]["isEntry"] is True
+    bundle = out / manifest["entry.client.ts"]["file"]
+    assert bundle.is_file()
+
+    sources = json.loads((bundle.with_suffix(".js.map")).read_text("utf-8"))["sources"]
+    named = {Path(s).name for s in sources}
+    assert {"entry.client.ts", "NotesConsole.vue", "notes.client.ts"} <= named, sources
+
+
+@needs_frontend_toolchain
+def test_the_frontend_typechecks_against_the_real_cordis_client():
+    """The typed boundary is only typed if it COMPILES against the real
+    `@cordisjs/client` surface, not against a loose local stand-in. `vue-tsc`
+    over the strict tsconfig reports nothing in the hand-written assets; the one
+    remaining diagnostic is the recorded generator gap G4 in the artifact
+    `revl export client` produces."""
+    result = subprocess.run(
+        [_npm, "exec", "--", "vue-tsc", "--noEmit", "-p", "tsconfig.json"],
+        cwd=FRONTEND, capture_output=True, text=True, timeout=900,
+    )
+    out = result.stdout + result.stderr
+    # third-party `.ts` shipped inside node_modules is not this app's contract.
+    ours = [
+        line for line in out.splitlines()
+        if line and not line.startswith(("node_modules", " ", "\t"))
+        and "error TS" in line and not line.startswith(_G4)
+    ]
+    assert ours == [], "\n".join(ours)
+    for asset in HAND_WRITTEN:
+        assert not any(line.startswith(asset) for line in out.splitlines()), out
+
+
+def test_the_frontend_tree_is_pinned_and_the_lockfile_does_not_drift():
+    """Item 461's reproducibility clause for the frontend half of `revl dev`:
+    the command spawns `npm run dev`, so an unpinned tree means the one dev
+    command can break on an upstream release. `package-lock.json` is committed
+    and its root entry declares the SAME ranges as `package.json`, which is what
+    `npm ci` refuses to install past."""
+    pkg = json.loads(PKG.read_text(encoding="utf-8"))
+    lock = json.loads(LOCK.read_text(encoding="utf-8"))
+    root = lock["packages"][""]
+    for field in ("dependencies", "devDependencies"):
+        assert root.get(field, {}) == pkg.get(field, {}), field
+    # `npm ci` needs a v2+ lockfile with a resolved tree, not a bare v1 shim.
+    assert lock["lockfileVersion"] >= 2
+    assert lock["packages"]["node_modules/vite"]["version"].startswith("7.")
+
+
+def test_the_pinned_vite_major_is_one_the_vue_plugin_peers():
+    """The `ERESOLVE` this project used to need `--legacy-peer-deps` for was its
+    own: `@vitejs/plugin-vue@5` peers `vite ^5 || ^6` against a pinned `vite ^7`.
+    Pinning the plugin to a major that peers the pinned Vite is what makes plain
+    `npm ci` resolve, so the pairing is asserted rather than left to a comment."""
+    pkg = json.loads(PKG.read_text(encoding="utf-8"))
+    dev = pkg["devDependencies"]
+    assert dev["vite"].startswith("^7"), dev["vite"]
+    assert dev["@vitejs/plugin-vue"].startswith("^6"), dev["@vitejs/plugin-vue"]
+    lock = json.loads(LOCK.read_text(encoding="utf-8"))
+    peers = lock["packages"]["node_modules/@vitejs/plugin-vue"]["peerDependencies"]
+    assert "^7.0.0" in peers["vite"], peers

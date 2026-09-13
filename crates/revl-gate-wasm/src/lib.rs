@@ -18,13 +18,20 @@
 //! deterministic function of its arguments, and that is provable from the
 //! artifact's import section rather than promised in prose.
 //!
-//! # This gate issues no admissions
+//! # This world issues no admissions
 //!
-//! `admitted` is `false` on every arm, exactly as in the rust crate. The
-//! self-host gate decides the composition/guarantee layer and not the reference
-//! type layer, so its non-refusing arm means *"this gate found nothing it is
-//! able to refuse"* and never *"the reference would admit this"*. See the crate
-//! docs for the measurement behind that.
+//! `admitted` is `false` on every arm, exactly as on the rust crate's VERDICT
+//! surface. The self-host gate decides the composition/guarantee layer and not
+//! the reference type layer, so its non-refusing arm means *"this gate found
+//! nothing it is able to refuse"* and never *"the reference would admit this"*.
+//! See the crate docs for the measurement behind that.
+//!
+//! The crate's separate admission surface (`revl_gate::issue_admission`, issue
+//! #346) is deliberately NOT exported here. It leans on the crate's
+//! `catch_unwind` fail-closed path, and on wasm the panic strategy is `abort`,
+//! so that path does not exist on this target: the one thing an admission arm
+//! must be able to do is refuse to answer, and here it cannot. Giving this
+//! target a fail-closed story for a trap comes first.
 //!
 //! # Panics trap; they do not become verdicts
 //!

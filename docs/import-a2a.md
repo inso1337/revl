@@ -163,7 +163,18 @@ that crossing speaks is the card's own choice:
 
 Both are one crossing, both refuse a redirect and a non-terminal task, both are
 `emission` with no inverse, and both return `Untrusted[Str]`: the wire differs,
-the boundary guarantees do not. gRPC is a binary transport over HTTP/2 with
+the boundary guarantees do not. Both also carry a per-crossing **correlation
+identity** (the JSON-RPC envelope `id` and the `revl.correlation` message
+metadata member, one value), and the JSON-RPC body reads nothing out of a reply
+until it is a JSON object that claims JSON-RPC `2.0` and carries that identity
+back. A reply that does not is a fault, never a value: the card is a claim and so
+is the reply, so an unattributable one is not read as an answer. A compliant A2A
+1.0.0 peer needs to do nothing for this, since JSON-RPC 2.0 already requires the
+response `id` to equal the request's. On the py backend the peer-authored text
+the crossing renders into its own error (an `error.code`, a task `state`, a reply
+`kind`) is scrubbed of the caller's own argument values first, by exact match
+(item 421 F5), so a peer that reflects what it was sent cannot put it back on
+your error channel. gRPC is a binary transport over HTTP/2 with
 protobuf framing — not that crossing — so a card that prefers it is refused
 naming the transport rather than approximated.
 

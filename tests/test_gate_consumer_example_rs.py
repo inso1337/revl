@@ -18,7 +18,7 @@ example is that a consumer must not read it as if it were:
   composition/guarantee layer and runs no type layer at all), and
   **outside-frontier** is a declined decision — the example ESCALATEs on both,
   to the reference toolchain, and never accepts locally;
-* there is no admission arm at all, so `gate_version().frontier` is
+* the verdict surface has no admission arm, so `gate_version().frontier` is
   `selfhost-admit:<hash>`, not py's `reference-full:<language>`, and a verdict
   cached from this tier must never be served to a reader of the other's
   (docs/design/338-revl-as-dependency.md §3, "Frontier skew").
@@ -81,7 +81,8 @@ def test_the_example_depends_on_revl_gate_and_nothing_else():
 
 
 def test_the_example_never_invents_an_acceptance():
-    """The rust gate has no admission arm, so a consumer of it has no local
+    """The rust gate's verdict surface has no admission arm, so a consumer of it
+    has no local
     "accept" decision to make. The example's decisions are REJECT (on a
     refusal) and ESCALATE (on everything else) — a third decision word in the
     source would be exactly the overclaim 338's adversarial review exists to
@@ -350,6 +351,9 @@ def test_the_human_log_says_what_a_non_refusal_means(prefilter):
     assert proc.returncode == 0, proc.stderr
     assert "gate_version: api=1.0.0" in proc.stdout
     assert "frontier=selfhost-admit:" in proc.stdout
-    assert "this crate issues no admissions" in proc.stdout
+    # scoped since issue #346: the crate's VERDICT surface (the one this example
+    # consumes) issues no admissions; its separate admission surface does, inside
+    # a narrow certified region this example deliberately does not ask about.
+    assert "this crate's verdict surface issues no admissions" in proc.stdout
     assert "REJECT" in proc.stdout
     assert "REGISTER" not in proc.stdout

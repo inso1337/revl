@@ -57,7 +57,12 @@ Grounding, so the design lands on real code and does not reinvent machinery.
 - **The crossing walk.** `__main__._boundary(ir)` walks each component body
   (`walk_steps` / `walk_expr`) and collects, per component, a `stats` dict:
   `emissions` (the SET of `key.method` labels), `capabilities` (label ->
-  declared scope list), `compensated`, `awaits`, and the reached `externs`.
+  declared scope list), `compensated` (the SET of those labels carrying a
+  compensating undo, reported as its length so the count is a subset of
+  `emissions` by construction: issue #940, where it was a count of emit STEPS
+  and could exceed the number of labels printed beside it), `awaits`, and the
+  reached `externs`. Compensation on an emitting host extern carries no label
+  and is carried separately.
   This is a SET membership computation - it answers "which boundaries", never
   "how many times". Cardinality adds the count alongside it.
 - **The capability fixed point.** `emission_analysis._emitting_capabilities`
@@ -161,7 +166,7 @@ One line under the existing `capabilities:` line in the `boundary:` detail:
 component Agent  (agent.rvl)
   requires: model, tools
   provides: agent
-  boundary: emissions: model.complete [model], tools.call [tools] (0 compensated);
+  boundary: emissions: model.complete [model], tools.call [tools] (0 of them compensated);
             capabilities: model, tools;
             cardinality: model <= 3 per activation, tools <= 3 per activation
 ```
@@ -169,7 +174,7 @@ component Agent  (agent.rvl)
 Unbounded is loud, on its own clause, never folded into a comma list:
 
 ```
-  boundary: emissions: model.complete [model] (0 compensated);
+  boundary: emissions: model.complete [model] (0 of them compensated);
             capabilities: model;
             cardinality: model UNBOUNDED (recursion through `poll_forever`
             has no decreasing bound)

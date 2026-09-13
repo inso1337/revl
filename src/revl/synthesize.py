@@ -99,7 +99,7 @@ import re
 # The audited authority helpers (items 416f and 421 F4). A peer address is the
 # same class of value an importer's server URL is, so these are reused rather
 # than re-derived.
-from . import a2a_task
+from . import a2a_boundary, a2a_task
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 from .errors import RevlError
 from .import_openapi import _authority_host, _comment_safe
@@ -635,7 +635,6 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
     if rest:
         endpoint = endpoint.rstrip("/") + _HTTPJSON_SEND_PATH
     url = json.dumps(endpoint)
-    oj = json.dumps(op)
     terminal = json.dumps(list(_TERMINAL_STATES))
     policy = py_policy(_A2A, follow=follow_redirects)
     wire = ("HTTP+JSON/REST `POST /v1/message:send`" if rest
@@ -667,7 +666,7 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         '        "role": "user",\n'
         '        "messageId": str(_uuid.uuid4()),\n'
         '        "parts": [_sent_part],\n'
-        f'        "metadata": {{"revl.skill": {oj}}},\n'
+        f'        "metadata": {a2a_boundary.py_metadata(op)},\n'
         '    }')
     if rest:
         payload = f'{{"message": {message_obj}}}'
@@ -677,15 +676,20 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
     else:
         payload = ('{\n'
                    '        "jsonrpc": "2.0",\n'
-                   '        "id": str(_uuid.uuid4()),\n'
+                   '        "id": _corr,\n'
                    '        "method": "message/send",\n'
                    f'        "params": {{"message": {message_obj}}},\n'
                    '    }')
         unwrap = (f"        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) "
                   "as _resp:\n            _rpc = _json.loads(_resp.read())\n")
         error_branch = (
-            '    if _rpc.get("error"):\n'
-            + fault(8, '"a2a: JSON-RPC error %s" % (_rpc["error"].get("code"),)')
+            # Item 439: nothing of the reply is read before the three gates
+            # (`a2a_boundary.py_envelope_gates`) pass, and the peer's own
+            # `error.code` is funnelled (F5) on the way out.
+            a2a_boundary.py_envelope_gates(fault)
+            + '    if _rpc.get("error"):\n'
+            + fault(8, '_scrub("a2a: JSON-RPC error %s"'
+                       ' % (_rpc["error"].get("code"),))')
             + '    _result = _rpc.get("result")\n')
 
     # The one `Part` READ BACK. A text reply joins the text parts; a file reply
@@ -720,10 +724,15 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         if not in_band else "")
     ok = "    return Ok(_value)\n" if in_band else "    return _value\n"
     fault_class = "" if in_band else _transport_fault_class(label, op)
+    # Item 439 (question (2), the fourth layer) and the correlation identity:
+    # both are `a2a_boundary`'s, shared with the four-op wire and the importer
+    # so an external peer cannot be read differently per entry point.
+    funnel = a2a_boundary.py_funnel("_args")
+    correlation = a2a_boundary.py_correlation()
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-{fault_class}    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
+{fault_class}{funnel}{correlation}    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
     # message `Part`; the method name rides as `revl.skill`.
     _message = _args[0]
 {send_prep}    _payload = _json.dumps({payload}).encode()
@@ -736,20 +745,19 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         # redirect is the peer declining to be the declared endpoint at all.
         raise
     except Exception as _exc:
-{transport_fail}{fault(8, '"a2a: transport failure"', cause="_exc")}{error_branch}    if not _result:
-{fault(8, '"a2a: response carried no result"')}    _kind = _result.get("kind")
+{transport_fail}{fault(8, '"a2a: transport failure"', cause="_exc")}{error_branch}{a2a_boundary.py_result_gate(fault)}    _kind = _result.get("kind")
     if _kind == "task":
         _state = (_result.get("status") or {{}}).get("state")
         if _state not in {terminal}:
             # Item 439's open question: a task still in flight is a LIFECYCLE
             # this slice does not express. Fault; never poll, never resume.
-{fault(12, '"a2a: task returned non-terminal state %r - this binding crosses once and does not poll" % (_state,)')}        if _state != "completed":
-{fault(12, '"a2a: task ended %r" % (_state,)')}        _parts = [p for a in (_result.get("artifacts") or [])
+{fault(12, '_scrub("a2a: task returned non-terminal state %r - this binding crosses once and does not poll" % (_state,))')}        if _state != "completed":
+{fault(12, '_scrub("a2a: task ended %r" % (_state,))')}        _parts = [p for a in (_result.get("artifacts") or [])
                   for p in (a.get("parts") or [])]
     elif _kind == "message":
         _parts = _result.get("parts") or []
     else:
-{fault(8, '"a2a: unexpected result kind %r" % (_kind,)')}{extract}{empty_guard}{ok}    """
+{fault(8, '_scrub("a2a: unexpected result kind %r" % (_kind,))')}{extract}{empty_guard}{ok}    """
 
 
 def _check_long_running(is_a2a: bool, is_rest: bool, in_band: bool, *,
