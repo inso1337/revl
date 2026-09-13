@@ -25,11 +25,14 @@ has landed, so this note is not introducing the surface.
 | the `slo` block | landed | `parser._slo_block`, `_slo_value`; registries `SLO_DATUMS`, `SLO_IR_KEYS`, `SLO_BACKED_BY` |
 | the compile-time gate | landed | `composition._slo_ceilings`, `_check_slo_bounds`; `G4`, `category="slo"`; runs on both `resolve` and `fold` |
 | the manifest carrier | landed | `RowTable.slo`, `to_ir()`'s conditional `slo` key, `RowTable.slo_contract()` |
-| the runtime monitor | absent | no producer, no sink |
-| the fallback divert | absent | no fallback vocabulary in the language at all |
-| the safe pause | absent | the phrase occurs only in the roadmap line and the companion note |
-| the SLO receipt | absent | no receipt is attached to a generation today |
-| the `slo` trace event | absent | `why_runtime.SCHEMA_VERSION` is 2, three event kinds |
+| the `on breach` response surface | landed (slice 2) | `parser._slo_response`, `SLO_RESPONSES`, `SLO_DEFAULT_RESPONSE`; `RowTable.slo_responses`, the conditional `slo_on_breach` IR key |
+| the runtime monitor | landed (slice 2) | `slo.observations`, `slo.measure`, `slo.Monitor`; over the recorded trace, not a live loop |
+| the fallback divert | landed (slice 2), narrowed | `slo.admit_divert` re-resolves the row table with the row's `from` pointing at the fallback and re-admits through `composition._admit_full`. It is NOT the standby-row vocabulary of slice 7: the fallback is a provider SOURCE named in the `on breach` clause |
+| the safe pause | landed (slice 2) | `slo.pause`, the E-Stop latch's first move under `verdict: paused`, `resumable: true` |
+| the SLO receipt | landed (slice 2) | `slo.RECEIPT_KIND`, its own domain tag, `slo.verify_receipt`, `slo.attach_generation` |
+| the rollout gate's E4 | landed (slice 2) | `slo.gate_rollout` / `slo.admit_rollout`, `revl slo --gate` |
+| the `slo` trace event | absent | `why_runtime.SCHEMA_VERSION` is 2, three event kinds. Slice 2 reads the events that exist rather than adding a fourth |
+| the producer inside `Session` | absent | nothing calls `Monitor` from a live generation yet; the measurement runs over a RECORDED trace through `revl slo` |
 
 Two of the five datums are gated. `SLO_BACKED_BY` maps `p95_latency` to item
 260's `time` ceiling and `max_pending_tasks` to its `calls` ceiling;
@@ -458,13 +461,26 @@ two backed datums, the `G4` refusal on both composition paths, the conditional I
 key. No runtime monitoring, no receipt, no response. Recorded in the companion
 note; restated here only so the plan reads whole.
 
-**Slice 2: the receipt and the trace vocabulary, with no producer.** The
-`revl.slo-receipt` kind, version and domain tag; the closed verdict set; the
-signing and verification following `erasure_receipt.py`; the fourth event kind
-and the breach cause kind in `why_runtime`, with the `SCHEMA_VERSION` bump. Pure
-vocabulary plus the decision the vocabulary encodes, which is what item 477's
-first slice did, and it means every later producer emits into a shape that is
-already tested and every consumer of the trace already tolerates.
+**Slice 2, landed: the observed half over a recorded trace.** Wider than the
+"vocabulary only" shape this plan first proposed, and the reason is that the
+vocabulary turned out to be checkable against something that already exists.
+`src/revl/slo.py` carries the whole of it: `observations` over the events the
+runtime already records, `measure` producing one closed verdict per declared
+datum, the `on breach` surface and its closed response registry, the dispatch
+(`admit_divert`, `pause`, `halt`), the `revl.slo-receipt` under its own domain
+tag with fail-closed verification and `attach_generation`, and the E4 rollout
+gate (`gate_rollout`). `revl slo` is the operator's door onto all three acts,
+and `tests/test_slo_473.py` pins them.
+
+Three things this slice deliberately does NOT do, so the remaining plan reads
+straight. There is no fourth `why_runtime` event kind and no `SCHEMA_VERSION`
+bump: the measurement reads the three event kinds that exist, which is why
+`p95_latency` is measured from the item-121 model-hop bracket and not from a
+per-call event. There is no producer inside `Session`: nothing calls `Monitor`
+from a live generation, so the measurement runs over a RECORDED trace through
+`revl slo` rather than in flight. And the divert is the narrow one — a provider
+source named in the clause, re-admitted through the ordinary gate — not the
+standby-row vocabulary of slice 7.
 
 **Slice 3: the window, the sample floor and the denominator.** `over`, `min` and
 `of` on an entry, parsed, domain-checked and lowered to the same conditional
@@ -477,16 +493,21 @@ new per-call trace event. Extends `metrics.py`, keeps its degrade discipline, an
 produces a receipt at generation end with `unmeasurable` on the three datums it
 cannot reach. No response is taken.
 
-**Slice 5: the monitor and the response ladder.** The per-datum `on breach`
-clause; the pause as a new lifecycle verdict with its conformance coverage; the
-halt reusing the E-Stop latch unchanged and inheriting its tier honesty. Divert
-is not in this slice.
+**Slice 5: the live producer and the pause as a lifecycle state.** The per-datum
+`on breach` clause and the response dispatch landed with slice 2 over a recorded
+trace; what remains is the IN-FLIGHT half. `Session` has to run the monitor at
+the generation boundary and attach the receipt to its own history entry
+(`slo.attach_generation` is the function it would call), and the pause has to
+become a member of item 460's lifecycle state set with its conformance coverage,
+rather than only a latch record whose `verdict` reads `paused`.
 
-**Slice 6: the rollout gate's remaining halves.** E2 (refuse a bound the
-cardinality verdict already reported unbounded) and E4 (the predecessor's receipt
-as a `revl plan` input, and a `revl canary --promote-to` refusal on a witness).
-Both become honest only once a receipt exists, which is why they follow slice 2
-rather than leading.
+**Slice 6: the rollout gate's remaining halves.** E4 landed with slice 2 as
+`slo.gate_rollout` and `revl slo --gate`, reading a verified predecessor receipt.
+What remains is E2 (refuse a bound the cardinality verdict already reported
+unbounded) and the two CALL SITES: `revl plan` reading the predecessor's receipt
+off the generation history as one of its bases, and `revl canary --promote-to`
+refusing on a recorded witness. The decision is written; wiring it into those two
+verbs is the work.
 
 **Slice 7: the fallback vocabulary and the divert.** A standby row for a key,
 its G2 argument, and the divert as a response. A language change of its own size.
@@ -510,6 +531,16 @@ entry carrying one closed verdict per declared datum, where a `breached` verdict
 on a datum whose composition declared a response has taken that response and the
 receipt names it, and every datum this tree cannot measure reads `unmeasurable`
 with a reason rather than `holding`.
+
+Slice 2 meets the second half over a RECORDED generation and not yet over a live
+one. `revl slo --composition C --trace T --generation N --key K` measures the
+declared contract, dispatches the declared response, and issues a receipt
+`attach_generation` files against generation N; `revl slo --gate` refuses the
+next rollout by name on that receipt. What stays open for the exit statement as
+written is the PRODUCER: `Session` does not yet run the monitor at its own
+generation boundary, so the receipt is attached by the operator's verb rather
+than by the generation that earned it. Everything the producer would call is in
+place and tested (slice 5).
 
 ## Relates to
 

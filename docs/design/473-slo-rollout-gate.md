@@ -178,6 +178,17 @@ whichever one the file order reaches first.
   running generation. The sink does not exist (stale premise 3). This is a
   runtime and an artifact design that deserves its own note; the compile-time
   gate above is the half that stands on its own.
+
+  **SUPERSEDED by slice 2.** `src/revl/slo.py` landed the observed half over a
+  RECORDED trace: the `on breach` response surface, the measurement, the
+  dispatch, the signed `revl.slo-receipt` and the E4 rollout gate, with `revl
+  slo` as the operator's door. The sink was built rather than waited for — it
+  reads the three `why_runtime` event kinds that already exist instead of adding
+  a fourth. What stays open is the LIVE producer (nothing calls the monitor from
+  inside a generation yet) and the standby-row vocabulary a full fallback
+  divert would need. See
+  [473-slo-contracts.md](473-slo-contracts.md), which is the design of record
+  for that half.
 * **`success_rate`, `recovery_time` and `approval_wait` are parsed, carried
   and printed, but never gated**, because nothing in the tree declares a value
   they could be compared against (stale premise 2). They are in the vocabulary
