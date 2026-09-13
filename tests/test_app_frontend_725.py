@@ -35,6 +35,7 @@ closes the filed gap G3 of docs/design/525-webapp-slice4-frontend.md.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -62,23 +63,32 @@ HAND_WRITTEN = ("entry.client.ts", "NotesConsole.vue", "contract.ts")
 
 #: `npm ci` in `examples/app/frontend` is what makes the real Vite/Vue toolchain
 #: available; without it the asset-shape assertions above still hold but nothing
-#: can be built or typechecked, so the toolchain legs skip rather than fail. Same
-#: gating shape as the cordis-py legs of tests/test_app_notes_725.py.
+#: can be built or typechecked, so the toolchain legs skip rather than fail on a
+#: contributor's machine. Same gating shape as the cordis-py legs of
+#: tests/test_app_notes_725.py.
+#:
+#: A SKIP is the right answer locally and the wrong one in the job that exists to
+#: run these legs: gap G5 (docs/webapp-competitiveness-report.md) is exactly "no
+#: CI leg builds or typechecks the frontend", and a leg that quietly skips there
+#: reopens it without anyone seeing a red. `REVL_REQUIRE_FRONTEND_TOOLCHAIN=1`
+#: turns the skip off, so in the `frontend-assets` job the legs always execute
+#: and a missing toolchain is a FAILURE naming what to install.
 _npm = shutil.which("npm")
+_REQUIRE_TOOLCHAIN = os.environ.get("REVL_REQUIRE_FRONTEND_TOOLCHAIN") == "1"
+_HAVE_TOOLCHAIN = _npm is not None and (FRONTEND / "node_modules" / "vite").is_dir()
 needs_frontend_toolchain = pytest.mark.skipif(
-    _npm is None or not (FRONTEND / "node_modules" / "vite").is_dir(),
+    not _HAVE_TOOLCHAIN and not _REQUIRE_TOOLCHAIN,
     reason="needs the frontend node toolchain: run "
            "`npm ci` in examples/app/frontend",
 )
 
-#: The ONE diagnostic the checked-in frontend still carries, recorded as gap G4 in
-#: docs/webapp-competitiveness-report.md: `revl export client` emits
-#: `private readonly transport` on a fully routed client, which the strict
-#: tsconfig (`noUnusedLocals`) reports as unread. It is a generator gap owned by
-#: item 457, not something this app can fix in an asset it regenerates, so it is
-#: filtered by NAME here — if the generator stops emitting it, this test keeps
-#: passing and G4 closes.
-_G4 = "notes.client.ts(66,63): error TS6138"
+#: Gap G4 (docs/webapp-competitiveness-report.md) was the one diagnostic the
+#: checked-in frontend still carried: `revl export client` declared a
+#: `private readonly transport` on a FULLY routed client, which nothing reads and
+#: the strict tsconfig (`noUnusedLocals`) reported as `notes.client.ts error
+#: TS6138`. The generator no longer emits it (`src/revl/export_client.py`
+#: `_service_block`), so there is no filtered-by-name exemption here any more and
+#: the typecheck leg below asserts ZERO first-party diagnostics.
 
 
 @pytest.fixture(scope="module")
@@ -312,6 +322,24 @@ def test_audit_surfaces_the_coeffect_boundary(capsys):
 # -- the toolchain really runs: build, source maps, typecheck ----------------
 
 @needs_frontend_toolchain
+def test_the_frontend_toolchain_is_really_installed():
+    """Anti-vacuity for the two legs below, and the whole of gap G5: they are the
+    only things in this repo that COMPILE the frontend, and a skip reads exactly
+    like a pass in a job summary. Under `REVL_REQUIRE_FRONTEND_TOOLCHAIN=1` — the
+    `frontend-assets` CI job — the skip is off, so this fails and names the
+    missing half instead of the legs silently not running."""
+    assert _npm is not None, (
+        "npm is not on PATH, so the frontend cannot be built or typechecked. "
+        "The `frontend-assets` job pins node with actions/setup-node."
+    )
+    assert (FRONTEND / "node_modules" / "vite").is_dir(), (
+        "examples/app/frontend/node_modules is cold: run `npm ci` there. "
+        "Without it vue-tsc and vite are absent and the two legs below measure "
+        "nothing (docs/webapp-competitiveness-report.md gap G5)."
+    )
+
+
+@needs_frontend_toolchain
 def test_the_frontend_really_builds_and_maps_to_the_originals(tmp_path):
     """459's "source maps pointing at the original files", proven by building
     rather than by reading `vite.config.ts`: the real Vite build emits a bundle
@@ -343,22 +371,27 @@ def test_the_frontend_really_builds_and_maps_to_the_originals(tmp_path):
 def test_the_frontend_typechecks_against_the_real_cordis_client():
     """The typed boundary is only typed if it COMPILES against the real
     `@cordisjs/client` surface, not against a loose local stand-in. `vue-tsc`
-    over the strict tsconfig reports nothing in the hand-written assets; the one
-    remaining diagnostic is the recorded generator gap G4 in the artifact
-    `revl export client` produces."""
+    over the strict tsconfig reports NOTHING in any first-party file of this
+    project — the hand-written assets and the generated ones alike. Gap G4 was
+    the single exemption this assertion used to carry; it is closed, so the
+    assertion is now unconditional and a reintroduced diagnostic in a generated
+    artifact reds here."""
     result = subprocess.run(
         [_npm, "exec", "--", "vue-tsc", "--noEmit", "-p", "tsconfig.json"],
         cwd=FRONTEND, capture_output=True, text=True, timeout=900,
     )
     out = result.stdout + result.stderr
-    # third-party `.ts` shipped inside node_modules is not this app's contract.
+    # third-party `.ts` shipped inside node_modules is not this app's contract:
+    # `@cordisjs/client` resolves its `.` export to raw source (`client/index.ts`),
+    # which `skipLibCheck` cannot skip because it is not a `.d.ts`, and this
+    # project does not own that package's strictness.
     ours = [
         line for line in out.splitlines()
         if line and not line.startswith(("node_modules", " ", "\t"))
-        and "error TS" in line and not line.startswith(_G4)
+        and "error TS" in line
     ]
     assert ours == [], "\n".join(ours)
-    for asset in HAND_WRITTEN:
+    for asset in (*HAND_WRITTEN, "notes.client.ts"):
         assert not any(line.startswith(asset) for line in out.splitlines()), out
 
 

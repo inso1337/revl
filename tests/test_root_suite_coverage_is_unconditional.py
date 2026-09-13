@@ -72,10 +72,20 @@ JOB = "root-suite-affected"
 # bootstraps the root itself, so it cannot fail this way and it costs ~36s.
 _ROOT_IMPORT_PROBE = "tests/test_274_navigable_slice2.py"
 
-# The only jobs allowed to carry the fast-path routing condition. A new
-# `needs.changes.outputs.frontend` gate outside this pair would be a new
-# conditional root-suite runner, which is the shape #854 exists to remove.
+# The jobs that run the WHOLE root suite (`pytest tests/`) behind the fast-path
+# routing condition. A new `needs.changes.outputs.frontend` gate on another
+# root-suite runner would be the shape #854 exists to remove.
 MATRIX_JOBS = ("frontend", "frontend-cordis")
+
+# Every job allowed to carry the fast-path routing condition at all: the matrix
+# pair above, plus `frontend-assets`. That job installs the exemplary app's node
+# tree and compiles the frontend (gap G5 of docs/webapp-competitiveness-report.md,
+# roadmap item 459), and it runs two NAMED root-suite files rather than
+# `pytest tests/` — so it is not a root-suite runner and is deliberately not in
+# MATRIX_JOBS above. It carries the gate for the same reason the matrix does, to
+# keep an `npm ci` off documentation-only pull requests, and it is re-costed here
+# rather than inheriting the pin silently.
+FAST_PATH_JOBS = MATRIX_JOBS + ("frontend-assets",)
 
 # The real change set of PR #850 (`e6067cd1`), the merge that put `main` red
 # because the root suite was skipped. `backends/python/emit.py` is the reference
@@ -889,15 +899,15 @@ def test_a_documentation_only_diff_does_not_pay_for_the_matrix():
 
 def test_the_matrix_jobs_are_still_routed_on_the_fast_path():
     """The companion to the test above: the matrix is still gated, and only the
-    matrix jobs carry that gate. The 3-version matrix stays expensive, which is
-    why the ungated job below exists rather than the gate being removed."""
+    enumerated jobs carry that gate. The 3-version matrix stays expensive, which
+    is why the ungated job below exists rather than the gate being removed."""
     jobs = _jobs()
     routed = {j for j, spec in jobs.items() if _routed_on_the_fast_path(spec)}
-    assert routed == set(MATRIX_JOBS), (
+    assert routed == set(FAST_PATH_JOBS), (
         f"the jobs gated on needs.changes.outputs.frontend are {sorted(routed)}, "
-        f"not {sorted(MATRIX_JOBS)}. Removing that gate would put the 3-version "
-        "matrix plus cordis-py on documentation-only pull requests; if that is "
-        "now the intent, change this pin deliberately and re-cost it."
+        f"not {sorted(FAST_PATH_JOBS)}. Removing that gate would put the "
+        "3-version matrix plus cordis-py on documentation-only pull requests; "
+        "if that is now the intent, change this pin deliberately and re-cost it."
     )
     assert JOB not in routed, (
         f"{JOB} is routed on the fast-path filter, which is the bug #854 fixes"
