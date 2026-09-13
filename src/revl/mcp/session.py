@@ -4457,11 +4457,37 @@ class Session:
                 record["remainingUses"] = release["remainingUses"]
         plan.clear()
 
+    def _persist_auto_spend(self, entry: dict) -> None:
+        """Write a distilled rule's post-spend counters back into `_auto_spend`,
+        the budget's PERSISTENT home (`_install_auto_approve_rules` re-reads it on
+        every generation). BOTH spend paths must call this: the per-call one
+        (`_consume_auto_rule`) and the activation gate's two-phase one
+        (`_reserve_spend` then `_commit_spends`).
+
+        The reason is that `_auto_rules` is DERIVED state, rebuilt from
+        `_auto_spend` on every materialization, while `_ledger` and `_grants`,
+        the other two arms of the same two-phase path, are durable. A spend that
+        only mutates the derived entry is discarded by the next
+        re-materialization, which re-arms a rule the operator had exhausted: the
+        `approval-consumed` record is durable while the counter it records is
+        not. That is the item-498 defect, and the activation path was the arm the
+        item-498 fix did not reach."""
+        spend = self._auto_spend.get(entry.get("key"))
+        if spend is not None:
+            spend["remainingUses"] = entry["remainingUses"]
+            spend["consumed"] = entry["consumed"]
+
     def _commit_spends(self, plan: list, spent_out: list | None = None) -> None:
         """Make every reservation in `plan` real: the durable `approval-consumed`
         record and the spend counters the one-shot `_consume_*` helpers write.
         Called only once the walk has cleared, and still before any crossing
         fires, so consume-before-fire holds for each spend in the set.
+
+        The counters are the ones the reservation already applied IN PLACE, so
+        every arm has to land on the structure that outlives the generation:
+        `_ledger` (`approval`) and `_grants` (`grant`) are durable, but
+        `_auto_rules` is derived, so the `auto` arm persists through
+        `_persist_auto_spend` exactly as the per-call path does.
 
         `spent_out` (design 460 §2.1, additive out-param) is filled in place with
         the `requestId` of every spend this call committed, so `_wire_turn` can
@@ -4474,6 +4500,7 @@ class Session:
                 self._grants_consumed += 1
             elif release["kind"] == "auto":
                 self._auto_consumed += 1
+                self._persist_auto_spend(record)
             if wal is not None:
                 wal.record_approval_consumed(record["requestId"])
             if release["kind"] == "approval":
@@ -6212,19 +6239,18 @@ class Session:
 
         The decremented counter is written back into `_auto_spend`, the budget's
         persistent home, so the next generation's re-materialization carries the
-        spend forward instead of renewing it. Without that write-back the
-        `approval-consumed` record is durable while the counter it records is not,
-        and any swap (or `rollback`/`undo`, which route through it) re-arms a rule
-        the operator had exhausted."""
+        spend forward instead of renewing it (`_persist_auto_spend`, which the
+        activation gate's two-phase path also calls -- one writer, so the two
+        paths cannot drift). Without that write-back the `approval-consumed`
+        record is durable while the counter it records is not, and any swap (or
+        `rollback`/`undo`, which route through it) re-arms a rule the operator
+        had exhausted."""
         remaining = entry.get("remainingUses")
         if remaining is not None:
             entry["remainingUses"] = remaining - 1
             if entry["remainingUses"] <= 0:
                 entry["consumed"] = True
-        spend = self._auto_spend.get(entry.get("key"))
-        if spend is not None:
-            spend["remainingUses"] = entry["remainingUses"]
-            spend["consumed"] = entry["consumed"]
+        self._persist_auto_spend(entry)
         self._auto_consumed += 1
         wal = self._approval_wal()
         if wal is not None:
