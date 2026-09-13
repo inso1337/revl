@@ -193,13 +193,19 @@ export default defineConfig({
 `external: ['vue', '@cordisjs/client']` is deliberate: Cordis WebUI provides Vue
 at runtime, so the frontend must not bundle a second copy.
 
-**The `npm install` trap.** The example app declares `vite ^7` while
-`@vitejs/plugin-vue@5.x` peers on `vite ^5 || ^6`, so a plain `npm install`
-stops at `ERESOLVE`. Install with:
+**Installing it.** The dependency set resolves without a peer-deps escape
+hatch, and `package-lock.json` is committed, so a contributor gets the exact tree
+the app was built against:
 
 ```bash
-npm install --legacy-peer-deps
+npm ci          # from the committed lockfile
+npm run typecheck   # vue-tsc over the strict tsconfig
+npm run build       # the source-mapped bundle + .vite/manifest.json
 ```
+
+Keep `@vitejs/plugin-vue` on a major that peers the pinned `vite`: `plugin-vue@5`
+peers `vite ^5 || ^6`, so pairing it with `vite ^7` is the `ERESOLVE` this project
+used to require `--legacy-peer-deps` for.
 
 See [`examples/app/frontend/`](../examples/app/frontend/) for a working project
 (`NotesConsole.vue`, `contract.ts`, `entry.client.ts`, `notes.client.ts`,
