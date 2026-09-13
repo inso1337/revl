@@ -24,7 +24,7 @@ Grammar (v0 subset — see DESIGN.md §3):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import contextlib
 import re
@@ -153,6 +153,11 @@ class MethodDecl:
     # scalar / query / body) and the IR entry are derived in lower, next to the
     # sibling `validated` schema derivation, where the `types` table is in scope.
     route: dict | None = None
+    # roadmap item 470 (docs/design/470-intent-refinement.md): the `within { … }`
+    # trailing clause — the intent this operation DECLARES. `None` unless the
+    # operation declares one, so every existing method's IR is byte-identical
+    # (the check it arms lives entirely in lower, keyed off this field).
+    within: "WithinClause | None" = None
 
 
 @dataclass
@@ -183,6 +188,49 @@ class CacheClause:
     cls: str
     invalidated_by: tuple[str, ...]
     ttl_ms: int | None
+    line: int
+
+
+@dataclass
+class WithinClause:
+    """`within { … }` on a service operation — the intent it DECLARES (roadmap
+    item 470, docs/design/470-intent-refinement.md §4 stage 1).
+
+    The declaration side of the refinement check: `intent` is the ready
+    `intent.Intent` the kernel compares against, and `line` is where the clause
+    was written, so a refusal can point at the declaration it violated rather
+    than only naming the dimension. The parser builds the record (the
+    capability spelling goes through `_capability_params`, so `object` and
+    `related` are validated by `cap_order`'s one canonical point), and
+    `intent.Intent.from_cap` splits the ceilings off; every other validity rule
+    (no ceiling parameter on an object, a scope name that collides with a
+    registered capability parameter) is the kernel's own and is re-raised here
+    as a parse error with this line.
+    """
+    intent: object          # intent.Intent
+    line: int
+
+
+@dataclass
+class ActingClause:
+    """`acting { … }` on an `emit` step — what one crossing ACTUALLY does.
+
+    The action side of the refinement check. It states only the three dimensions
+    a capability spelling cannot: the verb, the tenant, and the set-valued
+    scopes. The OBJECT and the AMOUNT are read off the crossing's own capability
+    spelling through `intent.Action.from_cap` — the typed link design §2 names,
+    so one spelling read as an intent and read as an action is the identity
+    refinement and the two sides cannot drift.
+
+    `tenant` is `None` when the author writes no `tenant:` field, which is the
+    kernel's STATED absence, not a default: against an intent that states a
+    tenant it is refused (fail closed), and against an intent that states none it
+    constrains nothing. `scopes` is the empty declaration when omitted, and an
+    action that reaches members in a scope the intent never bounded is refused.
+    """
+    verb: str
+    tenant: str | None
+    scopes: tuple            # ((name, frozenset[str]), …), sorted by name
     line: int
 
 
@@ -504,6 +552,11 @@ class EmitStmt:
     # Kept last so the positional `EmitStmt(expr, line, compensate, approval)`
     # construction is unchanged.
     is_async: bool = False
+    # roadmap item 470: the optional `acting { … }` trailing clause — what this
+    # crossing actually does, stated by the author. `None` unless the author
+    # writes one, so every existing emit's IR is byte-identical (the check it
+    # arms lives entirely in lower, keyed off this field).
+    acting: "ActingClause | None" = None
 
 
 @dataclass
@@ -914,6 +967,29 @@ SLO_IR_KEYS: dict[str, str] = {
     "max_pending_tasks": "max_pending_tasks",
 }
 
+# The inverse of `SLO_IR_KEYS`, so a consumer reading the IR can get back to the
+# datum the source declared. It is derived rather than written out, which is
+# what keeps the two spellings from drifting apart; a reader that only ever
+# saw the unit-bearing key would otherwise have to re-derive the mapping and
+# could re-derive it differently (item 473, observed half).
+SLO_SOURCE_NAMES: dict[str, str] = {v: k for k, v in SLO_IR_KEYS.items()}
+
+
+def slo_datum(key: str) -> str | None:
+    """The source datum name for `key`, which may be spelled either way: the
+    surface name (`p95_latency`) or the unit-bearing IR key (`p95_latency_ms`).
+    `None` for a name in neither registry.
+
+    One door, because the two halves of item 473 read the contract from two
+    places — the compile-time gate from `CompositionDecl.slo` (surface names)
+    and the observed half from the IR document (IR keys) — and a measurement
+    that silently failed to recognise a datum would report `unmeasurable` for
+    an objective the runtime can in fact measure. That is the fail-open the
+    observed half exists to prevent, so the lookup is shared."""
+    if key in SLO_DATUMS:
+        return key
+    return SLO_SOURCE_NAMES.get(key)
+
 # The ceiling parameter (item 260, section 3.1) each gateable datum is BACKED
 # by. A datum absent from this map has no declaration-owned bound in this language# version, so it is admitted as a contract the runtime must measure and is not
 # statically gated. See `composition._check_slo_bounds`.
@@ -921,6 +997,45 @@ SLO_BACKED_BY: dict[str, str] = {
     "p95_latency": "time",
     "max_pending_tasks": "calls",
 }
+
+# The DIRECTION each datum is a bound in (item 473, observed half). A duration
+# or a task count is an UPPER bound, so an observation ABOVE the target breaches
+# it; a rate is a LOWER bound, so an observation BELOW the target breaches it.
+# The direction is a property of the datum, not of the surface, which is why it
+# lives here beside the registry rather than being written per declaration:
+# `success_rate: 99.5` has one meaning and it is not "at most 99.5 percent".
+SLO_DIRECTION: dict[str, str] = {
+    "p95_latency": "upper",
+    "success_rate": "lower",
+    "recovery_time": "upper",
+    "approval_wait": "upper",
+    "max_pending_tasks": "upper",
+}
+
+# The RESPONSE a live breach of a datum triggers (`on breach <response>`), a
+# CLOSED registry like the datums themselves. The value says whether the
+# response takes a fallback provider source: `divert` switches the breaching
+# component to another provider, so it names one; `pause` and `halt` are
+# responses to the run, so they take no argument. The escalation order is by
+# RESIDUE COST (docs/design/473-slo-contracts.md): divert leaves none, a pause
+# owes everything it registered and is still recoverable, a halt strands.
+SLO_RESPONSES: dict[str, bool] = {
+    "divert": True,
+    "pause": False,
+    "halt": False,
+}
+
+# What a live breach triggers when the datum declares no `on breach` clause.
+#
+# `pause`, not "record a receipt and carry on": a breach that changes nothing is
+# not a contract, and the exit criterion for item 473 is that a live breach
+# "triggers the declared fallback or pause". Of the three responses `pause` is
+# the one whose cost is bounded and whose residue is honest — no new boundary
+# crossing is dispatched and everything registered is still owed and
+# recoverable — so it is the safe floor a declaration that named no response
+# gets. A composition that wants less must SAY so, and the vocabulary has no
+# "ignore" to say it with.
+SLO_DEFAULT_RESPONSE: str = "pause"
 
 
 @dataclass
@@ -955,12 +1070,26 @@ class CompositionDecl:
     # lists in a file, which is what makes the fold reproducible (§3.3).
     stack: list[tuple[str, int]] = field(default_factory=list)
     site: tuple[str, int] | None = None
-    # item 473 (issue #825): the declared SLO contract, as `(datum, canonical
-    # value, line)` in declaration order, the canonical value being milliseconds
-    # for a duration, percent for `success_rate`, tasks for `max_pending_tasks`.
+    # item 473 (issue #825): the declared SLO contract, as
+    # `(datum, canonical value, line, response)` in declaration order, the
+    # canonical value being milliseconds for a duration, percent for
+    # `success_rate`, tasks for `max_pending_tasks`.
+    #
     # Empty for every composition that declares no `slo` block, so a program
     # without one parses, resolves and emits byte-identically to before.
     slo: list[tuple[str, int | float, int]] = field(default_factory=list)
+    # item 473, the OBSERVED half: `<datum> -> (response name, fallback
+    # provider source or None)` for the datums that wrote an `on breach`
+    # clause. A SEPARATE map rather than a fourth member of `slo`'s tuples,
+    # for the same reason `RowTable` carries it under its own IR key: a `slo`
+    # block that declares targets and no responses has to parse, resolve and
+    # emit exactly the document it emitted before this slice, and widening the
+    # target tuples would move bytes that were already committed.
+    #
+    # A datum with no entry here is answered by `SLO_DEFAULT_RESPONSE`, so an
+    # empty map is the honest reading of "the document chose no response".
+    slo_responses: dict[str, tuple[str, str | None]] = field(
+        default_factory=dict)
 
 
 # --- item 426 S2: layers and the fold ---------------------------------------
@@ -2831,6 +2960,317 @@ class Parser:
                      "per-call ticket, not a typed `Approval`")
         return token
 
+    # -- roadmap item 470: the declared intent and the action ----------------
+    #
+    # Two CONTEXTUAL clauses, `within { … }` on a service operation (the intent
+    # it declares) and `acting { … }` on an `emit` step (what the crossing
+    # actually does). Both are recognised only in the one slot they occupy — the
+    # post-return-type slot of a service method, which nothing else can follow,
+    # and the trailing slot of an emit step — so the lexer's KEYWORDS set is
+    # untouched and neither a method nor an emit without one changes its IR by a
+    # byte (docs/design/470-intent-refinement.md §4 stage 1).
+
+    _WITHIN_FIELDS = ("object", "related", "verbs", "ceilings", "tenant",
+                      "scopes")
+    _ACTING_FIELDS = ("verb", "tenant", "scopes")
+
+    def _within_clause(self) -> "WithinClause":
+        """`within { … }` — the intent a service operation declares.
+
+        `object` and `verbs` are REQUIRED: they are the two dimensions with no
+        honest default (an absent object names nothing, and an empty verb set
+        refuses every action rather than permitting one). `related`,
+        `ceilings`, `tenant` and `scopes` are optional, and omitting one is the
+        NARROW reading, exactly as `intent.Intent`'s own docstring states it: no
+        `tenant` constrains no tenancy, no `ceilings` authorizes no spend, no
+        `scopes` permits no scope, and no `related` names one object.
+
+        The capability spellings are validated here by `cap_order`'s one
+        canonical point (`_capability_params`); the kernel's own record rules
+        (a ceiling parameter may not be bound on an object, a scope name may not
+        collide with a registered capability parameter) are re-raised as a parse
+        error carrying this clause's line.
+        """
+        line = self.next().line   # consume the contextual `within`
+        raw = self._clause_record("within", self._WITHIN_FIELDS)
+        for required in ("object", "verbs"):
+            if required not in raw:
+                raise self.err(
+                    line,
+                    f"a `within` clause must state `{required}`: it is one of "
+                    f"the two dimensions with no honest default",
+                    hint="`object` names the boundary the intent authorizes and "
+                         "`verbs` the operations permitted on it; `related`, "
+                         "`ceilings`, `tenant` and `scopes` are optional and "
+                         "their omission is the narrow reading "
+                         "(docs/design/470-intent-refinement.md)")
+        return WithinClause(self._interpret_within(raw, line), line)
+
+    def _interpret_within(self, raw: dict, line: int) -> object:
+        """The parsed `within` record as an `intent.Intent`.
+
+        The ceiling dimension may be written EITHER as parameters on the object
+        spelling (`object: model.complete(calls=3)`, which `Intent.from_cap`
+        splits off with `cap_order.split_ceilings`, the one place that split is
+        defined) OR as the explicit `ceilings` field, and writing it BOTH ways is
+        refused rather than merged: the ceiling is one bound, and two spellings
+        of it in one declaration is a question about which one the check reads.
+        """
+        from . import intent as _intent  # noqa: PLC0415 - lazy, avoids a cycle
+        from . import cap_order as _cap_order  # noqa: PLC0415 - lazy
+        try:
+            declared = _intent.Intent.from_cap(
+                _cap_order.parse_cap(raw["object"]),
+                verbs=raw["verbs"],
+                tenant=raw.get("tenant"),
+                related=[_cap_order.parse_cap(tok) for tok in raw.get("related", ())],
+                scopes=[(name, members)
+                        for name, members in (raw.get("scopes") or {}).items()],
+            )
+            if "ceilings" in raw:
+                if declared.ceilings:
+                    spelled = ", ".join(
+                        f"`{name}`" for name, _ in declared.ceilings)
+                    raise self.err(
+                        line,
+                        f"the ceiling {spelled} is stated twice: once on the "
+                        f"`object` spelling and once in `ceilings`",
+                        hint="a ceiling is one bound on the whole intent — state "
+                             "it on the object spelling "
+                             "(`object: model.complete(calls=3)`) or in "
+                             "`ceilings`, not both")
+                declared = replace(
+                    declared, ceilings=_intent.ceiling_params(raw["ceilings"]))
+            return declared
+        except _cap_order.CapError as exc:  # pragma: no cover - parse validated
+            raise self.err(line, str(exc), hint=exc.hint) from exc
+        except ValueError as exc:
+            raise self.err(line, str(exc)) from exc
+
+    def _acting_clause(self) -> "ActingClause":
+        """`acting { … }` — what one crossing actually does.
+
+        `verb` is REQUIRED (a capability spelling cannot state an operation
+        name, and an action that performs an unstated operation cannot be shown
+        to be within a declared verb set). `tenant` and `scopes` are optional
+        and their omission is the action's STATED absence, which the kernel
+        refuses against a stated bound rather than reading as permission.
+        """
+        line = self.next().line   # consume the contextual `acting`
+        raw = self._clause_record("acting", self._ACTING_FIELDS)
+        if "verb" not in raw:
+            raise self.err(
+                line,
+                "an `acting` clause must state `verb` — the operation this "
+                "crossing performs",
+                hint="a capability spelling names the boundary, not the "
+                     "operation performed on it, so the verb is stated here and "
+                     "checked against the declared intent's `verbs` (item 470)")
+        from . import intent as _intent  # noqa: PLC0415 - lazy, avoids a cycle
+        try:
+            scopes = _intent.scope_members(raw.get("scopes") or {})
+        except ValueError as exc:
+            raise self.err(line, str(exc)) from exc
+        return ActingClause(raw["verb"], raw.get("tenant"), scopes, line)
+
+    def _clause_record(self, clause: str, allowed: tuple) -> dict:
+        """`{ field: value (, field: value)* }` for an item-470 clause.
+
+        The field NAME is read with `_record_key_name` (the metadata-record
+        precedent, where a name is always followed by `:` so no keyword reading
+        is grammatically possible) and the VALUE by `_clause_value`, which
+        dispatches on the field. A name outside `allowed` is refused rather than
+        ignored: a typo'd field would otherwise bound nothing while reading as a
+        declaration.
+        """
+        self.expect("{", what=f"`{{` after `{clause}`")
+        raw: dict = {}
+        while not self.at("}"):
+            key_tok = self.peek()
+            key = self._record_key_name()
+            if key in raw:
+                raise self.err(key_tok.line,
+                               f"duplicate `{clause}` field `{key}`")
+            if key not in allowed:
+                names = ", ".join(f"`{n}`" for n in allowed)
+                raise self.err(
+                    key_tok.line,
+                    f"`{key}` is not a `{clause}` clause field",
+                    hint=f"a `{clause}` clause states {names} "
+                         f"(docs/design/470-intent-refinement.md)")
+            self.expect(":", what=f"`:` after `{key}` in `{clause}`")
+            raw[key] = self._clause_value(clause, key)
+            if self.at(","):
+                self.next()
+        self.expect("}", what=f"`}}` closing the `{clause}` clause")
+        return raw
+
+    def _clause_value(self, clause: str, key: str) -> object:
+        """One item-470 clause field's value, by field name."""
+        if key == "object":
+            return self._clause_capability("an `object` capability token")
+        if key == "related":
+            return self._clause_capability_list(
+                "a `related` capability token")
+        if key == "verbs":
+            return self._clause_verb_list()
+        if key == "verb":
+            return self._clause_verb()
+        if key == "tenant":
+            return self._clause_tenant()
+        if key == "ceilings":
+            return self._clause_ceiling_map()
+        if key == "scopes":
+            return self._clause_scope_map()
+        raise self.err(  # pragma: no cover - `_clause_record` filters
+            self.peek().line,
+            f"`{key}` is not a `{clause}` clause field")
+
+    def _clause_capability(self, what: str) -> str:
+        """A capability token in a clause record: a dotted ident path or a
+        string literal, with an optional parenthesized parameter list, funnelled
+        through `_capability_params` so `cap_order` validates and canonicalizes
+        it at the ONE point."""
+        tok = self.peek()
+        if tok.kind == "string":
+            self.next()
+            return self._capability_params(tok.value)
+        parts = [self.expect("ident", what=what).value]
+        while self.at("."):
+            self.next()
+            parts.append(self.expect("ident").value)
+        return self._capability_params(".".join(parts))
+
+    def _clause_capability_list(self, what: str) -> tuple:
+        """`[<capability token> (, …)*]` in a clause record."""
+        self.expect("[", what="`[` before a capability list")
+        tokens: list[str] = []
+        while not self.at("]"):
+            tokens.append(self._clause_capability(what))
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        return tuple(tokens)
+
+    def _clause_verb(self) -> str:
+        """One operation name: an ident (`insert`, `execute`) or a string
+        literal (for a name the lexer reserves)."""
+        tok = self.peek()
+        if tok.kind == "string":
+            self.next()
+            if not tok.value:
+                raise self.err(tok.line, "a verb must be a non-empty name")
+            return tok.value
+        return self.expect("ident", what="a verb (an operation name)").value
+
+    def _clause_verb_list(self) -> tuple:
+        """`[<verb> (, …)*]` — the operations the intent permits.
+
+        A list, never a bare name: `verbs` is a SET, and a single name written
+        without brackets is refused rather than guessed at, for the reason
+        `intent._canonical_verbs` refuses a bare `str` — a set and one member
+        are different declarations and the surface says which is meant.
+        """
+        self.expect("[", what="`[` before a verb list")
+        verbs: list[tuple] = []
+        while not self.at("]"):
+            vline = self.peek().line
+            verbs.append((vline, self._clause_verb()))
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        seen: set = set()
+        for vline, verb in verbs:
+            if verb in seen:
+                raise self.err(vline, f"duplicate verb `{verb}` in `verbs`")
+            seen.add(verb)
+        return tuple(verb for _, verb in verbs)
+
+    def _clause_tenant(self) -> str | None:
+        """A tenant name: a string literal, or a dotted ident path for a realm
+        spelled the item-33 way (`production.eu`). `null` states the explicit
+        absence the kernel also accepts."""
+        tok = self.peek()
+        if tok.kind == "string":
+            self.next()
+            return tok.value
+        if tok.kind == "kw" and tok.value == "null":
+            self.next()
+            return None
+        parts = [self.expect("ident", what="a tenant name").value]
+        while self.at("."):
+            self.next()
+            parts.append(self.expect("ident").value)
+        return ".".join(parts)
+
+    def _clause_ceiling_map(self) -> dict:
+        """`{ calls: 3, size: 4096 }` — the ceiling registry's names onto
+        non-negative integers. The kernel validates the names and values; a
+        resource-kind name (`path`, `host`, `table`) is refused there rather
+        than here so the two records share one check."""
+        self.expect("{", what="`{` before a ceiling map")
+        bounds: dict = {}
+        while not self.at("}"):
+            ntok = self.peek()
+            name = self._record_key_name()
+            if name in bounds:
+                raise self.err(ntok.line,
+                               f"ceiling parameter `{name}` is bound twice")
+            self.expect(":", what=f"`:` after `{name}`")
+            vt = self.peek()
+            if vt.kind != "int":
+                raise self.err(
+                    vt.line,
+                    f"`{name}` expects a non-negative integer bound, found "
+                    f"{vt.value!r}",
+                    hint="a ceiling is a count of at most N (cap_order's closed "
+                         "ceiling registry: `calls`, `size`, `time` and the "
+                         "budget aliases)")
+            self.next()
+            bounds[name] = vt.value
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return bounds
+
+    def _clause_scope_map(self) -> dict:
+        """`{ recipients: [alice, bob] }` — the set-valued dimension.
+
+        A scope name is a non-empty string that does NOT collide with a
+        registered capability parameter (the kernel refuses that, and the
+        refusal is re-raised here); each member set is written as a bracketed
+        list, because a bare name would be a set-or-one-member ambiguity the
+        kernel deliberately refuses."""
+        self.expect("{", what="`{` before a scope map")
+        scopes: dict = {}
+        while not self.at("}"):
+            ntok = self.peek()
+            name = self._record_key_name()
+            if name in scopes:
+                raise self.err(ntok.line, f"scope `{name}` is bound twice")
+            # `name: [ … ]`, the same `field: value` shape every other record in
+            # these two clauses uses, so a scope map does not read differently
+            # from the ceiling map beside it.
+            self.expect(":", what=f"`:` after the scope name `{name}`")
+            self.expect("[", what=f"`[` before the `{name}` member set")
+            members: list[str] = []
+            while not self.at("]"):
+                mtok = self.peek()
+                if mtok.kind == "string":
+                    self.next()
+                    members.append(mtok.value)
+                else:
+                    members.append(self.expect(
+                        "ident", what=f"a `{name}` member name").value)
+                if self.at(","):
+                    self.next()
+            self.expect("]")
+            scopes[name] = members
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return scopes
+
     def _cache_clause(self) -> "CacheClause":
         """`cache (pure|capability|external) (invalidated_by <tok> (, <tok>)*)?
         (ttl <dur>)?` — the item-310 trailing clause after a return type.
@@ -3078,6 +3518,13 @@ class Parser:
             cache = None
             if self.at("ident", "cache"):
                 cache = self._cache_clause()
+            # item 470: the `within { … }` trailing clause — the intent this
+            # operation DECLARES. Also contextual and also only here, and the
+            # refinement check it arms runs at the emit step, where the crossing
+            # and the declaring operation are both in hand (design §4 stage 1).
+            within = None
+            if self.at("ident", "within"):
+                within = self._within_clause()
             if mname in methods:
                 raise self.err(mline, f"duplicate method `{mname}` in service {name}")
             methods[mname] = MethodDecl(
@@ -3085,7 +3532,7 @@ class Parser:
                 commutative=method_commutative, idempotent=method_idempotent,
                 capabilities=capabilities, endorse_origins=endorse_origins,
                 cache=cache, validated=method_validated, retry=method_retry,
-                termination=termination, route=method_route,
+                termination=termination, route=method_route, within=within,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
@@ -3289,6 +3736,7 @@ class Parser:
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
         slo: list[tuple[str, int | float, int]] = []
+        slo_responses: dict[str, tuple[str, str | None]] = {}
         seen: dict[str, int] = {}
         while True:
             self._skip_semis()
@@ -3362,7 +3810,7 @@ class Parser:
                         hint="a composition carries exactly ONE SLO contract: "
                              "the datums are distinct keys, so two blocks could "
                              "only disagree")
-                slo = self._slo_block(name, sline)
+                slo, slo_responses = self._slo_block(name, sline)
                 continue
             if not self.at("ident", "row"):
                 tok = self.peek()
@@ -3378,20 +3826,23 @@ class Parser:
                          '`seam @label on key("k") observe with @observer`, or '
                          'places one: `place @label on process "p" backend rust`. '
                          'It may also declare the service-level objectives the '
-                         'rollout must hold: `slo { p95_latency: 250ms, '
-                         'success_rate: 99.5 }`')
+                         'rollout must hold, and what a live breach of each '
+                         'one does: `slo { p95_latency: 250ms on breach divert '
+                         '"standby.rvl", success_rate: 99.5 }`')
             rows.append(self.row_decl(name))
             self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
                                site=site, remotes=remotes, hosts=hosts,
-                               seams=seams, places=places, slo=slo)
+                               seams=seams, places=places, slo=slo,
+                               slo_responses=slo_responses)
 
-    def _slo_block(self, composition: str,
-                   line: int) -> list[tuple[str, int | float, int]]:
-        """`slo { <datum>: <value> (, <datum>: <value>)* }`, the composition's
-        SLO contract (roadmap item 473, issue #825). The leading `slo` is
-        already consumed.
+    def _slo_block(self, composition: str, line: int) -> tuple[
+            list[tuple[str, int | float, int]],
+            dict[str, tuple[str, str | None]]]:
+        """`slo { <datum>: <value> [on breach <response>] (, ...)* }`, the
+        composition's SLO contract (roadmap item 473, issue #825). The leading
+        `slo` is already consumed.
 
         The datum set is a CLOSED registry (`SLO_DATUMS`): an unknown datum is a
         refusal listing the registry rather than a silently ignored line, since a
@@ -3401,9 +3852,22 @@ class Parser:
         reinterpreted later. The block itself is refused when it declares
         nothing, and a datum is refused when it is declared twice: both are
         promises the document does not actually make.
+
+        `on breach <response>` is the OBSERVED half of the same promise (item
+        473): it names what a LIVE breach of this datum does — divert to a
+        named fallback provider, pause, or halt. It is optional, and the
+        response registry is closed for the same reason the datum registry is:
+        an action nothing implements is a promise the runtime cannot keep.
+
+        Returns `(targets, responses)`: the `(datum, value, line)` triples the
+        compile-time gate already read, and a SEPARATE `datum -> (response,
+        fallback)` map for the datums that wrote a clause. Two returns rather
+        than one widened list, so a document that declares no response
+        produces the same `CompositionDecl.slo` it produced before this slice.
         """
         self.expect("{")
         out: list[tuple[str, int | float, int]] = []
+        responses: dict[str, tuple[str, str | None]] = {}
         seen: set[str] = set()
         while not self.at("}"):
             dline = self.peek().line
@@ -3426,7 +3890,11 @@ class Parser:
                          "is a contract".format(datum))
             seen.add(datum)
             self.expect(":")
-            out.append((datum, self._slo_value(datum, dline), dline))
+            value = self._slo_value(datum, dline)
+            response = self._slo_response(datum, dline)
+            out.append((datum, value, dline))
+            if response is not None:
+                responses[datum] = response
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -3437,7 +3905,47 @@ class Parser:
                 hint="a composition that promises nothing should declare no "
                      "`slo` block at all; an empty one reads as a contract and "
                      "holds none (item 473)")
-        return out
+        return out, responses
+
+    def _slo_response(self, datum: str, line: int) -> tuple[str, str | None] | None:
+        """The optional `on breach <response>` clause of one SLO datum (item
+        473, observed half), or `None` when the datum declares no response.
+
+        The leading `on` is only a clause head when it is followed by `breach`,
+        so a datum value that happens to end beside an identifier is not
+        swallowed: the lookahead is two tokens, the same discipline
+        `_at_event_handler` uses for the `on <event>` surface.
+        """
+        if not (self.at("ident", "on") and self.pos + 1 < len(self.toks)
+                and self.toks[self.pos + 1].kind == "ident"
+                and self.toks[self.pos + 1].value == "breach"):
+            return None
+        self.next()                                   # `on`
+        self.next()                                   # `breach`
+        tok = self.peek()
+        name = tok.value if tok.kind == "ident" else None
+        if name not in SLO_RESPONSES:
+            known = ", ".join(f"`{n}`" for n in SLO_RESPONSES)
+            raise self.err(
+                tok.line,
+                f"unknown SLO breach response {tok.value!r} for `{datum}`",
+                hint=f"the response is a CLOSED registry (item 473): {known}. "
+                     "A response the runtime does not implement is a promise "
+                     "the composition cannot keep; a datum that declares no "
+                     f"response is answered by `{SLO_DEFAULT_RESPONSE}`")
+        self.next()
+        if not SLO_RESPONSES[name]:
+            return (name, None)
+        path = self.expect(
+            "string", what=f"the fallback provider source `{name}` diverts to")
+        if not path.value:
+            raise self.err(
+                line,
+                f"`on breach divert` for `{datum}` names an empty source path",
+                hint="a divert with no destination is a pause that lies about "
+                     "what it does; name the fallback provider's `.rvl` file, "
+                     "or write `on breach pause` (item 473)")
+        return (name, path.value)
 
     def _slo_value(self, datum: str, line: int) -> int | float:
         """The literal of one SLO datum, canonicalized by its value kind and
@@ -4789,7 +5297,13 @@ class Parser:
         if self.at("kw", "with"):
             self.next()
             approval = self.pure_expr()
-        return EmitStmt(expr, line, compensate, approval, is_async)
+        # item 470: `acting { … }` states what this crossing ACTUALLY does, and
+        # is checked against the operation's declared `within { … }` intent at
+        # lowering. Trailing, because it reads as a qualification of the step
+        # rather than part of the call being emitted, and optional: without it
+        # the crossing is checked exactly as it is today.
+        acting = self._acting_clause() if self.at("ident", "acting") else None
+        return EmitStmt(expr, line, compensate, approval, is_async, acting)
 
     def effect_form(self, line: int):
         self.expect("kw", "effect")

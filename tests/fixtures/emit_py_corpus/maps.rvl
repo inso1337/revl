@@ -1,0 +1,25 @@
+// The `Map` SUBSCRIPT surface (issue #957). Every read here is lowered from the
+// container's DECLARED key type, so its `index` node carries `key_type` and
+// `value_type`; a `List` read in the same document carries neither. Before this
+// document the corpus indexed no `Map` at all, so the self-host lowering could
+// omit the two annotations and the byte-agreement oracle stayed green.
+type Entry = { table: Map[Str, Int] }
+
+fn by_variable(m: Map[Str, Int], k: Str) -> Int { return m[k] }
+fn by_literal(m: Map[Str, Int]) -> Int { return m["alpha"] }
+fn bound(m: Map[Str, Int], k: Str) -> Int { let v = m[k] return v + 1 }
+fn arithmetic(m: Map[Str, Int], k: Str) -> Int { return m[k] * 2 }
+fn keyed_by_a_read(m: Map[Str, Str], k: Str) -> Str { return m[m[k]] }
+fn nested(m: Map[Str, Map[Str, Int]], outer: Str, inner: Str) -> Int { return m[outer][inner] }
+fn map_of_list(m: Map[Str, List[Int]], k: Str) -> Int { return m[k][0] }
+fn list_of_map(ms: List[Map[Str, Int]], k: Str) -> Int { return ms[0][k] }
+fn through_a_field(e: Entry, k: Str) -> Int { return e.table[k] }
+fn annotated(m: Map[Str, Str], k: Str) -> Str { let v: Str = m[k] return v }
+fn optional_value(m: Map[Str, Opt[Int]], k: Str) -> Opt[Int] { return m[k] }
+fn passed_on(m: Map[Str, Int], k: Str) -> Int { return by_variable(m, k) + m[k] }
+
+// The positional read, in the same document: a `List` subscript carries no
+// `key_type`, so a lowering that annotated by the shape of the index expression
+// rather than by the container would move these nodes too.
+fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }
+fn positional_literal(xs: List[Str]) -> Str { return xs[0] }
