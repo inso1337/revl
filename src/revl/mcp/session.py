@@ -1603,8 +1603,15 @@ class Session:
     def rollback(self) -> dict:
         if self.previous is None:
             raise SessionError("no previous generation to roll back to")
-        restored, self.previous = self.previous, None
-        restored_origin, self.previous_origin = self.previous_origin, None
+        # The pointers are deliberately NOT cleared here. `swap` saves them
+        # itself and reinstates the *current* generation as `previous` once it
+        # completes, so clearing them first would only make the value it saves
+        # None — and a rollback `swap` has to abort would then restore
+        # `previous` to None, destroying the target. That loses the recovery
+        # path precisely when a rollback was refused, which is the moment an
+        # operator retries it (item 372's activation health gate refuses a
+        # rollback to a generation that no longer activates).
+        restored, restored_origin = self.previous, self.previous_origin
         # rollback restores the *code* of the previous generation; it keeps
         # today's teardown semantics for instances (no cross-generation state
         # migration back), so it stays byte-identical to the pre-item-10 path.
