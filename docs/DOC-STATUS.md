@@ -151,7 +151,7 @@ was corrected by hand and had drifted back within a day.
 | network-path.md | needs-work | 24 |  |
 | network-placement.md | needs-work | 4 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 35 |  |
+| operator-capabilities.md | needs-work | 38 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |

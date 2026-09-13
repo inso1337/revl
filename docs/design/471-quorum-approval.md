@@ -4,11 +4,15 @@ Design note for roadmap item 471 (issue #823). It records what the item asked
 for, what the tree actually had, the slice that lands with this note, and the
 parts of the item that are deliberately left to a later slice.
 
-Status: Slice 1 landed with this note (the policy clause, the session-side
-decision protocol, the durable decision graph, the transport property that
-carries a vote, and the suite that pins every refusal). Slice 2 is design only
-here: the operator verbs for escalate/revoke/override, and the admission-time
-receipt the item names.
+Status: COMPLETE over two slices. Slice 1 landed with this note (the policy
+clause, the session-side decision protocol, the durable decision graph, the
+transport property that carries a vote, and the suite that pins every refusal).
+Slice 2 landed the two halves that note left design-only: the operator verbs for
+escalate / revoke / override, each with its own tool, doc surface and verb
+gating, and the admission receipt. Decision 6 below is Slice 2's; the earlier
+decisions are Slice 1's and are edited only where they claimed something Slice 2
+changed. What remains open is named at the end, and none of it is item 471: the
+second-operator transport is a transport item (operator profiles, item 55).
 
 ## The item's premise, measured against the tree
 
@@ -244,37 +248,31 @@ proposer, the approver set, the count and the `require`. The vote rows add the
 voter and the vote; the refusal rows add the reason and the voter; the closing
 rows add who closed it and how.
 
-The item asks for the graph in "the WAL and receipt". There is no separate
-receipt artifact in this tree for an approval, and this slice does not invent
-one: the `approval-granted` record carries a `quorum` sub-dict (request id,
-require, counted, approvers, proposer, `satisfiedBy`, the votes cast, and the
-override when there was one), and the minted approval is the same ledger entry a
-single-party approval is. The receipt-shaped artifact the item names belongs
-with the admission-time consumer of that ledger entry, which is Slice 2.
+The item asks for the graph in "the WAL and receipt". Slice 1 put it in the WAL:
+the `approval-granted` record carries a `quorum` sub-dict (request id, require,
+counted, approvers, proposer, `satisfiedBy`, the votes cast, and the override when
+there was one), and the minted approval is the same ledger entry a single-party
+approval is. The receipt-shaped artifact the item names belongs with the
+admission-time consumer of that ledger entry, and it is Decision 6 below.
 
 `quorum_state(hash)` is the read-only reader over the graph: it reports the
-question, the votes, the refusals and the outcome, without mutating it. Honest
-bound: it has no caller outside `tests/test_471_quorum_approval.py` and is NOT
-reachable from the transport, so it is how a TEST inspects a decision, not how an
-operator does. Nothing wires it to a verb in this slice; the design note names it
-because the graph it reads is part of the design, not because a shipped tool
-exposes it.
+question, the votes, the refusals and the outcome, without mutating it. Slice 1
+left it unreachable from the transport (a way for a TEST to inspect a decision,
+not for an operator to). Slice 2 gave it a verb: `revl_quorum` is that reader,
+read-only and ungated, and it carries the admission receipt too.
 
 ## Decision 4: denial, timeout, escalation, revocation, and the override
 
-**Reachability, stated once for the whole decision.** Two of the four paths below
-are shipped end to end and two are design only. *Denial* and *timeout* are part
-of the vote path, which the transport reaches: `revl_approve(hash=...,
-vote="deny")` denies and the ticket's own ttl times the question out. *Escalation*,
-*revocation* and the *emergency override* are session methods
-(`escalate_ticket`, `revoke_ticket`, `override_ticket`) with NO verb and NO tool
-behind them: `revl_override` does not exist in this tree, the three names appear
-only in `tests/test_471_quorum_approval.py` and in their own definitions, and an
-operator on the wire cannot reach any of them. What this decision pins is the
-PROTOCOL and its records, which is what the suite exercises; the operator verbs
-(their own tools, hence their own doc surface and verb gating) are Slice 2. The
-one operator-facing string that used to claim otherwise, the
-`how_to_resolve` field `escalate_ticket` returns, now says exactly that.
+**Reachability, stated once for the whole decision.** All five paths below are
+shipped end to end as of Slice 2. *Denial* and *timeout* are part of the vote
+path, which the transport has always reached: `revl_approve(hash=...,
+vote="deny")` denies and the ticket's own ttl times the question out.
+*Escalation*, *revocation* and the *emergency override* were session methods
+(`escalate_ticket`, `revoke_ticket`, `override_ticket`) with no verb and no tool
+behind them, and Slice 2 gave each one its transport: `revl_escalate`,
+`revl_revoke`'s `hash` branch, and `revl_override`. What this decision pins is
+still the PROTOCOL and its records; Decision 6 pins which authority reaches
+each.
 
 **Denial.** An approver saying NO is a `deny` vote, recorded as `quorum-vote`
 with `vote: "deny"`. A denial does not close the question by itself: it closes it
@@ -348,20 +346,120 @@ cast, asserted by the caller. Making several operators addressable within one
 session is a transport item (operator profiles and the item 55 verb grammar), not
 this one.
 
+## Decision 6: the Slice 2 surface: the verbs, and the receipt
+
+### The verbs, and why the override has one of its own
+
+Slice 1's protocol was complete and unreachable. An operator on the wire could
+open a question and vote on it; it could not hand a stalled one up, withdraw one,
+or break the glass. Slice 2 adds three tools and changes no protocol:
+
+| tool | reaches | operator verb |
+| --- | --- | --- |
+| `revl_escalate` | `escalate_ticket` | `approve` |
+| `revl_revoke` (its new `hash` branch) | `revoke_ticket` | `approve` |
+| `revl_override` | `override_ticket` | **`override`** |
+| `revl_quorum` | `quorum_state` + the receipt | none (read-only) |
+
+**Escalation and revocation gate under `approve`, and that is not laziness.**
+Escalating CLOSES the vote path, and the path it leaves is the separately granted
+override, so escalation only ever narrows authority: there is no authority to
+address beyond the one to answer the question. Revoking a pending question
+withdraws consent nobody gave yet, which is item 379's argument for gating a
+grant's revocation under the same verb as its mint, applied to a question instead
+of a grant.
+
+**The override gets its own verb, and that is the decision.** It is the one path
+that admits a class-(c) crossing WITHOUT the count its rule demands. `require N
+of {...}` says N distinct named humans must answer; an operator trusted to cast
+one of those N is not thereby trusted to stand in for all of them. Folding the
+override into `approve` would hand every voter a one-operator bypass of the very
+rule they vote under: the authority would be spelled `require N` and enforced
+as `require 1`. So the emergency path is its own address in the profile: `may
+approve on payments` authorizes votes on payments and no override at all, and
+`may override on payments` is what an on-call operator holds. Its target set is
+the crossing component, resolved through the same `_approve_targets` branch, not
+the whole composition: an override decides ONE question about one candidate.
+
+`revl_revoke` keeps two objects in one verb rather than growing a fourth tool,
+because a pending QUESTION and a minted GRANT are both consent being withdrawn
+under the same authority. They are separate branches, not one branch reading two
+spellings: a `hash` never resolves to a grant and a `capability` never closes a
+question.
+
+### The receipt, and why it is derived rather than a tenth record kind
+
+The item asks for the decision graph "in the WAL and receipt", and Slice 1 put it
+in the WAL. What was missing was not the facts but the ARTIFACT: one hash-bound
+document, for one crossing, that a reader can hold and check.
+
+A second durable copy of facts the WAL already holds is a record that can
+disagree with itself, and an audit that finds two answers has no answer. So the
+receipt (`src/revl/mcp/quorum.py`) is a JOIN over the durable rows
+(`quorum-open` for the binding, `quorum-vote` for each counted vote,
+`quorum-refused` for each cast that was not, the closing row for the outcome, and
+the `approval-granted` / `approval-consumed` pair for the authority and its
+spend), carrying the binding, the rule as written, the proposer, every vote, every
+refusal, the outcome, the override when there was one, and a `digest` over all of
+it.
+
+`verify_receipt` RE-DERIVES that body from the same rows and compares. The rows
+it reads are the session's `_approval_records`, which `_record_quorum` writes in
+lockstep with the WAL under the same keys, so there is one set of facts here and
+not two: a verifier in a fresh process reads the log, and a verifier inside the
+session reads the mirror, and they carry the same rows.
+
+The two forgeries it exists for are different:
+
+* edit a field and keep the digest, and the receipt does not hash to its own
+  body: refused on `digest`;
+* edit the binding AND recompute the digest, so the receipt is internally
+  consistent and asserts a different candidate hash, is refused on `binding`,
+  because the graph's own row carries the real one. **This is the property the
+  item calls load-bearing, one level up:** a vote cannot float to another
+  candidate, and neither can the receipt that says the votes happened.
+
+A receipt whose request id names no question in the graph is refused as
+`no-decision` rather than assumed, and a document of another kind or another
+version is refused before its content is read at all.
+
+**Admission time, not decision time.** The receipt is minted where the authority
+is SPENT (`_consume_approval`, and `_commit_spends` for the activation gate's
+two-phase spend), after the durable `approval-consumed` and before the fire. A
+satisfied quorum that no crossing ever spent authorized nothing, and a receipt
+naming a fire that never happened would be a false record. It is minted once per
+request id: consume-before-fire spends an entry exactly once, so a second call
+returns the artifact the first one minted rather than re-dating it.
+
+### What a single-party crossing sees
+
+Nothing. A rule that names no approvers and demands one opens no decision graph,
+so it mints no receipt, and `revl_quorum` reports `quorum: false` with the reason
+rather than inventing an empty graph. The clause is inert when it is not written,
+which is Decision 1's third point holding through Slice 2.
+
 ## Slice plan
 
-Slice 1, landed with this note: the clause and its refusals in the policy; the
-session-side protocol (`_open_quorum`, `_cast_vote`, `_decide_satisfied`,
-`_decide_denied`, `_lapse_quorum`, `override_ticket`, `escalate_ticket`,
-`revoke_ticket`, `quorum_state`); the nine WAL record kinds and their
-seq-free write; the `quorum` sub-dict on `approval-granted`; the optional `vote`
-and `asToken` properties on `revl_approve`; and
-`tests/test_471_quorum_approval.py`.
+Slice 1, landed: the clause and its refusals in the policy; the session-side
+protocol (`_open_quorum`, `_cast_vote`, `_decide_satisfied`, `_decide_denied`,
+`_lapse_quorum`, `override_ticket`, `escalate_ticket`, `revoke_ticket`,
+`quorum_state`); the nine WAL record kinds and their seq-free write; the `quorum`
+sub-dict on `approval-granted`; the optional `vote` and `asToken` properties on
+`revl_approve`; and `tests/test_471_quorum_approval.py`.
 
-Slice 2, design only: the operator verbs for override, escalate and revoke
-(their own tools, hence their own doc surface and verb gating), the
-admission-time receipt the item names, and the second-operator transport that
-would let a quorum be gathered from more than one bound operator.
+Slice 2, landed: `src/revl/mcp/quorum.py` (the receipt and the transport
+adapters); the `revl_escalate`, `revl_override` and `revl_quorum` tools and
+`revl_revoke`'s `hash` branch; the `override` operator verb and its target
+resolution; `Session._mint_admission_receipt`, `quorum_receipt` and
+`verify_quorum_receipt`; the doc surface for all four verbs; and
+`tests/test_471_quorum_slice2.py`.
+
+Not item 471, and still open: the second-operator transport that would let a
+quorum be gathered from more than one bound operator, which is what closes the
+`as_token` bound in Decision 5. It is a transport item (operator profiles and the
+item 55 verb grammar), and Slice 2 does not narrow or widen it: `as_token` is
+still the name of a cast, asserted by the caller, on every path including the
+three new verbs.
 
 ## Exit tests
 
@@ -396,6 +494,35 @@ that unblocks them rather than failing bare.
 `tests/test_capability_leases.py` cannot be exercised here (it is
 `needs_cordis`-gated and the cordis runtime is absent), so the lease lifecycle is
 driven in-process through `_enforce_lease_gate` rather than through `load()`.
+
+Slice 2's own exits are in `tests/test_471_quorum_slice2.py`. The verbs:
+`test_the_escalate_verb_closes_the_vote_path_and_names_its_outcome`,
+`test_escalation_refuses_a_bystander_and_records_the_refusal`,
+`test_the_revoke_verb_withdraws_a_pending_question` with
+`test_revoke_still_retires_a_standing_grant` holding the other branch,
+`test_the_override_verb_admits_without_the_count_and_says_so`,
+`test_an_override_the_proposer_exercises_is_recorded_as_a_self_override`,
+`test_an_override_with_no_stated_reason_is_refused_and_recorded`,
+`test_an_override_of_a_decided_question_is_refused`,
+`test_an_override_of_a_single_party_ticket_is_refused`, and the two
+fail-closed tables over all three question-scoped verbs. The GATING, which is the
+point of the separate verb: `test_the_override_verb_is_not_the_approve_verb` and
+`test_the_override_verb_scopes_to_the_crossing_component`. The named outcomes:
+`test_every_lifecycle_path_has_its_own_named_outcome` over all five, plus
+`test_denial_closes_the_question_as_denied_and_names_the_deniers`,
+`test_a_denial_that_leaves_the_count_reachable_leaves_it_open` and
+`test_timeout_closes_the_question_as_expired`. The receipt:
+`test_the_receipt_is_minted_at_admission_and_not_at_the_decision`,
+`test_the_receipt_carries_the_whole_decision_graph`,
+`test_the_receipt_verifies_against_the_durable_decision_graph`,
+`test_an_edited_receipt_does_not_hash_to_its_own_body`,
+`test_a_receipt_re_pointed_at_another_candidate_is_refused`,
+`test_a_receipt_with_padded_votes_is_refused`,
+`test_a_receipt_for_a_question_nobody_has_is_refused`,
+`test_a_document_that_is_not_an_admission_receipt_is_refused`,
+`test_the_override_receipt_says_override_and_carries_the_reason`,
+`test_the_receipt_is_not_re_dated_by_a_second_read`, and
+`test_a_single_party_approval_mints_no_quorum_receipt` for the inert side.
 
 ## Relates to
 

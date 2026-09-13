@@ -87,6 +87,27 @@ TOOL_VERB = {
     # deliberately ungated (absent from this map).
     "revl_apply_distillation": "approve",
     "revl_revoke_distillation": "approve",
+    # item 471 Slice 2: escalating a multi-party question CLOSES its vote path,
+    # which only ever narrows authority (the remaining path is the separately
+    # granted override), so it needs no authority beyond the one to answer the
+    # question — `approve`, the same verb a vote is cast under. Its
+    # `_approve_targets` branch resolves the ticket `hash` to the crossing
+    # component, so a subject-scoped `may approve on payments` grant governs who
+    # may hand a payments question up exactly as it governs who may vote on one.
+    "revl_escalate": "approve",
+    # item 471 Slice 2: the EMERGENCY OVERRIDE gets its own verb, deliberately
+    # NOT folded into `approve`. It is the one path that admits a class-(c)
+    # crossing WITHOUT the count its rule demands, and an operator trusted to cast
+    # one of N votes is not thereby trusted to stand in for all of them — that is
+    # the whole content of `require N of {...}`, and folding the override into
+    # `approve` would hand every voter a one-operator bypass of the rule they vote
+    # under. So a profile addresses the emergency path separately: `may approve on
+    # payments` authorizes votes on payments and no override at all, and `may
+    # override on payments` is what an on-call operator holds to break the glass.
+    # Its target set is the crossing component (the `_approve_targets` branch),
+    # not the whole composition: an override decides ONE question about one
+    # candidate.
+    "revl_override": "override",
     # item 443: the operator E-Stop. Its own verb, never folded into `unload`
     # or `commit`: an E-Stop is not a teardown and not a verdict on the work,
     # it is the authority to STOP DISPATCHING, and an operator trusted to
@@ -555,7 +576,10 @@ def _targets(verb: str, session, arguments: dict) \
         return _live_targets(candidate)
     if verb == "restore":
         return _snapshot_targets(arguments.get("snapshot"))
-    if verb == "approve":
+    if verb in {"approve", "override"}:
+        # item 471: the `override` verb scopes to the crossing component exactly
+        # as `approve` does, through the same ticket-hash resolution — an override
+        # decides ONE question, so it must not widen to the whole composition.
         return _approve_targets(session, arguments)
     if verb == "lease":
         component = arguments.get("component")
