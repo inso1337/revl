@@ -5216,12 +5216,37 @@ class Session:
     def _lapse_quorum(self, record: dict) -> bool:
         """Whether the question's deadline has passed, latching the timeout the
         first time it has (the same dead latch `_expired` applies to a grant, so a
-        clock that moves backwards cannot revive an answerable question)."""
+        clock that moves backwards cannot revive an answerable question).
+
+        A question that was already ANSWERED or WITHDRAWN must be ruled out by the
+        caller BEFORE this runs. The deadline bounds the VOTES, not the answer:
+        overwriting a `satisfied` record with `expired` retracts an authority after
+        the fact - the entry it minted stays live and spendable while the graph
+        says its decision is gone - and desynchronises the admission receipt
+        minted at that spend from the decision graph the receipt claims to
+        summarize. The three call sites therefore ask `_closed_reason` first and
+        let an already-decided question refuse on its own terms; only an `expired`
+        record (whose outcome this cannot change) falls through to the lapse, so
+        the pinned `lapsed` message is preserved. No refusal is widened: every
+        outcome that was refused before is still refused, only the rewrite and the
+        reason change.
+
+        The deadline still REFUSES a decided question that reaches here - one
+        outcome, `escalated`, does, because `override_ticket` carves escalation
+        out of its closed check: after escalation the override is the only path
+        left, so the carve-out has to reach this call. What it must not do is
+        re-answer: the timeout is not a second, contradictory decision, so a
+        record that already names an outcome returns True (refused) without
+        writing `expired` over the outcome an operator actually chose. The two
+        early returns above are untouched, so the `expired` path is
+        byte-identical and its `quorum-expired` row is written exactly once."""
         if record["outcome"] == "expired":
             return True
         if record["expiredAt"] is not None:
             return True
         if self._expired(record):
+            if record["outcome"] is not None:
+                return True
             record["outcome"] = "expired"
             record["resolvedAt"] = record["expiredAt"]
             self._record_quorum("quorum-expired", {
@@ -5250,14 +5275,28 @@ class Session:
         return {"satisfied": "closed-decision", "denied": "closed-decision"}.get(
             outcome, outcome)
 
+    def _refusal_row(self, record: dict, action: str, reason: str,
+                     voter: str) -> dict:
+        """One `quorum-refused` row: the binding, the act, the reason and WHO was
+        turned away. `at` is the refusal's own clock reading, so the graph can be
+        read in time order. `at` does NOT scope a receipt's refusal set
+        (`quorum._refusal_rows`): the session clock is ratcheted to a high-water
+        floor, so two acts a microsecond apart can carry the same millisecond, and
+        a refusal that happened strictly after the spend would then read as if it
+        preceded it. The receipt bounds its refusals by the POSITION of the row
+        that minted the authority, which has no ties."""
+        return {**self._quorum_binding(record), "action": action,
+                "reason": reason, "voter": voter,
+                "counted": self._counted(record),
+                "require": record["require"], "proposer": record["proposer"],
+                "at": self._now_ms()}
+
     def _refuse_vote(self, record: dict, reason: str, message: str, voter: str) -> None:
         """Record a vote that was NOT counted and refuse it. Every refusal is
         written down before it is raised: a quorum whose failures are invisible is
         a quorum an attacker can probe without a trace."""
-        self._record_quorum("quorum-refused", {
-            **self._quorum_binding(record), "action": "vote", "reason": reason,
-            "voter": voter, "counted": self._counted(record),
-            "require": record["require"], "proposer": record["proposer"]})
+        self._record_quorum("quorum-refused",
+                            self._refusal_row(record, "vote", reason, voter))
         raise SessionError(message)
 
     def _cast_vote(self, ticket: dict, rule, *, vote: str, as_token: str | None,
@@ -5299,6 +5338,13 @@ class Session:
                 f"unparseable vote {vote!r} on ticket {ticket['hash']}: a vote is "
                 f"`approve` or `deny` (roadmap item 471, fail closed on an "
                 f"unparseable vote)", voter)
+        closed = self._closed_reason(record)
+        if closed is not None and closed != "expired":
+            self._refuse_vote(
+                record, closed,
+                f"ticket {ticket['hash']} is already {record['outcome']}: its "
+                f"decision is made and a late vote is not counted (roadmap item "
+                f"471)", voter)
         if self._lapse_quorum(record):
             self._refuse_vote(
                 record, "expired",
@@ -5306,13 +5352,6 @@ class Session:
                 f"approval ttl ran out before the quorum answered, so no vote can "
                 f"be counted against it. Re-issue the call for a fresh ticket "
                 f"(roadmap item 471)", voter)
-        closed = self._closed_reason(record)
-        if closed is not None:
-            self._refuse_vote(
-                record, closed,
-                f"ticket {ticket['hash']} is already {record['outcome']}: its "
-                f"decision is made and a late vote is not counted (roadmap item "
-                f"471)", voter)
         if record["candidateHash"] != ticket["candidateHash"] \
                 or record["component"] != ticket["component"]:
             self._refuse_vote(
@@ -5491,25 +5530,24 @@ class Session:
             record = self._open_quorum(ticket, rule)
         actor = as_token if as_token is not None else self._operator_token()
         if not reason or not str(reason).strip():
-            self._record_quorum("quorum-refused", {
-                **self._quorum_binding(record), "action": "override",
-                "reason": "no-reason", "voter": actor,
-                "counted": self._counted(record), "require": record["require"],
-                "proposer": record["proposer"]})
+            self._record_quorum(
+                "quorum-refused",
+                self._refusal_row(record, "override", "no-reason", actor))
             raise SessionError(
                 f"an override of ticket {ticket_hash} must state a reason: an "
                 f"emergency override is an act someone is accountable for, and "
                 f"the record has to say why (roadmap item 471)")
+        closed = self._closed_reason(record)
+        if closed is not None and closed != "expired" \
+                and record["outcome"] != "escalated":
+            raise SessionError(
+                f"ticket {ticket_hash} is already {record['outcome']}, so it "
+                f"cannot be overridden (roadmap item 471)")
         if self._lapse_quorum(record):
             raise SessionError(
                 f"ticket {ticket_hash} lapsed at {record['expiresAt']} and cannot "
                 f"be overridden: re-issue the call for a fresh ticket (roadmap "
                 f"item 471)")
-        closed = self._closed_reason(record)
-        if closed is not None and record["outcome"] != "escalated":
-            raise SessionError(
-                f"ticket {ticket_hash} is already {record['outcome']}, so it "
-                f"cannot be overridden (roadmap item 471)")
         now = self._now_ms()
         record["override"] = {"by": actor, "reason": str(reason).strip(),
                               "at": now,
@@ -5566,24 +5604,22 @@ class Session:
         actor = as_token if as_token is not None else self._operator_token()
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
-            self._record_quorum("quorum-refused", {
-                **self._quorum_binding(record), "action": "escalate",
-                "reason": "unknown-approver", "voter": actor,
-                "counted": self._counted(record), "require": record["require"],
-                "proposer": record["proposer"]})
+            self._record_quorum(
+                "quorum-refused",
+                self._refusal_row(record, "escalate", "unknown-approver", actor))
             raise SessionError(
                 f"`{actor or 'nobody'}` cannot escalate ticket {ticket_hash}: only "
                 f"an approver this crossing names ({', '.join(record['approvers'])}) "
                 f"or the proposer may hand it up (roadmap item 471, fail closed)")
+        closed = self._closed_reason(record)
+        if closed is not None and closed != "expired":
+            raise SessionError(
+                f"ticket {ticket_hash} is already {record['outcome']}, so it cannot "
+                f"be escalated (roadmap item 471)")
         if self._lapse_quorum(record):
             raise SessionError(
                 f"ticket {ticket_hash} lapsed at {record['expiresAt']}, so there is "
                 f"nothing left to escalate (roadmap item 471)")
-        closed = self._closed_reason(record)
-        if closed is not None:
-            raise SessionError(
-                f"ticket {ticket_hash} is already {record['outcome']}, so it cannot "
-                f"be escalated (roadmap item 471)")
         now = self._now_ms()
         record["outcome"] = "escalated"
         record["resolvedAt"] = now
@@ -5631,11 +5667,9 @@ class Session:
         actor = as_token if as_token is not None else self._operator_token()
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
-            self._record_quorum("quorum-refused", {
-                **self._quorum_binding(record), "action": "revoke",
-                "reason": "unknown-approver", "voter": actor,
-                "counted": self._counted(record), "require": record["require"],
-                "proposer": record["proposer"]})
+            self._record_quorum(
+                "quorum-refused",
+                self._refusal_row(record, "revoke", "unknown-approver", actor))
             raise SessionError(
                 f"`{actor or 'nobody'}` cannot revoke ticket {ticket_hash}: only "
                 f"the proposer or an approver this crossing names "
