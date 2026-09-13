@@ -150,6 +150,22 @@ KNOWN_BYPASSES = {
     "examples/rejections/t26_anon_record_update_wrong_type.rvl",
     "examples/rejections/t27_anon_record_update_undeclared_field.rvl",
     "examples/rejections/t36_float_literal_range.rvl",
+    # The field-read-on-`Any` family. These three were ALREADY type-layer
+    # false-admits; they were merely hidden behind a `pub extern` parse refusal
+    # ("unexpected declaration"), which made the census file them as
+    # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. `p_top`
+    # now accepts `pub` before every declaration form the reference accepts it
+    # before, so the parse reaches the body and the real state of the gate shows:
+    # the reference refuses "field read `.x` on a value of type `Any`" in its
+    # TYPE layer and the gate runs no type layer. Nothing new is admitted that
+    # was not already outside the covered surface.
+    "examples/rejections/t29_field_read_on_any.rvl",
+    "examples/rejections/t30_field_read_on_any_provide_method.rvl",
+    # the same `Any` field read, reached through a backend fixture rather than a
+    # rejection fixture. It is the one entry on this list that has no row in
+    # `TYPE_LAYER_GAP`: that pin addresses its fixtures by bare name under
+    # `examples/rejections/`, and this program does not live there.
+    "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
     # -- calls and signatures --
     "examples/rejections/t10_call_arity.rvl",
     "examples/rejections/t15_generic_call_site.rvl",

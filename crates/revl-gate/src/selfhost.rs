@@ -720,6 +720,13 @@ fn at_top_decl(ts: &[Token], i: i64) -> bool {
     return (((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i));
 }
 
+fn at_pub_prefix(ts: &[Token], i: i64) -> bool {
+    if (!atw(ts, i, "pub")) {
+        return false;
+    }
+    return (((atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn") || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "type")) || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "service")) || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "extern"));
+}
+
 fn is_builtin_type_name(name: &str) -> bool {
     return (((((((((((((name == "Int") || (name == "Int32")) || (name == "Float")) || (name == "Str")) || (name == "Bool")) || (name == "Bytes")) || (name == "Unit")) || (name == "Opt")) || (name == "List")) || (name == "Map")) || (name == "Result")) || (name == "Any")) || (name == "Never"));
 }
@@ -2092,6 +2099,9 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
     if (t.kind != "kw") {
         return p_top(ts.clone(), skip_line(&ts, i), bad_prog(pg.clone(), String::from("unexpected token at top level")));
     }
+    if at_pub_prefix(&ts, i) {
+        return p_top(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), pg.clone());
+    }
     if (((t.text == "use") || (t.text == "test")) || (t.text == "type")) {
         if ((t.text == "test") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{")) {
             let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
@@ -2105,9 +2115,8 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
         let se = p_extern(ts.clone(), i, pg.clone());
         return p_top(ts.clone(), se.i, se.pg.clone());
     }
-    let public_fn = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
-    if ((t.text == "fn") || public_fn) {
-        let sf = p_fn(ts.clone(), if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i }, pg.clone());
+    if (t.text == "fn") {
+        let sf = p_fn(ts.clone(), i, pg.clone());
         return p_top(ts.clone(), sf.i, sf.pg.clone());
     }
     if (t.text == "service") {
@@ -5115,6 +5124,9 @@ fn cfg_owners_walk(ts: Vec<Token>, i: i64, a: CfgAcc) -> CfgAcc {
     if (t.kind != "kw") {
         return cfg_owners_walk(ts.clone(), skip_line(&ts, i), a.clone());
     }
+    if at_pub_prefix(&ts, i) {
+        return cfg_owners_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone());
+    }
     if (t.text == "use") {
         return cfg_owners_walk(ts.clone(), skip_line(&ts, i), a.clone());
     }
@@ -5797,6 +5809,9 @@ fn fb_refusal(ts: Vec<Token>, i: i64) -> Verd {
     if (t.kind != "kw") {
         return fb_refusal(ts.clone(), skip_line(&ts, i));
     }
+    if at_pub_prefix(&ts, i) {
+        return fb_refusal(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
     if ((t.text == "use") || (t.text == "type")) {
         return fb_refusal(ts.clone(), skip_line(&ts, i));
     }
@@ -5818,9 +5833,8 @@ fn fb_refusal(ts: Vec<Token>, i: i64) -> Verd {
     if (t.text == "component") {
         return fb_refusal(ts.clone(), p_component(ts.clone(), i, empty_prog()).i);
     }
-    let public_fn = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
-    if ((t.text == "fn") || public_fn) {
-        let sp = fb_span(ts.clone(), if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i });
+    if (t.text == "fn") {
+        let sp = fb_span(ts.clone(), i);
         if (!sp.ok) {
             return fb_refusal(ts.clone(), skip_line(&ts, i));
         }
@@ -7953,6 +7967,9 @@ fn case_binds_walk(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseAcc {
     if (t.kind != "kw") {
         return case_binds_walk(ts.clone(), skip_line(&ts, i), a.clone());
     }
+    if at_pub_prefix(&ts, i) {
+        return case_binds_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone());
+    }
     if (t.text == "type") {
         let d = decl_cases(ts.clone(), i, a.clone());
         return case_binds_walk(ts.clone(), d.i, d.a.clone());
@@ -7969,9 +7986,8 @@ fn case_binds_walk(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseAcc {
     if (t.text == "extern") {
         return case_binds_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, a.clone());
     }
-    let public_fn = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
-    if ((t.text == "fn") || public_fn) {
-        let fi = if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i };
+    if (t.text == "fn") {
+        let fi = i;
         let ps = params_at(ts.clone(), (fi).checked_add(3i64).expect("revl: Int overflow"));
         let ret = if atk(&ts, ps.i, "arrow") { taint_strip(type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow")).ty) } else { String::from("Unit") };
         let mut param_types: Vec<String> = vec![];
@@ -7982,7 +7998,7 @@ fn case_binds_walk(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseAcc {
         }
         let ty = ((String::from("(").revl_concat(&param_types.revl_join(", "))).revl_concat(") -> ")).revl_concat(&ret);
         let binds = tenv_put(&a.binds, tkc(&ts, (fi).checked_add(1i64).expect("revl: Int overflow")).text, ty);
-        return case_binds_walk(ts.clone(), p_fn(ts.clone(), fi.clone(), empty_prog()).i, CaseAcc { binds: binds.clone(), amb: a.amb.clone() });
+        return case_binds_walk(ts.clone(), p_fn(ts.clone(), fi, empty_prog()).i, CaseAcc { binds: binds.clone(), amb: a.amb.clone() });
     }
     if (t.text == "service") {
         return case_binds_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, a.clone());
@@ -9143,6 +9159,9 @@ fn fns_walk(ts: Vec<Token>, i: i64, acc: String, cases: Vec<Bind>) -> String {
         let acc2 = if (f.js == "") { acc.clone() } else { if (acc == "") { f.js } else { (acc.revl_concat(",")).revl_concat(&f.js) } };
         return fns_walk(ts.clone(), f.i, acc2, cases.clone());
     }
+    if at_pub_prefix(&ts, i) {
+        return fns_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), cases.clone());
+    }
     if (t.text == "service") {
         return fns_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, acc.clone(), cases.clone());
     }
@@ -9310,6 +9329,9 @@ fn externs_walk(ts: Vec<Token>, i: i64, acc: String, ok: bool, decls: Vec<TaintD
     if (t.kind != "kw") {
         return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok, decls.clone());
     }
+    if at_pub_prefix(&ts, i) {
+        return externs_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), ok, decls.clone());
+    }
     if (t.text == "extern") {
         let ex = ir_extern(ts.clone(), i, decls.clone());
         let ni = p_extern(ts.clone(), i, empty_prog()).i;
@@ -9459,6 +9481,9 @@ fn types_walk(ts: Vec<Token>, i: i64, acc: String) -> String {
     if (t.kind != "kw") {
         return types_walk(ts.clone(), skip_line(&ts, i), acc.clone());
     }
+    if at_pub_prefix(&ts, i) {
+        return types_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone());
+    }
     if (t.text == "type") {
         let d = ir_type_decl(ts.clone(), i);
         let acc2 = if (d.js == "") { acc.clone() } else { if (acc == "") { d.js } else { (acc.revl_concat(", ")).revl_concat(&d.js) } };
@@ -9498,6 +9523,9 @@ fn ir_walk(ts: Vec<Token>, i: i64, a: IrAcc) -> IrAcc {
     }
     if (t.kind != "kw") {
         return ir_walk(ts.clone(), skip_line(&ts, i), a.clone());
+    }
+    if at_pub_prefix(&ts, i) {
+        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone());
     }
     if (t.text == "use") {
         return ir_walk(ts.clone(), skip_line(&ts, i), a.clone());

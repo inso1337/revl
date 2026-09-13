@@ -2504,10 +2504,13 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 41 after the self-declared
-# async-colour arrow (rule C1) and then the four fn-body BINDING fixtures (item
-# 391's binding-discipline slice) moved from a pinned gap to gate/reference
-# agreement. Grouped below by the reference check that refuses
+# `examples/rejections/`; it now stands at 43. The self-declared async-colour
+# arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
+# binding-discipline slice) moved OUT of the gap into gate/reference agreement,
+# and the `pub` prefix slice moved TWO fixtures IN: `t29`/`t30` were type-layer
+# false-admits all along, hidden behind the `pub extern` parse refusal that used
+# to stop `p_top` before it ever read their bodies. Grouped below by the
+# reference check that refuses
 # them (the family each self-host slice T1..T4 will move from "pinned gap" to
 # "agrees").
 #
@@ -2550,6 +2553,12 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t26_anon_record_update_wrong_type", "T1"),
         ("t27_anon_record_update_undeclared_field", "TYPE"),
         ("t36_float_literal_range", "TYPE"),
+        # a field read on an erased `Any`. Pinned here once `p_top` learned the
+        # reference's `pub` prefix set: before that the fixture never reached a
+        # body at all, because its `pub extern` declaration drew a parse refusal,
+        # so the census filed it as tag-mismatch rather than as the type-layer
+        # false-admit it has always been.
+        ("t29_field_read_on_any", "T1"),
     ],
     # calls and signatures: arity, generic call sites, builtin/method receivers,
     # the literal zero divisor, extern-undo argument typing.
@@ -2600,6 +2609,9 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t3_config_default_type", "T1"),
         ("a6_method_not_in_service", "A6"),
         ("g6_method_local_shadows_component", "G6"),
+        # the t29 field-read-on-`Any` shape inside a provide method, pinned for
+        # the same reason: the `pub extern` parse refusal used to hide it.
+        ("t30_field_read_on_any_provide_method", "T1"),
     ],
 }
 
@@ -2610,12 +2622,12 @@ _TYPE_LAYER_CASES = [
 ]
 
 
-def test_the_type_layer_gap_is_exactly_41_fixtures():
+def test_the_type_layer_gap_is_exactly_43_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 41, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 43, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 41, "a fixture is listed twice"
+    assert len(set(names)) == 43, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
