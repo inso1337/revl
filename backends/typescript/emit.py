@@ -1016,12 +1016,19 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        index_node = node["index"]
+        # A `Map` subscript reads by KEY, whatever the key's type (issue #957):
+        # the List path coerced it with `Number(...)`, so `m[k]` on a
+        # `Map[Str, V]` emitted `revlIndex(m, Number(k))` — `NaN` for every key
+        # that is not a decimal string, compiling cleanly and reading the wrong
+        # entry. `revlMapIndex` faults on a miss, as every other tier now does.
+        if node.get("key_type") is not None:
+            return f"revlMapIndex({target}, {_expr(index_node, ctx)})"
         # A STRING-literal index is a property read on a dynamic/host value
         # (`tc["function"]`), not a List index — the checker only admits it on
         # an `Any`/host receiver, never on a `List`. Coercing it through
         # `Number(...)` (the List path) produced `tc[Number("function")]`
         # (`tc[NaN]`, always undefined). Emit the raw key straight (item 279).
-        index_node = node["index"]
         if isinstance(index_node, dict) and index_node.get("kind") == "lit" \
                 and isinstance(index_node.get("value"), str):
             return f"{target}[{_string(index_node['value'])}]"
@@ -3253,6 +3260,9 @@ def _v3_surface_type(node: object, known: dict) -> "str | None":
         operands = node.get("operands")
         return operands if isinstance(operands, str) else None
     if kind == "index":
+        # a Map subscript answers the map's declared VALUE type (#957)
+        if node.get("value_type"):
+            return node["value_type"]
         return _v3_list_element(_v3_surface_type(node.get("target"), known))
     if kind == "builtin":
         # every list/map builtin the emitter lowers answers the RECEIVER's type
@@ -3697,6 +3707,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_PARSE_INT_HELPER, ""])
     if _uses_index(ir):
         out.extend([_REVL_INDEX_HELPER, ""])
+    if _uses_map_index(ir):
+        out.extend([_REVL_MAP_INDEX_HELPER, ""])
     return out
 
 
@@ -3709,13 +3721,27 @@ _REVL_INDEX_HELPER = """function revlIndex<T>(xs: T[], i: number): T {
   return xs[i]
 }"""
 
+# A `Map` subscript reads by key and a MISS faults, on every tier (issue #957):
+# `m[k]` is the partial form and `m.lookup(k)` the total one, the same split
+# docs/stdlib-2.0.md §index pins for the List. `Map.get` answers `undefined` on
+# a miss, which is exactly the silent wrong value this issue exists to remove,
+# so the read is guarded here. The reason is spelled identically on all five
+# tiers, the way `revl: Int overflow` already is.
+_MAP_MISS_MSG = "revl: map index: no entry for key"
+_REVL_MAP_INDEX_HELPER = """function revlMapIndex<K, V>(m: Map<K, V>, k: K): V {
+  if (!m.has(k)) { throw new Error("%s") }
+  return m.get(k) as V
+}""" % _MAP_MISS_MSG
+
 
 def _uses_index(node) -> bool:
     """Does this IR read a List subscript `xs[i]` (routed through `revlIndex`)?
     A string-LITERAL key is a host/`Any` property read, not a List subscript,
-    so it does not pull the helper in."""
+    so it does not pull the helper in. Neither does a `Map` subscript (issue
+    #957): it routes through `revlMapIndex` instead, and an emitted helper
+    nothing calls is a `noUnusedLocals` error, not dead weight."""
     if isinstance(node, dict):
-        if node.get("kind") == "index":
+        if node.get("kind") == "index" and node.get("key_type") is None:
             idx = node.get("index")
             if not (isinstance(idx, dict) and idx.get("kind") == "lit"
                     and isinstance(idx.get("value"), str)):
@@ -3723,6 +3749,18 @@ def _uses_index(node) -> bool:
         return any(_uses_index(v) for v in node.values())
     if isinstance(node, list):
         return any(_uses_index(v) for v in node)
+    return False
+
+
+def _uses_map_index(node) -> bool:
+    """Does this IR read a `Map` subscript `m[k]` (issue #957)? The frontend
+    marks the node with the map's declared `key_type`; nothing else carries it."""
+    if isinstance(node, dict):
+        if node.get("kind") == "index" and node.get("key_type") is not None:
+            return True
+        return any(_uses_map_index(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_uses_map_index(v) for v in node)
     return False
 
 
