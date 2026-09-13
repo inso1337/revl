@@ -186,7 +186,7 @@ def test_an_action_with_no_declaration_is_refused_not_inferred():
     assert "declares no `within { … }` intent for it to refine" in message
 
 
-def test_an_unnameable_boundary_cannot_refine_a_declaration():
+def test_a_bare_emission_cannot_refine_a_declaration():
     """A bare `emission` operation names no capability, so no declared object
     can be shown to cover it. Fail closed rather than read the unnameable as the
     declared one."""
@@ -195,6 +195,26 @@ def test_an_unnameable_boundary_cannot_refine_a_declaration():
     with pytest.raises(RevlError) as exc:
         compile_source(bare, "<test>")
     assert "crosses an unnameable boundary" in str(exc.value)
+
+
+def test_a_crossing_with_no_resolvable_capability_is_refused():
+    """The same rule for the shapes whose boundary set the per-crossing
+    resolution cannot pin down at all (here, a crossing through a service-typed
+    parameter). An empty capability set is "nothing to compare", not "nothing to
+    check": treating it as the latter is the silent hole."""
+    src = (
+        'service Store { emission[db] fn ingest(row: Str) -> Int }\n'
+        'service Worker { emission fn run(s: Store) -> Str'
+        ' within { object: db, verbs: [ingest] } }\n'
+        'component W provides worker: Worker {\n'
+        '  provide worker { fn run(s: Store) { emit s.ingest("row")'
+        ' acting { verb: ingest } return "k" } }\n'
+        '}\n'
+    )
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "<test>")
+    assert "crosses an unnameable boundary" in str(exc.value)
+    assert "authorizes `db`" in str(exc.value)
 
 
 # ------------------------------------- the clause grammar

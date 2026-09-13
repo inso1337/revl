@@ -12188,8 +12188,39 @@ def _check_intent_refinement(stmt: EmitStmt, node: dict, env: Env) -> None:
                  "adding `tenant:` and `scopes:` where the intent bounds them "
                  "(item 470)",
             code="G4", category="intent-refinement")
-    for token in _emit_crossed_caps(node, env):
+    crossed = _emit_crossed_caps(node, env)
+    if not crossed or "*" in crossed:
+        # The crossing names no capability this check can compare: a bare
+        # `emission` operation, or a shape whose boundary set the per-crossing
+        # resolution cannot pin down (a provision call off a spawn handle, a
+        # service-typed local, an unclassified extern). Either way no declared
+        # object can be SHOWN to cover it, and reading the unnameable as the
+        # declared one is the direction the whole kernel was built to close.
+        _refuse_unnameable_crossing(clause, where, filename, stmt.line)
+    for token in crossed:
         _refine_one_crossing(token, clause, acting, where, filename, stmt.line)
+
+
+def _declared_objects(clause) -> str:
+    """Every capability the declaration names, as a refusal renders them."""
+    return ", ".join(cap.to_str() for cap in clause.intent.objects())
+
+
+def _refuse_unnameable_crossing(clause, where: str, filename: str,
+                                line: int) -> None:
+    """A crossing whose boundary set cannot be named, under a declared intent."""
+    declared = _declared_objects(clause)
+    raise RevlError(
+        filename, line,
+        f"this `emit` crosses an unnameable boundary, and the intent {where} "
+        f"declares authorizes `{declared}`",
+        hint="an intent authorizes the boundaries it names, and a crossing that "
+             "names none cannot be shown to be one of them (fail closed). Give "
+             "the operation this emit calls a capability scope — "
+             "`emission[<capability>] fn …` — so the crossing can be compared "
+             "against the declaration (item 470)",
+        code="G4", category="intent-refinement",
+        expected=declared, actual="an unnameable boundary")
 
 
 def _refine_one_crossing(token: str, clause, acting, where: str,
@@ -12204,24 +12235,6 @@ def _refine_one_crossing(token: str, clause, acting, where: str,
     from . import cap_order as _cap_order  # noqa: PLC0415 - lazy, avoids a cycle
     from . import intent as _intent  # noqa: PLC0415 - lazy, avoids a cycle
 
-    declared_objects = ", ".join(
-        cap.to_str() for cap in clause.intent.objects())
-    if token == "*":
-        # a bare `emission` crossing: the boundary is not named, so no declared
-        # object can be shown to cover it. Fail closed rather than treat the
-        # unnameable as the declared one.
-        raise RevlError(
-            filename, line,
-            f"this `emit` crosses an unnameable boundary (a bare `emission` "
-            f"operation), and the intent {where} declares authorizes "
-            f"`{declared_objects}`",
-            hint="an intent authorizes the boundaries it names, and a crossing "
-                 "that names none cannot be shown to be one of them (fail "
-                 "closed). Give the operation this emit calls a capability scope "
-                 "— `emission[<capability>] fn …` — so the crossing can be "
-                 "compared against the declaration (item 470)",
-            code="G4", category="intent-refinement",
-            expected=declared_objects, actual="*")
     try:
         action = _intent.Action.from_cap(
             _cap_order.parse_cap(token),
