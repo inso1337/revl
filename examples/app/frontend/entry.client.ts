@@ -11,10 +11,12 @@
 // It registers one page at `/notes` (the route the coeffect declares) rendering
 // the `NotesConsole.vue` screen, and reads the server's synced reactive state /
 // RPC surface through `useRpc<NotesConsoleChannel>()` — the typed contract in
-// `./contract.ts`. Until the server projects that surface (457 S4, the filed gap
-// in `./contract.ts`), `useRpc` resolves to an empty object and the page drives
-// note state through the typed REST routes instead; the type is already the
-// one-declaration shape so no rewrite is needed when the projection lands.
+// `./contract.ts`, which is GENERATED from the `NotesConsole` declaration by
+// `revl export client --lang ts --face webui --component NotesConsole`. The
+// server's published fields and this type are therefore one declaration, the way
+// `./notes.client.ts` is one declaration with `NotesApi`. Note state still flows
+// over the typed REST routes; the channel carries the ranker's live surface and
+// the two RPC methods the console provides.
 
 import { defineExtension, useRpc } from '@cordisjs/client'
 import NotesConsole from './NotesConsole.vue'

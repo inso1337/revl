@@ -124,7 +124,7 @@ was corrected by hand and had drifted back within a day.
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 14 |  |
-| frontend-assets.md | needs-work | 11 |  |
+| frontend-assets.md | needs-work | 12 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | needs-work | 28 |  |

@@ -7,9 +7,10 @@ with [design/526-webui-asset-alignment.md](design/526-webui-asset-alignment.md)
 [design/530-webui-entry-surface.md](design/530-webui-entry-surface.md) (the
 coeffect decision).
 
-> **Status: stage 1 landed; the remainder is named at the end of this page.**
-> Read [What is not expressible yet](#what-is-not-expressible-yet) before you
-> plan around it.
+> **Status: the asset model and the typed channel are landed; the remainder is
+> named at the end of this page.** Read
+> [What is not expressible yet](#what-is-not-expressible-yet) before you plan
+> around it.
 
 ## The problem it replaces
 
@@ -38,38 +39,111 @@ first-class coeffect on it and registers its frontend entry at activation,
 naming *files only*:
 
 ```revl
+// The reactive state this entry publishes to its page: an ordinary declared
+// record. Its fields are what the browser observes on the synced channel.
+type ConsoleState = { title: Str, ready: Bool }
+
+// The RPC surface the browser may call: the component's own provision, so the set
+// of server methods the page can reach is enumerable from the source.
+service ConsoleRpc {
+  fn ping(nonce: Str) -> Str
+}
+
 // The ambient WebUI service the host provides as `ctx.webui`. `add_entry` names
-// external asset files and returns a stable entry handle; it is an `emission`
-// because registering a frontend is an outward effect on the host (G4 upper
-// bound — the shape a `revl import cordis` of `@cordisjs/plugin-webui` recovers).
+// external asset files and the typed reactive channel, and returns a stable entry
+// handle; it is an `emission` because registering a frontend is an outward effect
+// on the host (G4 upper bound — the shape a `revl import cordis` of
+// `@cordisjs/plugin-webui` recovers).
 service WebUI {
   emission fn add_entry(
     dev_source: Str,
     prod_manifest: Str,
     routes: List[Str],
+    data: ConsoleState,
   ) -> Str
 }
 
 // A component contributes a frontend by declaring the coeffect and emitting the
 // registration. The binding is the declared coeffect, so `revl audit` reports the
-// `webui` requirement (G1) and the `webui.add_entry` emission (G8, the trusted
-// host boundary) on this component's surface.
-component ConsoleUI requires webui: WebUI {
+// `webui` requirement (G1), the `webui.add_entry` emission (G8, the trusted host
+// boundary) and the `console` provision on this component's surface.
+component ConsoleUI requires webui: WebUI provides console: ConsoleRpc {
   emit webui.add_entry(
     "./frontend/entry.client.ts",        // dev-mode source (a Vite/Vue module)
     "./frontend/dist/.vite/manifest.json", // built Vite manifest for production
     ["/console"],                        // client route patterns this entry owns
+    { title: "revl console",             // the typed reactive channel
+      ready: true },
   )
+
+  provide console {
+    fn ping(nonce) = "pong:" + nonce
+  }
 }
 ```
 
-The three arguments are:
+The four arguments are:
 
 | Argument | What it is |
 |---|---|
 | `dev_source` | the frontend's **entry module** as Vite serves it in dev — a real `.ts` file, not a bundle |
 | `prod_manifest` | the Vite **build manifest** (`build.manifest: true`), which maps entry names to hashed, emitted assets for production |
 | `routes` | the client-side route patterns this entry owns, so the host can mount it |
+| `data` | the **typed reactive state** the entry publishes — the object Cordis WebUI broadcasts to the browser, declared as a record instead of an untyped `T` |
+
+## The typed channel: `revl export client --face webui`
+
+Cordis WebUI's `addEntry(files, data)` publishes `data` as a reactive object: the
+server mutates it and the delta is broadcast to the browser, and any function on
+it becomes an RPC method the browser may call. Raw, that object is untyped. In
+revl both halves are declared, once each, and **projected** into the TypeScript
+the browser reads:
+
+| Half | Declared as | Projected to |
+|---|---|---|
+| reactive state | the record type of `add_entry`'s `data` parameter | `readonly` fields of `<Component>State` |
+| RPC methods | the services the component `provides` | `async` methods of `<Component>Rpc` |
+
+```bash
+revl export client --lang ts --face webui --component ConsoleUI \
+  -o frontend/contract.ts console.rvl
+```
+
+```ts
+// frontend/contract.ts (generated — do not edit)
+export interface ConsoleUIState {
+  readonly title: string;
+  readonly ready: boolean;
+}
+export interface ConsoleUIRpc {
+  ping(nonce: string): Promise<string>;
+}
+export type ConsoleUIChannel = ConsoleUIState & ConsoleUIRpc;
+```
+
+The client extension then reads the channel with the projected type, so the
+server's published fields and the browser's `useRpc` type are **one
+declaration**:
+
+```ts
+fields: () => ({ channel: useRpc<ConsoleUIChannel>() }),
+```
+
+Two properties follow from the projection, and neither is available when the
+contract is hand-written on the TS side:
+
+- **The published value is checked against the declared state.** The record the
+  component `emit`s is type-checked against `data`'s declared type, so a field the
+  browser expects that the server does not publish is a compile error in the revl
+  source, not a runtime `undefined`.
+- **The browser-callable set is exactly the component's provisions.** It is the
+  same surface `revl audit` reports as G1, so "which server methods can this page
+  call" is answerable from the declaration.
+
+Regenerate `contract.ts` whenever the state record or the provided service
+changes; the file carries a `DO NOT EDIT` header because a hand edit is a second,
+unchecked declaration. The REST half of the frontend is the sibling projection,
+`revl export client --lang ts --service NAME`.
 
 `emit` (not a plain call) is required because registering a frontend is an
 **outward effect**: it changes host state that outlives the call. That is the
@@ -132,7 +206,8 @@ See [`examples/app/frontend/`](../examples/app/frontend/) for a working project
 `vite.config.ts`, `package.json`, `tsconfig.json`), and
 [`examples/webui-entry/console.rvl`](../examples/webui-entry/console.rvl) for the
 canonical copy-me shape. Copy it the way `router.rvl` is copied: rename the
-component and point the three paths at your own project.
+component, point the asset paths at your own project, and declare your own state
+record and provision.
 
 ## Running it: `revl dev`
 
@@ -173,19 +248,13 @@ none of it should be assumed:
   `build.sourcemap: true` maps the bundle to *your* sources, which is a
   different claim from mapping the place revl names the asset back to a line.
   Design note 459 **F2**.
-- **No typed reactive-state / RPC channel.** `add_entry` has no `data`
-  parameter, so the coeffect publishes an **empty** reactive surface and the
-  shared state/RPC contract is authored by hand on the TS side (`contract.ts`)
-  rather than *projected* from the service declaration. This is the filed gap
-  **G3** in
-  [design/525-webapp-slice4-frontend.md](design/525-webapp-slice4-frontend.md),
-  folded into item 457's "one definition" work — it is what a
-  `revl export client --face webui` slice would close. It is recorded as a gap,
-  not absorbed as a workaround: the example frontend drives all state through
-  the typed REST routes.
-- **No `--face webui` CLI verb** (design note 459 **F7**).
 - **No template control flow** (`{{if}}`/`{{for}}`/includes/layouts, **F3**),
   and **tiers** are not extended beyond py/ts (**F6**).
+
+The typed reactive-state / RPC channel (design note 459 **F5**, filed as gap
+**G3** in
+[design/525-webapp-slice4-frontend.md](design/525-webapp-slice4-frontend.md)) and
+the `--face webui` verb (**F7**) are the section above; both are landed.
 
 The item's stated exit is app-gated on roadmap item 462 (the exemplary web
 application, issue #725, itself gated on item 461 / issue #724), so it cannot

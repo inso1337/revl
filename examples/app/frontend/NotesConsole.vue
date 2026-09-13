@@ -21,9 +21,11 @@ import type { NotesConsoleChannel } from './contract'
 const props = defineProps<{
   base?: string
   // The synced reactive state + RPC surface Cordis WebUI hands the page through
-  // `useRpc<NotesConsoleChannel>()` (see `./entry.client.ts`). Optional because
-  // the server publishes an empty reactive surface until 457 S4 lands the typed
-  // `--face webui` projection (see `./contract.ts` filed gap).
+  // `useRpc<NotesConsoleChannel>()` (see `./entry.client.ts`). Its type is
+  // PROJECTED from the `NotesConsole` declaration in `../notes.rvl`, so a field
+  // the server does not publish, or a method it does not provide, is a compile
+  // error here. Optional only so the screen renders standalone (a unit test, a
+  // Storybook-style harness) outside a Cordis WebUI host.
   channel?: NotesConsoleChannel
 }>()
 
@@ -33,6 +35,7 @@ const notes = ref<Note[]>([])
 const draft = ref<NewNote>({ title: '', body: '' })
 const error = ref<string | null>(null)
 const busy = ref(false)
+const scores = ref<Record<string, number>>({})
 
 async function refresh(): Promise<void> {
   busy.value = true
@@ -62,6 +65,16 @@ async function create(): Promise<void> {
   }
 }
 
+// One engagement signal, over the channel's RPC half. `bump` and `score` are the
+// console's declared provisions (`NotesConsoleRpc` in `../notes.rvl`), so this is
+// the whole set of server methods this page can reach — the enumerable boundary
+// the string-carried console could never state about itself.
+async function bump(id: string): Promise<void> {
+  if (!props.channel) return
+  await props.channel.bump(id)
+  scores.value = { ...scores.value, [id]: await props.channel.score(id) }
+}
+
 onMounted(refresh)
 </script>
 
@@ -86,6 +99,10 @@ onMounted(refresh)
       <li v-for="note in notes" :key="note.id">
         <strong>{{ note.title }}</strong>
         <span>{{ note.body }}</span>
+        <button v-if="props.channel" type="button" @click="bump(note.id)">
+          bump<template v-if="scores[note.id] !== undefined">
+            ({{ scores[note.id] }})</template>
+        </button>
       </li>
     </ul>
   </section>

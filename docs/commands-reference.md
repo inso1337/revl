@@ -1353,13 +1353,28 @@ onto a `revl serve --http` face (below): `base` is the service's route prefix
 `http://host:port/<composition>/<key>`, and each call POSTs its positional
 arguments as a JSON array.
 
+`--face webui` projects a different typed boundary from the same IR: the Cordis
+WebUI channel of ONE component (item 457 slice S4, design note 530 Decision B;
+see [frontend-assets.md](frontend-assets.md)). The reactive state is the record
+type of the `data` parameter the component publishes through `webui.add_entry`,
+and the RPC method set is the services the component `provides` - the surface
+`revl audit` reports as G1 - so the browser's `useRpc<T>()` type and the server's
+published fields are one declaration. It emits `<Component>State`,
+`<Component>Rpc` and `<Component>Channel`, and no transport: Cordis WebUI owns the
+WebSocket seam. A component with no webui requirement, an `add_entry` with no
+`data` parameter, a `data` type that is not a declared record, or a component that
+provides nothing is refused rather than projected as half a contract.
+
 - `FILES` - `.rvl` source files (required).
 - `--lang LANG` - target language for the generated client (default: `ts`; `ts`
   is the slice-C1 target).
+- `--face FACE` - which typed boundary to project: `rest` (default, the remote
+  client above) or `webui` (a component's browser channel).
 - Exactly one of (required, mutually exclusive):
-  - `--service NAME` - export a client for a single service by name.
+  - `--service NAME` - export a client for a single service by name (`rest`).
   - `--composition` - export a client for every service the composition
-    provides.
+    provides (`rest`).
+  - `--component NAME` - export this component's browser channel (`webui`).
 - `-o`, `--output PATH` - output path (default: stdout).
 - `--json-diagnostics` - structured diagnostic on rejection.
 
