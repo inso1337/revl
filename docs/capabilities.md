@@ -173,11 +173,11 @@ operation declares, and prints the union — where this component can reach:
 ```
 component PgCache
   requires: bus, db
-  boundary: emissions: bus.publish, db.execute (0 compensated); capabilities: *
+  boundary: emissions: bus.publish, db.execute (0 of them compensated); capabilities: *
 
 component Front
   requires: cache
-  boundary: emissions: cache.put [bus, db] (0 compensated); capabilities: bus, db
+  boundary: emissions: cache.put [bus, db] (0 of them compensated); capabilities: bus, db
 ```
 
 `Front` calls one operation and the audit says where that lands: `bus` and
