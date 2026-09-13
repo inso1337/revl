@@ -52,7 +52,7 @@ The crate builds with no Python on the machine. That is why the generated source
 is committed rather than produced at install time (items 336 and 338 depend on
 it).
 
-## This gate issues no admissions
+## The verdict surface issues no admissions
 
 Read this before wiring the crate into anything.
 
@@ -68,24 +68,67 @@ reference's type layer. Measured, not assumed: the reference refuses all of
 
 and the self-host gate raises no objection to any of them.
 
-So there is no `Verdict::Admitted` and no `is_admitted()`. The non-refusing arm
+So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
-refuse"* — never *"the reference would admit this"*. A host that must ADMIT,
-because it is about to run the program, still needs a reference verdict
-(`revl compile`, or `revl.gate.admit` on py). What this crate buys is the other
-direction: a local, in-process, Python-free REFUSAL that agrees with the
-reference byte for byte on the covered corpus.
+refuse"* — never *"the reference would admit this"*. On the wire, `to_json()`
+emits `"admitted": false` for **every** arm, so a consumer written against the
+design's fixed `{admitted, code, message}` shape reads the verdict surface as
+"never admits" rather than misreading a no-objection. The arm itself travels in
+the extra `"verdict"` field
+(`"refused"` / `"no_objection"` / `"outside_frontier"`).
 
 The asymmetry is the whole design: refusing what the reference admits is an
 inconvenience; **admitting what the reference refuses is the defect class the
-admission-gate arc exists to prevent.** A crate that cannot issue an admission
-cannot commit that defect.
+admission-gate arc exists to prevent.**
 
-On the wire, `to_json()` emits `"admitted": false` for **every** arm, so a
-consumer written against the design's fixed `{admitted, code, message}` shape
-reads this gate as "never admits" rather than misreading a no-objection. The
-arm itself travels in the extra `"verdict"` field
-(`"refused"` / `"no_objection"` / `"outside_frontier"`).
+## The admission surface (issue #346)
+
+An admission is a SECOND question, asked through a second type so the two cannot
+be confused: `issue_admission(source)` returns an `Admission`, not a `Verdict`.
+
+```rust
+match revl_gate::issue_admission("service Store { fn get(key: Str) -> Str }") {
+    revl_gate::Admission::Admitted { basis } => println!("admitted: {basis}"),
+    revl_gate::Admission::Withheld { verdict } => println!("withheld: {verdict:?}"),
+}
+```
+
+`Admission::Admitted` is reachable through exactly one path, and both conditions
+are necessary:
+
+1. `admit(source)` returned `Verdict::NoObjection` — the composition/guarantee
+   gate ran and found nothing to refuse. An admission is never issued over a
+   refusal or a frontier gap.
+2. the source is inside the ADMISSION SURFACE (`ADMISSION_SURFACE_ID`,
+   `src/admission.rs`) — the region where the covered layer is the WHOLE
+   question, because the source carries no term the type layer decides.
+
+The surface is deliberately tiny, and its one line is `ADMITTED_LAYER`:
+
+    interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides
+
+That is not the covered layer read optimistically; it is the sliver of it where
+reading a no-objection as an admission is sound. No body, no expression, no
+literal, no generic head. A source outside it is `Admission::Withheld` carrying
+the verdict verbatim, so switching a consumer from `admit` to `issue_admission`
+can only ADD the admitted wire — every other answer is byte-identical to the one
+it already handled. Widening the surface is the self-host type layer's lane
+(`docs/design/457-selfhost-type-layer.md`).
+
+`issue_admission_into(source, manifest)` asks the same question against a running
+composition. The empty manifest is the empty composition, so it is
+`issue_admission` byte for byte. Against a NON-EMPTY manifest only a candidate
+that DECLARES NOTHING is admitted, and the reason is the item-186 row wire rather
+than the certifier: a row carries a component name, a provision key and a realm,
+and no service shapes, so a declared `service Store` may collide with a `Store`
+the running composition already holds in a different shape and the wire cannot
+say. The reference refuses exactly that pair. Carrying the running shapes on the
+wire is the remaining half of issue #346.
+
+An issued admission serialises `{"verdict":"admitted","admitted":true,
+"code":null,"message":null}` — byte-identical to `revl.gate`'s own wire for a py
+admission, so a seam comparing the two tiers compares equal bytes. The basis is
+off the wire on purpose: it is evidence for a log, not part of the contract.
 
 ## Fail closed at the frontier
 
@@ -216,7 +259,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:d2fc9f5821e8c5de"
+    // frontier "selfhost-admit:6d397e940d359787"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
