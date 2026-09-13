@@ -274,6 +274,18 @@ def block_agents_mcp_count(current: str) -> str:
     )
 
 
+def block_authoring_mcp_count(current: str) -> str:
+    """docs/authoring-for-agents.md's verb total. It was hand-maintained and
+    drifted (issue #939): the page still claimed the authoring verbs were
+    CLI-only after item 345 exposed them over MCP, and its total lagged the
+    registry. Generating it ties the page to `TOOLS` like the other two."""
+    n = len(mcp_tools())
+    return (
+        f"`revl mcp serve` advertises {n} verbs in total; the full list is in\n"
+        "[mcp-reference.md](mcp-reference.md)."
+    )
+
+
 def block_cli_verbs(current: str) -> str:
     """docs/commands-reference.md's verb list, in the order the parser declares
     it. The fence is the index; the per-command sections below it are gated by
@@ -349,6 +361,8 @@ BLOCKS: list[tuple[str, str, str, object]] = [
     ("mcp-verb-count", "docs/mcp-reference.md", "revl.mcp.server.TOOLS", block_mcp_count),
     ("agents-mcp-count", "docs/guide-ai-agents.md", "revl.mcp.server.TOOLS",
      block_agents_mcp_count),
+    ("authoring-mcp-count", "docs/authoring-for-agents.md", "revl.mcp.server.TOOLS",
+     block_authoring_mcp_count),
     ("cli-verbs", "docs/commands-reference.md", "revl.cli.parser.build_parser()",
      block_cli_verbs),
     ("guarantees", "docs/rejections.md", "revl.diagnostics.GUARANTEES",
