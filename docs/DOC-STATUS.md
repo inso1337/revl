@@ -199,7 +199,7 @@ was corrected by hand and had drifted back within a day.
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
 | wasm-capabilities.md | needs-work | 35 | yes |
-| webapp-competitiveness-report.md | needs-work | 27 |  |
+| webapp-competitiveness-report.md | needs-work | 28 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
