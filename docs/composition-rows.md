@@ -500,19 +500,37 @@ unambiguous.
 
 ## `slo`: the rollout contract
 
-`slo { ... }` declares the service-level objectives the rollout has to hold. It
-is roadmap item 473's contract; the design note is
-[design/473-slo-rollout-gate.md](design/473-slo-rollout-gate.md).
+`slo { ... }` declares the service-level objectives the rollout has to hold, and
+what a live breach of each one does. It is roadmap item 473's contract; the
+design notes are [design/473-slo-rollout-gate.md](design/473-slo-rollout-gate.md)
+(the compile-time gate) and
+[design/473-slo-contracts.md](design/473-slo-contracts.md) (the contract end to
+end).
 
 ```revl
 composition Shop {
   use "services.rvl"
 
-  slo { p95_latency: 250ms, success_rate: 99.5 }
+  slo { p95_latency: 250ms on breach pause, success_rate: 99.5 }
 
   row @checkout from "consumer.rvl" provides checkout
 }
 ```
+
+`on breach <response>` is optional and per datum. The response registry is
+closed, like the datum registry, because a response nothing implements is a
+promise the runtime cannot keep: `divert "<source>.rvl"` swaps the breaching
+component's provider for the named fallback and re-admits it through the
+ordinary gate, `pause` stops dispatching new crossings and leaves everything
+registered still owed, and `halt` is the item-443 E-Stop with its stranding.
+The escalation order is by residue cost. A datum that declares no response is
+answered by `pause`, the bounded-residue floor — a breach that changed nothing
+would not be a contract, and the vocabulary has no "ignore" to ask for one.
+
+The observed half is `revl slo`: it measures a recorded run against this
+contract, takes the declared response, signs a `revl.slo-receipt` bound to the
+generation, and gates the next rollout on it. See
+[commands-reference.md](commands-reference.md#revl-slo).
 
 The datum set is closed, and each datum fixes its own unit:
 
@@ -691,7 +709,7 @@ patch the rows this document defines.
 | incremental admission | admitting a resolved delta through `admit_into` with a `replacing` withdrawal set, so the cost is one compile of the patched rows | the fold |
 | confinement | non-first-party rows compiled under the untrusted-author profile, and the per-root profile split in `compile_files` that makes a mixed-trust delta expressible in one call | roadmap 425 F1's decision |
 | the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, and a printed blind-spots block | confinement, and roadmap 428 F3 |
-| the SLO runtime | the observed half of item 473: a live breach diverting to a fallback provider, pausing or latching an e-stop, with a receipt on the running generation | a generation receipt and an `slo` trace event, neither of which exists |
+| the SLO runtime, in flight | the observed half of item 473 runs today over a RECORDED trace through `revl slo`: the measurement, the declared response, the signed receipt and the rollout gate. What is left is the LIVE producer, a session running the monitor at its own generation boundary | a producer inside `Session`, and the pause as a member of item 460's lifecycle state set |
 | distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |
 
 `open` (which fields a third-party layer may `configure`, §8.6) and `reach` (the
