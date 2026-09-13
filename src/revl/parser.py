@@ -922,6 +922,45 @@ SLO_BACKED_BY: dict[str, str] = {
     "max_pending_tasks": "calls",
 }
 
+# The DIRECTION each datum is a bound in (item 473, observed half). A duration
+# or a task count is an UPPER bound, so an observation ABOVE the target breaches
+# it; a rate is a LOWER bound, so an observation BELOW the target breaches it.
+# The direction is a property of the datum, not of the surface, which is why it
+# lives here beside the registry rather than being written per declaration:
+# `success_rate: 99.5` has one meaning and it is not "at most 99.5 percent".
+SLO_DIRECTION: dict[str, str] = {
+    "p95_latency": "upper",
+    "success_rate": "lower",
+    "recovery_time": "upper",
+    "approval_wait": "upper",
+    "max_pending_tasks": "upper",
+}
+
+# The RESPONSE a live breach of a datum triggers (`on breach <response>`), a
+# CLOSED registry like the datums themselves. The value says whether the
+# response takes a fallback provider source: `divert` switches the breaching
+# component to another provider, so it names one; `pause` and `halt` are
+# responses to the run, so they take no argument. The escalation order is by
+# RESIDUE COST (docs/design/473-slo-contracts.md): divert leaves none, a pause
+# owes everything it registered and is still recoverable, a halt strands.
+SLO_RESPONSES: dict[str, bool] = {
+    "divert": True,
+    "pause": False,
+    "halt": False,
+}
+
+# What a live breach triggers when the datum declares no `on breach` clause.
+#
+# `pause`, not "record a receipt and carry on": a breach that changes nothing is
+# not a contract, and the exit criterion for item 473 is that a live breach
+# "triggers the declared fallback or pause". Of the three responses `pause` is
+# the one whose cost is bounded and whose residue is honest — no new boundary
+# crossing is dispatched and everything registered is still owed and
+# recoverable — so it is the safe floor a declaration that named no response
+# gets. A composition that wants less must SAY so, and the vocabulary has no
+# "ignore" to say it with.
+SLO_DEFAULT_RESPONSE: str = "pause"
+
 
 @dataclass
 class CompositionDecl:
@@ -955,12 +994,26 @@ class CompositionDecl:
     # lists in a file, which is what makes the fold reproducible (§3.3).
     stack: list[tuple[str, int]] = field(default_factory=list)
     site: tuple[str, int] | None = None
-    # item 473 (issue #825): the declared SLO contract, as `(datum, canonical
-    # value, line)` in declaration order, the canonical value being milliseconds
-    # for a duration, percent for `success_rate`, tasks for `max_pending_tasks`.
+    # item 473 (issue #825): the declared SLO contract, as
+    # `(datum, canonical value, line, response)` in declaration order, the
+    # canonical value being milliseconds for a duration, percent for
+    # `success_rate`, tasks for `max_pending_tasks`.
+    #
     # Empty for every composition that declares no `slo` block, so a program
     # without one parses, resolves and emits byte-identically to before.
     slo: list[tuple[str, int | float, int]] = field(default_factory=list)
+    # item 473, the OBSERVED half: `<datum> -> (response name, fallback
+    # provider source or None)` for the datums that wrote an `on breach`
+    # clause. A SEPARATE map rather than a fourth member of `slo`'s tuples,
+    # for the same reason `RowTable` carries it under its own IR key: a `slo`
+    # block that declares targets and no responses has to parse, resolve and
+    # emit exactly the document it emitted before this slice, and widening the
+    # target tuples would move bytes that were already committed.
+    #
+    # A datum with no entry here is answered by `SLO_DEFAULT_RESPONSE`, so an
+    # empty map is the honest reading of "the document chose no response".
+    slo_responses: dict[str, tuple[str, str | None]] = field(
+        default_factory=dict)
 
 
 # --- item 426 S2: layers and the fold ---------------------------------------
@@ -3289,6 +3342,7 @@ class Parser:
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
         slo: list[tuple[str, int | float, int]] = []
+        slo_responses: dict[str, tuple[str, str | None]] = {}
         seen: dict[str, int] = {}
         while True:
             self._skip_semis()
@@ -3362,7 +3416,7 @@ class Parser:
                         hint="a composition carries exactly ONE SLO contract: "
                              "the datums are distinct keys, so two blocks could "
                              "only disagree")
-                slo = self._slo_block(name, sline)
+                slo, slo_responses = self._slo_block(name, sline)
                 continue
             if not self.at("ident", "row"):
                 tok = self.peek()
@@ -3378,20 +3432,23 @@ class Parser:
                          '`seam @label on key("k") observe with @observer`, or '
                          'places one: `place @label on process "p" backend rust`. '
                          'It may also declare the service-level objectives the '
-                         'rollout must hold: `slo { p95_latency: 250ms, '
-                         'success_rate: 99.5 }`')
+                         'rollout must hold, and what a live breach of each '
+                         'one does: `slo { p95_latency: 250ms on breach divert '
+                         '"standby.rvl", success_rate: 99.5 }`')
             rows.append(self.row_decl(name))
             self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
                                site=site, remotes=remotes, hosts=hosts,
-                               seams=seams, places=places, slo=slo)
+                               seams=seams, places=places, slo=slo,
+                               slo_responses=slo_responses)
 
-    def _slo_block(self, composition: str,
-                   line: int) -> list[tuple[str, int | float, int]]:
-        """`slo { <datum>: <value> (, <datum>: <value>)* }`, the composition's
-        SLO contract (roadmap item 473, issue #825). The leading `slo` is
-        already consumed.
+    def _slo_block(self, composition: str, line: int) -> tuple[
+            list[tuple[str, int | float, int]],
+            dict[str, tuple[str, str | None]]]:
+        """`slo { <datum>: <value> [on breach <response>] (, ...)* }`, the
+        composition's SLO contract (roadmap item 473, issue #825). The leading
+        `slo` is already consumed.
 
         The datum set is a CLOSED registry (`SLO_DATUMS`): an unknown datum is a
         refusal listing the registry rather than a silently ignored line, since a
@@ -3401,9 +3458,22 @@ class Parser:
         reinterpreted later. The block itself is refused when it declares
         nothing, and a datum is refused when it is declared twice: both are
         promises the document does not actually make.
+
+        `on breach <response>` is the OBSERVED half of the same promise (item
+        473): it names what a LIVE breach of this datum does — divert to a
+        named fallback provider, pause, or halt. It is optional, and the
+        response registry is closed for the same reason the datum registry is:
+        an action nothing implements is a promise the runtime cannot keep.
+
+        Returns `(targets, responses)`: the `(datum, value, line)` triples the
+        compile-time gate already read, and a SEPARATE `datum -> (response,
+        fallback)` map for the datums that wrote a clause. Two returns rather
+        than one widened list, so a document that declares no response
+        produces the same `CompositionDecl.slo` it produced before this slice.
         """
         self.expect("{")
         out: list[tuple[str, int | float, int]] = []
+        responses: dict[str, tuple[str, str | None]] = {}
         seen: set[str] = set()
         while not self.at("}"):
             dline = self.peek().line
@@ -3426,7 +3496,11 @@ class Parser:
                          "is a contract".format(datum))
             seen.add(datum)
             self.expect(":")
-            out.append((datum, self._slo_value(datum, dline), dline))
+            value = self._slo_value(datum, dline)
+            response = self._slo_response(datum, dline)
+            out.append((datum, value, dline))
+            if response is not None:
+                responses[datum] = response
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -3437,7 +3511,47 @@ class Parser:
                 hint="a composition that promises nothing should declare no "
                      "`slo` block at all; an empty one reads as a contract and "
                      "holds none (item 473)")
-        return out
+        return out, responses
+
+    def _slo_response(self, datum: str, line: int) -> tuple[str, str | None] | None:
+        """The optional `on breach <response>` clause of one SLO datum (item
+        473, observed half), or `None` when the datum declares no response.
+
+        The leading `on` is only a clause head when it is followed by `breach`,
+        so a datum value that happens to end beside an identifier is not
+        swallowed: the lookahead is two tokens, the same discipline
+        `_at_event_handler` uses for the `on <event>` surface.
+        """
+        if not (self.at("ident", "on") and self.pos + 1 < len(self.toks)
+                and self.toks[self.pos + 1].kind == "ident"
+                and self.toks[self.pos + 1].value == "breach"):
+            return None
+        self.next()                                   # `on`
+        self.next()                                   # `breach`
+        tok = self.peek()
+        name = tok.value if tok.kind == "ident" else None
+        if name not in SLO_RESPONSES:
+            known = ", ".join(f"`{n}`" for n in SLO_RESPONSES)
+            raise self.err(
+                tok.line,
+                f"unknown SLO breach response {tok.value!r} for `{datum}`",
+                hint=f"the response is a CLOSED registry (item 473): {known}. "
+                     "A response the runtime does not implement is a promise "
+                     "the composition cannot keep; a datum that declares no "
+                     f"response is answered by `{SLO_DEFAULT_RESPONSE}`")
+        self.next()
+        if not SLO_RESPONSES[name]:
+            return (name, None)
+        path = self.expect(
+            "string", what=f"the fallback provider source `{name}` diverts to")
+        if not path.value:
+            raise self.err(
+                line,
+                f"`on breach divert` for `{datum}` names an empty source path",
+                hint="a divert with no destination is a pause that lies about "
+                     "what it does; name the fallback provider's `.rvl` file, "
+                     "or write `on breach pause` (item 473)")
+        return (name, path.value)
 
     def _slo_value(self, datum: str, line: int) -> int | float:
         """The literal of one SLO datum, canonicalized by its value kind and

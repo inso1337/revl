@@ -955,11 +955,22 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
         # item 473: the declared SLO contract is a composition-level promise, so
         # it is printed with the composition's identity rather than among the
         # rows. Absent for every composition that declares no `slo` block, so
-        # this panel changes no existing output.
+        # this panel changes no existing output. The observed half prints the
+        # response a live breach takes, marking the one the document did not
+        # choose so a reader can tell a decision from a default.
+        from .parser import SLO_DEFAULT_RESPONSE  # noqa: PLC0415
         print()
         print("SLO")
         for key, (value, line) in table.slo.items():
-            print(f"  {key:<24} {value}   (declared at line {line})")
+            action, target = table.slo_responses.get(
+                key, (SLO_DEFAULT_RESPONSE, None))
+            breach = f"on breach {action}"
+            if target:
+                breach += f" -> {target}"
+            if key not in table.slo_responses:
+                breach += " (default)"
+            print(f"  {key:<24} {value}   {breach}   "
+                  f"(declared at line {line})")
     print()
     print("ROWS")
     for row in table.rows:
