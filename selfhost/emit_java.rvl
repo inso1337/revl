@@ -68,13 +68,14 @@
 //     surface this slice defers; the annotated `var m: Map[Str, Int] =
 //     Map.empty()` IS covered (its pin rides on the literal), and the
 //     unannotated one surfaces `<<DEFER-map-local-unpinned>>`;
-//   * the reference's `Stream.*` TIER-LIMIT refusal (roadmap 419e): the
-//     reference `_expr` now refuses a `Stream.*` host builtin, since this tier
-//     has no `Stream` runtime class and `Stream src = Stream.source();` was a
-//     dead emit. Deliberately NOT ported: this emitter has no refusal channel
-//     (its out-of-surface answer is a `<<DEFER-*>>` marker, which is the wrong
-//     shape for a tier limit the reference REFUSES), and no fixture reaches a
-//     `Stream.*` host builtin, so the oracle cannot see it;
+//   * the whole item-130 `Stream[T]` surface, which the reference java backend
+//     now LOWERS (the emitted `Stream`/`Subscription`/`EventContract` runtime,
+//     the `subscribe` acquisition, and the `stream-iter` loop behind
+//     `every … in` / `on … as`). Deliberately NOT ported, as it is not on the go
+//     and rust ports either: no fixture holds a stream, so the oracle cannot see
+//     it, and a fixture that did would force a divergence rather than expose one.
+//     Recorded as an `unported` baseline in
+//     tests/fixtures/selfhost_blind_spots.json;
 //   * the MODERN component path (`_emit_component_modern`), REMAINING surface —
 //     method-body `let`/`assign`/`await`/arrow bindings, `setup` blocks on effect
 //     steps, and body-level `while`/`for`/`let_pattern`. (config, required-service
