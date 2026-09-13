@@ -132,9 +132,9 @@ the frontend attached rather than with `--no-frontend`.
 
 ## Part 2 — Where friction remains
 
-Five gaps have been filed across the slices; G3 has since closed. None is a
-sentinel or an emitter workaround, so none violates bar 2. Four are ergonomic,
-expressiveness or process gaps a later item owns, and one (G1) has a correctness
+Five gaps have been filed across the slices; G3, G4 and G5 have since closed.
+None is a sentinel or an emitter workaround, so none violates bar 2. Of the two
+that remain, G2 is an ergonomic gap a later item owns and G1 has a correctness
 edge.
 
 ### G1 — the store owns no primary-key assignment *(filed against item 465, #752)*
@@ -199,42 +199,70 @@ What the channel still does not claim: a MUTATION path driven from revl. The
 component publishes the initial record; later deltas are Cordis' own
 `Entry.mutate` on the host side, and note state stays on the typed REST routes.
 
-### G4 — the generated TS client does not compile under a strict tsconfig *(filed against item 457)*
+### G4 (CLOSED 2026-09-13) — the generated TS client does not compile under a strict tsconfig *(filed against item 457)*
 
-`revl export client --lang ts --service NotesApi` emits a routed client whose
-constructor always declares a fallback transport:
+`revl export client --lang ts --service NotesApi` emitted a routed client whose
+constructor always declared a fallback transport:
 
 ```ts
 constructor(private readonly base: string, private readonly transport: Transport = ...) {}
 ```
 
 When every operation is routed, which is the point of the `route` clause,
-`transport` is never read, and `vue-tsc` over the app's `strict` + `noUnusedLocals` tsconfig
-reports `notes.client.ts(66,63): error TS6138`. The app cannot fix it: the file is
-a regenerated artifact whose byte-identity with the projection is asserted. The
-generator should omit the parameter, or not declare it `private`, when no
-operation is unrouted. **Severity: low, but it lands in the one artifact a user
+`transport` was never read, and `vue-tsc` over the app's `strict` +
+`noUnusedLocals` tsconfig reported `notes.client.ts(66,63): error TS6138`. The app
+could not fix it: the file is a regenerated artifact whose byte-identity with the
+projection is asserted. **Severity: low, but it landed in the one artifact a user
 is told not to edit**, which is the worst place for a diagnostic.
 
-### G5 — no CI leg builds or typechecks the frontend *(filed against item 462 / 461)*
+**Closed** by taking the recommended repair in `src/revl/export_client.py`
+(`_service_block`): a FULLY routed service's client declares `base` alone, and a
+MIXED service — one with at least one unrouted operation, the only thing that
+reads `this.transport` — still declares the transport it reads. The rule is
+pinned on all three service shapes in `tests/test_export_client_routes_457.py`,
+including a shape-independent check that every `private readonly <name>` the
+generator declares is read as `this.<name>` somewhere in the same file, so the
+gap cannot reopen under a different parameter name.
+`examples/app/frontend/notes.client.ts` is regenerated, and the typecheck leg in
+`tests/test_app_frontend_725.py` no longer filters a diagnostic by name: it
+asserts ZERO first-party diagnostics.
 
-The build and typecheck legs skip unless a contributor has run `npm ci` in
-`examples/app/frontend`; the required checks are the six backend matrices plus
-lint, none of which install node deps for this example. That is how a frontend
-that did not compile at all shipped and sat: until this pass, `entry.client.ts`
-passed a `fields` option `@cordisjs/client`'s `ctx.page` does not accept, and ran
-`useRpc` outside a component `setup` where its injection is absent. Both were
-invisible to a file-shape scan and obvious to `vue-tsc`
+### G5 (CLOSED 2026-09-13) — no CI leg builds or typechecks the frontend *(filed against item 462 / 461)*
+
+The build and typecheck legs skipped unless a contributor had run `npm ci` in
+`examples/app/frontend`; the checks were the six backend matrices plus lint, none
+of which install node deps for this example. That is how a frontend that did not
+compile at all shipped and sat: until this pass, `entry.client.ts` passed a
+`fields` option `@cordisjs/client`'s `ctx.page` does not accept, and ran `useRpc`
+outside a component `setup` where its injection is absent. Both were invisible to
+a file-shape scan and obvious to `vue-tsc`
 (docs/design/525-webapp-slice5-one-command.md D1). **Severity: process, and the
 highest-leverage item on this page**: a typed boundary is only typed once
 something compiles it.
 
-The two new legs are themselves the shape
+**Closed** by the `frontend-assets` job in `.github/workflows/ci.yml`: it pins
+node, runs `npm ci` in `examples/app/frontend`, and runs
+`tests/test_app_frontend_725.py` and `tests/test_webui_entry_asset_ref_459.py`
+with `REVL_REQUIRE_FRONTEND_TOOLCHAIN=1`. That environment variable is the part
+that matters. It turns the suite's toolchain skip OFF, so a job that installed
+nothing fails naming what is missing instead of skipping both legs and reporting
+green — which would be this gap with a green check on top of it.
+`tests/test_frontend_asset_gate_runs_in_ci.py` holds both halves: that a job
+installs the tree and runs the suite, and that it lifts the skip.
+
+One residual, stated rather than claimed away: whether `frontend-assets` is a
+REQUIRED check is branch-protection configuration, which lives outside the
+repository, so no test here can read or assert it. The repository half — a job
+that exists, installs the toolchain, compiles the frontend and cannot pass
+vacuously — is what this closes; promoting it to required is the repository
+owner's call.
+
+The two legs were themselves the shape
 `tests/test_env_gated_skips_run_somewhere.py` was written to warn about: a
 toolchain probe whose skip is the same colour as a pass. That file's own docstring
 names the residual it does not cover (a probe that does not go through a
-`revl.test` tier runner), and these are in it. Closing G5 means a required job
-that runs `npm ci && npm run typecheck && npm run build` for this example, not a
+`revl.test` tier runner), and these were in it. The repair was a job that
+installs the toolchain and a flag that makes the skip an error there, not a
 stronger assertion inside the suite.
 
 ### Friction that is real but was deliberately *not* filed
@@ -277,8 +305,8 @@ Recorded in the slice notes so a later pass does not refile them as bugs:
 
 Every bar is met, so the milestone's exit is met. What would DEEPEN the app
 rather than complete it: item 457 Slice 2 (`stdlib/auth.rvl`, a user-scoped
-store), the persistence surface behind G1/G2 (item 465 / design 527), and a CI
-leg for the frontend toolchain (G5).
+store) and the persistence surface behind G1/G2 (item 465 / design 527). The CI
+leg for the frontend toolchain (G5) has since landed.
 
 ## Part 4 — What the friction actually costs
 
@@ -288,26 +316,26 @@ Ranked by what a real user would feel, not by severity label:
    unsafe under concurrent creates, and it is exactly the kind of thing a
    "boring" framework should own. It is the strongest argument for the item-465 /
    527 Minato CRUD surface.
-2. **G5 costs the most and is not a language gap at all.** Nothing in CI
+2. **G5 cost the most and was not a language gap at all.** Nothing in CI
    compiled the frontend, so the typed boundary this app exists to demonstrate
    shipped in a state where it could not have worked in a browser: a page option
    Cordis does not accept, and a composable called where its injection is absent.
    Both fell out of `vue-tsc` in one run. The lesson generalises past this app:
    the parts of a revl system that live outside `.rvl` need the same gate the
-   `.rvl` half gets.
+   `.rvl` half gets, which the `frontend-assets` job now applies.
 3. **Item 186 is a diagnostics gap, not a structural blocker.** The earlier
    consolidation read it as one; running the command disproved that. A missing
    ambient provider today is a PENDING fiber and an exit 0, which is a weaker
    answer than an admission-time refusal but does not stop the app composing
    against a live host.
-4. **G4 is small and badly placed**: a diagnostic in the one file a user is told
-   to regenerate rather than edit.
+4. **G4 was small and badly placed**: a diagnostic in the one file a user is told
+   to regenerate rather than edit. It is closed, and the typecheck leg that used
+   to exempt it by name now admits no exemption at all.
 5. **G2 is the cheapest to close** and would remove N-round-trip listing.
 
 The honest summary: **revl's typed-boundary claim held under a real app** on the
 revl side of the boundary, and the friction that remains is concentrated in the
-persistence tier (465/527), the generated-artifact polish (G4), and the toolchain
-gating around the non-revl half (G5), not in routing, validation, serialization,
+persistence tier (465/527), not in routing, validation, serialization,
 the client contract, or the swap/recovery guarantees, which is where the app spent
 its budget. The one claim this report previously overstated was item 186's: it is
 corrected above.

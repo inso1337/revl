@@ -124,7 +124,7 @@ was corrected by hand and had drifted back within a day.
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 14 |  |
-| frontend-assets.md | needs-work | 12 |  |
+| frontend-assets.md | needs-work | 14 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | needs-work | 27 |  |
@@ -199,7 +199,7 @@ was corrected by hand and had drifted back within a day.
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
 | wasm-capabilities.md | needs-work | 35 | yes |
-| webapp-competitiveness-report.md | needs-work | 28 |  |
+| webapp-competitiveness-report.md | needs-work | 33 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |

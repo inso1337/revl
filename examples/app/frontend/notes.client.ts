@@ -63,7 +63,7 @@ export interface NewNote {
 /** Typed client for revl service `NotesApi`. LOCAL contract only: typed and
  *  bounded on THIS side; it makes no claim about what the remote runs. */
 export class NotesApiClient {
-  constructor(private readonly base: string, private readonly transport: Transport = { call() { throw new Error("no transport configured for an unrouted operation"); } }) {}
+  constructor(private readonly base: string) {}
 
   async get_note(id: string): Promise<{ "$kind": "Ok", "$value": Note } | { "$kind": "Err", "$value": { status: number, code: string, message: string } }> {
     let __path = `/notes/${encodeURIComponent(String(id))}`;

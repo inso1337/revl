@@ -127,6 +127,16 @@ NOT_REQUIRED_CHECKS = {
     #   gh api -X PATCH repos/inso1337/revl/branches/main/protection/required_status_checks \
     #     --input - <<< '{"strict":false,"contexts":[...ENFORCED_TODAY...,"root-suite-affected"]}'
     "root-suite-affected": "issue #854 unconditional root-suite coverage; promotion is a branch-protection change, out of tree",
+    # Gap G5 of docs/webapp-competitiveness-report.md (roadmap item 459): the
+    # only job that installs the exemplary app's node tree and COMPILES the
+    # frontend — a real `vite build` whose source map must name the originals,
+    # and `vue-tsc` over the strict tsconfig. Before it, both legs skipped in
+    # every job, which is how a frontend that did not compile at all shipped.
+    # Not required, for the same two reasons `root-suite-affected` is not: a
+    # context must already exist on `main` before branch protection can name it,
+    # and promoting it is a protection change made outside this tree. It is the
+    # obvious next promotion candidate once it has run on `main`.
+    "frontend-assets": "item 459 gap G5 frontend build/typecheck; promotion is a branch-protection change, out of tree",
 }
 
 
