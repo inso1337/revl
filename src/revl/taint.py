@@ -43,6 +43,7 @@ import re
 import warnings
 from dataclasses import dataclass, field
 
+from . import retention as _retention
 from .errors import RevlError
 from .typecheck import parse_type, format_type, FN_HEAD
 
@@ -72,15 +73,31 @@ class LiteralSecretDefaultWarning(UserWarning):
 
 # a qualifier head standing on its own (not the tail of a longer identifier such
 # as a user type `MyTrusted[T]`), used only as the byte-identity fast-path guard
-_QUALIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])(?:Untrusted|Trusted|Secret)\[")
+_QUALIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:Untrusted|Trusted|Secret|Retained)\[")
 
-# The three qualifier heads. Orthogonal to the base type (open question 2).
+# The four qualifier heads. Orthogonal to the base type (open question 2).
 # `Secret` (item 256 Slice 3) is the confidentiality qualifier of section 7: a
 # `Secret[T]` value is a real, projectable value the language reads and computes
 # with, fenced not by an absent eliminator but by the flow walk refusing it at
 # disclosure sinks (the `confidential` origin, DISJOINT from the bound key's
 # `secret`).
-_QUALIFIERS = ("Untrusted", "Trusted", "Secret")
+# `Retained` (item 472) is the fourth member and the one with a SECOND bracket
+# argument: `Retained[T, <policy>]` names the `retention <policy> { ... }`
+# declaration carrying the deadline, the residence, the legal-hold exception,
+# the allowed deleters and whether derivatives are covered. The policy name is
+# stripped off with the qualifier, so the base checker and every emitter still
+# see a bare `T` and the IR stays byte-identical (`revl.retention`).
+_QUALIFIERS = ("Untrusted", "Trusted", "Secret", "Retained")
+
+# How many bracket arguments each head accepts. All but `Retained` take exactly
+# one; `Retained[T, <policy>]` takes a second that is a LABEL rather than a
+# type. The arity is checked before a head is treated as a qualifier, which is what
+# `strip_qualifiers` and `top_qualifier` check before treating a head as a
+# qualifier at all (a user type named `Retained` with three arguments is not
+# this qualifier and is left alone).
+_QUALIFIER_ARITY = {"Untrusted": (1,), "Trusted": (1,), "Secret": (1,),
+                    "Retained": (1, 2)}
 
 # What a confidential value looks like once it leaves the process. A `Secret[T]`
 # declaration authorises disclosure to the DECLARED RECEIVER and to nobody else;
@@ -143,7 +160,9 @@ def strip_qualifiers(type_name: str | None) -> str | None:
         # byte-identity for programs that use no taint annotation.
         return type_name
     head, args = parse_type(type_name)
-    if head in _QUALIFIERS and len(args) == 1:
+    if head in _QUALIFIERS and len(args) in _QUALIFIER_ARITY[head]:
+        # args[0] is the base type; a second argument (only `Retained`'s policy
+        # name) is a LABEL, not a type, and is dropped here with the head.
         return strip_qualifiers(args[0])
     if not args:
         return head
@@ -161,11 +180,13 @@ def _has_qualifier(type_name: str | None) -> bool:
 
 
 def top_qualifier(type_name: str | None) -> str | None:
-    """`Untrusted`/`Trusted` if the *outermost* head is a qualifier, else None."""
+    """The qualifier head if the *outermost* head is one, else None. Arity is
+    checked, so a user type that merely shares a name is not mistaken for a
+    qualifier (`Retained[A, B, C]` is not `Retained[T, <policy>]`)."""
     if not type_name:
         return None
     head, args = parse_type(type_name)
-    if head in _QUALIFIERS and len(args) == 1:
+    if head in _QUALIFIERS and len(args) in _QUALIFIER_ARITY[head]:
         return head
     return None
 
@@ -180,6 +201,24 @@ def _mentions_trusted(type_name: str | None) -> bool:
     if head == "Trusted":
         return True
     return any(_mentions_trusted(a) for a in args)
+
+
+def retained_policy(type_name: str | None) -> str | None:
+    """The policy name a `Retained[T, <policy>]` declaration carries, or None.
+
+    Read off the OUTERMOST head only, like `confidential_params`' rule and for
+    the same reason: this is a REFUSAL input, and reading it out of a container
+    would newly refuse programs that compile today. A `Retained[T]` with no
+    policy argument is refused by name in `extract_and_normalize` rather than
+    silently treated as unretained — a retention qualifier with no policy is an
+    annotation nothing can enforce, which is the failure item 472's design note
+    exists to avoid."""
+    if not type_name:
+        return None
+    head, args = parse_type(type_name)
+    if head != "Retained":
+        return None
+    return args[1] if len(args) == 2 else ""
 
 
 def mentions_secret(type_name: str | None) -> bool:
@@ -392,6 +431,26 @@ class TaintModel:
     # `config.api_key` was seeded CLEAN and was therefore invisible to every §7
     # rule, the provide-method return crossing included.
     secret_config: dict[str, frozenset] = field(default_factory=dict)
+    # item 472: the validated `retention <name> { ... }` policies, keyed by name
+    # (`revl.retention.RetentionPolicy`). Empty for every program that declares
+    # none, which is what keeps the whole retention surface inert.
+    retention_policies: dict = field(default_factory=dict)
+    # item 472: callable name -> {param_index: `retained:<policy>`} for params
+    # declared `Retained[T, <policy>]`. The sibling of `confidential_params`, and
+    # seeded into the receiving body's environment for the same reason: the
+    # qualifier states what the value IS, so the body has to see it or the
+    # receiver becomes a laundering point for its own parameter.
+    retained_params: dict[str, dict[int, str]] = field(default_factory=dict)
+    # item 472: callable name -> the DURABLE-STORAGE scope head its declared
+    # capability grants (`retention.PERSISTENCE_SINK_SCOPES`). The persistence
+    # equivalent of `_SINK_CLASS_SCOPES`: a crossing is a persistence sink
+    # because of the capability it declares, never because of an author
+    # qualifier. This is the sink set the retention refusal fires at.
+    persistence_sinks: dict[str, str] = field(default_factory=dict)
+    # item 472: the ONE instant this compile compares every retention deadline
+    # against (`retention.evaluation_instant`). Held on the model so the whole
+    # program is checked against one clock reading rather than one per call site.
+    retention_as_of: object = None
 
     @property
     def active(self) -> bool:
@@ -405,7 +464,8 @@ class TaintModel:
         the author wrote a qualifier)."""
         return bool(self.sources or self.sinks or self.untrusted_params
                     or self.declassifiers or self.declared_endorse
-                    or self.secret_receivers or self.secret_config)
+                    or self.secret_receivers or self.secret_config
+                    or self.retained_params or self.retention_policies)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
@@ -418,6 +478,50 @@ def _sink_kind_for(name: str, capabilities) -> str:
     if "cap" in caps or "capability" in caps:
         return "a capability name"
     return f"the trusted sink `{name}`"
+
+
+def _retention_hint(policy, scope: str) -> str:
+    """The one repair line every `G-RETAIN` refusal carries. Written once so the
+    declaration-level and the flow-level refusal cannot drift apart on the
+    advice they give."""
+    until = policy.until.isoformat().replace("+00:00", "Z")
+    covered = ", ".join(policy.derivatives) or "no derivative class"
+    deleters = ", ".join("`" + d + "`" for d in policy.deleters)
+    return (
+        "`retention " + policy.name + "` says this data may be kept until "
+        + until + " in residence `" + policy.residence + "`, and the deadline "
+        "has passed. Erase it and keep the receipt (`revl erase-report`, then "
+        "`revl.retention.make_receipt` over the replicas and derivatives the "
+        "policy covers - " + covered + " is covered, and each derivative that "
+        "is NOT is reported as such rather than claimed erased); or extend "
+        "`until` if the retention basis really changed; or declare a `hold` on "
+        "the policy, which overrides the deadline. Deletion may be requested "
+        "by " + deleters + ". The sink is a `" + scope + "` crossing (item 472)")
+
+
+def _refuse_retention_declaration(filename: str, ext, index: int, policy,
+                                  scope: str, as_of) -> None:
+    """A crossing DECLARES that it persists a `Retained[T, P]` value whose
+    deadline has passed (G-RETAIN).
+
+    Raised off the declaration alone, with no flow analysis and no call site
+    required: the declaration is the statement that admitting this program
+    admits writing this data to durable storage, and the checker is the
+    admission gate. That makes the refusal a property of WHEN the program is
+    admitted rather than of its text — the same source is admitted before the
+    deadline and refused after it, which is the only reading of "past its
+    retention deadline" a static checker can hold (see `revl.retention`'s module
+    docstring for why, and for what this does not claim)."""
+    param = ext.params[index]
+    raise RevlError(
+        filename, ext.line,
+        f"`{ext.name}` declares a persistence sink (`{scope}`) whose argument "
+        f"{index + 1} (`{param.name}`) is `Retained[T, {policy.name}]`, and "
+        f"that policy's retention deadline passed at "
+        f"{as_of.isoformat().replace('+00:00', 'Z')} — data past its retention "
+        f"deadline may not be written to durable storage (G-RETAIN)",
+        hint=_retention_hint(policy, scope),
+        code="G-RETAIN", category="retention")
 
 
 def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
@@ -447,7 +551,48 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     model.extern_names = frozenset(
         ext.name for ext in getattr(program, "externs", ()) or ())
 
-    def _note_params(name: str, typed_params) -> set:
+    # item 472: the validated retention policies, and the ONE instant every
+    # deadline in this program is compared against. Both are read once, here, so
+    # a program is never checked against two clock readings and a malformed
+    # policy is refused before any refusal could quote it. Free and empty for a
+    # program that declares no `retention` block.
+    model.retention_policies = _retention.policies(program, program.filename)
+    if model.retention_policies:
+        model.retention_as_of = _retention.evaluation_instant()
+
+    def _retention_policy_for(type_str, name: str, line: int):
+        """The policy a `Retained[T, <policy>]` parameter or return names, or
+        None when the declaration carries no retention qualifier.
+
+        Refuses a qualifier with no policy argument and one naming a policy the
+        program does not declare. Both are refusals rather than shrugs: a
+        `Retained[T]` whose policy cannot be resolved is an annotation nothing
+        enforces, and shipping one would put a retention guarantee in the
+        language that the checker does not honour."""
+        label = retained_policy(type_str)
+        if label is None:
+            return None
+        if not label:
+            raise RevlError(
+                program.filename, line,
+                f"`{name}` declares `Retained[T]` with no retention policy",
+                hint="write `Retained[T, <policy>]` naming a `retention "
+                     "<policy> { ... }` declaration — a retention qualifier "
+                     "with no policy carries no deadline, no residence and no "
+                     "deleters, so nothing could enforce it (item 472)")
+        policy = model.retention_policies.get(label)
+        if policy is None:
+            declared = ", ".join(f"`{k}`" for k in
+                                 sorted(model.retention_policies)) or "none"
+            raise RevlError(
+                program.filename, line,
+                f"`{name}` names retention policy `{label}`, which this "
+                f"program does not declare",
+                hint=f"declared policies: {declared}. Add `retention {label} "
+                     "{ until: ..., residence: ..., deleters: ... }` (item 472)")
+        return policy
+
+    def _note_params(name: str, typed_params, line: int = 0) -> set:
         """`typed_params` is a list of (index, type_string, setter). Records
         sink/untrusted params and strips the qualifier via `setter`.
 
@@ -472,6 +617,16 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 # would newly reject programs that compile today.
                 model.confidential_params.setdefault(
                     name, {})[index] = CONFIDENTIAL_ORIGIN
+            elif qual == "Retained":
+                # item 472: the parameter carries a retention fact, which the
+                # body has to see for the same reason a `Secret[T]` parameter
+                # does - otherwise the receiver's own body launders its own
+                # argument. `_retention_policy_for` refuses an unresolvable
+                # policy, so an admitted program's every retention origin
+                # names a policy the program declares.
+                _policy = _retention_policy_for(type_str, name, line)
+                model.retained_params.setdefault(name, {})[index] = (
+                    _retention.origin_for(_policy.name))
             if mentions_secret(type_str):
                 # item 256 Slice 3: a declared `Secret[T]` receiver (§7b). A
                 # `confidential` value is ADMITTED here and refused everywhere
@@ -539,10 +694,37 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         if (secret_witness_position(ext.returns)
                 or witness_receiver_position(ext, _declared_params)):
             ext.secret_witness = True
+        # item 472: a `Retained[T, <policy>]` RETURN mints the retention origin
+        # where the value enters the value world, the shape a `Secret[T]` return
+        # uses. Recorded BEFORE the parameter sweep strips the qualifier off it.
+        _ret_policy = _retention_policy_for(ext.returns, ext.name, ext.line)
+        if _ret_policy is not None:
+            model.sources[ext.name] = _retention.origin_for(_ret_policy.name)
+        # item 472, prerequisite 1: the persistence sinks, derived from the
+        # crossing's DECLARED capability scope. `db`/`fs`/`store`/... means
+        # durable storage, so a value that reaches here outlives the process.
+        _persist = _retention.persistence_sink_of(ext.capabilities)
+        if _persist is not None:
+            model.persistence_sinks[ext.name] = _persist
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
-        ext.secret_params = frozenset(_note_params(ext.name, params))
+        ext.secret_params = frozenset(_note_params(ext.name, params, ext.line))
+        # item 472: the DECLARATION-level retention refusal. A crossing that
+        # declares it persists a `Retained[T, P]` value is refused outright once
+        # P's deadline has passed at this compile's evaluation instant, whether
+        # or not any call site exists: the declaration alone says that admitting
+        # this program admits writing past-deadline data to durable storage.
+        # A declared legal hold overrides the deadline (`RetentionPolicy.expired`
+        # applies it), which is what a legal hold is for.
+        if _persist is not None and model.retention_as_of is not None:
+            for _i, _p in enumerate(ext.params):
+                _pol = model.retention_policies.get(_retention.policy_of_origin(
+                    (model.retained_params.get(ext.name) or {}).get(_i)) or "")
+                if _pol is not None and _pol.expired(model.retention_as_of):
+                    _refuse_retention_declaration(
+                        program.filename, ext, _i, _pol, _persist,
+                        model.retention_as_of)
         # Slice D (D1/D3): derive sinks and sources from the crossing's declared
         # capability scope, under strict mode, for any parameter/return the author
         # left unqualified. Additive to the annotated surface above — an already
@@ -579,7 +761,8 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         params = []
         for i, p in enumerate(fn.params):
             params.append((i, p.type, _fnparam_setter(p)))
-        fn.secret_params = frozenset(_note_params(fn.name, params))
+        fn.secret_params = frozenset(
+            _note_params(fn.name, params, getattr(fn, 'line', 0)))
         if fn.name in model.sinks:
             model.sink_kind[fn.name] = _sink_kind_for(fn.name, ())
         fn.returns = strip_qualifiers(fn.returns)
@@ -649,6 +832,15 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                     # `mentions_secret`.
                     model.confidential_params.setdefault(
                         method.name, {})[i] = CONFIDENTIAL_ORIGIN
+                elif qual == "Retained":
+                    # item 472, the same INSIDE half: the provide method
+                    # implementing this operation sees the parameter as a
+                    # retained value, so persisting it past the deadline from
+                    # the body is refused exactly as a call-site flow is.
+                    _pol = _retention_policy_for(
+                        ptype, method.name, getattr(method, "line", svc.line))
+                    model.retained_params.setdefault(
+                        method.name, {})[i] = _retention.origin_for(_pol.name)
                 if mentions_secret(ptype):
                     # item 256 Slice 3: a `Secret[T]` service-operation parameter
                     # is a declared disclosure receiver — the ONE crossing that
@@ -703,6 +895,14 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                         getattr(method, "capabilities", None))
                 elif ret_qual == "Secret":
                     model.sources[method.name] = CONFIDENTIAL_ORIGIN
+                elif ret_qual == "Retained":
+                    # item 472: the interface-only carrier of a retained value.
+                    # Same rule, same position as the two above.
+                    _rpol = _retention_policy_for(
+                        method.returns, method.name,
+                        getattr(method, "line", svc.line))
+                    model.sources[method.name] = _retention.origin_for(
+                        _rpol.name)
             method.returns = strip_qualifiers(method.returns)
 
     # component config fields: a `Secret[T]` field is a declared confidential
@@ -899,6 +1099,30 @@ SECRET_ORIGIN = "secret"
 # what makes the permissive receiver rule unreachable by a bound key and the
 # no-declassifier bound-key rule unreachable by a `Secret[T]` value.
 CONFIDENTIAL_ORIGIN = "confidential"
+
+# item 472: the retention origins a taint carries, as policy names. A retention
+# origin is a fact about how long a value may be KEPT; it is not a provenance
+# fact, so it deliberately does not participate in the G9 authority rule (see
+# `_authority_dirty`).
+
+
+def _retention_origins(t) -> list:
+    """The policy names behind a value's retention origins, sorted."""
+    return sorted(
+        name for name in (_retention.policy_of_origin(o) for o in t.origins)
+        if name is not None)
+
+
+def _authority_dirty(t) -> bool:
+    """Whether a value carries any origin the AUTHORITY rule (G9) is about.
+
+    A value whose only origins are retention origins is not untrusted: item 472
+    adds a time-and-residence dimension, orthogonal to 249's provenance
+    dimension, and collapsing them would make a `Retained[Str, P]` value refused
+    at every `Trusted[T]` sink for a reason that has nothing to do with trust.
+    A value that is BOTH untrusted and retained keeps its untrusted origin here
+    and is still refused, so the filter never admits an authority flow."""
+    return any(_retention.policy_of_origin(o) is None for o in t.origins)
 
 
 def _carries_secret(t: Taint) -> bool:
@@ -1155,14 +1379,16 @@ class _FlowChecker:
         if sink_params:
             kind = self.model.sink_kind.get(callee, f"the trusted sink `{callee}`")
             for index in sink_params:
-                if index < len(arg_taints) and arg_taints[index].dirty:
+                if (index < len(arg_taints)
+                        and _authority_dirty(arg_taints[index])):
                     # a direct sink: the naming chain ends at the sink itself.
                     self._on_sink(callee, kind, index, arg_taints[index], node,
                                   (callee,))
         sig = self.signatures.get(callee)
         if sig:
             for index, (sink_name, kind, via) in sig.reaches_sink.items():
-                if index < len(arg_taints) and arg_taints[index].dirty:
+                if (index < len(arg_taints)
+                        and _authority_dirty(arg_taints[index])):
                     # a transitive sink: the callee's inferred cross-body chain.
                     self._on_sink(sink_name, kind, index, arg_taints[index],
                                   node, via)
@@ -1262,6 +1488,35 @@ class _FlowChecker:
                  "(docs/design/256-capability-bound-secrets.md §7).",
             code="G-SECRET-FLOW", category="taint-secret-flow",
         )
+
+    def _refuse_retention(self, sink_name: str, scope: str, index: int,
+                          policy, arg_taint: Taint, node) -> None:
+        """A `Retained[T, P]` value has reached a PERSISTENCE SINK past P's
+        deadline (G-RETAIN, item 472).
+
+        The flow-level sibling of `_refuse_retention_declaration`: that one
+        refuses a crossing that DECLARES it persists a retained value, this one
+        refuses a retained value that ARRIVES at a durable-storage crossing from
+        anywhere the flow walk can follow it, so a value minted by a
+        `Retained[T, P]`-returning extern is refused at a sink whose own
+        parameter carries no qualifier.
+
+        A declared legal hold has already been applied by `policy.expired`, so a
+        held policy never reaches here: keeping the data is the hold's whole
+        instruction, and overriding the deadline is what it is for."""
+        chain_parts = arg_taint.via + (sink_name,)
+        chain = " -> ".join(chain_parts) if chain_parts else "a Retained value"
+        as_of = self.model.retention_as_of
+        raise RevlError(
+            self.filename, self._line_of(node),
+            f"a `Retained[T, {policy.name}]` value flows into the persistence "
+            f"sink `{sink_name}` (a `{scope}` crossing) at argument "
+            f"{index + 1}, and that policy's retention deadline passed at "
+            f"{as_of.isoformat().replace('+00:00', 'Z')} — data past its "
+            f"retention deadline may not be written to durable storage "
+            f"(G-RETAIN). The retaining path is {chain}",
+            hint=_retention_hint(policy, scope),
+            code="G-RETAIN", category="retention")
 
     def _sink_navigate(self, sink_name: str, kind: str, origins: list) -> dict:
         """The taint-sink family's nearest allowed (item 274, design §2.1),
@@ -1639,7 +1894,7 @@ class _FlowChecker:
         if indirect and self.any_sink and self._is_unnameable(resolved):
             kind = "an unnameable call (a first-class function value)"
             for index, at in enumerate(arg_taints):
-                if at.origins:
+                if _authority_dirty(at):
                     self._on_sink("an unnamed callable", kind, index, at, node,
                                   ("a first-class function value",))
             result = CLEAN
@@ -1681,6 +1936,26 @@ class _FlowChecker:
                     self._refuse_confidential(
                         callee, "an extern host call (a disclosure sink)",
                         index, at, node)
+
+        # item 472: a retained value reaching a PERSISTENCE SINK. Checked in the
+        # same position as the disclosure crossing above, and before the
+        # `model.sources` early return, so a crossing that is both a persistence
+        # sink and a source refuses on the way IN rather than minting its own
+        # origin and returning. The scope is read off the crossing's declared
+        # capability (`retention.PERSISTENCE_SINK_SCOPES`), never off an author
+        # qualifier - the side that owns the store is the side that knows it is
+        # one. Only an EXPIRED policy refuses; a declared legal hold overrides
+        # the deadline inside `RetentionPolicy.expired`.
+        _scope = self.model.persistence_sinks.get(callee)
+        if (not self.infer and self.enforce and _scope is not None
+                and self.model.retention_as_of is not None):
+            for index, at in enumerate(arg_taints):
+                for _name in _retention_origins(at):
+                    _pol = self.model.retention_policies.get(_name)
+                    if _pol is not None and _pol.expired(
+                            self.model.retention_as_of):
+                        self._refuse_retention(callee, _scope, index, _pol, at,
+                                               node)
 
         # sink checks (both tiers): a directly-declared `Trusted[T]` parameter,
         # and a parameter a callee's inferred signature reaches transitively.
@@ -1952,7 +2227,7 @@ def _declared_param_origins(model: TaintModel, key: str) -> dict[int, frozenset]
     """The origins a callable's DECLARED parameter qualifiers put on its
     parameters inside its own body, keyed by parameter index.
 
-    Two qualifiers seed taint here, and both must, for the same reason: the
+    Three qualifiers seed taint here, and each must, for the same reason: the
     qualifier states what the value IS, so the body has to see it. `Untrusted[T]`
     seeds its provenance origin (landed, item 249); `Secret[T]` seeds
     `confidential` (item 256 Slice 3). The `Secret[T]` case is the one that used
@@ -1965,6 +2240,13 @@ def _declared_param_origins(model: TaintModel, key: str) -> dict[int, frozenset]
     for index, origin in (model.untrusted_params.get(key) or {}).items():
         origins[index] = origins.get(index, frozenset()) | {origin}
     for index, origin in (model.confidential_params.get(key) or {}).items():
+        origins[index] = origins.get(index, frozenset()) | {origin}
+    # item 472: `Retained[T, P]` seeds `retained:P` for the third instance of the
+    # same reason. A declared receiver of a retained value is authorised to
+    # RECEIVE it, never to persist it onward past its deadline; without this the
+    # receiver's own body saw a bare `T` with empty taint and could hand it to a
+    # durable store with no refusal anywhere.
+    for index, origin in (model.retained_params.get(key) or {}).items():
         origins[index] = origins.get(index, frozenset()) | {origin}
     return origins
 
