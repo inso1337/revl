@@ -537,6 +537,40 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None,
     return None
 
 
+def _cold_load_activation_emits(arguments: dict) -> bool:
+    """Whether a candidate's ACTIVATION body reaches a class-(c) crossing.
+
+    The cold-load exemption in :func:`decide` rests on "nothing is live,
+    activated, or swapped by it". That is true of a candidate whose body only
+    wires provisions, and false of one whose component-scope body EMITS: a cold
+    load boots the candidate, activation runs, and an ``emit`` there is a
+    one-way boundary crossing with no inverse (item 246's class (c)). Reaching
+    class (c) at activation is therefore exactly what makes a cold load a
+    privileged mutation, and it is the case the exemption's justification does
+    not cover — so this is the predicate that narrows the exemption to its
+    reason.
+
+    Derived from the same :class:`~revl.mcp.approval.ClassMap` the activation
+    gate reads, built directly from the candidate IR. The class map needs no
+    approval policy here and the check must not depend on one: the operator
+    gate is item 55, an independent opt-in.
+
+    Undecidable reads as ``True``. A candidate that does not compile cannot
+    boot and cannot emit, but the gate must never widen on an answer it could
+    not derive. The compile is the same UNPROFILED derivation ``_targets``
+    performs for this verb, so the reach checked here is the reach that runs.
+    """
+    ir = _compile_candidate(arguments)
+    if ir is None:
+        return True  # undecidable — do not widen the exemption
+    from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
+    try:
+        return any(reach.get("class") == "c"
+                   for reach in ClassMap(ir).activation_reaches())
+    except Exception:  # noqa: BLE001 - a failed derivation must not widen
+        return True
+
+
 def _targets(verb: str, session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
     """The components a management verb touches, as (name, labels) targets.
@@ -721,13 +755,22 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     with a policy-style why-trace (all-or-nothing, like admission).
 
     Exception: the **initial cold** ``revl_load`` is ungated (roadmap item
-    300). A cold load boots a candidate into an empty session so it can be
-    inspected and gauntleted; nothing is live, activated, or swapped by it, so
-    it is not yet a privileged mutation and the authority gate does not belong
-    on it. ``session.ir is None`` is exactly "nothing live yet": the field is
-    None until :meth:`Session.load` sets it, and a subsequent ``revl_load``
-    against a running composition is refused by the handler outright (`load`
-    never replaces or activates a live composition). The gate is kept for that
+    300), but only for as long as that item's justification holds. A cold load
+    boots a candidate into an empty session so it can be inspected and
+    gauntleted, and a candidate whose body only wires provisions is not yet a
+    privileged mutation. A candidate whose ACTIVATION body EMITS is a different
+    thing: the load runs it, and a component-scope ``emit`` is a one-way
+    boundary crossing with no inverse. That IS a privileged mutation, and it is
+    the case the exemption was never argued to cover, so the exemption is
+    narrowed to candidates whose activation reaches no class-(c) crossing
+    (:func:`_cold_load_activation_emits`). An emitting candidate falls through
+    to the ordinary gate below, where ``may load on ...`` authorizes it and
+    ``may not load on *`` refuses it.
+
+    ``session.ir is None`` is exactly "nothing live yet": the field is None
+    until :meth:`Session.load` sets it, and a subsequent ``revl_load`` against a
+    running composition is refused by the handler outright (`load` never
+    replaces or activates a live composition). The gate is kept for that
     already-live case, and for every state-changing verb (swap/edit/unload/
     restore/undo)."""
     verb = TOOL_VERB.get(tool_name)
@@ -741,7 +784,14 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     if verb is None or operator is None:
         return Decision(gated=False)
 
-    if verb == "load" and session.ir is None:
+    # Cold load (roadmap item 300): ungated ONLY while it is not yet a
+    # privileged mutation. A candidate whose activation body reaches a
+    # class-(c) crossing performs an irreversible emission when this load boots
+    # it, so it is a privileged mutation and answers to the same gate as every
+    # other one — a grant-less operator is refused, and an explicit
+    # `may not load on *` is honoured rather than silently ignored.
+    if verb == "load" and session.ir is None \
+            and not _cold_load_activation_emits(arguments):
         return Decision(gated=False)  # cold load: not yet a privileged mutation
 
     targets = _targets(verb, session, arguments)
