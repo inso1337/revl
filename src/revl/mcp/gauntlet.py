@@ -87,17 +87,54 @@ def _boundary_of(ir: dict) -> dict:
     return _boundary(ir)
 
 
+# The fields a component's identity is computed over. `source` is deliberately
+# excluded: it is the file a component was authored in, not its content, and a
+# candidate graded from `cand.rvl` then admitted from `c.rvl` is the same
+# program. Everything that can change what the component DOES is included.
+_DIGEST_FIELDS = ("name", "config", "requires", "provides", "body")
+
+
+def component_digest(entry: dict) -> str:
+    """The content identity of one compiled component (item 290).
+
+    A gauntlet dossier is evidence about a *program*, so the thing it is bound
+    to must be the program's content, never its bare name: two drafts that
+    share a name are different programs, and a dossier graded on one must not
+    vouch for the other. This is design 290 §6.2's rule — evidence is verified
+    against the ADMITTED component's rebuilt IR, never re-read from the bundle
+    in transit, "otherwise a resolved-then-modified source rides into the
+    composition on the original, still-valid attestation" — applied to the
+    session dossier.
+
+    Canonical JSON (sorted keys, no incidental whitespace) so the digest is a
+    function of the component and nothing else."""
+    import hashlib  # noqa: PLC0415 — pure, stdlib, keeps import cost off the module
+    import json  # noqa: PLC0415
+
+    payload = {field: entry.get(field) for field in _DIGEST_FIELDS}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                           default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _summary(ir: dict) -> dict:
     manifest = ir.get("manifest") or {}
+    bodies = {c.get("name"): c for c in ir.get("components") or []}
+    components = []
+    for entry in manifest.get("components") or []:
+        name = entry.get("name")
+        item = {"name": name,
+                "requires": entry.get("inject") or [],
+                "provides": entry.get("provides") or []}
+        body = bodies.get(name)
+        if body is not None:
+            # the binding an evidence gate checks: which program was graded
+            item["digest"] = component_digest(body)
+        components.append(item)
     return {
         "irVersion": ir.get("ir_version"),
         "loadOrder": manifest.get("loadOrder") or [],
-        "components": [
-            {"name": entry.get("name"),
-             "requires": entry.get("inject") or [],
-             "provides": entry.get("provides") or []}
-            for entry in manifest.get("components") or []
-        ],
+        "components": components,
         "services": sorted((ir.get("services") or {}).keys()),
     }
 
