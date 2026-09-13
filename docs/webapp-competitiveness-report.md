@@ -2,7 +2,7 @@
 
 **Roadmap:** item 462 (acceptance bar 5) · **Issue:** #725 · **App:**
 [`examples/app/notes.rvl`](../examples/app/notes.rvl) · **Status:** FINDINGS,
-2026-09-12
+2026-09-13
 
 Item 462's exit criterion has two clauses: the exemplary app "runs under one dev
 command (461) with zero sentinels/workarounds, and ships with a written *where
@@ -19,7 +19,8 @@ Sources: [525-exemplary-web-app.md](design/525-exemplary-web-app.md) (the
 design), [525-webapp-slice1-gaps.md](design/525-webapp-slice1-gaps.md) (the
 boring half), [525-webapp-slice3-differentiated.md](design/525-webapp-slice3-differentiated.md)
 (the hot-swap half), [525-webapp-slice4-frontend.md](design/525-webapp-slice4-frontend.md)
-(the TS frontend).
+(the TS frontend), [525-webapp-slice5-one-command.md](design/525-webapp-slice5-one-command.md)
+(the one dev command, run with the frontend attached).
 
 ## Part 1 — Where revl is already competitive
 
@@ -110,15 +111,31 @@ reports the `webui` requirement (**G1**) and the `webui.add_entry` emission
 (**G8**, the trusted host boundary) on `NotesConsole`'s surface, with no extern
 door and no `globalThis` reach.
 `tests/test_app_frontend_725.py` asserts the emitted TS carries **zero inline
-HTML/CSS/JS blob**, and `build.sourcemap` points the shipped bundle at the real
-originals. The old shape — ~4,800 lines of HTML/CSS/JS inside revl strings — is
-what this replaces.
+HTML/CSS/JS blob**. The old shape, ~4,800 lines of HTML/CSS/JS inside revl
+strings, is what this replaces.
+
+The source-map claim is proven by building, not by reading the config: the real
+Vite build emits a bundle whose map names `entry.client.ts`, `NotesConsole.vue`
+and `notes.client.ts`, plus the `.vite/manifest.json` keyed by the same
+`entry.client.ts` path the coeffect declares, which is how a production host
+resolves the dev source to the built asset. `vue-tsc` over the strict tsconfig
+compiles the assets against the real `@cordisjs/client` types.
+
+### 7. One command, both processes
+
+`revl dev --once --port P examples/app/notes.rvl` boots Vite on `P`, loads the
+composition, registers the console entry with its typed channel, and tears down
+residue-free. Compile and admission run *before* Vite is spawned, so a source
+error names its `.rvl` line and the failing stage with no port bound. The two
+processes a contributor used to assemble by hand are one command, asserted with
+the frontend attached rather than with `--no-frontend`.
 
 ## Part 2 — Where friction remains
 
-Three gaps were filed. None is a sentinel or an emitter workaround, so none
-violates bar 2; all three are ergonomic or expressiveness gaps that a later item
-owns.
+Five gaps have been filed across the slices; G3 has since closed. None is a
+sentinel or an emitter workaround, so none violates bar 2. Four are ergonomic,
+expressiveness or process gaps a later item owns, and one (G1) has a correctness
+edge.
 
 ### G1 — the store owns no primary-key assignment *(filed against item 465, #752)*
 
@@ -158,7 +175,7 @@ surface should expose the list directly (`fn all() -> List[Note]`), so a
 sqlite/postgres driver can answer it with **one statement instead of N `get`s**.
 **Severity: low** — correct, just not driver-independent at scale.
 
-### G3 — the webui coeffect carries no typed reactive-state / RPC channel *(filed against item 459 / 457)*
+### G3 (CLOSED 2026-09-13) — the webui coeffect carried no typed reactive-state / RPC channel *(item 457 slice S4)*
 
 Cordis WebUI's `addEntry(files, data)` publishes a reactive `data` object: the
 server mutates it, the delta is broadcast to the browser, and each function on it
@@ -166,18 +183,59 @@ is an RPC method. 459's typed-boundary requirement is that this be a contract
 *shared* between the revl component and the TS client — the browser's
 `useRpc<T>()` type and the server's published fields as one declaration.
 
-The landed coeffect cannot express it: `add_entry(dev_source, prod_manifest,
-routes) -> Str` has no `data` parameter, and the host publishes an **empty**
-reactive surface deliberately (design note 530 Decision B). So
-`examples/app/frontend/contract.ts` is **hand-authored TS** rather than projected
-from the service declaration.
+**It now expresses it.** `add_entry` takes a fourth `data` parameter whose
+declared record type is the reactive state, the RPC surface is the component's
+declared provision, and
+`revl export client --lang ts --face webui --component NotesConsole` projects both
+into `NotesConsoleState`, `NotesConsoleRpc` and `NotesConsoleChannel`.
+`examples/app/frontend/contract.ts` is that generated artifact, regenerated
+rather than edited, with byte-identity asserted, so a field the browser expects
+that the
+server does not publish is a compile error in the revl source. `revl dev` prints
+the channel the composition opened (`channel state signals, strategy`) next to
+the asset paths.
 
-This is explicitly *not* a workaround absorbed by the app: the console drives
-**all** note state through the typed REST routes, which need no `data` channel,
-and `contract.ts` is written against the shape the projection will emit so no
-client rewrite is needed when it lands. The closing slice is
-`revl export client --lang ts --face webui` (457 S4), after which `contract.ts`
-becomes a generated artifact like `notes.client.ts`.
+What the channel still does not claim: a MUTATION path driven from revl. The
+component publishes the initial record; later deltas are Cordis' own
+`Entry.mutate` on the host side, and note state stays on the typed REST routes.
+
+### G4 — the generated TS client does not compile under a strict tsconfig *(filed against item 457)*
+
+`revl export client --lang ts --service NotesApi` emits a routed client whose
+constructor always declares a fallback transport:
+
+```ts
+constructor(private readonly base: string, private readonly transport: Transport = ...) {}
+```
+
+When every operation is routed, which is the point of the `route` clause,
+`transport` is never read, and `vue-tsc` over the app's `strict` + `noUnusedLocals` tsconfig
+reports `notes.client.ts(66,63): error TS6138`. The app cannot fix it: the file is
+a regenerated artifact whose byte-identity with the projection is asserted. The
+generator should omit the parameter, or not declare it `private`, when no
+operation is unrouted. **Severity: low, but it lands in the one artifact a user
+is told not to edit**, which is the worst place for a diagnostic.
+
+### G5 — no CI leg builds or typechecks the frontend *(filed against item 462 / 461)*
+
+The build and typecheck legs skip unless a contributor has run `npm ci` in
+`examples/app/frontend`; the required checks are the six backend matrices plus
+lint, none of which install node deps for this example. That is how a frontend
+that did not compile at all shipped and sat: until this pass, `entry.client.ts`
+passed a `fields` option `@cordisjs/client`'s `ctx.page` does not accept, and ran
+`useRpc` outside a component `setup` where its injection is absent. Both were
+invisible to a file-shape scan and obvious to `vue-tsc`
+(docs/design/525-webapp-slice5-one-command.md D1). **Severity: process, and the
+highest-leverage item on this page**: a typed boundary is only typed once
+something compiles it.
+
+The two new legs are themselves the shape
+`tests/test_env_gated_skips_run_somewhere.py` was written to warn about: a
+toolchain probe whose skip is the same colour as a pass. That file's own docstring
+names the residual it does not cover (a probe that does not go through a
+`revl.test` tier runner), and these are in it. Closing G5 means a required job
+that runs `npm ci && npm run typecheck && npm run build` for this example, not a
+stronger assertion inside the suite.
 
 ### Friction that is real but was deliberately *not* filed
 
@@ -197,24 +255,30 @@ Recorded in the slice notes so a later pass does not refile them as bugs:
   verb. The in-`.rvl` test proves serving + residue-free teardown; the hot-swap
   legs live in the Python conformance test. That is the documented boundary
   between the two harnesses.
-- **The composition gate does not yet admit an ambient/host-provided `requires`
-  without a revl `provides`** (item 186 / design note 530 Decision A), and
-  **`host` rows for `ctx.server`/`ctx.webui`** are item 457 S3. The slice does not
-  compose a live host, so neither blocked it.
+- **An ambient/host-provided `requires` with no provider leaves the component
+  PENDING rather than refused** (item 186 / design note 530 Decision A).
+  `revl run examples/app/notes.rvl --once` with no ambient `webui` prints
+  `note | NotesConsole | PENDING — unmet requirement` and still exits 0 with no
+  residue; `revl dev`, which provides the scoped `webui`, activates it. So the app
+  IS composed against a live host today and 186 is about answering at admission
+  time what is currently a load-time note. **`host` rows for
+  `ctx.server`/`ctx.webui`** (item 457 S3) are the production-composition surface
+  and are likewise not what the dev command needs.
 
 ## Part 3 — Acceptance bar scorecard
 
 | # | Bar | State | Evidence |
 |---|---|---|---|
-| 1 | Runs under **one** dev command; an induced error names the `.rvl` line and failing stage | ✅ | `revl dev` (item 461, #724 **closed**); the app source is compiled and admitted before Vite spawns |
+| 1 | Runs under **one** dev command; an induced error names the `.rvl` line and failing stage | ✅ | `revl dev` (item 461, #724 **closed**), proven **with Vite attached** in `test_app_notes_725.py::test_dev_runs_the_app_and_its_vite_frontend_under_one_command`; compile and admission run before Vite spawns, so a source error names its line and stage with no port bound |
 | 2 | **Zero** routing sentinels, **zero** emitter workarounds | ✅ | `test_app_notes_725.py::test_zero_sentinels_and_no_emitter_workarounds` over every slice's added lines |
 | 3 | Outcome from the typed HTTP contract, never from prose | ✅ | `Result[T, ApiError]` → status mapping; the TS client decodes the same union |
 | 4 | Hot-swap demonstrates admission → cancellation → residue-free recovery | ✅ | all seven lifecycle rows asserted in `test_app_hotswap_725.py` |
 | 5 | Ships with the competitiveness/friction report | ✅ | this document |
 
-The two slices that would deepen the app rather than complete it are item 457
-Slice 2 (`stdlib/auth.rvl`, user-scoped store) and 457 S4 (the webui face, which
-closes G3).
+Every bar is met, so the milestone's exit is met. What would DEEPEN the app
+rather than complete it: item 457 Slice 2 (`stdlib/auth.rvl`, a user-scoped
+store), the persistence surface behind G1/G2 (item 465 / design 527), and a CI
+leg for the frontend toolchain (G5).
 
 ## Part 4 — What the friction actually costs
 
@@ -224,20 +288,29 @@ Ranked by what a real user would feel, not by severity label:
    unsafe under concurrent creates, and it is exactly the kind of thing a
    "boring" framework should own. It is the strongest argument for the item-465 /
    527 Minato CRUD surface.
-2. **Item 186 is the one structural blocker.** Until the composition gate admits
-   an ambient `requires` without a revl `provides`, a revl app cannot be
-   *composed against a live host* the way this app's frontend boundary implies.
-   Everything else on this page is an ergonomic or expressiveness gap.
-3. **G3 is the largest expressiveness gap**, but it is contained: the REST half of
-   the boundary is real and typed today, and the app is written so the reactive
-   half drops in without a client rewrite.
-4. **G2 is the cheapest to close** and would remove N-round-trip listing.
+2. **G5 costs the most and is not a language gap at all.** Nothing in CI
+   compiled the frontend, so the typed boundary this app exists to demonstrate
+   shipped in a state where it could not have worked in a browser: a page option
+   Cordis does not accept, and a composable called where its injection is absent.
+   Both fell out of `vue-tsc` in one run. The lesson generalises past this app:
+   the parts of a revl system that live outside `.rvl` need the same gate the
+   `.rvl` half gets.
+3. **Item 186 is a diagnostics gap, not a structural blocker.** The earlier
+   consolidation read it as one; running the command disproved that. A missing
+   ambient provider today is a PENDING fiber and an exit 0, which is a weaker
+   answer than an admission-time refusal but does not stop the app composing
+   against a live host.
+4. **G4 is small and badly placed**: a diagnostic in the one file a user is told
+   to regenerate rather than edit.
+5. **G2 is the cheapest to close** and would remove N-round-trip listing.
 
-The honest summary: **revl's typed-boundary claim held under a real app**, and
-the friction that remains is concentrated in the persistence tier (465/527) and
-the ambient-composition checker (186) — not in routing, validation,
-serialization, the client contract, or the swap/recovery guarantees, which is
-where the app spent its budget.
+The honest summary: **revl's typed-boundary claim held under a real app** on the
+revl side of the boundary, and the friction that remains is concentrated in the
+persistence tier (465/527), the generated-artifact polish (G4), and the toolchain
+gating around the non-revl half (G5), not in routing, validation, serialization,
+the client contract, or the swap/recovery guarantees, which is where the app spent
+its budget. The one claim this report previously overstated was item 186's: it is
+corrected above.
 
 ## Related
 
@@ -245,4 +318,6 @@ where the app spent its budget.
   the hot-swap half is observed through
 - [frontend-assets.md](frontend-assets.md) — the `webui` coeffect, `add_entry`,
   and the G1/G8 audit surface
+- [commands-reference.md](commands-reference.md#revl-dev) — `revl dev`, the one
+  development command
 - [v2.0-roadmap.md](v2.0-roadmap.md) — items 456–462, 465, 527, 186
