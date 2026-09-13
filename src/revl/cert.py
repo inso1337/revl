@@ -40,8 +40,21 @@ documents in the tree record, and every reading is the same clause grammar
 the status cells are written in, so a guarantee whose theorems are not
 registered cannot be certified as proved, and a certificate that does not
 carry the gaps of its partial rows does not build at all. A document that
-says nothing about a guarantee yields a refusal rather than a weaker
-claim, because silence is not evidence.
+says nothing about a guarantee of the attested invariant set yields a
+refusal rather than a weaker claim, because silence is not evidence.
+
+The coverage boundary is the catalogue, and it is carried in three lists
+rather than one. `statuses` is the numbered invariant set an admitted
+verdict attests, which is what `attest.catalogued_guarantees` means.
+`named_statuses` is the rest of the catalogue the ledger has a row for:
+`G-SECRET`/`G-SECRET-FLOW`, which the map records as `partial, inside the
+G9 development`, and the `A`/`T` assurances, most of which it records as
+`none`. `unrecorded` is the catalogued codes the map says nothing about at
+all. Between them they account for every code the diagnostics catalogue
+defines, exactly once, and the builder AND the verifier both refuse a
+record where they do not: nine rows out of a twenty one row ledger would
+read as complete coverage of a catalogue it does not cover, which is the
+same flattening in a different place.
 
 The verification boundary is member by member, because a MAC proves authorship
 and a key holder authors freely. `revl attest --verify-certificate` re-derives
@@ -74,7 +87,7 @@ from .attest import NotCanonicalizable
 from .errors import RevlError
 
 CERT_KIND = "revl.component-certificate"
-CERT_VERSION = "1.0"
+CERT_VERSION = "1.1"
 CERT_SIGN_DOMAIN = b"revl.component-certificate/v1\x00"
 
 #: The signed members no verifier can re-derive, because they are statements
@@ -109,9 +122,12 @@ REQ_MODEL = "revl.proof-model"
 REQ_ORACLE = "revl.oracle-census"
 REQ_INJECTION = "revl.injection-proof"
 REQ_SWEEP = "revl.injection-sweep"
+REQ_NAMED = "revl.named-guarantee-status"
+REQ_UNRECORDED = "revl.unrecorded-guarantee"
 REQUIREMENT_KINDS = (
     REQ_GUARANTEE, REQ_CONTENTLESS, REQ_UNSTATABLE, REQ_REGISTRY, REQ_MAP,
-    REQ_GATE, REQ_MODEL, REQ_ORACLE, REQ_INJECTION, REQ_SWEEP,
+    REQ_GATE, REQ_MODEL, REQ_ORACLE, REQ_INJECTION, REQ_SWEEP, REQ_NAMED,
+    REQ_UNRECORDED,
 )
 
 #: The artifacts every reading comes out of, and the digest of each in the
@@ -218,6 +234,19 @@ _MAP_ROW = re.compile(
 )
 _WORD_PROVED = re.compile(r"\bproved\b")
 
+#: A map row read for its label rather than for a numbered code: every cell of
+#: any five-cell table row, so a row whose first cell is `**G-SECRET /
+#: G-SECRET-FLOW**` or `**T1/T2/T3**` is seen at all.
+_NAMED_MAP_ROW = re.compile(
+    r"^\|\s*([^|]*?)\s*"                    # the label cell, verbatim
+    r"\|\s*([^|]+?)\s*"                     # the status cell
+    r"\|\s*([^|]*?)\s*"                     # the theorem-count cell
+    r"\|\s*([^|]*?)\s*"                     # the oracle cell
+    r"\|\s*([^|]*?)\s*\|\s*$"               # the gap cell
+)
+#: The bolded head of a label cell, which is where a row names its codes.
+_BOLD_LABEL = re.compile(r"\*\*([^*]+)\*\*")
+
 
 def _section(text: str, heading: str, level: int = 2) -> str | None:
     """The section starting at `heading`, up to the next heading of the same
@@ -273,6 +302,57 @@ def guarantee_map(text: str, *, source: str) -> dict[str, dict]:
         raise CertError(
             f"{source}'s `{MAP_HEADING}` section carries no guarantee row; a "
             "map with no rows is not evidence of anything")
+    return rows
+
+
+def named_guarantee_map(text: str, *, source: str) -> dict[str, dict]:
+    """The same map, read for the codes the numbered table does not carry.
+
+    `guarantee_map` reads the nine numbered G-rules, which is the invariant set
+    an admitted verdict attests. The map has more rows than that, and some of
+    them state a status for a code the compiler really refuses under:
+    `G-SECRET / G-SECRET-FLOW` is `partial, inside the G9 development`, and the
+    `A`/`T` rows are mostly `none`. A certificate that carried only the numbered
+    rows would be reporting nine statuses out of a ledger that states twenty
+    one, and a reader who knows `G-SECRET` exists would have no way to tell a
+    guarantee this build says nothing about from one the document says nothing
+    about.
+
+    A row's codes are the catalogued codes its bolded label names, so one row
+    can speak for several (`**T1/T2/T3**`, `**G-SECRET / G-SECRET-FLOW**`) and
+    a row that names no catalogued code at all (`**R4** no residue`, the
+    capability-ceiling and cross-tier items) is not this reading's business: it
+    is covered by the digest of the document, not by a per-code row. The label
+    travels verbatim beside every code it covers, because "the row that says
+    this" is part of what the certificate is reporting."""
+    section = _section(text, MAP_HEADING)
+    if section is None:
+        raise CertError(
+            f"{source} has no `{MAP_HEADING}` section, so it records no "
+            "per-guarantee status and a certificate would have nothing to "
+            "carry for any guarantee")
+    wanted = set(attest.named_guarantees())
+    rows: dict[str, dict] = {}
+    for line in section.splitlines():
+        match = _NAMED_MAP_ROW.match(line)
+        if match is None:
+            continue
+        label, status_cell, theorems, oracle, gap = (
+            group.strip() for group in match.groups())
+        bold = _BOLD_LABEL.match(label)
+        if bold is None:
+            continue
+        codes = [token for token in re.split(r"[\s/]+", bold.group(1))
+                 if token in wanted]
+        for code in codes:
+            if code in rows:
+                raise CertError(
+                    f"{source}'s map states {code} twice (second row: "
+                    f"{label!r}); a code with two statuses has none")
+            rows[code] = {
+                "code": code, "label": label, "status_cell": status_cell,
+                "theorems_cell": theorems, "oracle_cell": oracle, "gap": gap,
+            }
     return rows
 
 
@@ -586,6 +666,7 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
     gate_source = _relative(root, gate_path)
 
     rows = guarantee_map(status_text, source=status_source)
+    named_rows = named_guarantee_map(status_text, source=status_source)
     registered = registry(registry_text, source=registry_source)
     library, bridge = gate_theorems(gate_text)
     steps = gate_steps(gate_text)
@@ -620,6 +701,33 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
                                   if registered[name]["kind"] == "contentless"),
         })
 
+    named_statuses: list[dict] = []
+    for code in attest.named_guarantees():
+        row = named_rows.get(code)
+        if row is None:
+            continue
+        cited = _registered(registered, code)
+        named_statuses.append({
+            "code": code,
+            "label": row["label"],
+            "status": status_of(row["status_cell"], source=status_source, code=code),
+            "status_cell": row["status_cell"],
+            "theorems_cell": row["theorems_cell"],
+            "oracle_cell": row["oracle_cell"],
+            "gap": row["gap"],
+            "registered": cited,
+            "contentless": sorted(name for name in cited
+                                  if registered[name]["kind"] == "contentless"),
+        })
+    # The codes the ledger's map does not mention at all. Carried as codes
+    # rather than dropped, because "this build reports no status for it" and
+    # "the document states no status for it" are different admissions and only
+    # one of them is the ledger's.
+    covered = {status["code"] for status in statuses}
+    covered.update(status["code"] for status in named_statuses)
+    unrecorded = [code for code in attest.all_guarantee_codes()
+                  if code not in covered]
+
     unstatable = unstatable_gap(status_text)
     census = oracle_census(status_text, source=status_source)
     injections = injection_proofs(status_text, source=status_source)
@@ -646,6 +754,21 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
                 + "; ".join(f"{name} ({registered[name]['note']})"
                             for name in status["contentless"]),
                 f"the registry row's `kind` column in {registry_source}"))
+    for status in named_statuses:
+        detail = f"{status['status']}: {status['status_cell']}"
+        if status["theorems_cell"]:
+            detail += f" (theorems: {status['theorems_cell']})"
+        requirements.append(_requirement(
+            REQ_NAMED, status["code"], status_source, detail,
+            "the map row `" + status["label"] + "`, which states this code's "
+            "status without it being part of the attested invariant set"))
+    if unrecorded:
+        requirements.append(_requirement(
+            REQ_UNRECORDED, status_source, status_source,
+            "the guarantee catalogue defines " + ", ".join(unrecorded)
+            + ", for which the map records no row at all, so this certificate "
+              "reports no coverage for them",
+            "the catalogued codes with no row under `" + MAP_HEADING + "`"))
     if unstatable is not None:
         requirements.append(_requirement(
             REQ_UNSTATABLE, "G9", status_source, f"coverage obligation: {unstatable}",
@@ -704,9 +827,21 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
                 "the property it is named for")
     if unstatable is not None:
         caveats.append(f"G9: {unstatable}")
+    for status in named_statuses:
+        if status["status"] != PROVED:
+            caveats.append(f"{status['code']}: {status['status']}, {status['gap']}")
+        elif ";" in status["status_cell"]:
+            caveats.append(f"{status['code']}: {status['status_cell']}")
+    if unrecorded:
+        caveats.append(
+            ", ".join(unrecorded) + ": the guarantee catalogue defines this "
+            "code and the formal status map records no row for it, so this "
+            "certificate states no coverage for it either way")
 
     return {
         "statuses": statuses,
+        "named_statuses": named_statuses,
+        "unrecorded": unrecorded,
         "caveats": caveats,
         "requirements": requirements,
         "proof_model": model,
@@ -732,7 +867,11 @@ def certifiable(state: dict, guarantees: list[str] | None = None) -> None:
         checks;
       * a guarantee that is not `proved` and carries no recorded gap, because
         the gap is the part of the status the reader needs;
-      * a status outside `STATUSES`, or an empty requirement list."""
+      * a status outside `STATUSES`, or an empty requirement list;
+      * a catalogued code that is neither in the numbered coverage, nor in the
+        named coverage, nor named as unrecorded, because a code that falls out
+        of all three is a code the certificate is silent about while looking
+        complete."""
     if guarantees is None:
         guarantees = attest.catalogued_guarantees()
     requirements = state["requirements"]
@@ -767,6 +906,40 @@ def certifiable(state: dict, guarantees: list[str] | None = None) -> None:
     for requirement in requirements:
         if requirement["kind"] not in REQUIREMENT_KINDS:
             raise CertError(f"unknown requirement kind {requirement['kind']!r}")
+
+    # The catalogue, accounted for exactly once each. This is what makes the
+    # coverage claim non-lossy in both directions: a code the ledger states a
+    # status for is reported with it, a code the ledger is silent about is
+    # reported as unrecorded, and a code that appears in neither list is a
+    # refusal rather than a quiet omission.
+    named = {row["code"]: row for row in state["named_statuses"]}
+    unrecorded = list(state["unrecorded"])
+    accounted = set(by_code) | set(named) | set(unrecorded)
+    catalogue = set(attest.all_guarantee_codes())
+    dropped = sorted(catalogue - accounted)
+    if dropped:
+        raise CertError(
+            f"the recorded proof state accounts for neither the status nor the "
+            f"silence of {', '.join(dropped)}, so the certificate would report "
+            "complete coverage of a catalogue it does not cover")
+    invented = sorted(accounted - catalogue)
+    if invented:
+        raise CertError(
+            f"the recorded proof state accounts for {', '.join(invented)}, "
+            "which the diagnostics catalogue does not define")
+    overlap = sorted(set(by_code) & set(named))
+    if overlap:
+        raise CertError(
+            f"{', '.join(overlap)} is reported both as an attested invariant "
+            "and as a conditional guarantee, so its status is stated twice")
+    for code, row in sorted(named.items()):
+        if row["status"] not in STATUSES:
+            raise CertError(
+                f"{code} has status {row['status']!r}, which is not one of {STATUSES}")
+        if row["status"] != PROVED and not row["gap"]:
+            raise CertError(
+                f"{code} is not proved and records no gap, so the certificate "
+                "would report a weaker guarantee with no reason attached")
 
 
 # --------------------------------------------------------------------------- #
@@ -873,6 +1046,8 @@ def make_certificate(ir: dict, key: bytes, *, verdict=None,
         "as_of_commit": state["as_of_commit"],
         "artifacts": state["artifacts"],
         "statuses": state["statuses"],
+        "named_statuses": state["named_statuses"],
+        "unrecorded": state["unrecorded"],
         "caveats": state["caveats"],
         "requirements": state["requirements"],
         "checker": dict(sorted(attest.checker_identity().items())),
@@ -910,9 +1085,13 @@ def _validate_envelope(cert: dict) -> str:
         cannot name its subject with a truncated or empty hash;
       * `guarantees`, whose codes must come from the catalogue, so a
         certificate cannot carry a guarantee the compiler does not define;
-      * `statuses`, one per catalogued code, with a status from the
-        vocabulary and a non-empty cell, so a certificate cannot report a
-        status it does not name or name one twice;
+      * `statuses`, one per code of the attested invariant set, with a status
+        from the vocabulary and a non-empty cell, so a certificate cannot
+        report a status it does not name or name one twice;
+      * `named_statuses` and `unrecorded`, which between them have to account
+        for every remaining catalogued code exactly once, so a certificate
+        cannot look like complete coverage of the catalogue while being silent
+        about a conditional guarantee the ledger has a row for;
       * `requirements`, whose members must be present and whose kinds must
         be ones this module derives, so a certificate cannot be padded with
         an evidence kind no verifier knows how to re-derive.
@@ -1018,6 +1197,70 @@ def _validate_envelope(cert: dict) -> str:
                 f"{', '.join(silent)}, so it would leave part of the coverage "
                 "unstated")
 
+    conditional = attest.named_guarantees()
+    named = cert.get("named_statuses")
+    if not isinstance(named, list):
+        return (f"envelope refused: named_statuses is not a list ({named!r}), "
+                "so nothing says what the certificate reports for the "
+                "catalogue's conditional guarantees")
+    named_seen: list[str] = []
+    for row in named:
+        if not isinstance(row, dict):
+            return f"envelope refused: a named status row is not an object ({row!r})"
+        code = row.get("code")
+        if code not in conditional:
+            return (f"envelope refused: a named status row names {code!r}, which "
+                    "is not one of the catalogue's conditional guarantees "
+                    f"({', '.join(conditional)})")
+        if row.get("status") not in STATUSES:
+            return (f"envelope refused: {code} has status {row.get('status')!r}, "
+                    f"which is not one of {STATUSES}")
+        for member in ("label", "status_cell"):
+            if not isinstance(row.get(member), str) or not row[member]:
+                return (f"envelope refused: {code} carries no {member} "
+                        f"({row.get(member)!r})")
+        for member in ("theorems_cell", "oracle_cell", "gap"):
+            if not isinstance(row.get(member), str):
+                return f"envelope refused: {code} carries no {member} ({row.get(member)!r})"
+        if row.get("status") != PROVED and not row["gap"]:
+            return (f"envelope refused: {code} is {row['status']} and carries no "
+                    "gap, so the certificate would report a weaker guarantee "
+                    "with no reason attached")
+        for member in ("registered", "contentless"):
+            if not isinstance(row.get(member), list) \
+                    or not all(isinstance(name, str) and name for name in row[member]):
+                return (f"envelope refused: {code} carries no {member} list "
+                        f"({row.get(member)!r})")
+        named_seen.append(code)
+    if named_seen != sorted(set(named_seen)):
+        return ("envelope refused: named_statuses must be sorted by code and "
+                f"free of duplicates ({named_seen!r})")
+
+    unrecorded = cert.get("unrecorded")
+    if not isinstance(unrecorded, list) \
+            or not all(isinstance(code, str) and code for code in unrecorded):
+        return (f"envelope refused: unrecorded is not a list of codes "
+                f"({unrecorded!r})")
+    if unrecorded != sorted(set(unrecorded)):
+        return ("envelope refused: unrecorded must be sorted and free of "
+                f"duplicates ({unrecorded!r})")
+    stray = [code for code in unrecorded if code not in attest.all_guarantee_codes()]
+    if stray:
+        return ("envelope refused: unrecorded names "
+                f"{', '.join(repr(code) for code in stray)}, which the "
+                "diagnostics catalogue does not define")
+    accounted = set(seen) | set(named_seen) | set(unrecorded)
+    catalogue = set(attest.all_guarantee_codes())
+    dropped = sorted(catalogue - accounted)
+    if dropped:
+        return ("envelope refused: the certificate states neither a status nor "
+                f"a silence for {', '.join(dropped)}, so it would read as "
+                "complete coverage of a catalogue it does not cover")
+    twice = sorted((set(seen) | set(named_seen)) & set(unrecorded))
+    if twice:
+        return (f"envelope refused: {', '.join(twice)} is reported both with a "
+                "status and as unrecorded")
+
     artifacts = cert.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(ARTIFACT_NAMES):
         return (f"envelope refused: artifacts is not one entry per formal "
@@ -1072,6 +1315,12 @@ def _requirement_key(requirement: dict) -> tuple[str, str, str]:
 #: the registry and the gate. `code` is the key, so it is not here.
 STATUS_ROW_MEMBERS = ("name", "status", "status_cell", "theorems_cell",
                       "oracle_cell", "gap", "registered", "contentless")
+
+#: The members of a conditional guarantee's row that are re-derived the same
+#: way. `label` rather than `name`, because a named row's identity in the ledger
+#: is the label cell it is written under (one row can cover several codes).
+NAMED_ROW_MEMBERS = ("label", "status", "status_cell", "theorems_cell",
+                     "oracle_cell", "gap", "registered", "contentless")
 
 #: The requirement members re-derived and compared. `kind`/`subject`/`source`
 #: are the key, and `check` is what the certificate says produced the evidence,
@@ -1153,7 +1402,9 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
         restate whatever it was signed with. The members re-derived and
         compared are the artifact digests, the whole of every per-guarantee
         row (its status, the cell that status is read out of, the cell's own
-        name, the theorem names and the contentless findings), the caveats, the
+        name, the theorem names and the contentless findings), the rows of the
+        conditional guarantees and the catalogued codes the map records nothing
+        for, the caveats, the
         requirements with the check recorded behind each one, all three members
         of the proof model (the toolchain pin, the manifest digest and the
         dependency pins that manifest names), the checker identity, the
@@ -1347,6 +1598,36 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
                            f"and {row['code']} re-derives from the artifacts as "
                            f"{_brief(derived[member])}")
 
+    signed_named = {row["code"]: row for row in cert["named_statuses"]}
+    live_named = {row["code"]: row for row in live["named_statuses"]}
+    if set(signed_named) != set(live_named):
+        gone_named = sorted(set(signed_named) - set(live_named))
+        new_named = sorted(set(live_named) - set(signed_named))
+        return False, ("evidence mismatch: the conditional guarantees the "
+                       "formal status map records are not the ones this "
+                       "certificate carries ("
+                       + "; ".join(
+                           part for part in (
+                               f"no longer recorded: {', '.join(gone_named)}" if gone_named else "",
+                               f"newly recorded: {', '.join(new_named)}" if new_named else "")
+                           if part)
+                       + ")")
+    for code, row in sorted(signed_named.items()):
+        derived = live_named[code]
+        for member in NAMED_ROW_MEMBERS:
+            if row[member] == derived[member]:
+                continue
+            return False, ("evidence mismatch: the signed row for "
+                           f"{code} records {member} {_brief(row[member])}, and "
+                           f"{code} re-derives from the artifacts as "
+                           f"{_brief(derived[member])}")
+
+    if list(cert["unrecorded"]) != list(live["unrecorded"]):
+        return False, ("evidence mismatch: the certificate records "
+                       f"{_brief(cert['unrecorded'])} as catalogued codes the "
+                       "formal status map says nothing about, and the artifacts "
+                       f"here say that is {_brief(live['unrecorded'])}")
+
     signed_caveats = cert["caveats"]
     if signed_caveats != live["caveats"]:
         dropped = [line for line in live["caveats"] if line not in signed_caveats]
@@ -1386,7 +1667,9 @@ def render_certificate(cert: dict) -> str:
         f"  signed:    {cert.get('timestamp', '?')}  "
         f"({cert.get('sign_alg', '?')}, key {cert.get('key_id', '?')})",
         f"  evidence:  {len(cert.get('requirements') or [])} requirements over "
-        f"{len(cert.get('statuses') or [])} guarantees",
+        f"{len(cert.get('statuses') or [])} attested guarantees, "
+        f"{len(cert.get('named_statuses') or [])} conditional, "
+        f"{len(cert.get('unrecorded') or [])} with no recorded status",
     ]
     if cert.get("signer"):
         lines.append(f"  signer:    {cert['signer']}")
@@ -1394,6 +1677,14 @@ def render_certificate(cert: dict) -> str:
     for row in cert.get("statuses") or []:
         lines.append(f"    {row.get('code', '?')} {row.get('status', '?'):8} "
                      f"{row.get('status_cell', '')}")
+    conditional = cert.get("named_statuses") or []
+    if conditional:
+        lines.append("  conditional (not part of the attested invariant set):")
+        for row in conditional:
+            lines.append(f"    {row.get('code', '?'):14} {row.get('status', '?'):8} "
+                         f"{row.get('status_cell', '')}")
+    if cert.get("unrecorded"):
+        lines.append("  no recorded status: " + ", ".join(cert["unrecorded"]))
     if cert.get("caveats"):
         lines.append("  caveats:")
         for caveat in cert["caveats"]:

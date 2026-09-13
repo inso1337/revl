@@ -59,6 +59,7 @@ if str(SRC) not in sys.path:
 from revl import attest as A           # noqa: E402
 from revl import cert as C             # noqa: E402
 from revl.__main__ import main         # noqa: E402
+from revl.diagnostics import GUARANTEES  # noqa: E402
 
 KEY = b"item-826-certificate-signer-key"
 OTHER_KEY = b"item-826-a-different-signer"
@@ -194,6 +195,53 @@ def _map_rows() -> dict:
     return rows
 
 
+def _labelled_map_rows() -> dict:
+    """Every row of the same table, keyed by the catalogued codes its bolded
+    label names, read here rather than through the module under test.
+
+    `_map_rows` above reads the nine numbered rules. This reads the rest of the
+    ledger: `**G-SECRET / G-SECRET-FLOW**`, `**T1/T2/T3**` and the `A` rows,
+    each of which states a status for a code `src/revl/diagnostics.py` really
+    defines. A row that names no catalogued code (`**R4** no residue`, the
+    capability-ceiling items) is not keyed, because there is no code for it to
+    be keyed under."""
+    text = (ROOT / "formal" / "STATUS.md").read_text(encoding="utf-8")
+    section = text.split(C.MAP_HEADING, 1)[1].split("\n## ", 1)[0]
+    rows = {}
+    for line in section.splitlines():
+        parts = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(parts) != 5:
+            continue
+        bold = re.match(r"\*\*([^*]+)\*\*", parts[0])
+        if bold is None:
+            continue
+        for token in re.split(r"[\s/]+", bold.group(1)):
+            if token in GUARANTEES:
+                rows[token] = {
+                    "label": parts[0], "status": parts[1], "theorems": parts[2],
+                    "oracle": parts[3], "gap": parts[4],
+                }
+    return rows
+
+
+def _edit_status(formal: Path, old: str, new: str) -> None:
+    """Rewrite one fragment of the ledger COPY. The point of every use below is
+    that the certificate follows the document: a build over an edited ledger
+    reports what the edited ledger says, which is why the certificate cannot
+    drift away from the proofs."""
+    path = formal / "STATUS.md"
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) >= 1, f"the ledger no longer holds {old!r}"
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def _named_row(cert: dict, code: str) -> dict:
+    for row in cert["named_statuses"]:
+        if row["code"] == code:
+            return row
+    raise AssertionError(f"the certificate carries no conditional row for {code}")
+
+
 def _row(cert: dict, code: str) -> dict:
     for row in cert["statuses"]:
         if row["code"] == code:
@@ -299,6 +347,163 @@ def test_a_contentless_theorem_is_named_rather_than_counted_as_proof(tmp_path):
     assert [requirement["subject"] for requirement in contentless] == ["G5"]
     assert "contentless" in contentless[0]["detail"]
     assert any("contentless" in caveat for caveat in cert["caveats"])
+
+
+def test_the_conditional_guarantees_of_the_catalogue_are_carried_too(tmp_path):
+    """The ledger states a status for more codes than the nine an admitted
+    verdict attests, and every one of those codes is one `revl` refuses under.
+    `G-SECRET`/`G-SECRET-FLOW` are `partial, inside the G9 development`, and
+    most of the `A`/`T` rows are `none`. A certificate that carried only the
+    numbered rows would report nine statuses out of a twenty one row ledger and
+    read as complete coverage of the catalogue, which is the same flattening the
+    numbered rows are protected from."""
+    cert = _cert(tmp_path)
+    ledger = _labelled_map_rows()
+    numbered = set(A.catalogued_guarantees())
+    expected = {code: row for code, row in ledger.items() if code not in numbered}
+
+    assert expected, "the ledger states no conditional guarantee to check"
+    assert [row["code"] for row in cert["named_statuses"]] == sorted(expected)
+    for code, want in sorted(expected.items()):
+        row = _named_row(cert, code)
+        assert row["label"] == want["label"], (code, row["label"])
+        assert row["status_cell"] == want["status"], (
+            f"{code}: the certificate states {row['status_cell']!r}, "
+            f"formal/STATUS.md states {want['status']!r}")
+        assert row["gap"] == want["gap"], (code, row["gap"])
+        assert row["theorems_cell"] == want["theorems"], (code, row["theorems_cell"])
+        assert row["oracle_cell"] == want["oracle"], (code, row["oracle_cell"])
+
+
+def test_the_secret_guarantees_inherit_g9s_gap_rather_than_a_green_check(tmp_path):
+    """`G-SECRET` and `G-SECRET-FLOW` are the case worth spelling out: the rule
+    is proved and the coverage is G9's, which is the row the ledger calls
+    unproved and unstatable. Both codes are `partial`, and the reason that is so
+    travels with them."""
+    cert = _cert(tmp_path)
+
+    for code in ("G-SECRET", "G-SECRET-FLOW"):
+        row = _named_row(cert, code)
+        assert row["status"] == C.PARTIAL, (code, row["status_cell"])
+        assert "inside the G9 development" in row["status_cell"], row["status_cell"]
+        assert "inherit G9's coverage gap" in row["gap"], row["gap"]
+        caveats = [caveat for caveat in cert["caveats"]
+                   if caveat.startswith(f"{code}: ")]
+        assert caveats, f"{code} is partial and the certificate carries no caveat"
+        assert any("G9" in caveat for caveat in caveats), caveats
+    requirements = [requirement for requirement in cert["requirements"]
+                    if requirement["kind"] == C.REQ_NAMED]
+    subjects = {requirement["subject"] for requirement in requirements}
+    assert {"G-SECRET", "G-SECRET-FLOW"} <= subjects, sorted(subjects)
+
+
+def test_the_whole_catalogue_is_accounted_for_exactly_once(tmp_path):
+    """The coverage claim is non-lossy in both directions. Every code
+    `src/revl/diagnostics.py` defines is either reported with a status read out
+    of the ledger, or named as one the ledger records nothing for; none is in
+    two lists, and none falls out of all three. A code that fell out silently is
+    how nine rows come to look like a whole catalogue."""
+    cert = _cert(tmp_path)
+    numbered = [row["code"] for row in cert["statuses"]]
+    named = [row["code"] for row in cert["named_statuses"]]
+    unrecorded = list(cert["unrecorded"])
+
+    assert set(numbered) | set(named) | set(unrecorded) == set(GUARANTEES), (
+        "codes unaccounted for: "
+        f"{sorted(set(GUARANTEES) - set(numbered) - set(named) - set(unrecorded))}")
+    assert len(numbered) + len(named) + len(unrecorded) == len(GUARANTEES)
+    assert not set(numbered) & set(named)
+    assert not (set(numbered) | set(named)) & set(unrecorded)
+
+
+def test_a_code_the_ledger_says_nothing_about_is_named_rather_than_dropped(tmp_path):
+    """Silence is reported as silence. `T-UNRESOLVED` is in the catalogue and
+    has no row in the map, and the certificate says so in a member, a
+    requirement and a caveat, so a reader can tell a guarantee this build says
+    nothing about from one the document says nothing about."""
+    cert = _cert(tmp_path)
+    ledger = _labelled_map_rows()
+    silent = sorted(code for code in GUARANTEES if code not in ledger)
+
+    assert silent, "every catalogued code now has a ledger row"
+    assert cert["unrecorded"] == silent, (cert["unrecorded"], silent)
+    kinds = [requirement for requirement in cert["requirements"]
+             if requirement["kind"] == C.REQ_UNRECORDED]
+    assert len(kinds) == 1, kinds
+    for code in silent:
+        assert code in kinds[0]["detail"], kinds[0]["detail"]
+    assert any(caveat.startswith(silent[0] + ("," if len(silent) > 1 else ":"))
+               for caveat in cert["caveats"]), cert["caveats"]
+
+
+# ------------------------------------------------- the certificate follows the
+# ------------------------------------------------- ledger rather than the code
+
+@pytest.mark.parametrize(
+    "code,old,new,was,now",
+    [
+        ("G1", "| **G1** declared access | partial |",
+         "| **G1** declared access | full |", C.PARTIAL, C.PROVED),
+        ("G9", "rule proved; **coverage unproved and unstatable**",
+         "full for every path", C.PARTIAL, C.PROVED),
+        ("G-SECRET", "| partial, inside the G9 development |",
+         "| full over the lattice |", C.PARTIAL, C.PROVED),
+    ],
+    ids=["a partial row promoted", "the unproved row promoted",
+         "a conditional row promoted"])
+def test_a_ledger_edit_changes_the_certificate(tmp_path, code, old, new, was, now):
+    """The binding that keeps the certificate from drifting away from the
+    proofs. The status is not a constant in `src/revl`: rewrite the ledger row
+    and the certificate reports the rewritten row, for the numbered rules, for
+    the one row the ledger calls unproved, and for a conditional guarantee
+    alike. A build that kept saying `partial` after the document said `full`
+    would be evidence that the coverage is written in the code rather than read
+    out of the proofs, which is the failure this item exists to prevent.
+
+    The caveat is the other half: a row that stops being qualified stops
+    carrying a reason, so the caveat list follows the document too."""
+    checkout = (ROOT / "formal" / "STATUS.md").read_bytes()
+    pristine = _cert(tmp_path)
+    rows = pristine["statuses"] + pristine["named_statuses"]
+    before = next(row for row in rows if row["code"] == code)
+    assert before["status"] == was, before["status_cell"]
+    assert any(caveat.startswith(f"{code}: ") for caveat in pristine["caveats"])
+
+    formal = _formal_copy(tmp_path)
+    _edit_status(formal, old, new)
+    edited = _cert(tmp_path, formal=formal)
+    rows = edited["statuses"] + edited["named_statuses"]
+    after = next(row for row in rows if row["code"] == code)
+
+    assert after["status"] == now, after["status_cell"]
+    assert after["status_cell"] != before["status_cell"]
+    assert edited["caveats"] != pristine["caveats"]
+    assert (ROOT / "formal" / "STATUS.md").read_bytes() == checkout, (
+        "the edit reached the checkout's own ledger rather than the copy")
+
+
+def test_a_ledger_row_that_disappears_becomes_a_stated_silence(tmp_path):
+    """Deleting a row does not quietly shrink the coverage claim. The
+    `G-SECRET / G-SECRET-FLOW` row is removed from a copy of the ledger, and the
+    certificate built over that copy moves both codes out of the reported
+    statuses and into the codes it says the document records nothing for, with a
+    caveat naming them. The count of accounted-for codes does not move."""
+    formal = _formal_copy(tmp_path)
+    path = formal / "STATUS.md"
+    text = path.read_text(encoding="utf-8")
+    row = next(line for line in text.splitlines()
+               if line.startswith("| **G-SECRET"))
+    path.write_text(text.replace(row + "\n", ""), encoding="utf-8")
+
+    cert = _cert(tmp_path, formal=formal)
+    named = [entry["code"] for entry in cert["named_statuses"]]
+
+    assert "G-SECRET" not in named and "G-SECRET-FLOW" not in named
+    assert "G-SECRET" in cert["unrecorded"] and "G-SECRET-FLOW" in cert["unrecorded"]
+    assert set(entry["code"] for entry in cert["statuses"]) | set(named) \
+        | set(cert["unrecorded"]) == set(GUARANTEES)
+    assert any("G-SECRET" in caveat and "no coverage" in caveat
+               for caveat in cert["caveats"]), cert["caveats"]
 
 
 def test_the_proof_model_is_the_pinned_toolchain_and_the_manifest_pins(tmp_path):
@@ -614,6 +819,57 @@ def _forge_the_key_fingerprint(document):
     document["key_id"] = "0123456789abcdef"
 
 
+# The conditional half of the coverage claim, and the silence beside it. Every
+# mutation here is one that makes a certificate look like it covers more of the
+# catalogue than the ledger does.
+
+def _promote_a_conditional_guarantee(document):
+    for row in document["named_statuses"]:
+        if row["code"] == "G-SECRET":
+            row["status"] = C.PROVED
+
+
+def _rewrite_a_conditional_gap(document):
+    for row in document["named_statuses"]:
+        if row["code"] == "G-SECRET-FLOW":
+            row["gap"] = "no gaps: the rule and its coverage both hold"
+
+
+def _relabel_a_conditional_row(document):
+    for row in document["named_statuses"]:
+        if row["code"] == "G-SECRET":
+            row["label"] = "**G-SECRET** fully proved"
+
+
+def _drop_a_conditional_row(document):
+    document["named_statuses"] = [row for row in document["named_statuses"]
+                                  if row["code"] != "G-SECRET-FLOW"]
+
+
+def _drop_every_conditional_row(document):
+    document["named_statuses"] = []
+
+
+def _empty_the_unrecorded(document):
+    document["unrecorded"] = []
+
+
+def _invent_an_unrecorded_code(document):
+    document["unrecorded"] = sorted(document["unrecorded"] + ["G-INVENTED"])
+
+
+def _claim_a_reported_code_is_unrecorded(document):
+    document["unrecorded"] = sorted(document["unrecorded"] + ["G1"])
+
+
+def _drop_the_conditional_member(document):
+    document.pop("named_statuses")
+
+
+def _drop_the_silence_member(document):
+    document.pop("unrecorded")
+
+
 FORGERIES = [
     ("a promoted status", _promote_g1,
      "the recorded per-guarantee status changed for G1"),
@@ -677,6 +933,26 @@ FORGERIES = [
      "but the certificate signs 000000000000"),
     ("a key fingerprint that is not the key", _forge_the_key_fingerprint,
      "which is not the key it is being checked with"),
+    ("a conditional guarantee promoted", _promote_a_conditional_guarantee,
+     "the signed row for G-SECRET records status proved"),
+    ("a conditional gap rewritten", _rewrite_a_conditional_gap,
+     "the signed row for G-SECRET-FLOW records gap no gaps"),
+    ("a conditional row relabelled", _relabel_a_conditional_row,
+     "records label **G-SECRET** fully proved"),
+    ("a conditional row dropped", _drop_a_conditional_row,
+     "states neither a status nor a silence for G-SECRET-FLOW"),
+    ("every conditional row dropped", _drop_every_conditional_row,
+     "states neither a status nor a silence for"),
+    ("the stated silence emptied", _empty_the_unrecorded,
+     "states neither a status nor a silence for T-UNRESOLVED"),
+    ("a silence over a code that does not exist", _invent_an_unrecorded_code,
+     "unrecorded names 'G-INVENTED', which the diagnostics catalogue does not define"),
+    ("a reported code also called unrecorded", _claim_a_reported_code_is_unrecorded,
+     "G1 is reported both with a status and as unrecorded"),
+    ("the conditional coverage member dropped", _drop_the_conditional_member,
+     "named_statuses is not a list"),
+    ("the stated-silence member dropped", _drop_the_silence_member,
+     "unrecorded is not a list of codes"),
 ]
 
 
@@ -957,7 +1233,7 @@ def test_the_cli_signs_and_verifies_a_certificate(tmp_path, capsys):
 
     assert main(["attest", str(comp), "--certificate", "--key", keyf]) == 0
     out = capsys.readouterr().out
-    assert "revl.component-certificate v1.0" in out
+    assert f"{C.CERT_KIND} v{C.CERT_VERSION}" in out
     assert "coverage:" in out and "caveats:" in out
     for code in A.catalogued_guarantees():
         assert f"    {code} " in out, f"the printed certificate omits {code}"

@@ -230,9 +230,12 @@ and ship it). `revl attest ATT --verify --json` prints the verdict:
   which re-derives the evidence and never raises.
 - `load_certificate(path)` / `render_certificate(cert)` /
   `render_verify(ok, reason, cert)`, the IO helper and the two renders.
-- `guarantee_map(text, *, source)` / `status_of(cell, *, source, code)` /
-  `registry(text, *, source)`, the readers that turn `formal/STATUS.md` and
-  `formal/scripts/nonvacuity.tsv` into the coverage table.
+- `guarantee_map(text, *, source)` / `named_guarantee_map(text, *, source)` /
+  `status_of(cell, *, source, code)` / `registry(text, *, source)`, the readers
+  that turn `formal/STATUS.md` and `formal/scripts/nonvacuity.tsv` into the
+  coverage table. The first reads the nine numbered rules an admitted verdict
+  attests; the second reads the rest of the same table, which is where
+  `G-SECRET`, `G-SECRET-FLOW` and the `A`/`T` assurances state their status.
 
 ## 7. Component certificates
 
@@ -244,20 +247,27 @@ the first reads as a green check.
 
 ```
 $ revl attest service.rvl --certificate --key ci-signer.key
-certificate: admitted  (revl.component-certificate v1.0)
+certificate: admitted  (revl.component-certificate v1.1)
   subject:   service.rvl  (source 6edb64a9969e, ir c38dc4f80f98)
   proof:     leanprover/lean4:v4.33.1  (as of 267862fb455a)
   checker:   revl 2.0.0, ruleset 3e202568c8a0
   signed:    2026-09-10T04:17:27+00:00  (hmac-sha256, key a03904d368b21d03)
-  evidence:  26 requirements over 9 guarantees
+  evidence:  39 requirements over 9 attested guarantees, 12 conditional, 1 with no recorded status
   coverage:
     G1 partial  partial
     G2 proved   full
     ...
     G9 partial  rule proved; **coverage unproved and unstatable**
+  conditional (not part of the attested invariant set):
+    A1             unproved **none**
+    ...
+    G-SECRET       partial  partial, inside the G9 development
+    G-SECRET-FLOW  partial  partial, inside the G9 development
+  no recorded status: T-UNRESOLVED
   caveats:
     G1: partial, `declared_only_access` is real and witnessed, ...
     G9: partial, `Flow` starts from a path that is *given*. ...
+    G-SECRET: partial, ... they inherit G9's coverage gap exactly
   signature: 60f2ba1f7a8240ae0431a04b1a96ab07f3a23d1339ad1a361b9151d9d52ddd3c
 ```
 
@@ -268,14 +278,22 @@ like `--verify` it is a **check**: exit `0` when valid, nonzero when not.
 
 | member          | meaning                                                          |
 | --------------- | ---------------------------------------------------------------- |
-| `kind` / `version` | `revl.component-certificate` / `1.0`, the envelope identity   |
+| `kind` / `version` | `revl.component-certificate` / `1.1`, the envelope identity   |
 | `subject`       | the file, its source sha256 and its canonical IR hash            |
 | `proof_model`   | the pinned Lean toolchain, a digest of the lake manifest and the dependency pins that manifest names, all three re-derived from the package at verify time, so "checked against v4.33.1" is a statement a reader can check rather than take on trust |
-| `statuses`      | one row per catalogued guarantee: the status this build reads out of `formal/STATUS.md`, the map's own status cell verbatim and the map's own gap cell verbatim |
+| `statuses`      | one row per guarantee of the attested invariant set (the numbered `G` rules): the status this build reads out of `formal/STATUS.md`, the map's own status cell verbatim and the map's own gap cell verbatim |
+| `named_statuses` | the same reading for the catalogued codes that are NOT part of that set but do have a row in the same table: `G-SECRET` and `G-SECRET-FLOW`, which the map records as `partial, inside the G9 development`, and the `A`/`T` assurances, most of which it records as `none`. Each row carries the label cell it is written under, because one row can state a status for several codes (`**T1/T2/T3**`) |
+| `unrecorded`    | the catalogued codes the map has no row for at all, named rather than dropped: a conditional guarantee whose status is unstated and one that does not exist read the same unless something says which is which |
 | `requirements`  | what each status rests on: the guarantee rows of the non-vacuity registry, the registry itself, the map, the axioms gate and its axiom policy, the model pin, the oracle census, the injection table and the mutation sweep |
 | `caveats`       | the qualifications the artifacts record, quoted rather than summarised |
 | `artifacts`     | one entry per formal artifact with its sha256, so a verifier on another machine can say *which* document moved |
 | `as_of_commit`, `checker`, `timestamp`, `sign_alg`, `signer`, `key_id`, `signature` | the attestation members, unchanged in meaning in the envelope, checked as follows at verify time: `checker` against the identity this build resolves, `key_id` against the key the record is checked with, `as_of_commit` against this repository's history, and `timestamp` / `signer` recorded rather than re-derived (below) |
+
+Between them `statuses`, `named_statuses` and `unrecorded` account for every
+code the diagnostics catalogue defines, exactly once. Both the builder and the
+verifier refuse a record where they do not: nine rows out of a twenty one row
+ledger would read as complete coverage of a catalogue it does not cover, which
+is the same flattening in a different place.
 
 The status member is made of the document's prose, not of a constant in this
 repository. A row whose status cell this build cannot place (`rule proved;
