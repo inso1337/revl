@@ -3126,7 +3126,9 @@ class Session:
         FREEZES the parent (non-callable, Decision 4), snapshots the step-k state,
         mints the branch identity (fresh session_id + WAL + SessionOwner, no
         approval carry — item 246 invariant 5), restores the snapshot into the
-        branch, and writes `fork-frozen`/`fork-complete`.
+        branch, and writes `fork-frozen`/`fork-complete`. The branch inherits the
+        applied auto-approve rules with the parent's spend and review bind, so the
+        fork grants no authority the parent had not already granted itself.
 
         Returns `{forked, at, parent, branch, rewound, residue, ..., branchSession}`
         where `branchSession` is the live branch `Session` (the only live
@@ -3182,6 +3184,19 @@ class Session:
         # operator had withheld.
         branch.approval_record_values = self.approval_record_values
         branch.sandbox = self.sandbox
+        # the rule-bound authority state rides with the rules it bounds. `branch`
+        # is a fresh Session, so its budget and review dicts start empty and
+        # `_install_auto_approve_rules` would read the inherited rules as a first
+        # sighting — deriving a fresh `uses`/`ttl` budget from the rule text and
+        # re-snapshotting the review bind. That renews authority the parent had
+        # already spent, and the renewal IS the escape rather than a detail: the
+        # parent is frozen by this call, so the branch is the only live
+        # continuation. Carrying both is strictly narrower — a spent budget stays
+        # spent and a reviewed blast set stays as narrow as it was — so the fork
+        # still carries no *approval* (item 246 invariant 5), only the state that
+        # refuses one.
+        branch._auto_spend = dict(self._auto_spend)
+        branch._auto_reviewed = dict(self._auto_reviewed)
         branch.restore(snap)               # fresh session_id + owner; no approval carry
         if self._wal_path:
             # keep the branch's distinct WAL beside the parent's, rather than in
