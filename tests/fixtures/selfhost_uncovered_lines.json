@@ -281,6 +281,19 @@
     "java": {
       "statements": 2587,
       "uncovered": {
+        "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every … in` / `on … as` loop (`_emit_stream_iter`), the `on … as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json.": {
+          "_body_holds_stream": 1,
+          "_body_holds_stream_event": 7,
+          "_document_holds_stream": 1,
+          "_document_holds_stream_event": 4,
+          "_emit_stream_event_runtime": 1,
+          "_emit_stream_iter": 34,
+          "_emit_stream_runtime": 1,
+          "_java_event_field": 14,
+          "_r1_marker_lines": 12,
+          "_refuse_unlowered_stream_surface": 7,
+          "_stream_head": 4
+        },
         "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
           "<module>": 1
         },
@@ -318,13 +331,13 @@
           "_component_needs_frame.step_needs": 1
         },
         "backends/java/emit.py::_component_needs_modern: The remaining true returns are routes and step setup. Routers and setup are explicitly outside the admitted component subset, unlike config, requirements and realm placement.": {
-          "_component_needs_modern": 2
+          "_component_needs_modern": 3
         },
         "backends/java/emit.py::_contains_expr: The remaining true return detects call with callee in a component expression. Component direct calls lower to kind=fn or target/method; callee calls require the explicitly deferred local-arrow/first-class/value-builtin path. Non-v1 kind detection and ordinary traversal are covered.": {
           "_contains_expr": 1
         },
         "backends/java/emit.py::_core_imports: Only Contexts for lifecycle tests and CordisException for routers remain. In-file lifecycle tests and routers are declared boundaries; fail/frame/core imports are covered.": {
-          "_core_imports": 2
+          "_core_imports": 3
         },
         "backends/java/emit.py::_covers_variant: The remaining false return is a missing user-variant case. lower.py rejects nonexhaustive user matches before emission; exhaustive and wildcard matches are covered.": {
           "_covers_variant": 1
@@ -348,7 +361,7 @@
           "_emit_component_modern": 7
         },
         "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering.": {
-          "_emit_component_stmts": 15
+          "_emit_component_stmts": 17
         },
         "backends/java/emit.py::_emit_ftoa_helper: Only the Float-to-Str formatter text is missing, an explicit port boundary reproduced by strict floats.rvl divergence; Float literals, arithmetic and widening are covered.": {
           "_emit_ftoa_helper": 1
@@ -357,7 +370,7 @@
           "_emit_host_stubs.walk": 1
         },
         "backends/java/emit.py::_emit_host_stubs: Only Pool runtime insertion remains: emit_host_stubs emits <<DEFER-host-stub:Pool>>, reproduced by the strict pg-pool regression. Map and Job stubs are covered.": {
-          "_emit_host_stubs": 1
+          "_emit_host_stubs": 6
         },
         "backends/java/emit.py::_emit_inverse_pins: The remaining inverse expression rewrites require witnessed acquisition or Map CAS binding in provided methods. Witnessed externs and method let-effect are explicit port boundaries.": {
           "_emit_inverse_pins": 8
@@ -407,8 +420,14 @@
         "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred.": {
           "_emit_v3_lifecycle_tests": 31
         },
+        "backends/java/emit.py::_emit_v3_secret_members: item 421 F6, declared-shape half: the `revlSecretMembers()` method every generated record class and variant case declares, so the registry's walk can reach a declared shape's LEAVES by path. The walk cannot see these classes reflectively (`instanceof Record` is false for them), so the shape hands its members over instead. Reached only in `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d)).": {
+          "_emit_v3_secret_members": 6
+        },
         "backends/java/emit.py::_emit_v3_tests: Test-function generation and REVL_TESTS dispatch require in-file tests, explicitly deferred; records.rvl retains a strict divergent reproduction.": {
           "_emit_v3_tests": 20
+        },
+        "backends/java/emit.py::_emit_v3_types: item 421 F6, declared-shape half: the `implements RevlSecretShape` clause and the members method appended to a record class and to each variant case. Only the `_SECRET_MODE` branches are uncovered; the type bodies themselves are reached by every corpus document that declares a type. Unported in selfhost/emit_java.rvl (item-429(d)).": {
+          "_emit_v3_types": 3
         },
         "backends/java/emit.py::_emit_witnessed_step: Witnessed Result acquisition, error propagation, witness secrecy/redaction and inverse registration require class=witnessed externs, explicitly deferred; method_witnessed.rvl is a strict divergent reproduction.": {
           "_emit_witnessed_step": 21
@@ -417,7 +436,7 @@
           "_empty_map_decl_type": 2
         },
         "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, builtin/len and sized-length helpers, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered.": {
-          "_expr": 28
+          "_expr": 34
         },
         "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value.": {
           "_finite_float": 1
@@ -429,7 +448,7 @@
           "_guard_frame_neutral_loop": 1
         },
         "backends/java/emit.py::_host_of: The missing branches are RevlSpawnHandle for spawn acquisitions and Object for nonhost acquisitions. Spawn and nonhost activation bindings are explicitly deferred by the port gate.": {
-          "_host_of": 2
+          "_host_of": 3
         },
         "backends/java/emit.py::_ident: Only invalid/reserved non-callable identifier raises remain. They terminate reference emission rather than produce comparable bytes.": {
           "_ident": 2
@@ -511,9 +530,6 @@
         },
         "backends/java/emit.py::_refuse_missing_host_root: The missing branch raises for unsupported host roots rather than emitting a stub. Supported Map and Job and explicitly deferred Pool are separate from this refusal.": {
           "_refuse_missing_host_root": 1
-        },
-        "backends/java/emit.py::_refuse_stream_host: The residual branch rejects Stream types because the Java Stream runtime is not implemented. Refusal parity, not a supported emitter feature, is outside the successful corpus.": {
-          "_refuse_stream_host": 1
         },
         "backends/java/emit.py::_reject_fn_type: The only remaining branch raises the documented function-type refusal; a separate test asserts it. The successful-byte corpus intentionally cannot contain it.": {
           "_reject_fn_type": 1
@@ -601,12 +617,6 @@
         },
         "backends/java/emit.py::emit: The two missing branches reject a non-object document and an unsupported IR version. compile_files always supplies a supported versioned dict; successful API output cannot enter either.": {
           "emit": 2
-        },
-        "backends/java/emit.py::_emit_v3_secret_members: item 421 F6, declared-shape half: the `revlSecretMembers()` method every generated record class and variant case declares, so the registry's walk can reach a declared shape's LEAVES by path. The walk cannot see these classes reflectively (`instanceof Record` is false for them), so the shape hands its members over instead. Reached only in `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d)).": {
-          "_emit_v3_secret_members": 6
-        },
-        "backends/java/emit.py::_emit_v3_types: item 421 F6, declared-shape half: the `implements RevlSecretShape` clause and the members method appended to a record class and to each variant case. Only the `_SECRET_MODE` branches are uncovered; the type bodies themselves are reached by every corpus document that declares a type. Unported in selfhost/emit_java.rvl (item-429(d)).": {
-          "_emit_v3_types": 3
         }
       },
       "uncovered_statements": 942
@@ -923,6 +933,10 @@
           "_recursive_boxed_edges": 13,
           "_recursive_boxed_edges.reaches": 9
         },
+        "Recursive struct-field boxing (issue #919): the second half of the boxing pass, which puts a recursive STRUCT-field edge behind a `Box` (E0072) and then unboxes it where it is read (E0308 — Rust does not auto-deref a `Box` field in value position). `_inline_cycle_target` decides which wrapper types can carry the edge; `_boxed_field_read` unboxes it at the read site. Both are ENTERED on every corpus document, because the pass runs unconditionally over the document's types, so their headers and early exits execute; the struct-field arms below those exits are reached only by a document carrying such an edge. The rust byte-agreement corpus cannot hold one: the port (selfhost/emit_rust.rvl) carries no boxing pass at all — no `boxed_cases`/`boxed_fields`, no `_recursive_boxed_edges` — so the reference would emit a deref the port does not and there is no byte-identical oracle to hold over it. The recursive-edge regression lives in tests/test_emit_rust_opt_recursion_919.py instead, which asserts the emitted text directly.": {
+          "_boxed_field_read": 12,
+          "_inline_cycle_target": 13
+        },
         "Standalone transport boundary: the oracle imports emit directly, so module execution, argparse/stdin/file output, and separately requested Cargo manifest generation are not entered.": {
           "<module>": 1,
           "_main": 11,
@@ -1001,10 +1015,6 @@
           "_secret_method_params": 4,
           "_secret_result_lines": 8,
           "_stream_host_rust": 8
-        },
-        "Recursive struct-field boxing (issue #919): the second half of the boxing pass, which puts a recursive STRUCT-field edge behind a `Box` (E0072) and then unboxes it where it is read (E0308 — Rust does not auto-deref a `Box` field in value position). `_inline_cycle_target` decides which wrapper types can carry the edge; `_boxed_field_read` unboxes it at the read site. Both are ENTERED on every corpus document, because the pass runs unconditionally over the document's types, so their headers and early exits execute; the struct-field arms below those exits are reached only by a document carrying such an edge. The rust byte-agreement corpus cannot hold one: the port (selfhost/emit_rust.rvl) carries no boxing pass at all — no `boxed_cases`/`boxed_fields`, no `_recursive_boxed_edges` — so the reference would emit a deref the port does not and there is no byte-identical oracle to hold over it. The recursive-edge regression lives in tests/test_emit_rust_opt_recursion_919.py instead, which asserts the emitted text directly.": {
-          "_boxed_field_read": 12,
-          "_inline_cycle_target": 13
         }
       },
       "uncovered_statements": 1384

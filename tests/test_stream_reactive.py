@@ -719,11 +719,15 @@ def test_python_emits_the_fan_in_inside_the_subscription():
     assert "yield lambda: sub.close()" in code
 
 
-def test_go_and_rust_lower_the_blocking_tier(tmp_path):
-    """Slice 3's two implemented blocking tiers (§4.6). Both erase the async
-    color: the fan-in opens inside the subscription's acquisition, and the
-    bracket inverse is the subscription's `close`, which trips the cancel
-    signal."""
+def test_the_blocking_tiers_lower_the_fan_in(tmp_path):
+    """Slice 3's three blocking tiers (§4.6). All three erase the async color:
+    the fan-in opens inside the subscription's acquisition, and the bracket
+    inverse is the subscription's `close`, which trips the cancel signal.
+
+    item 130 (roadmap #81): `java` joined go and rust here — it carries a real
+    `Stream` runtime and lowers the fan-in. wasm is the one tier that still
+    refuses the whole surface, by design (it has no async at all); see
+    `test_wasm_still_refuses_the_fan_in`."""
     ir = compile_source(_FANIN, "s.rvl")
     go = _tier_emit("go").emit(ir)
     assert 'StreamSubscribe(StreamMerge(a, b), "error", 0)' in go
@@ -731,25 +735,9 @@ def test_go_and_rust_lower_the_blocking_tier(tmp_path):
     rust = _tier_emit("rust").emit(ir)
     assert 'Stream::subscribe(&Stream::merge(&a, &b), "error", 0usize)' in rust
     assert "sub_undo.close(); Ok(())" in rust
-
-
-@pytest.mark.parametrize("tier", ["java"])
-def test_unimplemented_tiers_refuse_honestly(tier):
-    """A tier Slice 3 did NOT lower must refuse the stream IR kind by name, not
-    fall through to the generic `unsupported expression kind` — a half-wired
-    tier that emits something whose bracket inverse was never proven reachable
-    is worse than an honest refusal.
-
-    item 130 (roadmap #81): `typescript` is no longer here — it now carries a
-    real `Stream` runtime and lowers the fan-in (see the ts section below).
-    java stays the honest refusal."""
-    emit = _tier_emit(tier)
-    with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_FANIN, "s.rvl"))
-    msg = str(excinfo.value)
-    assert "unsupported" not in msg
-    assert "suspends a fiber" in msg
-    assert "py, go and rust" in msg
+    java = _tier_emit("java").emit(ir)
+    assert 'Stream.subscribe(Stream.merge(a, b), "error", 0)' in java
+    assert "fx.track(Disposables.of(() -> sub.close()));" in java
 
 
 # item 416a: `subscribe` was refused on every tier, but a `Stream.source()`-only
@@ -765,24 +753,15 @@ component C {
 """
 
 
-@pytest.mark.parametrize("tier", ["java"])
-def test_source_only_program_is_refused_not_silently_emitted(tier):
-    # item 130 (roadmap #81): `typescript` graduated off this refusal — its
-    # `runtime.ts` now carries `Stream`, so a source-only program EMITS (see
-    # `test_ts_lowers_the_source_only_program`). java stays refused.
-    emit = _tier_emit(tier)
-    with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_SOURCE_ONLY, "s.rvl"))
-    msg = str(excinfo.value)
-    assert "unsupported" not in msg
-    assert "Stream.source" in msg
-    assert "py, go and rust" in msg
-
-
-@pytest.mark.parametrize("tier", ["go", "rust"])
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
 def test_source_only_program_still_emits_on_the_lowered_tiers(tier):
-    """The refusal is scoped to the tiers with no runtime: go and rust carry a
-    real `Stream` (Slice 3) and must keep emitting one."""
+    """The refusal is scoped to the tiers with no runtime: go, rust and java
+    carry a real `Stream` (Slice 3) and must keep emitting one.
+
+    item 130 (roadmap #81): `typescript` and `java` both graduated off the
+    source-only refusal — `runtime.ts` and the emitted `Stream` runtime class
+    carry a real provider now, so the program EMITS. wasm is the only tier left
+    refusing it (`test_wasm_refuses_the_source_only_program_too`)."""
     code = _tier_emit(tier).emit(compile_source(_SOURCE_ONLY, "s.rvl"))
     assert "Stream" in code
 
@@ -801,7 +780,7 @@ def test_wasm_still_refuses_the_fan_in():
     assert "suspends a fiber" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("tier", ["go", "rust"])
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
 @pytest.mark.parametrize(("head", "want"), [
     ("subscribe a.map(x => x) undo sub.close()", "combinator chain"),
     ("subscribe a policy drop_oldest undo sub.close()", "drop_oldest"),
@@ -827,7 +806,7 @@ def test_blocking_tiers_refuse_the_slice_2_surface_they_do_not_lower(tier, head,
     assert "not lowered" in msg and "backend py" in msg
 
 
-@pytest.mark.parametrize("tier", ["go", "rust"])
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
 def test_blocking_tiers_honour_a_declared_buffer(tier):
     """`buffer n` IS lowered on both blocking tiers: every buffer is bounded
     either way (§4.4), so honouring the declared capacity costs nothing and
@@ -1261,15 +1240,44 @@ def test_rust_emits_the_iteration_form_as_a_blocking_next_loop():
 # runtime proof.
 
 
-@pytest.mark.parametrize("tier", ["java", "wasm"])
-def test_the_unlowered_tiers_still_refuse_the_iteration_program(tier):
-    """These two refuse the whole stream surface, and the subscription the
-    loop needs is refused before the loop is reached — so an iteration program
-    gets the same honest refusal a Slice 1 one does.
+def test_java_emits_the_iteration_form_as_a_blocking_next_loop():
+    """The java tier lowers `every … in` (Slice 4) as a plain `while (true)` loop
+    over the cancellation-first `next` the Slice 1/3 protocol already ships — no
+    new runtime, the SAME shape go and rust lower. The three properties that
+    carry the guarantee are each a line: a `Faulted` is the `CordisException`
+    `next` throws, uncaught, so the activation's own `catch` disposes the
+    accumulated prefix (subscription bracket included) and rethrows; a `Closed`
+    terminal ENDS the loop before the body (it is a terminal, not an item); the
+    item enters the body only after both."""
+    emit = _tier_emit("java")
+    code = emit.emit(compile_source(_ITER, "s.rvl"))
+    assert "while (true) {" in code
+    assert "Object _revlStreamItem1 = sub.next();" in code
+    # a Closed terminal ends the loop and never enters the body
+    assert "if (Stream.isClosed(_revlStreamItem1)) {" in code
+    assert code.index("break;") < code.index("sink.write(o)")
+    # the item is recovered and the body runs it
+    assert "String o = (String) _revlStreamItem1;" in code
+    assert code.index("String o = (String) _revlStreamItem1;") < code.index(
+        "sink.write(o)")
+    # a Faulted terminal is NOT caught in the loop: nothing between the `next`
+    # and the body catches anything, so the throw leaves the activation and the
+    # A8 self-revert below disposes the accumulated prefix and rethrows.
+    loop = code[code.rindex("while (true) {"):code.index("sink.write(o)")]
+    assert "catch" not in loop and "try" not in loop
+    assert "fx.dispose();" in code
 
-    item 130 (roadmap #81): `typescript` left this set — it lowers the plain
-    `every … in` iteration form (see `test_ts_emits_the_iteration_form`)."""
-    emit = _tier_emit(tier)
+
+def test_wasm_still_refuses_the_iteration_program():
+    """wasm refuses the whole stream surface, and the subscription the loop needs
+    is refused before the loop is reached — so an iteration program gets the same
+    honest refusal a Slice 1 one does.
+
+    item 130 (roadmap #81): `typescript` and then `java` left this set — both
+    lower the plain `every … in` iteration form (see
+    `test_ts_emits_the_iteration_form` and
+    `test_java_emits_the_iteration_form_as_a_blocking_next_loop`)."""
+    emit = _tier_emit("wasm")
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_ITER, "s.rvl"))
     assert "suspends a fiber" in str(excinfo.value)
@@ -1771,9 +1779,8 @@ def test_go_lowers_a_stream_component_that_also_declares_a_record():
     assert "type Foo struct {" in code
 
 
-@pytest.mark.parametrize("tier", ["java", "wasm"])
-def test_the_unlowered_tiers_still_refuse_a_handler_program(tier):
-    emit = _tier_emit(tier)
+def test_wasm_still_refuses_a_handler_program():
+    emit = _tier_emit("wasm")
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_EVENT, "s.rvl"))
     assert "suspends a fiber" in str(excinfo.value)
@@ -1866,6 +1873,92 @@ def test_rust_lowers_the_typed_event_handler_with_an_additive_contract_gate():
     assert "let e: OrderCreated = match serde_json::from_value::<OrderCreated>(" in code
     assert code.index("let e: OrderCreated") < code.index("ship.dispatch(e.order_id)")
     assert "except" not in code and "catch" not in code
+
+
+def test_java_lowers_the_typed_event_handler_with_an_additive_contract_gate():
+    """item 130 (roadmap #81): the java tier graduated Slice 5 — it lowers the
+    `on … as` typed-event handler. The handler is the SAME blocking `while (true)`
+    loop the plain `every … in` emits (the specialization, §6) plus ONE gate, and
+    the tier erases the async color, so there is no `yield` to move: the iteration
+    boundary IS the return of the blocking `next`, and the gate sits between that
+    boundary and the body.
+
+    What must NOT move, and does not: the `Closed` test is still FIRST (a terminal
+    ends the loop without being validated or delivered as an item), and the gate's
+    refusal is the `CordisException` `admit` throws — uncaught, the same way a
+    `Faulted` out of `next` is, so the activation fails and the prefix reverts
+    LIFO with the subscription bracket on it (go/rust express this as an error
+    return / an `Err`; java, like py and ts, raises). The runtime proof (an item
+    reaches the typed body, a redelivery of its identity key collapses, a schema
+    violation faults and leaves no residue) is
+    backends/java/test_stream_exec_java_130.py."""
+    code = _tier_emit("java").emit(compile_source(_EVENT, "s.rvl"))
+    # the contract is built ONCE above the loop, from the derived schema
+    assert 'new EventContract("OrderCreated", ' in code
+    assert '"order_id", 64)' in code, "the derived key and default window"
+    # exactly one iteration node (one lowering): the host's own `next` park loop
+    # is not a lowering and lives in the emitted runtime, which is why the count
+    # is taken on the terminal test rather than on `while (true)`.
+    assert code.count("if (Stream.isClosed(_revlStreamItem1)) {") == 1
+    closed = code.index("if (Stream.isClosed(_revlStreamItem1)) {")
+    gate = code.index("_revlEvent1.admit(")
+    assert closed < gate, "the gate sits after the `Closed` terminal test"
+    # the three outcomes: run, collapse, FAULT (uncaught, so the prefix reverts)
+    assert ("java.util.Map<String, Object> _revlEventObj1 = _revlEvent1.admit("
+            in code)
+    assert "if (_revlEventObj1 == null) {" in code
+    assert "continue;" in code
+    loop = code[code.rindex("while (true) {"):code.index("ship.dispatch(")]
+    assert "catch" not in loop and "try" not in loop
+    # the validated item is constructed into the event's record for the typed body
+    assert ('OrderCreated e = new OrderCreated((String) _revlEventObj1.get('
+            '"order_id"), ((Number) _revlEventObj1.get("quantity")).longValue());'
+            in code)
+    assert code.index("OrderCreated e = new OrderCreated(") < code.index(
+        "ship.dispatch((e).order_id)")
+
+
+def test_java_pulls_the_event_contract_runtime_only_for_a_handler_program():
+    """The `EventContract` half of the java stream runtime — the derived-schema
+    validator and the bounded dedup window — is gated on the document carrying an
+    `on … as` handler, so a plain `every … in` program emits without it (§10.9's
+    "a tier pays for what it uses"). It is also the only half that needs the
+    hand-written JSON reader, the JDK shipping no binder."""
+    handler = _tier_emit("java").emit(compile_source(_EVENT, "s.rvl"))
+    assert "public static final class EventContract {" in handler
+    assert "static final class RevlJson {" in handler
+    plain = _tier_emit("java").emit(compile_source(_ITER, "s.rvl"))
+    assert "public static final class Stream {" in plain
+    assert "EventContract" not in plain
+    assert "RevlJson" not in plain
+
+
+def test_java_refuses_an_event_field_shape_it_cannot_read_back():
+    """The one place the java handler is narrower than go's and rust's, refused by
+    NAME rather than decoded approximately. go binds a validated item with
+    `encoding/json` and rust with `serde`; the JDK ships no JSON binder, so this
+    tier constructs the event record field by field and covers the scalars, a
+    nested record and `List[T]` over those. A union-valued field has no such
+    reading, and a handler that silently mis-bound one would run its body on
+    invented data — the worst outcome available (§6)."""
+    emit = _tier_emit("java")
+    ir = compile_source("""
+    type Channel = Web | Api
+    event OrderPlaced(key: order_id) { order_id: Str, via: Channel }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on OrderPlaced as e in sub { emit sink.write(e.order_id) }
+    }
+    """, "s.rvl")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(ir)
+    msg = str(excinfo.value)
+    assert "unsupported" not in msg
+    assert "event `OrderPlaced` field `via`" in msg
+    assert "Channel" in msg
+    assert "--backend py" in msg
 
 
 def test_a_multifile_build_carries_event_declarations_into_the_merged_program(

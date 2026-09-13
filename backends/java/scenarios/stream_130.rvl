@@ -1,0 +1,50 @@
+// item 130 Slices 3-4 — the blocking-tier (`java`) stream lowering.
+// docs/design/130-stream-reactive-types.md §4.6 (the java row), §9.
+//
+// The same shape backends/go/testdata/stream_130.rvl drives on the go tier, so
+// the two blocking tiers are proved against one program rather than two:
+//
+//   Consumer — the CORE GUARANTEE (§0, exit test §10.2): a sync resource, then a
+//     subscription bracket. Unloading the owner runs the inverses LIFO, so
+//     `close` runs before the pool's inverse and no listener outlives the owner.
+//   Parked   — a blocking `next` (§4.6): the activation occupies its thread in
+//     the cancellation-first park until the provider emits, then carries on.
+//     Faulting the provider instead terminates that park as `Faulted`, fails the
+//     activation, and reverts the prefix — closing the subscription (§9 Part B).
+//   Fanin    — `merge` (§1): two sources fanned into one DERIVED stream owned by
+//     the subscription. Multi-source teardown rides the one bracket the
+//     subscribe registers: `close` closes the merge, which detaches it from both
+//     sources, and each source is left to its own bracket.
+//   Iterate  — `every o in sub { … }` (Slice 4, §4.7): the async-iteration form,
+//     a plain blocking `next` loop on this tier. Each delivered item runs the
+//     effectful body (an emission to a required Sink); a `Closed` terminal ends
+//     the loop without entering the body.
+
+component Consumer {
+  let pool = effect Pool.open("orders", 2) undo pool.close()
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+}
+
+component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}
+
+component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let b = effect Stream.source() undo b.close()
+  let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}
+
+service Sink { emission fn write(v: Str) }
+
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
