@@ -4446,6 +4446,11 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             return (spec.get("fields") or {}).get(node.get("name"))
         return None
     if kind == "index":
+        # a Map subscript answers the map's declared VALUE type (#957); without
+        # it the binding is untyped and a later `.length()`/`.slice()` on it
+        # picks the LIST helper and does not build
+        if node.get("value_type"):
+            return node["value_type"]
         tt = _go_v3_infer_type(node.get("target"), ctx)
         if isinstance(tt, str) and tt.startswith("List[") and tt.endswith("]"):
             return tt[5:-1]
@@ -4858,6 +4863,12 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         target = _go_v3_expr(target_node, ctx)
         if target_node.get("kind") not in _V3_GO_ATOMIC:
             target = f"({target})"
+        if node.get("key_type") is not None:
+            # Go's subscript is type-directed, so `m[k]` already reached the
+            # right entry on a hit — but a MISS answers the value type's ZERO
+            # VALUE, silently, where every other tier faults (issue #957). Route
+            # it through the helper so the miss is the same fault here.
+            return f"revlMapIndex({target}, {_go_v3_expr(node.get('index'), ctx)})"
         return f"{target}[{_go_v3_expr(node.get('index'), ctx)}]"
 
     if kind == "len":
@@ -7873,6 +7884,25 @@ func revlMapKeys[V any](m map[string]V) []string {
 }
 '''
 
+# A `Map` subscript reads by key and a MISS faults, on every tier (issue #957):
+# `m[k]` is the partial form and `m.lookup(k)` the total one, the same split
+# docs/stdlib-2.0.md §index pins for the List. A bare Go `m[k]` answers the zero
+# value instead, which is the silent wrong answer this issue exists to remove.
+# The reason is spelled identically on all five tiers, as `revl: Int overflow`
+# already is. Gated separately from _V3_MAP_PREAMBLE so a document that only
+# uses the Map METHODS is byte-identical.
+_MAP_MISS_MSG = "revl: map index: no entry for key"
+_V3_MAP_INDEX_HELPER = '''// revlMapIndex is the Map subscript `m[k]`: a miss FAULTS (#957), where
+// `m.lookup(k)` is the total form that answers Opt.
+func revlMapIndex[K comparable, V any](m map[K]V, k K) V {
+\tv, ok := m[k]
+\tif !ok {
+\t\tpanic("%s")
+\t}
+\treturn v
+}
+''' % _MAP_MISS_MSG
+
 _V3_FTOA_HELPER = r'''// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical
 // cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,
 // "1e+21"/"NaN"/"Infinity", a whole-number float as "0", negative zero as "0".
@@ -8226,6 +8256,10 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         used_opt = True
     if any(t in body_blob for t in ("RevlResult[", "RevlOk[", "RevlErr[")):
         used_result = True
+    # The Map SUBSCRIPT helper (issue #957) is gated on its own, not on
+    # `used_map`: a document that only calls the Map methods must stay
+    # byte-identical.
+    used_map_index = "revlMapIndex(" in body_blob
 
     imports: list[str] = []
     if tests:
@@ -8376,6 +8410,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append(_V3_RESULT_PREAMBLE)
     if used_map:
         out.append(_V3_MAP_PREAMBLE)
+    if used_map_index:
+        out.append(_V3_MAP_INDEX_HELPER)
     if ctx.used_stdlib:
         out.append(_V3_STDLIB_PREAMBLE.replace(
             "strings.", f"{ctx.strings_alias}.",
@@ -9345,6 +9381,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     if used_map:
         used_opt = True
     used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    # the Map SUBSCRIPT helper (issue #957), gated on its own like above
+    used_map_index = "revlMapIndex(" in "\n".join(body)
 
     imports: list[str] = []
     if pure_tests or has_lifecycle:
@@ -9505,6 +9543,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append(_V3_RESULT_PREAMBLE)
     if used_map or _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)
+    if used_map_index:
+        out.append(_V3_MAP_INDEX_HELPER)
     if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
     if _COMP_NEEDS_TIMER:
