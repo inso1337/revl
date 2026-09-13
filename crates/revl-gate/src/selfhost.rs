@@ -1640,7 +1640,7 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
     let mut k = ret_at(ts.clone(), ps.i);
-    while ((((((k < ts.revl_length()) && (!atw(&ts, k, "service"))) && (!atw(&ts, k, "component"))) && (!atw(&ts, k, "extern"))) && (!atw(&ts, k, "fn"))) && (!atk(&ts, k, "eof"))) {
+    while ((((((((k < ts.revl_length()) && (!atw(&ts, k, "service"))) && (!atw(&ts, k, "component"))) && (!atw(&ts, k, "extern"))) && (!atw(&ts, k, "fn"))) && (!atw(&ts, k, "pub"))) && (!atw(&ts, k, "type"))) && (!atk(&ts, k, "eof"))) {
         if atk(&ts, k, "{") {
             let e = close_brace(&ts, k);
             if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
@@ -7548,6 +7548,13 @@ fn builtin_ret(method: &str, recvTy: String) -> String {
     if (method == "keys") {
         return String::from("List[Str]");
     }
+    if (method == "lookup") {
+        let margs = type_args(&recvTy);
+        if ((parse_head(recvTy.clone()) == "Map") && (margs.revl_length() == 2i64)) {
+            return (String::from("Opt[").revl_concat(&(margs)[(1i64) as usize])).revl_concat("]");
+        }
+        return String::from("");
+    }
     if (method == "field") {
         return String::from("Value");
     }
@@ -7681,6 +7688,57 @@ fn infer_callee(callee: Expr, env: &[Bind]) -> String {
 };
 }
 
+fn infer_ctor(callee: Expr, args: &[Expr], env: &[Bind]) -> String {
+    let nm = match callee {
+    Expr::Var(n) => n,
+    _ => String::from(""),
+};
+    if (nm == "") {
+        return String::from("");
+    }
+    let arg0 = if (args.revl_length() > 0i64) { infer((args)[(0i64) as usize].clone(), env) } else { String::from("") };
+    let payload = if (arg0 == "") { String::from("Any") } else { arg0.clone() };
+    if ((nm == "Some") && tenv_get(env, "case Some").revl_starts_with("Opt")) {
+        return (String::from("Opt[").revl_concat(&payload)).revl_concat("]");
+    }
+    let adt = tagged_case_adt(env, &nm);
+    if (adt == "") {
+        return String::from("");
+    }
+    if adt.revl_starts_with("Result") {
+        if (nm == "Ok") {
+            return (String::from("Result[").revl_concat(&payload)).revl_concat(", Any]");
+        }
+        if (nm == "Err") {
+            return (String::from("Result[Any, ").revl_concat(&payload)).revl_concat("]");
+        }
+        return String::from("");
+    }
+    if adt.revl_starts_with("Opt") {
+        return String::from("");
+    }
+    return adt;
+}
+
+fn infer_bare_case(n: &str, env: &[Bind]) -> String {
+    let adt = tagged_case_adt(env, n);
+    if ((adt == "") || (tenv_get(env, &(String::from("payload ").revl_concat(&n))) != "")) {
+        return String::from("");
+    }
+    if (adt.revl_starts_with("Result") || adt.revl_starts_with("Opt")) {
+        return String::from("");
+    }
+    return adt;
+}
+
+fn infer_call_ty(c: CallN, env: &[Bind]) -> String {
+    let ctor = infer_ctor(c.target.clone(), &c.args, env);
+    if (ctor != "") {
+        return ctor;
+    }
+    return infer_callee(c.target.clone(), env);
+}
+
 fn infer_record_ty(fields: &[InitN], env: &[Bind]) -> String {
     let mut names: Vec<String> = vec![];
     let mut i = 0i64;
@@ -7731,11 +7789,11 @@ fn infer(e: Expr, env: &[Bind]) -> String {
     Expr::StrLit(v) => String::from("Str"),
     Expr::BoolLit(v) => String::from("Bool"),
     Expr::NullLit => String::from(""),
-    Expr::Var(n) => tenv_get(env, &n),
+    Expr::Var(n) => if (tenv_get(env, &n) != "") { tenv_get(env, &n) } else { infer_bare_case(&n, env) },
     Expr::Bin(b) => { let b = *b; binop_ty(&b.op, infer(b.l.clone(), env), infer(b.r.clone(), env)) },
     Expr::Un(u) => { let u = *u; if (u.op == "!") { String::from("Bool") } else { infer(u.e.clone(), env) } },
     Expr::Emit(u) => { let u = *u; String::from("") },
-    Expr::Call(c) => { let c = *c; infer_callee(c.target, env) },
+    Expr::Call(c) => { let c = *c; infer_call_ty(c, env) },
     Expr::Field(f) => { let f = *f; infer_field(infer(f.target.clone(), env), &f.name, env) },
     Expr::OptField(f) => { let f = *f; String::from("") },
     Expr::OptCall(c) => { let c = *c; String::from("") },
@@ -8256,6 +8314,13 @@ fn apply_arg_markers(node: String, expected: &str, actual: &str) -> String {
         return (((node.revl_slice(0i64, (node.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"widen\":")).revl_concat(&jstr(expected))).revl_concat("}");
     }
     return node;
+}
+
+fn pins_empty_literal(node: &str, declared: &str) -> bool {
+    if node.revl_starts_with("{\"kind\":\"maplit\"") {
+        return true;
+    }
+    return ((node == "{\"kind\":\"list\",\"items\":[]}") && declared.revl_starts_with("List["));
 }
 
 fn is_compound_op(ts: &[Token], k: &str) -> bool {
@@ -8970,7 +9035,10 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         }
         let bindty = if (declared != "") { declared.clone() } else { r.ty };
         let env2 = if (bindty == "") { env.clone() } else { tenv_put(&env, name.clone(), bindty.clone()) };
-        let value = if ((declared != "") && (r.js == "{\"kind\":\"maplit\",\"entries\":[]}")) { (((r.js.revl_slice(0i64, (r.js.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&declared))).revl_concat("}") } else { r.js };
+        let mut value = if (declared == "") { r.js } else { apply_arg_markers(r.js.clone(), &declared, &r.ty) };
+        if ((declared != "") && pins_empty_literal(&r.js, &declared)) {
+            value = (((value.revl_slice(0i64, (value.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&declared))).revl_concat("}");
+        }
         let js = ((((((String::from("{\"step\":\"let\",\"name\":").revl_concat(&jstr(&predeclared_mangle(name.clone())))).revl_concat(",\"value\":")).revl_concat(&value)).revl_concat(",\"mutable\":")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat(&own_birth_marker(births.clone(), i))).revl_concat("}");
         return mk_one(js.clone(), env2, if mutable { muts.revl_push(name.clone()) } else { muts.clone() }, r.i);
     }
@@ -9117,7 +9185,7 @@ fn params_env(ps: Vec<ParamN>, acc: Vec<Bind>) -> Vec<Bind> {
     return env;
 }
 
-fn lir_function(ts: Vec<Token>, i: i64, cases: Vec<Bind>, public_fn: bool) -> LirFn {
+fn lir_function(ts: Vec<Token>, i: i64, cases: Vec<Bind>, public_fn: bool, colored: Vec<String>) -> LirFn {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"));
     let mut reti = ps.i;
@@ -9142,53 +9210,53 @@ fn lir_function(ts: Vec<Token>, i: i64, cases: Vec<Bind>, public_fn: bool) -> Li
     }
     let om = own_marks(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"));
     let bodyjs = lir_stmts(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), params_env(ps.ps.clone(), cases.clone()), vec![], retTy.clone(), om.marks.clone(), om.births.clone());
-    let js = (((((((((((String::from("{\"name\":").revl_concat(&jstr(&nm))).revl_concat(",\"params\":[")).revl_concat(&ir_params_json(&ps.ps))).revl_concat("],\"returns\":")).revl_concat(&retJson)).revl_concat(",\"public\":")).revl_concat(&if public_fn { String::from("true") } else { String::from("false") })).revl_concat(",\"body\":[")).revl_concat(&bodyjs)).revl_concat("]")).revl_concat(&if cache_pure { String::from(",\"cache\":{\"class\":\"pure_fn\"}") } else { String::from("") })).revl_concat("}");
+    let js = ((((((((((((String::from("{\"name\":").revl_concat(&jstr(&nm))).revl_concat(",\"params\":[")).revl_concat(&ir_params_json(&ps.ps))).revl_concat("],\"returns\":")).revl_concat(&retJson)).revl_concat(",\"public\":")).revl_concat(&if public_fn { String::from("true") } else { String::from("false") })).revl_concat(",\"body\":[")).revl_concat(&bodyjs)).revl_concat("]")).revl_concat(&if cache_pure { String::from(",\"cache\":{\"class\":\"pure_fn\"}") } else { String::from("") })).revl_concat(&if contains(&colored, &nm) { String::from(",\"async\":true") } else { String::from("") })).revl_concat("}");
     return LirFn { js: js, i: bend };
 }
 
-fn fns_walk(ts: Vec<Token>, i: i64, acc: String, cases: Vec<Bind>) -> String {
+fn fns_walk(ts: Vec<Token>, i: i64, acc: String, cases: Vec<Bind>, colored: Vec<String>) -> String {
     if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
         return acc;
     }
     let t = tkc(&ts, i);
     if at_boot(&ts, i) {
-        return fns_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), cases.clone(), colored.clone());
     }
     if (t.kind != "kw") {
-        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone(), colored.clone());
     }
     if (t.text == "use") {
-        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone(), colored.clone());
     }
     if (t.text == "test") {
         let e = test_block_end(&ts, i);
         if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return fns_walk(ts.clone(), e, acc.clone(), cases.clone());
+            return fns_walk(ts.clone(), e, acc.clone(), cases.clone(), colored.clone());
         }
-        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone(), colored.clone());
     }
     if (t.text == "type") {
-        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone(), colored.clone());
     }
     if (t.text == "extern") {
-        return fns_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, acc.clone(), cases.clone(), colored.clone());
     }
     let public_fn = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
     if ((t.text == "fn") || public_fn) {
-        let f = lir_function(ts.clone(), if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i }, cases.clone(), public_fn.clone());
+        let f = lir_function(ts.clone(), if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i }, cases.clone(), public_fn.clone(), colored.clone());
         let acc2 = if (f.js == "") { acc.clone() } else { if (acc == "") { f.js } else { (acc.revl_concat(",")).revl_concat(&f.js) } };
-        return fns_walk(ts.clone(), f.i, acc2, cases.clone());
+        return fns_walk(ts.clone(), f.i, acc2, cases.clone(), colored.clone());
     }
     if at_pub_prefix(&ts, i) {
-        return fns_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), cases.clone(), colored.clone());
     }
     if (t.text == "service") {
-        return fns_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, acc.clone(), cases.clone(), colored.clone());
     }
     if (t.text == "component") {
-        return fns_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, acc.clone(), cases.clone());
+        return fns_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, acc.clone(), cases.clone(), colored.clone());
     }
-    return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone());
+    return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone(), colored.clone());
 }
 
 fn ir_cap_list(ts: &[Token], i: i64) -> CapR {
@@ -9580,7 +9648,9 @@ pub fn lower_to_ir(src: String) -> String {
     let ts = lex_src(src.clone());
     let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false));
     let ver = if a.v3 { String::from("3") } else { if a.v2 { String::from("2") } else { String::from("1") } };
-    let fnsjs = fns_walk(ts.clone(), 0i64, String::from(""), case_binds(ts.clone()));
+    let pg = parse_prog_ts(ts.clone());
+    let colored = async_colored(&pg.fns, async_slots_map(&pg.fns));
+    let fnsjs = fns_walk(ts.clone(), 0i64, String::from(""), case_binds(ts.clone()), colored.clone());
     let typesjs = types_walk(ts.clone(), 0i64, String::from(""));
     let exres = externs_walk(ts.clone(), 0i64, String::from(""), true, taint_decl_params(ts.clone()));
     let mut out = (((((String::from("{\"ir_version\": ").revl_concat(&ver)).revl_concat(", \"services\": {")).revl_concat(&a.svcs)).revl_concat("}, \"components\": [")).revl_concat(&a.comps)).revl_concat("]");
@@ -12082,6 +12152,41 @@ fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
 #[test]
 fn a_map_subscript_carries_the_declared_key_and_value_type__issue__957_() {
     assert!((lower_to_ir(String::from("fn keyed(m: Map[Str, Int], k: Str) -> Int { return m[k] } fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"keyed\",\"params\":[{\"name\": \"m\", \"type\": \"Map[Str, Int]\"}, {\"name\": \"k\", \"type\": \"Str\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"m\"},\"index\":{\"kind\":\"var\",\"name\":\"k\"},\"key_type\":\"Str\",\"value_type\":\"Int\"}}]},{\"name\":\"positional\",\"params\":[{\"name\": \"xs\", \"type\": \"List[Int]\"}, {\"name\": \"i\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"xs\"},\"index\":{\"kind\":\"var\",\"name\":\"i\"}}}]}]}"));
+}
+
+#[test]
+fn a_pub_fn_and_a_type_written_after_an_extern_keep_their_declaration() {
+    assert!((lower_to_ir(format!("extern pure fn h(s: Str) -> Str = @py {{ return s }}\ntype T = {{ a: Int }}\npub fn render(l: Str) -> Str {{ return h(l) }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"T\": {\"params\": [], \"kind\": \"record\", \"fields\": {\"a\":\"Int\"}}}, \"functions\": [{\"name\":\"render\",\"params\":[{\"name\": \"l\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":true,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"h\"},\"args\":[{\"kind\":\"var\",\"name\":\"l\"}]}}]}], \"externs\": [{\"name\": \"h\", \"class\": \"pure\", \"params\": [{\"name\": \"s\", \"type\": \"Str\"}], \"returns\": \"Str\", \"bodies\": {\"py\": \" return s \"}}]}"));
+}
+
+#[test]
+fn an_annotated_let_pins_an_empty_list_and_marks_a_width_coercion() {
+    assert!((lower_to_ir(format!("fn empty() -> List[Int] {{ let xs: List[Int] = [] return xs }}\nfn full() -> List[Int] {{ let ys: List[Int] = [1] return ys }}\nfn widened(n: Int32) -> Int {{ let w: Int = n return w }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"empty\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"xs\",\"value\":{\"kind\":\"list\",\"items\":[],\"expected\":\"List[Int]\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"xs\"}}]},{\"name\":\"full\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"ys\",\"value\":{\"kind\":\"list\",\"items\":[{\"kind\":\"lit\",\"value\":1}]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"ys\"}}]},{\"name\":\"widened\",\"params\":[{\"name\": \"n\", \"type\": \"Int32\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"w\",\"value\":{\"kind\":\"var\",\"name\":\"n\",\"widen\":\"Int\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"w\"}}]}]}"));
+}
+
+#[test]
+fn a_constructor_in_scrutinee_position_types_its_match_arms() {
+    assert!((lower_to_ir(format!("type Tree = Leaf | Node(Int)\nfn f(x: Int) -> Int {{ return match Node(x) {{ Node(v) => v, Leaf => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"Tree\": {\"params\": [], \"kind\": \"variant\", \"cases\": [{\"name\":\"Leaf\",\"payload\":null},{\"name\":\"Node\",\"payload\":\"Int\"}]}}, \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"x\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"adt\",\"type\":\"Tree\",\"case\":\"Node\",\"args\":[{\"kind\":\"var\",\"name\":\"x\"}]},\"arms\":[{\"pattern\":\"Node\",\"bind\":\"v\",\"body\":{\"kind\":\"var\",\"name\":\"v\"},\"payload_type\":\"Int\"},{\"pattern\":\"Leaf\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":0}}]}}]}]}"));
+}
+
+#[test]
+fn a_nullary_case_bound_bare_carries_its_adt_to_the_match() {
+    assert!((lower_to_ir(format!("type Tag = Red | Green(Int)\nfn f() -> Int {{ let c = Red\n  return match c {{ Red => 1, Green(n) => n }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"Tag\": {\"params\": [], \"kind\": \"variant\", \"cases\": [{\"name\":\"Red\",\"payload\":null},{\"name\":\"Green\",\"payload\":\"Int\"}]}}, \"functions\": [{\"name\":\"f\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"c\",\"value\":{\"kind\":\"adt\",\"type\":\"Tag\",\"case\":\"Red\",\"args\":[]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"c\"},\"arms\":[{\"pattern\":\"Red\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":1}},{\"pattern\":\"Green\",\"bind\":\"n\",\"body\":{\"kind\":\"var\",\"name\":\"n\"},\"payload_type\":\"Int\"}]}}]}]}"));
+}
+
+#[test]
+fn a_built_in_constructor_carries_its_argument_type_into_the_arm() {
+    assert!((lower_to_ir(format!("fn f() -> Int {{ return match Ok(1) {{ Ok(o) => o, Err(e) => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"adt\",\"type\":\"Result[Any, Any]\",\"case\":\"Ok\",\"args\":[{\"kind\":\"lit\",\"value\":1}]},\"arms\":[{\"pattern\":\"Ok\",\"bind\":\"o\",\"body\":{\"kind\":\"var\",\"name\":\"o\"},\"payload_type\":\"Int\"},{\"pattern\":\"Err\",\"bind\":\"e\",\"body\":{\"kind\":\"lit\",\"value\":0},\"payload_type\":\"Any\"}]}}]}]}"));
+}
+
+#[test]
+fn map_lookup_types_the_opt_its_match_unwraps() {
+    assert!((lower_to_ir(format!("fn f(m: Map[Str, Int], k: Str) -> Int {{ let hit = m.lookup(k)\n  return match hit {{ Some(v) => v, None => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"m\", \"type\": \"Map[Str, Int]\"}, {\"name\": \"k\", \"type\": \"Str\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"hit\",\"value\":{\"kind\":\"builtin\",\"method\":\"lookup\",\"target\":{\"kind\":\"var\",\"name\":\"m\"},\"args\":[{\"kind\":\"var\",\"name\":\"k\"}]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"hit\"},\"arms\":[{\"pattern\":\"Some\",\"bind\":\"v\",\"body\":{\"kind\":\"var\",\"name\":\"v\"},\"payload_type\":\"Int\"},{\"pattern\":\"None\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":0}}]}}]}]}"));
+}
+
+#[test]
+fn the_async_colour_reaches_the_fn_entries_transitively() {
+    assert!((lower_to_ir(format!("extern emission async fn hf(p: Str) -> Str = @py {{ return p }}\nfn one(p: Str) -> Str {{ return hf(p) }}\nfn two(p: Str) -> Str {{ return one(p) }}\nfn plain(n: Int) -> Int {{ return n + 1 }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[{\"name\": \"p\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"hf\"},\"args\":[{\"kind\":\"var\",\"name\":\"p\"}]}}],\"async\":true},{\"name\":\"two\",\"params\":[{\"name\": \"p\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[{\"kind\":\"var\",\"name\":\"p\"}]}}],\"async\":true},{\"name\":\"plain\",\"params\":[{\"name\": \"n\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"n\"},\"right\":{\"kind\":\"lit\",\"value\":1},\"operands\":\"Int\"}}]}], \"externs\": [{\"name\": \"hf\", \"class\": \"emission\", \"params\": [{\"name\": \"p\", \"type\": \"Str\"}], \"returns\": \"Str\", \"bodies\": {\"py\": \" return p \"}, \"async\": true}]}"));
 }
 
 #[test]

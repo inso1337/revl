@@ -1,0 +1,85 @@
+// The markers an ANNOTATED `let`/`var` puts on its value (roadmap item 391).
+//
+// A declared type is a checking position, so the reference frontend stamps two
+// things there that a backend cannot re-derive: `_mark_widen` (Int/Int32 -> Float
+// and Int32 -> Int, the coercion a tier keeping the widths apart must emit) and
+// `_pin_empty_literal` (the author's annotation threaded onto an EMPTY
+// collection literal, which the checker types at bottom and a positional emitter
+// has nothing to infer from). The self-host lowering pinned the empty `Map` and
+// nothing else, and this corpus had no annotated `let` that needed either, so
+// the byte-agreement oracle stayed green across both gaps.
+type Point = { x: Int, y: Int }
+
+// `_pin_empty_literal`: `"expected"` on the empty literal, keyed by the
+// annotation rather than by the literal
+fn empty_list_of_scalars() -> List[Int] {
+  var xs: List[Int] = []
+  xs = xs.push(1)
+  return xs
+}
+
+fn empty_list_of_records() -> List[Point] {
+  var ps: List[Point] = []
+  ps = ps.push({ x: 1, y: 2 })
+  return ps
+}
+
+fn empty_list_of_lists() -> List[List[Int]] {
+  var rows: List[List[Int]] = []
+  return rows
+}
+
+fn empty_map_is_pinned_too(k: Str) -> Int {
+  var m: Map[Str, Int] = Map.empty()
+  m = m.set(k, 1)
+  return m.size()
+}
+
+// the negatives, in the same document: a NON-empty literal and an unannotated
+// binding carry no `expected`, so a pin keyed off the literal alone would move
+// these nodes too
+fn nonempty_is_not_pinned() -> List[Int] {
+  let xs: List[Int] = [1, 2, 3]
+  return xs
+}
+
+fn unannotated_is_not_pinned() -> Int {
+  var xs = [7]
+  xs = xs.push(8)
+  return xs.length()
+}
+
+// `_mark_widen` at the SAME position: `"widen"` naming the target width
+fn widen_int_to_float(n: Int) -> Float {
+  let f: Float = n
+  return f
+}
+
+fn widen_int32_to_int(n: Int32) -> Int {
+  let w: Int = n
+  return w
+}
+
+fn no_coercion_no_marker(n: Int) -> Int {
+  let k: Int = n
+  return k
+}
+
+// `Map.lookup` was the one `_BUILTIN_SIG` row the self-host method table did not
+// answer, so the `Opt[V]` it returns typed as unknown and the `match` that
+// always follows it lost the arm's `payload_type`
+fn lookup_payload(m: Map[Str, Int], k: Str) -> Int {
+  let hit = m.lookup(k)
+  return match hit {
+    Some(v) => v,
+    None => 0,
+  }
+}
+
+fn lookup_of_a_record(m: Map[Str, Point], k: Str) -> Int {
+  let hit = m.lookup(k)
+  return match hit {
+    Some(p) => p.x,
+    None => 0,
+  }
+}
