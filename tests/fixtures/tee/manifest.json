@@ -1,0 +1,291 @@
+{
+  "endorsements": {
+    "expired": {
+      "curve": "P-384",
+      "kind": "revl.tee-platform-endorsement",
+      "not_after": "2025-06-01T00:00:00+00:00",
+      "not_before": "2025-01-01T00:00:00+00:00",
+      "platform_key": "7aef81a04b52f148c64bc57f5a8ce1fd3100b97d6c12307f17b06202b919705e89f8a1a21ad468d934b65c7bf6fd8d22245fd253ad676fab48d4ddb7c4d064bc1edfa787d0f85ab0ff744367d1ea1488732aaa381e97ed1b9fd3805bdbb03d64",
+      "platform_key_id": "22447103ca54b37a",
+      "root_curve": "P-384",
+      "root_key_id": "632d76b4d300d4fd",
+      "signature": "57d24009aeb7562d6a022c7c83eaf9493cae6111702e55dd12c1d9dc689421024658b6c8cccdfd53d67bace35f37174182c98a23c02c7cae0a65f46d7bdce4972671f7942a8f44a14109f50dad037556e9757976826f43be872a215738c22d54",
+      "vendor": "amd-sev-snp",
+      "version": "1.0"
+    },
+    "good": {
+      "curve": "P-384",
+      "kind": "revl.tee-platform-endorsement",
+      "not_after": "2027-01-01T00:00:00+00:00",
+      "not_before": "2026-01-01T00:00:00+00:00",
+      "platform_key": "7aef81a04b52f148c64bc57f5a8ce1fd3100b97d6c12307f17b06202b919705e89f8a1a21ad468d934b65c7bf6fd8d22245fd253ad676fab48d4ddb7c4d064bc1edfa787d0f85ab0ff744367d1ea1488732aaa381e97ed1b9fd3805bdbb03d64",
+      "platform_key_id": "22447103ca54b37a",
+      "root_curve": "P-384",
+      "root_key_id": "632d76b4d300d4fd",
+      "signature": "aed9950a8f9504a32e7915be94a6fd505da0cf9d455f0cb3b59507952f223b81f89a4a6da218d019786596b88a0626f5b73bd1b2ccf7c25ed91a7fa0d59bfc37bff8647a0c759316af4d6012257ebcc0f85b31ab2b348f508a4dc6f3a44dbb43",
+      "vendor": "amd-sev-snp",
+      "version": "1.0"
+    },
+    "signed_by_an_unpinned_root": {
+      "curve": "P-384",
+      "kind": "revl.tee-platform-endorsement",
+      "not_after": "2027-01-01T00:00:00+00:00",
+      "not_before": "2026-01-01T00:00:00+00:00",
+      "platform_key": "7aef81a04b52f148c64bc57f5a8ce1fd3100b97d6c12307f17b06202b919705e89f8a1a21ad468d934b65c7bf6fd8d22245fd253ad676fab48d4ddb7c4d064bc1edfa787d0f85ab0ff744367d1ea1488732aaa381e97ed1b9fd3805bdbb03d64",
+      "platform_key_id": "22447103ca54b37a",
+      "root_curve": "P-384",
+      "root_key_id": "609ad73addc228a5",
+      "signature": "2c39d2d64e5645c74a6d6b40d14fa6ad1d168295748d4c6d6ae7cd9d3f1e29165c562843ba89692687d78bed85ea0b8d17b753fac94dfbf5b804368ef3b6cec236b449ef1e105e7c4a847266e754fcd49a0b3cc29c5235020b826e9b31f6bcfb",
+      "vendor": "amd-sev-snp",
+      "version": "1.0"
+    },
+    "window_extended_after_signing": {
+      "curve": "P-384",
+      "kind": "revl.tee-platform-endorsement",
+      "not_after": "2099-01-01T00:00:00+00:00",
+      "not_before": "2026-01-01T00:00:00+00:00",
+      "platform_key": "7aef81a04b52f148c64bc57f5a8ce1fd3100b97d6c12307f17b06202b919705e89f8a1a21ad468d934b65c7bf6fd8d22245fd253ad676fab48d4ddb7c4d064bc1edfa787d0f85ab0ff744367d1ea1488732aaa381e97ed1b9fd3805bdbb03d64",
+      "platform_key_id": "22447103ca54b37a",
+      "root_curve": "P-384",
+      "root_key_id": "632d76b4d300d4fd",
+      "signature": "aed9950a8f9504a32e7915be94a6fd505da0cf9d455f0cb3b59507952f223b81f89a4a6da218d019786596b88a0626f5b73bd1b2ccf7c25ed91a7fa0d59bfc37bff8647a0c759316af4d6012257ebcc0f85b31ab2b348f508a4dc6f3a44dbb43",
+      "vendor": "amd-sev-snp",
+      "version": "1.0"
+    }
+  },
+  "fixtures": [
+    {
+      "bytes": 1220,
+      "file": "tdx_quote_good.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "measurement": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "verdict": "admit",
+      "why": "the reference quote every other TDX fixture is one change away from"
+    },
+    {
+      "bytes": 1220,
+      "file": "tdx_quote_other_measurement.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "measurement": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "verdict": "admit",
+      "why": "verifies, and reports a measurement a requirement need not permit: the wrong-measurement refusal belongs to the placement, not the root"
+    },
+    {
+      "bytes": 1220,
+      "expect": "not signed by the platform key pinned as",
+      "file": "tdx_quote_other_platform.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "a complete, internally consistent quote from a platform this root does not endorse: the forged-root case, re-signed rather than corrupted"
+    },
+    {
+      "bytes": 1220,
+      "expect": "does not bind this attestation key",
+      "file": "tdx_quote_unattached_attestation_key.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "the platform signs a QE Report that certifies no key, so the attestation key is the peer's to choose"
+    },
+    {
+      "bytes": 1220,
+      "expect": "not signed by the attestation key",
+      "file": "tdx_quote_tampered_mrtd.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "the measurement register altered after the quote was signed"
+    },
+    {
+      "bytes": 1220,
+      "expect": "report_data does not match",
+      "file": "tdx_quote_wrong_challenge.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "a valid quote that answers a different challenge: the replay case"
+    },
+    {
+      "bytes": 1220,
+      "expect": "TDATTRIBUTES debug bit is set",
+      "file": "tdx_quote_debug_td.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "a debuggable TD is inspectable from its host"
+    },
+    {
+      "bytes": 1220,
+      "expect": "QE vendor id",
+      "file": "tdx_quote_other_qe_vendor.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "signed correctly, and by a quoting enclave that is not Intel's"
+    },
+    {
+      "bytes": 600,
+      "expect": "malformed TDX quote",
+      "file": "tdx_quote_truncated.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "shorter than a header plus a body plus a length"
+    },
+    {
+      "bytes": 1220,
+      "expect": "unsupported TDX quote version 3",
+      "file": "tdx_quote_version_3.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "an older layout refused rather than read with this one"
+    },
+    {
+      "bytes": 1220,
+      "expect": "an SGX quote, whose body is a different structure",
+      "file": "tdx_quote_sgx_tee_type.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "an SGX report body is not a TD quote body"
+    },
+    {
+      "bytes": 1224,
+      "expect": "bytes follow it",
+      "file": "tdx_quote_trailing_bytes.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "four unsigned bytes appended; the declared signature length no longer accounts for what is present"
+    },
+    {
+      "bytes": 1220,
+      "expect": "signature_data_len",
+      "file": "tdx_quote_signature_length_overrun.bin",
+      "format": "tdx-quote-v4-ecdsa-p256",
+      "verdict": "refuse",
+      "why": "the declared length claims bytes the quote does not carry"
+    },
+    {
+      "bytes": 1184,
+      "file": "sev_snp_report_good.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "measurement": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "verdict": "admit",
+      "why": "the reference report every other SEV-SNP fixture is one change from"
+    },
+    {
+      "bytes": 1184,
+      "file": "sev_snp_report_other_measurement.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "measurement": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+      "verdict": "admit",
+      "why": "verifies, and reports a measurement a requirement need not permit"
+    },
+    {
+      "bytes": 1184,
+      "expect": "not signed by the VCEK pinned as",
+      "file": "sev_snp_report_other_vcek.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "a complete report from a platform this root does not endorse"
+    },
+    {
+      "bytes": 1184,
+      "expect": "not signed by the VCEK pinned as",
+      "file": "sev_snp_report_tampered_measurement.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "the launch measurement altered after the report was signed"
+    },
+    {
+      "bytes": 1184,
+      "expect": "report_data does not match",
+      "file": "sev_snp_report_wrong_challenge.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "a valid report that answers a different challenge"
+    },
+    {
+      "bytes": 1184,
+      "expect": "allows debug",
+      "file": "sev_snp_report_debug_policy.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "a debuggable guest's memory is readable by its host"
+    },
+    {
+      "bytes": 1183,
+      "expect": "exactly 1184 bytes",
+      "file": "sev_snp_report_short.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "the report is a fixed size and a short one is refused, not padded"
+    },
+    {
+      "bytes": 1184,
+      "expect": "unsupported SEV-SNP report version 9",
+      "file": "sev_snp_report_version_9.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "an unknown layout refused rather than read with this one"
+    },
+    {
+      "bytes": 1184,
+      "expect": "signature_algo is 2",
+      "file": "sev_snp_report_bad_sig_algo.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "an algorithm the format does not define"
+    },
+    {
+      "bytes": 1184,
+      "expect": "bytes above the 48",
+      "file": "sev_snp_report_oversized_scalar.bin",
+      "format": "sev-snp-report-v2-ecdsa-p384",
+      "verdict": "refuse",
+      "why": "a signature scalar that spills past P-384, which a truncating reader would silently accept as a different scalar"
+    }
+  ],
+  "keys": {
+    "amd_root": {
+      "curve": "P-384",
+      "key_id": "632d76b4d300d4fd",
+      "public_key": "5c6d04e758c25a9a22094abdf091b5f5489891ff49d39c584b18bdc593e5a0fc6ab597227f6256a035444442a8799564eba1ee46c4aceb4b1e69429e0142a444477f33f20d51c4d950d27cf4f08e0048669e676875b39d8c225765d31fb8419b"
+    },
+    "rogue_root": {
+      "curve": "P-384",
+      "key_id": "609ad73addc228a5",
+      "public_key": "d7b4fa2c3bef5e3525aee830dd88446198d0d3ef4762d6d6d75ae22a17cda100a27b346b1d08e14b30162df9cfca7bf3ca7e57cd7d1bdb32ccf69734345eabeab67c27edbf07fd6db1c63af0039719ee1413a051416be5b615a708920ff95bd7"
+    },
+    "sev_other_vcek": {
+      "curve": "P-384",
+      "key_id": "fbc0a80447690ba2",
+      "public_key": "d8f38e92fc3268fabcb20401fe948aa748320363658ae2101e3e820e6d62c7c882929a6c4d7dd284a1994f6d04c7de6e9bd1dec1db64028f5863798d16a69f6cf31e96f3d87e40d04a692cbff83c05faf89b6557f2dc8bb1b88eeb59055e574d"
+    },
+    "sev_vcek": {
+      "curve": "P-384",
+      "key_id": "22447103ca54b37a",
+      "public_key": "7aef81a04b52f148c64bc57f5a8ce1fd3100b97d6c12307f17b06202b919705e89f8a1a21ad468d934b65c7bf6fd8d22245fd253ad676fab48d4ddb7c4d064bc1edfa787d0f85ab0ff744367d1ea1488732aaa381e97ed1b9fd3805bdbb03d64"
+    },
+    "tdx_attest": {
+      "curve": "P-256",
+      "key_id": "0fb936c9390b6970",
+      "public_key": "63bd3bb7fa1a49b6b1740ed4ebb573b060c456434fb64d64bc258557e85304b280f6afcaf030e324ed6987cf54aa1b9e8cadba1dd74d4ff6111efce65b0e0405"
+    },
+    "tdx_other_platform": {
+      "curve": "P-256",
+      "key_id": "da9cafb7f9920ea8",
+      "public_key": "8c12d5bc417b60f10f82197dec8637224776443aabf1027dc0b8a2745e603f99d57b003a61f5cb6eeb1d07cee624939651298f582b31f2ff44d40eebf0f5751a"
+    },
+    "tdx_platform": {
+      "curve": "P-256",
+      "key_id": "4ea351d4b4c7089f",
+      "public_key": "a8244cd3ebbeb50baf683041ea29791248b1ee33754ce0a13899df3a6ba6f12e95770c80d57ddafcd9279311889e4711a80710f86cbb219e7eb85f2ac6248b0a"
+    }
+  },
+  "note": "Committed TEE quote fixtures for roadmap item 475. Regenerate with `python tests/fixtures/tee/generate.py`; the bytes are a pure function of this directory's generator and are asserted to be. These are not vendor-issued quotes (see the generator's docstring) - they are the real wire layouts, signed with the real curves, chained to a pinned root.",
+  "other_report_data": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+  "report_data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "seeds": {
+    "amd_root": "revl-fixture/amd-root-key",
+    "rogue_root": "revl-fixture/a-root-the-operator-never-pinned",
+    "sev_other_vcek": "revl-fixture/sev-snp-vcek-of-another-platform",
+    "sev_vcek": "revl-fixture/sev-snp-vcek",
+    "tdx_attest": "revl-fixture/tdx-attestation-key",
+    "tdx_other_platform": "revl-fixture/tdx-pck-key-of-another-platform",
+    "tdx_platform": "revl-fixture/tdx-pck-key"
+  }
+}
