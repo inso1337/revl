@@ -43,6 +43,17 @@ component MemCache provides cache: Cache {
 }
 """
 
+# The same service, with a component whose activation body cannot complete.
+# Loading it is allowed and observable (item 372); making it the rollback
+# target is what the activation health gate refuses.
+BROKEN_ACTIVATION = """
+service Cache { fn get(key: Str) -> Opt[Str]
+                fn size() -> Int }
+component MemCache provides cache: Cache {
+  fail "activation cannot complete"
+}
+"""
+
 USING_MODULE = 'use "./lib.rvl" { double }\n' + """
 service S { fn f(a: Int) -> Int }
 component C provides s: S { provide s { fn f(a) = double(a) } }
@@ -167,6 +178,58 @@ def test_rollback_restores_the_previous_generation():
     _call("revl_swap", {"source": CACHE.replace("fn size() = 0", "fn size() = 42")})
     assert _call("revl_rollback", {})["ok"] is True
     assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 0
+
+
+@needs_runtime
+def test_a_refused_rollback_keeps_the_generation_it_would_have_restored():
+    """A rollback the gate refuses must not consume the target it restores.
+
+    `rollback` used to clear `previous`/`previous_origin` before delegating to
+    `swap`. `swap` saves those pointers for its own abort path, so it saved the
+    `None` `rollback` had just written and put it back: a refused rollback
+    restored `previous` to `None` and the rollback target was gone. The retry
+    an operator makes once the cause is fixed then failed with "no previous
+    generation to roll back to" instead of reaching the real reason.
+    """
+    from revl.mcp import server as server_mod
+
+    # Gen 1 does not activate; gen 2 does. Rolling back to gen 1 is refused by
+    # the activation health gate — precisely the operator-recovery case.
+    _call("revl_load", {"source": BROKEN_ACTIVATION})
+    _call("revl_swap", {"source": CACHE})
+    target = server_mod.SESSION.previous
+    assert target is not None
+
+    refused = _call("revl_rollback", {})
+    assert refused["ok"] is False
+    assert "swap rejected" in refused["diagnostics"][0]["message"]
+
+    # The running generation keeps serving, and the target survives the refusal.
+    assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 0
+    assert server_mod.SESSION.previous is target
+
+    # So a retry reaches the real reason, not a lost target.
+    retry = _call("revl_rollback", {})
+    assert retry["ok"] is False
+    assert "no previous generation" not in retry["diagnostics"][0]["message"]
+
+
+@needs_runtime
+def test_rollback_rolls_forward_again_after_rolling_back():
+    """The success path is unchanged: the generation just left becomes the
+    rollback target, so rollback toggles between two generations."""
+    from revl.mcp import server as server_mod
+
+    _call("revl_load", {"source": CACHE})
+    _call("revl_swap", {"source": CACHE.replace("fn size() = 0", "fn size() = 42")})
+    assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 42
+
+    assert _call("revl_rollback", {})["ok"] is True
+    assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 0
+    assert server_mod.SESSION.previous is not None
+
+    assert _call("revl_rollback", {})["ok"] is True
+    assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 42
 
 
 @needs_runtime
