@@ -252,7 +252,7 @@ certificate: admitted  (revl.component-certificate v1.1)
   proof:     leanprover/lean4:v4.33.1  (as of 267862fb455a)
   checker:   revl 2.0.0, ruleset 3e202568c8a0
   signed:    2026-09-10T04:17:27+00:00  (hmac-sha256, key a03904d368b21d03)
-  evidence:  39 requirements over 9 attested guarantees, 12 conditional, 1 with no recorded status
+  evidence:  39 requirements over 9 attested guarantees, 12 conditional, 2 with no recorded status
   coverage:
     G1 partial  partial
     G2 proved   full
@@ -263,7 +263,7 @@ certificate: admitted  (revl.component-certificate v1.1)
     ...
     G-SECRET       partial  partial, inside the G9 development
     G-SECRET-FLOW  partial  partial, inside the G9 development
-  no recorded status: T-UNRESOLVED
+  no recorded status: G-RETAIN, T-UNRESOLVED
   caveats:
     G1: partial, `declared_only_access` is real and witnessed, ...
     G9: partial, `Flow` starts from a path that is *given*. ...
