@@ -171,7 +171,12 @@ def test_teardown_runs_consumers_before_providers(running):
 
 
 def test_a_replacement_that_changes_the_interface_is_reported(running):
-    """Same name, different provision: `cache` goes away, `hits` appears."""
+    """Same name, different provision: `cache` goes away, `hits` appears.
+
+    Item 186: the delta is still computed in full, but the gate now REFUSES the
+    admission — `Front` is a retained running consumer of the `cache` this
+    replacement withdraws, and admitting it would deactivate `Front` into
+    PENDING with no diagnostic. The plan reports what it *would* have done."""
     result = plan(source="""
 service Hits { fn n() -> Int }
 component Store requires db: Database provides hits: Hits {
@@ -179,7 +184,10 @@ component Store requires db: Database provides hits: Hits {
   provide hits { fn n() = 1 }
 }
 """, manifest=running)
-    assert result["admissible"] is True
+    assert result["admissible"] is False
+    refusal = next(d for d in result["diagnostics"] if d["from"] == "admission")
+    assert refusal["code"] == "G2"
+    assert "`cache`" in refusal["message"] and "`Front`" in refusal["message"]
     replaced = result["components"]["replaced"][0]
     assert replaced["provides"]["removed"] == ["cache"]
     assert replaced["provides"]["added"] == ["hits"]
@@ -193,10 +201,17 @@ component Store requires db: Database provides hits: Hits {
 
 def test_withdrawing_a_provision_diverts_its_consumers_transitively(running):
     """Db leaves; Store loses `db` directly and Front loses `cache` because
-    its provider is itself diverted."""
+    its provider is itself diverted.
+
+    Item 186: the cascade is unchanged, but the verdict is not. Withdrawing
+    `Db` strands the retained running `Store` on `db`, so the gate refuses —
+    the prediction below is what the admission *would* have caused."""
     result = plan(source=ADDITION, manifest=running, replacing=("Db",))
 
-    assert result["admissible"] is True
+    assert result["admissible"] is False
+    refusal = next(d for d in result["diagnostics"] if d["from"] == "admission")
+    assert refusal["code"] == "G2"
+    assert "`db`" in refusal["message"] and "`Store`" in refusal["message"]
     assert result["components"]["withdrawn"] == ["Db"]
     assert _keys(result["provisions"]["withdrawn"]) == {"db"}
     assert result["provisions"]["withdrawn"][0]["service"] == "Database"
@@ -662,8 +677,10 @@ def test_cli_replacing_flag_drives_the_cascade(tmp_path, capsys, running):
     path.write_text(json.dumps(running))
     candidate = tmp_path / "add.rvl"
     candidate.write_text(ADDITION)
+    # item 186: stranding the retained `Store` is refused, so the CLI exits 1 —
+    # and still prints the whole cascade it would have caused.
     assert main(["plan", str(candidate), "--manifest", str(path),
-                 "--replacing", "Db"]) == 0
+                 "--replacing", "Db"]) == 1
     out = capsys.readouterr().out
     assert "DIVERTED   Store" in out
     assert "Front -> Store -> Db" in out
