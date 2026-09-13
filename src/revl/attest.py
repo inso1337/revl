@@ -254,9 +254,20 @@ def named_guarantees() -> list[str]:
 #: `admit_profile`), plus `holes` (the admission gate `run_gate` applies) and
 #: `diagnostics` (the catalogue the codes are drawn from). Their bytes are what
 #: :func:`ruleset_digest` identifies.
+#:
+#: `retention` is here for a different reason than the rest, and the difference
+#: is the point: it raises no refusal of its own, but `PERSISTENCE_SINK_SCOPES`
+#: — the crossings at which a past-deadline `Retained[T, P]` value is refused
+#: under `G-RETAIN` — is read by `taint.py` to decide whether to refuse at all.
+#: A member whose BYTES move the set of programs that are refused is a rule, so
+#: its bytes are part of the digest: without it two artifacts could carry the
+#: same ruleset digest while having been admitted under different retention
+#: rules, which is the drift the digest exists to catch (issue #989). It cites
+#: no numbered `(Gn)` tag, so listing it here adds it to the digest without
+#: changing the cited set :func:`discharged_guarantees` reads.
 RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
-                   "taint", "placement", "emission_analysis", "admit_profile",
-                   "holes", "diagnostics")
+                   "taint", "retention", "placement", "emission_analysis",
+                   "admit_profile", "holes", "diagnostics")
 
 #: The modules SCANNED for the G-codes the ruleset cites. `diagnostics` is
 #: excluded on purpose: it is the catalogue, and reading the list off the
