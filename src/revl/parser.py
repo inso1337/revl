@@ -24,7 +24,7 @@ Grammar (v0 subset — see DESIGN.md §3):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import contextlib
 import re
@@ -2931,11 +2931,19 @@ class Parser:
         return WithinClause(self._interpret_within(raw, line), line)
 
     def _interpret_within(self, raw: dict, line: int) -> object:
-        """The parsed `within` record as an `intent.Intent`."""
+        """The parsed `within` record as an `intent.Intent`.
+
+        The ceiling dimension may be written EITHER as parameters on the object
+        spelling (`object: model.complete(calls=3)`, which `Intent.from_cap`
+        splits off with `cap_order.split_ceilings`, the one place that split is
+        defined) OR as the explicit `ceilings` field, and writing it BOTH ways is
+        refused rather than merged: the ceiling is one bound, and two spellings
+        of it in one declaration is a question about which one the check reads.
+        """
         from . import intent as _intent  # noqa: PLC0415 - lazy, avoids a cycle
         from . import cap_order as _cap_order  # noqa: PLC0415 - lazy
         try:
-            return _intent.Intent.from_cap(
+            declared = _intent.Intent.from_cap(
                 _cap_order.parse_cap(raw["object"]),
                 verbs=raw["verbs"],
                 tenant=raw.get("tenant"),
@@ -2943,6 +2951,21 @@ class Parser:
                 scopes=[(name, members)
                         for name, members in (raw.get("scopes") or {}).items()],
             )
+            if "ceilings" in raw:
+                if declared.ceilings:
+                    spelled = ", ".join(
+                        f"`{name}`" for name, _ in declared.ceilings)
+                    raise self.err(
+                        line,
+                        f"the ceiling {spelled} is stated twice: once on the "
+                        f"`object` spelling and once in `ceilings`",
+                        hint="a ceiling is one bound on the whole intent — state "
+                             "it on the object spelling "
+                             "(`object: model.complete(calls=3)`) or in "
+                             "`ceilings`, not both")
+                declared = replace(
+                    declared, ceilings=_intent.ceiling_params(raw["ceilings"]))
+            return declared
         except _cap_order.CapError as exc:  # pragma: no cover - parse validated
             raise self.err(line, str(exc), hint=exc.hint) from exc
         except ValueError as exc:
@@ -2996,7 +3019,7 @@ class Parser:
                 names = ", ".join(f"`{n}`" for n in allowed)
                 raise self.err(
                     key_tok.line,
-                    f"`{key}` is not a field of a `{clause}` clause",
+                    f"`{key}` is not a `{clause}` clause field",
                     hint=f"a `{clause}` clause states {names} "
                          f"(docs/design/470-intent-refinement.md)")
             self.expect(":", what=f"`:` after `{key}` in `{clause}`")
@@ -3012,7 +3035,7 @@ class Parser:
             return self._clause_capability("an `object` capability token")
         if key == "related":
             return self._clause_capability_list(
-                "a `related` capability token", what="`related`")
+                "a `related` capability token")
         if key == "verbs":
             return self._clause_verb_list()
         if key == "verb":
@@ -3025,7 +3048,7 @@ class Parser:
             return self._clause_scope_map()
         raise self.err(  # pragma: no cover - `_clause_record` filters
             self.peek().line,
-            f"`{key}` is not a field of a `{clause}` clause")
+            f"`{key}` is not a `{clause}` clause field")
 
     def _clause_capability(self, what: str) -> str:
         """A capability token in a clause record: a dotted ident path or a
@@ -3149,6 +3172,10 @@ class Parser:
             name = self._record_key_name()
             if name in scopes:
                 raise self.err(ntok.line, f"scope `{name}` is bound twice")
+            # `name: [ … ]`, the same `field: value` shape every other record in
+            # these two clauses uses, so a scope map does not read differently
+            # from the ceiling map beside it.
+            self.expect(":", what=f"`:` after the scope name `{name}`")
             self.expect("[", what=f"`[` before the `{name}` member set")
             members: list[str] = []
             while not self.at("]"):

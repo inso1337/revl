@@ -798,6 +798,14 @@ class Env:
         # one is still refused, but the refusal must say the inverse was
         # discarded and by which rule rather than claim there is none.
         self.extern_undo: dict[str, str] = {}
+        # roadmap item 470 (docs/design/470-intent-refinement.md §4 stage 1):
+        # the intent the service operation whose provide-method body is being
+        # lowered DECLARES, as `(WithinClause, service_name, method_name)`.
+        # `None` everywhere else — the activation body, a module `fn`, and every
+        # operation that writes no `within { … }` clause — so the refinement
+        # check keyed off it is inert for every program in the tree today and
+        # the IR of an unannotated method or emit is unchanged.
+        self.declared_intent: tuple | None = None
         # names of `witnessed`-classified externs in scope (item 243, Slice 2,
         # docs/design/243-witnessed-externs.md): set by `_lower_component` so
         # an effect-position acquisition calling one of these lowers to the
@@ -11343,6 +11351,16 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     decl.returns, method.returns)
 
         saved = env.params
+        # item 470: the intent THIS operation declares, in scope for the whole
+        # body and restored after it, so an `emit` reached while lowering the
+        # body knows which declaration it must refine. Set only for an operation
+        # that writes a `within { … }` clause (`None` for every operation in the
+        # tree today), so the check below is inert unless a program opts in.
+        saved_intent = env.declared_intent
+        env.declared_intent = (
+            (decl.within, svc.name, method.name)
+            if getattr(decl, "within", None) is not None else None
+        )
         # Per-method provenance: a method's own alias / arrow bindings must not
         # leak into the next method, whose safe names may recycle theirs.
         saved_provisions = dict(env.provision_locals)
@@ -11816,6 +11834,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         _ownership_walk_method(mbody, env, comp.source or filename, method.line)
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
+        env.declared_intent = saved_intent
         env.type_env = saved_tenv
         env.provision_locals = saved_provisions
         env.local_arrows = saved_arrows
@@ -12087,7 +12106,141 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
         _b1_no_resource(comp, env, env.filename, stmt.line,
                         clause="compensate", borrows_only=False)
     _lower_emit_approval(stmt, node, step, env)
+    _check_intent_refinement(stmt, node, env)
     return step
+
+
+# ---------------------------------------------------------- item 470 ---------
+#
+# The checker-visible rule (docs/design/470-intent-refinement.md §4, stage 1).
+#
+# `src/revl/intent.py` already decides whether one action is a permitted
+# refinement of one declared intent, and that kernel is deliberately unwired:
+# what the tree had no surface for is the part the roadmap's exit criterion
+# turns on — a DECLARATION held across time, and a crossing compared against it
+# at the moment it fires, so the refusal can name the intent it violated rather
+# than only the capability it reached.
+#
+# The two halves the parser adds are that surface. `within { … }` on a service
+# operation is the declaration; `acting { … }` on an `emit` step is what one
+# crossing does. They meet in a provide-method body, which is the only place a
+# declared operation and a real crossing are both in hand: a service operation
+# is an interface, its providers are the bodies, and the declaration is an
+# upper bound every provider inherits exactly as `emission[...]` is.
+#
+# The object and the amount are NOT taken from the `acting` clause. They are
+# read off the crossing's own capability spelling (`_emit_crossed_caps`, the
+# same per-crossing resolution the approval obligation uses) through
+# `intent.Action.from_cap`, which is `Intent.from_cap`'s typed twin: one
+# spelling read as an intent and read as an action is the identity refinement,
+# so the declaration and the crossing cannot drift by being written twice. The
+# `acting` clause states only the three dimensions a capability spelling cannot
+# carry — the verb, the tenant, and the set-valued scopes.
+#
+# Both demands below are keyed off `MethodDecl.within`, which is `None` for
+# every operation in the tree, so no existing program reaches either one.
+
+
+def _check_intent_refinement(stmt: EmitStmt, node: dict, env: Env) -> None:
+    """Refuse a crossing that exceeds the intent its operation declared.
+
+    The two OMISSIONS are refused in both directions, because each of them would
+    otherwise be a silent hole:
+
+      * an `acting` clause with no declaration to check it against would read as
+        a check and perform none. Nothing here invents the missing intent —
+        that is item 470's own scope note ("not inferring an intent the caller
+        never stated") — so the clause is refused instead;
+      * a crossing with NO `acting` clause inside a body whose operation does
+        declare an intent is the dangerous direction: it would leave the
+        declaration vacuous, since a body could declare `within` and then reach
+        anything through an unannotated `emit`. Every crossing under a
+        declaration must state what it does.
+
+    `None`/`None` — the whole tree today — returns immediately, which is what
+    makes the IR of an unannotated method and an unannotated emit unchanged.
+    """
+    declared = getattr(env, "declared_intent", None)
+    acting = getattr(stmt, "acting", None)
+    if declared is None and acting is None:
+        return
+    filename = env.filename
+    if declared is None:
+        raise RevlError(
+            filename, stmt.line,
+            "this `emit` states `acting { … }`, but the operation it runs in "
+            "declares no `within { … }` intent for it to refine",
+            hint="an action is checked AGAINST a declaration, and nothing infers "
+                 "an intent the caller never stated (item 470): declare it on the "
+                 "service operation — `... -> T within { object: <capability>, "
+                 "verbs: [<verb>] }` — or drop the `acting` clause",
+            code="G4", category="intent-refinement")
+    clause, svc_name, method_name = declared
+    where = f"`{svc_name}.{method_name}`"
+    if acting is None:
+        raise RevlError(
+            filename, stmt.line,
+            f"{where} declares an intent (`within` at line {clause.line}), so "
+            f"this `emit` must state what it does with `acting {{ … }}`",
+            hint="a crossing that states nothing cannot be shown to refine the "
+                 "declaration, and one unannotated crossing would make the "
+                 "declaration vacuous — write `acting { verb: <operation> }`, "
+                 "adding `tenant:` and `scopes:` where the intent bounds them "
+                 "(item 470)",
+            code="G4", category="intent-refinement")
+    for token in _emit_crossed_caps(node, env):
+        _refine_one_crossing(token, clause, acting, where, filename, stmt.line)
+
+
+def _refine_one_crossing(token: str, clause, acting, where: str,
+                         filename: str, line: int) -> None:
+    """One crossed capability token, against the declared intent.
+
+    A crossing contributes one token per declared `emission[...]` scope, and
+    EVERY one of them must refine the declaration: the intent bounds the
+    operation, not a chosen capability of it, so admitting the crossing because
+    one of its tokens fits would authorize the rest by association.
+    """
+    from . import cap_order as _cap_order  # noqa: PLC0415 - lazy, avoids a cycle
+    from . import intent as _intent  # noqa: PLC0415 - lazy, avoids a cycle
+
+    declared_objects = ", ".join(
+        cap.to_str() for cap in clause.intent.objects())
+    if token == "*":
+        # a bare `emission` crossing: the boundary is not named, so no declared
+        # object can be shown to cover it. Fail closed rather than treat the
+        # unnameable as the declared one.
+        raise RevlError(
+            filename, line,
+            f"this `emit` crosses an unnameable boundary (a bare `emission` "
+            f"operation), and the intent {where} declares authorizes "
+            f"`{declared_objects}`",
+            hint="an intent authorizes the boundaries it names, and a crossing "
+                 "that names none cannot be shown to be one of them (fail "
+                 "closed). Give the operation this emit calls a capability scope "
+                 "— `emission[<capability>] fn …` — so the crossing can be "
+                 "compared against the declaration (item 470)",
+            code="G4", category="intent-refinement",
+            expected=declared_objects, actual="*")
+    try:
+        action = _intent.Action.from_cap(
+            _cap_order.parse_cap(token),
+            verb=acting.verb, tenant=acting.tenant, scopes=acting.scopes)
+    except _cap_order.CapError as exc:  # pragma: no cover - parse validated
+        raise RevlError(filename, line, str(exc),
+                        hint=getattr(exc, "hint", None)) from exc
+    except ValueError as exc:  # pragma: no cover - parse validated
+        raise RevlError(filename, line, str(exc)) from exc
+    refusal = _intent.refine(clause.intent, action)
+    if refusal is None:
+        return
+    raise RevlError(
+        filename, line,
+        f"this `emit` exceeds the intent {where} declares: {refusal.message}",
+        hint=f"{refusal.hint}. The declaration is the `within` clause at line "
+             f"{clause.line} (roadmap item 470)",
+        code="G4", category="intent-refinement",
+        expected=refusal.declared, actual=refusal.requested)
 
 
 def _approval_scope_of(expr_type: str | None) -> str | None:
