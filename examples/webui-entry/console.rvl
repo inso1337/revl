@@ -27,39 +27,66 @@
 // emission — is an ENUMERABLE crossing `revl audit` (G1) reports and G8 marks as
 // the trusted host boundary. There is no `globalThis` reach and no untyped door.
 //
-// This is the ENABLING SLICE, not the full close. Two pieces stay app-gated and
-// are recorded in design note 530: the typed reactive-state / RPC contract that
-// replaces Cordis' untyped `data: T` (folded into item 457's "one definition"
-// work — this slice publishes an empty `data` surface deliberately), and the
-// exemplary frontend itself, which is item 462's deliverable.
+// THE TYPED CHANNEL. Cordis WebUI's `addEntry(files, data)` publishes `data` as a
+// reactive object: the server mutates it and the delta is broadcast to the
+// browser, and any function on it is an RPC method the browser may call (526).
+// Raw, that `data` is untyped `T`. Here both halves are DECLARED, once each:
+//
+//   * the reactive STATE is the record type of the `data` parameter the component
+//     publishes through `webui.add_entry` — the value it actually hands the host;
+//   * the RPC METHOD SET is the component's declared provision, so the set of
+//     server methods the page can reach is exactly what `revl audit` reports.
+//
+// `revl export client --lang ts --face webui --component ConsoleUI` PROJECTS both
+// into the TypeScript the browser reads with `useRpc<ConsoleUIChannel>()`, so that
+// type and these declarations are one definition (item 457 slice S4, design note
+// 530 Decision B). Nothing about the channel is hand-authored on the TS side.
 //
 // Copy this file the way router.rvl is copied: rename the component, point the
-// paths at your own Vite project's dev source, built manifest, and routes.
+// paths at your own Vite project's dev source, built manifest, and routes, and
+// declare your own state record and provision.
+
+// The reactive state this entry publishes to its page. Ordinary declared record:
+// its fields are what the browser observes on the synced channel.
+type ConsoleState = { title: Str, ready: Bool }
+
+// The RPC surface the browser may call. It is the component's own provision, so
+// the browser-callable set is enumerable from the source — the property the
+// string-carried console could never state about itself.
+service ConsoleRpc {
+  fn ping(nonce: Str) -> Str
+}
 
 // The ambient WebUI service — the typed contract the host runtime provides as
-// `ctx.webui`. `add_entry` names external asset files and returns a stable entry
-// handle; it is an `emission` because registering a frontend is an outward
-// effect on the host (G4 upper bound, the shape a `revl import cordis` of
-// `@cordisjs/plugin-webui` recovers). A real console would grow this service
-// with the typed reactive-state / RPC methods design note 530 defers to 457.
+// `ctx.webui`. `add_entry` names external asset files and the typed reactive
+// channel, and returns a stable entry handle; it is an `emission` because
+// registering a frontend is an outward effect on the host (G4 upper bound, the
+// shape a `revl import cordis` of `@cordisjs/plugin-webui` recovers).
 service WebUI {
   emission fn add_entry(
     dev_source: Str,
     prod_manifest: Str,
     routes: List[Str],
+    data: ConsoleState,
   ) -> Str
 }
 
 // The console component. It declares a first-class coeffect on the ambient WebUI
 // service (`requires webui: WebUI`) and, at activation, registers its frontend
-// entry by naming external files only. The binding is the declared coeffect —
-// not a `globalThis` bridge and not an inline JS body — so `revl audit` sees the
-// `webui` requirement and the `webui.add_entry` emission on this component's
-// boundary.
-component ConsoleUI requires webui: WebUI {
+// entry by naming external files only, plus the typed state it publishes. The
+// binding is the declared coeffect — not a `globalThis` bridge and not an inline
+// JS body — so `revl audit` sees the `webui` requirement, the `webui.add_entry`
+// emission and the `console` provision on this component's boundary.
+component ConsoleUI requires webui: WebUI provides console: ConsoleRpc {
   emit webui.add_entry(
     "./frontend/entry.client.ts",       // dev-mode source (a Vite/Vue module)
     "./dist/.vite/manifest.json",       // built Vite manifest for production
     ["/console"],                       // client route patterns this entry owns
+    { title: "revl console",            // the typed reactive channel
+      ready: true },
   )
+
+  provide console {
+    fn ping(nonce) = "pong:" + nonce
+  }
 }

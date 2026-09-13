@@ -22,9 +22,14 @@ itself, mirroring tests/test_webui_entry_asset_ref_459.py but on the app:
   typed routes through the `revl export client` client (item 457 artifact 5);
 * `revl audit` reports the crossing on `NotesConsole`'s boundary (G1/G8).
 
-The typed reactive-state/RPC `data` projection (design note 530 Decision B, 457
-slice S4 `--face webui`) is the filed gap G3 in the slice-4 note; the REST half
-of the boundary is real and typed today, and this suite guards it.
+The reactive half of the boundary is typed too, and this suite guards it: the
+`data` parameter of `webui.add_entry` carries a declared record of reactive state,
+the RPC surface is the console's declared provision, and
+`revl export client --lang ts --face webui --component NotesConsole` PROJECTS both
+into `contract.ts` (design note 530 Decision B, item 457 slice S4) — so the
+server's published fields and the browser's `useRpc<T>()` type are one
+declaration, the way `notes.client.ts` is one declaration with `NotesApi`. That
+closes the filed gap G3 of docs/design/525-webapp-slice4-frontend.md.
 """
 
 from __future__ import annotations
@@ -75,17 +80,48 @@ def test_frontend_asset_files_exist():
 
 def test_console_declares_webui_coeffect(ir):
     """`NotesConsole` declares the coeffect on the ambient WebUI service
-    (`requires webui: WebUI`), provides nothing (the service is host-ambient),
-    and `WebUI` is a declared service — the typed boundary, reviewed surface
-    only."""
+    (`requires webui: WebUI`) plus the `ranking` service its channel reports, and
+    provides the console's RPC surface — the typed boundary, on reviewed surface
+    only (`service` + `requires` + `provides`)."""
     console = next(c for c in ir["components"] if c["name"] == "NotesConsole")
-    assert (console.get("requires") or {}) == {"webui": "WebUI"}
-    assert not (console.get("provides") or {})
+    assert (console.get("requires") or {}) == {
+        "webui": "WebUI", "ranking": "Ranker"}
+    assert (console.get("provides") or {}) == {"console": "NotesConsoleRpc"}
     services = ir.get("services") or []
     names = list(services) if isinstance(services, dict) else [
         s["name"] if isinstance(s, dict) else s for s in services
     ]
     assert "WebUI" in names
+    assert "NotesConsoleRpc" in names
+
+
+def test_add_entry_declares_a_typed_data_channel(ir):
+    """`WebUI.add_entry` takes a `data` parameter whose type is a DECLARED record:
+    the reactive state the entry publishes is typed in revl, not an untyped `T`
+    handed to Cordis (the property design note 526 argues revl adds)."""
+    add_entry = ir["services"]["WebUI"]["methods"]["add_entry"]
+    data = next(p for p in add_entry["params"] if p["name"] == "data")
+    assert data["type"] == "NotesConsoleState"
+    state = ir["types"]["NotesConsoleState"]
+    assert state["kind"] == "record"
+    assert state["fields"] == {"strategy": "Str", "signals": "Int"}
+
+
+def test_the_console_publishes_the_typed_state_it_declares(ir):
+    """The `emit` hands `add_entry` a record built from the ranking service the
+    console requires, so the published fields are the declared ones — the value
+    and the type are the same declaration, not two."""
+    console = next(c for c in ir["components"] if c["name"] == "NotesConsole")
+    emit = next(s for s in console["body"] if s.get("step") == "emit")
+    assert emit["expr"]["method"] == "add_entry"
+    data = emit["expr"]["args"][3]
+    assert data["kind"] == "record"
+    published = {name: value for name, value in data["fields"]}
+    assert set(published) == {"strategy", "signals"}
+    for name, value in published.items():
+        assert value["kind"] == "call"
+        assert value["target"] == {"kind": "req", "name": "ranking"}
+        assert value["method"] == name
 
 
 def test_no_extern_door_for_the_binding(ir):
@@ -99,9 +135,14 @@ def test_no_extern_door_for_the_binding(ir):
 
 def test_emitted_ts_resolves_webui_through_inject(ts):
     """The artifact resolves `webui` through Cordis' own `inject` (the ambient
-    host-provided service), and the activation body reaches it as `ctx.webui`."""
-    assert 'inject: ["webui"]' in ts
+    host-provided service), and the activation body reaches it as `ctx.webui`,
+    passing the typed reactive state as the `data` argument."""
+    assert 'inject: ["webui", "ranking"]' in ts
     assert "ctx.webui.add_entry(" in ts
+    assert "{strategy: ctx.ranking.strategy(), signals: ctx.ranking.signals()}" in ts
+    # the RPC half is the declared provision, registered on the same Context
+    assert 'provide: ["console"]' in ts
+    assert 'ctx.provide("console"' in ts
 
 
 def test_no_globalthis_bridge_in_the_artifact(ts):
@@ -179,15 +220,39 @@ def test_frontend_consumes_the_notes_typed_routes():
     assert regenerated.strip() == client_text.strip()
 
 
-def test_contract_is_the_typed_channel_shared_with_the_client():
+def test_contract_is_projected_from_the_declaration():
     """`contract.ts` is the typed reactive-state/RPC channel `useRpc<T>()` reads,
-    re-exporting the route wire types from the generated client so there is one
-    source of truth (design note 530 Decision B shape; the filed gap G3 is that
-    revl does not yet PROJECT it)."""
+    and it is a GENERATED artifact: `revl export client --lang ts --face webui
+    --component NotesConsole` reproduces the checked-in file byte-for-byte. So the
+    server's published fields and the browser's type are one declaration (design
+    note 530 Decision B, item 457 slice S4), not two hand-kept ones."""
+    from revl.export_client import export_client
+
     text = CONTRACT.read_text(encoding="utf-8")
-    assert "NotesConsoleState" in text
-    assert "NotesConsoleRpc" in text
-    assert "from './notes.client'" in text
+    assert "--face webui" in text.splitlines()[0]
+    assert "readonly strategy: string;" in text
+    assert "readonly signals: number;" in text
+    assert "score(id: string): Promise<number>;" in text
+    assert "bump(id: string): Promise<void>;" in text
+    assert ("export type NotesConsoleChannel = NotesConsoleState & "
+            "NotesConsoleRpc;") in text
+
+    regenerated = export_client(
+        compile_files([str(APP)]), lang="ts", face="webui",
+        component="NotesConsole",
+    )
+    assert regenerated.strip() == text.strip()
+
+
+def test_the_projected_channel_is_what_the_frontend_consumes():
+    """The client extension reads the projected channel with `useRpc<T>()` and the
+    screen calls only its RPC half, so the browser's reachable server surface is
+    exactly the console's declared provision."""
+    entry = ENTRY.read_text(encoding="utf-8")
+    assert "useRpc<NotesConsoleChannel>()" in entry
+    screen = SCREEN.read_text(encoding="utf-8")
+    assert "channel.bump(" in screen
+    assert "channel.score(" in screen
 
 
 def test_vite_build_emits_source_maps_and_manifest():
@@ -210,8 +275,8 @@ def test_audit_surfaces_the_coeffect_boundary(capsys):
     audit = json.loads(capsys.readouterr().out)
     comps = {c["name"]: c for c in audit["manifest"]["components"]}
     assert "NotesConsole" in comps
-    assert comps["NotesConsole"]["inject"] == ["webui"]
-    assert comps["NotesConsole"]["provides"] == []
+    assert sorted(comps["NotesConsole"]["inject"]) == ["ranking", "webui"]
+    assert comps["NotesConsole"]["provides"] == ["console"]
 
     boundary = audit["boundary"]["NotesConsole"]
     assert "webui.add_entry" in boundary["emissions"]

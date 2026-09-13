@@ -27,8 +27,17 @@
 // `routes` lists the client route patterns). All three are PATHS to external
 // asset files a normal Vite/Vue project produces, so browser tooling and source
 // maps point at the originals rather than at scripts extracted from a revl
-// string. The `data` reactive-state / RPC object is published empty here; the
-// typed contract for it is design note 530, folded into item 457.
+// string.
+//
+// THE `data` CHANNEL. `add_entry`'s fourth argument is the typed reactive state
+// the revl component publishes (`type ConsoleState` in console.rvl), and the RPC
+// half is the component's declared provision (`service ConsoleRpc`). This adapter
+// passes the state straight through to Cordis as the reactive object and attaches
+// the provision's methods to it, which is what makes them RPC methods the browser
+// may call (`@cordisjs/plugin-webui` base/index.ts:39). Both halves are PROJECTED
+// into the browser's type by `revl export client --lang ts --face webui
+// --component ConsoleUI`, so nothing about the channel is restated by hand here
+// or in the frontend (item 457 slice S4, design note 530 Decision B).
 
 import type { Context } from 'cordis'
 
@@ -47,9 +56,25 @@ export interface CordisWebUI {
 }
 
 /** The revl-facing `WebUI` service surface — the exact shape `service WebUI` in
- * console.rvl declares, and what a revl component reads as `ctx.webui`. */
+ * console.rvl declares, and what a revl component reads as `ctx.webui`. `data` is
+ * the typed reactive state the component publishes; its type on the revl side is
+ * the record `add_entry`'s `data` parameter declares, and the same declaration is
+ * what `revl export client --face webui` projects for the browser. */
 export interface RevlWebUI {
-  add_entry(devSource: string, prodManifest: string, routes: string[]): string
+  add_entry(
+    devSource: string,
+    prodManifest: string,
+    routes: string[],
+    data: Record<string, unknown>,
+  ): string
+}
+
+/** How the host finds the RPC half of the channel: the composition's provision
+ * key whose methods become the entry's browser-callable RPC surface. Optional —
+ * an entry that publishes state only needs no key. */
+export interface RevlWebuiOptions {
+  /** The revl `provides` key to expose as RPC (e.g. `console`). */
+  rpcKey?: string
 }
 
 /**
@@ -64,13 +89,24 @@ export interface RevlWebUI {
  * Returns the Cordis disposer `ctx.provide` hands back, so the host can reclaim
  * the service on teardown.
  */
-export function installRevlWebui(ctx: Context, webui: CordisWebUI): () => void {
+export function installRevlWebui(
+  ctx: Context,
+  webui: CordisWebUI,
+  options: RevlWebuiOptions = {},
+): () => void {
   const service: RevlWebUI = {
-    add_entry(devSource: string, prodManifest: string, routes: string[]): string {
+    add_entry(
+      devSource: string,
+      prodManifest: string,
+      routes: string[],
+      data: Record<string, unknown>,
+    ): string {
       const files: WebUIEntryFiles = { dev: devSource, prod: prodManifest, routes }
-      // `data` is the reactive-state / RPC object. This slice publishes an empty
-      // surface deliberately; the typed contract is design note 530 (item 457).
-      webui.addEntry(files, {})
+      // The reactive object Cordis broadcasts: the component's typed state, plus
+      // the methods of its declared provision. Cordis turns each function on this
+      // object into an RPC method (`base/index.ts:39`), so the browser-callable
+      // set is exactly that provision — nothing this adapter invents.
+      webui.addEntry(files, { ...data, ...rpcMethods(ctx, options.rpcKey) })
       // Return the dev source as a stable entry handle a revl caller can bind.
       return devSource
     },
@@ -81,4 +117,29 @@ export function installRevlWebui(ctx: Context, webui: CordisWebUI): () => void {
   return (ctx as unknown as {
     provide(key: string, impl: unknown): () => void
   }).provide('webui', service)
+}
+
+/**
+ * The RPC half of the channel: every method of the composition's `rpcKey`
+ * provision, bound to it. Returns nothing when no key is configured or the key is
+ * not on the Context yet, so an entry that publishes state only stays state-only.
+ *
+ * This reads the provision the revl component declared with `provides` — the same
+ * `ctx[key]` seam a revl `requires` resolves through — so the exposed set is the
+ * declared one and this adapter adds no method of its own.
+ */
+function rpcMethods(ctx: Context, rpcKey?: string): Record<string, unknown> {
+  if (!rpcKey) return {}
+  const provision = (ctx as unknown as Record<string, unknown>)[rpcKey]
+  if (!provision || typeof provision !== 'object') return {}
+  const out: Record<string, unknown> = {}
+  const source = provision as Record<string, unknown>
+  for (const name of Object.keys(source)) {
+    const value = source[name]
+    if (typeof value === 'function') {
+      out[name] = (...args: unknown[]) => (value as (...a: unknown[]) => unknown)
+        .apply(source, args)
+    }
+  }
+  return out
 }
