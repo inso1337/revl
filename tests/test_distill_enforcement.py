@@ -568,6 +568,46 @@ def test_exhausted_uses_budget_survives_an_unload_and_reload(sink):
     assert session._auto_rules[0]["consumed"] is True
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "two"])
+
+# item 250: the FORK boundary must not renew a spent budget either
+# ---------------------------------------------------------------------------
+
+def _fork(session, component="Biller"):
+    """Mint a branch the way `revl_fork` + `revl_fork_confirm` do, and hand back
+    the live branch Session (the only live continuation after the parent freezes).
+    `fork_confirm` snapshots the parent, so the parent must have been loaded with
+    its recorded sources and with `record=True`."""
+    report = session.fork(at=-1, component=component)
+    assert not report.get("refused"), report
+    result = session.fork_confirm(report["hash"])
+    assert result.get("forked"), result
+    return result["branchSession"]
+
+
+@needs_cordis
+def test_exhausted_uses_budget_survives_a_fork(sink):
+    """The branch is a FRESH `Session` that inherits the applied rules through
+    `branch.sandbox`. Without carrying the spend too, `_install_auto_approve_rules`
+    reads the inherited rule as a first sighting and derives a fresh budget from
+    the rule text — so an exhausted `uses` bound is renewed, and the parent is
+    frozen at the fork, which makes the branch the escape rather than a detail."""
+    src = _src(sink)
+    ir = compile_source(src, "biller.rvl")
+    session = _session(_rule(uses=1))
+    session.load(copy.deepcopy(ir), record=True, origin={"source": src})
+
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_spend[_rule(uses=1).to_dsl()]["consumed"] is True
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "two"])
+
+    branch = _fork(session)
+
+    assert len(branch.sandbox.auto_approve_rules) == 1     # the rule IS inherited
+    assert branch._auto_rules[0]["remainingUses"] == 0     # ... and so is its spend
+    assert branch._auto_rules[0]["consumed"] is True
+    with pytest.raises(ApprovalRequired):
+        branch.call("gw", "send", [STRIPE, "three"])
     assert _lines(sink) == [f"send:{STRIPE}:one"]
 
 
@@ -604,6 +644,35 @@ def test_lapsed_ttl_is_not_resurrected_by_an_unload_and_reload(sink):
     ir = compile_source(_src(sink), "biller.rvl")
     session = _session(rule)
     session.load(copy.deepcopy(ir), record=True)
+
+def test_partial_uses_budget_is_carried_across_a_fork(sink):
+    """A partly-spent budget crosses the fork at the count it actually reached,
+    rather than restarting at the rule's declared `uses`."""
+    src = _src(sink)
+    ir = compile_source(src, "biller.rvl")
+    session = _session(_rule(uses=3))
+    session.load(copy.deepcopy(ir), record=True, origin={"source": src})
+
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_rules[0]["remainingUses"] == 2
+
+    branch = _fork(session)
+
+    assert branch._auto_rules[0]["remainingUses"] == 2
+
+
+@needs_cordis
+def test_lapsed_ttl_is_not_resurrected_by_a_fork(sink):
+    """The inherited rule keeps the deadline the parent opened, not a new one
+    measured from the fork — so a window that lapsed in the parent stays lapsed
+    on the branch instead of being re-armed for another full ttl."""
+    rule = AutoApproveRule(component="Biller*",
+                           caps=(f'gwsend(host="{STRIPE}")',),
+                           realm=None, admitting=frozenset(), ttl_ms=1)
+    src = _src(sink)
+    ir = compile_source(src, "biller.rvl")
+    session = _session(rule)
+    session.load(copy.deepcopy(ir), record=True, origin={"source": src})
     deadline = session._auto_rules[0]["expiresAt"]
     assert deadline is not None
 
@@ -618,6 +687,12 @@ def test_lapsed_ttl_is_not_resurrected_by_an_unload_and_reload(sink):
     assert session._auto_rules[0]["expiresAt"] == deadline
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "b"])
+
+    branch = _fork(session)
+
+    assert branch._auto_rules[0]["expiresAt"] == deadline
+    with pytest.raises(ApprovalRequired):
+        branch.call("gw", "send", [STRIPE, "a"])
     assert _lines(sink) == []
 
 
@@ -646,6 +721,36 @@ def test_h1_review_bind_survives_an_unload_and_reload(sink):
         == frozenset({"BillerInvoice"})
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "c"])
+
+def test_a_suspended_rule_is_not_re_reviewed_by_a_fork(sink):
+    """The H1 facet of the same renewal: a rule SUSPENDED by glob growth (a member
+    entered the glob that was never reviewed) must stay suspended across a fork.
+    A branch that re-snapshots the review bind reads the new member as reviewed and
+    silently auto-approves exactly the component H1 exists to re-offer."""
+    src_invoice = _src(sink, "BillerInvoice")
+    src_refund = _src(sink, "BillerRefund")
+    ir_invoice = compile_source(src_invoice, "invoice.rvl")
+    ir_refund = compile_source(src_refund, "refund.rvl")
+    rule = _rule(component="Biller*")
+    session = _session(rule)
+    session.load(copy.deepcopy(ir_invoice), record=True,
+                 origin={"source": src_invoice})
+
+    assert session.call("gw", "send", [STRIPE, "a"])["result"] is None
+    assert session._auto_reviewed[rule.to_dsl()] == frozenset({"BillerInvoice"})
+
+    session.swap(copy.deepcopy(ir_refund), origin={"source": src_refund})
+    assert session._glob_members("Biller*") == frozenset({"BillerRefund"})
+    # the parent correctly re-offers the unreviewed member.
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "b"])
+
+    branch = _fork(session, component="BillerRefund")
+
+    assert branch._auto_reviewed[rule.to_dsl()] == frozenset({"BillerInvoice"})
+    with pytest.raises(ApprovalRequired):
+        branch.call("gw", "send", [STRIPE, "c"])
+    assert branch._auto_rules[0]["suspended"] is True
     assert _lines(sink) == [f"send:{STRIPE}:a"]
 
 
@@ -671,6 +776,28 @@ def test_revoke_drops_the_spent_budget_so_a_reapply_starts_clean(sink):
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "two"])
     assert _lines(sink) == [f"send:{STRIPE}:one"]
+
+def test_a_fork_still_carries_no_approval(sink):
+    """The control: carrying the rule state must not smuggle an APPROVAL across
+    the fork. A crossing that prompted in the parent still prompts in the branch,
+    and the branch's typed-approval ledger is empty (item 246 invariant 5)."""
+    src = _src(sink)
+    ir = compile_source(src, "biller.rvl")
+    session = _session(_rule(uses=10))
+    session.load(copy.deepcopy(ir), record=True, origin={"source": src})
+
+    # the rule covers api.stripe.com only, so this one prompts and is left
+    # UNANSWERED — the pending ticket must not become a grant on the branch.
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [ATTACKER, "evil"])
+
+    branch = _fork(session)
+
+    assert branch._approval_grants == []
+    assert branch._ledger == []
+    with pytest.raises(ApprovalRequired):
+        branch.call("gw", "send", [ATTACKER, "evil"])
+    assert _lines(sink) == []
 
 
 # ---------------------------------------------------------------------------
