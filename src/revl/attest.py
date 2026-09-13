@@ -222,6 +222,31 @@ def catalogued_guarantees() -> list[str]:
                   if code.startswith("G") and code[1:].isdigit())
 
 
+def all_guarantee_codes() -> list[str]:
+    """Every code the DIAGNOSTICS CATALOGUE defines, numbered or named.
+
+    `catalogued_guarantees` is the *invariant set* an admitted verdict attests,
+    and it is deliberately narrower than the catalogue. This is the catalogue
+    itself, and it exists because a record that reports coverage has to be able
+    to say which codes it did NOT report on: a conditional guarantee whose
+    status is unstated and a conditional guarantee that does not exist look the
+    same to a reader unless something enumerates the difference (item 474)."""
+    return sorted(GUARANTEES)
+
+
+def named_guarantees() -> list[str]:
+    """The catalogued codes that are NOT part of the numbered invariant set:
+    `G-SECRET`, the `A`/`T` assurances, and anything else the catalogue names
+    without a number.
+
+    These hold conditionally or sit outside the composition backbone, which is
+    why `catalogued_guarantees` keeps them out of an attested verdict. They are
+    still codes the compiler refuses under and `formal/STATUS.md` records rows
+    for, so a certificate that omits them silently is narrower than it looks."""
+    numbered = set(catalogued_guarantees())
+    return sorted(code for code in GUARANTEES if code not in numbered)
+
+
 #: The modules that MAKE UP the frontend ruleset — the code that actually
 #: refuses a composition. `lower.py` is the checker proper; the rest are the
 #: stages that raise a G-tagged refusal of their own (`parser`, `compiler`,
