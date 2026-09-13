@@ -233,9 +233,11 @@ class RowTable:
     """The resolved base composition: rows, plus the file list `compile_files`
     takes. The composition is source of truth for semantics (426 decision 7)."""
 
-    __slots__ = ("name", "origin", "source", "rows", "uses", "sources", "slo")
+    __slots__ = ("name", "origin", "source", "rows", "uses", "sources", "slo",
+                 "slo_responses")
 
-    def __init__(self, name, origin, source, rows, uses, sources=None, slo=None):
+    def __init__(self, name, origin, source, rows, uses, sources=None, slo=None,
+                 slo_responses=None):
         self.name = name
         self.origin = origin
         self.source = source
@@ -251,6 +253,13 @@ class RowTable:
         # that declares no `slo` block, which is why the block is absent from
         # the IR of every composition that does not use the feature.
         self.slo = slo or {}
+        # item 473, observed half: `<unit-bearing ir key> -> (response name,
+        # fallback source or None)` for the datums that declared an
+        # `on breach` clause. A datum with no entry is answered by
+        # `parser.SLO_DEFAULT_RESPONSE`, so this map is empty for every
+        # composition that declares no `slo` block — and for one that declares
+        # a block and no responses, which keeps that IR additive too.
+        self.slo_responses = slo_responses or {}
 
     def to_ir(self) -> dict:
         out = {
@@ -263,14 +272,38 @@ class RowTable:
         # composition with no `slo` block emits the S1 document byte for byte.
         if self.slo:
             out["slo"] = {k: v[0] for k, v in self.slo.items()}
+        # The observed half rides its own conditional key: a `slo` block that
+        # declares targets and no responses produces the same IR a `slo` block
+        # produced before this slice, so the surface grew without moving bytes
+        # that were already committed.
+        if self.slo_responses:
+            out["slo_on_breach"] = {
+                k: {"action": action, "divertTo": target}
+                for k, (action, target) in self.slo_responses.items()}
         return out
 
     def slo_contract(self) -> dict:
         """The SLO contract as a stable, order-independent document: datum name
-        to `{"target": value, "line": n}`. `to_ir` flattens it to the value
-        because the IR is the machine surface; this is the shape a reader (a
-        rollout panel, a report) wants (item 473)."""
-        return {k: {"target": v[0], "line": v[1]} for k, v in self.slo.items()}
+        to `{"target": value, "line": n}` plus, for a datum that declared one,
+        `"onBreach": {"action": ..., "divertTo": ...}`. `to_ir` flattens it to
+        the value because the IR is the machine surface; this is the shape a
+        reader (a rollout panel, a report) wants (item 473).
+
+        `onBreach` is present ONLY when the document declared a response, so a
+        contract written before the observed half is reported exactly as it was
+        (the same conditional discipline `to_ir` applies to `slo_on_breach`).
+        Its absence means the datum is answered by
+        `parser.SLO_DEFAULT_RESPONSE`, which a reader resolves the same way the
+        runtime does."""
+        out = {}
+        for key, (value, line) in self.slo.items():
+            entry = {"target": value, "line": line}
+            response = self.slo_responses.get(key)
+            if response is not None:
+                action, target = response
+                entry["onBreach"] = {"action": action, "divertTo": target}
+            out[key] = entry
+        return out
 
     def wiring(self) -> dict:
         """The rename-invariant projection: label -> what the row claims and
@@ -1344,6 +1377,18 @@ def _check_slo_bounds(decl: CompositionDecl, doc: str, rows: list["Row"],
             for datum, value, line in decl.slo}
 
 
+def _slo_responses(decl: CompositionDecl) -> dict[str, tuple[str, str | None]]:
+    """The declared `on breach` response per datum, keyed by the unit-bearing IR
+    name (item 473, observed half). Only the datums that declared one appear, so
+    a `slo` block written before this slice yields an empty map and an
+    unchanged IR — and a datum that declared none is answered by
+    `parser.SLO_DEFAULT_RESPONSE` rather than being recorded here."""
+    from .parser import SLO_IR_KEYS  # noqa: PLC0415 - lazy, avoids a cycle
+
+    return {SLO_IR_KEYS[datum]: response
+            for datum, response in decl.slo_responses.items()}
+
+
 def resolve(decl: CompositionDecl, doc_path: str,
             root: str | None = None) -> RowTable:
     """Resolve one composition declaration into its row table.
@@ -1380,7 +1425,7 @@ def resolve(decl: CompositionDecl, doc_path: str,
     # before the table is built, so a refused rollout never produces a table.
     slo = _check_slo_bounds(decl, doc, rows, uses, sources, root)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
-                    sources, slo)
+                    sources, slo, _slo_responses(decl))
 
 
 # ------------------------------------------------------------------- the fold
@@ -1718,7 +1763,7 @@ def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
     # and a layer cannot widen its way out of it.
     slo = _check_slo_bounds(decl, doc, rows, uses, sources, root)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
-                    sources, slo)
+                    sources, slo, _slo_responses(decl))
 
 
 def _reject_granted(layer: LayerDecl, rowdecl: RowDecl) -> None:
