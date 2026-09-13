@@ -209,7 +209,7 @@ def dev_command(args) -> int:
             hint = f"\n{tail}" if tail else ""
             return _fail(
                 f"vite exited during boot (port {args.port} in use, or run "
-                f"`npm install --legacy-peer-deps` in {frontend}){hint}",
+                f"`npm ci` in {frontend}){hint}",
                 lifecycle.BOOT,
                 code=3,
             )

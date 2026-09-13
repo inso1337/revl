@@ -38,6 +38,8 @@ import asyncio
 import importlib.util
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -62,6 +64,25 @@ needs_cordis = pytest.mark.skipif(
 APP = ROOT / "examples" / "app" / "notes.rvl"
 FRONTEND = ROOT / "examples" / "app" / "frontend"
 CORDIS_PY = ROOT / "backends" / "python" / ".venv" / "bin" / "python"
+
+#: `revl dev` with its frontend needs the node toolchain the frontend project
+#: pins (`npm ci` in examples/app/frontend). Without it
+#: the port/banner contracts above still run stubbed; the end-to-end leg skips.
+_npm = shutil.which("npm")
+needs_frontend_toolchain = pytest.mark.skipif(
+    _npm is None or not (FRONTEND / "node_modules" / "vite").is_dir(),
+    reason="needs the frontend node toolchain: run "
+           "`npm ci` in examples/app/frontend",
+)
+
+
+def _free_port() -> int:
+    """A port nothing holds right now. `revl dev` passes `--strictPort`, so Vite
+    fails rather than moving if the port is taken between here and the spawn;
+    that is the contract this test wants, not a port Vite chose itself."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def test_dev_webui_rejects_escaping_entry_paths():
@@ -563,3 +584,33 @@ def test_ambient_settlement_survives_a_raising_component_teardown(capsys):
     # ... and the proof that the composition is not clean still ran, naming the
     # provider the fault left unattempted instead of losing it to the traceback.
     assert "RESIDUE LEFT" in out
+
+
+@pytest.mark.skipif(
+    not CORDIS_PY.exists(),
+    reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)",
+)
+@needs_frontend_toolchain
+def test_dev_runs_the_app_and_its_vite_frontend_under_one_command():
+    """525 acceptance bar 1, proven with the frontend attached rather than with
+    `--no-frontend`: ONE command boots Vite on the port it names AND loads the
+    composition, the console's entry registers through the `webui` coeffect, and
+    teardown proves no residue. This is the whole point of item 461 — the two
+    processes a contributor used to assemble by hand are one command."""
+    port = _free_port()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [str(CORDIS_PY), "-P", "-m", "revl", "dev", "--once",
+         "--port", str(port), str(APP)],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=600,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    # the banner only prints after Vite survived its boot on THAT port.
+    assert f"== dev frontend — http://127.0.0.1:{port} ==" in out, out
+    assert f"--port {port} --strictPort" in out, out
+    # ... and the same command is what loaded the composition.
+    assert "entry ./frontend/entry.client.ts -> /notes" in out, out
+    assert "channel state signals, strategy" in out, out
+    assert "no residue" in out, out

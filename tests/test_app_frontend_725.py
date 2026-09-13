@@ -35,6 +35,8 @@ closes the filed gap G3 of docs/design/525-webapp-slice4-frontend.md.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,6 +56,29 @@ SCREEN = FRONTEND / "NotesConsole.vue"
 CONTRACT = FRONTEND / "contract.ts"
 CLIENT = FRONTEND / "notes.client.ts"
 VITE = FRONTEND / "vite.config.ts"
+PKG = FRONTEND / "package.json"
+LOCK = FRONTEND / "package-lock.json"
+HAND_WRITTEN = ("entry.client.ts", "NotesConsole.vue", "contract.ts")
+
+#: `npm ci` in `examples/app/frontend` is what makes the real Vite/Vue toolchain
+#: available; without it the asset-shape assertions above still hold but nothing
+#: can be built or typechecked, so the toolchain legs skip rather than fail. Same
+#: gating shape as the cordis-py legs of tests/test_app_notes_725.py.
+_npm = shutil.which("npm")
+needs_frontend_toolchain = pytest.mark.skipif(
+    _npm is None or not (FRONTEND / "node_modules" / "vite").is_dir(),
+    reason="needs the frontend node toolchain: run "
+           "`npm ci` in examples/app/frontend",
+)
+
+#: The ONE diagnostic the checked-in frontend still carries, recorded as gap G4 in
+#: docs/webapp-competitiveness-report.md: `revl export client` emits
+#: `private readonly transport` on a fully routed client, which the strict
+#: tsconfig (`noUnusedLocals`) reports as unread. It is a generator gap owned by
+#: item 457, not something this app can fix in an asset it regenerates, so it is
+#: filtered by NAME here — if the generator stops emitting it, this test keeps
+#: passing and G4 closes.
+_G4 = "notes.client.ts(66,63): error TS6138"
 
 
 @pytest.fixture(scope="module")
@@ -282,3 +307,86 @@ def test_audit_surfaces_the_coeffect_boundary(capsys):
     assert "webui.add_entry" in boundary["emissions"]
     assert boundary.get("externs") == []
     assert "WebUI" in audit["distributability"]
+
+
+# -- the toolchain really runs: build, source maps, typecheck ----------------
+
+@needs_frontend_toolchain
+def test_the_frontend_really_builds_and_maps_to_the_originals(tmp_path):
+    """459's "source maps pointing at the original files", proven by building
+    rather than by reading `vite.config.ts`: the real Vite build emits a bundle
+    whose map names `entry.client.ts`, `NotesConsole.vue` and `notes.client.ts`,
+    and writes the `.vite/manifest.json` the `webui` coeffect declares as the
+    production entry."""
+    out = tmp_path / "dist"
+    result = subprocess.run(
+        [_npm, "run", "build", "--", "--outDir", str(out)],
+        cwd=FRONTEND, capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    manifest = json.loads((out / ".vite" / "manifest.json").read_text("utf-8"))
+    # the manifest is keyed by the SAME path the component names through
+    # `webui.add_entry`, which is how a production host resolves the dev source
+    # to its built asset.
+    assert "entry.client.ts" in manifest
+    assert manifest["entry.client.ts"]["isEntry"] is True
+    bundle = out / manifest["entry.client.ts"]["file"]
+    assert bundle.is_file()
+
+    sources = json.loads((bundle.with_suffix(".js.map")).read_text("utf-8"))["sources"]
+    named = {Path(s).name for s in sources}
+    assert {"entry.client.ts", "NotesConsole.vue", "notes.client.ts"} <= named, sources
+
+
+@needs_frontend_toolchain
+def test_the_frontend_typechecks_against_the_real_cordis_client():
+    """The typed boundary is only typed if it COMPILES against the real
+    `@cordisjs/client` surface, not against a loose local stand-in. `vue-tsc`
+    over the strict tsconfig reports nothing in the hand-written assets; the one
+    remaining diagnostic is the recorded generator gap G4 in the artifact
+    `revl export client` produces."""
+    result = subprocess.run(
+        [_npm, "exec", "--", "vue-tsc", "--noEmit", "-p", "tsconfig.json"],
+        cwd=FRONTEND, capture_output=True, text=True, timeout=900,
+    )
+    out = result.stdout + result.stderr
+    # third-party `.ts` shipped inside node_modules is not this app's contract.
+    ours = [
+        line for line in out.splitlines()
+        if line and not line.startswith(("node_modules", " ", "\t"))
+        and "error TS" in line and not line.startswith(_G4)
+    ]
+    assert ours == [], "\n".join(ours)
+    for asset in HAND_WRITTEN:
+        assert not any(line.startswith(asset) for line in out.splitlines()), out
+
+
+def test_the_frontend_tree_is_pinned_and_the_lockfile_does_not_drift():
+    """Item 461's reproducibility clause for the frontend half of `revl dev`:
+    the command spawns `npm run dev`, so an unpinned tree means the one dev
+    command can break on an upstream release. `package-lock.json` is committed
+    and its root entry declares the SAME ranges as `package.json`, which is what
+    `npm ci` refuses to install past."""
+    pkg = json.loads(PKG.read_text(encoding="utf-8"))
+    lock = json.loads(LOCK.read_text(encoding="utf-8"))
+    root = lock["packages"][""]
+    for field in ("dependencies", "devDependencies"):
+        assert root.get(field, {}) == pkg.get(field, {}), field
+    # `npm ci` needs a v2+ lockfile with a resolved tree, not a bare v1 shim.
+    assert lock["lockfileVersion"] >= 2
+    assert lock["packages"]["node_modules/vite"]["version"].startswith("7.")
+
+
+def test_the_pinned_vite_major_is_one_the_vue_plugin_peers():
+    """The `ERESOLVE` this project used to need `--legacy-peer-deps` for was its
+    own: `@vitejs/plugin-vue@5` peers `vite ^5 || ^6` against a pinned `vite ^7`.
+    Pinning the plugin to a major that peers the pinned Vite is what makes plain
+    `npm ci` resolve, so the pairing is asserted rather than left to a comment."""
+    pkg = json.loads(PKG.read_text(encoding="utf-8"))
+    dev = pkg["devDependencies"]
+    assert dev["vite"].startswith("^7"), dev["vite"]
+    assert dev["@vitejs/plugin-vue"].startswith("^6"), dev["@vitejs/plugin-vue"]
+    lock = json.loads(LOCK.read_text(encoding="utf-8"))
+    peers = lock["packages"]["node_modules/@vitejs/plugin-vue"]["peerDependencies"]
+    assert "^7.0.0" in peers["vite"], peers

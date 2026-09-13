@@ -707,9 +707,8 @@ move: the child runs with `--strictPort`. A port already in use therefore exits
 3 naming that port, instead of Vite quietly auto-incrementing to the next free
 port behind a banner that still advertises the requested one. The same exit 3
 covers a frontend whose dependencies are not installed; install them with
-`npm install --legacy-peer-deps` in the frontend directory. The app declares
-`vite ^7` while `@vitejs/plugin-vue@5.x` peers on `vite ^5 || ^6`, so plain
-`npm install` stops at `ERESOLVE`.
+`npm ci` in the frontend directory, which resolves from the committed
+`package-lock.json` and needs no peer-deps escape hatch.
 
 The WebUI coeffect is a real scoped Cordis provision rather than a
 process-global bridge: the development adapter records the entry the

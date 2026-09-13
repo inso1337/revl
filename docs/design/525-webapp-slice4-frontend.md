@@ -108,10 +108,15 @@ component publishes the initial record; later deltas are Cordis' own
 
 ## What the next slices add
 
-- The one-command dev runner (item 461) composing the live Cordis host, at which
-  point the composition gate (530 Decision A / item 186) and the `host` rows (457
-  S3) are exercised end to end.
+- ~~The one-command dev runner (item 461) composing the live Cordis host.~~
+  LANDED. `revl dev` provides the scoped `webui` and activates `NotesConsole`;
+  slice 5 (`525-webapp-slice5-one-command.md`) runs it with Vite attached and
+  records what building the project for the first time revealed, including a
+  client-extension defect this slice's file-shape assertions could not see. The
+  `host` rows (457 S3) remain the production-composition surface, and item 186 is
+  about answering at admission time what is today a load-time PENDING note.
 - ~~`revl export client --face webui` (457 S4), which closes G3 and makes
-  `contract.ts` a projected artifact.~~ LANDED — see the section above.
-- The remaining 525 acceptance bars (1, 5: the one-command run and the
-  competitiveness/friction report).
+  `contract.ts` a projected artifact.~~ LANDED, see the section above.
+- ~~The remaining 525 acceptance bars (1, 5: the one-command run and the
+  competitiveness/friction report).~~ LANDED:
+  `docs/webapp-competitiveness-report.md`.
