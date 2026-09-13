@@ -165,6 +165,44 @@ component D provides grader: Grader {
 }
 """
 
+# item 458 / issue #721: a BARE `emit` STATEMENT inside an `if`/`else` arm — a
+# CONDITIONAL CROSSING. The same crossing in value position (`let v = emit …`,
+# `x = emit …`, `return emit …`) has always been admitted in a method `if` arm
+# and lowers on all six tiers; only the statement spelling was refused, so an
+# author who did not want the emission's value either bound one they never read
+# or hoisted the crossing into a module `fn` taking an emitting arrow — the
+# harness's `maybe_run`/`maybe_ship` shape. The statement spelling is now the
+# same `emit` IR step the method's top level produces.
+CONDITIONAL_EMIT_DRAFT = """
+service Bus { emission fn publish(topic: Str) }
+service Sink { emission[bus] fn accept(msg: Str, urgent: Bool) -> Str }
+component Relay requires bus: Bus provides sink: Sink {
+  provide sink {
+    fn accept(msg, urgent) {
+      if (msg.length() == 0) { return `empty` }
+      if (urgent) { emit bus.publish(msg) }
+      else { emit bus.publish(`queued`) }
+      return `ok`
+    }
+  }
+}
+"""
+
+# the same crossing at the method's TOP level — the pre-458 spelling an author
+# had to reach for. Used to prove the nested step renders identically.
+TOP_LEVEL_EMIT_DRAFT = """
+service Bus { emission fn publish(topic: Str) }
+service Sink { emission[bus] fn accept(msg: Str, urgent: Bool) -> Str }
+component Relay requires bus: Bus provides sink: Sink {
+  provide sink {
+    fn accept(msg, urgent) {
+      emit bus.publish(msg)
+      return `ok`
+    }
+  }
+}
+"""
+
 ALL_DRAFTS = {
     "if": IF_DRAFT,
     "while": WHILE_DRAFT,
@@ -173,6 +211,7 @@ ALL_DRAFTS = {
     "while_break": WHILE_BREAK_DRAFT,
     "guard_then_emit": GUARD_THEN_EMIT_DRAFT,
     "dispatch": DISPATCH_DRAFT,
+    "conditional_emit": CONDITIONAL_EMIT_DRAFT,
 }
 
 
@@ -298,6 +337,84 @@ component C provides s: S {
 
 
 # ---------------------------------------------------------------------------
+# item 458 / issue #721 — a CONDITIONAL CROSSING: a bare `emit` statement inside
+# an `if`/`else` arm, lowering to the same `emit` step the method's top level
+# produces and rendering identically on all six tiers.
+# ---------------------------------------------------------------------------
+
+def _emit_steps(source: str, component: str, method: str) -> list:
+    """The lowered body of one provide method."""
+    ir = compile_source(source, "x.rvl")
+    comp = next(c for c in ir["components"] if c["name"] == component)
+    provide = next(s for s in comp["body"] if s.get("step") == "provide")
+    return next(m for m in provide["methods"] if m["name"] == method)["body"]
+
+
+def test_bare_emit_in_an_if_arm_lowers_to_an_emit_step_in_the_arm():
+    body = _emit_steps(CONDITIONAL_EMIT_DRAFT, "Relay", "accept")
+    guard = body[1]
+    assert guard["step"] == "if"
+    assert [s["step"] for s in guard["then"]] == ["emit"]
+    assert [s["step"] for s in guard["else"]] == ["emit"]
+    # nothing was registered: a bare crossing carries no `compensate` slot, which
+    # is the ONLY thing an `emit` step puts on the activation frame.
+    assert guard["then"][0].get("compensate") is None
+
+
+def test_the_nested_emit_step_is_the_top_level_emit_step():
+    # the whole reuse argument, at the IR: the step the `if` arm carries is the
+    # SAME shape the method's top level produces for the same crossing, so every
+    # tier's existing method renderer is the reference for the nested one.
+    nested = _emit_steps(CONDITIONAL_EMIT_DRAFT, "Relay", "accept")[1]["then"][0]
+    top = _emit_steps(TOP_LEVEL_EMIT_DRAFT, "Relay", "accept")[0]
+    assert nested == top
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_conditional_crossing_renders_like_the_top_level_one(backend):
+    # per tier: the crossing the `if` arm carries is emitted VERBATIM as the
+    # top-level spelling emits it — the same call, the same argument handling
+    # (rust's param clone included), only wrapped in the tier's own `if`. A tier
+    # that hoisted, dropped or re-spelled the nested crossing fails here. Rust
+    # renders a method `if` on one line, so the comparison is by substring.
+    def text_of(draft):
+        out = _emit(draft, backend)
+        return "\n".join(out.values()) if isinstance(out, dict) else out
+
+    top_text = text_of(TOP_LEVEL_EMIT_DRAFT)
+    top_crossing = next(
+        (ln.strip() for ln in top_text.splitlines()
+         if "publish" in ln.lower() and "msg" in ln), None)
+    assert top_crossing, f"{backend}: no crossing in the top-level spelling"
+    nested_text = text_of(CONDITIONAL_EMIT_DRAFT)
+    assert top_crossing in nested_text, (
+        f"{backend}: {top_crossing!r} is not emitted inside the conditional")
+
+
+def test_statement_and_value_spellings_of_a_conditional_crossing_both_compile():
+    # the asymmetry item 458 removed. `x = emit …` inside an `if` arm always
+    # compiled and lowered on every tier; the statement spelling of the SAME
+    # crossing was refused, so an author who did not want the value bound one
+    # they never read (or hoisted to a module `fn` — `maybe_ship`).
+    tpl = """
+service Bus { emission fn publish(topic: Str) -> Str }
+service Sink { emission[bus] fn accept(msg: Str, go: Bool) -> Str }
+component Relay requires bus: Bus provides sink: Sink {
+  provide sink {
+    fn accept(msg, go) {
+      var out = msg
+      if (go) { %s }
+      return out
+    }
+  }
+}
+"""
+    statement = compile_source(tpl % "emit bus.publish(msg)", "x.rvl")
+    value = compile_source(tpl % "out = emit bus.publish(msg)", "x.rvl")
+    assert statement.get("components") and value.get("components")
+
+
+# ---------------------------------------------------------------------------
 # every tier emits — `for`/`break` included (item 458 closed the wasm remainder)
 # ---------------------------------------------------------------------------
 
@@ -339,24 +456,58 @@ def test_python_emit_is_valid_python():
 # refusals — the arms are pure, and the parser's redirects stand
 # ---------------------------------------------------------------------------
 
-def test_emit_inside_control_flow_is_refused():
+def test_effect_inside_control_flow_is_still_refused():
+    # an `effect` REGISTERS an inverse on the activation frame, so a conditional
+    # one is still the deferred teardown-contract question (design note 478
+    # §Group 3). The message no longer names `emit`, which registers nothing.
     src = """
-service Bus { emission fn publish(topic: Str) }
-service Sink { emission[bus] fn accept(msg: Str) }
-component Relay requires bus: Bus provides sink: Sink {
-  provide sink {
-    fn accept(msg) {
-      if (msg.length() > 0) { emit bus.publish(msg) }
+service Cache { fn put(key: Str, value: Str) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      if (key.length() > 0) { effect store.insert(key, value)
+        undo   store.remove(key) }
     }
   }
 }
 """
     with pytest.raises(RevlError) as ei:
         compile_source(src, "x.rvl")
-    assert "registering step" in str(ei.value)
+    text = str(ei.value)
+    # the message no longer LISTS `emit` among the refused forms: a bare
+    # crossing is admitted here, and only the registering forms are named.
+    assert "a teardown-registering step (`effect`/`let-effect`/`await`)" in text
 
 
-def test_effect_inside_loop_is_refused():
+def test_emit_with_compensate_inside_control_flow_is_refused():
+    # item 458: a BARE `emit` is admitted in an `if` arm, but `emit ...
+    # compensate ...` is not — the compensation is a first-class entry on the
+    # activation frame (item 247), drained in teardown Phase 2, so a CONDITIONAL
+    # one needs the teardown contract amended.
+    src = """
+service Bus { emission fn publish(topic: Str)  emission fn retract(topic: Str) }
+service Sink { emission[bus] fn accept(msg: Str) }
+component Relay requires bus: Bus provides sink: Sink {
+  provide sink {
+    fn accept(msg) {
+      if (msg.length() > 0) { emit bus.publish(msg) compensate bus.retract(msg) }
+    }
+  }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    text = str(ei.value)
+    assert "compensate" in text
+    assert "teardown contract" in text
+
+
+def test_emit_inside_a_loop_body_is_refused():
+    # item 379's frame-neutrality invariant is enforced whole-IR
+    # (`_validate_no_loop_scoped_registration`) and again in all six emitters
+    # (`_guard_frame_neutral_loop`) over the `emit` STEP KIND, so a loop-scoped
+    # crossing keeps its refusal — and gets the accurate message at lowering.
     src = """
 service Log { emission fn write(line: Str) }
 service Sink { emission[log] fn dump(lines: List[Str]) }
@@ -368,8 +519,27 @@ component C requires log: Log provides sink: Sink {
   }
 }
 """
-    with pytest.raises(RevlError):
+    with pytest.raises(RevlError) as ei:
         compile_source(src, "x.rvl")
+    assert "`while`/`for` body" in str(ei.value)
+
+
+def test_emit_inside_an_if_nested_in_a_loop_is_refused():
+    # the same invariant read through an `if`: loop-scoped is loop-scoped.
+    src = """
+service Log { emission fn write(line: Str) }
+service Sink { emission[log] fn dump(lines: List[Str]) }
+component C requires log: Log provides sink: Sink {
+  provide sink {
+    fn dump(lines) {
+      for (line of lines) { if (line.length() > 0) { emit log.write(line) } }
+    }
+  }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    assert "`while`/`for` body" in str(ei.value)
 
 
 def test_break_outside_a_loop_is_refused():
@@ -468,6 +638,34 @@ component C provides cache: Cache {
     out = backend_emitter(tier).emit(compile_source(src))
     (status, detail) = validator.check([("cf", out)])["cf"]
     assert status == "ok", f"{tier} rejected the emit: {detail}"
+
+
+@pytest.mark.parametrize("tier", ["python", "typescript", "go", "java", "rust"])
+def test_conditional_crossing_compiles_on_tier(tier):
+    # item 458: the conditional crossing is accepted by each tier's REAL
+    # toolchain, not merely by its emitter.
+    import validate  # noqa: PLC0415
+
+    validator = validate.VALIDATORS[tier]
+    reason = validator.unavailable()
+    if reason:
+        pytest.skip(f"{tier} toolchain unavailable: {reason}")
+    out = backend_emitter(tier).emit(compile_source(CONDITIONAL_EMIT_DRAFT))
+    (status, detail) = validator.check([("ce", out)])["ce"]
+    assert status == "ok", f"{tier} rejected the emit: {detail}"
+
+
+def test_wasm_conditional_crossing_validates():
+    import validate  # noqa: PLC0415
+
+    validator = validate.VALIDATORS["wasm"]
+    reason = validator.unavailable()
+    if reason:
+        pytest.skip(f"wasm toolchain unavailable: {reason}")
+    out = backend_emitter("wasm").emit(compile_source(CONDITIONAL_EMIT_DRAFT))
+    assert isinstance(out, dict)
+    status, detail = validator.check([("ce", out)])["ce"]
+    assert status == "ok", f"wasm rejected the emit: {detail}"
 
 
 def test_wasm_control_flow_component_validates():
@@ -611,3 +809,53 @@ async def test_runtime_dispatch_grades():
     assert grader.grade(85) == "B"
     assert grader.grade(72) == "C"
     assert grader.grade(50) == "F"
+
+
+@cordis_only
+async def test_runtime_conditional_crossing_fires_only_on_the_guard():
+    # item 458 / issue #721: the crossing inside the `if` arm runs, and only when
+    # the guard holds. The emission is a host extern, so the recorded crossings
+    # are observable by wrapping the module's own `extern_emit` seam — the exact
+    # call the emitted method makes.
+    import types  # noqa: PLC0415
+
+    import runtime as runtime_mod  # noqa: PLC0415
+    from cordis import Context  # noqa: PLC0415
+
+    src = """
+extern emission fn audit(msg: Str) -> Int = @py { return len(msg) }
+service Sink { emission fn accept(msg: Str, urgent: Bool) -> Str }
+component Relay provides sink: Sink {
+  provide sink {
+    fn accept(msg, urgent) {
+      if (urgent) { emit audit(msg) }
+      return `ok`
+    }
+  }
+}
+"""
+    import asyncio  # noqa: PLC0415
+
+    module_src = backend_emitter("python").emit(compile_source(src))
+    module = types.ModuleType("ce_exec")
+    exec(compile(module_src, "ce_exec.py", "exec"), module.__dict__)
+
+    seen: list = []
+    original = module._revl_extern_emit
+
+    def recording(ctx, name, fn, args):
+        seen.append((name, args))
+        return original(ctx, name, fn, args)
+
+    module._revl_extern_emit = recording
+
+    root = Context()
+    runtime_mod.plug(root, module.Relay)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    sink = root.reflect.get("sink")
+
+    assert sink.accept("hello", False) == "ok"
+    assert seen == []                      # the guard was false: no crossing
+    assert sink.accept("hello", True) == "ok"
+    assert seen == [("audit", ("hello",))]  # fired exactly once, with the arg
