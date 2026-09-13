@@ -264,10 +264,14 @@ rather than a convenience:
   all through an unannotated `emit`. Every crossing under a declaration must
   state what it does.
 
-A crossing whose callee is a bare `emission` operation is refused for the same
-reason: it names no capability, so no declared object can be shown to cover it,
-and reading the unnameable as the declared one is exactly the direction slice 1
-was built to close.
+A crossing whose capability set the per-crossing resolution cannot name is
+refused for the same reason. That covers a bare `emission` callee (which names
+no capability at all), the `*` token, and the shapes where the resolution
+returns nothing, such as a provision call off a spawn handle or a crossing
+through a service-typed parameter. No declared object can be SHOWN to cover any
+of them, and reading the unnameable as the declared one is exactly the direction
+slice 1 was built to close: an empty capability set is "nothing to compare", not
+"nothing to check".
 
 Both clauses are CONTEXTUAL, recognised only in the one slot each occupies (the
 post-return-type slot of a service operation, which the `cache` clause already
