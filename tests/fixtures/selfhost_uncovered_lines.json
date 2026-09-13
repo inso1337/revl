@@ -152,7 +152,7 @@
         "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior.": {
           "_go_v3_optchain": 19
         },
-        "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop.": {
+        "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_bridge_decode_expr": 16,
           "_bridge_encode_expr": 16,
           "_emit_go_bridge": 117,
@@ -161,7 +161,7 @@
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_v3_bridge_helpers": 52,
-          "_emit_v3_placement": 200,
+          "_emit_v3_placement": 203,
           "_go_bridge_arg_expr": 4,
           "_go_opt_inner": 4,
           "_go_result_inner": 5,
@@ -173,11 +173,11 @@
         "Remaining accumulator recognition handles .concat builtin chains rather than the covered + chains; stdlib concat emission is an explicit Go deferral.": {
           "_v3_str_concat_pieces": 6
         },
-        "Remaining assembly paths are the empty-document refusal, in-file tests, reflect structural equality, Float interpolation's ftoa helper, extern imports, and demanded Opt/Result/Map/stdlib plus integer-division helpers. Those helper-demand families are explicit Go scaffold deferrals; ordinary Float arithmetic and Int widening are covered, not excluded here.": {
-          "_emit_v3_go": 61
+        "Remaining assembly paths are the empty-document refusal, in-file tests, reflect structural equality, Float interpolation's ftoa helper, extern imports, and demanded Opt/Result/Map/stdlib plus integer-division helpers. Those helper-demand families are explicit Go scaffold deferrals; ordinary Float arithmetic and Int widening are covered, not excluded here. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_emit_v3_go": 62
         },
-        "Remaining branches are malformed/unresolved inference fallbacks, deferred len/builtin/Map and builtin constructors, ambiguous-record recovery, and the late Float % fallback (the frontend rejects Float remainder). Int32 complement inference and ordinary Float arithmetic/widening are now covered.": {
-          "_go_v3_infer_type": 15
+        "Remaining branches are malformed/unresolved inference fallbacks, deferred len/builtin/Map and builtin constructors, ambiguous-record recovery, and the late Float % fallback (the frontend rejects Float remainder). Int32 complement inference and ordinary Float arithmetic/widening are now covered. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_go_v3_infer_type": 16
         },
         "Remaining branches are non-string type fallback and Opt/Result interface detection; declared user-variant interfaces are covered, builtin tagged families remain deferred.": {
           "_go_v3_is_interface": 3
@@ -196,8 +196,8 @@
         "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead.": {
           "_emit": 107
         },
-        "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised.": {
-          "_go_v3_expr": 47
+        "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_go_v3_expr": 48
         },
         "Remaining extern paths generate config access scaffolding/bindings or reject a missing @go body. The oracle explicitly defers config-bearing externs and absent target bodies; simple synchronous body emission is already covered.": {
           "_emit_v3_go_externs": 3,
@@ -293,6 +293,10 @@
           "_r1_marker_lines": 12,
           "_refuse_unlowered_stream_surface": 7,
           "_stream_head": 4
+        },
+        "`Map` subscript lowering (issue #957): `_uses_map_index.walk` answers whether the document reads a `Map` subscript and `_emit_map_index_helper` renders the static `revlMapIndex` it lowers to. emit_java_corpus/maps.rvl exercises the Map METHODS, not the subscript, and a document that added one would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)). The reference half is pinned by tests/test_cross_tier_execution.py. Porting the arm to selfhost/emit_java.rvl is the corpus work that retires this entry.": {
+          "_emit_map_index_helper": 1,
+          "_uses_map_index.walk": 1
         },
         "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
           "<module>": 1
@@ -411,8 +415,8 @@
         "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Also the item-322-Slice-2 durable WAL sink splice behind `_RECORD_MODE`: the oracle emits with the default `emit(ir)` and never `record=True`, so the call is unreachable from the corpus by construction, and `backends/java/test_emit_java.py::test_v1_v2_witnessed_record_defines_the_sink_it_calls` exercises it directly. The self-host emitters mirror the v3 path, so v1/v2 is declared out of every self-host slice (the `_v1|_v2` group in tools/selfhost_line_coverage.py).": {
           "_emit_v2": 4
         },
-        "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
-          "_emit_v3": 15
+        "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_emit_v3": 16
         },
         "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
           "_emit_v3_externs": 32
@@ -435,8 +439,8 @@
         "backends/java/emit.py::_empty_map_decl_type: Remaining branches read writer-inferred pins for an unannotated VALUE Map.empty local or use raw java.util.Map when unpinned. The port explicitly defers unannotated value-Map inference, distinct from covered host Map.new inference.": {
           "_empty_map_decl_type": 2
         },
-        "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, builtin/len and sized-length helpers, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered.": {
-          "_expr": 34
+        "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, builtin/len and sized-length helpers, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_expr": 35
         },
         "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value.": {
           "_finite_float": 1
@@ -609,8 +613,8 @@
         "backends/java/emit.py::_v3_var: Remaining callable-as-value and renamed arrow-capture branches belong to first-class/local arrows, explicitly deferred. Raw user-case names are frontend-canonicalized to adt; an unbound arrow value raises.": {
           "_v3_var": 4
         },
-        "backends/java/emit.py::_value_map_write_type: This helper only types writers for unannotated VALUE Map.empty local inference, explicitly deferred, distinct from covered host Map inference.": {
-          "_value_map_write_type": 6
+        "backends/java/emit.py::_value_map_write_type: This helper only types writers for unannotated VALUE Map.empty local inference, explicitly deferred, distinct from covered host Map inference. Issue #957's `Map` subscript arm adds two statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_value_map_write_type": 8
         },
         "backends/java/emit.py::_witnessed_extern_for: Residual named/target lookup of class=witnessed externs requires the explicitly deferred witnessed-extern surface; method_witnessed.rvl is a strict reproduction.": {
           "_witnessed_extern_for": 3
@@ -657,8 +661,8 @@
         "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run.": {
           "_ComponentEmitter._compensated_extern": 3
         },
-        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; host/spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, advance.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, so its statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior.": {
-          "_ComponentEmitter._expr": 83
+        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; host/spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, advance.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, so its statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_ComponentEmitter._expr": 84
         },
         "Declared-`Secret[Map[K, V]]` marking (item 481): `_split_type_name` splits a declared type spelling into its head and its generic arguments, and `_secret_shape_facts` walks a document's declared secret roots transitively to answer whether any shape reachable from one is a `Map` and to render the field table the runtime needs so a map's keys and values are routed through their own declared types. The python corpus reaches both, but only through the non-generic splitter path and the no-Map answers; the branches that fire for a declared `Map` reachable from a secret root are not reached, because no `emit_py_corpus` document declares one. `selfhost/emit_py.rvl` carries the declared-`Secret[T]` marking import line only, not the call-site shape (item-429(d)), so a corpus document that reached them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by tests/test_secret_map_key_redaction.py.": {
           "_secret_shape_facts": 3,
@@ -758,11 +762,11 @@
         "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
           "_ComponentEmitter._method_step": 28
         },
-        "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one.": {
-          "emit": 36
+        "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. Issue #957's `Map` subscript arm adds seven statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "emit": 43
         },
-        "Module expression residuals: bare Some identity and legacy sized_length field both match expr_inner; unsupported binary/unary/kind raise while port emits explicit markers. Awaited call and async arrow require the retained async surface (emit_ts_corpus/async_module_local.rvl). Legal current module .length lowers to len, already covered by branches.rvl.": {
-          "_expr": 8
+        "Module expression residuals: bare Some identity and legacy sized_length field both match expr_inner; unsupported binary/unary/kind raise while port emits explicit markers. Awaited call and async arrow require the retained async surface (emit_ts_corpus/async_module_local.rvl). Legal current module .length lowers to len, already covered by branches.rvl. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_expr": 9
         },
         "Nonfinite literal refusal in _finite_float: no finite source Float literal can produce NaN/Infinity in literal IR. Runtime floating arithmetic is not this branch. Direct malformed IR is rejected, not a positive oracle input.": {
           "_finite_float": 1
@@ -800,6 +804,9 @@
         },
         "Witness lookup non-dict guard: after a witnessed table exists, _witnessed_extern returns None for a malformed/non-dict acquire. Legal effect acquires are expression dictionaries. witnessed.rvl covers matching and nonmatching fn lookups; the port's final missing-name return is equivalent.": {
           "_ComponentEmitter._witnessed_extern": 1
+        },
+        "`Map` subscript lowering (issue #957): `_scan_uses` sets the `map_index` gate that pulls the `_revl_map_index` helper into the module. No emit_py_corpus document indexes a `Map` — `lookup`/`has`/`set` are the Map surface the corpus exercises — and a document that did would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d), the same shape as the declared-`Secret[Map[K, V]]` entry). The reference half is pinned on all five tiers by tests/test_cross_tier_execution.py: the hit, the miss asserted by its reason, and a per-tier guard on the emitted lowering. Porting the arm to selfhost/emit_py.rvl is the corpus work that retires this entry.": {
+          "_scan_uses": 1
         },
         "backends/python/emit.py::_ComponentEmitter._method_control: issue #548 provide-method control flow (if/while/for/break/continue over a method's value computation) and its nested block step emitter. No byte-agreement corpus document contains method-level control flow, so no corpus document calls the helper; the fn-grammar if/while/for it mirrors is covered through the module _fn_stmt path.": {
           "_ComponentEmitter._method_control": 19,
@@ -895,12 +902,12 @@
           "_undo_reclone_locals": 1,
           "_v3_self_append_inplace": 19
         },
-        "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins.": {
+        "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_emit_v3_functions": 8,
           "_v3_builtin": 30,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_infer_type": 10,
+          "_v3_infer_type": 11,
           "_v3_inplace_persistent": 12,
           "_v3_interp": 3,
           "_v3_is_float": 4,
@@ -993,8 +1000,8 @@
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
-        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read — `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`).": {
-          "_render_expr": 66
+        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read — `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_render_expr": 67
         },
         "backends/rust/emit.py::_borrow_list_arg: item 437d borrow of a read-only list parameter into a `&[T]` slot. The already-lowered-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual statement is the List-index place-borrow arm (`&xs[i]` via _v3_strip_index_clone), which no byte-agreement corpus document passes into a borrowed `&[T]` argument, the same shape left uncovered on _v3_strip_index_clone itself.": {
           "_borrow_list_arg": 1
@@ -1025,12 +1032,12 @@
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, dispatches the item-130 `stream-iter` step (roadmap #81), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions, timers and the ts reactive-tier stream steps are declared port boundaries": {
           "_component_step": 44
         },
-        "Canonical type parser fallbacks: `_split_fn_type` rejects missing arrows/unclosed parameter lists; `_split_ts_types` tracks nested generic bracket depth; `_ts_type` and `_ts_v3_type` erase unknown nominal/generic arguments; `_v3_surface_type` retains legacy unstamped literal/name/list inference. Frontend canonical type strings and stamped expressions exercise the supported paths": {
+        "Canonical type parser fallbacks: `_split_fn_type` rejects missing arrows/unclosed parameter lists; `_split_ts_types` tracks nested generic bracket depth; `_ts_type` and `_ts_v3_type` erase unknown nominal/generic arguments; `_v3_surface_type` retains legacy unstamped literal/name/list inference. Frontend canonical type strings and stamped expressions exercise the supported paths Issue #957's `Map` subscript arm adds two statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_split_fn_type": 2,
           "_split_ts_types": 2,
           "_ts_type": 1,
           "_ts_v3_type": 2,
-          "_v3_surface_type": 8
+          "_v3_surface_type": 10
         },
         "Component header residuals: `_component` rejects unknown service/provision/isolate/intercept/route keys and emits routed requirement realm/strategy metadata; `_context_augmentation` rejects one Context key bound to conflicting services; `_provide_impl` rejects unknown services, undeclared methods and arity mismatch. The frontend enforces these relationships; routed requires are the declared router-runtime boundary": {
           "_component": 10,
@@ -1048,8 +1055,8 @@
           "_refuse_holes.walk": 1,
           "_refuse_missing_host_root": 1
         },
-        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered": {
-          "_expr": 41,
+        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+          "_expr": 42,
           "_fn_call": 2,
           "_ts_builtin": 1
         },
@@ -1127,6 +1134,10 @@
           "_method_witnessed_step": 19,
           "_witnessed_extern": 3,
           "_witnessed_step": 19
+        },
+        "`Map` subscript lowering (issue #957): `_uses_map_index` answers whether the document reads a `Map` subscript and `_revl_helpers` emits `revlMapIndex` when it does. No emit_ts_corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)). The reference half is pinned by tests/test_cross_tier_execution.py. Porting the arm to selfhost/emit_ts.rvl is the corpus work that retires this entry.": {
+          "_revl_helpers": 1,
+          "_uses_map_index": 1
         },
         "`do` expression boundary: `_v3_do_expr` requires component/method context, permits only let statements, computes empty-list annotations, renders mutable/immutable bindings and an async-or-sync IIFE tail. The port has no frame-aware `do` arm and records `kind=do` unported": {
           "_v3_do_expr": 22
