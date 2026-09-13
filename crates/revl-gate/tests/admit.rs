@@ -51,7 +51,7 @@ fn unparseable_source_is_refused_as_bad() {
     }
 }
 
-// --------------------------------------- the gate issues no admissions, ever
+// ------------------------------ the verdict surface issues no admissions
 
 #[test]
 fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
@@ -61,7 +61,8 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
     assert!(verdict.to_json().contains("\"admitted\":false"));
 }
 
-/// The measured reason `Verdict::Admitted` does not exist.
+/// The measured reason `Verdict` has no admitting arm, and the measured reason
+/// the admission surface is as narrow as it is.
 ///
 /// This gate decides the composition/guarantee layer, not the reference type
 /// layer, so every program below is one the REFERENCE compiler refuses and this

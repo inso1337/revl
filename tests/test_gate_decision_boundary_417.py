@@ -2,7 +2,7 @@
 
 Item 417's finding: the `revl-gate` crate decides the composition/guarantee
 layer (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`) and runs NO
-type layer at all, so it can only REFUSE and issues no admissions. That is the
+type layer at all, so its VERDICT surface can only REFUSE. That is the
 honest, load-bearing property of the whole 332/335/336/337/338 arc. The exit
 this file closes: 335 (the wasm edge gate), 336 slice 2 (the native LSP's
 native `admit`), 337 (a non-py mesh receiver's embedded gate) and 338 (`cargo
@@ -22,8 +22,10 @@ Two halves, both pure-Python (no rust toolchain, so this runs everywhere):
 2. THE EXECUTABLE MEANING. "Runs no type layer" is not prose here: the five
    type-layer probes item 417 measured are run through the REFERENCE and shown
    to be real refusals (so a full gate genuinely owes them), while the crate's
-   published surface (`issues_admissions: false`, a `Verdict` enum with no
-   `Admitted` arm) proves structurally that the crate can never admit them.
+   published surface proves structurally that the crate can never admit them.
+   Two independent reasons, both checked: its `Verdict` enum has no `Admitted`
+   arm, and every probe lies OUTSIDE the admission surface `issue_admission`
+   certifies (issue #346), so neither entry point has a path to one.
 
 Distinct from item 429's job. 429 owns `tests/test_selfhost_lower.py`'s oracle
 and corpus and the family that makes the self-host's MISSING type layer loud in
@@ -87,9 +89,17 @@ def test_the_crate_states_what_it_decides_and_does_not_decide():
     the layer NOT decided. The four dependents below are gated on these words."""
     meta = _crate_meta()
     assert meta["covered_layer"] == GEN.COVERED_LAYER
-    assert meta["issues_admissions"] is False
+    # The crate grew an ADMISSION surface (issue #346), so `issues_admissions` is
+    # true. What item 417 gates is unchanged and is the pair below: the VERDICT
+    # surface still has no admitting arm, and the admission surface is a separate
+    # region with its own one-line statement. Both have to be stated, or a
+    # dependent cannot know which surface it is holding.
+    assert meta["issues_admissions"] is True
     assert meta["verdict_arms"] == ["refused", "no_objection", "outside_frontier"]
     assert "admitted" not in meta["verdict_arms"]
+    assert meta["admitted_layer"] == GEN.ADMITTED_LAYER
+    assert "interface declarations only" in GEN.ADMITTED_LAYER
+    assert "no term the reference type layer decides" in GEN.ADMITTED_LAYER
     # Both halves must be spelled out, or a reader cannot know where the gap is.
     assert "composition" in GEN.COVERED_LAYER and "guarantee" in GEN.COVERED_LAYER
     assert "NOT the reference type layer" in GEN.COVERED_LAYER
@@ -105,8 +115,9 @@ def test_the_verdict_enum_has_no_admitting_arm():
     body = after[: after.index("\n}")]  # the enum's own closing brace, at line start
     assert "Refused" in body and "NoObjection" in body and "OutsideFrontier" in body
     assert "Admitted" not in body, (
-        "a `Verdict::Admitted` arm would contradict `issues_admissions: false` "
-        "and let the crate decide the type layer it does not run"
+        "an admitting arm on `Verdict` would let a consumer of the REFUSAL "
+        "surface read a decision about the type layer this gate does not run; "
+        "the admission surface is a separate type, asked for by name"
     )
 
 
@@ -135,9 +146,13 @@ def test_337_polyglot_mesh_receiver_is_gated_on_the_same_statement():
     The contract must state that gate is refuse-only, so the seam relies on a
     refusal and never on a crate `no_objection` read as acceptance."""
     contract = CONTRACT.read_text(encoding="utf-8")
-    assert "The rust gate issues no admissions at all." in contract
+    assert "The rust gate's verdict surface issues no admissions at all." in contract
     assert "**not** the reference type" in contract
-    assert "a gate with no admission arm cannot commit it" in contract
+    assert "the verdict surface has no arm that could commit it" in contract
+    # and the admission surface a seam MAY rely on is stated, with the scope a
+    # cached admission is only valid inside
+    assert "ADMISSION_SURFACE_ID" in contract
+    assert "interface declarations only" in contract
 
 
 def test_338_rust_cargo_consumer_treats_the_gate_as_refuse_only():
@@ -147,7 +162,7 @@ def test_338_rust_cargo_consumer_treats_the_gate_as_refuse_only():
     main_rs = (CONSUMER / "src" / "main.rs").read_text(encoding="utf-8")
     assert "REJECT" in main_rs and "ESCALATE" in main_rs
     assert "never an admission" in main_rs
-    assert "this crate issues no admissions" in main_rs
+    assert "this crate's verdict surface issues no admissions" in main_rs
 
 
 # --------------------------------------------- the executable meaning of it
@@ -166,13 +181,37 @@ def test_the_type_layer_boundary_is_real_the_reference_refuses_the_probes():
 
 
 def test_the_crate_cannot_admit_the_type_layer_probes():
-    """The other side of the same boundary, held structurally so it needs no
-    rust toolchain: with `issues_admissions: false` and no `Admitted` arm, the
-    crate has no path to admit ANY of the type-layer probes. It answers
-    `no_objection`/`outside_frontier` (never admission), which a consumer gated
-    per the tests above must escalate rather than accept."""
+    """The other side of the same boundary, held structurally so it needs no rust
+    toolchain.
+
+    Two independent reasons the five probes cannot be admitted, and both are
+    checked because either alone could be undone by a later change:
+
+    1. the VERDICT surface has no admitting arm, so `admit`/`admit_into` have no
+       path to one however they are called;
+    2. every probe carries an `fn` body or a component, so it is OUTSIDE the
+       admission surface `issue_admission` certifies — checked here through the
+       census's python mirror of the crate's certifier, which is the same walk
+       the shipped rust performs (`tests/test_gate_reference_census.py::
+       test_the_admission_mirror_matches_the_rust` pins the mirror to it).
+
+    The probes are exactly the programs a type layer owes an answer for, so this
+    is the boundary item 417 named: the crate answers `no_objection` /
+    `outside_frontier` / `withheld`, never an admission, and a consumer gated per
+    the tests above must escalate rather than accept."""
     meta = _crate_meta()
-    assert meta["issues_admissions"] is False
     assert not any(arm.startswith("admit") for arm in meta["verdict_arms"]), (
-        "no admitting arm may exist, or the type-layer probes could be admitted"
+        "no admitting VERDICT arm may exist, or the type-layer probes could be "
+        "admitted through `admit`"
     )
+    spec = importlib.util.spec_from_file_location(
+        "boundary_census", ROOT / "tools" / "gate_reference_census.py")
+    census = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = census
+    spec.loader.exec_module(census)
+    certify = census.build_admission_certify()
+    for src in TYPE_LAYER_PROBES:
+        assert not certify(src), (
+            f"{src!r} is a type-layer probe and must be outside the admission "
+            f"surface; certifying it would admit a program the reference refuses"
+        )
