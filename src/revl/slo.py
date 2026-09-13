@@ -383,6 +383,16 @@ def percentile(values, fraction: float) -> Optional[float]:
 #: from n = 21; stated as a constant so the receipt and the test agree.
 PERCENTILE_MIN_SAMPLES = 21
 
+#: The trace records every duration in SECONDS (`ts` is a `time.monotonic()`
+#: reading, `llm.latencySeconds` says so in its name); the contract records
+#: every duration in MILLISECONDS, because `parser.SLO_IR_KEYS` puts the unit in
+#: the key name so a target cannot be re-read in another unit downstream. The
+#: conversion therefore happens exactly ONCE, here, on the observation side, and
+#: the verdict's `observed` is in the target's unit — a receipt that compared
+#: 1.5 against 250 and called it holding is the arithmetic this constant exists
+#: to stop.
+MS_PER_SECOND = 1000.0
+
 
 # ---------------------------------------------------------------------------
 # 3. The measurement — one verdict per declared datum.
@@ -451,8 +461,17 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
 
     Returns `{}` for an empty contract, which is how a composition declaring no
     `slo` block stays byte-identically unaffected.
+
+    A contract key may be spelled either way — the surface datum
+    (`p95_latency`) or the unit-bearing IR key (`p95_latency_ms`) — and
+    `parser.slo_datum` is the one door that resolves it. It has to be one door:
+    the compile-time gate reads the surface names off the declaration and this
+    reads the IR keys off the document, and a measurement that failed to
+    recognise the second spelling would answer `unmeasurable` for every
+    objective in the contract, which fails OPEN in the only way this module
+    exists to prevent.
     """
-    from .parser import SLO_DIRECTION
+    from .parser import SLO_DIRECTION, slo_datum
 
     if not contract:
         return {}
@@ -461,8 +480,9 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
     verdicts: dict = {}
     for key, entry in contract.items():
         target = entry.get("target") if isinstance(entry, Mapping) else entry
-        direction = SLO_DIRECTION.get(key, "upper")
-        if key == "p95_latency":
+        datum = slo_datum(key)
+        direction = SLO_DIRECTION.get(datum or key, "upper")
+        if datum == "p95_latency":
             if len(latencies) < PERCENTILE_MIN_SAMPLES:
                 verdicts[key] = {
                     "verdict": INSUFFICIENT, "observed": None, "target": target,
@@ -471,17 +491,25 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
                               f"at least {PERCENTILE_MIN_SAMPLES}",
                     "measurement": "modelHopLatencyBracket"}
             else:
-                verdicts[key] = _decide(percentile(latencies, 0.95), target,
-                                        direction, n=len(latencies))
+                # The trace's seconds against the contract's milliseconds: the
+                # unit is converted on the OBSERVATION, never on the target, so
+                # what the receipt prints as `target` is the number the document
+                # declared.
+                seconds = percentile(latencies, 0.95)
+                verdicts[key] = _decide(
+                    None if seconds is None else seconds * MS_PER_SECOND,
+                    target, direction, n=len(latencies))
                 verdicts[key]["measurement"] = "modelHopLatencyBracket"
+                verdicts[key]["unit"] = "ms"
             continue
-        if key == "max_pending_tasks":
+        if datum == "max_pending_tasks":
             by_component = obs.get("emissionsByComponent") or {}
             peak = max(by_component.values()) if by_component else 0
             verdicts[key] = _decide(peak, target, direction, n=peak)
             verdicts[key]["measurement"] = "perComponentEmissionPeak"
+            verdicts[key]["unit"] = "tasks"
             continue
-        if key == "success_rate":
+        if datum == "success_rate":
             verdicts[key] = {
                 "verdict": UNMEASURABLE, "observed": None, "target": target,
                 "samples": 0,
@@ -490,14 +518,14 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
                           "not a request population to divide them by",
                 "measurement": "none"}
             continue
-        if key == "recovery_time":
+        if datum == "recovery_time":
             verdicts[key] = {
                 "verdict": UNMEASURABLE, "observed": None, "target": target,
                 "samples": len(durations),
                 "reason": UNMEASURABLE_REASON["recovery_time"],
                 "measurement": "none"}
             continue
-        if key == "approval_wait":
+        if datum == "approval_wait":
             verdicts[key] = {
                 "verdict": UNMEASURABLE, "observed": None, "target": target,
                 "samples": 0,
@@ -615,11 +643,22 @@ def make_receipt(body: Mapping, key: bytes) -> dict:
     """Sign a body. A body with no canonical byte spelling raises
     `attest.NotCanonicalizable`, which the caller turns into a refusal rather
     than a crash — the same contract `erasure_receipt.make_receipt` keeps.
-    There is no partially-signed receipt."""
+    There is no partially-signed receipt.
+
+    `keyId` goes INSIDE the body before the MAC is taken, the way
+    `erasure_receipt.build_body` binds it, for two reasons. It has to be inside
+    for the signature to cover it, or the key identity a reader uses to pick a
+    verification key would be the one member of the document anybody could
+    rewrite. And it has to be inside for `verify_receipt` to recompute the same
+    bytes at all: the verifier MACs the receipt it was handed, with only
+    `signature` removed, so a member added after signing is a member the
+    verifier includes and the signer did not — which makes every receipt fail
+    verification as if it had been altered.
+    """
     if not isinstance(key, (bytes, bytearray)) or not key:
         raise ValueError("the SLO receipt signing key must be non-empty bytes")
-    return {**body, "keyId": key_id(bytes(key)),
-            SIGNATURE_FIELD: _mac(body, bytes(key))}
+    signed = {**body, "keyId": key_id(bytes(key))}
+    return {**signed, SIGNATURE_FIELD: _mac(signed, bytes(key))}
 
 
 def _envelope(receipt: Mapping) -> str:
@@ -757,7 +796,219 @@ def attach_generation(entry: Mapping, receipt: Mapping) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. The declared action, dispatched.
+# 5. The ROLLOUT GATE, observed half — evidence E4 of
+#    docs/design/473-slo-contracts.md.
+#
+#    The compile-time gate (`composition._check_slo_bounds`, slice 1) refuses a
+#    composition whose own declarations contradict its objectives. That is a
+#    self-consistency check and the design note says so plainly. THIS gate is
+#    the other half of the item's exit clause: the generation a rollout is about
+#    to replace produced a signed receipt, and that receipt is a MEASUREMENT.
+#    If it says an objective the candidate still promises was breached, the
+#    candidate is promising something the evidence already contradicts, and the
+#    rollout is refused BY NAME.
+# ---------------------------------------------------------------------------
+
+#: Why a rollout was admitted or refused. Ranked, because the strength of the
+#: gate is exactly the strength of its basis and a caller must be able to tell
+#: "nothing contradicted this" from "this was checked against a measurement".
+NO_CONTRACT = "no-contract"        #: the candidate declares no `slo` block
+NO_EVIDENCE = "no-evidence"        #: no predecessor receipt was presented
+UNVERIFIED = "unverified-receipt"  #: a receipt was presented and did not verify
+WITNESSED = "predecessor-receipt"  #: a verified receipt was read
+
+BASES = (NO_CONTRACT, NO_EVIDENCE, UNVERIFIED, WITNESSED)
+
+
+class RolloutRefused(Exception):
+    """The SLO gate refused a rollout. `report` is the structured refusal, the
+    same document `gate_rollout` returns, so a caller that catches this and a
+    caller that reads the report see the same bytes."""
+
+    def __init__(self, report: Mapping):
+        self.report = dict(report)
+        super().__init__(render_gate(self.report))
+
+
+def gate_rollout(*, ir: Mapping | None, receipt: Mapping | None = None,
+                 key: Optional[bytes] = None) -> dict:
+    """The rollout verdict for one candidate composition against the receipt of
+    the generation it would replace. Pure: no clock, no I/O, no latch.
+
+    The candidate's contract is read from its own IR (`contract_from_ir`), so
+    the objectives gated here are the objectives the compile-time gate already
+    admitted, not a second parse that could disagree.
+
+    Refusal rule, one sentence: a datum the candidate STILL declares, whose
+    `breached` observation in the predecessor's receipt would ALSO breach the
+    candidate's own target, refuses the rollout.
+
+    Each clause of that rule is load bearing, so each is stated:
+
+      * *still declares* — a candidate that dropped the objective is promising
+        nothing about it, and refusing on an objective nobody claimed would be
+        refusing a document for a sentence it does not contain.
+      * *breached* — `insufficient` and `unmeasurable` are NOT refusals. They
+        are "nobody knows", and a gate that refused on them would refuse every
+        rollout of a contract this tree cannot measure, which is three of the
+        five datums. They ARE reported, under `notHolding`, so the admission is
+        never mistaken for a clean bill.
+      * *would ALSO breach the candidate's target* — the comparison is re-run
+        against the NEW target with the datum's own direction
+        (`parser.SLO_DIRECTION`). A candidate that widened `p95_latency` past
+        the witnessed value is no longer contradicted by it and is admitted,
+        with the widening recorded. That is not a loophole; it is the author
+        withdrawing a promise in the source, in public, where a reviewer sees
+        it — as against silently breaching it in production.
+
+    Evidence discipline, fail closed in one direction only. A receipt PRESENTED
+    with a key it does not verify against is a REFUSAL (`unverified-receipt`):
+    evidence that cannot be checked is not evidence, and admitting on it would
+    let a forged receipt buy an admission. The ABSENCE of a receipt is not a
+    refusal (`no-evidence`): the first generation of any composition has no
+    predecessor, and a gate that refused it would refuse every first rollout.
+    The basis is in the report either way, so nothing has to infer which
+    happened.
+    """
+    from .parser import SLO_DIRECTION, slo_datum
+
+    contract = contract_from_ir(ir)
+    report: dict = {
+        "gate": "slo-rollout",
+        "admitted": True,
+        "basis": NO_CONTRACT,
+        "generation": None,
+        "composition": None,
+        "refusals": [],
+        "notHolding": [],
+        "relaxed": [],
+    }
+    if not contract:
+        report["note"] = ("the candidate declares no `slo` block, so this gate "
+                          "is inert and refuses nothing")
+        return report
+    report["declared"] = sorted(contract)
+    if not isinstance(receipt, Mapping) or not receipt:
+        report["basis"] = NO_EVIDENCE
+        report["note"] = (
+            "no predecessor receipt was presented, so there is no measurement "
+            "to contradict the candidate's objectives; this admission is the "
+            "absence of evidence and not evidence of absence")
+        return report
+    if key:
+        ok, reason = verify_receipt(receipt, key)
+        if not ok:
+            report["admitted"] = False
+            report["basis"] = UNVERIFIED
+            report["refusals"] = [{"reason": reason}]
+            report["note"] = ("a receipt was presented as evidence and could "
+                              "not be verified; an unverifiable receipt is "
+                              "refused rather than ignored")
+            return report
+    envelope = _envelope(receipt)
+    if envelope:
+        report["admitted"] = False
+        report["basis"] = UNVERIFIED
+        report["refusals"] = [{"reason": envelope}]
+        report["note"] = ("the presented receipt is not a well-formed "
+                          "`revl.slo-receipt`")
+        return report
+    report["basis"] = WITNESSED
+    report["generation"] = receipt.get("generation")
+    report["composition"] = receipt.get("composition")
+    verdicts = receipt.get("verdicts") or {}
+    for datum_key, entry in contract.items():
+        observed_entry = verdicts.get(datum_key)
+        if not isinstance(observed_entry, Mapping):
+            continue
+        verdict = observed_entry.get("verdict")
+        if verdict != BREACHED:
+            if verdict in NOT_HOLDING:
+                report["notHolding"].append({
+                    "datum": datum_key, "verdict": verdict,
+                    "reason": observed_entry.get("reason", "")})
+            continue
+        observed = observed_entry.get("observed")
+        target = entry.get("target")
+        direction = SLO_DIRECTION.get(slo_datum(datum_key) or datum_key,
+                                      "upper")
+        again = _decide(observed, target, direction,
+                        n=observed_entry.get("samples", 0))
+        witness = {
+            "datum": datum_key,
+            "observed": observed,
+            "target": target,
+            "previousTarget": observed_entry.get("target"),
+            "direction": direction,
+            "samples": observed_entry.get("samples", 0),
+            "generation": receipt.get("generation"),
+        }
+        if again["verdict"] == BREACHED:
+            report["refusals"].append(witness)
+        else:
+            report["relaxed"].append(witness)
+    if report["refusals"]:
+        report["admitted"] = False
+        report["note"] = (
+            "the generation this rollout replaces measurably breached an "
+            "objective the candidate still declares")
+    return report
+
+
+def admit_rollout(*, ir: Mapping | None, receipt: Mapping | None = None,
+                  key: Optional[bytes] = None) -> dict:
+    """`gate_rollout`, raising `RolloutRefused` on a refusal.
+
+    Two functions rather than one for the same reason `Monitor` splits
+    `evaluate` from `observe`: the verdict is a pure document a test and a
+    report can read, and the refusal is the imperative act a rollout path must
+    not be able to ignore by forgetting to look at a returned dict.
+    """
+    report = gate_rollout(ir=ir, receipt=receipt, key=key)
+    if not report["admitted"]:
+        raise RolloutRefused(report)
+    return report
+
+
+def render_gate(report: Mapping) -> str:
+    """The rollout verdict for a terminal. The refusal names the datum, both
+    numbers and the generation the witness came from, because a gate that says
+    only "refused" makes an operator go find out why by hand."""
+    if not isinstance(report, Mapping):
+        return "error: not an SLO rollout verdict"
+    head = ("SLO ROLLOUT GATE: admitted" if report.get("admitted")
+            else "SLO ROLLOUT GATE: REFUSED")
+    out = [f"{head}  (basis: {report.get('basis')})"]
+    if report.get("generation") is not None:
+        out.append(f"  witness: generation {report['generation']}"
+                   + (f" of {report['composition']}"
+                      if report.get("composition") else ""))
+    for refusal in report.get("refusals") or []:
+        if "datum" not in refusal:
+            out.append(f"  refused: {refusal.get('reason')}")
+            continue
+        out.append(
+            f"  refused: `{refusal['datum']}` was observed "
+            f"{refusal.get('observed')!r} against the candidate's declared "
+            f"{refusal.get('target')!r} "
+            f"({refusal.get('samples', 0)} sample(s), generation "
+            f"{refusal.get('generation')})")
+    for relaxed in report.get("relaxed") or []:
+        out.append(
+            f"  admitted: `{relaxed['datum']}` was observed "
+            f"{relaxed.get('observed')!r}, which the candidate's declared "
+            f"{relaxed.get('target')!r} now permits (previously "
+            f"{relaxed.get('previousTarget')!r})")
+    for unheld in report.get("notHolding") or []:
+        out.append(f"  not refused, not measured: `{unheld['datum']}` "
+                   f"({unheld.get('verdict')}) {unheld.get('reason', '')}")
+    if report.get("note"):
+        out.append(f"  {report['note']}")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# 6. The declared action, dispatched.
 # ---------------------------------------------------------------------------
 
 class DivertRefused(Exception):
@@ -975,7 +1226,7 @@ def halt(*, latch: Optional[str], wal: Optional[str] = None, reason: str = "",
 
 
 # ---------------------------------------------------------------------------
-# 6. The monitor — evaluate, decide, act, receipt.
+# 7. The monitor — evaluate, decide, act, receipt.
 # ---------------------------------------------------------------------------
 
 class Monitor:
@@ -1147,10 +1398,24 @@ class Monitor:
 
 
 # ---------------------------------------------------------------------------
-# 7. Rendering — the auditor's readable view. The structured receipt is the
+# 8. Rendering — the auditor's readable view. The structured receipt is the
 #    product; this states scope first, because a reader who cannot check a
 #    claim cannot use it.
 # ---------------------------------------------------------------------------
+
+def _not_taken(dispatch: Mapping) -> str:
+    """The `[not taken: ...]` suffix, or `""` when the action WAS taken.
+
+    Keyed off `taken`/`armed` and never off the presence of a `reason`: a
+    latch that armed successfully carries the breach reason it was armed FOR,
+    so reading a present `reason` as a failure prints "not taken" on exactly
+    the dispatches that were taken — which is the one line an operator reading
+    a receipt would act on backwards."""
+    took = dispatch.get("taken", dispatch.get("armed", True))
+    if took:
+        return ""
+    return f" [not taken: {dispatch.get('reason') or 'no reason recorded'}]"
+
 
 def render(document: Mapping) -> str:
     """Render an evaluation or a receipt for a terminal."""
@@ -1184,8 +1449,7 @@ def render(document: Mapping) -> str:
                       if dispatch.get("divertTo") else "")
                    + (f" ({dispatch.get('latch')})" if dispatch.get("latch")
                       else "")
-                   + (f" [not taken: {dispatch['reason']}]"
-                      if dispatch.get("reason") else ""))
+                   + _not_taken(dispatch))
     return "\n".join(out)
 
 
@@ -1239,8 +1503,7 @@ def render_receipt(receipt: Mapping) -> str:
                       if dispatch.get("divertTo") else "")
                    + (f" ({dispatch.get('latch')})" if dispatch.get("latch")
                       else "")
-                   + (f" [not taken: {dispatch['reason']}]"
-                      if dispatch.get("reason") else ""))
+                   + _not_taken(dispatch))
     samples = (receipt.get("observed") or {}).get("samples") or {}
     out.append("  samples: " + ", ".join(f"{k} {v}" for k, v in samples.items()))
     out.append(f"  signature: {receipt.get(SIGNATURE_FIELD)}")

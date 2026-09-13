@@ -914,6 +914,29 @@ SLO_IR_KEYS: dict[str, str] = {
     "max_pending_tasks": "max_pending_tasks",
 }
 
+# The inverse of `SLO_IR_KEYS`, so a consumer reading the IR can get back to the
+# datum the source declared. It is derived rather than written out, which is
+# what keeps the two spellings from drifting apart; a reader that only ever
+# saw the unit-bearing key would otherwise have to re-derive the mapping and
+# could re-derive it differently (item 473, observed half).
+SLO_SOURCE_NAMES: dict[str, str] = {v: k for k, v in SLO_IR_KEYS.items()}
+
+
+def slo_datum(key: str) -> str | None:
+    """The source datum name for `key`, which may be spelled either way: the
+    surface name (`p95_latency`) or the unit-bearing IR key (`p95_latency_ms`).
+    `None` for a name in neither registry.
+
+    One door, because the two halves of item 473 read the contract from two
+    places — the compile-time gate from `CompositionDecl.slo` (surface names)
+    and the observed half from the IR document (IR keys) — and a measurement
+    that silently failed to recognise a datum would report `unmeasurable` for
+    an objective the runtime can in fact measure. That is the fail-open the
+    observed half exists to prevent, so the lookup is shared."""
+    if key in SLO_DATUMS:
+        return key
+    return SLO_SOURCE_NAMES.get(key)
+
 # The ceiling parameter (item 260, section 3.1) each gateable datum is BACKED
 # by. A datum absent from this map has no declaration-owned bound in this language# version, so it is admitted as a contract the runtime must measure and is not
 # statically gated. See `composition._check_slo_bounds`.

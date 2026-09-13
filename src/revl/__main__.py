@@ -43,6 +43,7 @@ from .cli.interop import (
 from .cli.observe import (
     _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
     _run_history_query, _run_metrics, _run_profile, _run_trace, _run_why)
+from .cli.slo import _run_slo
 
 
 # The G8 boundary walk lives in `revl.boundary` (a CLI-free module) so the
@@ -1202,6 +1203,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_recover(args)
     if args.command == "estop":
         return _run_estop(args)
+    if args.command == "slo":
+        return _run_slo(args)
     if args.command == "branch":
         return _run_branch(args)
     if args.command == "compare":

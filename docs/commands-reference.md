@@ -13,7 +13,7 @@ The verb set, in the order the parser declares it:
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  plan  apply  undo  canary  query  fmt  quarantine  analyze
-test  mcp  import  export  serve  run  dev  recover  estop  branch
+test  mcp  import  export  serve  run  dev  recover  estop  slo  branch
 compare  replay  why  metrics  trace  profile  attest  dash  repair
 bundle  emit  verify  deploy  deploy-admit  truc
 ```
@@ -848,6 +848,66 @@ which one each component got:
 child gets to name its inventory before it is killed anyway. It is not a
 teardown grace and must never grow into one: by the time it starts the child is
 already refusing crossings, so it buys the inventory and nothing else.
+### `revl slo`
+
+The composition **SLO contract, observed** (item 473,
+[473-slo-contracts.md](design/473-slo-contracts.md)). The compile-time half of
+the contract needs no verb: it runs whenever a composition resolves, and refuses
+a document whose own `emission[...]` ceilings contradict the `slo { ... }` block
+it declares. This verb is for the two things that happen against a run that has
+already finished: measuring it, and gating the next rollout on what the
+measurement found.
+
+Three acts, selected by flag:
+
+- **measure** (the default) - read a recorded trace against the declared
+  contract, take the declared `on breach` response, and sign a receipt bound to
+  the generation.
+- `--verify` - check a receipt. Fail closed: a wrong envelope, a wrong key, an
+  altered body, or a summary that contradicts the verdicts it summarises is
+  refused, and nothing reads as "valid but unverified".
+- `--gate` - REFUSE this rollout when the receipt of the generation it replaces
+  measurably breached an objective the candidate still declares.
+
+Flags:
+
+- `--composition FILE` - the composition whose `slo { ... }` block is the
+  contract. Its IR is read rather than re-parsed, so the objectives gated here
+  are the ones the compile-time gate already admitted.
+- `--root DIR` - the composition root its rows resolve against.
+- `--trace FILE` - a recorded causal trace. The measurement reads only this: no
+  metrics backend is called and no service is scraped.
+- `--generation N` - the generation the measurement belongs to. It is carried
+  inside the signed body, and a receipt filed under another generation is
+  refused before it is filed.
+- `--latch FILE` / `--wal FILE` - where a `pause` or `halt` response writes, the
+  same latch `revl estop` arms and a running composition watches.
+- `--key PATH` - the receipt signing key (else `REVL_SLO_KEY_FILE`, else
+  `REVL_SLO_KEY`). With no key the run is measured and reported but not signed,
+  and the output says so.
+- `--signer TOKEN` - who issued the receipt, recorded inside the signed body.
+- `--receipt FILE` - the receipt to verify, or the predecessor receipt to gate
+  against.
+- `--out FILE` - write the signed receipt.
+- `--json` - machine-readable output.
+
+Exit status distinguishes the two operator situations: **0** clean, **1** a
+measured breach (the run missed its objectives), **2** a refused rollout (this
+rollout was not allowed to start).
+
+**What the gate refuses, and what it does not.** A datum the candidate still
+declares, whose `breached` observation in the predecessor's receipt would also
+breach the candidate's own target, refuses the rollout by name. A candidate that
+widened the objective past the witnessed value is admitted, and the widening is
+recorded: that is the author withdrawing a promise in the source, where a
+reviewer sees it. An `insufficient` or `unmeasurable` datum never refuses
+anything, because it is "nobody knows" rather than an observed failure, but it
+is reported under `notHolding` so an admission is never mistaken for a clean
+bill. A receipt
+presented as evidence that does not verify is a refusal; the absence of a
+receipt is not, because the first generation of any composition has no
+predecessor.
+
 ### `revl branch`
 
 Session branch lineage over durable write-ahead logs (roadmap item 250): what a
