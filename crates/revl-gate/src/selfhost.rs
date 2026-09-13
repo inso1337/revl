@@ -9033,10 +9033,12 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         if (!r.ok) {
             return mk_one(String::from(""), env.clone(), muts.clone(), hi);
         }
-        let bindty = if (declared != "") { declared.clone() } else { r.ty };
+        let rty = r.ty;
+        let rjs = r.js;
+        let bindty = if (declared != "") { declared.clone() } else { rty.clone() };
         let env2 = if (bindty == "") { env.clone() } else { tenv_put(&env, name.clone(), bindty.clone()) };
-        let mut value = if (declared == "") { r.js } else { apply_arg_markers(r.js.clone(), &declared, &r.ty) };
-        if ((declared != "") && pins_empty_literal(&r.js, &declared)) {
+        let mut value = if (declared == "") { rjs.clone() } else { apply_arg_markers(rjs.clone(), &declared, &rty) };
+        if ((declared != "") && pins_empty_literal(&rjs, &declared)) {
             value = (((value.revl_slice(0i64, (value.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&declared))).revl_concat("}");
         }
         let js = ((((((String::from("{\"step\":\"let\",\"name\":").revl_concat(&jstr(&predeclared_mangle(name.clone())))).revl_concat(",\"value\":")).revl_concat(&value)).revl_concat(",\"mutable\":")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat(&own_birth_marker(births.clone(), i))).revl_concat("}");

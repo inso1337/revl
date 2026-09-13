@@ -9803,15 +9803,20 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (!atk(ts, j, "=")) { return mk_one("", env, muts, hi) }
     let r = lir_rhs(ts, j + 1, env)
     if (!r.ok) { return mk_one("", env, muts, hi) }
-    let bindty = declared != "" ? declared : r.ty
+    // read the rhs out of the step ONCE: both the type and the JSON are used
+    // more than once below, and a repeated FIELD read is what the rust tier
+    // cannot borrow (a plain local it clones, a moved field it does not).
+    let rty = r.ty
+    let rjs = r.js
+    let bindty = declared != "" ? declared : rty
     let env2 = bindty == "" ? env : tenv_put(env, name, bindty)
     // An annotated `let`/`var` is a checking position, so the reference stamps
     // the same two markers here that it stamps on a call argument and a return:
     // `_mark_widen` (Int/Int32 -> Float, Int32 -> Int) and then
     // `_pin_empty_literal`. They are disjoint — a widen needs a numeric declared
     // type, a pin needs a collection one — so the pin tests the ORIGINAL rhs.
-    var value = declared == "" ? r.js : apply_arg_markers(r.js, declared, r.ty)
-    if (declared != "" && pins_empty_literal(r.js, declared)) {
+    var value = declared == "" ? rjs : apply_arg_markers(rjs, declared, rty)
+    if (declared != "" && pins_empty_literal(rjs, declared)) {
       value = value.slice(0, value.length() - 1)
         .concat(",\"expected\":").concat(jstr(declared)).concat("}")
     }
