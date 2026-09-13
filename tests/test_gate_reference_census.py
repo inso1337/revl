@@ -126,13 +126,18 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # BOTH lists and the census baseline is re-recorded.
 KNOWN_BYPASSES = {
     # -- fn-body binding rules (G1/G6) --
+    # The ASSIGNMENT half landed with item 391's binding-discipline slice (the
+    # `let`/`var`/parameter scope walk over a module `fn` body, plus the
+    # arrow-body write form): `v2_let_reassignment`,
+    # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
+    # `g6_closure_mutates_capture` now refuse with the reference's message
+    # byte-for-byte and are struck from this list. What remains needs machinery
+    # this slice deliberately does not build: resolving a name READ against the
+    # whole callable universe (the two G1 rows below), and the whole-body
+    # callable-shadowing scan over every fn, component and test block.
     "examples/rejections/g1_template_undeclared.rvl",
     "examples/rejections/v2_undeclared_fn_var.rvl",
-    "examples/rejections/v2_let_reassignment.rvl",
-    "examples/rejections/v2_compound_assign_on_let.rvl",
-    "examples/rejections/v2_duplicate_let_block_scope.rvl",
     "examples/rejections/shadowed_module_fn_call.rvl",
-    "examples/rejections/g6_closure_mutates_capture.rvl",
     # -- expression typing (T1/T2) --
     "examples/rejections/t2_null_in_expression.rvl",
     "examples/rejections/t11_field_through_opt.rvl",

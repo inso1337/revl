@@ -11,12 +11,8 @@
    "examples/rejections/g4_spawn_widens_parameter.rvl"
   ],
   "false-admit/G6": [
-   "examples/rejections/g6_closure_mutates_capture.rvl",
    "examples/rejections/g6_method_local_shadows_component.rvl",
-   "examples/rejections/shadowed_module_fn_call.rvl",
-   "examples/rejections/v2_compound_assign_on_let.rvl",
-   "examples/rejections/v2_duplicate_let_block_scope.rvl",
-   "examples/rejections/v2_let_reassignment.rvl"
+   "examples/rejections/shadowed_module_fn_call.rvl"
   ],
   "false-admit/HOST-METHOD": [
    "examples/rejections/host_method_not_on_surface.rvl",
@@ -483,18 +479,6 @@
     "tag": "G4"
    }
   },
-  "examples/rejections/g6_closure_mutates_capture.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "a closure cannot assign to `n`: captures are by value, not by reference (G6)",
-    "tag": "G6"
-   }
-  },
   "examples/rejections/g6_method_local_shadows_component.rvl": {
    "bucket": "false-admit/G6",
    "gate": {
@@ -925,42 +909,6 @@
    "reference": {
     "message": "`rank` is declared to return `Int` but control can reach the end of its body without a `return`",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/v2_compound_assign_on_let.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "cannot reassign `n` \u2014 it is `let` (single-assignment)",
-    "tag": "G6"
-   }
-  },
-  "examples/rejections/v2_duplicate_let_block_scope.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`y` is already declared in this function",
-    "tag": "G6"
-   }
-  },
-  "examples/rejections/v2_let_reassignment.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "cannot reassign `n` \u2014 it is `let` (single-assignment)",
-    "tag": "G6"
    }
   },
   "examples/rejections/v2_map_set_value_mismatch.rvl": {

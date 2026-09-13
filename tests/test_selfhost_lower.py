@@ -390,6 +390,50 @@ component C provides s: S {
   provide s { fn go() { let x = Str("a")   return 0 } }
 }
 """),
+    # ---- item 391: the accepting twins of the fn-body binding refusals -----
+    # A `var` is exactly what the reassignment guard lets through.
+    ("var reassignment", """fn bump() -> Int {
+  var n = 1
+  n = 2
+  n += 1
+  return n
+}
+"""),
+    # Two DISJOINT sibling blocks may reuse a name: only one arm is ever live,
+    # so neither `let` is redeclaring something already bound (item 155).
+    ("disjoint sibling blocks reuse a name", """fn pick(c: Bool) -> Int {
+  if (c) { let y = 1  return y } else { let y = 2  return y }
+}
+"""),
+    # A loop binding lives in the body's scope only, so a second loop over the
+    # same spelling is not a redeclaration.
+    ("two for loops binding one name", """fn total(xs: List[Int]) -> Int {
+  var t = 0
+  for (x of xs) { t += x }
+  for (x of xs) { t += x }
+  return t
+}
+"""),
+    # THE HOST PROVENANCE. A non-`var` `let` bound to a host acquisition is
+    # recorded `"host"`, and the reference's reassign guard tests falsiness — so
+    # this IS admitted, and a gate that refused it would be a false rejection.
+    ("reassigning a host-provenance let", """fn f() -> Int {
+  let m = Map.new()
+  m = m
+  return 1
+}
+"""),
+    # A statement-block MATCH arm spells `Pat => { … }` with the same two tokens
+    # an arrow does, and revl does allow a `let` there — so the arrow-body write
+    # scan must not fire on it.
+    ("a let inside a statement-block match arm", """type S = A(Str) | B(Str)
+fn f(s: S) -> Int {
+  return match s {
+    A(x) => { let y = 1  y },
+    B(x) => 2,
+  }
+}
+"""),
     # item 350: a `boot` component — the environment contract. `boot` is a
     # contextual keyword the admission gate carries no verdict for (the contract
     # is an admission-time CONFIG concern, checked by `run.py`'s `--env`
@@ -1675,6 +1719,62 @@ extern pure fn g(h: Int) = @py { return None }
 extern acquire fn good() -> H undo g(1) = @py { return 1 }
 extern acquire fn bad() -> H = @py { return 1 }
 """, "G4"),
+
+    # ---- item 391 / issue #106: the fn-body BINDING DISCIPLINE (G1/G6) -------
+    # `_lower_pure_stmt`'s scope rules over a module `fn` body, plus the
+    # arrow-body write form the reference's PARSER refuses. All four are
+    # code-less in the reference, so before this slice the gate raised no
+    # objection and the census filed them as false-admits; they were pinned in
+    # TYPE_LAYER_GAP below and have been struck from it. The first four are the
+    # checked-in rejection fixtures; the rest are the family's remaining shapes.
+    ("let reassignment", _fixture("v2_let_reassignment"), "G6"),
+    ("compound assignment on a let",
+     _fixture("v2_compound_assign_on_let"), "G6"),
+    ("duplicate let in one straight-line scope",
+     _fixture("v2_duplicate_let_block_scope"), "G6"),
+    ("a closure assigning to a capture",
+     _fixture("g6_closure_mutates_capture"), "G6"),
+    # a PARAMETER is recorded not-mutable, so writing one is a `let`
+    # reassignment and not an undeclared name.
+    ("assignment to a parameter", """
+fn f(p: Int) -> Int {
+  p = 2
+  return p
+}
+""", "G6"),
+    # the same guard inside a nested block: the arm snapshots the enclosing
+    # scope, so the outer `let` is still what the write lands on.
+    ("let reassignment inside an if arm", """
+fn f(c: Bool) -> Int {
+  let n = 1
+  if (c) { n = 2 }
+  return n
+}
+""", "G6"),
+    # a redeclaration INSIDE one arm collides, unlike two disjoint arms.
+    ("duplicate let inside one if arm", """
+fn f(c: Bool) -> Int {
+  if (c) { let y = 1  let y = 2  return y }
+  return 0
+}
+""", "G6"),
+    # a loop binding shadows nothing already live, and draws the same
+    # already-declared diagnostic a second `let` would.
+    ("a for binding over a live name", """
+fn f(xs: List[Int]) -> Int {
+  let x = 1
+  for (x of xs) { }
+  return x
+}
+""", "G6"),
+    # the assignment position also decides UNDECLARED: nothing bound `z`, so the
+    # write is the reference's G1 fn-scope refusal (not the G6 half).
+    ("assignment to a name nothing bound", """
+fn f() -> Int {
+  z = 2
+  return 1
+}
+""", "G1"),
 ]
 
 
@@ -2404,8 +2504,9 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 45 after the self-declared
-# async-colour arrow (rule C1) moved from a pinned gap to gate/reference
+# `examples/rejections/`; it now stands at 41 after the self-declared
+# async-colour arrow (rule C1) and then the four fn-body BINDING fixtures (item
+# 391's binding-discipline slice) moved from a pinned gap to gate/reference
 # agreement. Grouped below by the reference check that refuses
 # them (the family each self-host slice T1..T4 will move from "pinned gap" to
 # "agrees").
@@ -2416,21 +2517,24 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # fixtures from KNOWN_BYPASSES in tests/test_gate_reference_census.py and
 # re-record the census baseline, and (3) fold the fixtures into the slice's own
 # agreement corpus. Until then this file plus KNOWN_BYPASSES are the whole
-# record that the 46-fixture gap is intended, not a latent gate bypass.
+# record that the remaining gap is intended, not a latent gate bypass.
 #
 # The tag beside each fixture is what `_classify` (above) derives from the
 # reference refusal, i.e. the bucket the census now files the false-admit under.
 TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
-    # fn-body binding rules (G1/G6): undeclared names, let/var reassignment and
-    # redeclaration, callable shadowing, a by-value capture written through.
+    # fn-body binding rules (G1/G6). The ASSIGNMENT half of this family has
+    # LANDED (item 391's binding-discipline slice): the module-`fn` scope walk
+    # and the arrow-body write form moved `v2_let_reassignment`,
+    # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
+    # `g6_closure_mutates_capture` into REJECTED_PROGRAMS above, where tag AND
+    # message are compared. What stays pinned here needs what that slice
+    # deliberately does not build: resolving a name READ against the whole
+    # callable universe (the two G1 rows), and the whole-body callable-shadowing
+    # scan over every fn, component and test block.
     "fn-body binding (G1/G6)": [
         ("g1_template_undeclared", "G1"),
         ("v2_undeclared_fn_var", "G1"),
-        ("v2_let_reassignment", "G6"),
-        ("v2_compound_assign_on_let", "G6"),
-        ("v2_duplicate_let_block_scope", "G6"),
         ("shadowed_module_fn_call", "G6"),
-        ("g6_closure_mutates_capture", "G6"),
     ],
     # expression typing (T1/T2): the operator/field/index/record algebra and the
     # literal-range and `null` refusals.
@@ -2506,12 +2610,12 @@ _TYPE_LAYER_CASES = [
 ]
 
 
-def test_the_type_layer_gap_is_exactly_45_fixtures():
+def test_the_type_layer_gap_is_exactly_41_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 45, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 41, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 45, "a fixture is listed twice"
+    assert len(set(names)) == 41, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
