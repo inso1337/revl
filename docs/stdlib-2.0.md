@@ -176,6 +176,18 @@ like what they are: an empty persistent value vs a stateful host object.
   `v` to match the receiver's `V`.
 - **Persistence:** `set` returns a fresh map; the receiver is untouched.
   `let m2 = m.set(k, v)` leaves `m` exactly as it was, on every tier.
+- **`m[k]` reads by KEY, and a miss FAULTS.** The subscript is the partial
+  read and `lookup(k)` is the total one — the same split §index draws for the
+  List, and the reading rust already had (`HashMap`'s own `Index` panics).
+  A miss faults with one sentence on every tier,
+  `revl: map index: no entry for key`, so a program that relies on the key
+  being present fails in the same place everywhere instead of reading a go
+  zero value, a java `null` or a ts `undefined`. Reach for `lookup(k) ?? d`
+  where absence is expected. The read is lowered from the map's **declared
+  key type**, not from the shape of the index expression: keying it on the
+  index made `m[k]` on a `Map[Str, V]` cast the key to an integer, which did
+  not compile on rust or java and looked the entry up under `NaN` on ts
+  (issue #957).
 - **Equality** is the language's one structural equality (syntax-2.0
   §3.4), specialized order-independently: two maps are equal iff they have
   the same key set and equal values under every key — `{a=1, b=2} ==
