@@ -22,14 +22,15 @@
 //!     // A definitive refusal. Byte-agreeing with the reference compiler on
 //!     // the covered corpus: stop here, and show the message as-is.
 //!     Verdict::Refused { code, message } => println!("refused ({}): {}", code, message),
-//!     // NOT an admission. See "This gate issues no admissions" below.
+//!     // NOT an admission. See "The verdict surface issues no admissions"
+//!     // below; ask `issue_admission` for a green.
 //!     Verdict::NoObjection => println!("nothing this gate can refuse"),
 //!     // The gate declined to decide at all.
 //!     Verdict::OutsideFrontier { reason } => println!("undecided: {}", reason),
 //! }
 //! ```
 //!
-//! # This gate issues no admissions
+//! # The verdict surface issues no admissions
 //!
 //! Read this before wiring the crate into anything.
 //!
@@ -41,26 +42,67 @@
 //! `fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }`
 //! and `fn f() -> { }`; the self-host gate raises no objection to any of them.
 //!
-//! So there is no `Verdict::Admitted` arm, and no `is_admitted()`. The
-//! non-refusing outcome is [`Verdict::NoObjection`], which means exactly
-//! *"this gate found nothing it is able to refuse"* and never *"the reference
-//! would admit this"*. A host that must ADMIT — because it is about to run the
-//! program — still has to get a reference verdict (`revl compile`, or
-//! `revl.gate.admit` on py). What this crate buys is the other direction: a
-//! local, in-process, allocation-cheap REFUSAL that agrees with the reference
-//! byte for byte on the covered corpus, with no round trip and no Python.
+//! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
+//! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
+//! nothing it is able to refuse"* and never *"the reference would admit this"*,
+//! and [`Verdict::to_json`] emits `"admitted": false` for EVERY arm. A consumer
+//! written against the fixed `{admitted, code, message}` shape
+//! (`docs/design/332-embeddable-gate-api.md`) therefore reads the verdict
+//! surface as "never admits" rather than misreading a no-objection as an
+//! admission; the arm itself is carried in the extra `"verdict"` field.
 //!
 //! The two divergence directions are not symmetric, and this asymmetry is the
 //! whole design: refusing what the reference admits is an inconvenience;
 //! ADMITTING what the reference refuses is the defect class the admission-gate
-//! arc exists to prevent. A crate that cannot issue an admission cannot commit
-//! that defect.
+//! arc exists to prevent.
 //!
-//! On the wire, [`Verdict::to_json`] therefore emits `"admitted": false` for
-//! EVERY arm. A consumer written against the fixed `{admitted, code, message}`
-//! shape (`docs/design/332-embeddable-gate-api.md`) reads this gate as
-//! "never admits" rather than misreading a no-objection as an admission; the
-//! arm itself is carried in the extra `"verdict"` field.
+//! # The admission surface (issue #346)
+//!
+//! An admission is therefore a SECOND, separate question, asked through a
+//! separate type and a separate entry point: [`issue_admission`] returns an
+//! [`Admission`], not a [`Verdict`]. The split is the point. A host holding a
+//! [`Verdict`] cannot accidentally read it as a green — there is no arm to
+//! misread — and a host that wants a green has to ask for one explicitly and
+//! handle [`Admission::Withheld`].
+//!
+//! [`Admission::Admitted`] is reachable through exactly one path, and both of
+//! its conditions are necessary:
+//!
+//! 1. [`admit`] returned [`Verdict::NoObjection`] — the composition/guarantee
+//!    gate ran and found nothing to refuse. An admission is never issued over a
+//!    refusal or over a frontier gap.
+//! 2. the source is inside the ADMISSION SURFACE
+//!    ([`ADMISSION_SURFACE_ID`], `src/admission.rs`) — the region where the
+//!    covered layer is the WHOLE question, because the source carries no term
+//!    the reference type layer decides.
+//!
+//! The surface is deliberately tiny: `service` method signatures and scalar
+//! `type` aliases, over a closed scalar vocabulary derived from the reference's
+//! own table. No body, no expression, no literal, no generic head. That is not
+//! the covered layer read optimistically; it is the sliver of the covered layer
+//! where reading it as an admission is sound, and it is measured rather than
+//! argued — every certified program in the census corpus is a program the
+//! reference admits, and the `false-admission` bucket of
+//! `tools/gate_reference_census.py` reds on the first one that is not.
+//!
+//! A source OUTSIDE the surface is [`Admission::Withheld`] carrying the verdict
+//! verbatim, which is the same fail-closed answer the crate gave before the arm
+//! existed. Widening the surface is the self-host type layer's lane
+//! (`docs/design/457-selfhost-type-layer.md`): each slice it lands is a family
+//! the certifier can then account for.
+//!
+//! ```no_run
+//! use revl_gate::{issue_admission, Admission};
+//!
+//! match issue_admission("service Store { fn get(key: Str) -> Str }") {
+//!     // A real admission: `"admitted": true` on the wire, and the basis says
+//!     // on what ground.
+//!     Admission::Admitted { basis } => println!("admitted: {}", basis),
+//!     // No admission. The verdict inside is the refusal surface's answer, and
+//!     // a `NoObjection` there is still not a green.
+//!     Admission::Withheld { verdict } => println!("withheld: {:?}", verdict),
+//! }
+//! ```
 //!
 //! # Fail closed, always
 //!
@@ -120,7 +162,8 @@
 //! match admit_into(candidate, running) {
 //!     // A refusal the reference agrees with: this candidate re-provides `store`.
 //!     Verdict::Refused { code, message } => println!("refused ({}): {}", code, message),
-//!     // NOT an admission. See "This gate issues no admissions" above.
+//!     // NOT an admission. See "The verdict surface issues no admissions"
+//!     // above; ask `issue_admission_into` for a green.
 //!     Verdict::NoObjection => println!("nothing this gate can refuse"),
 //!     // The gate declined to decide at all: a row it cannot honour, a frontier
 //!     // gap, or an aborted fold. Fail closed.
@@ -181,6 +224,7 @@
 #[allow(non_snake_case, unused_braces, clippy::all)]
 mod selfhost;
 
+mod admission;
 mod frontier;
 pub mod ir;
 pub mod session;
@@ -205,11 +249,26 @@ pub const LANGUAGE_VERSION: &str = "2.0.0";
 pub const SYMBOLS_API_VERSION: &str = "0.1.0";
 
 /// What this gate actually decides, in one line. The reference type layer is
-/// deliberately absent — see the crate docs, "This gate issues no admissions".
+/// deliberately absent — see the crate docs, "The verdict surface issues no
+/// admissions", and [`ADMITTED_LAYER`] for the sliver it is sound to admit in.
 pub const COVERED_LAYER: &str = "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer";
 
 /// The `code` a frontier gap reports on the wire.
 pub const FRONTIER_CODE: &str = "FRONTIER";
+
+/// An identifier of the region [`issue_admission`] is willing to ADMIT in.
+///
+/// Versioned apart from [`FRONTIER_ID`] because the two bound different things:
+/// the frontier bounds where this gate may REFUSE, this bounds where it may
+/// ADMIT. A host caching an admission compares THIS value before trusting the
+/// cached green against a gate built from another tree — two gates with
+/// different admission surfaces admitted under different rules.
+pub const ADMISSION_SURFACE_ID: &str = admission::SURFACE_ID;
+
+/// What [`issue_admission`] is willing to admit, in one line. Read it before
+/// treating an [`Admission::Withheld`] as a defect: outside this region the
+/// honest answer is to withhold.
+pub const ADMITTED_LAYER: &str = "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides";
 
 /// The three values a host can branch on (design "Versioning").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +373,82 @@ impl Verdict {
         }
         out.push('}');
         out
+    }
+}
+
+/// The answer to the ADMISSION question (issue #346) — a different question
+/// from [`Verdict`], carried in a different type so the two cannot be confused.
+///
+/// [`Verdict`] answers *"is there something here I can refuse"*. This answers
+/// *"may this run"*, and only one of its arms says yes. A host that needs a
+/// green asks [`issue_admission`] and handles [`Admission::Withheld`]; a host
+/// that only wants a local refusal keeps using [`admit`] and never sees this
+/// type at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// The gate ISSUES an admission: [`admit`] raised no objection AND the
+    /// source is inside the admission surface, so the covered layer was the
+    /// whole question. `basis` is the certificate's why-trace — which surface,
+    /// and what it accounted for. It is not on the wire.
+    Admitted { basis: String },
+    /// No admission. `verdict` is the refusal surface's answer verbatim, and a
+    /// [`Verdict::NoObjection`] in here is still not a green: it means the gate
+    /// found nothing to refuse and was not entitled to admit either.
+    Withheld { verdict: Verdict },
+}
+
+impl Admission {
+    /// True only for an ISSUED admission. This is the one call a host may treat
+    /// as a green light, and only within [`ADMISSION_SURFACE_ID`].
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, Admission::Admitted { .. })
+    }
+
+    /// The certificate's why-trace for an issued admission.
+    pub fn basis(&self) -> Option<&str> {
+        match self {
+            Admission::Admitted { basis } => Some(basis),
+            Admission::Withheld { .. } => None,
+        }
+    }
+
+    /// The withheld answer's verdict; `None` for an issued admission.
+    pub fn verdict(&self) -> Option<&Verdict> {
+        match self {
+            Admission::Admitted { .. } => None,
+            Admission::Withheld { verdict } => Some(verdict),
+        }
+    }
+
+    /// The arm's stable wire name: `"admitted"`, or the withheld verdict's own
+    /// [`Verdict::kind`].
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Admission::Admitted { .. } => "admitted",
+            Admission::Withheld { verdict } => verdict.kind(),
+        }
+    }
+
+    /// The design's fixed `{"admitted", "code", "message"}` shape plus the
+    /// `"verdict"` arm name.
+    ///
+    /// An issued admission serialises `{"verdict":"admitted","admitted":true,
+    /// "code":null,"message":null}` — BYTE-IDENTICAL to what `revl.gate`'s own
+    /// `Verdict.to_json()` writes for a py admission, so a seam comparing the
+    /// two tiers' wires (item 337) compares equal bytes rather than two
+    /// spellings of the same yes. The basis is deliberately off the wire: it is
+    /// evidence for a log, not part of the contract.
+    ///
+    /// A withheld answer serialises the verdict verbatim, so switching a
+    /// consumer from [`admit`] to [`issue_admission`] changes nothing about the
+    /// bytes it already handled.
+    pub fn to_json(&self) -> String {
+        match self {
+            Admission::Admitted { .. } => String::from(
+                "{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}",
+            ),
+            Admission::Withheld { verdict } => verdict.to_json(),
+        }
     }
 }
 
@@ -444,6 +579,63 @@ pub fn admit_into(source: &str, manifest: &str) -> Verdict {
         }
     };
     verdict_from_wire(&wire)
+}
+
+/// The ADMISSION question for `source` (issue #346): may this run?
+///
+/// Two conditions, both necessary, and in this order:
+///
+/// 1. [`admit`] must return [`Verdict::NoObjection`]. A refusal or a frontier
+///    gap is withheld as it stands — an admission is never issued over the
+///    refusal surface's head.
+/// 2. `source` must be inside the ADMISSION SURFACE ([`ADMISSION_SURFACE_ID`]),
+///    the region where the covered layer is the WHOLE question because the
+///    source carries no term the reference type layer decides.
+///
+/// Outside that region the answer is [`Admission::Withheld`] carrying the
+/// verdict, which is exactly what a consumer of [`admit`] already handles. See
+/// [`ADMITTED_LAYER`] for what the region is, and the crate docs for why it is
+/// this small.
+pub fn issue_admission(source: &str) -> Admission {
+    let verdict = admit(source);
+    if verdict == Verdict::NoObjection {
+        if let Some(basis) = admission::certify(source) {
+            return Admission::Admitted { basis };
+        }
+    }
+    Admission::Withheld { verdict }
+}
+
+/// The ADMISSION question for `source` once it is admitted INTO the running
+/// composition `manifest` (issue #346) — the shape an agent loop actually needs.
+///
+/// The empty manifest is the empty composition, so `issue_admission_into(src,
+/// "")` is [`issue_admission`] byte for byte.
+///
+/// Against a NON-EMPTY manifest the surface is far narrower, and the reason is
+/// the item-186 row wire rather than a gap in the certifier: a row carries a
+/// component name, a provision key and a realm, and NO SERVICE SHAPES. A
+/// candidate declaring `service Store { ... }` may collide with a `Store` the
+/// running composition already holds in a different shape — the reference
+/// refuses that pair with "service `Store` differs from the running manifest"
+/// — and no amount of care on this side can see it in the wire. So only a
+/// candidate that declares nothing is certified against a running composition,
+/// and everything else is withheld with the fold's verdict.
+///
+/// Widening this is not the type layer alone: the WIRE has to carry the running
+/// composition's declared shapes first. That is the remaining half of issue
+/// #346, and naming it here is cheaper than rediscovering it.
+pub fn issue_admission_into(source: &str, manifest: &str) -> Admission {
+    if manifest.is_empty() {
+        return issue_admission(source);
+    }
+    let verdict = admit_into(source, manifest);
+    if verdict == Verdict::NoObjection {
+        if let Some(basis) = admission::certify_into(source, manifest) {
+            return Admission::Admitted { basis };
+        }
+    }
+    Admission::Withheld { verdict }
 }
 
 /// Parse the self-host gate's internal `"<TAG>|<message>"` protocol into the
@@ -777,5 +969,134 @@ component CacheLayer requires store: Store provides store: Store {\n\
             "fn id(x: Int) -> Int { return x }",
             &over
         )));
+    }
+
+    // The admission surface (issue #346).
+
+    /// A source inside the admission surface: interface declarations only.
+    const CERTIFIABLE: &str = "service Store {\n  fn get(key: Str) -> Str\n}\n";
+
+    #[test]
+    fn the_verdict_surface_still_has_no_admitting_arm() {
+        // The split is the whole safety story: a host holding a `Verdict` has no
+        // arm it could misread as a green, whatever the admission surface grows
+        // into.
+        for source in [CERTIFIABLE, "fn id(x: Int) -> Int { return x }", ""] {
+            let verdict = admit(source);
+            assert!(!verdict.is_refused());
+            assert_eq!(verdict, Verdict::NoObjection);
+            assert!(verdict.to_json().contains("\"admitted\":false"));
+        }
+    }
+
+    #[test]
+    fn an_interface_only_source_is_admitted_and_says_so_on_the_wire() {
+        let issued = issue_admission(CERTIFIABLE);
+        match &issued {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains(ADMISSION_SURFACE_ID), "{}", basis);
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        assert!(issued.is_admitted());
+        assert_eq!(issued.kind(), "admitted");
+        assert_eq!(
+            issued.to_json(),
+            "{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}"
+        );
+    }
+
+    #[test]
+    fn a_source_outside_the_surface_is_withheld_with_the_verdict_verbatim() {
+        // The type-layer gap, which is the whole reason the surface is this
+        // small: the reference refuses this and the covered layer cannot see it,
+        // so the honest answer is to withhold rather than to admit.
+        for source in [
+            "fn f() -> Int { return \"s\" }",
+            "fn f() -> Int { return undefined_name }",
+            "fn f() -> { }",
+        ] {
+            let issued = issue_admission(source);
+            assert!(!issued.is_admitted(), "must not admit {:?}", source);
+            assert_eq!(issued.to_json(), admit(source).to_json());
+            assert_eq!(issued.verdict(), Some(&admit(source)));
+        }
+    }
+
+    #[test]
+    fn an_admission_is_never_issued_over_a_refusal_or_a_frontier_gap() {
+        // Condition 1, held from the outside: every source the refusal surface
+        // does not answer `NoObjection` to is withheld, so the arm cannot be
+        // reached past a refusal however the surface is widened later.
+        let over_bound = "x".repeat(MAX_SOURCE_BYTES + 1);
+        // a G3 refusal, a BAD parse refusal, and a frontier gap
+        for source in [AMBIENT_CONFLICT, "service S { fn f(", over_bound.as_str()] {
+            let verdict = admit(source);
+            assert_ne!(verdict, Verdict::NoObjection, "{:?}", &source[..17.min(source.len())]);
+            assert_eq!(issue_admission(source), Admission::Withheld { verdict });
+        }
+    }
+
+    #[test]
+    fn an_empty_manifest_is_the_standalone_admission_question() {
+        for source in [CERTIFIABLE, AMBIENT_CONFLICT, "fn id(x: Int) -> Int { return x }"] {
+            assert_eq!(
+                issue_admission_into(source, ""),
+                issue_admission(source),
+                "an empty manifest is the empty composition on the admission surface too"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaring_candidate_is_withheld_against_a_running_composition() {
+        // The wire carries no service shapes, so the same bytes that are
+        // ADMITTED standalone are WITHHELD against a running composition. This
+        // is the remaining half of issue #346, and it is a refusal to guess
+        // rather than an oversight.
+        assert!(issue_admission(CERTIFIABLE).is_admitted());
+        let into = issue_admission_into(CERTIFIABLE, RUNNING);
+        assert!(!into.is_admitted());
+        assert_eq!(into.verdict(), Some(&Verdict::NoObjection));
+        assert!(into.to_json().contains("\"admitted\":false"));
+    }
+
+    #[test]
+    fn a_candidate_that_declares_nothing_is_admitted_into_a_running_composition() {
+        let into = issue_admission_into("// nothing to add\n", RUNNING);
+        match &into {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains("provision rows"), "{}", basis)
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        assert!(into.is_admitted());
+    }
+
+    #[test]
+    fn a_halted_or_deferred_manifest_row_is_never_admitted_into() {
+        for rows in ["!halted", "Kv/store/;-Kv/store/", "!paused", "Kv/store/;Kv/store=Int"] {
+            let into = issue_admission_into("// nothing to add\n", rows);
+            assert!(!into.is_admitted(), "must not admit into {:?}", rows);
+            assert!(into.to_json().contains("\"admitted\":false"));
+        }
+    }
+
+    #[test]
+    fn the_withheld_wire_is_the_verdict_wire_on_every_arm() {
+        // Switching a consumer from `admit` to `issue_admission` may only ADD
+        // the admitted wire; every other answer has to be byte-identical to what
+        // it already handled.
+        for source in [
+            "fn id(x: Int) -> Int { return x }",
+            AMBIENT_CONFLICT,
+            "component X provides { fn = }",
+            "service Store {\n  fn get(k: Str) -> Str\n  fn get(k: Str) -> Str\n}\n",
+        ] {
+            let issued = issue_admission(source);
+            if !issued.is_admitted() {
+                assert_eq!(issued.to_json(), admit(source).to_json(), "{:?}", source);
+            }
+        }
     }
 }
