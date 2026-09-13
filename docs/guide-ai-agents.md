@@ -286,7 +286,7 @@ is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
-The complete advertised verb set is 52 verbs, from
+The complete advertised verb set is 55 verbs, from
 `src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what
 you reach for; each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
@@ -313,6 +313,7 @@ you reach for; each verb's exact inputs and outputs are in
 | `revl_explain` · `revl_fmt` | what a diagnostic code guarantees and how to satisfy it; canonical formatting of inline source, IR-equivalence gated | [mcp-reference.md](mcp-reference.md#revl_explain) · [fmt.md](fmt.md) |
 | `revl_commit` · `revl_commit_confirm` · `revl_abort` | the session commit protocol: enumerate the irreversible residue, confirm it by hash, or abort and replay the inverses | [mcp-reference.md](mcp-reference.md) |
 | `revl_approve` · `revl_revoke` | say yes to one outstanding class-(c) crossing, or mint and later withdraw a session-scoped standing grant | [mcp-reference.md](mcp-reference.md#revl_approve) |
+| `revl_escalate` · `revl_override` · `revl_quorum` | hand a stalled multi-party approval question up, admit one without its count (its own `override` verb, recorded as an override), read the decision graph and its admission receipt | [mcp-reference.md](mcp-reference.md#revl_escalate) |
 | `revl_distillation_offers` · `revl_apply_distillation` · `revl_revoke_distillation` | fold repeated yeses into a proposed auto-approve rule, install it, retire it | [mcp-reference.md](mcp-reference.md#revl_distillation_offers) |
 | `revl_estop` · `revl_estop_report` | the operator's emergency halt (a latch flip, not an unwind), and reading back what it stranded | [mcp-reference.md](mcp-reference.md#revl_estop) |
 | `revl_fork` · `revl_fork_confirm` | enumerate what forking the session at step k would rewind and what it cannot, then perform it and mint the branch | [mcp-reference.md](mcp-reference.md#revl_fork) |

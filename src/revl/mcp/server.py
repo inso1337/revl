@@ -80,6 +80,7 @@ from . import operator as _operator
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
+from . import quorum as _quorum
 from . import repair as _repair
 from . import ship as _ship
 from . import deploy as _mcp_deploy
@@ -1149,16 +1150,91 @@ def _tool_revoke(arguments: dict) -> dict:
       * `capability` revokes EVERY live standing grant for that capability (the
         same key `revl_approve` mints against — a token when scoped by item 343,
         the extern name otherwise);
-      * `requestId` revokes one specific grant (the id the mint returned).
+      * `requestId` revokes one specific grant (the id the mint returned);
+      * `hash` (item 471 Slice 2) withdraws a PENDING multi-party QUESTION — a
+        different object from a minted grant, so it is a different branch and not
+        a third spelling of one. The votes cast so far stop counting, no approval
+        is minted, and the decision graph records who closed it and why.
 
     Revoking a capability/id with no live grant is a clean typed no-op
     (`count: 0`), not an error — idempotent. Gated by the `approve` operator verb
-    (item 55): withdrawing consent is the same authority as granting it."""
+    (item 55): withdrawing consent is the same authority as granting it, whether
+    what is withdrawn is a standing grant or a question nobody has answered yet."""
     capability = arguments.get("capability")
     request_id = arguments.get("requestId")
     try:
+        if arguments.get("hash"):
+            return {"ok": True, **_quorum.revoke_question(SESSION, arguments)}
         return {"ok": True, **SESSION.revoke_standing_grant(
             capability=capability, request_id=request_id)}
+    except ValueError as error:
+        return _session_error(str(error))
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_escalate(arguments: dict) -> dict:
+    """Hand a stalled MULTI-PARTY question up, closing its vote path (roadmap
+    item 471 Slice 2, docs/design/471-quorum-approval.md Decision 4).
+
+    What an approver does when the rule cannot be answered as written: the named
+    approvers cannot be convened, the question has stalled, or the change needs an
+    authority the rule does not name. Escalation only ever NARROWS authority — an
+    escalated question can no longer be admitted by votes, and the one path left
+    is `revl_override`, which is separately granted and separately recorded.
+
+    Only an approver the rule names, or the proposer, may escalate; a bystander is
+    refused as `unknown-approver` and the refusal is written to the decision graph
+    before it is raised. Gated by the `approve` operator verb (item 55): saying a
+    question cannot be answered as written is the same authority as answering
+    it."""
+    try:
+        return {"ok": True, **_quorum.escalate(SESSION, arguments)}
+    except ValueError as error:
+        return _session_error(str(error))
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_override(arguments: dict) -> dict:
+    """EMERGENCY OVERRIDE of a multi-party question: admit the crossing WITHOUT
+    its count (roadmap item 471 Slice 2).
+
+    Gated by its own `override` operator verb, never by `approve`. That separation
+    is the authority statement: an operator trusted to cast one of N votes is not
+    thereby trusted to stand in for all of them, so a profile grants or withholds
+    the emergency path as its own address.
+
+    An override is never counted as a quorum. The decision records
+    `satisfiedBy: "override"` with the count it actually had (below `require` by
+    construction), the operator who exercised it, whether that operator was also
+    the proposer (`selfOverride`), and the stated reason — so no later reader can
+    mistake an override for the votes it stood in for. A missing or blank `reason`
+    is refused and the refusal is recorded: an override nobody stated a reason for
+    is an unattributable act. A ticket that demands no quorum, a lapsed question
+    and an already-decided one are refused too."""
+    try:
+        return {"ok": True, **_quorum.override(SESSION, arguments)}
+    except ValueError as error:
+        return _session_error(str(error))
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_quorum(arguments: dict) -> dict:
+    """Read the DECISION GRAPH of one multi-party question, and the admission
+    receipt once the authority it minted has been spent (roadmap item 471).
+
+    Read-only: it decides nothing and mints nothing. This is the item's
+    "auditable after the fact" surface — who was asked, who voted, who was turned
+    away and why, and how the question closed. With `verify: true` the receipt is
+    RE-DERIVED from the durable `quorum-*` rows and the ledger entry and the
+    verdict is reported, so a receipt that disagrees with the record is refused
+    rather than reported as fact."""
+    try:
+        return {"ok": True, **_quorum.decision_report(SESSION, arguments)}
+    except ValueError as error:
+        return _session_error(str(error))
     except SessionError as error:
         return _session_error(str(error))
 
@@ -2691,10 +2767,135 @@ TOOLS = [
                 "requestId": {"type": "string",
                               "description": "revoke one specific grant by the "
                                              "id revl_approve's standing-grant "
-                                             "mint returned"}},
+                                             "mint returned"},
+                "hash": {"type": "string",
+                         "description": "item 471: withdraw a PENDING multi-party "
+                                        "question by its ticket hash (not a "
+                                        "minted grant). The votes cast so far "
+                                        "stop counting and no approval is minted. "
+                                        "Only the proposer or an approver the rule "
+                                        "names may close it"},
+                "reason": {"type": "string",
+                           "description": "item 471: why the question is being "
+                                          "withdrawn, recorded on the "
+                                          "`quorum-revoked` row"},
+                "asToken": {"type": "string",
+                            "description": "item 471: the operator closing the "
+                                           "question when it is not the session's "
+                                           "bound operator"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_revoke,
+    },
+    {
+        "name": "revl_escalate",
+        "description": "Hand a stalled MULTI-PARTY approval question UP, closing "
+                       "its vote path (item 471). What an approver does when the "
+                       "`require N of {...}` rule cannot be answered as written: "
+                       "the named approvers cannot be convened, the question has "
+                       "stalled, or the change needs an authority the rule does "
+                       "not name. Escalation only ever NARROWS authority — an "
+                       "escalated question can no longer be admitted by votes, and "
+                       "the only path left is revl_override, which is separately "
+                       "granted (its own `override` verb) and separately recorded. "
+                       "Only an approver the rule names, or the proposer, may "
+                       "escalate; a bystander is refused as `unknown-approver` and "
+                       "the refusal is written to the decision graph before it is "
+                       "raised. The outcome is the named `escalated`, readable "
+                       "back through revl_quorum. Gated by the `approve` operator "
+                       "verb (item 55).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hash": {"type": "string",
+                         "description": "the ticket hash from the "
+                                        "approvalRequired response"},
+                "reason": {"type": "string",
+                           "description": "why the question is being handed up, "
+                                          "recorded on the `quorum-escalated` row"},
+                "asToken": {"type": "string",
+                            "description": "the operator escalating when it is not "
+                                           "the session's bound operator; it must "
+                                           "be the proposer or one of the rule's "
+                                           "named approvers"}},
+            "required": ["hash"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_escalate,
+    },
+    {
+        "name": "revl_override",
+        "description": "EMERGENCY OVERRIDE of a multi-party approval question: "
+                       "admit the crossing WITHOUT its count (item 471). For the "
+                       "case the item names — the named approvers cannot be "
+                       "convened and a crossing that matters must still be "
+                       "decidable. An override is NEVER counted as a quorum: the "
+                       "decision records `satisfiedBy: \"override\"` with the "
+                       "count it actually had (below `require` by construction), "
+                       "the operator who exercised it, whether that operator was "
+                       "also the proposer (`selfOverride`), and the stated reason, "
+                       "so no later reader can mistake an override for the votes "
+                       "it stood in for. A missing or blank `reason` is REFUSED "
+                       "and the refusal recorded — an override nobody stated a "
+                       "reason for is an unattributable act. A ticket that demands "
+                       "no quorum, a lapsed question and an already-decided one "
+                       "are refused too (an override of a decided question would "
+                       "be a replay primitive for consent). Gated by its OWN "
+                       "`override` operator verb, never by `approve`: an operator "
+                       "trusted to cast one of N votes is not thereby trusted to "
+                       "stand in for all of them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hash": {"type": "string",
+                         "description": "the ticket hash from the "
+                                        "approvalRequired response"},
+                "reason": {"type": "string",
+                           "description": "REQUIRED in substance: why the count is "
+                                          "being bypassed. A missing or blank "
+                                          "reason is refused and recorded"},
+                "asToken": {"type": "string",
+                            "description": "the operator exercising the override "
+                                           "when it is not the session's bound "
+                                           "operator"}},
+            "required": ["hash", "reason"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_override,
+    },
+    {
+        "name": "revl_quorum",
+        "description": "Read the DECISION GRAPH of one multi-party approval "
+                       "question (item 471): the rule as written, the required "
+                       "count, the named approver set, the proposer, the votes "
+                       "counted and who cast them, every cast that was REFUSED "
+                       "and why (duplicate voter, unknown approver, proposer "
+                       "self-approval, stale candidate, expired, closed decision), "
+                       "the deadline, and the named outcome — `satisfied` (by "
+                       "`votes` or by `override`), `denied`, `expired`, "
+                       "`escalated` or `revoked`. Once the authority the decision "
+                       "minted has been SPENT at a crossing, the hash-bound "
+                       "admission `receipt` rides along, carrying the whole graph "
+                       "for that one crossing. With `verify: true` the receipt is "
+                       "re-derived from the durable `quorum-*` WAL rows and the "
+                       "ledger entry and the verdict is reported, so a receipt "
+                       "that disagrees with the record is refused rather than "
+                       "reported as fact. Read-only and ungated: it decides "
+                       "nothing and mints nothing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hash": {"type": "string",
+                         "description": "the ticket hash from the "
+                                        "approvalRequired response"},
+                "verify": {"type": "boolean",
+                           "description": "re-derive the admission receipt from "
+                                          "the durable decision graph and report "
+                                          "the verdict"}},
+            "required": ["hash"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_quorum,
     },
     {
         "name": "revl_distillation_offers",
