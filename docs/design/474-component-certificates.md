@@ -2,9 +2,11 @@
 
 **Roadmap:** item 474. **Issue:** #826. **Landed:** slice 1, `revl attest
 COMPOSITION --certificate` and `revl attest CERT --verify-certificate` over
-`src/revl/cert.py`, with `tests/test_826_component_certificate.py`. **Status:**
-DECISION, slice 1 landed; the confidence and drift items below are designed and
-deferred behind named preconditions.
+`src/revl/cert.py`, with `tests/test_826_component_certificate.py`; slice 2, the
+whole diagnostics catalogue accounted for rather than the nine numbered rules
+alone (envelope `v1.1`). **Status:** DECISION, slices 1 and 2 landed; the
+confidence and drift items below are designed and deferred behind named
+preconditions.
 
 ## The decision
 
@@ -19,7 +21,8 @@ open the formal package and reconcile two documents by hand to find out that one
 of the nine is unproved and unstatable.
 
 Slice 1 lands that reconciliation as a signed document. It is a second envelope
-under the same key (`revl.component-certificate` v1.0) rather than a member added
+under the same key (`revl.component-certificate`, `v1.1` as of slice 2) rather
+than a member added
 to the attestation, because the attestation's v2 envelope is what deploy, bundle
 and publish verify against and widening it would move the meaning of every
 record already in flight.
@@ -67,7 +70,9 @@ signer=None)` builds the body and signs it. The members are:
 | `proof_model` | `cert.proof_model(root)`: the pinned `formal/lean-toolchain`, a sha256 of `formal/lake-manifest.json`, and the pinned manifest package names |
 | `as_of_commit` | `cert.tree_commit(root)`, the commit the formal package sits in, or `null` when the package is not in a git work tree |
 | `artifacts` | one sha256 per formal artifact, over the three files the requirements are read from |
-| `statuses` | `cert.formal_state(root)`: one row per catalogued code with the status this build derives, the map's status cell verbatim, the map's gap cell verbatim, the registered theorem names and the contentless findings |
+| `statuses` | `cert.formal_state(root)`: one row per code of the attested invariant set, with the status this build derives, the map's status cell verbatim, the map's gap cell verbatim, the registered theorem names and the contentless findings |
+| `named_statuses` | the same reading over `cert.named_guarantee_map`, for the catalogued codes outside that set which the map states a status for: `G-SECRET`, `G-SECRET-FLOW` and the `A`/`T` assurances. Carries the label cell each row is written under, because `**T1/T2/T3**` is one row for three codes |
+| `unrecorded` | the catalogued codes the map has no row for at all |
 | `requirements` | what each status rests on, one row per derived claim |
 | `caveats` | the qualifications the artifacts record, flattened to one line each |
 | `checker`, `timestamp`, `key_id`, `signer` | the attestation members, unchanged in meaning |
@@ -116,11 +121,54 @@ rather than a promise in a comment. The asymmetry to know about: the rows and
 the registered theorems are required, but the unstatable-obligation section is
 optional. Deleting the whole "What G9 does NOT cover" section from
 `formal/STATUS.md` therefore still builds, silently dropping `REQ_UNSTATABLE`
-and one requirement (26 to 25), so a certificate can be produced over a package
+and one requirement, so a certificate can be produced over a package
 that stopped admitting the unstatable obligation at all. It is not silent to a
 *verifier*: the deleted text moves the `formal/STATUS.md` digest, and a reader
 holding the revision the certificate was signed over catches it as an artifact
 mismatch.
+
+## The coverage boundary, and why it is three lists (slice 2)
+
+Slice 1 read the nine numbered `G` rules, which is what
+`attest.catalogued_guarantees` means: the invariant set an admitted verdict
+attests. That is the right set for the *verdict*, and the wrong set for a
+*coverage* claim. `src/revl/diagnostics.py` defines twenty two codes, the
+frontend refuses under all of them, and the ledger's map states a status for
+twenty one. A certificate that reported nine of those and said nothing about the
+rest reads as complete coverage of the catalogue: a reader who knows
+`G-SECRET-FLOW` exists cannot tell a guarantee the build is silent about from one
+the document is silent about, and `G-SECRET`/`G-SECRET-FLOW` are exactly the two
+whose row says they inherit G9's unproved coverage.
+
+So the claim is carried in three lists, and both the builder
+(`cert.certifiable`) and the verifier (`cert._validate_envelope`) refuse a record
+where they do not account for the catalogue exactly once:
+
+- `statuses`, the numbered invariant set, unchanged from slice 1;
+- `named_statuses`, read by `cert.named_guarantee_map` from the same table. A
+  row's codes are the catalogued codes its bolded label names, so one row can
+  speak for several (`**G-SECRET / G-SECRET-FLOW**`, `**T1/T2/T3**`) and a row
+  that names no catalogued code (`**R4** no residue`, the capability-ceiling and
+  cross-tier items) is covered by the document's digest rather than by a
+  per-code row. These rows get a `REQ_NAMED` requirement each, and a caveat
+  apiece when they are not `proved`, which today is all of them but `A8`;
+- `unrecorded`, the catalogued codes with no row at all (`T-UNRESOLVED` today),
+  carried as a `REQ_UNRECORDED` requirement and a caveat. Stated silence is a
+  weaker claim than an unproved status and a stronger one than an absence.
+
+`certifiable` keeps the slice-1 asymmetry for the numbered rules (a `proved`
+status needs a registered theorem, a weaker status needs the map's gap sentence)
+and applies only the gap half to the named rows, because the ledger itself
+records `0` theorems for most of them and requiring a registry row would make the
+honest reading unbuildable. The verifier re-derives every member of every named
+row (`cert.NAMED_ROW_MEMBERS`) and the `unrecorded` list, so a key holder cannot
+promote `G-SECRET` to `proved`, empty its gap, relabel its row, drop it from the
+list, or empty the stated silence.
+
+The envelope moves from `v1.0` to `v1.1` because the two members are required
+rather than optional: a `v1.0` record has no `named_statuses`, and reading its
+absence as "nothing to report" would be the omission this slice closes. A `v1.0`
+document is refused by version, with the version it is not named in the reason.
 
 ## The trust boundary
 
@@ -155,7 +203,11 @@ plus one step, and the user-facing statement of it lives in
   rewritten requirement `detail` or `check`, a forged toolchain pin, a forged
   manifest digest or a dependency pin the manifest does not name, a rewritten
   checker version or ruleset digest, a commit this history does
-  not contain, a forged subject digest and a forged key fingerprint.
+  not contain, a forged subject digest and a forged key fingerprint. The same
+  sweep covers the slice-2 members: a promoted conditional guarantee, a
+  rewritten or relabelled conditional row, a dropped conditional row, an emptied
+  stated silence, a silence over a code the catalogue does not define, and a code
+  claimed both with a status and as unrecorded.
 - **It fails closed.** `verify_certificate` never raises: a malformed document
   is `(False, reason)` with the reason naming which of the key, the envelope and
   the evidence failed. Unknown guarantee names, unknown requirement kinds,
@@ -196,7 +248,8 @@ plus one step, and the user-facing statement of it lives in
 
 | file | change |
 |---|---|
-| `src/revl/cert.py` | new; 1413 lines, the model, the readers, the builder, the verifier and the renders |
+| `src/revl/cert.py` | new in slice 1: the model, the readers, the builder, the verifier and the renders. Slice 2 adds `named_guarantee_map`, the `named_statuses` / `unrecorded` members and their re-derivation |
+| `src/revl/attest.py` | slice 2: `all_guarantee_codes()` and `named_guarantees()` beside `catalogued_guarantees()`, so the catalogue and the attested invariant set are two named readings rather than one |
 | `src/revl/cli/parser.py` | three flags on the existing `attest` subparser: `--certificate`, `--verify-certificate`, `--formal DIR` |
 | `src/revl/cli/observe.py` | `_run_attest` dispatches to `_run_certificate`, and refuses `--verify` combined with either certificate flag so the two protocols cannot be confused |
 | `tests/test_826_component_certificate.py` | new; the exit criterion, the readers, the trust boundary, the re-signed forgeries and the artifact mutations |
