@@ -143,9 +143,10 @@ closed, and the reason names why.
 
 Objections worth recording:
 
-* The algorithm is a symmetric MAC (`SIGN_ALG`, `tee_attestation.py:96`). The
-  member exists and is validated so an asymmetric upgrade is additive, and the
-  rest of this note does not change with it. Real quote formats are deferred.
+* The algorithm is a symmetric MAC (`SIGN_ALG`). The member exists and is
+  validated so an asymmetric upgrade is additive, and the rest of this note does
+  not change with it. Real quote formats are deferred. **This objection is closed:
+  see "The third slice" below.**
 * The verifier is pure and reads no clock of its own: `now` is passed in, so a
   test can pin expiry, staleness and future-dating exactly.
 * `key_id` is a hash of the attester's key and discloses no key material, which
@@ -180,11 +181,61 @@ attester root: an attested placement is refused rather than run unattested.
 `docs/attested-tee-placement.md` is the surface reference and
 `tests/test_placement_attested_tee.py` pins it.
 
+## The third slice: the attestation root (landed)
+
+The note above records one objection against itself: "The algorithm is a symmetric
+MAC. ... Real quote formats are deferred." That is now closed, and
+`docs/tee-attestation-root.md` is its reference.
+
+`src/revl/tee_quote.py` parses an Intel TDX Quote v4 and an AMD SEV-SNP
+`ATTESTATION_REPORT` at the offsets the vendors define, and verifies each with
+ECDSA (P-256 with SHA-256 for TDX, P-384 with SHA-384 for SEV-SNP, both in terms of
+`hashlib` and integers, because the package ships no runtime dependency). The chain
+terminates in a `HardwareRoot`: platform keys the OPERATOR pinned, or a one-hop
+`PlatformEndorsement` signed by a pinned vendor root. The root is never read out of
+the record, so a peer cannot supply the key its own quote is checked against.
+
+Two bindings make the hardware signature cover the whole claim rather than only the
+hardware's own fields. The 64-byte `report_data`, the single field either format
+gives the workload, carries `SHA-512` of the evidence's whole canonical body
+(`evidence_report_data`), so the peer, the bundle, the region, the posture, the
+window and above all the CHALLENGE are covered; and the measurement the record
+STATES is compared against the register the hardware REPORTED, because `report_data`
+binds what the workload said and only the register is what the platform measured.
+
+The prediction in the deferral note was half right. The seam did not move:
+`TeeRequirement`, `PlacementSlot.attested_tee`, `tee_admits`, `offer_eligible` and
+the placement file's `[attest]` table are unchanged, and a pre-existing caller keeps
+working. But "only `verify_evidence` grows" understated it, because the evidence
+record itself grows a `quote` member in place of a `signature`, `sign_alg` moves
+into `body()` as a parameter so a record cannot be re-presented as though another
+verifier had decided it, and the measurement cross-check is a NEW gate with no
+analogue on the MAC path.
+
+The symmetric verifier stays as `DevMacRoot`, and is fenced: `is_production` is
+`False`, constructing one requires `acknowledged_dev_only=True` by name, every
+verdict it reaches (the admission included) carries `DEV_ROOT_NOTE` in its reason
+text, and `tee_admits(..., require_hardware_root=True)` refuses it outright. The
+two verifiers cannot be crossed, and supplying both a root and an attester key
+refuses rather than letting one win.
+
+Verification: `tests/test_tee_quote.py` (69 tests: the curve parameters re-derived
+from their own definitions, ECDSA including the non-canonical-scalar and
+off-curve-key refusals, the parsers, the root and endorsement refusals, and one test
+per committed fixture reading its expected verdict from `manifest.json`) and
+`tests/test_tee_hardware_root.py` (56 tests: the hardware accept path, then the
+refusals grouped as forged root, wrong measurement in both directions, replay in
+both directions, malformed structure, the two verifiers crossed, and the whole thing
+driven through `offer_eligible` and `admit_peer_for_process`). The fixtures are 23
+committed quotes under `tests/fixtures/tee/`, regenerable by
+`tests/fixtures/tee/generate.py` and asserted to equal a fresh generation.
+
 ## Deliberately deferred
 
-* **Real quote formats.** TDX and SEV-SNP quote parsing, an attestation root and
-  a key hierarchy that terminates outside the peer's control. The seam is the
-  same; only `verify_evidence` grows.
+* **The vendor DER chain.** Consuming Intel's PCK certificate chain and AMD's KDS
+  VCEK certificate directly, in place of the one-hop `PlatformEndorsement` that
+  stands in for them. The root is the same; the bytes carrying the endorsement
+  differ.
 * **Quorum.** One attester is trusted here. Requiring k-of-n attesters from
   disjoint roots is item 471, in flight.
 * **Drift control.** A permitted measurement set that is updated, re-attested and

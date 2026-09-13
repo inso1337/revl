@@ -56,7 +56,15 @@ already defines, which lands in the `attested_tee` field `PlacementSlot`
 
 - `placement.parse_tee_requirement(placement, process)` → `TeeRequirement`
 - `placement.process_placement_slot(placement, process)` → `PlacementSlot`
-- `placement.admit_peer_for_process(placement, process, offer, offer_key=…, attester_key=…, tee_ledger=…, now=…)` → `(admitted, reason)`
+- `placement.admit_peer_for_process(placement, process, offer, offer_key=…, root=…, tee_ledger=…, now=…)` → `(admitted, reason)`
+
+`root` is the attestation root the evidence is verified against: a
+`tee_quote.HardwareRoot` holding keys the operator pinned, which the peer does not
+hold (`docs/tee-attestation-root.md`). `attester_key=` is the pre-root spelling and
+selects the development symmetric-MAC verifier, which is not an attestation root
+and labels every verdict it reaches. There is deliberately no placement-FILE key
+for a root: a root is operator configuration, it is what makes the demand mean
+anything, and a file a composition author edits is the wrong place to name it.
 
 So a peer is admitted only on a proof that is authentic, about the approved
 bundle, inside a permitted measurement and region, confined to a forbidden
@@ -113,6 +121,10 @@ a requirement that admits everything" — the second is refused at parse time.
 Every existing placement file is unchanged.
 
 ## Tests
+
+`tests/test_tee_hardware_root.py` drives this surface with a real TDX quote
+chained to a pinned root, and pins that the file spelling's verdict is still
+byte-identical to `offer_eligible`'s on the hardware path.
 
 `tests/test_placement_attested_tee.py` pins the spelling: that it parses and
 round-trips (`parse` → `render` → `parse` is stable, the minted challenge

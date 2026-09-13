@@ -76,6 +76,7 @@ from typing import Mapping, MutableSet, Optional
 from . import cap_order
 from .attest import NotCanonicalizable, _canonical_bytes, key_id
 from .tee_attestation import TeeRequirement, tee_admits
+from .tee_quote import AttestationRoot
 
 # The peer-offer envelope identity (mirrors `attest`'s kind/version idea: a
 # self-identifying tag plus a MAJOR.MINOR line, additive within a MAJOR).
@@ -392,6 +393,8 @@ class PlacementSlot:
 
 def offer_eligible(record: Mapping, slot: PlacementSlot, key: bytes, *,
                    attester_key: Optional[bytes] = None,
+                   root: Optional[AttestationRoot] = None,
+                   require_hardware_root: bool = False,
                    tee_ledger: Optional[MutableSet[tuple[str, str]]] = None,
                    now: Optional[datetime] = None) -> tuple[bool, str]:
     """Is a signed offer ELIGIBLE for ``slot``? Returns ``(eligible, reason)``.
@@ -411,10 +414,14 @@ def offer_eligible(record: Mapping, slot: PlacementSlot, key: bytes, *,
         under ``cap_order.covers_set`` — the peer never receives a grant its own
         advertised ceiling does not cover. This is the seam to Primitive 3.
 
-    ``attester_key`` is the key that must verify an enclave evidence: the
-    attestation authority's, which the peer does not hold. It is required when
-    (and only used when) ``slot.attested_tee`` is set. ``tee_ledger`` is the
-    caller's ``(nonce, peer_id)`` admission ledger, which :func:`tee_admits`
+    ``root`` is the attestation root an enclave evidence is verified against: a
+    :class:`~revl.tee_quote.HardwareRoot` holding keys the OPERATOR pinned, which
+    the peer does not hold. ``attester_key`` is the pre-root spelling and selects
+    the development symmetric-MAC verifier, which is not an attestation root and
+    labels every verdict it reaches; ``require_hardware_root=True`` refuses it.
+    One or the other is required when (and only used when) ``slot.attested_tee``
+    is set, and supplying both refuses rather than picking one. ``tee_ledger`` is
+    the caller's ``(nonce, peer_id)`` admission ledger, which :func:`tee_admits`
     consumes on success; without it a demanding slot refuses rather than accept a
     proof it cannot check for replay.
 
@@ -440,6 +447,8 @@ def offer_eligible(record: Mapping, slot: PlacementSlot, key: bytes, *,
             peer_id=record.get("peer_id", ""),
             peer_key=key,
             attester_key=attester_key,
+            root=root,
+            require_hardware_root=require_hardware_root,
             now=now,
             replay_ledger=tee_ledger)
         if not admitted:
