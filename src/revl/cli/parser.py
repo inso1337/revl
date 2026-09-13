@@ -1263,6 +1263,75 @@ def build_parser() -> argparse.ArgumentParser:
                             "reconciles them (item 443, open question 3)")
     estop.add_argument("--json", action="store_true",
                        help="machine-readable output")
+    # `revl slo` — the OBSERVED half of the composition SLO contract (item 473,
+    # docs/design/473-slo-contracts.md). The compile-time half needs no verb:
+    # it runs whenever the composition resolves. This verb is for the two things
+    # that happen against a RECORDED run — measuring it against the declared
+    # contract, and gating the next rollout on what that measurement found.
+    slo_cmd = sub.add_parser(
+        "slo",
+        help="the composition SLO contract, observed (item 473): measure a "
+             "recorded run against the declared `slo { ... }` block, take the "
+             "declared `on breach` response, sign the receipt bound to the "
+             "generation, verify one, and gate the next rollout on it "
+             "(docs/design/473-slo-contracts.md)")
+    slo_cmd.add_argument(
+        "--composition", default=None, metavar="FILE",
+        help="the composition document whose `slo { ... }` block is the "
+             "contract. Its IR is the SAME contract the compile-time gate "
+             "admitted, read rather than re-parsed")
+    slo_cmd.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="the composition root its rows resolve against (default: the "
+             "document's own directory)")
+    slo_cmd.add_argument(
+        "--trace", default=None, metavar="FILE",
+        help="a recorded causal trace (`revl run --trace FILE`, or a JSON list "
+             "of events). The measurement reads ONLY this: no metrics backend "
+             "is called and no service is scraped")
+    slo_cmd.add_argument(
+        "--generation", type=int, default=0, metavar="N",
+        help="the generation the measurement belongs to; it is carried inside "
+             "the signed receipt, and a receipt filed under another generation "
+             "is refused")
+    slo_cmd.add_argument(
+        "--latch", default=None, metavar="FILE",
+        help="the latch a `pause` or `halt` response writes — the same latch "
+             "`revl estop` arms and a running composition watches (item 443)")
+    slo_cmd.add_argument(
+        "--wal", default=None, metavar="FILE",
+        help="the session's write-ahead log; derives the latch as FILE.estop "
+             "when --latch is omitted, and names the log `revl recover` "
+             "reconciles from")
+    slo_cmd.add_argument(
+        "--key", default=None, metavar="PATH",
+        help="the receipt signing key file (else REVL_SLO_KEY_FILE, else "
+             "REVL_SLO_KEY). With no key the run is measured and reported but "
+             "NOT signed, and the output says so")
+    slo_cmd.add_argument(
+        "--signer", default=None, metavar="TOKEN",
+        help="who issued the receipt, recorded inside the signed body")
+    slo_cmd.add_argument(
+        "--receipt", default=None, metavar="FILE",
+        help="a receipt to act on: with --verify, the one to check; with "
+             "--gate, the PREDECESSOR generation's receipt the rollout is "
+             "gated against")
+    slo_cmd.add_argument(
+        "--out", default=None, metavar="FILE",
+        help="write the signed receipt to FILE")
+    slo_cmd.add_argument(
+        "--verify", action="store_true",
+        help="verify the --receipt against the key and print what it says. "
+             "FAIL CLOSED: a wrong envelope, a wrong key or an altered body is "
+             "refused, and nothing is 'valid but unverified'")
+    slo_cmd.add_argument(
+        "--gate", action="store_true",
+        help="REFUSE this rollout when the --receipt of the generation it "
+             "replaces measurably breached an objective --composition still "
+             "declares. Exits 2 on a refusal, naming the datum, both numbers "
+             "and the generation the witness came from")
+    slo_cmd.add_argument("--json", action="store_true",
+                         help="machine-readable output")
     branch_cmd = sub.add_parser(
         "branch",
         help="session branch lineage over durable write-ahead logs (item 250): "
