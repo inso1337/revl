@@ -6176,6 +6176,382 @@ fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
   return no_verd()
 }
 
+// ======================================= the fn-body binding discipline (G1/G6)
+//
+// item 391 / issue #106 — `_lower_pure_stmt`'s SCOPE rules over a module `fn`
+// body, the first family named in `tests/test_gate_reference_census.py`'s
+// `KNOWN_BYPASSES`. The reference seeds one `scope` dict per `fn` with its
+// parameters (each recorded NOT mutable), then walks the body in order:
+//
+//   * a `let`/`var` whose name is already live -> "`x` is already declared in
+//     this function" (the same diagnostic a `for` binding draws);
+//   * an assignment to a name nothing bound -> "`x` is not declared in this
+//     function";
+//   * an assignment to a name bound by `let` (a parameter included) -> "cannot
+//     reassign `x` — it is `let` (single-assignment)".
+//
+// All three are code-less in the reference, so the census classifier reads them
+// off the message; the first and third are its G6 family and the second its G1.
+//
+// Every nested block SNAPSHOTS the scope (`dict(scope)` at the `if` arms, the
+// `while` body and the `for` body), so a binding does not leak out of its block
+// and two DISJOINT sibling blocks may reuse a name while a redeclaration inside
+// one straight-line scope still collides. The walk below gets that for free:
+// `List[Bind]` is persistent, so handing a sub-body the enclosing scope and
+// discarding its result IS the snapshot.
+//
+// THE HOST PROVENANCE, mirrored because it decides an ADMISSION: the reference
+// records a non-`var` `let` bound to a host constructor call (`Map.new()`,
+// `Pool.open(..)`, `Job`/`Stream`, but NOT the `Map.empty()` VALUE constructor)
+// as `"host"` rather than `False`, and its reassign guard tests falsiness — so
+// `let m = Map.new()` followed by `m = ...` is ADMITTED by the reference. A gate
+// that refused it would be a false rejection, so the provenance is carried here
+// too, including its transitive form (a `let` bound to a host-provenance name).
+//
+// WHERE IT DELIBERATELY STAYS SILENT (an under-refusal is a no-objection, which
+// the gate is allowed; an over-refusal is a false rejection, which it is not):
+// a `let`/`var` DESTRUCTURING pattern, and any statement the reader cannot model,
+// end the walk for that scope with no verdict rather than guessing at the names
+// it binds. Name READS are out of this slice as well — resolving one needs the
+// whole callable universe (`g1_template_undeclared`, `v2_undeclared_fn_var`
+// stay open); only the ASSIGNMENT position is decided here, where the binder is
+// the only thing that has to be known.
+
+// The statement view this walk runs over — the `own_scan` shape, plus what the
+// binding rules need and the ownership marks do not: the `let`/`var` split, the
+// diagnostic line, and a "bail" kind for the forms above.
+type FbStep = { kind: Str, name: Str, mutable: Bool, line: Int, value: Expr,
+                then_: List[FbStep], els: List[FbStep], body: List[FbStep] }
+type FbStepR = { step: FbStep, i: Int }
+// A walk result: the refusal (empty when the scope is clean) and the scope the
+// following statement in the SAME block sees.
+type FbR = { v: Verd, scope: List[Bind] }
+
+fn fb_step(kind: Str, name: Str, mutable: Bool, line: Int, v: Expr) -> FbStep {
+  return { kind: kind, name: name, mutable: mutable, line: line, value: v,
+           then_: [], els: [], body: [] }
+}
+fn fb_block(kind: Str, name: Str, line: Int, thenS: List[FbStep],
+            elseS: List[FbStep], bodyS: List[FbStep]) -> FbStep {
+  return { kind: kind, name: name, mutable: false, line: line, value: NullLit,
+           then_: thenS, els: elseS, body: bodyS }
+}
+fn fb_bail() -> FbStep { return fb_step("bail", "", false, 0, NullLit) }
+
+fn fb_already_msg(name: Str) -> Str {
+  return "`".concat(name).concat("` is already declared in this function")
+}
+fn fb_reassign_msg(name: Str) -> Str {
+  return "cannot reassign `".concat(name)
+    .concat("` — it is `let` (single-assignment)")
+}
+fn fb_undeclared_msg(name: Str) -> Str {
+  return "`".concat(name).concat("` is not declared in this function")
+}
+
+// `_HOST_CALLABLES`: the roots whose `Root.verb(..)` call acquires a HOST object.
+// `is_host_root` above is the emission-side subset (`Stream` has no lowering
+// there); the provenance rule reads the whole set.
+fn fb_host_root(n: Str) -> Bool {
+  return n == "Map" || n == "Pool" || n == "Job" || n == "Stream"
+}
+fn fb_host_field(f: FieldN) -> Bool {
+  return match f.target {
+    // `Map.empty()` is the Map VALUE constructor, a pure value and not an
+    // acquisition — the one exclusion `_is_host_valued` spells out.
+    Var(root) => fb_host_root(root) && !(root == "Map" && f.name == "empty"),
+    _ => false,
+  }
+}
+fn fb_host_call(c: CallN) -> Bool {
+  return match c.target { Field(f) => fb_host_field(f), _ => false, }
+}
+fn fb_host_value(e: Expr, scope: List[Bind]) -> Bool {
+  return match e {
+    Var(n) => tenv_get(scope, n) == "host",
+    Call(c) => fb_host_call(c),
+    _ => false,
+  }
+}
+
+// One statement of a fn body. Mirrors `own_one`'s reader token for token, so the
+// two cannot disagree about where a statement ends; what differs is the payload.
+fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
+  let t = tkc(ts, i)
+  if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
+    // a destructuring pattern binds names this reader does not enumerate
+    if (atk(ts, i + 1, "{") || atk(ts, i + 1, "[")) {
+      return { step: fb_bail(), i: hi }
+    }
+    let name = tkc(ts, i + 1).text
+    var j = i + 2
+    if (atk(ts, j, ":")) { let tr = type_at(ts, j + 1)  j = tr.i }
+    if (!atk(ts, j, "=")) { return { step: fb_bail(), i: hi } }
+    let r = lir_rhs(ts, j + 1, [])
+    if (!r.ok) { return { step: fb_bail(), i: hi } }
+    let ve = expr_at(ts, j + 1)
+    return { step: fb_step("let", name, t.text == "var", t.line, ve.e), i: r.i }
+  }
+  if (t.kind == "kw" && t.text == "return") {
+    let r = expr_at(ts, i + 1)
+    let ni = (is_bad(r.e) || r.i <= i + 1) ? i + 1 : r.i
+    return { step: fb_step("other", "", false, t.line, NullLit), i: ni }
+  }
+  if (t.kind == "kw" && t.text == "assert") {
+    let r = expr_at(ts, i + 1)
+    if (is_bad(r.e) || r.i <= i + 1) { return { step: fb_bail(), i: hi } }
+    return { step: fb_step("other", "", false, t.line, NullLit), i: r.i }
+  }
+  if (t.kind == "kw" && (t.text == "break" || t.text == "continue")) {
+    return { step: fb_step("other", "", false, t.line, NullLit), i: i + 1 }
+  }
+  if (t.kind == "kw" && t.text == "if") {
+    let c = expr_at(ts, i + 1)
+    if (is_bad(c.e) || c.i <= i + 1 || !atk(ts, c.i, "{")) {
+      return { step: fb_bail(), i: hi }
+    }
+    let tend = close_brace(ts, c.i)
+    if (tend == 0 - 1) { return { step: fb_bail(), i: hi } }
+    let thenS = fb_scan(ts, c.i + 1, tend - 1)
+    var elseS: List[FbStep] = []
+    var nexti = tend
+    if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
+      let eend = close_brace(ts, tend + 1)
+      if (eend != 0 - 1) { elseS = fb_scan(ts, tend + 2, eend - 1)  nexti = eend }
+    }
+    return { step: fb_block("if", "", t.line, thenS, elseS, []), i: nexti }
+  }
+  if (t.kind == "kw" && t.text == "while") {
+    let c = expr_at(ts, i + 1)
+    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return { step: fb_bail(), i: hi } }
+    let bend = close_brace(ts, c.i)
+    if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
+    return { step: fb_block("while", "", t.line, [], [],
+                            fb_scan(ts, c.i + 1, bend - 1)), i: bend }
+  }
+  if (t.kind == "kw" && t.text == "for") {
+    if (!atk(ts, i + 1, "(")) { return { step: fb_bail(), i: hi } }
+    let bind = tkc(ts, i + 2).text
+    let it = expr_at(ts, i + 4)
+    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) {
+      return { step: fb_bail(), i: hi }
+    }
+    let bend = close_brace(ts, it.i + 1)
+    if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
+    return { step: fb_block("for", bind, t.line, [], [],
+                            fb_scan(ts, it.i + 2, bend - 1)), i: bend }
+  }
+  if (t.kind == "ident" && atk(ts, i + 1, "=")) {
+    let r = expr_at(ts, i + 2)
+    if (is_bad(r.e) || r.i <= i + 2) { return { step: fb_bail(), i: hi } }
+    return { step: fb_step("assign", t.text, false, t.line, NullLit), i: r.i }
+  }
+  if (t.kind == "ident" && is_compound_op(ts, tkc(ts, i + 1).kind)
+      && atk(ts, i + 2, "=")) {
+    let r = expr_at(ts, i + 3)
+    if (is_bad(r.e) || r.i <= i + 3) { return { step: fb_bail(), i: hi } }
+    return { step: fb_step("assign", t.text, false, t.line, NullLit), i: r.i }
+  }
+  let r = expr_at(ts, i)
+  if (is_bad(r.e) || r.i <= i) { return { step: fb_bail(), i: hi } }
+  return { step: fb_step("other", "", false, t.line, NullLit), i: r.i }
+}
+
+fn fb_scan(ts: List[Token], lo: Int, hi: Int) -> List[FbStep] {
+  var i = lo
+  var out: List[FbStep] = []
+  while (i < hi && !atk(ts, i, "}")) {
+    if (atk(ts, i, ";")) { i += 1 }
+    else {
+      let so = fb_one(ts, i, hi)
+      out = out.push(so.step)
+      if (so.i <= i) { i = hi } else { i = so.i }
+    }
+  }
+  return out
+}
+
+fn fb_clean(scope: List[Bind]) -> FbR { return { v: no_verd(), scope: scope } }
+fn fb_refuse(tag: Str, msg: Str, line: Int, scope: List[Bind]) -> FbR {
+  return { v: mk_verd(tagged(tag, msg), line), scope: scope }
+}
+
+// The walk. A "bail" ends THIS block with no verdict: an unmodelled statement may
+// bind a name, so nothing after it in the same scope can be judged — but a block
+// never leaks a binding outward, so an enclosing scope carries on unaffected.
+fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind]) -> FbR {
+  if (i >= steps.length()) { return fb_clean(scope) }
+  let s = steps[i]
+  if (s.kind == "bail") { return fb_clean(scope) }
+  if (s.kind == "let") {
+    if (tenv_get(scope, s.name) != "") {
+      return fb_refuse("G6", fb_already_msg(s.name), s.line, scope)
+    }
+    let birth = s.mutable ? "var" : (fb_host_value(s.value, scope) ? "host" : "let")
+    return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth))
+  }
+  if (s.kind == "assign") {
+    let held = tenv_get(scope, s.name)
+    if (held == "") {
+      return fb_refuse("G1", fb_undeclared_msg(s.name), s.line, scope)
+    }
+    if (held == "let") {
+      return fb_refuse("G6", fb_reassign_msg(s.name), s.line, scope)
+    }
+    return fb_walk(steps, i + 1, scope)
+  }
+  if (s.kind == "if") {
+    let a = fb_walk(s.then_, 0, scope)
+    if (a.v.v != "") { return a }
+    let b = fb_walk(s.els, 0, scope)
+    if (b.v.v != "") { return b }
+    return fb_walk(steps, i + 1, scope)
+  }
+  if (s.kind == "while") {
+    let a = fb_walk(s.body, 0, scope)
+    if (a.v.v != "") { return a }
+    return fb_walk(steps, i + 1, scope)
+  }
+  if (s.kind == "for") {
+    if (tenv_get(scope, s.name) != "") {
+      return fb_refuse("G6", fb_already_msg(s.name), s.line, scope)
+    }
+    let a = fb_walk(s.body, 0, tenv_put(scope, s.name, "let"))
+    if (a.v.v != "") { return a }
+    return fb_walk(steps, i + 1, scope)
+  }
+  return fb_walk(steps, i + 1, scope)
+}
+
+// Every parameter, recorded NOT mutable — the reference's `scope[param] = False`,
+// which is what makes `p = e` on a parameter a `let` reassignment.
+fn fb_params_scope(ps: List[ParamN], i: Int, acc: List[Bind]) -> List[Bind] {
+  if (i >= ps.length()) { return acc }
+  return fb_params_scope(ps, i + 1, tenv_put(acc, ps[i].name, "let"))
+}
+
+// One module `fn` located from its `fn` keyword (`pub` already stepped over by
+// the caller, as `fns_walk` does): its parameters, its statement span, and the
+// index past the whole declaration. `ok` is false for a signature this reader
+// does not spell — a type-parameter list, a trailer other than `cache pure`, an
+// unbalanced body — and such a `fn` is skipped rather than judged.
+type FbSpan = { ps: List[ParamN], lo: Int, hi: Int, next: Int, ok: Bool }
+
+fn fb_no_span() -> FbSpan { return { ps: [], lo: 0, hi: 0, next: 0, ok: false } }
+
+fn fb_span(ts: List[Token], i: Int) -> FbSpan {
+  if (!atk(ts, i + 2, "(")) { return fb_no_span() }
+  let ps = params_at(ts, i + 3)
+  var reti = ps.i
+  if (atk(ts, ps.i, "arrow")) { let tr = type_at(ts, ps.i + 1)  reti = tr.i }
+  if (ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")) { reti += 2 }
+  if (!atk(ts, reti, "{")) { return fb_no_span() }
+  let bend = close_brace(ts, reti)
+  if (bend == 0 - 1) { return fb_no_span() }
+  let body = reti + 1
+  return { ps: ps.ps, lo: body, hi: bend - 1, next: bend, ok: true }
+}
+
+fn fb_function(ts: List[Token], sp: FbSpan) -> Verd {
+  return fb_walk(fb_scan(ts, sp.lo, sp.hi), 0, fb_params_scope(sp.ps, 0, [])).v
+}
+
+// The first refusing module `fn` in declaration order. Top-level forms other than
+// `fn` are stepped over structurally, exactly as `fns_walk` does — a `fn` nested
+// in a component is a provide method, not a module function, and the component
+// body has its own (already mirrored) scope rules.
+fn fb_refusal(ts: List[Token], i: Int) -> Verd {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return no_verd() }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return fb_refusal(ts, i + 1) }
+  if (t.kind != "kw") { return fb_refusal(ts, skip_line(ts, i)) }
+  if (t.text == "use" || t.text == "type") { return fb_refusal(ts, skip_line(ts, i)) }
+  if (t.text == "test") {
+    if (atk(ts, i + 1, "{")) {
+      let e = close_brace(ts, i + 1)
+      if (e != 0 - 1) { return fb_refusal(ts, e) }
+    }
+    return fb_refusal(ts, skip_line(ts, i))
+  }
+  if (t.text == "extern") { return fb_refusal(ts, p_extern(ts, i, empty_prog()).i) }
+  if (t.text == "service") { return fb_refusal(ts, p_service(ts, i, empty_prog()).i) }
+  if (t.text == "component") { return fb_refusal(ts, p_component(ts, i, empty_prog()).i) }
+  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  if (t.text == "fn" || public_fn) {
+    let sp = fb_span(ts, public_fn ? i + 1 : i)
+    if (!sp.ok) { return fb_refusal(ts, skip_line(ts, i)) }
+    let v = fb_function(ts, sp)
+    if (v.v != "") { return v }
+    return fb_refusal(ts, sp.next)
+  }
+  return fb_refusal(ts, skip_line(ts, i))
+}
+
+// ------------------------------------------------ the arrow-body write form (G6)
+//
+// `(…) => { name = … }` — a closure assigning to a name bound outside it. revl
+// closures capture strictly BY VALUE, so there is no live cell to write through,
+// and the reference's PARSER refuses the spelling outright (parser.py
+// `_arrow_body`, roadmap item 129) rather than letting it land as the incidental
+// "`{ name =` is not a record" error. Being a parse refusal it precedes every
+// admission phase, so the gate decides it in `admit_src` ahead of `parse_prog_ts`.
+//
+// The one thing a token reader has to get right is WHICH `=>` it is looking at: a
+// `match` arm spells `Pat => { … }` with the same two tokens, and a block arm
+// there is lambda-LIFTED into a helper fn whose refusal is the ordinary
+// "cannot reassign … it is `let`" (the enclosing name arrives as a parameter). So
+// the scan fires only on the PARENTHESISED arrow head — `(` … `)` `=>` where the
+// `(` is not a call/pattern argument list (its preceding token is not an
+// identifier, `)` or `]`). A bare single-parameter arrow (`n => { n = 1 }`) is
+// left to a later slice: an under-refusal, not a wrong one.
+fn closure_assign_msg(name: Str) -> Str {
+  return "a closure cannot assign to `".concat(name)
+    .concat("`: captures are by value, not by reference (G6)")
+}
+
+// The index of the `(` that opens the group closed by the `)` at `i`, or -1.
+fn fb_open_paren(ts: List[Token], i: Int) -> Int {
+  var depth = 0
+  var j = i
+  while (j >= 0) {
+    let k = tkc(ts, j).kind
+    if (k == ")" || k == "]" || k == "}") { depth += 1 }
+    if (k == "(" || k == "[" || k == "{") {
+      depth -= 1
+      if (depth == 0) { return k == "(" ? j : 0 - 1 }
+    }
+    j -= 1
+  }
+  return 0 - 1
+}
+
+// `(`…`)` at `i` is an arrow PARAMETER list and not a call's or a constructor
+// pattern's argument list.
+fn fb_arrow_head(ts: List[Token], i: Int) -> Bool {
+  let open = fb_open_paren(ts, i)
+  if (open <= 0) { return open == 0 }
+  let prev = tkc(ts, open - 1).kind
+  return prev != "ident" && prev != ")" && prev != "]"
+}
+
+fn closure_assign_scan(ts: List[Token]) -> Verd {
+  var i = 1
+  while (i + 3 < ts.length()) {
+    if (atk(ts, i, "=>") && atk(ts, i - 1, ")") && atk(ts, i + 1, "{")
+        && tkc(ts, i + 2).kind == "ident" && fb_arrow_head(ts, i - 1)) {
+      let nx = tkc(ts, i + 2)
+      if (atk(ts, i + 3, "=")) {
+        return mk_verd(tagged("G6", closure_assign_msg(nx.text)), nx.line)
+      }
+      if (is_compound_op(ts, tkc(ts, i + 3).kind) && atk(ts, i + 4, "=")) {
+        return mk_verd(tagged("G6", closure_assign_msg(nx.text)), nx.line)
+      }
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
 type NoLink = { done: Bool, refs: List[Verd] }
 
 fn collect_nonlink(ts: List[Token], pg: Prog) -> NoLink {
@@ -6193,6 +6569,15 @@ fn collect_nonlink(ts: List[Token], pg: Prog) -> NoLink {
   // the component loop.
   let cfgv = config_data_refusal(ts, pg)
   if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
+  // the module-`fn` BINDING DISCIPLINE (item 391): `_lower_fns` walks every `fn`
+  // body before `_lower_externs` and raises on the first scope violation, so the
+  // phase sits here — after the declared-type validation and ahead of the extern
+  // section. Its `undo`/`compensate` half is `_lower_externs`'s and so is later
+  // than this, while the classification word is the parser's and so is earlier;
+  // the merged `extern_decl_refusal` below carries both, and no corpus program
+  // trips one of them together with a binding violation.
+  let fbv = fb_refusal(ts, 0)
+  if (fbv.v != "") { return { done: true, refs: [fbv] } }
   // the extern DECLARATION: its classification word (G8, refused by the
   // reference's parser) and its `undo`/`compensate` slots (G4,
   // `_lower_externs`/`_check_extern_undo`). `_lower_externs` runs after the fn
@@ -6282,6 +6667,10 @@ pub fn admit_src(src: Str) -> Str {
   if (nesting_depth(ts) > nesting_limit()) {
     return tagged("BAD", too_deep_msg())
   }
+  // the arrow-body write form, the reference's other PARSE-stage refusal on this
+  // surface (item 129): `(…) => { n = … }` never reaches admission.
+  let cav = closure_assign_scan(ts)
+  if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
   // item 419c: collect every recoverable refusal and report the minimum by
@@ -6306,6 +6695,8 @@ pub fn admit_all(src: Str) -> Str {
   if (nesting_depth(ts) > nesting_limit()) {
     return fmt_all([mk_verd(tagged("BAD", too_deep_msg()), 0)])
   }
+  let cav = closure_assign_scan(ts)
+  if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
   return fmt_all(collect_refusals(ts, pg))
@@ -6322,8 +6713,9 @@ fn fmt_all(rs: List[Verd]) -> Str {
   return out
 }
 
-// The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "A1" | "PRELUDE" |
-// "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "BAD") — the coarse oracle.
+// The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "G6" | "A1" |
+// "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "BAD") — the coarse
+// oracle. "G6" is the fn-body binding discipline (item 391).
 pub fn admit_tag(src: Str) -> Str {
   let v = admit_src(src)
   if (v == "") { return "" }
@@ -6505,6 +6897,8 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   let fgn = foreign_scan_ts(ts)
   if (fgn != "") { return tagged("FOREIGN", fgn) }
   if (nesting_depth(ts) > nesting_limit()) { return tagged("BAD", too_deep_msg()) }
+  let cav = closure_assign_scan(ts)
+  if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
   // the INTERNAL refusals (per-component G1/G4/A1/PRELUDE, module fn, spawn,
@@ -10908,4 +11302,102 @@ service V { fn take(t: Secret[Str]) -> Int  fn plain(n: Int) -> Int }""")
   assert ir.indexOf("\"name\": \"t\", \"type\": \"Str\", \"secret\": true") != 0 - 1
   assert ir.indexOf("\"name\": \"n\", \"type\": \"Int\"}") != 0 - 1
   assert ir.indexOf("Secret[") == 0 - 1
+}
+
+// ------------------------------- the fn-body binding discipline (item 391, G6)
+//
+// `G6` is a NEW verdict tag on this surface, and a new tag is invisible to
+// `tests/test_selfhost_lower.py`'s `_classify`-driven corpus until the family is
+// named there (that classifier work is item 429's). It already names the G6
+// message shapes, so the corpus does see these — and the pins below hold the
+// wire independently of it, the way the item-384 `FOREIGN` port did.
+
+test "reassigning a let is refused (G6), exact wording" {
+  let v = admit_src("fn bump() -> Int { let n = 1  n = 2  return n }")
+  assert v == "G6|cannot reassign `n` — it is `let` (single-assignment)"
+}
+
+test "a compound assignment on a let is the same refusal" {
+  let v = admit_src("fn bump() -> Int { let n = 1  n += 1  return n }")
+  assert v == "G6|cannot reassign `n` — it is `let` (single-assignment)"
+}
+
+test "a parameter is not mutable, so writing one is a let reassignment" {
+  let v = admit_src("fn f(p: Int) -> Int { p = 2  return p }")
+  assert v == "G6|cannot reassign `p` — it is `let` (single-assignment)"
+}
+
+test "reassigning a var admits" {
+  assert admit_src("fn bump() -> Int { var n = 1  n = 2  n += 1  return n }") == ""
+}
+
+test "a duplicate let in one straight-line scope is refused (G6)" {
+  let v = admit_src("fn pick(x: Int) -> Int { let y = x  let y = 0  return y }")
+  assert v == "G6|`y` is already declared in this function"
+}
+
+test "disjoint sibling blocks may reuse a name" {
+  let v = admit_src("fn pick(c: Bool) -> Int { if (c) { let y = 1  return y } else { let y = 2  return y } }")
+  assert v == ""
+}
+
+test "a nested block still sees the enclosing let" {
+  let v = admit_src("fn f(c: Bool) -> Int { let n = 1  if (c) { n = 2 }  return n }")
+  assert v == "G6|cannot reassign `n` — it is `let` (single-assignment)"
+}
+
+test "a for binding over a live name is already declared" {
+  let v = admit_src("fn f(xs: List[Int]) -> Int { let x = 1  for (x of xs) { }  return x }")
+  assert v == "G6|`x` is already declared in this function"
+}
+
+test "two for loops may bind one name (the bind is body-scoped)" {
+  let v = admit_src("fn total(xs: List[Int]) -> Int { var t = 0  for (x of xs) { t += x }  for (x of xs) { t += x }  return t }")
+  assert v == ""
+}
+
+test "assigning a name nothing bound is the fn-scope G1" {
+  assert admit_src("fn f() -> Int { z = 2  return 1 }") == "G1|`z` is not declared in this function"
+}
+
+test "a host-provenance let may be reassigned (reference admits)" {
+  // `_is_host_valued`: a non-`var` `let` bound to a host acquisition is recorded
+  // "host", and the reference's guard tests falsiness — so this is ADMITTED, and
+  // a gate that refused it would be a false rejection.
+  assert admit_src("fn f() -> Int { let m = Map.new()  m = m  return 1 }") == ""
+}
+
+test "the Map VALUE constructor carries no host provenance" {
+  // `Map.empty()` is a pure value, the one exclusion the provenance rule spells
+  // out, so this `let` stays a `let` and the write is refused.
+  let v = admit_src("fn f() -> Int { let m = Map.empty()  m = m  return 1 }")
+  assert v == "G6|cannot reassign `m` — it is `let` (single-assignment)"
+}
+
+test "a closure assigning to a capture is refused at parse (G6)" {
+  let v = admit_src("fn counter(step: Int) -> Int { var n = 0  let bump = (by: Int) => { n = n + by  n }  return bump(step) }")
+  assert v == "G6|a closure cannot assign to `n`: captures are by value, not by reference (G6)"
+}
+
+test "a record literal after => is not the closure write form" {
+  assert admit_src("fn f() -> Int { let k = (x: Int) => { value: x + 1 }  return k(1).value }") == ""
+}
+
+test "a statement-block match arm is not an arrow head" {
+  // `Pat => { … }` spells the same two tokens; the arm is lambda-LIFTED, so its
+  // own refusal is the reference's reassignment one and NOT the closure write
+  // form. The scan stays off it (an under-refusal, not a wrong one).
+  let v = admit_src("type S = A(Str) | B(Str) fn f(s: S) -> Int { return match s { A(x) => { let y = 1  y }, B(x) => 2, } }")
+  assert v == ""
+}
+
+test "a destructuring let is read, not refused" {
+  // the pattern binds names this reader does not enumerate, so the walk ends
+  // there rather than guessing at them: an under-refusal (a no-objection, which
+  // the gate is allowed to give) and never a false rejection. A write to a
+  // destructured name is therefore still admitted here, so it is NOT pinned as a
+  // program — `test_in_file_test_programs_agree` holds every in-file program to
+  // full agreement, and that one deliberately diverges.
+  let v = admit_src("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }")
+  assert v == ""
 }
