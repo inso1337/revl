@@ -24,7 +24,7 @@ Grammar (v0 subset — see DESIGN.md §3):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import contextlib
 import re
@@ -153,6 +153,11 @@ class MethodDecl:
     # scalar / query / body) and the IR entry are derived in lower, next to the
     # sibling `validated` schema derivation, where the `types` table is in scope.
     route: dict | None = None
+    # roadmap item 470 (docs/design/470-intent-refinement.md): the `within { … }`
+    # trailing clause — the intent this operation DECLARES. `None` unless the
+    # operation declares one, so every existing method's IR is byte-identical
+    # (the check it arms lives entirely in lower, keyed off this field).
+    within: "WithinClause | None" = None
 
 
 @dataclass
@@ -183,6 +188,49 @@ class CacheClause:
     cls: str
     invalidated_by: tuple[str, ...]
     ttl_ms: int | None
+    line: int
+
+
+@dataclass
+class WithinClause:
+    """`within { … }` on a service operation — the intent it DECLARES (roadmap
+    item 470, docs/design/470-intent-refinement.md §4 stage 1).
+
+    The declaration side of the refinement check: `intent` is the ready
+    `intent.Intent` the kernel compares against, and `line` is where the clause
+    was written, so a refusal can point at the declaration it violated rather
+    than only naming the dimension. The parser builds the record (the
+    capability spelling goes through `_capability_params`, so `object` and
+    `related` are validated by `cap_order`'s one canonical point), and
+    `intent.Intent.from_cap` splits the ceilings off; every other validity rule
+    (no ceiling parameter on an object, a scope name that collides with a
+    registered capability parameter) is the kernel's own and is re-raised here
+    as a parse error with this line.
+    """
+    intent: object          # intent.Intent
+    line: int
+
+
+@dataclass
+class ActingClause:
+    """`acting { … }` on an `emit` step — what one crossing ACTUALLY does.
+
+    The action side of the refinement check. It states only the three dimensions
+    a capability spelling cannot: the verb, the tenant, and the set-valued
+    scopes. The OBJECT and the AMOUNT are read off the crossing's own capability
+    spelling through `intent.Action.from_cap` — the typed link design §2 names,
+    so one spelling read as an intent and read as an action is the identity
+    refinement and the two sides cannot drift.
+
+    `tenant` is `None` when the author writes no `tenant:` field, which is the
+    kernel's STATED absence, not a default: against an intent that states a
+    tenant it is refused (fail closed), and against an intent that states none it
+    constrains nothing. `scopes` is the empty declaration when omitted, and an
+    action that reaches members in a scope the intent never bounded is refused.
+    """
+    verb: str
+    tenant: str | None
+    scopes: tuple            # ((name, frozenset[str]), …), sorted by name
     line: int
 
 
@@ -504,6 +552,11 @@ class EmitStmt:
     # Kept last so the positional `EmitStmt(expr, line, compensate, approval)`
     # construction is unchanged.
     is_async: bool = False
+    # roadmap item 470: the optional `acting { … }` trailing clause — what this
+    # crossing actually does, stated by the author. `None` unless the author
+    # writes one, so every existing emit's IR is byte-identical (the check it
+    # arms lives entirely in lower, keyed off this field).
+    acting: "ActingClause | None" = None
 
 
 @dataclass
@@ -2907,6 +2960,317 @@ class Parser:
                      "per-call ticket, not a typed `Approval`")
         return token
 
+    # -- roadmap item 470: the declared intent and the action ----------------
+    #
+    # Two CONTEXTUAL clauses, `within { … }` on a service operation (the intent
+    # it declares) and `acting { … }` on an `emit` step (what the crossing
+    # actually does). Both are recognised only in the one slot they occupy — the
+    # post-return-type slot of a service method, which nothing else can follow,
+    # and the trailing slot of an emit step — so the lexer's KEYWORDS set is
+    # untouched and neither a method nor an emit without one changes its IR by a
+    # byte (docs/design/470-intent-refinement.md §4 stage 1).
+
+    _WITHIN_FIELDS = ("object", "related", "verbs", "ceilings", "tenant",
+                      "scopes")
+    _ACTING_FIELDS = ("verb", "tenant", "scopes")
+
+    def _within_clause(self) -> "WithinClause":
+        """`within { … }` — the intent a service operation declares.
+
+        `object` and `verbs` are REQUIRED: they are the two dimensions with no
+        honest default (an absent object names nothing, and an empty verb set
+        refuses every action rather than permitting one). `related`,
+        `ceilings`, `tenant` and `scopes` are optional, and omitting one is the
+        NARROW reading, exactly as `intent.Intent`'s own docstring states it: no
+        `tenant` constrains no tenancy, no `ceilings` authorizes no spend, no
+        `scopes` permits no scope, and no `related` names one object.
+
+        The capability spellings are validated here by `cap_order`'s one
+        canonical point (`_capability_params`); the kernel's own record rules
+        (a ceiling parameter may not be bound on an object, a scope name may not
+        collide with a registered capability parameter) are re-raised as a parse
+        error carrying this clause's line.
+        """
+        line = self.next().line   # consume the contextual `within`
+        raw = self._clause_record("within", self._WITHIN_FIELDS)
+        for required in ("object", "verbs"):
+            if required not in raw:
+                raise self.err(
+                    line,
+                    f"a `within` clause must state `{required}`: it is one of "
+                    f"the two dimensions with no honest default",
+                    hint="`object` names the boundary the intent authorizes and "
+                         "`verbs` the operations permitted on it; `related`, "
+                         "`ceilings`, `tenant` and `scopes` are optional and "
+                         "their omission is the narrow reading "
+                         "(docs/design/470-intent-refinement.md)")
+        return WithinClause(self._interpret_within(raw, line), line)
+
+    def _interpret_within(self, raw: dict, line: int) -> object:
+        """The parsed `within` record as an `intent.Intent`.
+
+        The ceiling dimension may be written EITHER as parameters on the object
+        spelling (`object: model.complete(calls=3)`, which `Intent.from_cap`
+        splits off with `cap_order.split_ceilings`, the one place that split is
+        defined) OR as the explicit `ceilings` field, and writing it BOTH ways is
+        refused rather than merged: the ceiling is one bound, and two spellings
+        of it in one declaration is a question about which one the check reads.
+        """
+        from . import intent as _intent  # noqa: PLC0415 - lazy, avoids a cycle
+        from . import cap_order as _cap_order  # noqa: PLC0415 - lazy
+        try:
+            declared = _intent.Intent.from_cap(
+                _cap_order.parse_cap(raw["object"]),
+                verbs=raw["verbs"],
+                tenant=raw.get("tenant"),
+                related=[_cap_order.parse_cap(tok) for tok in raw.get("related", ())],
+                scopes=[(name, members)
+                        for name, members in (raw.get("scopes") or {}).items()],
+            )
+            if "ceilings" in raw:
+                if declared.ceilings:
+                    spelled = ", ".join(
+                        f"`{name}`" for name, _ in declared.ceilings)
+                    raise self.err(
+                        line,
+                        f"the ceiling {spelled} is stated twice: once on the "
+                        f"`object` spelling and once in `ceilings`",
+                        hint="a ceiling is one bound on the whole intent — state "
+                             "it on the object spelling "
+                             "(`object: model.complete(calls=3)`) or in "
+                             "`ceilings`, not both")
+                declared = replace(
+                    declared, ceilings=_intent.ceiling_params(raw["ceilings"]))
+            return declared
+        except _cap_order.CapError as exc:  # pragma: no cover - parse validated
+            raise self.err(line, str(exc), hint=exc.hint) from exc
+        except ValueError as exc:
+            raise self.err(line, str(exc)) from exc
+
+    def _acting_clause(self) -> "ActingClause":
+        """`acting { … }` — what one crossing actually does.
+
+        `verb` is REQUIRED (a capability spelling cannot state an operation
+        name, and an action that performs an unstated operation cannot be shown
+        to be within a declared verb set). `tenant` and `scopes` are optional
+        and their omission is the action's STATED absence, which the kernel
+        refuses against a stated bound rather than reading as permission.
+        """
+        line = self.next().line   # consume the contextual `acting`
+        raw = self._clause_record("acting", self._ACTING_FIELDS)
+        if "verb" not in raw:
+            raise self.err(
+                line,
+                "an `acting` clause must state `verb` — the operation this "
+                "crossing performs",
+                hint="a capability spelling names the boundary, not the "
+                     "operation performed on it, so the verb is stated here and "
+                     "checked against the declared intent's `verbs` (item 470)")
+        from . import intent as _intent  # noqa: PLC0415 - lazy, avoids a cycle
+        try:
+            scopes = _intent.scope_members(raw.get("scopes") or {})
+        except ValueError as exc:
+            raise self.err(line, str(exc)) from exc
+        return ActingClause(raw["verb"], raw.get("tenant"), scopes, line)
+
+    def _clause_record(self, clause: str, allowed: tuple) -> dict:
+        """`{ field: value (, field: value)* }` for an item-470 clause.
+
+        The field NAME is read with `_record_key_name` (the metadata-record
+        precedent, where a name is always followed by `:` so no keyword reading
+        is grammatically possible) and the VALUE by `_clause_value`, which
+        dispatches on the field. A name outside `allowed` is refused rather than
+        ignored: a typo'd field would otherwise bound nothing while reading as a
+        declaration.
+        """
+        self.expect("{", what=f"`{{` after `{clause}`")
+        raw: dict = {}
+        while not self.at("}"):
+            key_tok = self.peek()
+            key = self._record_key_name()
+            if key in raw:
+                raise self.err(key_tok.line,
+                               f"duplicate `{clause}` field `{key}`")
+            if key not in allowed:
+                names = ", ".join(f"`{n}`" for n in allowed)
+                raise self.err(
+                    key_tok.line,
+                    f"`{key}` is not a `{clause}` clause field",
+                    hint=f"a `{clause}` clause states {names} "
+                         f"(docs/design/470-intent-refinement.md)")
+            self.expect(":", what=f"`:` after `{key}` in `{clause}`")
+            raw[key] = self._clause_value(clause, key)
+            if self.at(","):
+                self.next()
+        self.expect("}", what=f"`}}` closing the `{clause}` clause")
+        return raw
+
+    def _clause_value(self, clause: str, key: str) -> object:
+        """One item-470 clause field's value, by field name."""
+        if key == "object":
+            return self._clause_capability("an `object` capability token")
+        if key == "related":
+            return self._clause_capability_list(
+                "a `related` capability token")
+        if key == "verbs":
+            return self._clause_verb_list()
+        if key == "verb":
+            return self._clause_verb()
+        if key == "tenant":
+            return self._clause_tenant()
+        if key == "ceilings":
+            return self._clause_ceiling_map()
+        if key == "scopes":
+            return self._clause_scope_map()
+        raise self.err(  # pragma: no cover - `_clause_record` filters
+            self.peek().line,
+            f"`{key}` is not a `{clause}` clause field")
+
+    def _clause_capability(self, what: str) -> str:
+        """A capability token in a clause record: a dotted ident path or a
+        string literal, with an optional parenthesized parameter list, funnelled
+        through `_capability_params` so `cap_order` validates and canonicalizes
+        it at the ONE point."""
+        tok = self.peek()
+        if tok.kind == "string":
+            self.next()
+            return self._capability_params(tok.value)
+        parts = [self.expect("ident", what=what).value]
+        while self.at("."):
+            self.next()
+            parts.append(self.expect("ident").value)
+        return self._capability_params(".".join(parts))
+
+    def _clause_capability_list(self, what: str) -> tuple:
+        """`[<capability token> (, …)*]` in a clause record."""
+        self.expect("[", what="`[` before a capability list")
+        tokens: list[str] = []
+        while not self.at("]"):
+            tokens.append(self._clause_capability(what))
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        return tuple(tokens)
+
+    def _clause_verb(self) -> str:
+        """One operation name: an ident (`insert`, `execute`) or a string
+        literal (for a name the lexer reserves)."""
+        tok = self.peek()
+        if tok.kind == "string":
+            self.next()
+            if not tok.value:
+                raise self.err(tok.line, "a verb must be a non-empty name")
+            return tok.value
+        return self.expect("ident", what="a verb (an operation name)").value
+
+    def _clause_verb_list(self) -> tuple:
+        """`[<verb> (, …)*]` — the operations the intent permits.
+
+        A list, never a bare name: `verbs` is a SET, and a single name written
+        without brackets is refused rather than guessed at, for the reason
+        `intent._canonical_verbs` refuses a bare `str` — a set and one member
+        are different declarations and the surface says which is meant.
+        """
+        self.expect("[", what="`[` before a verb list")
+        verbs: list[tuple] = []
+        while not self.at("]"):
+            vline = self.peek().line
+            verbs.append((vline, self._clause_verb()))
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        seen: set = set()
+        for vline, verb in verbs:
+            if verb in seen:
+                raise self.err(vline, f"duplicate verb `{verb}` in `verbs`")
+            seen.add(verb)
+        return tuple(verb for _, verb in verbs)
+
+    def _clause_tenant(self) -> str | None:
+        """A tenant name: a string literal, or a dotted ident path for a realm
+        spelled the item-33 way (`production.eu`). `null` states the explicit
+        absence the kernel also accepts."""
+        tok = self.peek()
+        if tok.kind == "string":
+            self.next()
+            return tok.value
+        if tok.kind == "kw" and tok.value == "null":
+            self.next()
+            return None
+        parts = [self.expect("ident", what="a tenant name").value]
+        while self.at("."):
+            self.next()
+            parts.append(self.expect("ident").value)
+        return ".".join(parts)
+
+    def _clause_ceiling_map(self) -> dict:
+        """`{ calls: 3, size: 4096 }` — the ceiling registry's names onto
+        non-negative integers. The kernel validates the names and values; a
+        resource-kind name (`path`, `host`, `table`) is refused there rather
+        than here so the two records share one check."""
+        self.expect("{", what="`{` before a ceiling map")
+        bounds: dict = {}
+        while not self.at("}"):
+            ntok = self.peek()
+            name = self._record_key_name()
+            if name in bounds:
+                raise self.err(ntok.line,
+                               f"ceiling parameter `{name}` is bound twice")
+            self.expect(":", what=f"`:` after `{name}`")
+            vt = self.peek()
+            if vt.kind != "int":
+                raise self.err(
+                    vt.line,
+                    f"`{name}` expects a non-negative integer bound, found "
+                    f"{vt.value!r}",
+                    hint="a ceiling is a count of at most N (cap_order's closed "
+                         "ceiling registry: `calls`, `size`, `time` and the "
+                         "budget aliases)")
+            self.next()
+            bounds[name] = vt.value
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return bounds
+
+    def _clause_scope_map(self) -> dict:
+        """`{ recipients: [alice, bob] }` — the set-valued dimension.
+
+        A scope name is a non-empty string that does NOT collide with a
+        registered capability parameter (the kernel refuses that, and the
+        refusal is re-raised here); each member set is written as a bracketed
+        list, because a bare name would be a set-or-one-member ambiguity the
+        kernel deliberately refuses."""
+        self.expect("{", what="`{` before a scope map")
+        scopes: dict = {}
+        while not self.at("}"):
+            ntok = self.peek()
+            name = self._record_key_name()
+            if name in scopes:
+                raise self.err(ntok.line, f"scope `{name}` is bound twice")
+            # `name: [ … ]`, the same `field: value` shape every other record in
+            # these two clauses uses, so a scope map does not read differently
+            # from the ceiling map beside it.
+            self.expect(":", what=f"`:` after the scope name `{name}`")
+            self.expect("[", what=f"`[` before the `{name}` member set")
+            members: list[str] = []
+            while not self.at("]"):
+                mtok = self.peek()
+                if mtok.kind == "string":
+                    self.next()
+                    members.append(mtok.value)
+                else:
+                    members.append(self.expect(
+                        "ident", what=f"a `{name}` member name").value)
+                if self.at(","):
+                    self.next()
+            self.expect("]")
+            scopes[name] = members
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return scopes
+
     def _cache_clause(self) -> "CacheClause":
         """`cache (pure|capability|external) (invalidated_by <tok> (, <tok>)*)?
         (ttl <dur>)?` — the item-310 trailing clause after a return type.
@@ -3154,6 +3518,13 @@ class Parser:
             cache = None
             if self.at("ident", "cache"):
                 cache = self._cache_clause()
+            # item 470: the `within { … }` trailing clause — the intent this
+            # operation DECLARES. Also contextual and also only here, and the
+            # refinement check it arms runs at the emit step, where the crossing
+            # and the declaring operation are both in hand (design §4 stage 1).
+            within = None
+            if self.at("ident", "within"):
+                within = self._within_clause()
             if mname in methods:
                 raise self.err(mline, f"duplicate method `{mname}` in service {name}")
             methods[mname] = MethodDecl(
@@ -3161,7 +3532,7 @@ class Parser:
                 commutative=method_commutative, idempotent=method_idempotent,
                 capabilities=capabilities, endorse_origins=endorse_origins,
                 cache=cache, validated=method_validated, retry=method_retry,
-                termination=termination, route=method_route,
+                termination=termination, route=method_route, within=within,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
@@ -4926,7 +5297,13 @@ class Parser:
         if self.at("kw", "with"):
             self.next()
             approval = self.pure_expr()
-        return EmitStmt(expr, line, compensate, approval, is_async)
+        # item 470: `acting { … }` states what this crossing ACTUALLY does, and
+        # is checked against the operation's declared `within { … }` intent at
+        # lowering. Trailing, because it reads as a qualification of the step
+        # rather than part of the call being emitted, and optional: without it
+        # the crossing is checked exactly as it is today.
+        acting = self._acting_clause() if self.at("ident", "acting") else None
+        return EmitStmt(expr, line, compensate, approval, is_async, acting)
 
     def effect_form(self, line: int):
         self.expect("kw", "effect")
