@@ -191,3 +191,79 @@ def test_non_reserved_underscore_names_are_untouched():
     assert "String value_" in out
     assert "final var out_ = value_;" in out
     assert "value__" not in out and "out__" not in out
+
+
+# ---------------------------------------------------------------------------
+# item 130: the names the STREAM runtime injects
+#
+# The rename ladder above is exercised against Java's own keywords. The other
+# source of a colliding simple name is the emitter itself: every class
+# `_emit_host_stubs` splices is nested in `Components`, so a user type of the
+# same name is a javac duplicate declaration. #936 reserved the names java
+# injected at the time; item 130's stream lowering then added four more
+# (`Stream`/`Subscription`, and `EventContract`/`RevlJson` for a typed-event
+# handler) without reserving them, so `type Stream` in a stream program emitted
+# `class Stream` twice.
+#
+# This is the half a substring assertion cannot settle (issue #154, this file's
+# docstring): "the emitter escaped the user type" and "the emitted file still
+# compiles" are different claims, and only javac answers the second. `_emit`
+# gates every emission here, so each assert below stands on a program javac
+# accepted.
+
+_STREAM_SHADOW = """
+service Sink { emission fn write(v: Str) }
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+}
+"""
+
+_EVENT_SHADOW = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Sink { emission fn write(v: Str) }
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub { emit sink.write(e.order_id) }
+}
+"""
+
+# `EventContract` and `RevlJson` are spliced only for an `on … as` handler, so a
+# plain `every … in` base leaves them undeclared and the case vacuous.
+_STREAM_INJECTED_TYPES = {
+    "Stream": _STREAM_SHADOW,
+    "Subscription": _STREAM_SHADOW,
+    "EventContract": _EVENT_SHADOW,
+    "RevlJson": _EVENT_SHADOW,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_STREAM_INJECTED_TYPES))
+def test_stream_runtime_type_names_do_not_collide_with_a_user_type(name: str):
+    """A stream program declaring `type <injected name>` still compiles.
+
+    Before item 130's names joined `_JAVA_TYPE_RESERVED` this emitted the class
+    twice and javac answered `class Stream is already defined in class
+    Components` — a program the checker accepts, every other tier emits, and
+    this tier cannot build."""
+    source = (_STREAM_INJECTED_TYPES[name]
+              + f"\ntype {name} = {{ a: Int }}\n"
+              + f"pub fn use_{name}(v: {name}) -> Int {{ return v.a }}\n")
+    out = _emit(source)                      # javac-gated
+    assert f"class {name}_ " in out, "the user type must be escaped"
+    assert f"use_{name}({name}_ v)" in out, "the use site must follow it"
+
+
+def test_stream_host_root_still_resolves_past_the_escape():
+    """The escape is scoped to the type-name position, so the acquisition still
+    names the runtime class. A role-agnostic rename would point
+    `effect Stream.source()` at the user's record — a different wrong program,
+    and one javac would accept for `type Stream = { a: Int }` only by accident."""
+    source = (_STREAM_SHADOW
+              + "\ntype Stream = { a: Int }\n"
+              + "pub fn use_Stream(v: Stream) -> Int { return v.a }\n")
+    out = _emit(source)                      # javac-gated
+    assert "Stream.source()" in out
+    assert "Stream_.source()" not in out
