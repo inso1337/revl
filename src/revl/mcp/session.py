@@ -309,12 +309,15 @@ class Session:
         # enforced at load/swap as a machine-checked invariant instead of a
         # review convention. None = no sandbox (the default).
         self.sandbox = None
-        # item 290, §4: gauntlet dossiers this session produced (candidate name
-        # -> the `mcp.gauntlet.run` dossier), so a `mcp requires evidence
-        # [gauntlet admissible]` rule can threshold the operator-run session
-        # gauntlet at admission. Operator-produced at evaluation time, so it
-        # needs no attestation root. Populated by the gauntlet verb; empty until
-        # a candidate has been graded.
+        # item 290, §4: gauntlet dossiers this session produced, keyed by the
+        # (component name, content digest) the run GRADED -> the
+        # `mcp.gauntlet.run` dossier, so a `mcp requires evidence [gauntlet
+        # admissible]` rule can threshold the operator-run session gauntlet at
+        # admission. Operator-produced at evaluation time, so it needs no
+        # attestation root. Populated by the gauntlet verb; empty until a
+        # candidate has been graded. The digest is the binding: a name alone
+        # would let a draft that was never graded ride in on a different draft's
+        # verdict (see `gauntlet.component_digest`).
         self._gauntlet_dossiers: dict = {}
         # the bound operator identity (roadmap item 55): a `revl.mcp.operator.
         # Operator` whose grants bound which management verbs this session may
@@ -983,15 +986,21 @@ class Session:
                 f"else (boundary policy, docs/boundary-policy.md)")
 
     def record_gauntlet(self, dossier: dict) -> None:
-        """Store an admissible gauntlet dossier under each component name it
-        graded (item 290, §4), so a later `mcp requires evidence [gauntlet
-        admissible]` admission can read the operator-run session dossier."""
+        """Store an admissible gauntlet dossier under each component it graded
+        (item 290, §4), so a later `mcp requires evidence [gauntlet admissible]`
+        admission can read the operator-run session dossier.
+
+        The key is the graded component's ``(name, digest)`` — the program that
+        was actually graded, not the name it happened to carry. A dossier whose
+        components carry no digest records nothing: an unbound dossier cannot
+        be evidence, so it is refused rather than trusted (fail-closed)."""
         if not isinstance(dossier, dict) or dossier.get("verdict") != "admissible":
             return
         for comp in (dossier.get("candidate") or {}).get("components") or []:
             name = comp.get("name")
-            if name:
-                self._gauntlet_dossiers[name] = dossier
+            digest = comp.get("digest")
+            if name and digest:
+                self._gauntlet_dossiers[(name, digest)] = dossier
 
     def _enforce_evidence(self, ir: dict) -> None:
         """item 290, §4: the confidence/evidence admission rules over agent
@@ -1001,6 +1010,11 @@ class Session:
         components it graded; every other facet stays `unavailable` for a draft,
         so a rule thresholding published evidence refuses fail-closed.
 
+        The dossier is looked up by the admitted component's CONTENT digest, not
+        its name: the evidence says "this program was graded", and a component
+        that merely shares a name with a graded one is a different program that
+        has not been graded at all.
+
         Additive: a no-op unless the bound sandbox names evidence rules, so an
         evidence-free sandbox admits exactly as before."""
         if self.sandbox is None \
@@ -1009,12 +1023,19 @@ class Session:
         from ..audit_diff import audit_report  # noqa: PLC0415 — lazy, no cordis
         from ..policy import evaluate, first_error  # noqa: PLC0415
         from .. import registry as reg  # noqa: PLC0415
+        from .gauntlet import component_digest  # noqa: PLC0415 — gauntlet imports session
 
         audit = audit_report(ir)
         everyone = frozenset(audit.get("boundary") or {})
-        evidence = {
-            name: reg.EvidenceBundle(gauntlet=self._gauntlet_dossiers[name])
-            for name in everyone if name in self._gauntlet_dossiers}
+        bodies = {c.get("name"): c for c in ir.get("components") or []}
+        evidence = {}
+        for name in everyone:
+            body = bodies.get(name)
+            if body is None:
+                continue
+            dossier = self._gauntlet_dossiers.get((name, component_digest(body)))
+            if dossier is not None:
+                evidence[name] = reg.EvidenceBundle(gauntlet=dossier)
         error = first_error(evaluate(self.sandbox, audit,
                                      mcp_components=everyone, evidence=evidence))
         if error is not None:
@@ -3339,6 +3360,12 @@ class Session:
         # session that recorded it (invariant 5).
         self._quorums = {}
         self._quorum_receipts = {}
+        # item 290, §4: the session gauntlet dossiers die with the session
+        # exactly as the ledger and the grants they stand beside do (invariant
+        # 5). Evidence is a statement about a graded candidate under THIS
+        # session's authority; a torn-down session's dossier must not admit a
+        # later composition on a reused Session object.
+        self._gauntlet_dossiers = {}
         self._auto_consumed = 0
         self._distillation_seq = 0
         # item 310: the seam-method cache is session-scoped, exactly as the ledger
