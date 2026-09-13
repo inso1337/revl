@@ -368,6 +368,63 @@ test "a rust keyword does not capture its underscore twin"   { assert rust_shado
 test "a keyword-named fn keeps its own body"                 { assert pick(true) == "PUBLIC-VALUE" }
 test "its underscore twin keeps its own body"                { assert pick(false) == "SEKRIT-CANARY-416" }
 """,
+
+    # Issue #957. `m[k]` on a `Map[Str, V]` was lowered by the shape of the
+    # INDEX EXPRESSION rather than by the map's declared key type, so every
+    # backend read it as the positional `List` read it was written for and cast
+    # the key to an integer: `revlIndex(m, Number(k))` on ts (`Number("a")` is
+    # `NaN`, so it compiled and read nothing), `(m)[(k) as usize]` on rust
+    # (E0605, does not compile), `m.get((int)(k))` on java (does not compile)
+    # and `_revl_index(m, k)` on python, whose helper is the negative-index List
+    # guard and so compares a `Str` with 0 — a TypeError on a key that IS
+    # present. go alone was right, because its subscript is native and
+    # type-directed.
+    #
+    # The probe indexes through a CALL (`table()[k]`, a non-atomic target the
+    # emitters parenthesise), with a variable key and a literal key: a string
+    # literal used to be routed to the host/`Any` property read on py and ts,
+    # which is a different arm of the same branch. It also BINDS the read and
+    # calls a method on it, because the node carries the map's declared value
+    # type for the same reason it carries the key type: a subscript whose type
+    # the tier cannot name is treated as a `List` element downstream, and
+    # `let v: Str = m[k]  v.length()` picked go's LIST length helper and did not
+    # build. The binding is ANNOTATED because the checker still infers no type
+    # for a map subscript, so `m[k].slice(0, 1)` is refused outright as a
+    # method on an unknown receiver — a frontend gap, separate from this
+    # lowering the way the unchecked non-`K` key is (see the issue's shape 2).
+    "a Str-keyed Map is indexed by its key": """
+type Point = { x: Int, y: Int }
+
+fn table() -> Map[Str, Point] {
+  var m: Map[Str, Point] = Map.empty()
+  m = m.set("a", { x: 1, y: 2 })
+  m = m.set("b", { x: 3, y: 4 })
+  return m
+}
+
+fn names() -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  m = m.set("a", "alpha")
+  return m
+}
+
+pub fn at(k: Str) -> Int { return table()[k].x }
+pub fn literal() -> Int { return table()["b"].y }
+pub fn whole(k: Str) -> Point { return table()[k] }
+pub fn bound() -> Str { let v: Str = names()["a"]  return v }
+pub fn measured() -> Int { let v: Str = names()["a"]  return v.length() }
+pub fn nested(k: Str) -> Int { let v: Str = names()[k]  return table()[v.slice(0, 1)].x }
+
+test "a Str key reaches its own entry" { assert at("a") == 1 }
+test "and so does the next one" { assert at("b") == 3 }
+test "a literal key is a key, not a property name" { assert literal() == 4 }
+test "the entry read out is the whole value" { assert whole("a") == { x: 1, y: 2 } }
+test "the read binds" { assert bound() == "alpha" }
+test "and carries its declared value type" { assert measured() == 5 }
+test "a read is a key for the next read" { assert nested("a") == 1 }
+test "the total form still answers Opt" { assert table().lookup("a") == Some({ x: 1, y: 2 }) }
+test "and `has` still agrees with it" { assert table().has("a") && !table().has("zz") }
+""",
 }
 
 # go joins the fast set: the v3 tier is dependency-free Go, so `go test`
@@ -933,6 +990,129 @@ def test_549_divergence_now_agrees_java(name: str):
     observed = _observed("java", source)
     assert observed == verdict, (
         f"java now {observed}es {name!r}; #549 fixed it to {verdict}")
+
+
+# ------------------------------------------- a Map index MISS faults (issue #957)
+#
+# What a miss DOES was the open half of #957, and it is not expressible as
+# agreement by accident: measured after the key-type fix and before this
+# section, a miss yielded a rust panic, a python fault, a go ZERO-VALUE record,
+# a java `null` and a ts `undefined` — three different silent values, so there
+# was no value for "the same lookup result" to agree on.
+#
+# The decision recorded on the issue is that the miss FAULTS on every tier.
+# `m[k]` is the partial form of the read and `m.lookup(k)` is the total one,
+# which is the split docs/stdlib-2.0.md §index already pins for the List ("a
+# negative index FAULTS on every tier — there is no wrap and no silent
+# `undefined`"), and it is the reading rust already had: `HashMap`'s own `Index`
+# panics. Pinning the divergence instead would have codified the silent-wrong
+# class this issue exists to remove, on three tiers.
+#
+# The reason is asserted, not merely that something raised: a fault whose text
+# is five different sentences is one guarantee that reads as five bugs, which is
+# what `test_every_bounded_tier_uses_the_same_trap_message` exists to prevent
+# for the Int bound.
+MAP_MISS_REASON = "revl: map index: no entry for key"
+
+MAP_INDEX_MISS = """
+fn table() -> Map[Str, Int] {
+  var m: Map[Str, Int] = Map.empty()
+  m = m.set("a", 1)
+  return m
+}
+
+pub fn absent() -> Int { return table()["zz"] }
+
+test "a miss must not answer a value" { assert absent() == 0 }
+"""
+
+
+def _miss_observed(tier: str, capsys) -> tuple[str, str]:
+    """(status, everything the tier said). The fault text reaches stdout on
+    py/ts/go/rust (the runner streams the toolchain's own output) and the
+    verdict string on java, so both are searched."""
+    status, message = _run(tier, MAP_INDEX_MISS)
+    said = capsys.readouterr().out + str(message)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    return status, said
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_map_index_miss_faults_with_its_reason(tier: str, capsys):
+    status, said = _miss_observed(tier, capsys)
+    assert status == "fail", (
+        f"{tier} answered a VALUE for a Map index miss ({status}). A miss "
+        "faults on every tier (#957); `m.lookup(k)` is the total form.")
+    assert MAP_MISS_REASON in said, (
+        f"{tier} faulted without naming the cause; expected {MAP_MISS_REASON!r} "
+        f"in:\n{said[:600]}")
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_map_index_miss_faults_with_its_reason_slow(tier: str, capsys):
+    status, said = _miss_observed(tier, capsys)
+    assert status == "fail", (
+        f"{tier} answered a VALUE for a Map index miss ({status}); #957 pins "
+        "the miss as a fault on every tier.")
+    assert MAP_MISS_REASON in said, (
+        f"{tier} faulted without naming the cause; expected {MAP_MISS_REASON!r} "
+        f"in:\n{said[:600]}")
+
+
+# The static half, which runs everywhere the slow gate is shut — and the whole
+# observable of #957 was a COMPILE failure on rust and java, so a tier that
+# cannot build must be caught here even when no toolchain is installed.
+_MAP_INDEX_EMITTED = {
+    "python": ("_revl_map_index(", "_revl_index("),
+    # `revlIndex` is the List read the Map subscript used to be routed to (with
+    # the key wrapped in `Number(...)`); the probe has no List subscript at all,
+    # so the helper must be absent from the module entirely.
+    "typescript": ("revlMapIndex(", "revlIndex("),
+    "go": ("revlMapIndex(", None),
+    "rust": ('.cloned().expect("', " as usize]"),
+    "java": ("revlMapIndex(", "(int)("),
+}
+
+
+@pytest.mark.parametrize("backend", sorted(_MAP_INDEX_EMITTED))
+def test_map_index_does_not_lower_to_a_positional_read(backend: str):
+    """The key stays a key on every tier (#957).
+
+    The second needle is the pre-fix lowering: the integer cast that did not
+    compile on rust and java, coerced the key through `Number()` on ts, and sent
+    a `Str` into the List guard on python. It must be absent from the emitted
+    module, not merely accompanied by the right one.
+    """
+    emitted = _emit(backend, PROBES["a Str-keyed Map is indexed by its key"])
+    present, absent = _MAP_INDEX_EMITTED[backend]
+    assert present in emitted, (backend, emitted[:800])
+    if absent is not None:
+        assert absent not in emitted, (
+            f"{backend} still lowers a Map subscript positionally ({absent!r})")
+
+
+def test_every_tier_spells_the_map_miss_reason_the_same_way():
+    """One guarantee should not read as five different bugs (#957).
+
+    The same check `test_every_bounded_tier_uses_the_same_trap_message` makes
+    for the Int bound: the miss is a fault on all five tiers, so the sentence it
+    faults with is the same sentence on all five.
+    """
+    for backend in sorted(_MAP_INDEX_EMITTED):
+        emitted = _emit(backend, MAP_INDEX_MISS)
+        assert MAP_MISS_REASON in emitted, (backend, emitted[:800])
+
+
+def test_wasm_has_no_map_to_index():
+    """The five tiers above are the whole matrix for this issue: the wasm tier
+    refuses a `Map` value outright, so it has no subscript to get wrong. Pinned
+    so a later Map lowering there cannot land without revisiting #957."""
+    with pytest.raises(Exception) as excinfo:
+        _emit("wasm", MAP_INDEX_MISS)
+    assert "is not lowerable" in str(excinfo.value)
 
 
 def test_str_ordering_agrees_everywhere():

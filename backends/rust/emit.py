@@ -5568,6 +5568,9 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
         if kind == "list":
             return "List"
         if kind == "index":
+            # a Map subscript answers the map's declared VALUE type (#957)
+            if node.get("value_type"):
+                return node["value_type"]
             base_ty = _v3_infer_type(node.get("target"), ctx)
             if isinstance(base_ty, str):
                 inner = _list_element_type(base_ty)
@@ -6274,6 +6277,16 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         target = _render_expr(target_node, ctx, rename)
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
+        if node.get("key_type") is not None:
+            # A `Map` subscript reads by KEY (issue #957). The positional form
+            # below cast the key to `usize`, which for a `Map[Str, V]` is
+            # `E0605: non-primitive cast: String as usize` — the tier did not
+            # compile at all. This is `lookup`'s own lowering (`.get(&k)`) with
+            # the miss turned into the fault every tier now takes: `HashMap`'s
+            # own `Index` already panics on a miss, so the only thing added is
+            # the shared reason.
+            return (f"({target}).get(&{_render_expr(node['index'], ctx, rename)})"
+                    f'.cloned().expect("{_MAP_MISS_MSG}")')
         # revl Int is i64; Rust indexing wants usize.
         return f"({target})[({_render_expr(node['index'], ctx, rename)}) as usize].clone()"
 
@@ -6553,6 +6566,9 @@ def _v3_instance_get(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
 _DIV_ZERO_MSG = "revl: division by zero"
+# The reason a `Map` subscript miss faults (issue #957), spelled identically on
+# every tier so one guarantee does not read as five different bugs.
+_MAP_MISS_MSG = "revl: map index: no entry for key"
 
 
 def _v3_checked_div(method: str, target: str, arg: str) -> str:
