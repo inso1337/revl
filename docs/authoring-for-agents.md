@@ -13,8 +13,9 @@ If you only read one other doc, read [guide-ai-agents.md](guide-ai-agents.md):
 it is the full workflow guide, including the MCP verb table and the
 `revl_check` -> `revl_edit` -> `revl_resolve` -> `revl_admit` loop for a
 **running** composition. This page is narrower, naming the five verbs an
-authoring agent reaches for before anything is live, with the CLI form that
-exists today and the MCP form that is coming.
+authoring agent reaches for before anything is live, each with both its CLI
+form and its MCP form. Every step of the loop is reachable either way, so an
+MCP-native agent never has to shell out.
 
 ## The loop
 
@@ -35,6 +36,10 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    `--json` returns the skeleton and its obligations, each hole already
    carrying its fill spec (next step), in one call, so an agent driving the
    CLI as a subprocess does not need a second round trip to `revl_check`.
+   `revl_scaffold` is the same call over MCP: the spec arrives as named
+   arguments (`service` is the only required one, the rest default the same
+   way the flags do) and the reply is that `--json` payload, `source` plus
+   `holeCount`, `admissible` and `obligations`, with nothing written to disk.
 
 2. **fillSpec.** For every open hole, `revl_check` (and `revl scaffold
    --json`) enrich the obligation with everything the checker already knew
@@ -58,6 +63,11 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    CI gate); `--migrate` rewrites 1.x `$name` interpolation to backtick
    templates instead of formatting.
 
+   `revl_fmt` is the MCP form, text in and text out: pass `source` (and
+   `migrate: true` for the 1.x rewrite) and read `formatted` back. It runs
+   the same IR-equivalence gate, so `admitted: false` means the rewrite would
+   have changed what the compiler sees and no `formatted` is returned.
+
 4. **explain.** When a check comes back with a diagnostic code instead of a
    clean compile, don't guess.
 
@@ -68,6 +78,8 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    turns any code back into the guarantee it enforces and the rewrite that
    satisfies it, the same text the structured diagnostic's `hint` field
    already carries, addressable on its own when an agent only kept the code.
+   `revl_explain` takes the same `code` over MCP (case-insensitive), and an
+   unknown code answers with the roster of known ones rather than nothing.
 
 5. **admit.** The loop closes against a real gate, not a lint pass. Working
    against a standalone file, `revl compile` is the check and `revl run`
@@ -85,7 +97,7 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
 | step | CLI | MCP |
 |---|---|---|
 | scaffold | `revl scaffold` | `revl_scaffold` |
-| fillSpec | folded into scaffold `--json` | `revl_check` (enriches every open hole) |
+| fillSpec | folded into scaffold `--json` | folded into `revl_scaffold`; `revl_check` enriches every open hole |
 | fmt | `revl fmt` | `revl_fmt` |
 | explain | `revl explain <code>` | `revl_explain`, plus the `hint` field on every diagnostic |
 | grammar | `revl grammar` | `revl_grammar` |
@@ -94,8 +106,19 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
 Item 345 landed: `scaffold`, `fmt`, `explain` and `grammar` are MCP verbs, not
 CLI-only steps. An MCP-native harness needs no shell-out for any of them, and
 the CLI forms keep working identically for anything driving revl as a
-subprocess. `revl mcp serve` advertises 51 verbs in total; the full list is in
+subprocess. This loop's three authoring verbs carry their inputs and outputs
+in full at [`revl_scaffold`](mcp-reference.md#revl_scaffold),
+[`revl_fmt`](mcp-reference.md#revl_fmt) and
+[`revl_explain`](mcp-reference.md#revl_explain).
+
+<!-- docgen:authoring-mcp-count begin -->
+`revl mcp serve` advertises 52 verbs in total; the full list is in
 [mcp-reference.md](mcp-reference.md).
+<!-- docgen:authoring-mcp-count end -->
+
+The count above is generated from `revl.mcp.server.TOOLS` by
+`tools/docgen.py`, so a verb added to or withdrawn from the surface moves this
+page with it instead of leaving a hand-maintained number behind.
 
 ## See also
 
