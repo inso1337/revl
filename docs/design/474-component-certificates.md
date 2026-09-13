@@ -152,9 +152,11 @@ where they do not account for the catalogue exactly once:
   cross-tier items) is covered by the document's digest rather than by a
   per-code row. These rows get a `REQ_NAMED` requirement each, and a caveat
   apiece when they are not `proved`, which today is all of them but `A8`;
-- `unrecorded`, the catalogued codes with no row at all (`T-UNRESOLVED` today),
-  carried as a `REQ_UNRECORDED` requirement and a caveat. Stated silence is a
-  weaker claim than an unproved status and a stronger one than an absence.
+- `unrecorded`, the catalogued codes with no row at all — derived from the
+  catalogue and the map rather than listed here, so a code catalogued without a
+  ledger row appears in the certificate instead of falling out of it — carried
+  as a `REQ_UNRECORDED` requirement and a caveat. Stated silence is a weaker
+  claim than an unproved status and a stronger one than an absence.
 
 `certifiable` keeps the slice-1 asymmetry for the numbered rules (a `proved`
 status needs a registered theorem, a weaker status needs the map's gap sentence)
