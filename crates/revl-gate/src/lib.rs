@@ -153,15 +153,22 @@
 //! Its own fail-closed rule is the mirror of this one: it answers only what it
 //! can answer EXACTLY, and every uncertainty is an absence rather than a guess.
 //!
-//! # Layer 2: the session surface (item 334 slice 1)
+//! # Layer 2: the session surface (item 334 slices 1-2)
 //!
-//! See [`session`]. [`session::Session`] is the foundational first slice of the
-//! rust host: the generation state machine, the untrusted-author admission entry
-//! (`propose`/`admit`, reusing this crate's [`admit`]), and the item-245
-//! witnessed-call recording path (`call`/`commit`/`abort`/`unload`). The ACCEPT
-//! half of `propose` (activate + health-gate + swap), the witnessed-effect
-//! runtime, the WAL, and the approver callback are the remaining slices; a
-//! candidate the native gate does not refuse is fail-closed, never waved through.
+//! See [`session`]. [`session::Session`] is the rust host: the generation state
+//! machine, the untrusted-author admission entry (`propose`/`admit`, reusing
+//! this crate's [`admit`]), and the item-245 call path
+//! (`call`/`commit`/`abort`/`unload`) over a WITNESSED-EFFECT runtime. The host
+//! declares its externs in a [`session::Externs`] registry, where the item-243
+//! pair rules are checked — a witnessed effect cannot be declared before its
+//! inverse, an emission cannot stand in as an undo, an undo slot cannot go on
+//! the call surface — and a `call` runs the real body while `abort` runs the
+//! real inverses, LIFO. `AbortReport::residue_free` is therefore a measurement:
+//! an inverse that FAILED is residue, not a clean revert.
+//!
+//! The ACCEPT half of `propose` (activate + health-gate + swap), the item-322
+//! WAL, and the approver callback are the remaining slices; a candidate the
+//! native gate does not refuse is fail-closed, never waved through.
 //!
 //! # Two host obligations
 //!

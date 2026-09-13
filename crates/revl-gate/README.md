@@ -163,15 +163,25 @@ Two honest limits, both fail-closed:
 * **The deferred manifest rows.** Replacement and handoff rows are refused, for
   the reason in the section above: they need the type layer.
 * **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
-  foundational first slice: the generation state machine, the untrusted-author
-  admission entry (`propose`/`admit`/`admit_into`), and the item-245
-  witnessed-call recording path (`call`/`commit`/`abort`/`unload`). The
-  accept-and-swap half, the witnessed-effect runtime, the WAL and the approver
-  callback are later slices; a candidate the native gate does not refuse is
-  fail-closed, never admitted. `Session::admit_into` takes the manifest wire as
-  a PARAMETER, not as a projection of the loaded composition: a manifest also
-  needs requirements and realms, and synthesising rows out of what the session
-  holds would be inventing a running composition.
+  rust host, slices 1-2: the generation state machine, the untrusted-author
+  admission entry (`propose`/`admit`/`admit_into`), and the item-245 call path
+  (`call`/`commit`/`abort`/`unload`) over a witnessed-effect runtime. The host
+  declares its externs in a `session::Externs` registry, which is where the
+  item-243 pair rules are checked (a witnessed effect may not be declared before
+  its inverse, an emission may not be an undo slot, an undo slot may not be bound
+  to the call surface); a `call` runs the real host body and `abort` runs the real
+  inverses LIFO, so `AbortReport::residue_free` reports what the inverses actually
+  did rather than what the classification promised. The accept-and-swap half, the
+  WAL and the approver callback are later slices; a candidate the native gate does
+  not refuse is fail-closed, never admitted. `Session::admit_into` takes the
+  manifest wire as a PARAMETER, not as a projection of the loaded composition: a
+  manifest also needs requirements and realms, and synthesising rows out of what
+  the session holds would be inventing a running composition.
+* **Layer 2's externs are the HOST's.** A witnessed pair is registered by the
+  embedder, not derived from a `witnessed[fs]` extern in the candidate's source:
+  that step needs `compile_to`, which this tier does not have. The pair rules are
+  enforced over the registry, and the runtime is real; what is not yet real is the
+  path from admitted source to a running body.
 
 ## Host obligations
 
@@ -216,7 +226,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:bfa86a723e72c471"
+    // frontier "selfhost-admit:c14c71e534d8fd99"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
