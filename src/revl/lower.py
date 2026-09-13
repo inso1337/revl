@@ -2189,6 +2189,30 @@ def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
     return infer_ast(expr, type_env, types)
 
 
+def _map_key_value_types(target, type_env: dict,
+                         types: dict) -> tuple[str | None, str | None]:
+    """The declared `(K, V)` of a subscript target that is a `Map[K, V]`, else
+    ``(None, None)`` (issue #957).
+
+    This is what tells a backend that `m[k]` is a map lookup rather than a
+    positional read. The decision has to be made HERE, from the container's
+    declared type: an emitter sees only the index expression, and every one of
+    them read a subscript as the `List` read it was written for, which is how a
+    `Str` key ended up cast to an integer on four tiers.
+
+    ``(None, None)`` covers every other target — a `List`, a `Str` (refused by the
+    checker), and the `Any`/host receiver whose string-literal subscript is a
+    property read — so those lowerings are untouched.
+    """
+    target_type = _expr_static_type(target, type_env, types)
+    if not target_type:
+        return (None, None)
+    head, args = parse_type(target_type)
+    if head == "Map" and args:
+        return (args[0], args[1] if len(args) > 1 else None)
+    return (None, None)
+
+
 def _field_declared_type(target_type: str | None, field_name: str,
                          types: dict) -> str | None:
     """The DECLARED type of ``target_type.field_name`` when the target resolves
@@ -6697,8 +6721,28 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             node["opt"] = True
         return node
     if isinstance(expr, ExprIndex):
-        return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
+        node = {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
                 "index": _lower_pure_expr(expr.index, scope, callables, alias_fns, filename, type_env, types)}
+        # issue #957: a subscript is lowered by the CONTAINER's declared key
+        # type, not by the shape of the index expression. Every backend read the
+        # index node as a positional `List` read, so `m[k]` on a `Map[Str, V]`
+        # emitted an integer cast of the key: `revlIndex(m, Number(k))` on ts
+        # (`NaN`, silently wrong), `(m)[(k) as usize]` on rust and
+        # `m.get((int)(k))` on java (neither compiles), and `_revl_index(m, k)`
+        # on python, whose helper is the List guard and compares the key with 0.
+        # `key_type` is the declared key of a `Map` target and nothing else, so
+        # a `List` read and a host/`Any` property read are untouched.
+        key_type, value_type = _map_key_value_types(expr.target, type_env, types)
+        if key_type is not None:
+            node["key_type"] = key_type
+            # The declared VALUE type travels with it: the tiers infer a
+            # subscript's type from the container, and a map read that answered
+            # "unknown" was then treated as a `List` element read downstream —
+            # `let s: Str = m[k]  s.length()` picked go's LIST length helper and
+            # did not build. One annotation, read by every backend's inference.
+            if value_type is not None:
+                node["value_type"] = value_type
+        return node
     if isinstance(expr, ExprIf):
         return {"kind": "if", "cond": _lower_pure_expr(expr.cond, scope, callables, alias_fns, filename, type_env, types),
                 "then": _lower_pure_expr(expr.then, scope, callables, alias_fns, filename, type_env, types),
