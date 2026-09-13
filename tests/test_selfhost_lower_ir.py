@@ -71,6 +71,14 @@ With that, `lower_to_ir` is COMPLETE for the whole covered surface — function,
 component, and extern programs — up to the per-component `source` (input
 filename) and top-level `manifest` (linker artifact), which are environment/link
 artifacts the covered emitter surface never reads.
+
+Issue #957 adds the `Map` SUBSCRIPT region. The reference frontend lowers a
+subscript from the CONTAINER's declared type and stamps an `index` node on a
+`Map[K, V]` with `key_type`/`value_type`; the self-host lowering did not, and
+this oracle did not notice, because the corpus it globs indexed no `Map` at all.
+`maps.rvl` is that document — keyed reads (variable key, literal key, a read
+used as the next read's key, nested maps, a map reached through a record field)
+next to the `List` reads that must carry neither annotation.
 """
 
 import importlib.util
@@ -105,6 +113,7 @@ VERSION_BODY_DEPENDENT: set[str] = set()
 FUNCTION_EMIT_READY_DOCS = [
     "arith.rvl", "control.rvl", "strings.rvl", "records.rvl", "result.rvl",
     "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
+    "maps.rvl",
 ]
 
 # The component documents whose whole activation/method body is now lowered
@@ -243,6 +252,29 @@ def test_selfhosted_lower_ir_in_file_tests_pass(ns):
     assert len(lower_to_ir_cases) >= 4, lower_to_ir_cases
     for name, fn in tests:
         fn()  # the block's asserts fire here; a failure raises
+
+
+def test_native_ir_annotates_a_map_subscript(lower_to_ir):
+    """Issue #957 — a subscript is lowered from the CONTAINER's declared type.
+
+    An `index` node whose target is a declared `Map[K, V]` carries `key_type`
+    and `value_type`, which is how a backend tells a keyed read from the
+    positional `List` read every subscript arm was written for. The reference
+    frontend started stamping them without the self-host lowering following, and
+    the byte-agreement oracle stayed green because no corpus document indexed a
+    `Map` at all — `tests/fixtures/emit_py_corpus/maps.rvl` is that document, and
+    this pins the annotation itself next to the `List` read that must NOT carry
+    it."""
+    source = (
+        "fn keyed(m: Map[Str, Int], k: Str) -> Int { return m[k] }\n"
+        "fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    keyed = reference[0]["body"][-1]["expr"]
+    assert keyed["key_type"] == "Str" and keyed["value_type"] == "Int"
+    assert "key_type" not in reference[1]["body"][-1]["expr"]
+    assert native == reference
 
 
 def test_native_ir_preserves_function_visibility(lower_to_ir):
