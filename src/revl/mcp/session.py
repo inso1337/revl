@@ -787,6 +787,33 @@ class Session:
             out[name] = cm.candidate_hash(closure)
         return out
 
+    def _settle_approval_spend(self, prev) -> None:
+        """Carry a spent `Approval[C]` back onto the session's own record (item
+        246, Decision 3).
+
+        `SessionOwner.grant_approval` stores a COPY of each grant and the frame
+        check spends that copy (`SessionOwner.consume_approval`), so a crossing
+        left the session's `_approval_grants` entry reading `consumed: False`.
+        Seeding the next generation's owner from an unspent-looking entry
+        therefore re-armed a token that had already been spent: a single-use
+        approval fired again on `unload`/`load`, on `swap` and on `rollback` —
+        each one an irreversible class-(c) crossing the operator approved
+        exactly once. The generation boundary is the only place the two records
+        meet, so it is where the spend is settled.
+
+        An entry only ever moves from unspent to spent, so this narrows what a
+        crossing may do and can never widen it."""
+        if prev is None or not self._approval_grants:
+            return
+        spent = {e.get("requestId")
+                 for e in getattr(prev, "approval_ledger", None) or []
+                 if e.get("consumed")}
+        if not spent:
+            return
+        for grant in self._approval_grants:
+            if grant.get("requestId") in spent:
+                grant["consumed"] = True
+
     def _install_session_owner(self, ir: dict) -> None:
         """Create a FRESH session commit-state owner for the generation about to
         load, seed its typed-approval state, and make it the process-global owner
@@ -830,6 +857,11 @@ class Session:
             self._owner.prompts = prev.prompts
             self._owner.flush_residue = prev.flush_residue
             self._owner.approvals = prev.approvals
+            # …and settle any typed approval the predecessor generation already
+            # spent, BEFORE the seeding below can hand it to the successor as an
+            # unspent token (a single-use approval must not re-arm across a
+            # generation boundary).
+            self._settle_approval_spend(prev)
         # item 246, Slice 3: seed the SessionOwner with the typed-approval state
         # BEFORE the activation body runs, so a `with a` crossing in the activation
         # body checks and consumes its token against the live ledger (the runtime
@@ -3305,6 +3337,12 @@ class Session:
         if _reflect_bridge.current() is self:
             _reflect_bridge.bind(None)
         self._driver = None
+        # the teardown boundary is the last generation boundary this session will
+        # see, so settle any approval the outgoing generation spent before the
+        # owner that recorded the spend is dropped — otherwise a fresh `load`
+        # seeds the next owner from an entry still reading `consumed: False` and
+        # a single-use approval re-arms across the unload.
+        self._settle_approval_spend(self._owner)
         self._owner = None
         self.ir = None
         self.previous = None
