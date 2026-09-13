@@ -88,9 +88,11 @@ groups "the `Secret` families" with G9 as the same no-paper-anchor family.
 | `Untrusted[T]` | value returned across an untrusted-origin boundary; joins by set union | qualifier (checker side-table, taint flow at lower) | revl-original (item 249) |
 | `Trusted[T]` | an authority-granting sink parameter; an `Untrusted[T]` may not reach it without a declassifier | qualifier (lower, taint flow) | revl-original (item 249) |
 | `Secret[T]` | a capability-bound secret, redacted at boundaries (config trace, WAL, seam text, approval tickets) | qualifier (lower, taint flow) | revl-original (items 249 / 256) |
+| `Retained[T, P]` | a value held under retention policy `P`: a deadline, a residence, a legal-hold exception, the principals that may request deletion, and which derivative classes the policy covers | qualifier (lower, taint: declaration and flow) | revl-original (item 472) |
 | G9 | untrusted data cannot create authority without a declared declassification (`endorse`, or a `verified` checked parser) | lower (taint flow) | revl-original (no paper anchor; roadmap item 249) |
 | [G-SECRET](rejections.md#the-families) | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
 | [G-SECRET-FLOW](rejections.md#the-families) | a `Secret[T]` value never reaches a disclosure sink; it crosses only at a declared `Secret[T]` receiver and downgrades only at a declared `endorse[confidential]` | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
+| [G-RETAIN](rejections.md#the-families) | a `Retained[T, P]` value past `P`'s retention deadline never reaches a persistence sink (a `db`/`fs`/`store`/`kv`/`blob`/`archive`/`index`/`cache`/`queue`/`wal` crossing), unless `P` declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) | revl-original (item 472); no paper anchor |
 
 A declared receiver is not a licence to RECORD. A `Secret[T]` declaration
 authorises disclosure to the receiver it names; it says nothing about a durable

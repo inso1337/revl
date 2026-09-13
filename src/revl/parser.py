@@ -1741,6 +1741,38 @@ class SecretDecl:
 
 
 @dataclass
+class RetentionDecl:
+    """A typed data-retention policy (roadmap item 472):
+
+        retention customer_pii {
+          until: "2027-01-01T00:00:00Z"
+          residence: "eu"
+          hold: "litigation-2025-07"
+          deleters: dpo, subject
+          derivatives: summary, index
+        }
+
+    `retention` is a CONTEXTUAL keyword, the `secret`/`composition`/`layer`
+    discipline: it heads a declaration ONLY in the shape `retention NAME {`, so
+    no program that already uses `retention` as an ordinary identifier breaks
+    and the self-hosted lexer's KEYWORDS table (and the gate crate's frontier
+    derived from it) needs no sync.
+
+    This node is SYNTAX ONLY. Every semantic rule — that `until` is an
+    RFC-3339 instant, that `deleters` is non-empty, that `derivatives` names
+    members of a closed vocabulary — lives in `revl.retention`, beside the
+    refusal that consumes it. `fields` keeps the author's order and lines so
+    those refusals can point at the offending line rather than at the block.
+    """
+
+    name: str
+    # (key, values, was_string, line) — `values` is a 1-tuple for a string
+    # value and the comma-separated list for an identifier value.
+    fields: list = field(default_factory=list)
+    line: int = 0
+
+
+@dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
@@ -1755,6 +1787,11 @@ class Program:
     uses: list[UseDecl] = field(default_factory=list)
     externs: list[ExternDecl] = field(default_factory=list)
     secrets: list[SecretDecl] = field(default_factory=list)
+    # item 472: the typed data-retention policies a `Retained[T, <policy>]`
+    # qualifier names. Read by `revl.retention` (validated there) and by
+    # `taint.extract_and_normalize`, which mints the retention origin. Empty for
+    # every program that declares none, so those programs are byte-identical.
+    retentions: list[RetentionDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
     prop_tests: list[PropTestDecl] = field(default_factory=list)
@@ -2217,6 +2254,17 @@ class Parser:
                 # self-hosted lexer's KEYWORDS table needs no sync.
                 program.secrets.append(self.secret_decl())
 
+            elif self.at("ident", "retention") \
+                    and self.peek_ahead(1).kind == "ident" \
+                    and self.peek_ahead(2).kind == "{":
+                # item 472: `retention NAME { ... }`. `retention` is a
+                # *contextual* keyword on the `secret`/`composition`/`layer`
+                # discipline - it heads a declaration ONLY in this shape, so a
+                # program that already uses `retention` as an ordinary
+                # identifier keeps parsing and the self-hosted lexer's KEYWORDS
+                # table needs no sync.
+                program.retentions.append(self.retention_decl())
+
             elif self.at("ident", "prop") and self.peek_ahead(1).kind == "kw" \
                     and self.peek_ahead(1).value == "test":
                 # `prop` is a *contextual* keyword: like `fault`, it only heads a
@@ -2310,6 +2358,36 @@ class Parser:
             self.next()
             parts.append(self.expect("ident").value)
         return SecretDecl(name, ".".join(parts), line)
+
+    def retention_decl(self) -> RetentionDecl:
+        """`retention NAME { <key>: <value> ... }` (roadmap item 472).
+
+        A value is either a STRING literal (`until: "2027-01-01T00:00:00Z"`) or
+        a comma-separated list of identifiers (`deleters: dpo, subject`). The
+        parser records which of the two it read and validates NOTHING else:
+        the key set, the instant format, the closed derivative vocabulary and
+        the non-empty-deleters rule are `revl.retention`'s, so the refusal and
+        the rule it enforces sit in one file.
+        """
+        line = self.expect("ident", value="retention").line
+        name = self.expect("ident", what="a retention policy name").value
+        self.expect("{")
+        fields: list = []
+        while not self.at("}"):
+            key_tok = self.expect("ident", what="a retention policy field name")
+            self.expect(":", what=f"`:` after `{key_tok.value}`")
+            if self.at("string"):
+                tok = self.next()
+                fields.append((key_tok.value, (tok.value,), True, key_tok.line))
+            else:
+                values = [self.expect(
+                    "ident", what=f"a name or a string for `{key_tok.value}`").value]
+                while self.at(","):
+                    self.next()
+                    values.append(self.expect("ident", what="a name").value)
+                fields.append((key_tok.value, tuple(values), False, key_tok.line))
+        self.expect("}")
+        return RetentionDecl(name, fields, line)
 
     def extern_decl(self, public: bool) -> ExternDecl:
         line = self.expect("kw", "extern").line

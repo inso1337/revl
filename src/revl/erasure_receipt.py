@@ -42,14 +42,22 @@ resolved from `--receipt-key`, `REVL_ERASURE_KEY_FILE`, then `REVL_ERASURE_KEY`,
 never hardcoded: a missing key is an error, so a receipt is never signed with a
 secret the tree assumed.
 
-WHAT THE RETENTION HALF IS NOT. Item 472 also asks for a `Retained[T]` type
-whose value past its retention deadline is refused at a persistence sink. That
-half is NOT implemented here, and this module does not pretend otherwise.
-docs/design/472-retention-erasure-receipts.md records the measurement behind
-that decision: the tree has no persistence sink the type system owns, no
-residence or legal-hold vocabulary, and no runtime age fact a checker could
-refuse on, so the deadline half is a language change with named prerequisites
-rather than a slice that could be landed honestly.
+WHERE THE RETENTION HALF LIVES. Item 472's other clause asks for a `Retained[T]`
+type whose value past its retention deadline is refused at a persistence sink.
+That half is NOT in this module and never was: it is `revl.retention`, which
+supplies the `retention <name> { ... }` declaration (deadline, residence,
+legal-hold exception, allowed deleters, covered derivative classes), registers
+`Retained[T, <policy>]` as a fourth qualifier head in `taint.py`'s family, and
+refuses a past-deadline value at a persistence sink with `G-RETAIN`.
+`revl.retention` also signs its own erasure receipt, over an ENUMERATION of
+replicas and derivatives rather than over an erase report, under its own domain
+tag. The two receipts are siblings, not versions of each other: this one
+summarises a MEASUREMENT `erase_report` took of a realm, and that one summarises
+a DECLARED policy and the replicas a caller can name under it. Neither proves
+destruction, and both say so inside the signed body.
+docs/design/472-retention-erasure-receipts.md carries the reasoning, including
+which of its four named prerequisites `revl.retention` supplies and which it
+deliberately does not.
 """
 
 from __future__ import annotations

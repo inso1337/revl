@@ -1,0 +1,52 @@
+// REJECTED — G-RETAIN: a `Retained[T, P]` value whose retention policy's
+// deadline has passed may not reach a PERSISTENCE SINK (roadmap item 472).
+//
+// `customer_pii` declares the five facts a retention policy carries: the
+// deadline (`until`), the geographic residence, who may request deletion
+// (`deleters`), which derivative classes the policy covers (`derivatives`), and
+// — by its absence here — that no legal hold is in force. `load` hands back a
+// value under that policy, so the value carries the `retained:customer_pii`
+// origin from the moment it enters the value world.
+//
+// `db_put` declares `emission[db.insert]`. `db` is a DURABLE-STORAGE scope
+// (revl.retention.PERSISTENCE_SINK_SCOPES), so the crossing is a persistence
+// sink — read off the capability the crossing DECLARES, never off an author
+// qualifier, because the side that owns the store is the side that knows it is
+// one. Note that `db_put`'s own parameter carries no qualifier: the refusal
+// follows the VALUE, not the spelling at the sink.
+//
+// The deadline here is in the past absolutely (2020), so this file is refused
+// under any clock. A policy whose deadline has not passed compiles, and so does
+// this one with `hold: "<matter>"` added: a declared legal hold overrides the
+// deadline, which is what a legal hold is for.
+//
+// Honest scope: this refuses a WRITE the compiler can see. It does not prove
+// that data already written was destroyed — that is the erasure receipt's job,
+// and a receipt is an enumeration plus a signature, never a proof of
+// destruction (revl.retention, docs/design/472-retention-erasure-receipts.md).
+//
+// expected error:
+//   data past its retention deadline may not be written to durable storage
+
+retention customer_pii {
+  until: "2020-01-01T00:00:00Z"
+  residence: "eu"
+  deleters: dpo, subject
+  derivatives: summary, index
+}
+
+extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+
+extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+
+service Ops { emission fn go(k: Str) -> Int }
+
+component Store provides ops: Ops {
+  provide ops {
+    fn go(k) {
+      let row = load(k)
+      let n = db_put(row)
+      return n
+    }
+  }
+}
