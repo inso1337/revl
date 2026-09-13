@@ -865,6 +865,19 @@ fn close_brace(ts: &[Token], i: i64) -> i64 {
     return (0i64).checked_sub(1i64).expect("revl: Int overflow");
 }
 
+fn test_block_end(ts: &[Token], i: i64) -> i64 {
+    if (!atw(ts, i, "test")) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
+        return close_brace(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    if (atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "string") && atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{")) {
+        return close_brace(ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+    }
+    return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+}
+
 fn contains(xs: &[String], s: &str) -> bool {
     return (xs.revl_index_of(&s.to_string()) != (0i64).checked_sub(1i64).expect("revl: Int overflow"));
 }
@@ -2103,8 +2116,8 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
         return p_top(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), pg.clone());
     }
     if (((t.text == "use") || (t.text == "test")) || (t.text == "type")) {
-        if ((t.text == "test") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{")) {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+        if (t.text == "test") {
+            let e = test_block_end(&ts, i);
             if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 return p_top(ts.clone(), e, pg.clone());
             }
@@ -5131,11 +5144,9 @@ fn cfg_owners_walk(ts: Vec<Token>, i: i64, a: CfgAcc) -> CfgAcc {
         return cfg_owners_walk(ts.clone(), skip_line(&ts, i), a.clone());
     }
     if (t.text == "test") {
-        if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return cfg_owners_walk(ts.clone(), e, a.clone());
-            }
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return cfg_owners_walk(ts.clone(), e, a.clone());
         }
         return cfg_owners_walk(ts.clone(), skip_line(&ts, i), a.clone());
     }
@@ -5816,11 +5827,9 @@ fn fb_refusal(ts: Vec<Token>, i: i64) -> Verd {
         return fb_refusal(ts.clone(), skip_line(&ts, i));
     }
     if (t.text == "test") {
-        if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return fb_refusal(ts.clone(), e);
-            }
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return fb_refusal(ts.clone(), e);
         }
         return fb_refusal(ts.clone(), skip_line(&ts, i));
     }
@@ -7975,11 +7984,9 @@ fn case_binds_walk(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseAcc {
         return case_binds_walk(ts.clone(), d.i, d.a.clone());
     }
     if (t.text == "test") {
-        if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return case_binds_walk(ts.clone(), e, a.clone());
-            }
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return case_binds_walk(ts.clone(), e, a.clone());
         }
         return case_binds_walk(ts.clone(), skip_line(&ts, i), a.clone());
     }
@@ -9139,11 +9146,9 @@ fn fns_walk(ts: Vec<Token>, i: i64, acc: String, cases: Vec<Bind>) -> String {
         return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone());
     }
     if (t.text == "test") {
-        if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return fns_walk(ts.clone(), e, acc.clone(), cases.clone());
-            }
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return fns_walk(ts.clone(), e, acc.clone(), cases.clone());
         }
         return fns_walk(ts.clone(), skip_line(&ts, i), acc.clone(), cases.clone());
     }
@@ -9339,11 +9344,9 @@ fn externs_walk(ts: Vec<Token>, i: i64, acc: String, ok: bool, decls: Vec<TaintD
         return externs_walk(ts.clone(), ni, acc2, (ok && ex.ok), decls.clone());
     }
     if (t.text == "test") {
-        if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return externs_walk(ts.clone(), e, acc.clone(), ok, decls.clone());
-            }
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return externs_walk(ts.clone(), e, acc.clone(), ok, decls.clone());
         }
         return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok, decls.clone());
     }
@@ -9490,11 +9493,9 @@ fn types_walk(ts: Vec<Token>, i: i64, acc: String) -> String {
         return types_walk(ts.clone(), d.i, acc2);
     }
     if (t.text == "test") {
-        if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return types_walk(ts.clone(), e, acc.clone());
-            }
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return types_walk(ts.clone(), e, acc.clone());
         }
         return types_walk(ts.clone(), skip_line(&ts, i), acc.clone());
     }
@@ -9532,11 +9533,9 @@ fn ir_walk(ts: Vec<Token>, i: i64, a: IrAcc) -> IrAcc {
     }
     if (t.text == "test") {
         let na = mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2);
-        if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
-            let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return ir_walk(ts.clone(), e, na.clone());
-            }
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return ir_walk(ts.clone(), e, na.clone());
         }
         return ir_walk(ts.clone(), skip_line(&ts, i), na.clone());
     }
@@ -12043,6 +12042,26 @@ fn a_record_literal_after____is_not_the_closure_write_form() {
 fn a_statement_block_match_arm_is_not_an_arrow_head() {
     let v = admit_src(String::from("type S = A(Str) | B(Str) fn f(s: S) -> Int { return match s { A(x) => { let y = 1  y }, B(x) => 2, } }"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_named_test_block_is_stepped_over__not_read_as_declarations() {
+    assert!((admit_src(String::from("fn id(x: Int) -> Int { return x } test \"id round trips\" { assert id(1) == 1 }")) == ""));
+}
+
+#[test]
+fn a_declaration_after_a_named_test_block_is_still_reached() {
+    assert!((admit_src(String::from("test \"first\" { let a = 1  assert a == 1 } fn id(x: Int) -> Int { return x }")) == ""));
+}
+
+#[test]
+fn a_named_test_body_s_statements_draw_no_top_level_verdict() {
+    assert!((admit_src(String::from("test \"locals\" { let a = 1  var b = 2  b = a  assert b == 1 } fn id(x: Int) -> Int { return x }")) == ""));
+}
+
+#[test]
+fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
+    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}]}"));
 }
 
 #[test]
