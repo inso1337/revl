@@ -40,6 +40,8 @@ CANDIDATE_SAME = os.path.join(FIX, "canary_candidate_same.rvl")
 CANDIDATE_INVERSE = os.path.join(FIX, "canary_candidate_inverse.rvl")
 EMIT_BASELINE = os.path.join(FIX, "canary_emit_baseline.rvl")
 EMIT_CANDIDATES = os.path.join(FIX, "canary_emit_candidates.rvl")
+MOVED_BASELINE = os.path.join(FIX, "canary_moved_baseline.rvl")
+MOVED_CANDIDATE = os.path.join(FIX, "canary_moved_candidate.rvl")
 
 TENANTS = ("tenant_a", "tenant_b", "tenant_c")
 OTHER_TENANT_COMPONENTS = {
@@ -171,27 +173,30 @@ def test_a_compensation_only_change_is_a_divergence(provider):
 
 
 def test_the_compared_key_is_behaviour_not_provenance():
-    """`_step_key` keys `(kind, label, undo, compensate)` — the step's behaviour
-    and the inverse it records — and deliberately NOT `origin`.
+    """`_step_key` keys `(kind, label, undo, compensate, slot)` — the step's
+    behaviour, the inverse it records, and the entry point it is reached from —
+    and deliberately NOT `origin`.
 
     `origin` is provenance (the component, key and method a step came from) and
-    is identical for two generations of one provider; keying it would report a
-    rename as behavioural change. The inverse IS behaviour, so it is keyed. This
-    pins both halves of that decision, plus the length-mismatch field."""
+    its method NAME is allowed to change; keying it would report a rename as
+    behavioural change. The part of it that says WHICH method reached the step
+    is not provenance, it is behaviour, and it is keyed as `slot`. The inverse
+    IS behaviour, so it is keyed. This pins all three halves of that decision,
+    plus the length-mismatch field."""
     replay = canary.replay_module()
 
-    def step(origin: str, undo):
+    def step(origin: str, undo, slot=1):
         return replay.Step(0, replay.KIND_EFFECT, "store.insert(k, v)", None,
                            {"origin": origin},
-                           detail={"origin": origin, "undo": undo})
+                           detail={"origin": origin, "slot": slot, "undo": undo})
 
     def timeline(*steps):
         tl = replay.Timeline("TenantAStore")
         tl.steps.extend(steps)
         return tl
 
-    # same behaviour recorded from a different site (a renamed method): NOT a
-    # divergence — the recorded world is the same world
+    # same behaviour recorded from a different site (a renamed method, same
+    # entry point): NOT a divergence — the recorded world is the same world
     a = timeline(step("TenantAStore:kv.set", "store.remove(k)"))
     b = timeline(step("TenantAStore:kv.put", "store.remove(k)"))
     assert canary.compare_timelines(a, b)["diverged"] is False
@@ -201,11 +206,60 @@ def test_the_compared_key_is_behaviour_not_provenance():
                                                    "store.remove('other')")))
     assert div["diverged"] is True and div["field"] == "undo"
 
+    # same acquisition AND same inverse, reached from a different entry point:
+    # IS a divergence — the step runs on a different operation
+    div = canary.compare_timelines(a, timeline(step("TenantAStore:kv.get",
+                                                   "store.remove(k)", slot=0)))
+    assert div["diverged"] is True and div["field"] == "slot"
+
     # a length mismatch is still a divergence, named as such
     div = canary.compare_timelines(a, timeline(step("TenantAStore:kv.set",
                                                    "store.remove(k)"),
                                               step("TenantAStore:kv.set", None)))
     assert div["diverged"] is True and div["field"] == "length"
+
+
+def test_a_step_relocated_between_methods_is_a_divergence():
+    """A candidate whose recorded world is step-for-step identical and whose
+    entry points are not: the acquisition `set` performed now runs inside `get`.
+
+    `_walk_steps` flattens the per-method step runs into one list, so a step
+    that MOVES between methods leaves that list unchanged — and `origin` was
+    excluded from the compared key on the grounds that it is identical for two
+    generations of one provider. It is not: it names the method, and here the
+    two generations reach the same step from `kv.set` and from `kv.get`. A
+    consumer that reads through `get` would perform the write, and the canary
+    recommended the promote."""
+    baseline = canary.slice_timeline(compile_files([MOVED_BASELINE]), "TenantAStore")
+    candidate = canary.slice_timeline(compile_files([MOVED_CANDIDATE]), "TenantAStore")
+
+    # the recorded worlds really are the same steps, in the same order: the
+    # comparison is not catching a difference in what the steps did
+    assert [(s.kind, s.label) for s in baseline.steps] \
+        == [(s.kind, s.label) for s in candidate.steps]
+    assert [s.detail["origin"] for s in baseline.steps] \
+        != [s.detail["origin"] for s in candidate.steps]
+
+    div = canary.compare_timelines(baseline, candidate)
+    assert div["diverged"] is True
+    assert div["field"] == "slot"
+    assert div["baseline"]["slot"] == 1 and div["candidate"]["slot"] == 0
+    assert div["baseline"]["label"] == div["candidate"]["label"] \
+        == "store.insert(k, v)"
+
+
+def test_the_canary_reverts_a_relocated_step_end_to_end():
+    """The same move through the whole verdict: admitted against the running
+    composition (the service is unchanged, so the admission gate has no
+    objection), divergent on the slice, and therefore a REVERT — not the
+    promote a comparison keyed on what each step did alone would recommend."""
+    report = canary.run_canary(compile_files([MOVED_BASELINE]),
+                               candidate_files=[MOVED_CANDIDATE],
+                               realm="tenant_a", prove_residue=False)
+    assert report["ok"] is True and report["admitted"] is True
+    assert report["divergence"]["diverged"] is True
+    assert report["divergence"]["field"] == "slot"
+    assert report["recommendation"] == "revert"
 
 
 # ---------------------------------------------- revert (derived, survivors)

@@ -1,0 +1,64 @@
+// Fixture for tests/test_canary.py — a CANDIDATE generation of tenant_a's store
+// whose recorded world is step-for-step identical to canary_moved_baseline.rvl
+// and whose ENTRY POINTS are not: the acquisition that `set` performed now runs
+// inside `get`. A consumer that reads through `get` therefore performs the
+// write, and `set` has become inert. The flat step list is unchanged, so a
+// comparison that keys only what each step did reports this as an identical
+// generation and recommends the promote (roadmap item 496).
+
+service Kv {
+  fn get(k: Str, v: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+      return store.get(k)
+    }
+    fn set(k, v) = store.get(k)
+  }
+}
+
+component TenantBStore provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k, v) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantBApp requires kv: Kv {
+  isolate kv in realm("tenant_b")
+  effect kv.set("who", "B") undo kv.set("who", "")
+}
+
+component TenantCStore provides kv: Kv {
+  isolate kv in realm("tenant_c")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k, v) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantCApp requires kv: Kv {
+  isolate kv in realm("tenant_c")
+  effect kv.set("who", "C") undo kv.set("who", "")
+}
+
+component TenantAApp requires kv: Kv {
+  isolate kv in realm("tenant_a")
+  effect kv.set("who", "A") undo kv.set("who", "")
+}
