@@ -788,3 +788,281 @@ def test_the_slice2_verbs_are_documented_where_docgen_checks(quorum):
         encoding="utf-8")
     assert "override" in caps and "revl_override" in caps
     assert "revl_escalate" in caps
+
+
+# ---------------------------------------------------------------------------
+# A decision, once made, is not unmade by an act that comes after it
+#
+# The question's deadline and the ledger entry's expiry are both the ticket's
+# ttl measured from DIFFERENT instants: the question from ticket creation
+# (`_open_quorum`), the entry from the DECISION (`_mint_ticket_entry`). An entry
+# minted from votes cast late therefore OUTLIVES the question that authorized it,
+# and inside that window an act arriving after the decision used to rewrite the
+# decision. Two directions, one root: an act after admission changed the answer
+# about an admission.
+# ---------------------------------------------------------------------------
+
+_LEASE_SOURCE = (
+    'extern emission[fs.write(path="/tmp")] fn wr(sink: Str, msg: Str)'
+    " = @py {\n"
+    "    with open(sink, 'a') as f: f.write('w:' + msg + '\\n')\n"
+    "    return\n"
+    "}\n"
+    "service Ops { emission fn go(sink: Str, msg: Str) }\n"
+    "component Agent provides ops: Ops {\n"
+    '  let l = effect lease fs.write(path="/tmp") ttl 10m uses 3 '
+    "undo l.revoke()\n"
+    "  provide ops { fn go(sink, msg) { emit wr(sink, msg) } }\n"
+    "}\n"
+)
+
+_LEASE_CAP = 'fs.write(path="/tmp")'
+
+
+def _lease_harness(tmp_path, clock, *, ttl_ms=1_000, name="lease.json"):
+    """A session whose only crossing is guarded by a `lease` effect, so the
+    decision's authority is spent through the item-61 lease gate - the path on
+    which a rewritten decision shows up as a refused load rather than a bad
+    record."""
+    ir = copy.deepcopy(compile_source(_LEASE_SOURCE, "quorum471lease.rvl"))
+    session = Session()
+    session.recorder = _replay.Recorder(copy.deepcopy(ir))
+    session._wal_path = str(tmp_path / name)
+    session._generation = 1
+    session._ensure_wal_open()
+    session.approval_policy = "auto"
+    session._class_map = ClassMap(ir)
+    session.sandbox = Policy(approval_rules=(
+        ApprovalRule(_LEASE_CAP, ttl_ms, 2, tuple(_THREE)),))
+    session.operator = op.Operator(token="alice")
+    session._clock_ms = lambda: clock["now"]
+    return session, ir
+
+
+def _lease_gate(session, ir):
+    """Attempt the load. Returns the ApprovalRequired, or None when the lease
+    gate let it through."""
+    try:
+        session._enforce_lease_gate(ir)
+    except ApprovalRequired as caught:
+        return caught
+    return None
+
+
+def test_a_late_vote_does_not_rewrite_a_decided_question(tmp_path):
+    """The question's deadline bounds its VOTES, not its answer. A vote arriving
+    after the decision was made is refused, and the decision it arrived too late
+    for is left exactly as it was: `satisfied` stays `satisfied` and no
+    `quorum-expired` row is written. A `quorum-expired` row here would be the
+    record of a timeout that never happened."""
+    clock = {"now": 1_000}
+    session = _harness(tmp_path, rules=[_quorum_rule(ttl_ms=1_000)],
+                       clock=clock)
+    ticket = _ticket(session)
+    session.approve_ticket(ticket["hash"], as_token="bob")
+    session.approve_ticket(ticket["hash"], as_token="carol")
+    assert session.quorum_state(ticket["hash"])["outcome"] == "satisfied"
+
+    clock["now"] += 5_000
+    with pytest.raises(SessionError, match="already satisfied"):
+        session.approve_ticket(ticket["hash"], vote="approve", as_token="bob")
+
+    state = session.quorum_state(ticket["hash"])
+    assert state["outcome"] == "satisfied"
+    assert state["satisfiedBy"] == "votes"
+    assert "quorum-expired" not in _kinds(session)
+    assert state["refusals"][-1]["reason"] == "closed-decision"
+
+
+@pytest.mark.parametrize("outcome,match", [
+    ("denied", "already denied"),
+    ("escalated", "already escalated"),
+    ("revoked", "already revoked"),
+], ids=["deny", "escalate", "revoke"])
+def test_a_late_vote_never_rewrites_any_closed_outcome(tmp_path, outcome, match):
+    """Every named outcome, not just `satisfied`: the rewrite was unconditional,
+    so a denial, an escalation and a revocation were all equally overwritable by
+    one late vote from any operator holding `approve`. None of them is now."""
+    clock = {"now": 1_000}
+    session = _harness(tmp_path, rules=[_quorum_rule(ttl_ms=1_000)], clock=clock)
+    ticket = _ticket(session)
+    if outcome == "denied":
+        _deny(session, ticket)
+    elif outcome == "escalated":
+        session.escalate_ticket(ticket["hash"], reason="up", as_token="bob")
+    else:
+        session.revoke_ticket(ticket["hash"], reason="back", as_token="alice")
+
+    clock["now"] += 5_000
+    with pytest.raises(SessionError, match=match):
+        session.approve_ticket(ticket["hash"], vote="approve", as_token="bob")
+
+    assert session.quorum_state(ticket["hash"])["outcome"] == outcome
+    assert "quorum-expired" not in _kinds(session)
+
+
+def test_an_expired_question_still_reads_as_lapsed(tmp_path):
+    """The other direction of the same ordering: a question that genuinely ran
+    out of time is still refused as `lapsed`, because `expired` is the one
+    outcome the lapse cannot change. Reordering the checks must not cost an audit
+    the name of the timeout."""
+    clock = {"now": 1_000}
+    session = _harness(tmp_path, rules=[_quorum_rule(ttl_ms=1_000)], clock=clock)
+    ticket = _ticket(session)
+    clock["now"] += 5_000
+    with pytest.raises(SessionError, match="lapsed"):
+        session.approve_ticket(ticket["hash"], vote="approve", as_token="bob")
+    assert session.quorum_state(ticket["hash"])["outcome"] == "expired"
+
+
+def test_a_late_vote_does_not_wedge_the_lease_the_decision_authorized(tmp_path):
+    """The reachable window, and the reason this is a live defect rather than a
+    bookkeeping one. The question opens at t=1000 with `expiresAt` 2000; the votes
+    land at t=1500, so the ledger entry they mint is dated from the DECISION and
+    expires at 2500. At t=2200 the question has lapsed and the authority has not.
+    A late vote there used to lapse the satisfied question, and the lease gate -
+    which asks the decision graph whether the load is authorized - then refused a
+    load whose authority was still live and spendable. The ticket re-raised with
+    the SAME hash, so no fresh question could clear it: the decision was wedged."""
+    clock = {"now": 1_000}
+    session, ir = _lease_harness(tmp_path, clock)
+
+    first = _lease_gate(session, ir)
+    assert first is not None, "the load must raise the lease ticket"
+    ticket = first.ticket
+    assert session._quorums[ticket["hash"]]["expiresAt"] == 2_000
+
+    clock["now"] = 1_500
+    session.approve_ticket(ticket["hash"], as_token="bob")
+    session.approve_ticket(ticket["hash"], as_token="carol")
+    (entry,) = session._ledger
+    assert session._quorums[ticket["hash"]]["outcome"] == "satisfied"
+    assert entry["expiresAt"] == 2_500 > session._quorums[ticket["hash"]]["expiresAt"]
+
+    clock["now"] = 2_200
+    with pytest.raises(SessionError, match="already satisfied"):
+        session.approve_ticket(ticket["hash"], vote="approve", as_token="bob")
+    assert session.quorum_state(ticket["hash"])["outcome"] == "satisfied"
+
+    assert _lease_gate(session, ir) is None, (
+        "the load the satisfied decision authorized must still be admitted")
+    assert [grant["lease"] for grant in session._grants] == [True]
+    assert [e["consumed"] for e in session._ledger] == [True]
+
+
+def test_a_refusal_after_the_spend_does_not_invalidate_the_receipt(quorum):
+    """The other direction: a receipt must not be un-verified by a later probe.
+    A genuine, correctly spent admission re-verified as forged - "the receipt
+    disagrees with the decision graph" - the moment anybody probed the question
+    afterwards, because the receipt's refusal set was rebuilt from the LIVE rows.
+    A refusal written after the spend is a fact about the question's afterlife,
+    not about the decision that admitted, so it stays on the graph and in the
+    reader but out of the receipt."""
+    ticket = _admit(quorum)
+    receipt = quorum.quorum_receipt(ticket["hash"])
+    assert quorum.verify_quorum_receipt(receipt) == {"ok": True, "reasons": []}
+
+    with pytest.raises(SessionError, match="already satisfied"):
+        quorum.approve_ticket(ticket["hash"], vote="approve", as_token="bob")
+
+    assert quorum.verify_quorum_receipt(receipt) == {"ok": True, "reasons": []}
+    assert quorum.quorum_receipt(ticket["hash"]) == receipt, (
+        "the same artifact, not a re-dated one")
+    # the probe is not hidden: it is on the graph and the live reader shows it
+    assert "quorum-refused" in _kinds(quorum)
+    assert [r["reason"] for r in quorum.quorum_state(ticket["hash"])["refusals"]] \
+        == ["closed-decision"]
+    assert receipt["decision"]["refusals"] == []
+
+
+def test_a_refusal_before_the_spend_is_still_in_the_receipt(quorum):
+    """The bound is the spend's own clock reading, not "drop the refusals": a cast
+    turned away while the question was still open is part of the decision and must
+    ride with the receipt, or the receipt would stop being a full decision graph."""
+    ticket = _ticket(quorum)
+    with pytest.raises(SessionError):
+        quorum.approve_ticket(ticket["hash"], as_token="mallory")
+    quorum.approve_ticket(ticket["hash"], as_token="bob")
+    quorum.approve_ticket(ticket["hash"], as_token="carol")
+    assert _cross(quorum) is None
+
+    with pytest.raises(SessionError, match="already satisfied"):
+        quorum.approve_ticket(ticket["hash"], vote="approve", as_token="bob")
+
+    receipt = quorum.quorum_receipt(ticket["hash"])
+    assert [(r["voter"], r["reason"]) for r in receipt["decision"]["refusals"]] \
+        == [("mallory", "unknown-approver")]
+    assert quorum.verify_quorum_receipt(receipt)["ok"] is True
+
+
+def test_the_refusal_bound_is_re_derived_and_not_stored(quorum):
+    """The receipt carries no second copy of the bound: the verifier re-derives it
+    from the durable rows and the entry the receipt names - the position of the
+    `approval-granted` row that minted the spent authority. So a forger cannot
+    widen the refusal set at all: an extra row in the body is a row the graph does
+    not carry, and the only way to make it agree is to edit the body, which breaks
+    the digest."""
+    ticket = _admit(quorum)
+    receipt = quorum.quorum_receipt(ticket["hash"])
+    with pytest.raises(SessionError, match="already satisfied"):
+        quorum.approve_ticket(ticket["hash"], vote="approve", as_token="bob")
+
+    forged = copy.deepcopy(receipt)
+    forged["decision"]["refusals"].append(
+        {"action": "vote", "reason": "closed-decision", "voter": "bob",
+         "counted": 2})
+    forged.pop("digest")
+    forged["digest"] = _sha(_canon(forged))
+    verdict = quorum.verify_quorum_receipt(forged)
+    assert verdict["ok"] is False
+    assert any(r.startswith("decision") for r in verdict["reasons"])
+
+
+# --- the fix must not widen anything -------------------------------------
+
+def test_an_override_of_an_escalated_question_is_still_lapsed(tmp_path):
+    """The one place the ordering could have relaxed a refusal. `override_ticket`
+    deliberately carves escalation out of the closed check - after escalation the
+    override is the only path left - so if that carve-out ran before the lapse, an
+    escalated question past its deadline would have become overridable where it
+    was refused before. It is refused exactly as before."""
+    clock = {"now": 1_000}
+    session = _harness(tmp_path, rules=[_quorum_rule(ttl_ms=1_000)], clock=clock)
+    ticket = _ticket(session)
+    session.approve_ticket(ticket["hash"], as_token="bob")
+    session.escalate_ticket(ticket["hash"], reason="stalled", as_token="alice")
+    assert session.quorum_state(ticket["hash"])["outcome"] == "escalated"
+
+    clock["now"] += 5_000
+    with pytest.raises(SessionError, match="lapsed"):
+        session.override_ticket(ticket["hash"], reason="sev1", as_token="carol")
+    assert session.quorum_state(ticket["hash"])["outcome"] == "escalated"
+
+
+@pytest.mark.parametrize("verb,match", [
+    ("override", "already satisfied"),
+    ("escalate", "already satisfied"),
+    ("revoke", "already satisfied"),
+], ids=["override", "escalate", "revoke"])
+def test_no_verb_rewrites_a_satisfied_question_past_its_deadline(
+        tmp_path, verb, match):
+    """Every operator verb that consults the deadline, not just the vote path:
+    each still refuses a satisfied question past its deadline, and each refuses by
+    the decision's own name rather than rewriting it to a timeout."""
+    clock = {"now": 1_000}
+    session = _harness(tmp_path, rules=[_quorum_rule(ttl_ms=1_000)], clock=clock)
+    ticket = _ticket(session)
+    session.approve_ticket(ticket["hash"], as_token="bob")
+    session.approve_ticket(ticket["hash"], as_token="carol")
+
+    clock["now"] += 5_000
+    with pytest.raises(SessionError, match=match):
+        if verb == "override":
+            session.override_ticket(ticket["hash"], reason="sev1", as_token="carol")
+        elif verb == "escalate":
+            session.escalate_ticket(ticket["hash"], reason="up", as_token="bob")
+        else:
+            session.revoke_ticket(ticket["hash"], reason="back", as_token="alice")
+
+    assert session.quorum_state(ticket["hash"])["outcome"] == "satisfied"
+    assert "quorum-expired" not in _kinds(session)
