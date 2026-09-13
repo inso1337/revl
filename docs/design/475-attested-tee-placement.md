@@ -127,7 +127,7 @@ offer is decoration, and `tests/test_tee_attestation.py` pins that specifically:
 
 ## Verification
 
-`tests/test_tee_attestation.py` (70 tests) pins the accept path, then every
+`tests/test_tee_attestation.py` (73 tests) pins the accept path, then every
 refusal above, then the integration: an asserted trust level does not fill an
 attested slot; a proof for another bundle, another region, a tampered
 measurement, a replayed challenge, a missing ledger, a missing attester key and
@@ -151,14 +151,37 @@ Objections worth recording:
 * `key_id` is a hash of the attester's key and discloses no key material, which
   is the same discipline `attest.key_id` already follows.
 
+## The follow-up slice: the placement-file key (landed)
+
+This note deliberately left one thing out: `requires attested_tee` was not a
+grammar word in the placement surface of `src/revl/placement.py`. The requirement
+landed here as a typed field on `PlacementSlot` plus the verifier that decides
+it, and the file-level spelling was left to the next slice, because it changes a
+surface other work is actively editing and because the decision was worth having
+settled before the spelling was chosen.
+
+That slice has since landed. A placement file spells the demand as
+
+```toml
+[processes.worker.attest]
+requires = "attested_tee"
+bundle = "<64 hex>"
+measurements = ["<hex digest>"]
+region = "eu-west"
+outbound_network = "forbidden"
+```
+
+and it parses into this note's `TeeRequirement`, lands in
+`PlacementSlot.attested_tee`, and defers its verdict to `tee_admits` through
+`offer_eligible`, so the placement spelling and the typed requirement cannot
+disagree. `run_placement` refuses a well-formed demand outright, because this
+build places a process on the planning host and has no peer transport and no
+attester root: an attested placement is refused rather than run unattested.
+`docs/attested-tee-placement.md` is the surface reference and
+`tests/test_placement_attested_tee.py` pins it.
+
 ## Deliberately deferred
 
-* **The placement-file key.** `requires attested_tee` is not yet a grammar word
-  in the placement surface of `src/revl/placement.py`. The requirement lands
-  here as a typed field on `PlacementSlot` plus the verifier that decides it, and
-  the file-level spelling is the next slice, because it changes a surface other
-  work is actively editing and because the decision is worth having settled
-  before the spelling is chosen.
 * **Real quote formats.** TDX and SEV-SNP quote parsing, an attestation root and
   a key hierarchy that terminates outside the peer's control. The seam is the
   same; only `verify_evidence` grows.
