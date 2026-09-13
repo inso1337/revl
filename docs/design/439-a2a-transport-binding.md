@@ -1,6 +1,7 @@
 # 439: the A2A 1.0.0 transport binding for remote providers
 
-Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-13.
+Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-13
+(slice B1 completed on the ts tier).
 The semantics are item 424 gap (c)'s and are not reopened here; the Task
 lifecycle is `docs/design/439-a2a-task-lifecycle.md`'s and is not re-decided
 here. This note records what the binding IS, where every guarantee still applies
@@ -379,7 +380,7 @@ row says so instead of inventing a site.
 | G1, declared-only access | the consumer writes `requires key: Service` and nothing else; the synthesized provider requires nothing of its own and holds one extern per method whose only reach is the folded token | `src/revl/composition.py:809` (the token), `:832` (`requires=[]`), `src/revl/synthesize.py:954` (`extern emission[<cap>]`) |
 | the capability cone | the token is a declared token on an ordinary extern, so cone scoping and the ceiling check see it unchanged; the binding adds and removes no token | `src/revl/lower.py:12838` (`_cap_keyed`), `:13180` (`_ceiling_attenuation_check`) |
 | tickets, class (c) | the extern is a bare `emission`, so the crossing is class (c) and receives the per-call ticket; an unanswered ticket refuses fail-closed rather than running the crossing | `src/revl/deploy.py:3280` (the class), `src/revl/gate.py:838` (the ticket on the activation body), `src/revl/recovery.py:549` (recovery re-asks, never auto-answers) |
-| F5, the call-argument funnel | JOINED at this boundary (slice B1), emitted as source rather than imported because a synthesized body is not a seam client: the peer-authored text the boundary renders is scrubbed of this call's own argument values by exact match, and the marked-value exclusion above still keeps the subset small | `src/revl/a2a_boundary.py` (`py_funnel`), mirroring `backends/python/confidential.py:415` (the runtime funnel) and `backends/python/bridge.py:460` (its seam call site) |
+| F5, the call-argument funnel | JOINED at this boundary (slice B1), on BOTH tiers, emitted as source rather than imported because a synthesized body is not a seam client: the peer-authored text the boundary renders is scrubbed of this call's own argument values by exact match, and the marked-value exclusion above still keeps the subset small | `src/revl/a2a_boundary.py` (`py_funnel` for the three py bodies, `ts_funnel` for the importer's two coloured ts bodies), mirroring `backends/python/confidential.py:415` (the runtime funnel), `backends/python/bridge.py:460` (its seam call site) and `backends/typescript/bridge.ts`'s `seamFailure` |
 | the correlation identity | every crossing carries one uuid4 as the JSON-RPC envelope `id` and the `revl.correlation` metadata member, and a reply that is not a JSON object, does not claim JSON-RPC 2.0, or does not carry that identity back is the crossing's ordinary fault, never a value. `through a2a_rest` carries it one-way, because a REST reply echoes no envelope | `src/revl/a2a_boundary.py` (`py_correlation`, `py_envelope_gates`, `py_task_identity_gate`) |
 | G8, the enumerable boundary | a remote row synthesizes an ordinary provider holding ordinary externs, so the one (or four) synthesized crossings are on the boundary surface with their folded `net.<host>` reach, which is what makes `docs/design/439-a2a-task-lifecycle.md` decision 3's G8 row true. Verified over the COMPOSITION's compiled document (`audit_report`, the same walk `revl audit` renders); see the scope limit below for what the CLI does not do yet | `src/revl/boundary.py` (the walk), pinned for both forms by `tests/test_439_a2a_transport.py::test_the_a2a_crossing_is_on_the_g8_audit_surface` and `::test_all_four_task_crossings_are_on_the_g8_audit_surface` |
 | F6, the trace funnel | every host-trace event, a crossing fault's included, passes the one choke point that removes registered secret values | `backends/python/runtime.py:1198` |
@@ -496,16 +497,37 @@ question.
    merely resembles an argument is left verbatim, because the match is exact).
    `tests/test_import_a2a.py::test_the_peers_error_code_cannot_echo_the_callers_argument`
    is the same pair on the importer's body.
-   Still open, and named so it is not mistaken for done: the **`@ts` half of the
-   funnel**. The importer's coloured ts body carries B1's correlation identity
-   and its three envelope gates, but not the argument scrub. Exit test: the ts
-   body's thrown error scrubbed the way the py one is, under the
-   `tsc --strict` gate, with the placeholder equal to `bridge.ts`'s
-   `REDACTED_ARG`. Negative exit test: a ts scrub by pattern, or one that loses
-   the error's shape.
+   The **`@ts` half of the funnel** is LANDED too, so B1 is now complete on
+   both tiers. `a2a_boundary.ts_funnel` emits the same rule the py bodies
+   carry — the placeholder and the minimum length read off the same two module
+   constants, the needle walk spelled the way `backends/typescript/bridge.ts`
+   spells it — into BOTH coloured ts bodies (`message/send` and the REST
+   `message:send`), around each of the four peer-authored interpolations. Exit
+   test:
+   `tests/test_import_a2a.py::test_the_ts_crossing_scrubs_every_peer_authored_interpolation`,
+   a peer that reflects the caller's argument into `error.code`, a task `state`
+   or a reply `kind`, scrubbed with the sentence surviving, executed against a
+   loopback peer under node; the emitted module goes through the
+   `tsc --strict` gate as the `a2a_agent` fixture pair, and
+   `tests/test_439_a2a_boundary.py::test_the_ts_placeholder_and_the_bound_match_the_seams_funnel`
+   pins the placeholder equal to `bridge.ts`'s `REDACTED_ARG`. Negative exit
+   tests: `::test_the_ts_funnel_matches_exactly_and_never_by_pattern` (a peer
+   string that merely RESEMBLES the argument is left verbatim, because the
+   match is exact), `::test_the_ts_funnel_leaves_a_legitimate_reply_untouched`
+   (a successful crossing returns the peer's text unchanged, the caller's own
+   argument included: the funnel is the failure channel's, not the result's)
+   and `::test_the_ts_crossing_would_have_leaked_before_this_slice`, which puts
+   the pre-slice body back by dropping the `a2aScrub(...)` wrapper and asserts
+   the caller's bytes then do reach the error channel.
+
+   The needle walk deliberately omits `py_funnel`'s `bytes` branch, because it
+   has nothing to walk: a file `Part` is refused on the ts tier (item 5 above),
+   so the only argument a ts crossing is ever made with is a `Str`.
 
 Item 439 is NOT closed by this note. Items 1 and 3 are what stand between the
-binding as landed and the protocol as specified.
+binding as landed and the protocol as specified, and neither waits on effort
+here: 1 waits on item 130's `Stream[T]`, 3 on a durable task id that item 130's
+replay has to decide first.
 
 ## Files
 
@@ -526,13 +548,15 @@ binding as landed and the protocol as specified.
 - `src/revl/a2a_boundary.py`: slice B1. The correlation identity, the three
   envelope gates, the result and task-identity shape gates, and the F5 funnel,
   all as EMITTED source, in the one place the three generated py bodies share
-  them. Also the ts correlation binding and gates the importer's coloured body
-  uses.
+  them. Also the ts correlation binding, the ts envelope gates and `ts_funnel`,
+  which the importer's two coloured ts bodies use — so what the boundary does
+  with a peer's text does not depend on which tier answered.
 - `tests/test_439_a2a_boundary.py`: B1's shared contract. The placeholder and the
-  needle bound pinned equal to `backends/python/confidential.py`'s, the gates
-  present on every generated py crossing, the REST wire's one-way identity, the
-  correlation refusal rendering nothing of the peer's, and the ts body's
-  identity.
+  needle bound pinned equal to `backends/python/confidential.py`'s AND to
+  `backends/typescript/bridge.ts`'s, the gates present on every generated py
+  crossing, the funnel present on every generated ts crossing, the REST wire's
+  one-way identity, the correlation refusal rendering nothing of the peer's,
+  and the ts body's identity.
 - `tests/test_439_a2a_transport.py`: the seam/remote-provider exit test for the
   binding, the C3 taint section, the modality refusals, the four-op projection,
   and `test_no_marked_value_can_cross_the_a2a_wire`, which pins question (2)'s

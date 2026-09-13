@@ -647,15 +647,22 @@ def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
     reusable `a2aSend` rather than written inline because a declared follow
     re-issues it, and re-issuing has to send the SAME method and the SAME body
     — which is exactly what the default `fetch` does not do.
+
+    The boundary rules are `revl.a2a_boundary`'s, the same module the three py
+    bodies read them from: the correlation identity, the three envelope gates,
+    and the F5 funnel every peer-authored interpolation below goes through.
     """
     url = json.dumps(endpoint)
     sid = json.dumps(skill_id)
     terminal = json.dumps(list(_TERMINAL_STATES))
+    # Item 439 B1: the failure-channel funnel, closing over this crossing's
+    # own argument, which the emitted ts signature always names `message`.
+    funnel = a2a_boundary.ts_funnel("[message]")
     policy = ts_policy("a2a", follow=follow_redirects, url_expr=url,
                        send="a2aSend")
     return f"""
       // A2A {A2A_VERSION}, JSON-RPC 2.0 `message/send`. ONE crossing.
-{a2a_boundary.TS_CORRELATION}      const a2aPayload = JSON.stringify({{
+{funnel}{a2a_boundary.TS_CORRELATION}      const a2aPayload = JSON.stringify({{
         jsonrpc: "2.0",
         id: a2aCorr,
         method: "message/send",
@@ -683,7 +690,7 @@ def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
       }}
       const rpc = await res.json();
 {a2a_boundary.TS_ENVELOPE_GATES}      if (rpc.error) {{
-        throw new Error(`a2a: JSON-RPC error ${{rpc.error.code}}`);
+        throw new Error(a2aScrub(`a2a: JSON-RPC error ${{rpc.error.code}}`));
       }}
       const result = rpc.result;
       if (!result || typeof result !== "object") {{
@@ -698,15 +705,15 @@ def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
         if (!terminal.includes(state)) {{
           // Item 439's open question: a task still in flight is a LIFECYCLE
           // this slice does not express. Refuse; never poll, never resume.
-          throw new Error(
+          throw new Error(a2aScrub(
             `a2a: task returned non-terminal state '${{state}}' — this binding \
-crosses once and does not poll`);
+crosses once and does not poll`));
         }}
         if (state !== "completed") {{
-          throw new Error(`a2a: task ended '${{state}}'`);
+          throw new Error(a2aScrub(`a2a: task ended '${{state}}'`));
         }}
       }} else if (kind !== "message") {{
-        throw new Error(`a2a: unexpected result kind '${{kind}}'`);
+        throw new Error(a2aScrub(`a2a: unexpected result kind '${{kind}}'`));
       }}
       // The reply is the peer's JSON and nothing about it is typed: `res.json()`
       // is `any` on every ts lib, so an unannotated `(p) => ...` here is an
@@ -904,11 +911,19 @@ def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
     envelope), and the reply IS the `Task`/`Message` object, so an A2A error
     arrives as a NON-2xx status (already a fault on the `!res.ok` branch) rather
     than as an `error` member to unwrap.
+
+    The correlation identity rides one-way here, for the reason
+    `revl.a2a_boundary` gives: a REST reply echoes no envelope. The F5 funnel
+    does NOT ride one-way — the peer still authors the `state` and the `kind`
+    this body renders — so it is emitted exactly as on the envelope wire.
     """
     rest = _httpjson_endpoint(endpoint)
     url = json.dumps(rest)
     sid = json.dumps(skill_id)
     terminal = json.dumps(list(_TERMINAL_STATES))
+    # Item 439 B1: the failure-channel funnel, closing over this crossing's
+    # own argument, which the emitted ts signature always names `message`.
+    funnel = a2a_boundary.ts_funnel("[message]")
     policy = ts_policy("a2a", follow=follow_redirects, url_expr=url,
                        send="a2aSend")
     return f"""
@@ -917,7 +932,7 @@ def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
       // `Task`/`Message` and echoes nothing a client could check, so this wire
       // carries the identity for the peer's log and ours and gets the shape
       // gate alone (item 439, `revl.a2a_boundary`).
-{a2a_boundary.TS_CORRELATION}      const a2aPayload = JSON.stringify({{
+{funnel}{a2a_boundary.TS_CORRELATION}      const a2aPayload = JSON.stringify({{
         message: {{
           role: "user",
           messageId: crypto.randomUUID(),
@@ -954,15 +969,15 @@ def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
         if (!terminal.includes(state)) {{
           // Item 439's open question: a task still in flight is a LIFECYCLE
           // this slice does not express. Refuse; never poll, never resume.
-          throw new Error(
+          throw new Error(a2aScrub(
             `a2a: task returned non-terminal state '${{state}}' — this binding \
-crosses once and does not poll`);
+crosses once and does not poll`));
         }}
         if (state !== "completed") {{
-          throw new Error(`a2a: task ended '${{state}}'`);
+          throw new Error(a2aScrub(`a2a: task ended '${{state}}'`));
         }}
       }} else if (kind !== "message") {{
-        throw new Error(`a2a: unexpected result kind '${{kind}}'`);
+        throw new Error(a2aScrub(`a2a: unexpected result kind '${{kind}}'`));
       }}
       // The reply is the peer's JSON and nothing about it is typed (issue #251):
       // every field stays optional and the `kind`/`typeof` guards do the work.
