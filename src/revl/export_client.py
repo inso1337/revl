@@ -368,6 +368,14 @@ class _ClientExporter:
     def _service_block(self, sname: str) -> list[str]:
         methods = (self.services.get(sname) or {}).get("methods") or {}
         routed = any(spec.get("route") for spec in methods.values())
+        # An UNROUTED operation is the only thing that reads `this.transport`
+        # (`_method` above). A service whose operations are ALL routed therefore
+        # has no reader for it, and declaring it anyway emitted a `private
+        # readonly transport` nothing reads — `error TS6138` under a consumer's
+        # `noUnusedLocals`, in the one file a user is told not to edit (gap G4,
+        # docs/webapp-competitiveness-report.md). The parameter is emitted only
+        # when an operation can actually use it.
+        unrouted = any(not spec.get("route") for spec in methods.values())
         # refuse a method the projection cannot express, naming the method
         for op_name, spec in methods.items():
             for param in spec.get("params") or []:
@@ -400,14 +408,19 @@ class _ClientExporter:
             "runs. */",
             f"export class {sname}Client {{",
         ]
-        if routed:
-            # a routed service is a REST client: `base` is the server's origin
-            # (e.g. `http://host:port`), and `transport` still serves any unrouted
-            # operation over the canonical POST face.
+        if routed and unrouted:
+            # a MIXED service: `base` is the server's origin (e.g.
+            # `http://host:port`) for the routed operations, and `transport`
+            # serves the unrouted ones over the canonical POST face.
             lines.append("  constructor(private readonly base: string, "
                          "private readonly transport: Transport = "
                          "{ call() { throw new Error(\"no transport configured "
                          "for an unrouted operation\"); } }) {}")
+        elif routed:
+            # a FULLY routed service is a REST client and nothing else: every
+            # method builds its own request from `base`, so there is no unrouted
+            # operation left for a transport to serve and none is declared.
+            lines.append("  constructor(private readonly base: string) {}")
         else:
             lines.append("  constructor(private readonly transport: Transport) {}")
         lines.append("")

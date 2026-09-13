@@ -215,6 +215,36 @@ canonical copy-me shape. Copy it the way `router.rvl` is copied: rename the
 component, point the asset paths at your own project, and declare your own state
 record and provision.
 
+## What compiles it
+
+A typed boundary is only typed once something compiles it, so the frontend half
+of the boundary has its own CI job rather than riding on file-shape assertions.
+`frontend-assets` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+pins node, runs `npm ci` in `examples/app/frontend`, and then runs
+`tests/test_app_frontend_725.py` and `tests/test_webui_entry_asset_ref_459.py`.
+Those suites carry the two legs that matter:
+
+- a real `vite build`, whose emitted source map must name `entry.client.ts`,
+  `NotesConsole.vue` and `notes.client.ts` — "source maps pointing at the
+  original files" proven by building, not by reading `vite.config.ts`;
+- `vue-tsc` over the strict tsconfig, which must report **no** diagnostic in any
+  first-party file. Diagnostics inside `node_modules` are excluded and nothing
+  else is: `@cordisjs/client` resolves its `.` export to raw TypeScript source
+  rather than a `.d.ts`, so `skipLibCheck` cannot skip it and this project does
+  not own that package's strictness.
+
+Both legs skip on a machine with no `node_modules`, which is right locally and
+wrong in the job that exists to run them — a skip reads exactly like a pass. The
+job sets `REVL_REQUIRE_FRONTEND_TOOLCHAIN=1`, which turns that skip off, so a
+missing toolchain fails there naming what is absent.
+`tests/test_frontend_asset_gate_runs_in_ci.py` holds both halves in place.
+
+This matters because it has already failed the other way: a frontend that did
+not compile at all shipped and sat, passing a page option `@cordisjs/client` does
+not accept and calling a composable outside the `setup` where its injection
+lives. Both were invisible to every file-shape assertion and immediate under
+`vue-tsc`.
+
 ## Running it: `revl dev`
 
 `revl dev` (roadmap item 724) runs the app and its frontend under one parent
@@ -262,9 +292,11 @@ The typed reactive-state / RPC channel (design note 459 **F5**, filed as gap
 [design/525-webapp-slice4-frontend.md](design/525-webapp-slice4-frontend.md)) and
 the `--face webui` verb (**F7**) are the section above; both are landed.
 
-The item's stated exit is app-gated on roadmap item 462 (the exemplary web
-application, issue #725, itself gated on item 461 / issue #724), so it cannot
-close before that. See [v2.0-roadmap.md](v2.0-roadmap.md) items 459 and 462.
+The item's stated exit was app-gated on roadmap item 462 (the exemplary web
+application, issue #725, itself gated on item 461 / issue #724). Both have since
+closed, so the external gate has lifted and what remains open against item 459 is
+F1, F2, F3 and F6 above. See [v2.0-roadmap.md](v2.0-roadmap.md) items 459 and
+462.
 
 ## Related
 

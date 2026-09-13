@@ -115,3 +115,89 @@ component W provides inv: Inventory {
     assert "constructor(private readonly transport: Transport) {}" in ts
     assert 'await this.transport.call("lookup", [sku])' in ts
     assert "fetch(`${this.base}" not in ts
+
+
+# -- the constructor declares only what a method can read (gap G4) -----------
+#
+# docs/webapp-competitiveness-report.md filed G4 against this generator: a FULLY
+# routed client still declared `private readonly transport`, which no method
+# reads, so a consumer compiling the artifact under `noUnusedLocals` got
+# `error TS6138` in the one file it is told not to edit
+# (`examples/app/frontend/notes.client.ts`). The three tests below are the whole
+# rule, stated on all three shapes a service can have.
+
+_MIXED = """\
+use "stdlib/http.rvl" { ApiError }
+
+type Note = { id: Str }
+
+service Mixed {
+  route get "/notes/{id}"
+  fn get_note(id: Str) -> Result[Note, ApiError]
+
+  fn count() -> Int
+}
+
+component MixedHost provides mixed: Mixed {
+  provide mixed {
+    fn get_note(id) = Ok({ id: id })
+    fn count() = 0
+  }
+}
+"""
+
+
+def test_a_fully_routed_client_declares_no_transport(tmp_path):
+    """Every operation on `NotesApi` is routed, so every method builds its own
+    request from `base` and NOTHING reads a transport. Declaring one anyway is
+    an unread private property in a generated artifact — gap G4. The constructor
+    takes `base` alone."""
+    ts = _client(tmp_path)
+    assert "constructor(private readonly base: string) {}" in ts
+    assert "private readonly transport" not in ts
+    # and the reason it is safe to drop: no method reaches for it.
+    assert "this.transport" not in ts
+
+
+def test_a_mixed_client_still_declares_the_transport_it_reads(tmp_path):
+    """The anti-vacuity control for the test above: the parameter is dropped
+    because it is UNREAD, not because the generator stopped emitting transports.
+    A service with one routed and one unrouted operation still declares it, with
+    the unrouted operation reading it."""
+    ts = _client(tmp_path, source=_MIXED, service="Mixed")
+    assert "private readonly transport: Transport = " in ts
+    assert 'await this.transport.call("count", [])' in ts
+    # the routed half is unchanged
+    assert "private readonly base: string" in ts
+    assert "fetch(`${this.base}" in ts
+
+
+def test_no_generated_client_declares_a_property_no_method_reads(tmp_path):
+    """The property G4 is an instance of, checked directly rather than through
+    one constructor spelling: every `private readonly <name>` the generator
+    declares is read as `this.<name>` somewhere in the same file. Run over all
+    three service shapes, so a future parameter cannot reintroduce the gap under
+    a different name."""
+    import re
+
+    shapes = (
+        (APP, "NotesApi"),
+        (_MIXED, "Mixed"),
+        ("""
+service Inventory { fn lookup(sku: Str) -> Opt[Str] }
+component W provides inv: Inventory {
+  let store = effect Map.new() undo store.drop()
+  provide inv { fn lookup(sku) = store.get(sku) }
+}
+""", "Inventory"),
+    )
+    for source, service in shapes:
+        ts = _client(tmp_path, source=source, service=service)
+        declared = set(re.findall(r"private readonly (\w+)", ts))
+        assert declared, f"{service}: no parameter properties found at all"
+        for name in sorted(declared):
+            assert f"this.{name}" in ts, (
+                f"{service}Client declares `private readonly {name}` and no "
+                f"method reads `this.{name}`: that is `error TS6138` under a "
+                "consumer's noUnusedLocals (gap G4)."
+            )
