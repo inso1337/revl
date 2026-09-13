@@ -28,6 +28,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -385,6 +386,153 @@ def test_consume_before_fire_no_double_fire(sink, tmp_path):
     consumed = [r for r in records if r.get("record") == "approval-consumed"
                 and r.get("requestId") == rid]
     assert len(consumed) == 1                     # the durable spend, exactly once
+
+
+# ---------------------------------------------------------------------------
+# the spent budget is STATE, not a function of the rule text
+# ---------------------------------------------------------------------------
+#
+# `_install_auto_approve_rules` re-materializes every rule on each generation
+# change (`load`, `swap`, `rollback`/`undo` which route through it, the `wire`
+# turn, and apply/revoke). Re-deriving the budget from the rule text there turned
+# `uses N` into "N per generation" and moved a lapsed `ttl` deadline forward, so a
+# spent or expired rule was re-armed by any swap — an over-authorization with no
+# review. The budget is persisted on the rule's canonical DSL (`_auto_spend`), the
+# same key and the same reason as the H1 review bind (`_auto_reviewed`).
+
+@needs_cordis
+def test_exhausted_uses_budget_survives_a_swap(sink):
+    """A `uses 1` rule that spent its one use stays exhausted across a swap: a
+    generation change is not a fresh grant of authority, so the next crossing
+    still prompts."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(_rule(uses=1))
+    session.load(copy.deepcopy(ir), record=True)
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_rules[0]["consumed"] is True
+
+    session.swap(copy.deepcopy(ir))
+
+    assert session._auto_rules[0]["remainingUses"] == 0
+    assert session._auto_rules[0]["consumed"] is True
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "two"])
+    assert _lines(sink) == [f"send:{STRIPE}:one"]
+
+
+@needs_cordis
+def test_partial_uses_budget_is_carried_across_a_swap(sink):
+    """A `uses 3` rule spends 1, survives a swap with 2 left (carried forward, not
+    reset to 3), spends those 2, and then prompts — the bound is total, not
+    per-generation."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(_rule(uses=3))
+    session.load(copy.deepcopy(ir), record=True)
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_rules[0]["remainingUses"] == 2
+
+    session.swap(copy.deepcopy(ir))
+
+    assert session._auto_rules[0]["remainingUses"] == 2
+    assert session.call("gw", "send", [STRIPE, "two"])["result"] is None
+    assert session.call("gw", "send", [STRIPE, "three"])["result"] is None
+    assert session._auto_rules[0]["remainingUses"] == 0
+    with pytest.raises(ApprovalRequired):        # the third use was the last
+        session.call("gw", "send", [STRIPE, "four"])
+    assert _lines(sink) == [f"send:{STRIPE}:{w}"
+                            for w in ("one", "two", "three")]
+
+
+@needs_cordis
+def test_exhausted_budget_survives_a_rollback(sink):
+    """`rollback` routes through `swap`, so it re-materializes the rules too. The
+    spend survives that route as well: an operator cannot recover a spent budget
+    by rolling the generation back."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(_rule(uses=2))
+    session.load(copy.deepcopy(ir), record=True)
+    session.swap(copy.deepcopy(ir))              # a generation to roll back TO
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session.call("gw", "send", [STRIPE, "two"])["result"] is None
+    assert session._auto_rules[0]["consumed"] is True
+
+    session.rollback()
+
+    assert session._auto_rules[0]["remainingUses"] == 0
+    assert session._auto_rules[0]["consumed"] is True
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "three"])
+    assert _lines(sink) == [f"send:{STRIPE}:{w}" for w in ("one", "two")]
+
+
+@needs_cordis
+def test_lapsed_ttl_is_not_resurrected_by_a_swap(sink):
+    """A rule whose `ttl` window lapsed is not resurrected by a swap: the deadline
+    is fixed when the rule is first materialized, never recomputed from `now` on
+    the next generation."""
+    rule = AutoApproveRule(component="Biller*",
+                           caps=(f'gwsend(host="{STRIPE}")',),
+                           realm=None, admitting=frozenset(), ttl_ms=1)
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(rule)
+    session.load(copy.deepcopy(ir), record=True)
+    deadline = session._auto_rules[0]["expiresAt"]
+    assert deadline is not None
+
+    time.sleep(0.02)                             # let the 1ms window lapse
+
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "a"])
+
+    session.swap(copy.deepcopy(ir))
+
+    assert session._auto_rules[0]["expiresAt"] == deadline
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "b"])
+    assert _lines(sink) == []
+
+
+@needs_cordis
+def test_applying_a_rule_does_not_renew_another_rules_budget(sink, tmp_path):
+    """`apply_distillation` re-materializes EVERY rule, so it must not hand a spent
+    budget back to the rules it did not touch: applying an unrelated offer renews
+    nothing (and a re-applied rule starts clean — see the apply/revoke test)."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(_rule(uses=1), operator="alice")
+    session.load(copy.deepcopy(ir), record=True)
+    _open_wal(session, tmp_path)
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+    assert session._auto_rules[0]["consumed"] is True
+
+    _seed_settled_ledger(session, host=ATTACKER)  # a DIFFERENT rule text
+    offers = session.distillation_offers()
+    assert offers["offers"], offers
+    applied = session.apply_distillation(offers["offers"][0]["offerId"])
+    assert applied["applied"]
+
+    spent = [e for e in session._auto_rules if e["glob"] == "Biller*"]
+    assert spent and spent[0]["remainingUses"] == 0
+    assert spent[0]["consumed"] is True
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "two"])
+    assert _lines(sink) == [f"send:{STRIPE}:one"]
+
+
+@needs_cordis
+def test_unbounded_rule_still_auto_approves_across_a_swap(sink):
+    """The persistence does not break the unbounded case it must leave alone: a
+    rule with no `uses` and no `ttl` keeps auto-approving after a swap."""
+    ir = compile_source(_src(sink), "biller.rvl")
+    session = _session(_rule(uses=None))
+    session.load(copy.deepcopy(ir), record=True)
+    assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
+
+    session.swap(copy.deepcopy(ir))
+
+    assert session._auto_rules[0]["remainingUses"] is None
+    assert session._auto_rules[0]["expiresAt"] is None
+    assert session.call("gw", "send", [STRIPE, "two"])["result"] is None
+    assert _lines(sink) == [f"send:{STRIPE}:{w}" for w in ("one", "two")]
 
 
 # ---------------------------------------------------------------------------
