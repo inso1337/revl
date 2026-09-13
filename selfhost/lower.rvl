@@ -407,6 +407,24 @@ fn at_top_decl(ts: List[Token], i: Int) -> Bool {
       || atw(ts, i, "test") || at_boot(ts, i)
 }
 
+// `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
+// before `fn`, `type`, `service` and `extern` (parser.py `_parse_program`) and
+// refuses it before `component` outright, so the prefix carries no declaration
+// shape of its own: every top-level walker steps over it and dispatches on the
+// keyword it heads, which is how `pub type` / `pub extern` / `pub service` reach
+// the same readers their unprefixed spellings do. The one walker that reads the
+// prefix ITSELF is `fns_walk`, where `pub fn` is what stamps the IR's `"public"`.
+//
+// Deliberately NOT wider than the reference: `pub component` stays a refusal,
+// and the `verified` / `commutative` / `endorse[...]` slots the reference also
+// allows after `pub` are a separate unhandled form (they are unhandled in their
+// unprefixed spellings too), so they are left to the slice that adds them.
+fn at_pub_prefix(ts: List[Token], i: Int) -> Bool {
+  if (!atw(ts, i, "pub")) { return false }
+  return atw(ts, i + 1, "fn") || atw(ts, i + 1, "type")
+      || atw(ts, i + 1, "service") || atw(ts, i + 1, "extern")
+}
+
 // Every Upper-cased name a `type` declaration mentions — the ADT CONSTRUCTORS a
 // bare call head may legitimately be (`type Step = Final(Str) | NeedTool(T)`
 // makes `Final(...)` and `NeedTool(...)` callable heads in a component body).
@@ -1983,6 +2001,7 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
   }
+  if (at_pub_prefix(ts, i)) { return p_top(ts, i + 1, pg) }
   if (t.text == "use" || t.text == "test" || t.text == "type") {
     // frontend `use`, `test` blocks and type decls are checker-stage concerns;
     // admission reads none of them. Skip structurally (brace blocks included).
@@ -1996,9 +2015,8 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
     let se = p_extern(ts, i, pg)
     return p_top(ts, se.i, se.pg)
   }
-  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
-  if (t.text == "fn" || public_fn) {
-    let sf = p_fn(ts, public_fn ? i + 1 : i, pg)
+  if (t.text == "fn") {
+    let sf = p_fn(ts, i, pg)
     return p_top(ts, sf.i, sf.pg)
   }
   if (t.text == "service") {
@@ -5684,6 +5702,7 @@ fn cfg_owners_walk(ts: List[Token], i: Int, a: CfgAcc) -> CfgAcc {
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return cfg_owners_walk(ts, i + 1, a) }
   if (t.kind != "kw") { return cfg_owners_walk(ts, skip_line(ts, i), a) }
+  if (at_pub_prefix(ts, i)) { return cfg_owners_walk(ts, i + 1, a) }
   if (t.text == "use") { return cfg_owners_walk(ts, skip_line(ts, i), a) }
   if (t.text == "test") {
     if (atk(ts, i + 1, "{")) {
@@ -6465,6 +6484,7 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return fb_refusal(ts, i + 1) }
   if (t.kind != "kw") { return fb_refusal(ts, skip_line(ts, i)) }
+  if (at_pub_prefix(ts, i)) { return fb_refusal(ts, i + 1) }
   if (t.text == "use" || t.text == "type") { return fb_refusal(ts, skip_line(ts, i)) }
   if (t.text == "test") {
     if (atk(ts, i + 1, "{")) {
@@ -6476,9 +6496,8 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   if (t.text == "extern") { return fb_refusal(ts, p_extern(ts, i, empty_prog()).i) }
   if (t.text == "service") { return fb_refusal(ts, p_service(ts, i, empty_prog()).i) }
   if (t.text == "component") { return fb_refusal(ts, p_component(ts, i, empty_prog()).i) }
-  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
-  if (t.text == "fn" || public_fn) {
-    let sp = fb_span(ts, public_fn ? i + 1 : i)
+  if (t.text == "fn") {
+    let sp = fb_span(ts, i)
     if (!sp.ok) { return fb_refusal(ts, skip_line(ts, i)) }
     let v = fb_function(ts, sp)
     if (v.v != "") { return v }
@@ -8675,6 +8694,7 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return case_binds_walk(ts, i + 1, a) }
   if (t.kind != "kw") { return case_binds_walk(ts, skip_line(ts, i), a) }
+  if (at_pub_prefix(ts, i)) { return case_binds_walk(ts, i + 1, a) }
   if (t.text == "type") {
     let d = decl_cases(ts, i, a)
     return case_binds_walk(ts, d.i, d.a)
@@ -8687,9 +8707,8 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
     return case_binds_walk(ts, skip_line(ts, i), a)
   }
   if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a) }
-  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
-  if (t.text == "fn" || public_fn) {
-    let fi = public_fn ? i + 1 : i
+  if (t.text == "fn") {
+    let fi = i
     let ps = params_at(ts, fi + 3)
     let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : "Unit"
     var param_types: List[Str] = []
@@ -9859,6 +9878,11 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind]) -> Str {
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
     return fns_walk(ts, f.i, acc2, cases)
   }
+  // the remaining `pub` forms (`pub type` / `pub service` / `pub extern`) carry
+  // nothing this walker reads, so the prefix is stepped over and the declaration
+  // it heads dispatches above. `pub fn` cannot reach here: it is the one form
+  // whose prefix IS data (the `"public"` stamp), handled with the `fn` branch.
+  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases) }
   if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases) }
   if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases) }
   return fns_walk(ts, skip_line(ts, i), acc, cases)
@@ -10050,6 +10074,7 @@ fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls) }
   if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls) }
+  if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls) }
   if (t.text == "extern") {
     let ex = ir_extern(ts, i, decls)
     let ni = p_extern(ts, i, empty_prog()).i
@@ -10175,6 +10200,7 @@ fn types_walk(ts: List[Token], i: Int, acc: Str) -> Str {
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return types_walk(ts, i + 1, acc) }
   if (t.kind != "kw") { return types_walk(ts, skip_line(ts, i), acc) }
+  if (at_pub_prefix(ts, i)) { return types_walk(ts, i + 1, acc) }
   if (t.text == "type") {
     let d = ir_type_decl(ts, i)
     let acc2 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
@@ -10201,6 +10227,7 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a) }
   if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a) }
+  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a) }
   if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a) }
   if (t.text == "test") {
     let na = mk_iracc(a.svcs, a.comps, true, a.v2)

@@ -1,0 +1,24 @@
+// item 130 Slice 5 — the typed-event handler (`on … as`) on the java tier.
+// docs/design/130-stream-reactive-types.md §6, §6b.
+//
+// A typed event is a `Stream[T]` element with a contract, so this is the Slice 4
+// `every … in` loop plus ONE gate: the derived-schema validation and the bounded
+// dedup window the `EventContract` runtime carries.
+//
+// The provider emits JSON strings (the blocking tiers' stream buffer holds the
+// emitted text); each is validated against the derived schema before the body
+// runs, an in-window redelivery of the same key is collapsed, and a schema
+// violation FAULTS — the same terminal a provider abort delivers, so it reverts
+// the prefix LIFO and closes the subscription with no residue.
+
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+
+service Sink { emission fn write(v: Str) }
+
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit sink.write(e.order_id)
+  }
+}

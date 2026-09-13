@@ -416,6 +416,16 @@ class Session:
         # swap's re-materialize. Reset per session.
         self._auto_rules: list = []
         self._auto_reviewed: dict = {}
+        # the rule's SPENT budget (`remainingUses`/`expiresAt`/`consumed`),
+        # persisted on the same key and for the same reason as `_auto_reviewed`:
+        # a rule is re-materialized each generation, and re-deriving the budget
+        # from the rule text on each of those would RENEW it — silently turning
+        # `uses N` into "N per generation" and resurrecting a rule whose `ttl` had
+        # already lapsed. A 344 grant is immune by construction (its
+        # `candidateHash` pin self-invalidates it on a swap); a 251 rule must
+        # persist across swaps, so its budget has to persist with it. Reset per
+        # session, exactly as the review bind is.
+        self._auto_spend: dict = {}
         # the in-memory mirror of the `approval-granted` / `approval-denied`
         # records this session produced, WITH the item-251 shape-key fields, so
         # `distillation_offers` folds the live ledger without re-reading the WAL.
@@ -3318,9 +3328,11 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
-        # item 251 Slice 2: distilled-rule materialization and its H1 review bind.
+        # item 251 Slice 2: distilled-rule materialization, its H1 review bind and
+        # its persisted budget (all three die with the session, invariant 5).
         self._auto_rules = []
         self._auto_reviewed = {}
+        self._auto_spend = {}
         self._approval_records = []
         # roadmap item 471: the multi-party decision graph dies with the session
         # exactly as the ledger it keys into does, so a vote cannot outlive the
@@ -6015,6 +6027,10 @@ class Session:
         members it is REVIEWED against (the H1 bind). The reviewed set is snapshot
         the first time a rule is seen and PERSISTS across a swap (`_auto_reviewed`),
         so a swap that moves a new component into the glob is detected as growth.
+        The spent BUDGET persists the same way (`_auto_spend`): re-materializing a
+        rule is not a fresh grant of authority, so an exhausted `uses` bound stays
+        exhausted and a lapsed `ttl` stays lapsed across the generations that did
+        not re-review the rule.
 
         Inert when the policy names no `auto-approve` rule (`self._auto_rules`
         stays empty), so a composition with no distilled rule is byte-identical."""
@@ -6033,20 +6049,32 @@ class Session:
                 caps = [cap_order.parse_cap(c) for c in rule.caps]
             except cap_order.CapError:
                 continue  # a malformed rule cannot admit anything (fail-closed)
+            spend = self._auto_spend.get(key)
+            if spend is None:
+                # first materialization: the budget is the rule's own and its
+                # `ttl` window opens now. From here on the budget is STATE, not a
+                # function of the rule text (see `_auto_spend`).
+                spend = {
+                    "remainingUses": rule.uses,
+                    "expiresAt": (now + rule.ttl_ms) if rule.ttl_ms is not None
+                    else None,
+                    "consumed": False,
+                }
+                self._auto_spend[key] = spend
             self._auto_rules.append({
                 "requestId": "auto:" + hashlib.sha256(
                     key.encode("utf-8")).hexdigest()[:16],
                 "kind": "auto-approve-rule",
+                "key": key,
                 "rule": rule,
                 "glob": rule.component,
                 "realm": rule.realm,
                 "caps": caps,
                 "admitting": rule.admitting,
                 "reviewedComponents": reviewed,
-                "remainingUses": rule.uses,
-                "expiresAt": (now + rule.ttl_ms) if rule.ttl_ms is not None
-                else None,
-                "consumed": False,
+                "remainingUses": spend["remainingUses"],
+                "expiresAt": spend["expiresAt"],
+                "consumed": spend["consumed"],
                 "suspended": False,
             })
 
@@ -6146,12 +6174,23 @@ class Session:
         decrements `remainingUses` and marks `consumed` at zero, so an applied rule
         cannot double-fire and a crash between this `approval-consumed` record and
         the fire re-prompts (fail-closed). An unbounded rule records the spend for
-        the audit join without a counter."""
+        the audit join without a counter.
+
+        The decremented counter is written back into `_auto_spend`, the budget's
+        persistent home, so the next generation's re-materialization carries the
+        spend forward instead of renewing it. Without that write-back the
+        `approval-consumed` record is durable while the counter it records is not,
+        and any swap (or `rollback`/`undo`, which route through it) re-arms a rule
+        the operator had exhausted."""
         remaining = entry.get("remainingUses")
         if remaining is not None:
             entry["remainingUses"] = remaining - 1
             if entry["remainingUses"] <= 0:
                 entry["consumed"] = True
+        spend = self._auto_spend.get(entry.get("key"))
+        if spend is not None:
+            spend["remainingUses"] = entry["remainingUses"]
+            spend["consumed"] = entry["consumed"]
         self._auto_consumed += 1
         wal = self._approval_wal()
         if wal is not None:
@@ -6604,6 +6643,11 @@ class Session:
         reviewed = frozenset(nc.component for nc in offer.blast.not_covered) \
             | self._glob_members(rule.component)
         self._auto_reviewed[rule.to_dsl()] = reviewed
+        # a freshly applied rule is a fresh operator review, so it starts with its
+        # own budget: drop any spend left behind by a previous apply/revoke cycle
+        # of the identical rule text (a re-applied rule is re-reviewed, not
+        # re-armed from a stale counter).
+        self._auto_spend.pop(rule.to_dsl(), None)
         self._install_auto_approve_rules()
         now = self._now_ms()
         me = self._operator_token()
@@ -6652,6 +6696,10 @@ class Session:
         if removed and pol is not None:
             self.sandbox = dataclasses.replace(pol,
                                                auto_approve_rules=tuple(kept))
+            # a revoked rule's budget is spent authority with no rule to hold it;
+            # drop it so a later re-apply of the same text starts clean.
+            for dsl in removed:
+                self._auto_spend.pop(dsl, None)
             self._install_auto_approve_rules()
             me = self._operator_token()
             wal = self._approval_wal()
