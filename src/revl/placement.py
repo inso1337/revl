@@ -815,7 +815,9 @@ def process_placement_slot(placement: dict, process: str, *,
 
 
 def admit_peer_for_process(placement: dict, process: str, offer: dict, *,
-                           offer_key, attester_key=None, tee_ledger=None,
+                           offer_key, attester_key=None, root=None,
+                           require_hardware_root: bool = False,
+                           tee_ledger=None,
                            now=None, nonce: str | None = None,
                            ) -> tuple[bool, str]:
     """Does `offer` satisfy what the placement file demands of `process`?
@@ -830,13 +832,25 @@ def admit_peer_for_process(placement: dict, process: str, offer: dict, *,
 
     A process that declares no requirement is admitted on the pool's own terms:
     the slot it is checked against is the empty :class:`PlacementSlot`, which
-    demands nothing and consumes no challenge — the pre-item-475 behaviour."""
+    demands nothing and consumes no challenge — the pre-item-475 behaviour.
+
+    `root` is the attestation root the evidence is verified against (a
+    `tee_quote.HardwareRoot` holding keys the operator pinned, which the peer does
+    not hold); `attester_key` is the pre-root spelling and selects the development
+    symmetric-MAC verifier, which is not an attestation root. Both are passed
+    through untouched, because the verdict on them belongs to `tee_admits` and not
+    to this surface: `require_hardware_root=True` reaches the same gate. There is
+    deliberately no placement-FILE key for a root. A root is operator
+    configuration, it is what makes the demand mean anything, and a file a
+    composition author edits is the wrong place to name it."""
     slot, problem = process_placement_slot(placement, process, nonce=nonce)
     if problem:
         return False, f"placement: {problem}"
     if slot is None:
         slot = PlacementSlot()
     return offer_eligible(offer, slot, offer_key, attester_key=attester_key,
+                          root=root,
+                          require_hardware_root=require_hardware_root,
                           tee_ledger=tee_ledger, now=now)
 
 

@@ -189,6 +189,7 @@ was corrected by hand and had drifted back within a day.
 | strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 19 |  |
 | syntax-2.0.md | needs-work | 10 |  |
+| tee-attestation-root.md | current | 0 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
