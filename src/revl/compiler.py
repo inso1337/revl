@@ -942,6 +942,18 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             # replacement must accept, so dropped entries stay in — the gate
             # compares the replacement's *accepted* shape against them.
             "handoffs": _running_handoffs(manifest),
+            # item 186 / issue #86: what this admission WITHDRAWS from the
+            # running composition — `replacing=` plus every running component
+            # the candidate redeclares by name. `components` above is the
+            # RETAINED half, and the difference is exactly what the gate needs
+            # to tell a provision that moved provider (fine) from one that is
+            # gone (a retained consumer is stranded, refused in `admission`).
+            # Empty on a cold start and on a pure addition, so a compile that
+            # withdraws nothing is byte-identical.
+            "withdrawn": [
+                entry for entry in (running.get("components") or [])
+                if entry.get("name") in dropped
+            ],
         }
     # roadmap item 329, item 426 S4: the untrusted-author profile, structural
     # (pre-lowering) half — refuse a new extern/host-block, a self-minted
