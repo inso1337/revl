@@ -8390,6 +8390,25 @@ fn infer_index(t: Str) -> Str {
   return ""
 }
 
+// issue #957: the annotations a subscript on a `Map[K, V]` receiver carries,
+// `,"key_type":K` followed by `,"value_type":V`, else "". A subscript is
+// lowered by the CONTAINER's declared key type, never by the shape of the index
+// expression: an emitter sees only the index, and every one of them read the
+// node as the positional `List` read it was written for, so `m[k]` cast the key
+// to an integer. The value type travels with it because the tiers infer a
+// subscript's type from the container, and a map read that answered "unknown"
+// was treated as a `List` element downstream. A `List` read, and the host/`Any`
+// receiver whose string-literal subscript is a property read, are not `Map` and
+// so carry neither — their node is byte-identical to before.
+fn map_index_tags(t: Str) -> Str {
+  if (parse_head(t) != "Map") { return "" }
+  let a = type_args(t)
+  if (a.length() == 0) { return "" }
+  let keyed = ",\"key_type\":".concat(jstr(a[0]))
+  if (a.length() == 1) { return keyed }
+  return keyed.concat(",\"value_type\":").concat(jstr(a[1]))
+}
+
 fn infer_method(recv: Expr, method: Str, env: List[Bind]) -> Str {
   let recvHostRoot = match recv { Var(n) => is_host_root(n), _ => false, }
   if (recvHostRoot) { return "" }
@@ -8970,7 +8989,8 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
                      .concat(",\"method\":").concat(jstr(c.name))
                      .concat(",\"args\":[").concat(lir_args(c.args, env)).concat("]}"),
     Index(x)    => "{\"kind\":\"index\",\"target\":".concat(lir_expr(x.target, env))
-                     .concat(",\"index\":").concat(lir_expr(x.idx, env)).concat("}"),
+                     .concat(",\"index\":").concat(lir_expr(x.idx, env))
+                     .concat(map_index_tags(infer(x.target, env))).concat("}"),
     If(f)       => "{\"kind\":\"if\",\"cond\":".concat(lir_expr(f.cond, env))
                      .concat(",\"then\":").concat(lir_expr(f.then_, env))
                      .concat(",\"else\":").concat(lir_expr(f.els, env)).concat("}"),
@@ -11459,6 +11479,16 @@ test "lower_to_ir keeps both fns around a one-line named test block" {
   // named spelling this dropped `two` from the IR entirely, silently.
   assert lower_to_ir("""fn one() -> Int { return 1 } test "t" { assert one() == 1 } fn two() -> Int { return 2 }""")
     == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}]}"""
+}
+
+test "a Map subscript carries the declared key and value type (issue #957)" {
+  // The `index` node is annotated from the CONTAINER's declared type, not from
+  // the shape of the index expression: `m[k]` on a `Map[Str, Int]` is a keyed
+  // read on every tier, while `xs[i]` on a `List` is the positional one and
+  // carries neither annotation. The reference frontend stamps both fields in
+  // this order; this pins the bytes so the two lowerings cannot drift again.
+  assert lower_to_ir("""fn keyed(m: Map[Str, Int], k: Str) -> Int { return m[k] } fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }""")
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"keyed","params":[{"name": "m", "type": "Map[Str, Int]"}, {"name": "k", "type": "Str"}],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"index","target":{"kind":"var","name":"m"},"index":{"kind":"var","name":"k"},"key_type":"Str","value_type":"Int"}}]},{"name":"positional","params":[{"name": "xs", "type": "List[Int]"}, {"name": "i", "type": "Int"}],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"index","target":{"kind":"var","name":"xs"},"index":{"kind":"var","name":"i"}}}]}]}"""
 }
 
 test "a destructuring let is read, not refused" {

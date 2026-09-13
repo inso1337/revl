@@ -856,6 +856,17 @@ class Session:
         # inert there — only a swap/abort-swap has a predecessor to inherit from.
         if prev is not None:
             self._owner._escrow = prev._escrow
+            # item 245 Decision 3: the deferral queue is owned by the driver
+            # ("the same owner as the escrow"), not by any frame, so its entries
+            # survive the withdrawal of the activation that enqueued them. The
+            # successor generation's fresh owner starts with an EMPTY queue, so
+            # without this carry a pending class-(b) emission is orphaned in the
+            # dead owner: it never flushes, `commit_confirm` reports
+            # `noResidue: True` over an empty manifest, and `revl recover` reads
+            # the activation-complete short-circuit as balanced. Move, never
+            # copy — a stale owner must not be able to report the entries again.
+            self._owner._queue = prev._queue
+            prev._queue = []
             self._owner.compensation_residue = prev.compensation_residue
             self._owner.prompts = prev.prompts
             self._owner.flush_residue = prev.flush_residue
