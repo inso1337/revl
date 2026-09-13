@@ -36,13 +36,23 @@ class DevWebUI:
     module, so this adapter makes the composition's registration visible and
     verifies that it names an external asset rather than silently accepting a
     stale path or an inline substitute.
+
+    ``add_entry``'s fourth argument is the typed reactive state the component
+    publishes (the ``data`` channel Cordis WebUI broadcasts).  ``data`` keeps a
+    default so an entry declared before the channel landed still registers.
     """
 
     def __init__(self, app_root: Path) -> None:
         self.app_root = app_root
         self.entries: list[tuple[str, str, tuple[str, ...]]] = []
+        #: the reactive state each entry published, in registration order. A
+        #: production Cordis WebUI host hands this to ``addEntry`` as the reactive
+        #: ``data`` object; locally it is recorded so the dev run shows the channel
+        #: the composition actually opened, not only the asset paths.
+        self.channels: list[dict] = []
 
-    def add_entry(self, dev_source: str, prod_manifest: str, routes: list[str]) -> str:
+    def add_entry(self, dev_source: str, prod_manifest: str, routes: list[str],
+                  data: dict | None = None) -> str:
         rel = Path(dev_source)
         if rel.is_absolute() or ".." in rel.parts:
             raise RuntimeError(
@@ -61,8 +71,12 @@ class DevWebUI:
             )
         if not routes or any(not route.startswith("/") for route in routes):
             raise RuntimeError("WebUI entry routes must be absolute, non-empty paths")
+        channel = dict(data or {})
         self.entries.append((dev_source, prod_manifest, tuple(routes)))
+        self.channels.append(channel)
+        fields = ", ".join(sorted(channel)) or "(none)"
         print(f"  webui  | entry {dev_source} -> {', '.join(routes)}", flush=True)
+        print(f"  webui  | channel state {fields}", flush=True)
         return dev_source
 
 

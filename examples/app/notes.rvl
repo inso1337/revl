@@ -254,42 +254,81 @@ component TrendingRanker provides ranking: Ranker {
 // client `revl export client --lang ts --service NotesApi` derives from the
 // `NotesApi` declaration above (item 457 artifact 5) — one declaration is both
 // the server's router and the browser's typed call surface.
+
+// The SECOND half of the boundary is the reactive channel. Cordis WebUI's
+// `addEntry(files, data)` publishes `data` as a reactive object: the server
+// mutates it and the delta is broadcast to the browser, and any function on it is
+// an RPC method the browser may call (526). Raw, that `data` is untyped `T`; here
+// it is DECLARED, and each half is declared exactly once:
 //
-// The typed reactive-state / RPC `data` channel Cordis WebUI also offers (526,
-// design note 530 Decision B) is NOT expressible from revl yet: `add_entry` has
-// no `data` parameter, so the coeffect publishes an empty reactive surface and
-// the shared state/RPC contract is authored on the TS side rather than PROJECTED
-// from the service declaration. That is a filed gap against 459/457 (see
-// docs/design/525-webapp-slice4-frontend.md §G3), not a workaround absorbed here:
-// the frontend drives all note state through the typed REST routes, the landed
-// typed contract, and the gap is what a `revl export client --face webui` slice
-// (457 S4) closes.
+//   * the reactive STATE is `NotesConsoleState`, the declared type of the `data`
+//     parameter the console publishes through `webui.add_entry` — the value it
+//     actually hands the host, so the published fields and the browser's type
+//     cannot drift apart;
+//   * the RPC METHOD SET is the console's declared provision, `NotesConsoleRpc`
+//     (526: "an entry's exposed methods are exactly the component's declared
+//     provisions"), which `revl audit` already reports as G1.
+//
+// `revl export client --lang ts --face webui --component NotesConsole` PROJECTS
+// both into `./frontend/contract.ts` (item 457 slice S4, design note 530 Decision
+// B), so the `useRpc<NotesConsoleChannel>()` type the browser reads and these
+// declarations are one definition, the same way `notes.client.ts` is one
+// definition with `NotesApi`. Neither half is hand-authored on the TS side.
+
+// The reactive state the console publishes. The console REPORTS the ranker's live
+// surface rather than restating it: the fields are exactly what the screen renders
+// from the synced channel, and they come from `Ranker` at activation.
+type NotesConsoleState = { strategy: Str, signals: Int }
+
+// The RPC surface the browser may call. It is the console's own declared
+// provision, so the set of server methods reachable from the page is enumerable
+// from the source — the property the ~4,800-line string console could never state
+// about itself. Only the operations the page actually needs are on it: the state
+// fields above are observed, not called.
+service NotesConsoleRpc {
+  fn score(id: Str) -> Int    // the note's score under the live strategy
+  fn bump(id: Str)            // record one engagement signal for a note
+}
 
 // The ambient WebUI service the host provides as `ctx.webui`. `add_entry` names
-// external asset files and returns a stable entry handle; it is an `emission`
-// because registering a frontend is an outward effect on the host (the shape a
-// `revl import cordis` of `@cordisjs/plugin-webui` recovers, design note 526).
+// external asset files and the typed reactive channel, and returns a stable entry
+// handle; it is an `emission` because registering a frontend is an outward effect
+// on the host (the shape a `revl import cordis` of `@cordisjs/plugin-webui`
+// recovers, design note 526).
 service WebUI {
   emission fn add_entry(
     dev_source: Str,
     prod_manifest: Str,
     routes: List[Str],
+    data: NotesConsoleState,
   ) -> Str
 }
 
 // The notes console component. It declares the first-class coeffect on the
 // ambient WebUI service and, at activation, registers the app's Vite/Vue frontend
 // by naming external files only — the dev-mode source, the built Vite manifest,
-// and the client route the entry owns. The binding is the declared coeffect, so
-// `revl audit` reports the `webui` requirement (G1) and the `webui.add_entry`
-// emission (the trusted host boundary, G8) on this component's surface; there is
+// the client route the entry owns, and the typed reactive state it publishes. The
+// binding is the declared coeffect, so `revl audit` reports the `webui` and
+// `ranking` requirements (G1), the `webui.add_entry` emission (the trusted host
+// boundary, G8) and the `console` provision on this component's surface; there is
 // no `globalThis` bridge and no inline JS.
-component NotesConsole requires webui: WebUI {
+component NotesConsole requires webui: WebUI, ranking: Ranker
+                       provides console: NotesConsoleRpc {
   emit webui.add_entry(
     "./frontend/entry.client.ts",            // dev-mode Vite/Vue source
     "./frontend/dist/.vite/manifest.json",   // built Vite manifest for production
     ["/notes"],                              // client route this entry owns
+    { strategy: ranking.strategy(),          // the typed reactive channel
+      signals: ranking.signals() },
   )
+
+  // The RPC bodies are plain delegations to the ranking service the console
+  // requires: the page reaches the ranker only through this declared surface, so
+  // the browser-callable set stays exactly the provision above.
+  provide console {
+    fn score(id) = ranking.score(id)
+    fn bump(id)  = ranking.bump(id)
+  }
 }
 
 // ---------------------------------------------------------------- lifecycle

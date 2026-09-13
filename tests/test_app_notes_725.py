@@ -80,6 +80,16 @@ def test_dev_webui_records_the_declared_entry():
     assert host.entries == [("./frontend/entry.client.ts", "m", ("/notes",))]
 
 
+def test_dev_webui_records_the_published_reactive_channel():
+    """The dev host records the typed reactive state the entry published as well as
+    its asset paths, so a dev run shows the channel the composition opened (the
+    `data` half of the boundary, item 457 slice S4)."""
+    host = DevWebUI(ROOT / "examples" / "app")
+    host.add_entry("./frontend/entry.client.ts", "m", ["/notes"],
+                   {"strategy": "recency", "signals": 0})
+    assert host.channels == [{"strategy": "recency", "signals": 0}]
+
+
 def test_dev_preflight_names_the_source_line():
     import tempfile
 
