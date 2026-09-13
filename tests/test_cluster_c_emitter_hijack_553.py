@@ -528,6 +528,112 @@ def test_java_escapes_injected_generic_host_root_type_name():
     assert "class Map {" not in emitted, "bare `class Map` collides"
 
 
+# ------------------------------- the java STREAM runtime's own injected names
+#
+# #936 reserved the java names the emitter injected AT THE TIME. item 130's java
+# slice then nested four MORE classes in `Components` -- `Stream` and
+# `Subscription` from `_emit_stream_runtime`, `EventContract` and `RevlJson`
+# from `_emit_stream_event_runtime` -- and did not add them to
+# `_JAVA_TYPE_RESERVED`. So the same cluster-C hole reopened one runtime over: a
+# stream program that also declared `type Stream` emitted the class TWICE and
+# javac answered `class Stream is already defined in class Components`, for a
+# program the checker accepts and every other tier emits.
+#
+# The four names are invisible to `_shadow_prelude_type`: those runtimes are
+# spliced only for a document that HOLDS a stream, so the shadow base has to
+# open one. That is why the existing host-root case above did not catch this.
+_JAVA_STREAM_SHADOW = """
+service Sink { emission fn write(v: Str) }
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+}
+"""
+
+_JAVA_EVENT_SHADOW = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Sink { emission fn write(v: Str) }
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub { emit sink.write(e.order_id) }
+}
+"""
+
+# name -> the base that splices the runtime declaring it. `EventContract` and
+# `RevlJson` ride the `on … as` handler only, so a plain `every … in` base would
+# leave them undeclared and the test vacuous.
+_JAVA_STREAM_INJECTED_TYPES = {
+    "Stream": _JAVA_STREAM_SHADOW,
+    "Subscription": _JAVA_STREAM_SHADOW,
+    "EventContract": _JAVA_EVENT_SHADOW,
+    "RevlJson": _JAVA_EVENT_SHADOW,
+}
+
+
+def _shadow_stream_type(name: str, base: str) -> str:
+    """A stream program that also declares, and USES, `type <name>`.
+
+    The use site matters as much as the declaration: escaping only the
+    declaration would emit `class Stream_` and then annotate the parameter
+    `Stream`, which is the injected runtime class -- a DIFFERENT wrong program,
+    not a fix. `use_<name>` makes the emitted signature name whichever class the
+    ladder picked."""
+    return (base
+            + f"\npub type {name} = {{ a: Int }}\n"
+            + f"pub fn use_{name}(v: {name}) -> Int {{ return v.a }}\n")
+
+
+@pytest.mark.parametrize("name", sorted(_JAVA_STREAM_INJECTED_TYPES))
+def test_java_escapes_the_stream_runtime_type_names(name: str):
+    """A user `type Stream` in a stream program emits as `Stream_`, so the
+    runtime class item 130 splices keeps its name and `Components` declares each
+    exactly once.
+
+    Escaped rather than refused, the posture `Map`/`Pool`/`Job` already take
+    here and the one rust takes for this same set: `Stream` is a live host root
+    spelled as a bare token (`Stream.source()`), and `Subscription` /
+    `EventContract` are plausible domain names in precisely the event-driven
+    programs that reach the runtime, so a refusal would cost a valid program for
+    a spelling reason."""
+    emitted = _emit("java",
+                    _shadow_stream_type(name, _JAVA_STREAM_INJECTED_TYPES[name]))
+    decls = re.findall(rf"class {name}(?![A-Za-z0-9_])", emitted)
+    assert len(decls) == 1, (
+        f"`class {name}` is declared {len(decls)} times -- the user type must "
+        f"not land on the injected runtime class")
+    assert f"class {name}_ " in emitted, f"user `type {name}` must be escaped"
+    assert f"use_{name}({name}_ v)" in emitted, (
+        f"the use site must follow the declaration onto `{name}_`")
+
+
+def test_java_stream_type_escape_stays_injective():
+    """The control for the ladder, not the entry: a program declaring BOTH
+    `Stream` and `Stream_` must keep three distinct classes. `_mangle`'s
+    trailing-underscore walk is what delivers it (`Stream` -> `Stream_`,
+    `Stream_` -> `Stream__`); an escape that merely appended once would collapse
+    the two user types onto one declaration."""
+    source = (_JAVA_STREAM_SHADOW
+              + "\npub type Stream = { a: Int }\n"
+              + "pub type Stream_ = { b: Int }\n")
+    emitted = _emit("java", source)
+    for spelling in ("Stream", "Stream_", "Stream__"):
+        decls = re.findall(rf"class {spelling}(?![A-Za-z0-9_])", emitted)
+        assert len(decls) == 1, f"`class {spelling}` declared {len(decls)} times"
+
+
+def test_java_stream_host_call_site_keeps_the_bare_name():
+    """The control for the escape's SCOPE: reserving `Stream` at the type-name
+    position must not touch the host call site. `effect Stream.source()` is a
+    bare token naming the runtime class, so escaping it too would point the
+    acquisition at the user's record and break the program the reservation
+    exists to save."""
+    emitted = _emit("java", _shadow_stream_type("Stream", _JAVA_STREAM_SHADOW))
+    assert "Stream.source()" in emitted, "the host root must stay bare"
+    assert "Stream_.source()" not in emitted
+
+
 def test_go_escapes_spawn_handle_type_name():
     """`RevlSpawnHandle` is declared on the live path only, so the base must
     carry a `lifecycle test` — a bare top-level `type` routes the emitter onto

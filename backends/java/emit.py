@@ -512,7 +512,24 @@ _EMITTER_RESERVED = {
 # nested `Map`, which javac rejects -- so they are escaped at the type-name
 # position only, the same posture rust takes with `_RUST_TYPE_RESERVED`. A
 # field, local, param or host call site of the same spelling is untouched.
-_JAVA_TYPE_RESERVED = frozenset({"Map", "Pool", "Job"})
+#
+# item 130: the stream lowering nests FOUR more classes in `Components` --
+# `Stream` and `Subscription` (`_emit_stream_runtime`), `EventContract` and
+# `RevlJson` (`_emit_stream_event_runtime`) -- and they were injected without
+# being reserved, so a stream program that also declared `type Stream`,
+# `type Subscription`, `type EventContract` or `type RevlJson` emitted the
+# class twice and javac rejected the file. Escaping (not refusing) is the
+# posture for all four: `Stream` is a live host root spelled as a bare token
+# (`Stream.source()`) like `Map`/`Pool`/`Job`, and the other three are
+# plausible domain names in exactly the event-driven programs that reach the
+# runtime, so a refusal would cost a valid program for a spelling reason.
+# This is the set rust already escapes (`_RUST_TYPE_RESERVED` carries its own
+# `Stream*`/`Subscription*` families and `EventContract`), so the two blocking
+# tiers agree on which names a user type cannot silently take.
+_JAVA_TYPE_RESERVED = frozenset({
+    "Map", "Pool", "Job",
+    "Stream", "Subscription", "EventContract", "RevlJson",
+})
 
 
 class EmitError(ValueError):
