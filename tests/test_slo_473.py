@@ -660,6 +660,25 @@ def test_a_presented_receipt_that_does_not_verify_refuses_the_rollout(tmp_path):
     assert report["basis"] == slo.UNVERIFIED
 
 
+def test_a_keyless_gate_still_runs_and_says_what_it_did_not_check(tmp_path):
+    """With no key there is nothing to verify against, and the two directions
+    are not symmetric: refusing on an unchecked receipt is the conservative
+    error, and admitting on one is no weaker than the `no-evidence` admission a
+    caller gets by presenting nothing. So the gate runs, and states that the
+    signature was not checked rather than implying it was."""
+    doc = project(tmp_path, "slo { p95_latency: 2s }")
+    ir = resolve_file(str(doc), str(tmp_path)).to_ir()
+    report = slo.gate_rollout(ir=ir, receipt=_breached_receipt(), key=None)
+    assert report["admitted"] is False
+    assert report["macChecked"] is False
+    assert "NOT checked" in report["note"]
+    assert "signature UNCHECKED" in slo.render_gate(report)
+
+    with_key = slo.gate_rollout(ir=ir, receipt=_breached_receipt(), key=KEY)
+    assert with_key["macChecked"] is True
+    assert "UNCHECKED" not in slo.render_gate(with_key)
+
+
 def test_the_absence_of_a_receipt_is_not_a_refusal(tmp_path):
     """The first generation of any composition has no predecessor, and a gate
     that refused it would refuse every first rollout. The basis says which
