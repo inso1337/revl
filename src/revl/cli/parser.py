@@ -1139,6 +1139,39 @@ def build_parser() -> argparse.ArgumentParser:
                              help="on rejection, print a structured diagnostic "
                                   "instead of the human rendering")
 
+    # `revl sourcemap compose` — item 459 F2's remaining half: the chain
+    # between a generated file's own map and the bundler's. It reads two (or
+    # more) Source Map v3 documents and writes one; it compiles nothing, so it
+    # takes no `.rvl` files and lives in its own group rather than under
+    # `export`, which projects a revl artifact into an external format.
+    smap = sub.add_parser(
+        "sourcemap",
+        help="compose Source Map v3 documents: chain a generated file's map "
+             "into the bundler's so a bundled stack trace walks back to the "
+             "template that produced the generated file "
+             "(docs/frontend-assets.md, item 459 F2)")
+    smap_sub = smap.add_subparsers(dest="sourcemap_command", required=True)
+    smap_compose = smap_sub.add_parser(
+        "compose",
+        help="rewrite every mapping of MAP that points INTO a generated file "
+             "through that file's own map, so one document reaches the "
+             "original")
+    smap_compose.add_argument(
+        "map", metavar="MAP",
+        help="the OUTER map: the bundler's, describing the artifact a browser "
+             "loads")
+    smap_compose.add_argument(
+        "--through", action="append", required=True, metavar="[NAME=]MAP",
+        help="an INNER map: one generated input's own map (the one "
+             "`stdlib/template.rvl`'s `source_map` writes). NAME is how the "
+             "OUTER map spells that input in its `sources`; without it the "
+             "inner map's own `file` is used. Repeatable, applied in order. A "
+             "NAME naming no source of the outer map is refused rather than "
+             "returning the outer map unchanged")
+    smap_compose.add_argument(
+        "-o", "--output", default=None,
+        help="output path (default: stdout)")
+
     serve = sub.add_parser(
         "serve",
         help="serve a composition's OWN provided operations, over MCP stdio "
