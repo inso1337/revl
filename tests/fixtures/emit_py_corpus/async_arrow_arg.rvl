@@ -1,0 +1,30 @@
+// The async colour on an arrow in ARGUMENT position.
+//
+// item 391 stamped the colour on a coloured `fn` ENTRY. The value-position half
+// was still unstamped, because an arrow written `y => host_get(y)` says nothing
+// about its own signature: the colour comes from the parameter it is checked
+// against. That is also the reference's rule C2 — the flag is a certificate that
+// some declaration promised to await this arrow, so it may come from a checking
+// position and never from the author's own annotation.
+extern emission async fn host_get(path: Str) -> Str
+= @py {
+      return path
+    }
+
+fn drive(cb: (Str) -> Async[Str], path: Str) -> Str {
+  let body = cb(path)
+  return body
+}
+
+pub fn fetch(path: Str) -> Str {
+  return drive(y => host_get(y), path)
+}
+
+// the control, in the same document: the same call shape against a parameter
+// that is NOT coloured, so its arrow must carry the resolved signature and no
+// `async` stamp at all
+fn run(cb: (Str) -> Int, s: Str) -> Int { return cb(s) }
+
+pub fn measure(s: Str) -> Int {
+  return run(y => y.length(), s)
+}

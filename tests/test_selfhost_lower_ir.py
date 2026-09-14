@@ -139,6 +139,8 @@ FUNCTION_EMIT_READY_DOCS = [
     "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
     "maps.rvl", "annotated_lets.rvl", "adt_inference.rvl",
     "extern_neighbours.rvl", "async_colour.rvl",
+    "generics.rvl", "variant_multiline.rvl", "else_if.rvl", "arrows.rvl",
+    "async_arrow_arg.rvl",
 ]
 
 # The component documents whose whole activation/method body is now lowered
@@ -684,3 +686,165 @@ def test_native_ir_is_emitter_ready(lower_to_ir):
         else:
             del sys.modules["runtime"]
     assert from_native == from_reference
+
+
+# ======================================================== item 391, next tranche
+#
+# Each of the six below is a shape the self-host frontend did not lower, found by
+# running BOTH frontends over every single-file `.rvl` in the tree (563 of them,
+# against the 41 this oracle globs) and diffing the `functions`/`types`/`externs`
+# projection. The document that pins each one enters `emit_py_corpus/`, so it
+# joins every globbed projection here automatically — which is the half that
+# stops the regression, and the reason these hid as long as they did.
+
+def test_native_ir_lowers_a_generic_module_fn(lower_to_ir):
+    """`fn name[T](…)` — a declaration the reference accepts and the self-host
+    dropped out of `functions` entirely.
+
+    Every declaration reader assumed the parameter list opened two tokens after
+    the `fn` keyword, so a type-parameter list walked the parameter reader into
+    `[T, U]`. Type parameters are ERASED: a generic declaration must lower to
+    exactly the shape its monomorphic neighbour does."""
+    source = (
+        "pub fn identity[T](x: T) -> T { return x }\n"
+        "pub fn identity_int(x: Int) -> Int { return x }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert [fn["name"] for fn in reference] == ["identity", "identity_int"]
+    assert reference[0]["params"] == [{"name": "x", "type": "T"}]
+    assert native == reference
+
+
+def test_native_ir_reads_a_variant_declared_over_several_lines(lower_to_ir):
+    """A `type` declaration is not bounded by its first line.
+
+    A case below the first line never entered the case table, so a bare nullary
+    constructor lowered as a `var` — a reference to a binding that does not
+    exist — rather than an `adt` node. `stdlib/a2a.rvl` and `stdlib/http.rvl`
+    both declare their variants this way."""
+    source = (
+        "pub type Phase =\n"
+        "    Queued\n"
+        "  | Finished(Int)\n"
+        "pub fn start() -> Phase { return Queued }\n"
+    )
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    started = reference["functions"][0]["body"][0]["expr"]
+    assert started == {"kind": "adt", "type": "Phase", "case": "Queued", "args": []}
+    assert native["functions"] == reference["functions"]
+    assert native["types"] == reference["types"]
+
+
+def test_a_type_declaration_span_stops_at_the_pub_that_follows_it(lower_to_ir):
+    """`pub` is not a declaration head, but it IS the first token of the next
+    declaration.
+
+    A span that only stops at heads runs one token past it, and hands the next
+    reader a `fn` whose visibility prefix has already been eaten — an exported
+    function lowered as private. Same shape as the extern-neighbour divergence,
+    reached from the other side."""
+    source = (
+        "pub type Phase =\n"
+        "    Queued\n"
+        "  | Running\n"
+        "pub fn start() -> Phase { return Queued }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["public"] is True
+    assert native == reference
+
+
+def test_native_ir_lowers_an_else_if_chain(lower_to_ir):
+    """`else if` nests the trailing `if` as the sole step of the else list.
+
+    The reader recognised `else {` and nothing else, so the chain lowered as a
+    bare `if` with an empty else AND stopped the enclosing block — the cursor
+    came to rest on the word `else`, which is not a statement, so the branches
+    below the first and every statement AFTER the chain went together."""
+    source = (
+        "pub fn grade(n: Int) -> Str {\n"
+        "  var out = \"?\"\n"
+        "  if (n >= 90) { out = \"A\" } else if (n >= 80) { out = \"B\" } else { out = \"C\" }\n"
+        "  out = out.concat(\"!\")\n"
+        "  return out\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    body = reference[0]["body"]
+    assert [step["step"] for step in body] == ["let", "if", "assign", "return"]
+    assert body[1]["else"][0]["step"] == "if"
+    assert native == reference
+
+
+def test_native_ir_lists_the_mutable_names_an_arrow_captures(lower_to_ir):
+    """`captures` is a VALUE, not an annotation that may be withheld.
+
+    It is the list of mutable names the arrow snapshots at creation time, and
+    every emitter binds them by value there — python, typescript and go would
+    otherwise close over the enclosing local by reference and see a later write.
+    The self-host wrote `[]` on every arrow, so this is the one entry in the
+    projection a backend could act on and get a different answer from the
+    reference's. The immutable neighbour is the control: it must stay empty."""
+    source = (
+        "pub fn snapshot() -> Int {\n"
+        "  var n = 1\n"
+        "  let f = x => x + n\n"
+        "  n += 10\n"
+        "  return f(5)\n"
+        "}\n"
+        "pub fn no_capture(base: Int) -> Int { let g = x => x + base  return g(5) }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][1]["value"]["captures"] == ["n"]
+    assert reference[1]["body"][0]["value"]["captures"] == []
+    assert native == reference
+
+
+def test_native_ir_resolves_an_arrows_signature_from_its_position(lower_to_ir):
+    """`param_types`/`returns` on an arrow that annotates nothing.
+
+    A zero-parameter arrow declares no parameter type, so the "every declared
+    type is known" condition is vacuously met and both keys go in — the
+    self-host asked for at least one annotated parameter and so withheld them
+    from every `() => …`. An arrow ARGUMENT gets its signature from the
+    parameter it is checked against, which is the only place `Int` is written."""
+    source = (
+        "fn apply(f: (Int) -> Int, x: Int) -> Int { return f(x) }\n"
+        "pub fn maker(s: Str) -> () -> Int { return () => s.length() }\n"
+        "pub fn doubled(x: Int) -> Int { return apply(v => v * 2, x) }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    made = reference[1]["body"][0]["expr"]
+    assert made["param_types"] == [] and made["returns"] == "Int"
+    assert reference[2]["body"][0]["expr"]["args"][0]["param_types"] == ["Int"]
+    assert native == reference
+
+
+def test_native_ir_colours_an_arrow_argument_async(lower_to_ir):
+    """The value-position half of the colour item 391 stamps on a fn entry.
+
+    `y => host_get(y)` says nothing about its own signature: the colour comes
+    from the `(Str) -> Async[Str]` parameter it is checked against, which is
+    also why it may never be self-declared (rule C2 — the flag is a certificate
+    that a declaration promised to await this arrow). The uncoloured neighbour
+    carries the resolved signature and no stamp."""
+    source = (
+        "extern emission async fn host_get(path: Str) -> Str = @py { return path }\n"
+        "fn drive(cb: (Str) -> Async[Str], path: Str) -> Str { return cb(path) }\n"
+        "fn run(cb: (Str) -> Int, s: Str) -> Int { return cb(s) }\n"
+        "pub fn fetch(path: Str) -> Str { return drive(y => host_get(y), path) }\n"
+        "pub fn measure(s: Str) -> Int { return run(y => y.length(), s) }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    coloured = reference[2]["body"][0]["expr"]["args"][0]
+    plain = reference[3]["body"][0]["expr"]["args"][0]
+    assert coloured["async"] is True and coloured["returns"] == "Async[Str]"
+    assert "async" not in plain and plain["returns"] == "Int"
+    assert native == reference
