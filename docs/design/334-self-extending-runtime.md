@@ -798,20 +798,84 @@ running, data survived); an incompatible successor (a changed resource vector)
 reverts to gen N with the instance state intact; a provider hand-off carries its
 `Map` across; and a stateless swap reports `migration = None`.
 
-**Still deferred after slice 3:** the rust host (below, still genuinely
-blocked); the re-entrant `propose` (enforced-deferred by the forbidden-grant
-rule); the genuinely-new-host-code path (operator gate or item 411); and the
-per-turn `Session.admit` realm question named in slice 2's (1).
+**Still deferred after slice 3:** the rust host (below); the re-entrant
+`propose` (enforced-deferred by the forbidden-grant rule); the
+genuinely-new-host-code path (operator gate or item 411); and the per-turn
+`Session.admit` realm question named in slice 2's (1).
 
-**The rust host remains BLOCKED, re-verified 2026-09-02.** `crates/revl-gate`
-landed since the slice-1 triage, but it is layer 1 ONLY and admit-only: `admit`
-is a pure function returning `Refused`/`NoObjection`/`OutsideFrontier` with no
-`Admitted` arm at all, `compile_to` is unimplemented, and
-`crates/revl-gate/src/session.rs` is a 25-line documented EMPTY RESERVATION that
-names item 334 as its owner. There is no rust `Session`, no witnessed-effect
-runtime, no WAL and no approver seam, so items 243/245/322 are unavailable on
-that tier and nothing in 334's loop can run there. The blocker is real; what is
-NOT blocked is the py envelope work above, which is why slice 2 exists.
+**Slice 4 (LANDED): what a proposal INHERITS — the per-turn handle.** Slices 1-3
+bound what a candidate may REACH (`untrusted_author`), what authority ADDRESS it
+may write for itself (`no_realm_placement`), what happens when it fails to
+activate (the health gate) and what live state may cross onto it (the
+state-compat gate). None of them bound what the successor may be HANDED.
+
+An item-330 `Gate.admit` mints a `Handle` onto the turn it admitted, and that
+handle dispatched by KEY NAME against the live session (`AdmitHandle.call`, and
+separately the facade `Handle.call`, which reimplemented the same key check and
+went straight to `Session.call`). A key name is not a binding. `Session.swap`
+disposes the WHOLE composition, so after a `propose` the turn the handle names
+is gone — while the key it names can be re-declared by the successor, and under
+`propose` the successor is agent-authored code that writes its own component and
+key names. An embedder that kept calling the handle it was given for its trusted
+turn landed in the agent's implementation instead, silently: no new `extern`, no
+ungranted service, no realm of its own, so nothing the admission profile checks
+was violated. The profile judges what a candidate REACHES; it cannot see what a
+stale caller hands it. This is the same shape as the record-mode frame
+attribution slice 3 fixed — state keyed to a name outliving the thing the name
+was meant to bound — and it failed OPEN.
+
+The binding is the generation's item-245 owner, which is exactly the frame
+`AdmitHandle`'s own docstring promises the turn's crossings register into.
+`_install_session_owner` builds a FRESH owner for every generation that loads
+(`load`, `swap`'s successor, `_abort_swap`'s reloaded predecessor) and `_reset`
+drops it, while `_wire_turn` — additive, no generation change — leaves it alone.
+So the rule is one line: a handle is live while the owner it was minted under is
+the live owner. A handle whose owner moved refuses `STALE_HANDLE`, naming the
+generation it was minted against, and the generation check runs BEFORE the key
+check so a successor that happens to drop the key cannot dress the refusal up as
+a missing-key answer. The reference is held weakly: a collected owner is a gone
+generation, which is the refusing answer anyway.
+
+The generation number alone would not do: `_reset` takes it back to 0 and the
+next `load` back to 1, so a handle from a previous load would alias into a fresh
+composition that re-provided its key. The owner is a fresh object per install
+and cannot alias.
+
+Three consequences, all deliberate. A REFUSED proposal swaps nothing, so the
+generation never moves and the handle stays live (the non-vacuity control). A
+sibling turn admitted alongside rebuilds the class map — the surface epoch moves
+— but not the generation, so earlier turns keep their handles. And a REVERTED
+proposal does invalidate: `_abort_swap` disposes and re-loads the predecessor,
+so the turn's fibers were torn down and re-activated and the handle no longer
+addresses the instance it was minted onto. `Gate.call` keeps serving gen N
+throughout, which is EDGE 1's guarantee and is untouched. Seven tests.
+
+**The rust host, re-verified 2026-09-14. The 2026-09-02 statement below is
+SUPERSEDED and the blocker has moved.** It read: `crates/revl-gate` is layer 1
+only and admit-only, `crates/revl-gate/src/session.rs` is a 25-line documented
+EMPTY RESERVATION, there is no rust `Session` and no witnessed-effect runtime,
+so items 243/245 are unavailable on that tier. That is no longer true.
+`session.rs` now carries a real `Session` state machine: the generation state,
+the untrusted-author admission ENTRY (`propose`'s decision half, wired in this
+design's order — halt-dominance, then the forbidden-grant rule, then the
+standalone decision), an `Externs` registry that enforces the item-243 pair
+rules at declaration time (`UNKNOWN_INVERSE`, `INVERSE_NOT_LOCAL`,
+`INVERSE_NOT_CALLABLE`), and `call`/`commit`/`abort` that RUN the host bodies
+and replay the recorded inverses LIFO, so `AbortReport::residue_free` is a
+measurement rather than a report. `Admission::Admitted` also has a reachable
+arm now.
+
+What is still missing is the ACCEPT half, and it is one thing: `compile_to`
+refuses on every tier (`crates/revl-gate/src/lib.rs`, Stage 4 — the self-host
+emitters still depend on `@py`-only helper externs, so there is no native
+emitter to run). A rust host can therefore DECIDE on an agent-proposed
+candidate and fail closed (`NO_ADMISSION`), but it cannot turn one into a
+runnable composition, which is what `swap` needs; the rust `propose` is
+`&self` and swaps nothing by construction. So the rust tier runs the
+"witnessed effects + residue-free abort" half of the loop and not the
+"compile + admit + hot-swap at runtime" half, and closing that is gated on the
+native emitter (item 332 Stage 4 / item 391), not on anything in this design.
+The py loop above is complete and is the tier the exit test is stated on.
 
 ## Exit test
 
