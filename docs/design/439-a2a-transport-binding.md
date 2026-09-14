@@ -1,7 +1,7 @@
 # 439: the A2A 1.0.0 transport binding for remote providers
 
-Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-13
-(slice B1 completed on the ts tier).
+Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-14
+(the four-op Task lifecycle bound over HTTP+JSON/REST as well as JSON-RPC 2.0).
 The semantics are item 424 gap (c)'s and are not reopened here; the Task
 lifecycle is `docs/design/439-a2a-task-lifecycle.md`'s and is not re-decided
 here. This note records what the binding IS, where every guarantee still applies
@@ -125,8 +125,75 @@ reaches a terminal state in that one crossing, with a non-terminal reply
 (`working`, `input-required`, `auth-required`, `unknown`) a FAULT at the boundary
 (`src/revl/synthesize.py:746`, and the terminal list is imported from the
 importer, `src/revl/import_a2a.py:212`, so the two entry points cannot drift).
-`long_running` is admitted only on `through a2a`, and is refused on the default
-wire and on `through a2a_rest` (`tests/test_439_a2a_transport.py:731`, `:740`).
+`long_running` is admitted on BOTH A2A sub-transports and refused on the default
+wire, which has no `tasks/get` to speak. See "the four ops over HTTP+JSON/REST"
+below.
+
+### The four ops over HTTP+JSON/REST
+
+A2A 1.0.0 specifies the same four Task operations over both of its JSON-body
+sub-transports, so `long_running` binds on `through a2a_rest` as well as on
+`through a2a`, and `revl import a2a --long-running` follows the card's own
+`preferredTransport` instead of always emitting a JSON-RPC envelope. The wire a
+generated body speaks has to be the wire the row or the card DECLARES: posting a
+JSON-RPC envelope at a peer that advertised HTTP+JSON only would be this
+composition claiming A2A 1.0.0 while speaking a sub-transport the peer never
+offered, which is the same dishonesty the version check and the gRPC refusal
+exist to prevent.
+
+The projection is unchanged and that is the point: the four ops, the
+`stdlib/a2a.rvl` handle vocabulary, the shape check, the `tasks/cancel`
+compensation (item 247), the F5 funnel, the deadline, the redirect refusal, the
+`Untrusted[T]` return and the T0 withdrawal are the same code on both wires
+(`src/revl/a2a_task.py`, one `rest` flag). Two things follow from the REST
+envelope, and both are stated at the boundary rather than papered over.
+
+**The correlation identity rides one way.** A REST reply is the bare
+`Task`/`Message` and echoes no envelope `id`, so there is nothing to check a
+reply against. `_start` and `_reply` still carry the identity in the message
+metadata, for the peer's log and ours; `_poll` and `_cancel` send no message and
+so carry none. What the wire CAN check it does check: the reply is a JSON object
+with content (the shape gate) and, for the three ops that name a task they
+already hold, it describes THAT task (the task-identity gate). A check the wire
+cannot make is not emitted as if it could.
+
+**A peer-authored string becomes URL structure, so it is encoded whole.** REST
+addresses a running Task by putting its id in the path (`GET /v1/tasks/{id}`,
+`POST /v1/tasks/{id}:cancel`), and that id is the peer's: it came back from its
+own `_start` reply. The failure direction is exact. Concatenated raw, a peer that
+answered `_start` with an id of `../v1/message:send` would make this
+composition's next `_poll` cross to the SEND path rather than the task path, at
+the declared endpoint, with the row still describing a poll; an id carrying `?`
+or `#` would attach a query or a fragment nobody declared. So
+`a2a_boundary.py_rest_task_url` checks the id for shape and then percent-encodes
+it whole (`safe=""`), which leaves it exactly one path segment: every separator,
+every reserved character and every dot-segment is escaped. The shape gate in
+front of the encoder is not decoration either, because `quote` raises `TypeError`
+on a non-string and that is an exception no settlement classifies; a handle with
+no usable id refuses as the crossing's own declared fault instead. The JSON-RPC
+wire carries the same id as a JSON member, where it is data rather than
+structure, and needs no such rule: the rule lives where the wire creates the
+exposure.
+
+Exit tests: `tests/test_439_a2a_transport.py::test_a_peer_authored_task_id_cannot_steer_the_rest_crossing`
+(the hostile id lands percent-encoded on the task path, on `_poll` and on
+`_cancel`), `::test_a_rest_task_handle_with_no_usable_id_faults`,
+`::test_a_rest_task_reply_about_another_task_is_refused` and the four
+round-trips (`::test_rest_start_posts_the_bare_message_and_returns_a_task_ref`,
+`::test_rest_poll_gets_the_task_path_and_walks_working_to_done`,
+`::test_rest_reply_posts_message_send_with_the_task_id`,
+`::test_rest_cancel_posts_the_cancel_verb_and_returns_unit`), plus
+`tests/test_import_a2a.py::test_a_rest_cards_four_ops_speak_the_rest_method_paths`
+for the importer. Negative exit tests, which hold on both wires and so pass
+before this slice as well as after it:
+`::test_the_jsonrpc_four_ops_are_unchanged` and
+`tests/test_import_a2a.py::test_a_jsonrpc_cards_four_ops_still_speak_jsonrpc` (a
+JSON-RPC row and a JSON-RPC card still speak `tasks/get` and know nothing of the
+REST paths), and `::test_long_running_on_the_default_wire_is_refused` (the
+canonical wire is still not an A2A wire).
+
+gRPC remains outside both: it is binary framing over HTTP/2, not a JSON POST, and
+it needs its own `through` name and its own note.
 
 ## Question (2): the boundary refuses the untrusted author, and `Untrusted[T]` alone is not enough
 

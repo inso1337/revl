@@ -901,6 +901,53 @@ def test_four_op_ops_synthesize_no_inverse():
             assert "undo" not in line and "compensate" not in line
 
 
+_LR_REST_CARD = dict(_LR_CARD, preferredTransport="HTTP+JSON")
+
+
+def test_a_rest_cards_four_ops_speak_the_rest_method_paths():
+    """A card that prefers HTTP+JSON gets the REST Task paths. The wire a
+    generated body speaks must be the wire the CARD declares: a JSON-RPC
+    envelope posted at a REST-only peer would be this composition claiming A2A
+    1.0.0 while speaking a sub-transport the peer never advertised."""
+    source = import_a2a(_LR_REST_CARD, filename="card.json", backend="py",
+                        long_running=True)
+    assert "/v1/message:send" in source
+    assert '"/v1/tasks/"' in source
+    assert '":cancel"' in source
+    assert '"jsonrpc": "2.0"' not in source
+    assert '"method": "tasks/get"' not in source
+    assert '"method": "tasks/cancel"' not in source
+    # the projection itself is unchanged: the same four ops, the same vocabulary
+    for op in ("start", "poll", "reply", "cancel"):
+        assert f"emission fn research_{op}(" in source
+    assert "research_poll(task: TaskRef) -> Untrusted[TaskEvent]" in source
+
+
+def test_a_rest_cards_four_op_file_compiles():
+    source = import_a2a(_LR_REST_CARD, filename="card.json", backend="py",
+                        long_running=True)
+    assert _compile_generated(source) is not None
+
+
+def test_a_rest_four_op_body_encodes_the_peers_task_id_whole():
+    """The peer-authored task id becomes URL path structure on this wire, so the
+    generated body percent-encodes it whole rather than concatenating it."""
+    source = import_a2a(_LR_REST_CARD, filename="card.json", backend="py",
+                        long_running=True)
+    assert '_urlp.quote(_task["id"], safe="")' in source
+    assert 'if not isinstance(_task.get("id"), str) or not _task["id"]:' in source
+
+
+def test_a_jsonrpc_cards_four_ops_still_speak_jsonrpc():
+    """The non-vacuity control: the JSON-RPC card is untouched by the REST
+    branch and still posts the envelope at the card's own `url`."""
+    source = import_a2a(_LR_CARD, filename="card.json", backend="py",
+                        long_running=True)
+    assert '"method": "tasks/get"' in source
+    assert '"method": "tasks/cancel"' in source
+    assert "/v1/tasks/" not in source
+
+
 def test_long_running_is_refused_on_ts():
     with pytest.raises(RevlError) as excinfo:
         import_a2a(_LR_CARD, filename="card.json", backend="ts",

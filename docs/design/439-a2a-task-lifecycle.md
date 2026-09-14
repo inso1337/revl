@@ -1,6 +1,6 @@
 # 439: the A2A Task lifecycle binding, and the first slice
 
-**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1)
+**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1; the four ops bound over HTTP+JSON/REST 2026-09-14)
 
 ## What this note decides
 
@@ -89,6 +89,18 @@ service Researcher {
 }
 ```
 
+The method names in the comments are the JSON-RPC 2.0 spelling. A2A 1.0.0
+specifies the same four operations over HTTP+JSON/REST as well
+(`POST /v1/message:send`, `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}:cancel`),
+and T1 binds both: `through a2a` and `through a2a_rest` project the same four
+ops, and `revl import a2a --long-running` follows the card's own
+`preferredTransport`. The projection does not vary with the sub-transport; the
+envelope does. Two consequences of the REST envelope are recorded in
+`docs/design/439-a2a-transport-binding.md` under "the four ops over
+HTTP+JSON/REST": the correlation identity rides one way, because there is no
+envelope `id` to echo, and the peer-authored task id becomes URL path structure,
+so it is percent-encoded whole.
+
 Every operation is a single crossing, so everything the landed wire decides
 (one crossing, redirect refusal, the deadline, `on_failure`, the version claim,
 the `Untrusted[T]` return) applies unchanged. `research_poll` returns one event
@@ -151,9 +163,10 @@ second wire.
 | G8 | the boundary surface is the four (or one) synthesized externs, enumerable on the boundary surface `revl audit` renders, each carrying the folded `net.<host>` reach. True because a remote row synthesizes an ORDINARY provider holding ORDINARY externs, and pinned over the composition's compiled document for both forms by `tests/test_439_a2a_transport.py::test_the_a2a_crossing_is_on_the_g8_audit_surface` and `::test_all_four_task_crossings_are_on_the_g8_audit_surface`. The `revl audit` CLI itself compiles its arguments as modules, so it does not resolve a composition yet: `docs/design/439-a2a-transport-binding.md`'s scope limits name that gap |
 | G9 | every returned value and every stream element is `Untrusted[T]` with origin `net`; a flow into a sink is refused without `endorse` |
 | failure | `on_failure(withdraw)` by default: a transport fault on any of the four crossings, or a `Faulted` terminal on the feed, withdraws the provider (R2/R3); `on_failure(result)` keeps it wired and returns the `Err` |
-| trust | the card and every reply are claims; no re-admission (337), no badge (D-424c.8); every A2A provider is item 329's untrusted-author case. A reply is not read until it correlates: every crossing carries one identity as the JSON-RPC `id` and the `revl.correlation` metadata member, and a reply that is not a JSON object, does not claim JSON-RPC 2.0, or does not carry that identity back is a fault (slice B1, `src/revl/a2a_boundary.py`). On these four ops a reply that describes ANOTHER task is refused too: `_poll`/`_reply`/`_cancel` name a task they already hold |
+| trust | the card and every reply are claims; no re-admission (337), no badge (D-424c.8); every A2A provider is item 329's untrusted-author case. On JSON-RPC a reply is not read until it correlates: every crossing carries one identity as the envelope `id` and the `revl.correlation` metadata member, and a reply that is not a JSON object, does not claim JSON-RPC 2.0, or does not carry that identity back is a fault (slice B1, `src/revl/a2a_boundary.py`). On HTTP+JSON/REST there is no envelope to echo it, so the identity rides one way and the shape gate is what the wire can check. On these four ops a reply that describes ANOTHER task is refused too: `_poll`/`_reply`/`_cancel` name a task they already hold |
 | failure text | the peer-authored text the boundary renders into our own fault (a JSON-RPC `error.code`, a task `state`, a reply `kind`) is funnelled through item 421 F5's call-argument scrub before the consumer sees it (slice B1); `docs/design/439-a2a-transport-binding.md` question (2) is the reasoning |
-| version | "A2A 1.0.0 over JSON-RPC 2.0" or "over HTTP+JSON", exact, never bare "A2A" |
+| version | "A2A 1.0.0 over JSON-RPC 2.0" or "over HTTP+JSON", exact, never bare "A2A". The four ops speak whichever of the two the row or the card declares, never the other one under the same claim |
+| peer text as structure | the task id `_poll`/`_cancel` address is the peer's own, and on HTTP+JSON/REST it lands in the URL path, so it is shape-checked and percent-encoded whole (`a2a_boundary.py_rest_task_url`); on JSON-RPC it is a JSON member and needs no such rule |
 | operator halt | see Decision 6 |
 
 ## Decision 4: the runtime half of `on_failure(withdraw)`

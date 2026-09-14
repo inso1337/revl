@@ -200,7 +200,11 @@ _DEFAULT_TRANSPORT = _JSONRPC
 #: `url`. A constant, never card-derived, so interpolating it into a generated
 #: host body carries no injection risk the endpoint check does not already
 #: cover.
-_HTTPJSON_SEND_PATH = "/v1/message:send"
+#: A2A 1.0.0's REST method path for `message/send`. It lives in
+#: `a2a_boundary` with the task paths, so the terminal wire, the four-op wire
+#: and the `remote` row synthesizer (which imports this name) all read the one
+#: spelling. Kept under this name because `synthesize` imports it from here.
+_HTTPJSON_SEND_PATH = a2a_boundary.HTTPJSON_SEND_PATH
 
 #: How each transport is spelled where a generated file names it: a display
 #: label and the method it crosses on.
@@ -1080,6 +1084,11 @@ class _Generator:
         # header the way `--allow-plaintext` is: a generated file states the
         # policy it was generated under.
         self.follow_redirects = follow_redirects
+        # item 439: which of the two JSON-body A2A sub-transports the card
+        # prefers. The four-op Task projection reads it the way the terminal
+        # bodies do (`_BODIES`), so a REST card gets the REST method paths
+        # instead of a JSON-RPC envelope posted at a REST endpoint.
+        self._rest = card.transport == _HTTPJSON
         # issue #251: the crossing's colour, from the one host body this file
         # ships (`_ASYNC_BACKENDS`). Rendered into all three declarations at
         # once — the service operation, the extern and the provide method — so
@@ -1185,8 +1194,10 @@ class _Generator:
         lines = [f"  // skill `{_comment_safe(skill_id)}` — A2A Task lifecycle "
                  f"(item 439 T1)"
                  + (f": {_comment_safe(summary)}" if summary else "")]
-        lines.append("  // FOUR ops over `message/send` / `tasks/get` / "
-                     "`tasks/cancel`; every")
+        wire = ("`POST /v1/message:send` / `GET /v1/tasks/{id}` / "
+                "`POST /v1/tasks/{id}:cancel`" if self._rest
+                else "`message/send` / `tasks/get` / `tasks/cancel`")
+        lines.append(f"  // FOUR ops over {wire}; every")
         lines.append("  // return is `Untrusted[..]` (the peer is not this "
                      "composition's trust")
         lines.append("  // domain). `_cancel` is the best-effort `tasks/cancel` "
@@ -1205,7 +1216,7 @@ class _Generator:
             extern = f"a2a_{self.key}_{name}"
             body = a2a_task.task_body(suffix, self.card.endpoint, skill_id,
                                       follow_redirects=self.follow_redirects,
-                                      label=self.key)
+                                      label=self.key, rest=self._rest)
             externs.append(
                 f"extern emission[{self.card.net_cap}] fn {extern}({sig}) "
                 f"-> Untrusted[{ret}]\n  = @py {{\n    _args = [{', '.join(names)}]\n"
