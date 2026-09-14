@@ -1067,6 +1067,19 @@ class _ComponentEmitter:
             # them and knows the operand types; it refuses with its own reason
             # if the combination is genuinely not lowerable.
             return self._delegate(node, scope, types, where)
+        if op in _BOOL_OPS and not _trap_free_operand(
+                node.get("right"),
+                lambda n: self._lower(n, scope, types, where).ty):
+            # item 458: `&&`/`||` short-circuit, and `i32.and`/`i32.or` do not.
+            # Same branch the engine's `_bin_expr` emits, in this path's folded
+            # spelling, so a guard written in a provide-method body agrees with
+            # the identical guard written in a module `fn` — and with the five
+            # tiers whose host operator short-circuits for them.
+            return _E(
+                f"(if (result i32) {left.wat} (then {right.wat}) "
+                f"(else (i32.const 0)))" if op == "&&" else
+                f"(if (result i32) {left.wat} (then (i32.const 1)) "
+                f"(else {right.wat}))", "Bool")
         result_ty = "Bool" if op in _COMPARISON_OPS else "Int"
         return _E(f"({instruction} {left.wat} {right.wat})", result_ty)
 
@@ -2610,6 +2623,47 @@ _COMPARISON_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS))
 _BINARY_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS)
                         | set(_TRAPPING_INT_OPS) | set(_RAW_INT_OPS)
                         | set(_BITWISE_INT32_OPS))
+
+
+def _trap_free_operand(node: Any, type_of) -> bool:
+    """True when `node` provably cannot trap, allocate or read memory on this
+    tier, so evaluating it where the language would have skipped it is
+    observationally identical to not evaluating it.
+
+    One caller, one decision: whether a SHORT-CIRCUITED right operand (item
+    458) may keep the strict single-instruction `i32.and`/`i32.or` form.  The
+    branch is always the correct lowering; this only says whether the strict
+    one is ALSO correct, so the answer is False for everything it has not been
+    taught.  What it has been taught is a closed list — a constant, a local
+    read, and `!`/comparison/logical combinations of those at the scalar widths
+    (`kind` is `"var"` in the v3 fn IR and `"name"` on the component path, so
+    both spellings are leaves here).  Arithmetic (the checked `+ - *`, the
+    natively trapping `/ %`), an index, a field read, a call, a builtin, a
+    `Str`/`List` operand (a memory load or an allocation), an interpolation and
+    a nested `if`/`match` all answer False.
+
+    `type_of` resolves a leaf's revl type and may raise `EmitError` for a name
+    the caller cannot see; that is answered False, never propagated, because
+    the caller's own lowering raises the accurate error a moment later.
+    """
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind in ("lit", "var", "name"):
+        try:
+            return type_of(node) in ("Int", "Int32", "Bool")
+        except EmitError:
+            return False
+    if kind == "un":
+        return (node.get("op") == "!"
+                and _trap_free_operand(node.get("operand"), type_of))
+    if kind == "bin":
+        op = node.get("op")
+        if op not in _CMP_SUFFIX and op not in _BOOL_OPS:
+            return False
+        return (_trap_free_operand(node.get("left"), type_of)
+                and _trap_free_operand(node.get("right"), type_of))
+    return False
 
 
 def _bin_instr(op: str, operand_ty: str | None) -> str | None:
@@ -4532,6 +4586,9 @@ class _V3Emitter:
             self._release_tmp()
         return _E(wat, payload_ty)
 
+    def _trap_free(self, node: Any, scope: _Scope) -> bool:
+        return _trap_free_operand(node, lambda n: self._infer_type(n, scope))
+
     def _bin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         op = node.get("op")
         if op == "??":
@@ -4560,6 +4617,29 @@ class _V3Emitter:
             raise EmitError(f"{where}: relational operator {op!r} is only lowerable for Int/Int32")
         if op in ("&&", "||") and (left_ty != "Bool" or right_ty != "Bool"):
             raise EmitError(f"{where}: logical operator {op!r} is only lowerable for Bool")
+        if op in ("&&", "||") and not self._trap_free(right_node, scope):
+            # item 458. `&&`/`||` SHORT-CIRCUIT: the right operand runs only
+            # when the left one has not already decided the answer. Every other
+            # tier gets that from its host operator (`and`/`&&`); wasm has no
+            # such instruction, and `i32.and`/`i32.or` are STRICT, so a right
+            # operand that traps executed anyway and this tier — alone — gave a
+            # different answer for a guard the other five compile and run. The
+            # three shapes that reach it are the ordinary ones:
+            # `d != 0 && n % d == 0` (`i64.rem_s` traps on a zero divisor),
+            # `i < xs.length() && xs[i] > 0` (an out-of-range slot load), and
+            # `big && n * n > 0` (the checked `$int_mul` at the Int edge).
+            #
+            # The lowering is a branch, the same folded `(if (result …))`
+            # skeleton `??` and the ternary already use on this tier, so all
+            # three control-flow forms agree by construction.
+            left = self._expr(left_node, scope, where, "Bool")
+            right = self._expr(right_node, scope, where, "Bool")
+            if _is_unit_type(left.ty) or _is_unit_type(right.ty):
+                raise EmitError(f"{where}: void operand in binary expression")
+            arms = (f"(then {right.wat})\n        (else (i32.const 0))"
+                    if op == "&&" else
+                    f"(then (i32.const 1))\n        (else {right.wat})")
+            return _E(f"{left.wat}\n      (if (result i32)\n        {arms})", "Bool")
         if op in ("==", "===", "!=", "!==") and (left_ty not in ("Int", "Int32", "Bool") or right_ty not in ("Int", "Int32", "Bool")):
             raise EmitError(f"{where}: equality on this tier is lowerable for Int, Int32, Bool, and Str")
         if op in ("==", "===", "!=", "!==") and left_ty != right_ty:
