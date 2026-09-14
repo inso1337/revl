@@ -503,6 +503,10 @@ fn is_addsubmul(op: Str) -> Bool {
   return op == "+" || op == "-" || op == "*"
 }
 
+fn is_relational(op: Str) -> Bool {
+  return op == "<" || op == ">" || op == "<=" || op == ">="
+}
+
 fn is_v3_atomic(node: Any) -> Bool {
   let k = node_kind(node)
   return k == "var" || k == "field" || k == "index" || k == "call" || k == "lit"
@@ -658,7 +662,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   if (method == "has") { return { text: `${target}.has(${args[0]})`, counter: counter } }
   if (method == "size") { return { text: `BigInt(${target}.size)`, counter: counter } }
   if (method == "keys") {
-    return { text: `[...${target}.keys()].sort((a, b) => { const A = Array.from(a), B = Array.from(b); for (let i = 0; i < Math.min(A.length, B.length); i++) { if (A[i] !== B[i]) return A[i] < B[i] ? -1 : 1 } return A.length - B.length })`, counter: counter }
+    return { text: `[...${target}.keys()].sort(revlStrCmp)`, counter: counter }
   }
   if (method == "remove") {
     return { text: `(() => { const c = new Map(${target}); c.delete(${args[0]}); return c })()`, counter: counter }
@@ -857,6 +861,15 @@ fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
   }
   let jop = ts_bin_op(op)
   let opnd = node_operands(node)
+  // `Str` ordering is lexicographic by CODE POINT (docs/strings.md). JS `<`
+  // on a string compares UTF-16 CODE UNITS, which agrees only below U+FFFF:
+  // an astral scalar begins with a high surrogate in D800..DBFF, so the
+  // comparison came out backwards at the BMP boundary (item 458).
+  if (is_relational(op) && opnd == "Str") {
+    let sl = expr(value_field(node, "left"), counter, acx)
+    let sr = expr(value_field(node, "right"), sl.counter, acx)
+    return { text: `(revlStrCmp(${sl.text}, ${sr.text}) ${op} 0)`, counter: sr.counter }
+  }
   if (op == "/") {
     let l = float_operand(value_field(node, "left"), counter, acx)
     let r = float_operand(value_field(node, "right"), l.counter, acx)
@@ -1700,6 +1713,9 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
       let tsop = ts_bin_op(op)
       let shown = json_dumps(`${left.text} ${tsop} ${right.text}`)
       var condition = `$revl_l ${tsop} $revl_r`
+      if (node_operands(e) == "Str" && is_relational(op)) {
+        condition = `revlStrCmp($revl_l, $revl_r) ${tsop} 0`
+      }
       if (list_contains(["==", "===", "!=", "!=="], op)) {
         condition = "revlEq($revl_l, $revl_r)"
         if (op == "!=" || op == "!==") { condition = `!${condition}` }
@@ -2874,6 +2890,26 @@ fn revl_split_helper() -> Str {
   return o.join(newline())
 }
 
+// `Str` ordering, in the one unit revl counts strings in: CODE POINTS
+// (docs/strings.md). Every `<`/`<=`/`>`/`>=` on a `Str` goes through here, and
+// so does the `Map.keys()` sort — the two places this tier used to fall back on
+// JS `<`, which is UTF-16 CODE UNIT order. The scalars are compared as NUMBERS:
+// comparing the one-scalar strings with `<` is the same code-unit comparison
+// one level down. Mirrors `_REVL_STR_CMP_HELPER`.
+fn revl_str_cmp_helper() -> Str {
+  var o = []
+  o = o.push("function revlStrCmp(a: string, b: string): number {")
+  o = o.push("  const A = Array.from(a), B = Array.from(b)")
+  o = o.push("  const n = Math.min(A.length, B.length)")
+  o = o.push("  for (let i = 0; i < n; i++) {")
+  o = o.push("    const x = A[i].codePointAt(0) as number, y = B[i].codePointAt(0) as number")
+  o = o.push("    if (x !== y) return x < y ? -1 : 1")
+  o = o.push("  }")
+  o = o.push("  return A.length === B.length ? 0 : (A.length < B.length ? -1 : 1)")
+  o = o.push("}")
+  return o.join(newline())
+}
+
 // ---------------------------------------------------- IR-wide `_uses_*` gates
 // `_uses_spawn`: true iff any COMPONENT body carries a `spawn` acquisition node,
 // so the module imports the `spawn` runtime helper (docs/design-v2-instances.md
@@ -3120,6 +3156,18 @@ fn uses_index(n: Any) -> Bool {
   return false
 }
 
+// `_uses_str_cmp`: does this IR order two `Str` values — a relational `bin`
+// the frontend marked `operands: "Str"`, or a `Map.keys()` (whose result is in
+// ascending canonical Str order)?
+fn uses_str_cmp(n: Any) -> Bool {
+  if (node_kind(n) == "bin" && node_operands(n) == "Str" && is_relational(node_op(n))) { return true }
+  if (node_kind(n) == "builtin" && node_method(n) == "keys") { return true }
+  for (c of value_children(n)) {
+    if (uses_str_cmp(c)) { return true }
+  }
+  return false
+}
+
 // `_revl_helpers`: the helper functions this document actually needs, in
 // dependency order (revlI64 before the named integer operations that call it).
 fn revl_helpers(ir: Any) -> List[Str] {
@@ -3131,6 +3179,7 @@ fn revl_helpers(ir: Any) -> List[Str] {
   if (uses_int_arith(ir)) { out = out.push(revl_int_arith_helper()); out = out.push("") }
   if (uses_str_methods(ir)) { out = out.push(revl_str_helper()); out = out.push("") }
   if (uses_split(ir)) { out = out.push(revl_split_helper()); out = out.push("") }
+  if (uses_str_cmp(ir)) { out = out.push(revl_str_cmp_helper()); out = out.push("") }
   if (uses_parse_int(ir)) { out = out.push(revl_parse_int_helper()); out = out.push("") }
   if (uses_index(ir)) { out = out.push(revl_index_helper()); out = out.push("") }
   return out

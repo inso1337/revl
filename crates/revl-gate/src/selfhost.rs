@@ -8240,6 +8240,12 @@ fn operands_of(op: &str, lt: &str, rt: &str) -> String {
         }
         return String::from("");
     }
+    if ((((op == "<") || (op == ">")) || (op == "<=")) || (op == ">=")) {
+        if ((lt == "Str") && (rt == "Str")) {
+            return String::from("Str");
+        }
+        return String::from("");
+    }
     return String::from("");
 }
 

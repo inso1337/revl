@@ -6387,9 +6387,28 @@ def _retarget_holes(node, source: str) -> None:
 # Operators whose meaning depends on whether the operands are Int or Float.
 # `/` and `%` because integer and float division differ; `+`, `-` and `*`
 # because Int is a *bounded* 64-bit type whose overflow traps, and a tier
-# cannot check a bound it does not know applies. Comparisons and booleans
-# gain nothing from the annotation, so they do not carry it.
+# cannot check a bound it does not know applies. Booleans gain nothing from
+# the annotation, so they do not carry it.
 _TYPED_ARITH_OPS = ("/", "%", "+", "-", "*")
+
+# Relational comparison needs the operand type for ONE family: `Str`. The
+# order revl promises is lexicographic by CODE POINT (docs/strings.md — the
+# same unit `length`/`charAt`/`slice` count in), and three tiers get that free
+# from their host (python compares code points; go and rust compare UTF-8
+# bytes, which is the same order). Two do not:
+#   - TypeScript's `<` on a string compares UTF-16 CODE UNITS, so
+#     `"￿" < "\u{10000}"` is `false` there and `true` everywhere else — a
+#     silent wrong answer at the BMP/supplementary boundary.
+#   - Java has no relational operator on `String` at all, so `a < b` reached
+#     `javac` as "bad operand types for binary operator '<'": the document
+#     compiled on five tiers and would not build on the sixth.
+# Neither tier can tell a `Str` comparison from an `Int` one at the `bin` node
+# (relational nodes carried no type), which is the same missing-information
+# shape `_TYPED_ARITH_OPS` exists for — so the annotation is spelled the same
+# way, on the same key, and is additive (no ir_version bump), exactly as
+# `widen` and `key_type` were. wasm refuses the form by name and keeps doing
+# so; a refusal is honest where a wrong answer is not.
+_RELATIONAL_OPS = ("<", ">", "<=", ">=")
 
 
 def _str_literal_value(value):
@@ -6598,6 +6617,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 node["operands"] = "Int"
             elif "Float" in (left_type, right_type):
                 node["operands"] = "Float"
+        elif expr.op in _RELATIONAL_OPS:
+            # `Str` ordering is by code point on every tier that lowers it;
+            # ts and java need to be told the operands are strings to get
+            # there (see _RELATIONAL_OPS). Only `Str` is marked: every other
+            # relational operand is a scalar its host already orders the same
+            # way revl does.
+            if (infer_ast(expr.left, type_env, types, None) == "Str"
+                    and infer_ast(expr.right, type_env, types, None) == "Str"):
+                node["operands"] = "Str"
         return node
     if isinstance(expr, ExprUn):
         node = {"kind": "un", "op": expr.op,
@@ -8605,11 +8633,23 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 )
         return {"kind": "call", "callee": callee_node, "args": args}
     if isinstance(expr, ExprBin):
-        return {"kind": "bin", "op": expr.op,
+        node = {"kind": "bin", "op": expr.op,
                 "left": _lower_component_pure_expr(expr.left, env, scope, callables,
                                                    pure_only),
                 "right": _lower_component_pure_expr(expr.right, env, scope, callables,
                                                     pure_only)}
+        # A provide-method body is a second renderer on every tier, so a
+        # comparison written there must mean what the same comparison means in
+        # a module `fn` — the lesson item 458's `&&`/`||` fix already paid for.
+        # `env.type_env` carries the method's parameter types (the service
+        # signature is their source of truth, A6); an operand it cannot type
+        # is simply left unannotated, never guessed.
+        if expr.op in _RELATIONAL_OPS:
+            tenv = getattr(env, "type_env", None) or {}
+            if (infer_ast(expr.left, tenv, env.types, None) == "Str"
+                    and infer_ast(expr.right, tenv, env.types, None) == "Str"):
+                node["operands"] = "Str"
+        return node
     if isinstance(expr, ExprUn):
         return {"kind": "un", "op": expr.op,
                 "operand": _lower_component_pure_expr(expr.operand, env, scope, callables,
