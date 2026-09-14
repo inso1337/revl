@@ -1,0 +1,43 @@
+// The async COLOUR on a module `fn` (roadmap item 391).
+//
+// Colour is a whole-program property: the reference runs a fixed point over the
+// call graph and stamps `"async": true` on every coloured entry, which is the
+// only thing that tells an emitter to render `async`/`await`. The self-host's
+// streaming function producer decided each declaration on its own and so stamped
+// nothing, even though the gate half of the same file already computes that
+// closure for its A1 verdicts. No document in this corpus was async-coloured, so
+// the byte-agreement oracle never asked.
+extern emission async fn host_fetch(path: Str) -> Str
+= @py {
+      return path
+    }
+
+// A module `fn` never SPELLS its colour — it is inferred, which is exactly why
+// the stamp has to be produced rather than copied off the declaration.
+// seed: a direct call of an async extern colours the caller
+fn fetch_one(path: Str) -> Str {
+  return host_fetch(path)
+}
+
+// transitive: a call of a coloured fn colours the caller too
+fn fetch_pair(a: Str, b: Str) -> Str {
+  let first = fetch_one(a)
+  let second = fetch_one(b)
+  return first.concat(second)
+}
+
+// two hops out, through a plain `let` chain
+fn fetch_chain(a: Str) -> Str {
+  let both = fetch_pair(a, a)
+  return both
+}
+
+// the negatives, in the same document: nothing here reaches a suspension, so no
+// entry may carry the stamp
+fn pure_neighbour(n: Int) -> Int {
+  return n * 2
+}
+
+fn calls_only_pure(n: Int) -> Int {
+  return pure_neighbour(n) + 1
+}
