@@ -37,7 +37,7 @@
           "_flag_stream_event": 2,
           "_is_stream_next": 7,
           "_raw_go_ident": 3,
-          "_refuse_unlowered_stream_surface": 5,
+          "_refuse_unlowered_stream_surface": 2,
           "_stream_chain": 13,
           "_stream_head": 4,
           "_stream_stage_arrow": 16
@@ -293,7 +293,7 @@
           "_emit_stream_runtime": 1,
           "_java_event_field": 14,
           "_r1_marker_lines": 12,
-          "_refuse_unlowered_stream_surface": 5,
+          "_refuse_unlowered_stream_surface": 2,
           "_stream_chain": 11,
           "_stream_head": 4,
           "_stream_stage_arrow": 9
@@ -955,7 +955,7 @@
         },
         "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone.": {
           "_is_stream_next": 7,
-          "_refuse_unlowered_stream_surface": 5,
+          "_refuse_unlowered_stream_surface": 2,
           "_stream_chain": 12,
           "_stream_event_host_rust": 1,
           "_stream_head": 4,

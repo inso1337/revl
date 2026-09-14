@@ -136,6 +136,11 @@ public final class RunStream130 {
         theFanInRidesTheSubscriptionsSingleBracket();
         oneSourcesCloseDoesNotStrandTheConsumerOnTheOther();
         aFullBoundedBufferFaultsRatherThanDropping();
+        dropNewestDiscardsTheIncomingItemAndRecordsIt();
+        dropOldestEvictsTheBufferHeadAndRecordsIt();
+        blockPausesTheProviderUntilTheConsumerDrains();
+        aPausedSubscriptionStillClosesCleanly();
+        aBlockPauseDoesNotSpendTheTakeBudget();
         theIterationFormRunsTheBodyPerItemAndEndsOnClosed();
         theCombinatorChainFiltersMapsAndEndsOnTake();
         theCombinatorChainUnwindsOffTheOneBracket();
@@ -304,6 +309,169 @@ public final class RunStream130 {
             faulted = expected.getMessage().contains("overflow");
         }
         expect(scenario, faulted, "the overflow did not fault the consumer");
+        sub.close();
+        provider.close();
+        expectNoResidue(scenario);
+    }
+
+    // Backpressure: the three NON-DEFAULT policies (item 130 Slice 2, §4.4).
+    //
+    // Each case below mirrors the py reference's own case in
+    // backends/python/tests/test_stream_runtime.py statement for statement — same
+    // capacity, same emit sequence, same drained values, same trace marks. That
+    // is deliberate: a policy that COMPILES on this tier and behaves differently
+    // from the reference is strictly worse than one that is refused by name, so
+    // the reference's case IS this tier's specification.
+
+    // `drop_newest` discards the INCOMING item and records the loss. A drop
+    // policy never blocks the provider and never pauses the subscription.
+    private static void dropNewestDiscardsTheIncomingItemAndRecordsIt() throws Exception {
+        String scenario = "drop_newest";
+        fresh();
+        revl.Components.Stream provider = revl.Components.Stream.source();
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribe(provider, "drop_newest", 2);
+        for (String item : new String[] {"i0", "i1", "i2", "i3"}) {
+            expect(scenario, provider.emit(item),
+                "a drop policy never blocks the provider (" + item + ")");
+        }
+        expect(scenario, "i0".equals(sub.next()), "the buffered prefix was lost");
+        expect(scenario, "i1".equals(sub.next()), "the buffered prefix was lost");
+        // the buffered prefix survives; the overflow is DISCARDED and recorded,
+        // so the loss is explicit rather than silent.
+        expect(scenario, marked("stream.drop_newest i2") && marked("stream.drop_newest i3"),
+            "the discarded items were not recorded");
+        expect(scenario, "active".equals(sub.state()), "a drop policy never pauses");
+        sub.close();
+        provider.close();
+        expectNoResidue(scenario);
+    }
+
+    // `drop_oldest` evicts the buffer HEAD and keeps the newest item
+    // (latest-wins gauges), recording the eviction.
+    private static void dropOldestEvictsTheBufferHeadAndRecordsIt() throws Exception {
+        String scenario = "drop_oldest";
+        fresh();
+        revl.Components.Stream provider = revl.Components.Stream.source();
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribe(provider, "drop_oldest", 2);
+        for (String item : new String[] {"i0", "i1", "i2"}) {
+            expect(scenario, provider.emit(item),
+                "a drop policy never blocks the provider (" + item + ")");
+        }
+        // latest-wins: the head was evicted, the newest item is buffered
+        expect(scenario, "i1".equals(sub.next()), "the head was not the evicted item");
+        expect(scenario, "i2".equals(sub.next()), "the newest item was not kept");
+        expect(scenario, marked("stream.drop_oldest i0"),
+            "the eviction was not recorded");
+        sub.close();
+        provider.close();
+        expectNoResidue(scenario);
+    }
+
+    // `block` REFUSES the delivery and puts the subscription in the reserved
+    // `Paused` state. No implicit retry — `emit` returns false, so the provider
+    // knows it is suspended, and the refusal is TRACED. Draining resumes it
+    // eagerly, which is what the reference does with no `drain` window declared;
+    // a declared window is refused by this tier's emitter rather than resumed
+    // early.
+    private static void blockPausesTheProviderUntilTheConsumerDrains() throws Exception {
+        String scenario = "block";
+        fresh();
+        revl.Components.Stream provider = revl.Components.Stream.source();
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribe(provider, "block", 2);
+        expect(scenario, provider.emit("i0") && provider.emit("i1"),
+            "the first two items fit the bounded buffer");
+        expect(scenario, "active".equals(sub.state()), "paused before the buffer filled");
+        expect(scenario, !provider.emit("i2"),
+            "the provider must be TOLD it is blocked - a `true` here is a silent loss");
+        expect(scenario, "paused".equals(sub.state()),
+            "the reserved `Paused` state index was not entered");
+        expect(scenario, marked("stream.paused"), "the pause was not recorded");
+        // the refused delivery is traced as such, exactly as the py reference and
+        // the ts tier trace it - a refusal is never silent.
+        expect(scenario, marked("stream.emit i2 refused"),
+            "the refused emit was not recorded");
+
+        expect(scenario, "i0".equals(sub.next()), "the buffered item was lost");
+        expect(scenario, "active".equals(sub.state()),
+            "draining did not resume the provider");
+        expect(scenario, marked("stream.resume"), "the resume was not recorded");
+        expect(scenario, provider.emit("i2"),
+            "the provider may emit again once the subscription is Active");
+        expect(scenario, "i1".equals(sub.next()), "no silent loss: nothing was dropped");
+        expect(scenario, "i2".equals(sub.next()), "no silent loss: nothing was dropped");
+        sub.close();
+        provider.close();
+        expectNoResidue(scenario);
+    }
+
+    // A `block`-paused subscription is still torn down by its own bracket
+    // inverse: the pause is a provider-side refusal, never a hold on the
+    // consumer, so the core guarantee (§9 Part A) is untouched by the policy.
+    private static void aPausedSubscriptionStillClosesCleanly() throws Exception {
+        String scenario = "a paused subscription closes";
+        fresh();
+        revl.Components.Stream provider = revl.Components.Stream.source();
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribe(provider, "block", 1);
+        provider.emit("i0");
+        provider.emit("i1"); // refused: paused
+        expect(scenario, "paused".equals(sub.state()), "the buffer did not pause");
+        sub.close();
+        expect(scenario, "closed".equals(sub.state()), "close did not reach the state index");
+        expect(scenario, revl.Components.Stream.isClosed(sub.next()),
+            "next after close did not report the Closed terminal");
+        provider.close();
+        expectNoResidue(scenario);
+    }
+
+    // A lossy/blocking POLICY and a `take(n)` link on the SAME subscription - the
+    // interaction between the two Slice 2 landings, which neither one tests alone.
+    //
+    // Both mechanisms ride the SAME boolean: the acceptance `deliver` answers.
+    // `take(n)` reserves its slot under the lock and REFUNDS it when the forward
+    // is refused, and a `block` pause is exactly such a refusal. So the pause must
+    // not spend the budget: a consumer that asked for two items has to receive
+    // two. If the two used different signalling, `take(2)` would exhaust after ONE
+    // delivered item, push its `Closed` terminal early, and the second item would
+    // be gone with no overflow, no drop mark and no fault - the silent loss §4.4
+    // rules out.
+    //
+    // The sequence is the py reference's, asserted there by
+    // `test_a_block_pause_does_not_spend_the_take_budget`.
+    private static void aBlockPauseDoesNotSpendTheTakeBudget() throws Exception {
+        String scenario = "a block pause does not spend take's budget";
+        fresh();
+        revl.Components.Stream provider = revl.Components.Stream.source();
+        revl.Components.Stream chain = revl.Components.Stream.take(provider, 2);
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribe(chain, "block", 1);
+
+        expect(scenario, provider.emit("i0"), "the first item fits the buffer");
+        // the buffer is full; `block` refuses and pauses, and the refusal travels
+        // UP through the take link, which must hand its slot back.
+        expect(scenario, !provider.emit("i1"),
+            "the consumer's pause did not reach the provider through the chain");
+        expect(scenario, "paused".equals(sub.state()), "the buffer did not pause");
+        expect(scenario, marked("stream.emit i1 refused"),
+            "the refusal was not traced");
+        expect(scenario, !marked("stream.take exhausted"),
+            "the refused item SPENT the take budget - take(2) exhausted after one "
+            + "delivered item");
+
+        expect(scenario, "i0".equals(sub.next()), "the buffered item was lost");
+        expect(scenario, "active".equals(sub.state()),
+            "draining did not resume the provider");
+        // the budget survived the pause, so the second item is still admissible
+        expect(scenario, provider.emit("i1"),
+            "the take budget was not refunded: the second item was refused");
+        expect(scenario, "i1".equals(sub.next()), "the second item was lost");
+        expect(scenario, revl.Components.Stream.isClosed(sub.next()),
+            "take(2) did not end the derived stream after the second item");
+        expect(scenario, markCount("stream.take exhausted") == 1,
+            "take's terminal fired more than once");
         sub.close();
         provider.close();
         expectNoResidue(scenario);

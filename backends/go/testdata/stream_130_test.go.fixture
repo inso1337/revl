@@ -499,6 +499,229 @@ func TestBackpressureError_FaultsOnOverflow(t *testing.T) {
 	}
 }
 
+// -------------------------------------------------------------------------
+// Backpressure: the three NON-DEFAULT policies (item 130 Slice 2, §4.4).
+//
+// Each case below mirrors the py reference's own case in
+// backends/python/tests/test_stream_runtime.py statement for statement — same
+// capacity, same emit sequence, same drained values, same trace marks. That is
+// deliberate: a policy that COMPILES on this tier and behaves differently from
+// the reference is strictly worse than one that is refused by name, so the
+// reference's case IS this tier's specification.
+// -------------------------------------------------------------------------
+
+func drainMarks(prefix string) []string {
+	var out []string
+	for _, m := range HostMarks() {
+		if strings.HasPrefix(m, prefix) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func nextItem(t *testing.T, sub *Subscription, want string) {
+	t.Helper()
+	v, err := sub.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	got, ok := v.(string)
+	if !ok || got != want {
+		t.Fatalf("Next = %#v, want %q", v, want)
+	}
+}
+
+// `drop_newest` discards the INCOMING item and records the loss. A drop policy
+// never blocks the provider and never pauses the subscription.
+func TestDropNewest_DiscardsTheIncomingItemAndRecordsIt(t *testing.T) {
+	reset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "drop_newest", 2)
+	for _, item := range []string{"i0", "i1", "i2", "i3"} {
+		if !src.Emit(item) {
+			t.Fatalf("a drop policy never blocks the provider (%s)", item)
+		}
+	}
+	nextItem(t, sub, "i0")
+	nextItem(t, sub, "i1")
+	// the buffered prefix survives; the overflow is DISCARDED and recorded, so
+	// the loss is explicit rather than silent.
+	if got := drainMarks("stream.drop_newest"); !reflect.DeepEqual(
+		got, []string{"stream.drop_newest i2", "stream.drop_newest i3"}) {
+		t.Fatalf("drop_newest marks = %v", got)
+	}
+	if st := sub.State(); st != "active" {
+		t.Fatalf("a drop policy never pauses, state = %q", st)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// `drop_oldest` evicts the buffer HEAD and keeps the newest item (latest-wins
+// gauges), recording the eviction.
+func TestDropOldest_EvictsTheBufferHeadAndRecordsIt(t *testing.T) {
+	reset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "drop_oldest", 2)
+	for _, item := range []string{"i0", "i1", "i2"} {
+		if !src.Emit(item) {
+			t.Fatalf("a drop policy never blocks the provider (%s)", item)
+		}
+	}
+	// latest-wins: the head was evicted, the newest item is buffered
+	nextItem(t, sub, "i1")
+	nextItem(t, sub, "i2")
+	if got := drainMarks("stream.drop_oldest"); !reflect.DeepEqual(
+		got, []string{"stream.drop_oldest i0"}) {
+		t.Fatalf("drop_oldest marks = %v", got)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// `block` REFUSES the delivery and puts the subscription in the reserved
+// `Paused` state. No implicit retry — `Emit` returns false, so the provider
+// knows it is suspended, and the refusal is TRACED. Draining resumes it
+// eagerly, which is what the reference does with no `drain` window declared;
+// a declared window is refused by this tier's emitter rather than resumed early.
+func TestBlock_PausesTheProviderUntilTheConsumerDrains(t *testing.T) {
+	reset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "block", 2)
+	if !src.Emit("i0") || !src.Emit("i1") {
+		t.Fatal("the first two items fit the bounded buffer")
+	}
+	if st := sub.State(); st != "active" {
+		t.Fatalf("state before the buffer fills = %q, want active", st)
+	}
+	if src.Emit("i2") {
+		t.Fatal("the provider must be TOLD it is blocked — a `true` here is a silent loss")
+	}
+	if st := sub.State(); st != "paused" {
+		t.Fatalf("state = %q, want the reserved `Paused` index", st)
+	}
+	if marksIndex(HostMarks(), "stream.paused") < 0 {
+		t.Fatalf("the pause was not recorded: %v", HostMarks())
+	}
+	// the refused delivery is traced as such, exactly as the py reference and
+	// the ts tier trace it — a refusal is never silent.
+	if marksIndex(HostMarks(), "stream.emit i2 refused") < 0 {
+		t.Fatalf("the refused emit was not recorded: %v", HostMarks())
+	}
+
+	nextItem(t, sub, "i0") // drains -> resumes eagerly
+	if st := sub.State(); st != "active" {
+		t.Fatalf("draining did not resume the provider, state = %q", st)
+	}
+	if marksIndex(HostMarks(), "stream.resume") < 0 {
+		t.Fatalf("the resume was not recorded: %v", HostMarks())
+	}
+	if !src.Emit("i2") {
+		t.Fatal("the provider may emit again once the subscription is Active")
+	}
+	nextItem(t, sub, "i1")
+	nextItem(t, sub, "i2") // no silent loss: nothing was dropped
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// A `block`-paused subscription is still torn down by its own bracket inverse:
+// the pause is a provider-side refusal, never a hold on the consumer, so the
+// core guarantee (§9 Part A) is untouched by the policy.
+func TestBlock_APausedSubscriptionStillClosesCleanly(t *testing.T) {
+	reset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "block", 1)
+	src.Emit("i0")
+	src.Emit("i1") // refused: paused
+	if st := sub.State(); st != "paused" {
+		t.Fatalf("state = %q, want paused", st)
+	}
+	sub.Close()
+	if st := sub.State(); st != "closed" {
+		t.Fatalf("state after close = %q, want closed", st)
+	}
+	v, err := sub.Next()
+	if err != nil || !IsStreamClosed(v) {
+		t.Fatalf("Next after close = (%#v, %v), want the Closed terminal", v, err)
+	}
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// A lossy/blocking POLICY and a `take(n)` link on the SAME subscription — the
+// interaction between the two Slice 2 landings, which neither one tests alone.
+//
+// Both mechanisms ride the SAME boolean: the acceptance `deliver` answers.
+// `take(n)` reserves its slot under the lock and REFUNDS it when the forward is
+// refused, and a `block` pause is exactly such a refusal. So the pause must not
+// spend the budget: a consumer that asked for two items has to receive two. If
+// the two used different signalling, `take(2)` would exhaust after ONE delivered
+// item, push its `Closed` terminal early, and the second item would be gone with
+// no overflow, no drop mark and no fault — the silent loss §4.4 rules out.
+//
+// The sequence is the py reference's, asserted there by
+// `test_a_block_pause_does_not_spend_the_take_budget`.
+func TestBlockPause_DoesNotSpendTheTakeBudget(t *testing.T) {
+	reset()
+	src := StreamSource()
+	chain := StreamTake(src, 2)
+	sub := StreamSubscribe(chain, "block", 1)
+
+	if !src.Emit("i0") {
+		t.Fatal("the first item fits the bounded buffer")
+	}
+	// the buffer is full; `block` refuses and pauses, and the refusal travels UP
+	// through the take link, which must hand its slot back.
+	if src.Emit("i1") {
+		t.Fatal("the consumer's pause did not reach the provider through the chain")
+	}
+	if st := sub.State(); st != "paused" {
+		t.Fatalf("state = %q, want paused", st)
+	}
+	if marksIndex(HostMarks(), "stream.emit i1 refused") < 0 {
+		t.Fatalf("the refusal was not traced: %v", HostMarks())
+	}
+	if i := marksIndex(HostMarks(), "stream.take exhausted"); i >= 0 {
+		t.Fatalf("the refused item SPENT the take budget — take(2) exhausted "+
+			"after one delivered item: %v", HostMarks())
+	}
+
+	nextItem(t, sub, "i0") // drains -> resumes eagerly
+	if st := sub.State(); st != "active" {
+		t.Fatalf("state = %q, want active", st)
+	}
+	// the budget survived the pause, so the second item is still admissible
+	if !src.Emit("i1") {
+		t.Fatal("the take budget was not refunded: the second item was refused")
+	}
+	nextItem(t, sub, "i1")
+	v, err := sub.Next()
+	if err != nil || !IsStreamClosed(v) {
+		t.Fatalf("next = (%#v, %v), want take(2)'s Closed terminal", v, err)
+	}
+	if n := len(drainMarks("stream.take exhausted")); n != 1 {
+		t.Fatalf("stream.take exhausted fired %d times, want exactly 1", n)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
 // Subscribing to an already-terminal provider terminates at once, so the first
 // `next` cannot park on a provider that is already gone.
 func TestSubscribeAfterProviderClose_TerminatesImmediately(t *testing.T) {
