@@ -186,8 +186,9 @@ holds conflicts (`G2`), a route into a realm the union does not provide dangles
 (`G3`). The decision is the native fold `selfhost/lower.rvl::admit_ambient`,
 compiled to rust like `admit`, and the manifest arrives as item 186's row wire
 (`docs/design/186-ambient-admission-guarantees.md`): `C/k/r` for a provision
-(`r` the realm, `""` for shared), `C<k` for a requirement, `!halted` for a
-halted composition, joined by `;`. The empty manifest is the empty composition,
+(`r` the realm, `""` for shared), `C<k` for a requirement, `C>k/r,r` for the
+realms a running component routes a key across, `!halted` for a halted
+composition, joined by `;`. The empty manifest is the empty composition,
 so `admit_into(source, "")` is `admit(source)` byte for byte — the arm
 generalises `admit` rather than re-implementing it.
 
@@ -279,7 +280,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:9d99dfa9c88517ad"
+    // frontier "selfhost-admit:edd027584069b7e9"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
