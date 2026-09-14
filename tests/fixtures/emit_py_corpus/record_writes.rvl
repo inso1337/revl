@@ -1,0 +1,53 @@
+// item 391 / item 445: the token-level record-update as an RVALUE. The shared
+// parser's expression grammar has no node for `{ base | f = e }`, so the
+// statement reader recognised it only after `let`/`var` — an `assign` or a
+// `return` holding one failed to read, the statement was dropped, and
+// `lir_stmts` gave up on the rest of the block (a loop body lowered as `[]`).
+//
+// The ownership scan reads the same shape: `p = { p | .. }` rebinds its own base,
+// which is a self-rebind write exactly as `out = out.push(v)` is, so it carries
+// the `unique` marker every mutable-container tier reads. `restated` is the
+// negative control — the update's base is ANOTHER name, so it is not a
+// self-rebind and must carry no marker at all.
+
+type Pt = { x: Int, y: Int }
+
+fn shifted(p: Pt, d: Int) -> Pt { return { p | x = p.x + d } }
+
+fn derived(p: Pt) -> Pt {
+  let q = { p | y = 0 }
+  return { q | x = q.y }
+}
+
+// a SWAP in a loop: both updates are computed before either is written
+fn swapped(n: Int) -> Pt {
+  var p = { x: 1, y: 2 }
+  var i = 0
+  while (i < n) {
+    p = { p | x = p.y, y = p.x }
+    i = i + 1
+  }
+  return p
+}
+
+fn walked(n: Int) -> Int {
+  var p = { x: 0, y: 0 }
+  var i = 0
+  while (i < n) {
+    p = { p | x = p.x + 1 }
+    i = i + 1
+  }
+  return p.x + p.y
+}
+
+// -- negative controls ------------------------------------------------------
+
+// the base is another name, so this is a plain rebind and carries no `unique`
+fn restated(p: Pt, q: Pt) -> Pt {
+  var r = p
+  r = { q | x = q.x + 1 }
+  return r
+}
+
+// the ordinary record literal, which must keep lowering as a `record`
+fn built(a: Int, b: Int) -> Pt { return { x: a, y: b } }

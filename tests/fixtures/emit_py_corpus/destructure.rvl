@@ -1,0 +1,55 @@
+// item 391: `let { a, b } = r` / `var [head, ...rest] = xs` lower to ONE
+// `let_pattern` step (lower.py `_lower_let_pattern_stmt`). The self-host
+// statement reader read the token after `let` as the bound NAME, found `{` where
+// it wanted `=`, and gave up on the whole enclosing block — so every function
+// that destructures lowered with an empty body.
+//
+// The bound names carry their types too: a record pattern's from the record's
+// field table, a list pattern's element names from the list's argument and its
+// `...rest` from the whole list type. `sums`/`plain_let` are the negative
+// controls — the ordinary `let` must keep its own step shape.
+
+type Pair = { left: Int, right: Int }
+
+fn split(p: Pair) -> Int {
+  let { left, right } = p
+  return left * 10 + right
+}
+
+fn mutated(p: Pair) -> Int {
+  var { left } = p
+  left = 7
+  return left
+}
+
+fn headed(xs: List[Int]) -> Int {
+  let [head] = xs
+  return head + 1
+}
+
+fn tailed(xs: List[Int]) -> Int {
+  var [head, ...rest] = xs
+  head = 7
+  rest = [8]
+  return head + rest[0]
+}
+
+fn paired(xs: List[Int]) -> Int {
+  let [a, b, ...more] = xs
+  return a + b + more.length()
+}
+
+// -- negative controls ------------------------------------------------------
+
+fn plain_let(p: Pair) -> Int {
+  let l = p.left
+  var r = p.right
+  r = r + 1
+  return l + r
+}
+
+fn sums(xs: List[Int]) -> Int {
+  var t = 0
+  for (x of xs) { t += x }
+  return t
+}

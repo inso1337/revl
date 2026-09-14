@@ -141,6 +141,8 @@ FUNCTION_EMIT_READY_DOCS = [
     "extern_neighbours.rvl", "async_colour.rvl",
     "generics.rvl", "variant_multiline.rvl", "else_if.rvl", "arrows.rvl",
     "async_arrow_arg.rvl",
+    "events.rvl", "braceless.rvl", "record_writes.rvl", "reserved_keys.rvl",
+    "destructure.rvl", "branch_values.rvl",
 ]
 
 # The component documents whose whole activation/method body is now lowered
@@ -847,4 +849,247 @@ def test_native_ir_colours_an_arrow_argument_async(lower_to_ir):
     plain = reference[3]["body"][0]["expr"]["args"][0]
     assert coloured["async"] is True and coloured["returns"] == "Async[Str]"
     assert "async" not in plain and plain["returns"] == "Int"
+    assert native == reference
+
+
+# ================================================== item 391, the third tranche
+#
+# Measured the way the last two were: both frontends run over every single-file
+# `.rvl` in the tree and their `functions`/`types`/`externs` projections diffed.
+# 18 divergent before, 5 after, over 1015 documents (689 -> 702 byte-identical;
+# no document moved the other way). Six documents enter the globbed corpus above,
+# each failing against the unported lowering and each carrying its own negative
+# controls, because a glob is what stops these coming back.
+
+
+def test_native_ir_lowers_a_typed_event_declaration(lower_to_ir):
+    """Item 130 §6 / item 391 — `event N(key: f) { fields }` IS a record with a
+    contract, so the reference parser appends an ordinary record `TypeDecl`
+    beside the `EventDecl` and the `types` section carries the same entry a
+    `type` spelling would.
+
+    `event` lexes as an `ident`, and every self-host top-level walker refuses a
+    non-keyword head, so the gate answered `BAD|unexpected token at top level` —
+    a FALSE REFUSAL of a program the reference compiles — and `lower_to_ir`
+    dropped the record out of `types` entirely. The head is recognised on exactly
+    the three tokens the reference recognises it on (`event IDENT (` /
+    `event IDENT {`), so a parameter or record field named `event` is untouched;
+    `tests/fixtures/emit_py_corpus/events.rvl` holds both halves."""
+    source = (
+        "event OrderPlaced(key: order_id) { order_id: Str, quantity: Int }\n"
+        "fn line_total(o: OrderPlaced, unit: Int) -> Int { return o.quantity * unit }\n"
+        "fn describe(event: Str) -> Str { return event }\n"
+    )
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert reference["types"] == {
+        "OrderPlaced": {"params": [], "kind": "record",
+                        "fields": {"order_id": "Str", "quantity": "Int"}}}
+    assert native["types"] == reference["types"]
+    # the event's fields reach the nominal field table too, which is what stamps
+    # `operands` on arithmetic over one of them
+    assert reference["functions"][0]["body"][0]["expr"]["operands"] == "Int"
+    assert native["functions"] == reference["functions"]
+
+
+def test_native_ir_reads_a_braceless_statement_body(lower_to_ir):
+    """Item 391 — the reference reads an `if`/`while`/`for` body as
+    `self.block() if self.at("{") else [self.fn_stmt()]`.
+
+    This reader demanded the brace, so a braceless `if (c) return x` was not a
+    statement it recognised: `lir_stmts` stopped there and the WHOLE enclosing
+    body lowered as `[]` — every statement, not only the conditional."""
+    source = (
+        "fn guarded(n: Int) -> Int {\n"
+        "  if (n < 0) return 0 - n\n"
+        "  return n\n"
+        "}\n"
+        "fn summed(xs: List[Int]) -> Int {\n"
+        "  var t = 0\n"
+        "  for (x of xs) t += x\n"
+        "  return t\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["step"] == "if"
+    assert reference[0]["body"][0]["then"][0]["step"] == "return"
+    assert len(reference[0]["body"]) == 2
+    assert native == reference
+
+
+def test_native_ir_lowers_a_record_update_written_as_an_rvalue(lower_to_ir):
+    """Item 391 / item 445 — the token-level record-update as an RVALUE.
+
+    The shared parser's expression grammar carries no node for `{ base | f = e }`,
+    so the statement reader recognised it only after `let`/`var`: an `assign` or a
+    `return` holding one failed to read and took the rest of its block with it.
+    The ownership scan reads the same shape, so a self-rebinding spread carries
+    the `unique` marker a `push` write already did; an update over ANOTHER name
+    is not a self-rebind and carries none."""
+    source = (
+        "type Pt = { x: Int, y: Int }\n"
+        "fn swapped(n: Int) -> Pt {\n"
+        "  var p = { x: 1, y: 2 }\n"
+        "  var i = 0\n"
+        "  while (i < n) {\n"
+        "    p = { p | x = p.y, y = p.x }\n"
+        "    i = i + 1\n"
+        "  }\n"
+        "  return p\n"
+        "}\n"
+        "fn shifted(p: Pt, d: Int) -> Pt { return { p | x = p.x + d } }\n"
+        "fn restated(p: Pt, q: Pt) -> Pt {\n"
+        "  var r = p\n"
+        "  r = { q | x = q.x + 1 }\n"
+        "  return r\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    write = reference[0]["body"][2]["body"][0]
+    assert write["step"] == "assign" and write["unique"] is True
+    assert write["value"]["kind"] == "record_update"
+    assert reference[1]["body"][0]["expr"]["kind"] == "record_update"
+    assert "unique" not in reference[2]["body"][1]
+    assert native == reference
+
+
+def test_native_ir_reads_a_keyword_in_record_field_position(lower_to_ir):
+    """Items 158/237/391 — a field name is always followed by `:` / `=` /
+    end-of-access, so no keyword reading is grammatically possible there and the
+    reference broadens the plain `ident` with the contextual cordis-domain nouns
+    plus the component-grammar ones (`_record_key_name`).
+
+    The self-host expression parser read only `ident`, so a record literal, a
+    `.field` read, a record-update clause and a record TYPE's field list all
+    failed on a field named `config` — silently, because a failed statement
+    lowers to nothing rather than to a diagnostic."""
+    source = (
+        "type Envelope = { config: Int, plain: Int }\n"
+        "fn built(n: Int) -> Envelope { return { config: n, plain: n } }\n"
+        "fn summed(e: Envelope) -> Int { return e.config + e.plain }\n"
+        "fn bumped(e: Envelope) -> Envelope { return { e | config = e.config + 1 } }\n"
+    )
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert reference["types"]["Envelope"]["fields"] == {"config": "Int", "plain": "Int"}
+    assert reference["functions"][1]["body"][0]["expr"]["operands"] == "Int"
+    assert native["types"] == reference["types"]
+    assert native["functions"] == reference["functions"]
+
+
+def test_a_type_declaration_span_is_stepped_over_by_every_walker(lower_to_ir):
+    """Item 391 — the same `type_decl_end` span #1025 gave `p_top`, for the
+    walkers it did not reach.
+
+    `ir_walk`, `fns_walk` and `externs_walk` each stepped a `type` to the end of
+    its first LINE, so a record written one field per line left the cursor INSIDE
+    the body — where a field named with a keyword is a top-level declaration head.
+    `type Envelope = {` followed by `component: Int,` on its own line minted a
+    component named `":"` in the IR."""
+    source = (
+        "type Envelope = {\n"
+        "  component: Int,\n"
+        "  plain: Int,\n"
+        "}\n"
+        "fn plain_of(e: Envelope) -> Int { return e.plain }\n"
+    )
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert reference["components"] == []
+    assert native["components"] == reference["components"]
+    assert native["types"] == reference["types"]
+    assert native["functions"] == reference["functions"]
+
+
+def test_native_ir_lowers_a_destructuring_let(lower_to_ir):
+    """Item 391 — `let { a, b } = r` / `var [head, ...rest] = xs` lower to ONE
+    `let_pattern` step (lower.py `_lower_let_pattern_stmt`).
+
+    The statement reader read the token after `let` as the bound NAME, found `{`
+    where it wanted `=`, and gave up on the whole enclosing block. The bound names
+    carry their types too — a record pattern's from the record's field table, a
+    list pattern's element names from the list's argument and its `...rest` from
+    the whole list type — which is what stamps `operands` on arithmetic over
+    them."""
+    source = (
+        "type Pair = { left: Int, right: Int }\n"
+        "fn split(p: Pair) -> Int {\n"
+        "  let { left, right } = p\n"
+        "  return left * 10 + right\n"
+        "}\n"
+        "fn tailed(xs: List[Int]) -> Int {\n"
+        "  var [head, ...rest] = xs\n"
+        "  head = 7\n"
+        "  return head + rest[0]\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0] == {
+        "step": "let_pattern", "pattern": "record",
+        "names": ["left", "right"],
+        "value": {"kind": "var", "name": "p"}, "mutable": False}
+    assert reference[1]["body"][0]["pattern"] == "list"
+    assert reference[1]["body"][0]["rest"] == "rest"
+    assert reference[0]["body"][1]["expr"]["operands"] == "Int"
+    assert native == reference
+
+
+def test_native_ir_reads_a_block_bodied_if_in_value_position(lower_to_ir):
+    """Item 196 / item 391 — `if (c) { a } else { b }` in EXPRESSION position is
+    the ternary's block-bodied twin and lowers to the very same `if` node, so it
+    sits under a `.field`, a subscript or a `??` the way any other primary can.
+
+    The self-host expression parser had no branch for it, so the statement
+    holding one lowered as nothing."""
+    source = (
+        "type Cell = { value: Int }\n"
+        "fn picked(c: Bool, a: Cell, b: Cell) -> Int {\n"
+        "  return (if (c) { a } else { b }).value\n"
+        "}\n"
+        "fn ternary_picked(c: Bool, a: Cell, b: Cell) -> Int {\n"
+        "  return (c ? a : b).value\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["expr"]["target"]["kind"] == "if"
+    # the block form and the ternary are the SAME node
+    assert reference[0]["body"][0] == reference[1]["body"][0]
+    assert native == reference
+
+
+def test_native_ir_lowers_an_empty_template(lower_to_ir):
+    """Item 391 — an empty template carries no segments at all. Splitting its
+    segment list yielded one empty segment whose two-character tag was neither
+    `t:` nor `v:`, so the parse failed where the reference reads an `interp` with
+    an empty part list."""
+    source = "fn blank() -> Str { return `` }\nfn filled(n: Int) -> Str { return `n=${n}` }\n"
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["expr"] == {"kind": "interp", "parts": []}
+    assert native == reference
+
+
+def test_native_ir_types_a_match_used_as_a_value(lower_to_ir):
+    """Item 391 — a `match` YIELDS a value, and the reference's checker types it
+    by unifying the arm bodies.
+
+    `infer` answered "" for one, so `t += match o { … }` lost the `operands` tag
+    the lowering stamps on typed arithmetic — the one annotation in this
+    projection a backend cannot re-derive. Each arm body is inferred under the
+    arm's payload binding and joined with the same meet a ternary already uses,
+    so a disagreement answers "" and stamps nothing."""
+    source = (
+        "fn accumulated(xs: List[Opt[Int]]) -> Int {\n"
+        "  var t = 0\n"
+        "  for (o of xs) { t += match o { Some(v) => v, None => 0 } }\n"
+        "  return t\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][1]["body"][0]["value"]["operands"] == "Int"
     assert native == reference

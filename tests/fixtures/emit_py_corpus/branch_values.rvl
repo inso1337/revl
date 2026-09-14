@@ -1,0 +1,54 @@
+// item 391, three value-position shapes the self-host expression parser did not
+// read, each of which cost the whole statement holding it:
+//
+//   * the BLOCK-bodied `if` in expression position (item 196) — the ternary's
+//     twin, lowering to the same `if` node, so it can sit under a `.field`, a
+//     subscript or a `??` the way any other primary can;
+//   * the EMPTY template. Splitting its (empty) segment list yielded one segment
+//     whose two-character tag was neither `t:` nor `v:`, so the parse failed
+//     where the reference reads an `interp` with an empty part list;
+//   * a `match` USED AS A VALUE. `infer` answered "" for one, so
+//     `t += match o { … }` lost the `operands` tag the lowering stamps on typed
+//     arithmetic — the one annotation in this projection a backend cannot
+//     re-derive.
+//
+// The ternary spellings below are the negative control for the first: the two
+// must lower to the same node.
+
+type Cell = { value: Int }
+
+fn picked(c: Bool, a: Cell, b: Cell) -> Int { return (if (c) { a } else { b }).value }
+
+fn ternary_picked(c: Bool, a: Cell, b: Cell) -> Int { return (c ? a : b).value }
+
+fn indexed(c: Bool, a: List[Int], b: List[Int]) -> Int {
+  return (if (c) { a } else { b })[0]
+}
+
+fn defaulted(c: Bool, a: Opt[Int], b: Opt[Int]) -> Int {
+  return (if (c) { a } else { b }) ?? 0
+}
+
+fn summed_branch(c: Bool, x: Int, y: Int) -> Int {
+  return (if (c) { x } else { y }) + 1
+}
+
+fn blank() -> Str { return `` }
+
+fn filled(n: Int) -> Str { return `n=${n}` }
+
+fn unwrapped(o: Opt[Int], d: Int) -> Int {
+  return match o { Some(v) => v, None => d }
+}
+
+fn accumulated(xs: List[Opt[Int]]) -> Int {
+  var t = 0
+  for (o of xs) { t += match o { Some(v) => v, None => 0 } }
+  return t
+}
+
+fn widened(xs: List[Opt[Float]]) -> Float {
+  var t = 0.0
+  for (o of xs) { t = t + match o { Some(v) => v, None => 0.0 } }
+  return t
+}

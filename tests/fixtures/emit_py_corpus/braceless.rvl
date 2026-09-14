@@ -1,0 +1,54 @@
+// item 391: a braceless single-statement body. The reference reads
+// `self.block() if self.at("{") else [self.fn_stmt()]` in `if_stmt`,
+// `while_stmt` and `for_stmt` alike; the self-host statement reader demanded the
+// brace, so a braceless conditional was not a statement it recognised and the
+// WHOLE enclosing body lowered as `[]` — every statement, not only the
+// conditional. Each braced twin below is the negative control: the two spellings
+// must lower to the same step shape.
+
+fn guarded(n: Int) -> Int {
+  if (n < 0) return 0 - n
+  return n
+}
+
+fn guarded_braced(n: Int) -> Int {
+  if (n < 0) { return 0 - n }
+  return n
+}
+
+fn ladder(n: Int) -> Str {
+  if (n < 0) return "neg"
+  else if (n == 0) return "zero"
+  else return "pos"
+}
+
+fn ladder_braced(n: Int) -> Str {
+  if (n < 0) { return "neg" }
+  else if (n == 0) { return "zero" }
+  else { return "pos" }
+}
+
+fn counted(n: Int) -> Int {
+  var i = 0
+  while (i < n) i += 1
+  return i
+}
+
+fn summed(xs: List[Int]) -> Int {
+  var t = 0
+  for (x of xs) t += x
+  return t
+}
+
+fn collected(xs: List[Int]) -> List[Int] {
+  var out: List[Int] = []
+  for (x of xs) out = out.push(x * 2)
+  return out
+}
+
+fn mixed(n: Int, xs: List[Int]) -> Int {
+  var t = 0
+  if (n > 0) { t = n } else t = 0 - n
+  for (x of xs) if (x > 0) t += x
+  return t
+}
