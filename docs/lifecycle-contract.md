@@ -55,6 +55,29 @@ enough to fault; a `DISPOSED` fiber was taken down deliberately. `run.py`'s
 `_SETTLED_DOWN = ("DISPOSED", "PENDING", "FAILED")` names the settled-terminal set
 a liveness observer keys on.
 
+### Paused: a state the session is in, not a fiber state
+
+A composition that declares an `slo { ... }` block (roadmap item 473) can be
+PAUSED by a measured breach of its own contract. The state belongs to the
+session, not to any fiber, and the distinction is not bookkeeping:
+
+- `Session.state()["slo"]["paused"]` reports it, and `Session.call` is refused
+  while it is in force (`_refuse_if_paused`).
+- Every fiber still reads `ACTIVE`, because it is active: it holds the resources
+  it acquired and owes every entry it registered. Only DISPATCH is stopped.
+- It is not an E-Stop. A halt leaves the instance dead and its entries
+  `stranded`, and the way back is `revl recover --wal <file>`; a pause strands
+  nothing, and the way back is lifting the latch (`revl estop --clear`). The two
+  refusals are separate and say which one they are.
+- `slo.latch_state` classifies a stop fail-closed: a latch it cannot classify
+  reads `halted`, never `paused`, because a pause is the weaker claim and
+  reading an unclassifiable stop as the weaker one would talk a host into
+  resuming an instance that was killed.
+
+The fiber state table above is therefore unchanged, and gains no `PAUSED`
+member: those states are `cordis.fiber.FiberState`, and growing that set is a
+runtime change with its own argument.
+
 ## 1. Serving
 
 A key is **serving** when, and only when, it has a live provider.

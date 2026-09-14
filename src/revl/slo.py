@@ -127,6 +127,25 @@ HALT = "halt"
 
 ACTIONS = (DIVERT, PAUSE, HALT)
 
+# ---------------------------------------------------------------------------
+# The latch VERDICT vocabulary — what a stop that is in force means.
+#
+# An action is what the contract said to DO; a verdict is what the latch on
+# disk now MEANS to whoever reads it. They are deliberately separate words:
+# `pause` and `halt` both write a record `estop.read_latch` reports as in
+# force, and the whole difference between a recoverable stop and a dead
+# instance lives in this member plus `resumable`.
+# ---------------------------------------------------------------------------
+
+#: Dispatch is stopped, the instance is alive, every registered entry is still
+#: owed and still recoverable. `resumable: true`.
+PAUSED = "paused"
+#: The item-443 E-Stop: the instance is dead, its entries are STRANDED, and the
+#: way back is `revl recover --wal <file>`. `resumable: false`.
+HALTED = "halted"
+
+LATCH_VERDICTS = (PAUSED, HALTED)
+
 #: The action a breached datum takes when the surface declared none. A breach
 #: that changes nothing is not a contract, and the exit criterion names exactly
 #: two legal outcomes ("the declared fallback or pause"); `pause` is the
@@ -328,20 +347,104 @@ def _latency_observations(events) -> dict:
     return {"latencies": samples, "hostReported": skipped}
 
 
-def observations(events) -> dict:
-    """Everything the runtime genuinely observed on this run, from the causal
-    trace it already records. Pure: it reads the event list and nothing else.
+#: The WAL record kind the live per-call latency population is read from. The
+#: constant is restated rather than imported so this module keeps its "reads a
+#: document, imports no runtime" property; `wal.RECORD_MODEL_DECISION` is the
+#: same string and the tests pin the two equal, the way the writer and reader
+#: of that record are already pinned to each other.
+WAL_MODEL_DECISION = "model-decision"
+
+
+def _decision_observations(decisions) -> dict:
+    """The per-call latency population, from the WAL's `model-decision`
+    records — one record per model completion, written at the crossing.
+
+    The same `latencyProvenance` check as the trace side, for the same reason:
+    a payload that does not claim `revl-measured-bracket` is a host-reported
+    number, and folding a host number into a revl-measured percentile is the
+    "arbitrary external service-level indicator" the scope forbids. It is
+    counted as skipped so the receipt can say how many completions it declined
+    to measure.
+    """
+    samples: list = []
+    skipped = 0
+    for record in decisions or []:
+        if not isinstance(record, Mapping):
+            continue
+        if record.get("record") not in (None, WAL_MODEL_DECISION):
+            continue
+        llm = record.get("llm")
+        if not isinstance(llm, Mapping):
+            skipped += 1
+            continue
+        if llm.get("latencyProvenance") != "revl-measured-bracket":
+            skipped += 1
+            continue
+        value = llm.get("latencySeconds")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            samples.append(float(value))
+        else:
+            skipped += 1
+    return {"latencies": samples, "hostReported": skipped}
+
+
+def decisions_from_wal(path: Optional[str]) -> list:
+    """The `model-decision` records of a WAL, in recorded order, or `[]`.
+
+    Fail-SOFT, and that is the deliberate direction here: a WAL that is absent,
+    unreadable or torn yields no samples, and no samples is `insufficient` —
+    which is a verdict this module already refuses to read as `holding`. So the
+    failure of a measurement source degrades the datum honestly rather than
+    either crashing the generation it was measuring or, worse, admitting one.
+
+    The WAL is flushed and `fsync`'d per record (`replay.WriteAheadLog`), so a
+    record a crossing saw acknowledged is on disk before this reads it; there
+    is no in-flight window where a completed call is invisible here.
+    """
+    if not path:
+        return []
+    try:
+        from .wal import read_wal  # noqa: PLC0415 — lazy, pure reader
+        document = read_wal(path)
+    except Exception:            # noqa: BLE001 — see the fail-soft note above
+        return []
+    records = document.get("records") if isinstance(document, Mapping) else None
+    return [r for r in (records or [])
+            if isinstance(r, Mapping)
+            and r.get("record") == WAL_MODEL_DECISION]
+
+
+def observations(events, decisions=None) -> dict:
+    """Everything the runtime genuinely observed on this run, from the records
+    it already writes. Pure: it reads the two lists it is handed and nothing
+    else.
 
     No new pipeline. Every number here is a number revl took itself:
-      * `latencies` — the item-121 model-hop bracket;
+      * `latencies` — the revl-measured completion bracket;
       * `durations` — load/withdraw pairs, the same pairing `metrics` uses;
       * `emissions` — the emit events the runtime recorded;
       * `open` — components still loaded at the end of the trace, so a
         duration that has not closed is visible rather than silently absent.
+
+    `decisions` is the run's `model-decision` WAL records, and it is the LIVE
+    source: one record per completion, written at the crossing by the running
+    generation. When any are present they are the latency population and the
+    trace's `emit` hops are NOT added to it, because the two describe the SAME
+    crossings — the WAL record and the trace hop are keyed on one another by
+    `(component, stepIndex)` — and pooling them would count every completion
+    twice and halve the rank a percentile selects. Which source was used is
+    reported as `latencySource` and travels into the receipt, so a reader can
+    never mistake a replay-visited population for the run's own.
     """
     events = list(events or [])
     durations = _duration_observations(events)
-    latencies = _latency_observations(events)
+    live = _decision_observations(decisions)
+    if live["latencies"]:
+        latencies = live
+        source = LATENCY_FROM_WAL
+    else:
+        latencies = _latency_observations(events)
+        source = LATENCY_FROM_TRACE if latencies["latencies"] else LATENCY_NONE
     emissions = 0
     by_component: dict = {}
     for event in events:
@@ -352,7 +455,9 @@ def observations(events) -> dict:
     return {
         "events": len(events),
         "latencies": latencies["latencies"],
+        "latencySource": source,
         "hostReportedLatencies": latencies["hostReported"],
+        "decisions": len(live["latencies"]) + live["hostReported"],
         "durations": durations["durations"],
         "openAtEnd": durations["open"],
         "emissions": emissions,
@@ -382,6 +487,24 @@ def percentile(values, fraction: float) -> Optional[float]:
 #: maximum wearing its name. `ceil(0.95 * n) < n` is the condition, which holds
 #: from n = 21; stated as a constant so the receipt and the test agree.
 PERCENTILE_MIN_SAMPLES = 21
+
+#: Where a latency sample population came from, named on the observation and
+#: carried into the receipt. The two are NOT interchangeable and the receipt
+#: must not let a reader mistake one for the other:
+#:
+#:   * `trace-emit-hop` — the item-121 `llm` payload on an `emit` event of the
+#:     causal trace. The driver records those during a STEP-BACK walk, so the
+#:     population is the crossings a replay visited, not the crossings the run
+#:     made. This is the slice-2 source and stays the fallback.
+#:   * `wal-model-decision` — the item-250 Slice 3a `model-decision` record,
+#:     written DURABLY AT THE CROSSING, one per model completion, carrying the
+#:     same `revl_model_hop` payload. This is a PER-CALL population of the run
+#:     itself, which is what a percentile needs, and it exists today: no fourth
+#:     `why_runtime` event kind and no `SCHEMA_VERSION` bump is required to
+#:     reach it.
+LATENCY_FROM_TRACE = "trace-emit-hop"
+LATENCY_FROM_WAL = "wal-model-decision"
+LATENCY_NONE = "none"
 
 #: The trace records every duration in SECONDS (`ts` is a `time.monotonic()`
 #: reading, `llm.latencySeconds` says so in its name); the contract records
@@ -433,10 +556,13 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
 
     Per datum, and why:
 
-      * `p95_latency` — MEASURED, from the item-121 model-hop bracket, over the
-        model hops THIS run recorded. The sample is per-crossing and only model
-        completions produce one, so a composition with no model hop gets
-        `insufficient` with that as the reason rather than a fabricated zero.
+      * `p95_latency` — MEASURED, from the revl-measured completion bracket,
+        over the population `observations` selected and NAMED (`latencySource`,
+        carried onto the verdict as `measurement`): the run's own
+        `model-decision` records when it wrote any, else the trace's replayed
+        `emit` hops. The sample is per-completion either way, so a composition
+        with no model hop gets `insufficient` with that as the reason rather
+        than a fabricated zero.
         The percentile needs `PERCENTILE_MIN_SAMPLES`; below that the datum is
         `insufficient`, because the maximum of a handful of samples is not a
         95th percentile.
@@ -477,6 +603,11 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
         return {}
     latencies = list(obs.get("latencies") or [])
     durations = list(obs.get("durations") or [])
+    # Which population the percentile is over, named on the verdict. A p95 of
+    # the crossings a replay walked and a p95 of the calls the run made are
+    # different quantities, so the verdict says which one it is rather than
+    # leaving a reader to assume the better of the two.
+    source = obs.get("latencySource") or LATENCY_FROM_TRACE
     verdicts: dict = {}
     for key, entry in contract.items():
         target = entry.get("target") if isinstance(entry, Mapping) else entry
@@ -489,7 +620,7 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
                     "samples": len(latencies),
                     "reason": f"{len(latencies)} model-hop sample(s); a p95 needs "
                               f"at least {PERCENTILE_MIN_SAMPLES}",
-                    "measurement": "modelHopLatencyBracket"}
+                    "measurement": source}
             else:
                 # The trace's seconds against the contract's milliseconds: the
                 # unit is converted on the OBSERVATION, never on the target, so
@@ -499,7 +630,7 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
                 verdicts[key] = _decide(
                     None if seconds is None else seconds * MS_PER_SECOND,
                     target, direction, n=len(latencies))
-                verdicts[key]["measurement"] = "modelHopLatencyBracket"
+                verdicts[key]["measurement"] = source
                 verdicts[key]["unit"] = "ms"
             continue
         if datum == "max_pending_tasks":
@@ -621,7 +752,13 @@ def build_body(*, composition, generation, contract, verdicts, action,
                 "emissions": observed.get("emissions", 0),
                 "events": observed.get("events", 0),
                 "hostReportedLatencies": observed.get("hostReportedLatencies", 0),
+                "decisions": observed.get("decisions", 0),
             },
+            # WHICH population the percentile was over, inside the signed body.
+            # A receipt that reported a number without its population would let
+            # a replay-visited p95 and the run's own p95 read identically, and
+            # they are not the same claim.
+            "latencySource": observed.get("latencySource", LATENCY_NONE),
             "openAtEnd": list(observed.get("openAtEnd") or []),
         },
     }
@@ -1160,7 +1297,7 @@ def pause(*, latch: Optional[str], wal: Optional[str] = None,
 
     record = {
         "halted": True,
-        "verdict": "paused",
+        "verdict": PAUSED,
         "reason": reason or "slo breach",
         "operator": operator,
         "at": time.time() if now is None else now,
@@ -1204,7 +1341,7 @@ def halt(*, latch: Optional[str], wal: Optional[str] = None, reason: str = "",
 
     record = {
         "halted": True,
-        "verdict": "halted",
+        "verdict": HALTED,
         "reason": reason or "slo breach",
         "operator": operator,
         "at": time.time() if now is None else now,
@@ -1237,6 +1374,45 @@ def halt(*, latch: Optional[str], wal: Optional[str] = None, reason: str = "",
     return {"armed": True, "latch": path, **record}
 
 
+def latch_state(path: Optional[str]) -> Optional[dict]:
+    """What the stop at `path` MEANS, or None when no stop is in force.
+
+    `estop.read_latch` answers whether a latch exists; this answers which of
+    the two stops it is, which is the question a host has to answer before it
+    can report a paused instance as anything but dead.
+
+    FAIL CLOSED, in the one direction that matters. A latch this cannot
+    classify is reported `halted` and `resumable: False`, never `paused`: a
+    pause is the WEAKER claim (the instance is alive, nothing is stranded), and
+    reading an unclassifiable stop as the weaker one would let a corrupted or
+    foreign latch talk a host into resuming an instance that was killed. The
+    same reasoning `read_latch` already applies to a malformed latch file, one
+    level up.
+
+    Returns the latch record with `inForce`, `verdict` and `resumable` settled,
+    so a caller reads three members rather than re-deriving them.
+    """
+    from . import estop
+
+    record = estop.read_latch(path)
+    if record is None:
+        return None
+    verdict = record.get("verdict")
+    resumable = record.get("resumable")
+    if verdict != PAUSED or resumable is not True:
+        verdict, resumable = HALTED, False
+    return {**record, "inForce": True, "latch": path,
+            "verdict": verdict, "resumable": resumable}
+
+
+def paused(path: Optional[str]) -> Optional[dict]:
+    """The pause in force at `path`, or None. A halt is NOT a pause, so a
+    halted instance answers None here and a caller that only asks this question
+    can never report a dead instance as merely paused."""
+    state = latch_state(path)
+    return state if state is not None and state["verdict"] == PAUSED else None
+
+
 # ---------------------------------------------------------------------------
 # 7. The monitor — evaluate, decide, act, receipt.
 # ---------------------------------------------------------------------------
@@ -1261,7 +1437,7 @@ class Monitor:
                  composition: Optional[str] = None, generation: int = 0,
                  latch: Optional[str] = None, wal: Optional[str] = None,
                  key: Optional[bytes] = None, signer: Optional[str] = None,
-                 divert=None, events=None, now=None):
+                 divert=None, events=None, decisions=None, now=None):
         self.contract = dict(contract or {})
         self.composition = composition
         self.generation = generation
@@ -1273,6 +1449,10 @@ class Monitor:
         # (`admit_divert`), and the caller passes a callable to substitute one.
         self.divert = divert
         self.events = list(events or [])
+        # The run's own `model-decision` records: the LIVE per-call latency
+        # population. Empty is not an error — `observations` falls back to the
+        # trace hops and says which source it used.
+        self.decisions = list(decisions or [])
         self.now = now
         self.receipt: Optional[dict] = None
         self.action: Optional[str] = None
@@ -1294,7 +1474,8 @@ class Monitor:
         """
         if not self.declared:
             return None
-        obs = observations(self.events if events is None else events)
+        obs = observations(self.events if events is None else events,
+                           self.decisions)
         verdicts = measure(self.contract, obs)
         hits = breached_keys(self.contract, verdicts)
         action = DEFAULT_ACTION
@@ -1332,12 +1513,72 @@ class Monitor:
         dispatch = self._dispatch(verdict)
         verdict["dispatch"] = dispatch
         verdict["body"]["response"]["dispatch"] = dispatch
-        if self.key:
-            try:
-                self.receipt = make_receipt(verdict["body"], self.key)
-            except attest.NotCanonicalizable as error:
-                verdict["receiptRefused"] = str(error)
-                self.receipt = None
+        self._sign(verdict)
+        return verdict
+
+    def _sign(self, verdict: dict) -> None:
+        """Sign `verdict`'s body, or record why it could not be signed. One
+        place, so `observe`, `seal` and `record` cannot drift on what a
+        signature covers."""
+        if self.receipt is not None or not self.key:
+            return
+        try:
+            self.receipt = make_receipt(verdict["body"], self.key)
+        except attest.NotCanonicalizable as error:
+            verdict["receiptRefused"] = str(error)
+            self.receipt = None
+
+    def record(self, events=None) -> Optional[dict]:
+        """The GENERATION-BOUNDARY act: measure, SIGN, and take NO action.
+
+        Two decisions, and both are about honesty rather than caution.
+
+        SIGN ALWAYS. The design of record (docs/design/473-slo-contracts.md,
+        "Exit") requires that "a generation that runs under a declared contract
+        produces a verifiable `revl.slo-receipt` on its generation-history
+        entry carrying one closed verdict per declared datum" — every
+        generation, not only the ones that failed. A history carrying receipts
+        only for breaches makes their ABSENCE ambiguous between "it held" and
+        "nobody measured", which is the exact confusion `unmeasurable` exists
+        to remove.
+
+        DISPATCH NOTHING. A generation boundary is the moment the generation
+        being measured stops running: at a swap it is about to be disposed, and
+        at a teardown it is already over. There is nothing left to divert and
+        nothing left to pause, and the latch a pause writes OUTLIVES the
+        process — so a boundary that dispatched would arm a stop against the
+        SUCCESSOR generation, or against the next process to read that latch,
+        for a breach neither of them committed. The design note makes the same
+        argument about `recovery_time` ("by the moment it is known the recovery
+        is over, so there is nothing left to divert or pause... wiring it to a
+        response would be theatre"). A LIVE breach is one `observe` sees while
+        the generation is still running, and that is the one that acts.
+
+        The measurement is unchanged either way, so the receipt a boundary
+        files names the breach in full; `response.dispatch` is simply absent,
+        which is the accurate statement that nothing was done.
+        """
+        verdict = self.evaluate(events)
+        if verdict is None:
+            return None
+        self._sign(verdict)
+        verdict["recorded"] = True
+        return verdict
+
+    def seal(self, events=None) -> Optional[dict]:
+        """`observe`, and sign the receipt even when nothing breached.
+
+        The dispatching form of `record`, for a caller that is measuring a run
+        that has ENDED and holds the latch's whole lifetime itself — `revl slo
+        --seal` over a recorded trace, where the operator named the latch on
+        the command line. A live `Session` uses `record` at its boundaries and
+        `observe` in flight; see `record` for why.
+        """
+        verdict = self.observe(events)
+        if verdict is None:
+            return None
+        self._sign(verdict)
+        verdict["sealed"] = True
         return verdict
 
     def _dispatch(self, verdict: Mapping) -> dict:
