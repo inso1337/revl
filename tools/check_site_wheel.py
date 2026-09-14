@@ -18,6 +18,16 @@ set and each member's SHA-256, ignoring the zip's own timestamps.
     python3 tools/check_site_wheel.py --write     # rebuild + refresh the committed wheels
 
 Exit status is 0 when both committed wheels match a fresh build, 1 otherwise.
+
+SCOPE: the `revl-*.whl` wheels only. `site/vendor/cordis-*.whl` is a different
+artifact with a different source (the pinned `backends/python/setup.sh` clone,
+absent from a plain checkout and from this tool's own workflow), so it is gated
+in the suite instead, by
+`tests/test_cordis_wheel_records_its_source_revision_1029.py`: the wheel records
+the revision it was built from and that record is held against `CORDIS_PY_PIN`,
+with the member-hash comparison below applied to the cordis wheel wherever the
+clone exists. Adding it here would be a leg that no-ops in the one workflow
+that runs this tool.
 """
 from __future__ import annotations
 
