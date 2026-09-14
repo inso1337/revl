@@ -18,7 +18,10 @@ The WAL's terminal ``activation-complete`` marker is the whole decision:
 * **present** — activation finished before the crash. The composition's shape
   is durable via item 15; recovery *rolls forward*, resuming the persisted
   generation through :func:`revl.mcp.persist.restore` (this module composes with
-  it, it does not reimplement it). No in-flight boundary state is outstanding.
+  it, it does not reimplement it). The marker settles the ACTIVATION, and only
+  that: a roll-forward still cross-checks the crossings the WAL kept recording
+  after it (issue #536) and the class-(b) deferral queue against its ``flushed``
+  records (issue #1017) before it is allowed to report ``residue.clean``.
 * **absent** — the process died mid-activation. Recovery *rolls back*: it
   reconstructs the boundary inverses from their descriptors and runs them
   newest-first (LIFO, exactly as an L-Raise teardown would), then states a
@@ -486,6 +489,108 @@ def _steady_state_proof(residue: dict) -> str:
             f"hidden behind the activation-complete marker.")
 
 
+def _deferral_crosscheck(records: list) -> dict:
+    """Cross-check the class-(b) deferral queue against the ``flushed`` set on a
+    WAL that carries ``activation-complete`` (issue #1017).
+
+    The terminal marker settles the ACTIVATION. It never settled the deferral
+    queue: a ``deferred-emission`` descriptor is logged at ENQUEUE (the intent),
+    and its outcome is a LATER ``flushed`` record written only after the host
+    body fired. So a cut that reaches ``activation-complete`` can still carry an
+    approved emission that never crossed — the exact shape the item-245
+    deferral-queue finding measured (#1004:
+    ``[effect, effect, deferred-emission, effect, effect, commit-approved,
+    activation-complete]``). #1004 fixed the CAUSE of that lost queue; the reader
+    still certified the cut balanced, because :func:`_roll_forward` returned
+    before anything looked at the queue. It looks now.
+
+    Fails CLOSED: an approved descriptor with no ``flushed`` record is RESIDUE,
+    never silence. The classification is the one
+    :func:`_roll_forward_window` already makes over the same two record families,
+    so the two roll-forward surfaces cannot drift on the same WAL:
+
+    * ``flushed`` for its seq — confirmed crossed.
+    * ``flush-residue`` for its seq — the host body RAISED at flush
+      (continue-and-record); the crossing did not land, so it is owed with the
+      recorded error.
+    * neither — OWED, ``not-attempted``: the body may not have fired before the
+      crash, which is the honest state.
+
+    A descriptor with NO ``commit-approved`` after it was never approved, so it
+    was DROPPED, never fired (item 245, Decision 3 — dropping is free, nothing
+    crossed the boundary). That is the roll-back path's rule and it stays clean
+    here; the fail-closed direction is about APPROVED queues. Approval is read
+    positionally — ``commit-approved`` names the manifest hash, not the seqs —
+    and a WAL that reuses one file across runs keeps a single monotonic seq
+    space, so matching by seq is exact across run boundaries.
+
+    Recovery FIRES NOTHING here: this path has no world adapter and no operator
+    re-issue policy, so an owed emission is reported and left for a human. The
+    item-440 re-issue seam stays where it is, on the window path.
+    """
+    last_approved = next((i for i in range(len(records) - 1, -1, -1)
+                          if records[i].get("record") == "commit-approved"), -1)
+    flushed = {r.get("seq") for r in records if r.get("record") == "flushed"}
+    flush_failed = {r.get("seq"): r for r in records
+                    if r.get("record") == "flush-residue"}
+    fired, owed, dropped, outstanding = [], [], [], []
+    for index, record in enumerate(records):
+        if record.get("record") != "deferred-emission":
+            continue
+        seq = record.get("seq")
+        call = record.get("call") or {}
+        entry = {"seq": seq,
+                 "referent": f"{call.get('receiver')}.{call.get('method')}"}
+        if index > last_approved:
+            dropped.append(entry)
+        elif seq in flushed:
+            fired.append(entry)
+        elif seq in flush_failed:
+            info = flush_failed[seq].get("error") or {}
+            owed.append({**entry, "outcome": "failed"})
+            outstanding.append(_record(
+                "flush-residue", crossing=_crossing_of_descriptor(record),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": None},
+                error=info or {"type": "flush-failed",
+                               "message": "the host body raised at flush"},
+                attempted_flag=True, outcome="failed",
+                referent=entry["referent"],
+                hint="the deferred emission's host body raised at flush "
+                     "(continue-and-record) and the run went on to stamp "
+                     "`activation-complete`; the marker does not settle this "
+                     "crossing — finish it by hand (issue #1017)"))
+        else:
+            owed.append({**entry, "outcome": "not-attempted"})
+            outstanding.append(_record(
+                "flush-residue", crossing=_crossing_of_descriptor(record),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": None},
+                error={"type": "not-attempted",
+                       "message": "approved but no `flushed` record — the host "
+                                  "body may not have fired before the crash"},
+                attempted_flag=False, outcome="not-attempted",
+                referent=entry["referent"],
+                hint="the emission was approved but its flush is unconfirmed, "
+                     "and `activation-complete` does not settle it — the marker "
+                     "proves activation finished, not that the deferral queue "
+                     "was flushed. Finish the flush by hand (issue #1017)"))
+    return {"flushed": fired, "owed": owed, "dropped": dropped,
+            "outstanding": outstanding}
+
+
+def _deferral_proof(crosscheck: dict) -> str:
+    owed = crosscheck["owed"]
+    names = ", ".join(sorted({e["referent"] for e in owed})) or "none named"
+    return (f"RESIDUE: {len(owed)} approved deferred emission(s) have no "
+            f"`flushed` record under a WAL that carries `activation-complete` — "
+            f"the marker settles the activation, never the deferral queue, so an "
+            f"unmatched emission is residue, not silence (issue #1017). "
+            f"{len(crosscheck['flushed'])} confirmed flushed, "
+            f"{len(crosscheck['dropped'])} never approved (dropped, nothing "
+            f"crossed). Unconfirmed: {names}.")
+
+
 def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -> dict:
     """Activation completed before the crash: the shape is durable (item 15).
     Resume by re-admitting the persisted generation.
@@ -536,6 +641,12 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
     steady = [r for r in tail[last_run_complete + 1:]
               if r.get("record") == "effect"]
     steady_residue = _steady_state_residue(steady)
+    # issue #1017: the activation marker is not a flush receipt. Cross-check the
+    # deferral queue the WAL already enumerates against its `flushed` records
+    # before this verdict is allowed to say `clean`. Empty in both directions on
+    # a WAL with no `deferred-emission`, so every deferral-free roll-forward
+    # report keeps its existing body and proof text.
+    deferrals = _deferral_crosscheck(records)
     resumed = None
     if session is not None and snapshot is not None:
         from .mcp.approval import ApprovalRequired  # noqa: PLC0415
@@ -582,15 +693,24 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
                 "diagnostic": error.diagnostic,
                 "guarantee": _guarantee(),
             }
-    outstanding = steady_residue["outstanding"]
-    if outstanding:
+    steady_outstanding = steady_residue["outstanding"]
+    outstanding = steady_outstanding + deferrals["outstanding"]
+    if steady_outstanding:
         decision = ("the WAL carries `activation-complete` but no `run-complete`: "
                     "activation finished, then the process was `kill -9`'d in "
                     "steady state. The composition's shape is durable via item 15, "
-                    f"but the {len(outstanding)} crossing(s) committed after "
+                    f"but the {len(steady_outstanding)} crossing(s) committed after "
                     "activation are in-flight — recovery reports them honestly "
                     "instead of reading the WAL as CLEAN (issue #536).")
         proof = _steady_state_proof(steady_residue)
+    elif deferrals["outstanding"]:
+        decision = ("the WAL carries `activation-complete`, but an approved "
+                    "deferred emission has no `flushed` record: the marker proves "
+                    "activation finished, never that the class-(b) deferral queue "
+                    "was flushed. Recovery reports the unmatched emission(s) as "
+                    "residue rather than certifying the cut balanced, and fires "
+                    "nothing (issue #1017).")
+        proof = _deferral_proof(deferrals)
     else:
         decision = ("the WAL carries `activation-complete`: activation finished "
                     "before the crash, so no in-flight boundary state is "
@@ -599,6 +719,10 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
                     "undoing anything.")
         proof = ("a completed activation left the accumulator balanced; "
                  "there is nothing half-done to roll back.")
+    if steady_outstanding and deferrals["outstanding"]:
+        # both causes at once: neither may mask the other, so the proof carries
+        # both sentences the same way a failed shared reclaim appends its own.
+        proof = f"{proof} | {_deferral_proof(deferrals)}"
     return {
         "verdict": "rolled-forward",
         "decision": decision,
@@ -610,6 +734,10 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
         # clean shutdown (`run-complete` present) or a run that never left
         # activation, which keeps every pre-#536 roll-forward report unchanged.
         "steadyState": steady_residue,
+        # issue #1017: the deferral queue's flush state under the activation
+        # marker. `owed` is non-empty exactly when the short-circuit would once
+        # have certified an unbalanced WAL clean.
+        "deferrals": {k: deferrals[k] for k in ("flushed", "owed", "dropped")},
         "residue": {
             "clean": not outstanding,
             "outstanding": outstanding,
@@ -1925,6 +2053,16 @@ def render(report: dict) -> str:
         for entry in steady.get("moot") or []:
             lines.append(f"  moot     {entry['label'] or '(effect)':<22} "
                          f"steady-state in-process crossing (memory gone)")
+        # issue #1017: the deferral cross-check. Both lists are empty on a WAL
+        # with no `deferred-emission`, so a deferral-free roll-forward renders
+        # byte-identically.
+        deferrals = report.get("deferrals") or {}
+        for entry in deferrals.get("flushed") or []:
+            lines.append(f"  flushed  seq {entry['seq']:<3} {entry['referent']}")
+        for entry in deferrals.get("owed") or []:
+            lines.append(f"  OWED     seq {entry['seq']:<3} {entry['referent']} "
+                         f"— {entry['outcome']}: approved, no `flushed` record "
+                         f"under `activation-complete`")
     elif report["verdict"] == "roll-forward-refused":
         lines.append("  " + (report.get("message")
                              or "the persisted generation no longer passes the gate"))
