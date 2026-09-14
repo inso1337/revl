@@ -21,6 +21,7 @@ import asyncio
 import dataclasses
 import hashlib
 import sys
+import weakref
 from fnmatch import fnmatchcase
 
 from .. import cap_order
@@ -152,13 +153,61 @@ class AdmitHandle:
     top-level `call` takes, so a granted-emission or witnessed-fs crossing the
     turn makes registers into the enclosing session's 245 frame — the whole
     point of the crossing: the per-turn actions are governed by the session's
-    commit/abort, not a separate lifecycle the turn could escape into."""
+    commit/abort, not a separate lifecycle the turn could escape into.
+
+    The handle is BOUND to the generation that minted it (roadmap item 334). It
+    dispatches by KEY NAME, and a key name is not a binding: `Session.swap`
+    disposes the whole live composition and loads the successor, so the turn
+    whose operations this handle names is gone, while the key it names can be
+    re-provided by whatever the successor declares. Under `Gate.propose` the
+    successor is AGENT-AUTHORED and writes its own component and key names, so
+    an unbound handle hands the agent's implementation to a caller that asked
+    for the turn's — authority the proposal was never granted, reached with no
+    new extern and no ungranted service, i.e. past everything the
+    untrusted-author profile checks. The binding is the generation's item-245
+    owner, which is exactly the frame this docstring promises the crossings
+    register into: `_install_session_owner` builds a FRESH owner for every
+    generation that loads (`load`, `swap`'s successor, `_abort_swap`'s reloaded
+    predecessor) and `_reset` drops it, while `_wire_turn` — additive, no
+    generation change — leaves it alone, so sibling turns keep their handles.
+    A handle whose owner is no longer the live one refuses `STALE_HANDLE`; it
+    never dispatches into a composition it was not minted against."""
 
     def __init__(self, session: "Session", keys: tuple[str, ...]) -> None:
         self._session = session
         self.keys = tuple(keys)
+        self._generation = session._generation
+        # weak: a handle must not keep a dead generation's owner (and its
+        # escrow) alive. A collected owner is a gone generation, which is the
+        # refusing answer anyway, so the weak deref failing is fail-closed.
+        owner = session._owner
+        self._owner_ref = weakref.ref(owner) if owner is not None else None
+
+    def _live(self) -> bool:
+        owner = self._session._owner
+        if owner is None or self._owner_ref is None:
+            return False
+        return self._owner_ref() is owner
 
     def call(self, key: str, method: str, args: list | None = None) -> dict:
+        # the generation check comes FIRST: on a swapped-out turn the key check
+        # below would pass (the successor may well provide the same key) and the
+        # call would silently land in the successor.
+        if not self._live():
+            raise SessionError(
+                f"admitted-turn handle refused: it was minted against "
+                f"generation {self._generation} and that generation is no "
+                f"longer live (the session is now at generation "
+                f"{self._session._generation}). A `swap` — including the one "
+                f"`Gate.propose` performs, and the `_abort_swap` that reverts "
+                f"it — disposes the whole composition, so the turn this handle "
+                f"names no longer exists; the key it names may be re-provided "
+                f"by the successor, which under `propose` is agent-authored "
+                f"code that writes its own key names. Dispatching would hand "
+                f"that successor a call addressed to the turn, so this refuses "
+                f"instead (item 334). Admit the turn again against the live "
+                f"generation to get a handle onto it.",
+                code="STALE_HANDLE")
         if key not in self.keys:
             raise SessionError(
                 f"key {key!r} is not one the admitted turn provides "

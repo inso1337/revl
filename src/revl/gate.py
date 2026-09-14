@@ -422,7 +422,15 @@ class Handle:
     top-level `Gate.call` takes (classification, the item-246 approval decision,
     the approver seam), so an admitted turn cannot escape the session's
     commit/abort. The facade hands back a Handle, never the emitted artifact:
-    the module, driver, and fibers are not exported."""
+    the module, driver, and fibers are not exported.
+
+    The handle is bound to the generation that minted it, exactly as the inner
+    `AdmitHandle` is (item 334): a `Gate.propose` swaps the whole composition
+    for an AGENT-AUTHORED successor that writes its own key names, so a handle
+    that dispatched by name alone would hand the agent a call addressed to the
+    turn. This facade takes the same choke point rather than re-deciding it —
+    the two `call` paths must not be able to disagree about whether a handle is
+    still live."""
 
     def __init__(self, gate: "Gate", inner: Any) -> None:
         self._gate = gate
@@ -430,6 +438,19 @@ class Handle:
         self.keys = tuple(getattr(inner, "keys", ()) or ())
 
     def call(self, key: str, method: str, args: list | None = None) -> dict:
+        # the generation check FIRST, and through the inner handle's own rule:
+        # the facade must not carry a second copy of it that could drift.
+        live = getattr(self._inner, "_live", None)
+        if live is not None and not live():
+            raise GateError(
+                f"admitted-turn handle refused: it was minted against "
+                f"generation {getattr(self._inner, '_generation', '?')} and "
+                f"that generation is no longer live. A `propose`/`swap` "
+                f"disposes the whole composition, so the turn this handle "
+                f"names is gone and its key may now be served by the "
+                f"agent-authored successor; dispatching would hand that "
+                f"successor a call addressed to the turn (item 334). Admit the "
+                f"turn again against the live generation.")
         if key not in self.keys:
             raise GateError(
                 f"key {key!r} is not one the admitted turn provides "
