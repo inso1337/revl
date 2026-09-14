@@ -807,6 +807,14 @@ class Env:
         # check keyed off it is inert for every program in the tree today and
         # the IR of an unannotated method or emit is unchanged.
         self.declared_intent: tuple | None = None
+        # item 470 stage 0: the lowered crossing node of every BINDING in the
+        # method being lowered that stated itself with a trailing `acting { … }`
+        # clause. An `emit` STEP is recognised structurally by the completeness
+        # residue; a stated binding cannot be, because marking it would put a
+        # key in the IR and the whole surface is designed to contribute none.
+        # So the register is held here, out of band, by object identity, and is
+        # reset per method exactly as `declared_intent` is.
+        self.stated_crossings: list = []
         # names of `witnessed`-classified externs in scope (item 243, Slice 2,
         # docs/design/243-witnessed-externs.md): set by `_lower_component` so
         # an effect-position acquisition calling one of these lowers to the
@@ -11423,6 +11431,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # that writes a `within { … }` clause (`None` for every operation in the
         # tree today), so the check below is inert unless a program opts in.
         saved_intent = env.declared_intent
+        saved_stated = env.stated_crossings
+        env.stated_crossings = []
         env.declared_intent = (
             (decl.within, svc.name, method.name)
             if getattr(decl, "within", None) is not None else None
@@ -11547,6 +11557,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             _check_rebind(ms.name, ms.line)
             safe = _alloc_safe(ms.name)
             value = _lower_expr(ms.value, env, mode="setup")
+            # item 470 stage 0: a binding that states its crossing with a
+            # trailing `acting { … }` is checked here, at the crossing, exactly
+            # as an `emit` step is. Inert for every binding that writes no
+            # clause, which is every binding in the tree.
+            _check_let_intent_refinement(ms, value, env)
             swept = _sweep(value, ms.line)
             method_locals[ms.name] = safe
             env.params[ms.name] = safe
@@ -11967,6 +11982,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
         env.declared_intent = saved_intent
+        env.stated_crossings = saved_stated
         env.type_env = saved_tenv
         env.provision_locals = saved_provisions
         env.local_arrows = saved_arrows
@@ -12298,15 +12314,7 @@ def _check_intent_refinement(stmt: EmitStmt, node: dict, env: Env) -> None:
         return
     filename = env.filename
     if declared is None:
-        raise RevlError(
-            filename, stmt.line,
-            "this `emit` states `acting { … }`, but the operation it runs in "
-            "declares no `within { … }` intent for it to refine",
-            hint="an action is checked AGAINST a declaration, and nothing infers "
-                 "an intent the caller never stated (item 470): declare it on the "
-                 "service operation — `... -> T within { object: <capability>, "
-                 "verbs: [<verb>] }` — or drop the `acting` clause",
-            code="G4", category="intent-refinement")
+        _refuse_acting_without_declaration("`emit`", filename, stmt.line)
     clause, svc_name, method_name = declared
     where = f"`{svc_name}.{method_name}`"
     if acting is None:
@@ -12328,9 +12336,95 @@ def _check_intent_refinement(stmt: EmitStmt, node: dict, env: Env) -> None:
         # service-typed local, an unclassified extern). Either way no declared
         # object can be SHOWN to cover it, and reading the unnameable as the
         # declared one is the direction the whole kernel was built to close.
-        _refuse_unnameable_crossing(clause, where, filename, stmt.line)
+        _refuse_unnameable_crossing(clause, where, filename, stmt.line, "`emit`")
     for token in crossed:
-        _refine_one_crossing(token, clause, acting, where, filename, stmt.line)
+        _refine_one_crossing(token, clause, acting, where, filename, stmt.line,
+                             "`emit`")
+
+
+def _check_let_intent_refinement(stmt, value, env: Env) -> None:
+    """Refuse a value-returning crossing that exceeds its operation's intent.
+
+    Stage 0 of the design note's section 4, and the hole the completeness half
+    opened. `_check_intent_refinement` demands that every crossing under a
+    declaration state what it does, and the completeness check restates that
+    over the whole body — but an `emit` STEP discards the value it produces, so
+    an emission that RETURNS data (an LLM completion, an HTTP GET, a row count)
+    is written `let r = emit svc.op(…)`, where the marker sits inside an
+    expression and no clause can trail it. Under a declaration that spelling was
+    refused with no rewrite available other than throwing the value away.
+
+    The binding STATEMENT is the slot that can carry the clause, and once it
+    does the check is exactly the per-crossing one the `emit` step already runs:
+    the verb, the tenant and the scopes come off `acting`, while the object and
+    the amount are read off the crossing's own capability spelling through
+    `Action.from_cap`, so the two sides cannot drift by being written twice.
+
+    Three refusals, and each is the same fail-closed direction as the step's:
+
+      * an `acting` clause with no declaration to check it against
+        (`_refuse_acting_without_declaration`, shared with the step);
+      * an `acting` clause on a binding whose value performs no MARKED
+        crossing. The `emit` marker is G4's point, and a clause on a value that
+        does not carry it would state something about a crossing that is not
+        there while leaving the real one (a bare call to an `emission` extern)
+        unstated;
+      * the crossing itself exceeding the declaration, or naming no boundary
+        this check can compare.
+
+    A binding that states NOTHING returns quietly and is left to
+    `_check_intent_completeness`, which is where "a crossing that states
+    nothing cannot be shown to refine the declaration" is already stated over
+    the whole body. Registering the stated node with `env.stated_crossings` is
+    what keeps that check from then refusing this one too.
+    """
+    acting = getattr(stmt, "acting", None)
+    if acting is None:
+        return
+    filename = env.filename
+    declared = getattr(env, "declared_intent", None)
+    if declared is None:
+        _refuse_acting_without_declaration("`let`", filename, stmt.line)
+    clause, svc_name, method_name = declared
+    where = f"`{svc_name}.{method_name}`"
+    if not isinstance(stmt.value, EmitExpr):
+        raise RevlError(
+            filename, stmt.line,
+            "this `let` states `acting { … }`, but its value carries no `emit` "
+            "marker, so it performs no crossing this clause can be about",
+            hint="a crossing is marked at its call site (G4), and the clause "
+                 "states what THAT crossing does: write `let <name> = emit "
+                 "<call> acting { verb: <operation> }`, or drop the clause — a "
+                 "clause on an unmarked value would leave the real crossing "
+                 "unstated (item 470)",
+            code="G4", category="intent-refinement")
+    crossed = _emit_crossed_caps(value, env)
+    if not crossed or "*" in crossed:
+        _refuse_unnameable_crossing(clause, where, filename, stmt.line, "`let`")
+    for token in crossed:
+        _refine_one_crossing(token, clause, acting, where, filename, stmt.line,
+                             "`let`")
+    env.stated_crossings.append(value)
+
+
+def _refuse_acting_without_declaration(subject: str, filename: str,
+                                       line: int) -> None:
+    """An `acting` clause with no declaration to check it against.
+
+    Shared by both stating slots (an `emit` step and a `let` binding), because
+    the reason is the surface's, not the spelling's: an action is checked
+    AGAINST a declaration, and item 470's own scope note forbids inventing the
+    missing one. A clause that reads as a check and performs none is the hole.
+    """
+    raise RevlError(
+        filename, line,
+        f"this {subject} states `acting {{ … }}`, but the operation it runs in "
+        "declares no `within { … }` intent for it to refine",
+        hint="an action is checked AGAINST a declaration, and nothing infers "
+             "an intent the caller never stated (item 470): declare it on the "
+             "service operation — `... -> T within { object: <capability>, "
+             "verbs: [<verb>] }` — or drop the `acting` clause",
+        code="G4", category="intent-refinement")
 
 
 def _declared_objects(clause) -> str:
@@ -12339,16 +12433,16 @@ def _declared_objects(clause) -> str:
 
 
 def _refuse_unnameable_crossing(clause, where: str, filename: str,
-                                line: int) -> None:
+                                line: int, subject: str = "`emit`") -> None:
     """A crossing whose boundary set cannot be named, under a declared intent."""
     declared = _declared_objects(clause)
     raise RevlError(
         filename, line,
-        f"this `emit` crosses an unnameable boundary, and the intent {where} "
+        f"this {subject} crosses an unnameable boundary, and the intent {where} "
         f"declares authorizes `{declared}`",
         hint="an intent authorizes the boundaries it names, and a crossing that "
              "names none cannot be shown to be one of them (fail closed). Give "
-             "the operation this emit calls a capability scope — "
+             "the operation this crossing calls a capability scope — "
              "`emission[<capability>] fn …` — so the crossing can be compared "
              "against the declaration (item 470)",
         code="G4", category="intent-refinement",
@@ -12356,7 +12450,8 @@ def _refuse_unnameable_crossing(clause, where: str, filename: str,
 
 
 def _refine_one_crossing(token: str, clause, acting, where: str,
-                         filename: str, line: int) -> None:
+                         filename: str, line: int,
+                         subject: str = "`emit`") -> None:
     """One crossed capability token, against the declared intent.
 
     A crossing contributes one token per declared `emission[...]` scope, and
@@ -12381,37 +12476,43 @@ def _refine_one_crossing(token: str, clause, acting, where: str,
         return
     raise RevlError(
         filename, line,
-        f"this `emit` exceeds the intent {where} declares: {refusal.message}",
+        f"this {subject} exceeds the intent {where} declares: {refusal.message}",
         hint=f"{refusal.hint}. The declaration is the `within` clause at line "
              f"{clause.line} (roadmap item 470)",
         code="G4", category="intent-refinement",
         expected=refusal.declared, actual=refusal.requested)
 
 
-def _without_stated_crossings(node):
-    """`node` with every `emit` STEP's crossing removed, and nothing else.
+def _without_stated_crossings(node, stated: frozenset = frozenset()):
+    """`node` with every STATED crossing removed, and nothing else.
 
-    An `emit` step under a declaration has already been compared against it
-    (`_check_intent_refinement` runs at the step, and refuses the step that
-    carries no `acting` clause), so it is the one crossing spelling that STATES
-    what it does. Everything else in the body is left exactly as lowered,
-    including an emit step's `compensate` and approval slots: a compensation
-    that itself crosses a boundary states nothing about that crossing and is
-    not covered by the step's own `acting` clause.
+    Two spellings state themselves, and each is recognised the only way it can
+    be. An `emit` STEP is structural: `_check_intent_refinement` runs at the
+    step and refuses the step that carries no `acting` clause, so `step ==
+    "emit"` already means "compared against the declaration". A stated BINDING
+    (`let r = emit svc.op(…) acting { … }`, stage 0) cannot be structural,
+    because a marker on the lowered node would be an IR key and this surface
+    contributes none — so `stated` carries the identities of the crossing nodes
+    `_check_let_intent_refinement` admitted, and a value that IS one of them is
+    dropped from its binding.
 
-    Only the `step`/`expr` pair is dropped rather than the whole step, so the
-    residue keeps those sibling slots. The result feeds `_method_emissions` and
-    is never lowered, so pruning a copy costs no IR.
+    Everything else in the body is left exactly as lowered, including an emit
+    step's `compensate` and approval slots: a compensation that itself crosses a
+    boundary states nothing about that crossing and is not covered by the step's
+    own `acting` clause.
+
+    Only the crossing is dropped rather than the whole step, so the residue keeps
+    the sibling slots. The result feeds `_method_emissions` and is never lowered,
+    so pruning a copy costs no IR.
     """
     if isinstance(node, dict):
-        if node.get("step") == "emit":
-            return {key: _without_stated_crossings(value)
-                    for key, value in node.items()
-                    if key not in ("step", "expr")}
-        return {key: _without_stated_crossings(value)
-                for key, value in node.items()}
+        drop = ("step", "expr") if node.get("step") == "emit" else ()
+        return {key: _without_stated_crossings(value, stated)
+                for key, value in node.items()
+                if key not in drop and id(value) not in stated}
     if isinstance(node, list):
-        return [_without_stated_crossings(value) for value in node]
+        return [_without_stated_crossings(value, stated) for value in node
+                if id(value) not in stated]
     return node
 
 
@@ -12428,7 +12529,11 @@ def _check_intent_completeness(decl, mbody, env, svc_name: str,
       * a direct call to an `emission` extern (`let n = wr(row)`), which the G4
         scope check already counts as a crossing but item 470 never saw;
       * a value-position emission (`let r = emit svc.op(...)`, `EmitExpr`),
-        whose marker sits inside an expression where no clause can trail it;
+        whose marker sits inside an expression where no clause can trail it.
+        Stage 0 gives that spelling a stating slot on the BINDING statement
+        (`_check_let_intent_refinement`); a binding that uses it is registered
+        in `env.stated_crossings` and dropped from the residue below, and one
+        that does not is refused here exactly as before;
 
     and one that hides a crossing behind an extra hop:
 
@@ -12440,8 +12545,9 @@ def _check_intent_completeness(decl, mbody, env, svc_name: str,
     exact direction the `acting`-less `emit` refusal was written to close.
 
     So the rule is stated over the whole body rather than per step: under a
-    declaration, the only crossing spelling admitted is an `emit` step that
-    states itself. Whatever the body still reaches once those are removed is a
+    declaration, the only crossings admitted are the two that state themselves,
+    an `emit` step and a `let` binding whose value is a marked crossing.
+    Whatever the body still reaches once those are removed is a
     crossing that states nothing, and a crossing that states nothing cannot be
     shown to refine the declaration (fail closed). The analysis is
     `_method_emissions`, the same one the G4 provider upper bound reads, run
@@ -12455,7 +12561,9 @@ def _check_intent_completeness(decl, mbody, env, svc_name: str,
     clause = getattr(decl, "within", None)
     if clause is None:
         return
-    caused, _caps = _method_emissions(_without_stated_crossings(mbody), env)
+    stated = frozenset(id(crossing) for crossing in env.stated_crossings)
+    caused, _caps = _method_emissions(
+        _without_stated_crossings(mbody, stated), env)
     if not caused:
         return
     evidence = ", ".join(f"`{item}`" for item in caused)

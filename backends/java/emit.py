@@ -556,18 +556,15 @@ def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
     """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
 
     A byte-for-byte mirror of `backends/go/emit.py` and `backends/rust/emit.py`:
-    Slice 2 shipped `map`/`filter`/`take` and the three non-default backpressure
-    policies on the py reference tier only, while the blocking tiers lower
-    subscribe / next / close and the `merge` fan-in. Emitting a subscription that
-    SILENTLY dropped a combinator chain, a lossy policy or a drain window would
-    be the worst outcome available: the program would run and quietly disagree
-    with the reference. Refuse by name instead."""
-    if node.get("stages"):
-        raise EmitError(
-            "a stream combinator chain (`map`/`filter`/`take`) is not lowered "
-            "on the %s tier; the derived-stream chain runs on the py reference "
-            "tier (item 130 Slice 2) while this tier lowers subscribe / next / "
-            "close and `merge` (Slice 3) — try `--backend py`" % tier)
+    the derived combinator chain (`map`/`filter`/`take`) IS lowered here now (see
+    `_stream_chain`), and what is left are the three non-default backpressure
+    policies and the `block`-policy drain window. The drain window is the one
+    that must stay refused on principle: its resume fires on the deterministic
+    test clock, which this tier does not carry, so lowering it would resume
+    EARLY and quietly disagree with the reference. Emitting a subscription that
+    SILENTLY dropped a lossy policy or a drain window is the worst outcome
+    available — the program would run and answer differently from the py
+    reference — so refuse by name instead."""
     policy = node.get("policy") or "error"
     if policy != "error":
         raise EmitError(
@@ -2254,7 +2251,8 @@ def _expr(
         # teardown thread even while a `next` is parked, and teardown never has
         # to wait for the provider (§9 Part A).
         _refuse_unlowered_stream_surface(node)
-        stream = _stream_head(node.get("stream") or {}, ctx, rename, env)
+        stream = _stream_chain(node.get("stream") or {},
+                               node.get("stages") or [], ctx, rename, env)
         policy = node.get("policy") or "error"
         capacity = int(node.get("buffer") or 0)
         return "Stream.subscribe(%s, %s, %d)" % (
@@ -2279,6 +2277,64 @@ def _stream_head(node, ctx, rename, env) -> str:
                          for src in node.get("sources") or [])
         return "Stream.merge(%s)" % args
     return _expr(node, ctx, rename, env)
+
+
+def _stream_stage_arrow(stage: dict, ctx, rename, env) -> str:
+    """Render ONE combinator's pure transform as a Java lambda over the tier's
+    stream item (item 130 Slice 2, rule 3.5).
+
+    An arrow VALUE has no lowering on this tier (`_ARROW_VALUE_REFUSAL`) because
+    there is no functional interface to target and revl has no lowerable
+    function type. That limit stands. A combinator's transform is a different
+    animal: the interface IS known (`java.util.function.Function<String,String>`
+    for `map`, `Predicate<String>` for `filter`), the parameter is ONE, the body
+    is ONE pure expression, and the item type is `String` — the same type the
+    `every … in` loop recovers. So it is rendered here against that interface
+    rather than through the general arrow arm, and nothing else in a component
+    body gains an arrow lowering.
+
+    The purity of the body is the FRONTEND's guarantee (lower.py refuses a stage
+    whose transform reaches an effect or a suspension), so this renders a plain
+    expression and never a bracket."""
+    fn = stage.get("fn") or {}
+    params = fn.get("params") or []
+    if fn.get("kind") != "arrow" or len(params) != 1:
+        raise EmitError(
+            "a `%s` combinator needs a one-parameter pure arrow on the %s tier "
+            "(item 130 rule 3.5)" % (stage.get("stage"), CRATE))
+    name = _ident(params[0], "binding")
+    # the parameter SHADOWS any component capture of the same name: the overlay
+    # is what stops `map(pool => …)` from rendering the captured field.
+    inner = dict(rename or {})
+    inner[params[0]] = name
+    body = _expr(fn.get("body"), ctx, inner, env)
+    return "(%s) -> %s" % (name, body)
+
+
+def _stream_chain(head, stages, ctx, rename, env) -> str:
+    """The `subscribe` head wrapped in its derived-stream combinator chain
+    (item 130 Slice 2, §1).
+
+    Left to right, so `src.filter(p).map(f)` filters first and the LAST link is
+    the subscription's immediate upstream — the same nesting the py reference
+    builds from its `stages=[…]` list, so the two tiers agree item for item.
+    Every link is DERIVED and owned by the subscription, so the whole chain
+    unwinds off the ONE bracket the `subscribe` registers."""
+    out = _stream_head(head, ctx, rename, env)
+    for stage in stages:
+        kind = stage.get("stage")
+        if kind == "take":
+            count = stage.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                raise EmitError(
+                    "`take` needs a positive whole count, got %r" % (count,))
+            out = "Stream.take(%s, %d)" % (out, count)
+        elif kind in ("map", "filter"):
+            out = "Stream.%s(%s, %s)" % (
+                kind, out, _stream_stage_arrow(stage, ctx, rename, env))
+        else:  # pragma: no cover — the parser admits exactly three combinators
+            raise EmitError("unknown stream combinator %r" % (kind,))
+    return out
 
 
 def _v3_instance_get(
@@ -3811,18 +3867,32 @@ public static final class Stream {
         }
     }
 
-    private final String kind; // "source" | "merge"
+    private final String kind; // "source" | "merge" | "stage"
+    private final String stage; // "" | "map" | "filter" | "take"
+    private final java.util.function.Function<String, String> mapFn;
+    private final java.util.function.Predicate<String> predFn;
+    private int remaining; // items a `take(n)` link still forwards
     private final java.util.List<Subscription> subs = new java.util.ArrayList<>();
     private final java.util.List<Stream> down = new java.util.ArrayList<>();
     private java.util.List<Stream> up = new java.util.ArrayList<>();
-    private int pending; // upstream sources not yet terminal (merged only)
+    private int pending; // upstream sources not yet terminal (derived only)
     private String state = "open"; // "open" | "closed" | "faulted"
     private String faultReason = "";
     private boolean released = false;
 
     private Stream(String kind, int pending) {
+        this(kind, pending, "", null, null, 0);
+    }
+
+    private Stream(String kind, int pending, String stage,
+                   java.util.function.Function<String, String> mapFn,
+                   java.util.function.Predicate<String> predFn, int remaining) {
         this.kind = kind;
         this.pending = pending;
+        this.stage = stage;
+        this.mapFn = mapFn;
+        this.predFn = predFn;
+        this.remaining = remaining;
     }
 
     // Open a provider. It takes a live-resource slot; `close` returns it, so a
@@ -3854,6 +3924,51 @@ public static final class Stream {
         a.attachDown(merged);
         b.attachDown(merged);
         return merged;
+    }
+
+    // One link of a derived-stream combinator chain — `map(f)`, `filter(p)` or
+    // `take(n)` (design §1, Slice 2). A link is BOTH a subscriber of its upstream
+    // and an upstream of the next link, so a chain is
+    // `Stream -> stage -> … -> Subscription` and neither the provider nor the
+    // subscription needs to know the chain is there.
+    //
+    // A link is DERIVED — owned by the subscription below it, never a bracket of
+    // its own — so `close` unwinds the whole chain down to (but not including)
+    // the provider, which is left to its OWN bracket. Teardown stays one LIFO
+    // stack. The transforms are G6-pure (rule 3.5), enforced at admission, so a
+    // link never introduces an effect, a suspension or a failure path of its own.
+    private static Stream link(Stream up, String stage,
+                               java.util.function.Function<String, String> mapFn,
+                               java.util.function.Predicate<String> predFn,
+                               int remaining) {
+        Stream derived = new Stream("stage", 1, stage, mapFn, predFn, remaining);
+        derived.up.add(up);
+        synchronized (REGISTRY) {
+            STREAMS.add(derived);
+        }
+        record("stream.stage " + stage);
+        //@R1-INC
+        up.attachDown(derived);
+        return derived;
+    }
+
+    // `map(f)`: every item is transformed by a pure arrow.
+    public static Stream map(Stream up, java.util.function.Function<String, String> f) {
+        return link(up, "map", f, null, 0);
+    }
+
+    // `filter(p)`: an item the predicate rejects is not forwarded. A rejection is
+    // NOT backpressure — the provider's emit succeeded, this derived stream simply
+    // has nothing to carry — so the link still reports acceptance.
+    public static Stream filter(Stream up, java.util.function.Predicate<String> p) {
+        return link(up, "filter", null, p, 0);
+    }
+
+    // `take(n)`: the derived stream ends with a `Closed` TERMINAL after n ACCEPTED
+    // items (never silence, §4.3) and detaches from its upstream so the provider
+    // stops feeding it.
+    public static Stream take(Stream up, int n) {
+        return link(up, "take", null, null, n);
     }
 
     private void attachDown(Stream merged) {
@@ -3891,22 +4006,86 @@ public static final class Stream {
         return true;
     }
 
-    private void forward(String item) {
+    // Carry one item to this stream's consumer and into any derived stream fed by
+    // it, applying this link's combinator first when it is one.
+    //
+    // Answers downstream ACCEPTANCE, exactly as the py reference does: an `error`
+    // overflow anywhere below reaches the provider through the chain rather than
+    // being swallowed by a link, which is also what `take(n)` counts — an item the
+    // consumer never accepted does not spend the budget.
+    private boolean forward(String item) {
         java.util.List<Subscription> targets;
         java.util.List<Stream> downs;
+        java.util.List<Stream> ups;
+        boolean reserved = false;
+        boolean last = false;
+        // `take(n)` RESERVES its slot under the monitor and refunds it if the
+        // delivery is refused, rather than reading the budget here and
+        // decrementing it after the forward. Two concurrent emits could
+        // otherwise both observe `remaining == 1` and deliver n+1 items — a
+        // divergence from the py reference (single-threaded, so it cannot have
+        // the race) that would only show under load.
         synchronized (this) {
             if (!state.equals("open")) {
-                return;
+                return false;
+            }
+            if (stage.equals("take")) {
+                if (remaining <= 0) {
+                    return false;
+                }
+                remaining = remaining - 1;
+                reserved = true;
+                last = remaining == 0;
             }
             targets = new java.util.ArrayList<>(subs);
             downs = new java.util.ArrayList<>(down);
+            ups = new java.util.ArrayList<>(up);
         }
+        String carried = item;
+        if (stage.equals("map")) {
+            carried = mapFn.apply(item);
+        } else if (stage.equals("filter") && !predFn.test(item)) {
+            // a predicate rejection is not backpressure: the provider's emit
+            // succeeded, this derived stream simply has nothing to forward.
+            return true;
+        }
+        boolean accepted = true;
         for (Subscription sub : targets) {
-            sub.deliver(item);
+            if (!sub.deliver(carried)) {
+                accepted = false;
+            }
         }
         for (Stream derived : downs) {
-            derived.forward(item);
+            if (!derived.forward(carried)) {
+                accepted = false;
+            }
         }
+        if (reserved) {
+            if (!accepted) {
+                // refused downstream: the item never landed, so it does not spend
+                // the budget (the py reference decrements only on acceptance).
+                synchronized (this) {
+                    remaining = remaining + 1;
+                }
+            } else if (last) {
+                // `take(n)` is exhausted: the derived stream ends with a `Closed`
+                // TERMINAL pushed downstream (never silence, §4.3) and detaches
+                // from its upstream so the provider stops feeding it. The link
+                // itself stays live until the subscription's bracket inverse
+                // closes it, so the chain still unwinds as one LIFO stack.
+                record("stream.take exhausted");
+                for (Stream upstream : ups) {
+                    upstream.detachDown(this);
+                }
+                for (Subscription sub : targets) {
+                    sub.terminate("closed", "");
+                }
+                for (Stream derived : downs) {
+                    derived.upstreamTerminal("closed", "");
+                }
+            }
+        }
+        return accepted;
     }
 
     // The provider's terminal-delivering inverse (§9 Part B) and, for a merged
@@ -3949,7 +4128,8 @@ public static final class Stream {
             }
         }
         if (release) {
-            record("stream." + kind + " close");
+            record(kind.equals("stage") ? "stream.stage close " + stage
+                                        : "stream." + kind + " close");
             //@R1-DEC
         }
         return first;
@@ -4138,16 +4318,21 @@ public static final class Subscription {
         this.capacity = capacity;
     }
 
-    void deliver(String item) {
+    // Buffer one item under the declared overflow policy (§4.4). Answers whether
+    // the delivery was ACCEPTED — a false is backpressure the provider sees
+    // through the chain, never a silent drop.
+    boolean deliver(String item) {
         boolean overflow = false;
+        boolean accepted = false;
         lock.lock();
         try {
             if (closed || termed) {
-                return;
+                return false;
             }
             if (items.size() < capacity) {
                 items.addLast(item);
                 ready.signalAll();
+                accepted = true;
             } else if (policy.isEmpty() || policy.equals("error")) {
                 overflow = true;
             } else {
@@ -4162,6 +4347,7 @@ public static final class Subscription {
             Stream.record("stream.overflow");
             terminate("faulted", "overflow");
         }
+        return accepted;
     }
 
     void terminate(String kind, String reason) {
