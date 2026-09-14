@@ -206,14 +206,24 @@ else is `Admission::Withheld`, carrying the verdict verbatim, so switching from
 
 `issue_admission_into(source, manifest)` asks the same question against a
 running composition. The empty manifest is the empty composition and reduces to
-the standalone question. Against a non-empty one, only a candidate that
-declares nothing is admitted, and the reason is the item-186 row wire rather
-than the certifier: a row carries a component name, a provision key and a
-realm, and no service shapes, so a declared `service Store` may collide with a
-`Store` the running composition already holds in a different shape and no
-amount of care on the gate's side can see it. The reference refuses that pair
-by name. Carrying the running shapes on the wire is the remaining half of
-issue #346.
+the standalone question. Against a non-empty one the candidate carries one
+obligation more: nothing it declares may REDECLARE a service the running
+composition already declares. That is the only interaction the reference has
+between an interface-only candidate and a running manifest, and it gates a
+redeclaration on the compatibility relation the type layer decides, so a
+redeclaration is withheld here while a fresh interface is admitted.
+
+The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
+header followed by one `:S` row per declared service, which `revl.manifest_wire`
+renders from a compiled composition. The header is the load-bearing half. A wire
+without it CLAIMS NOTHING about the running services, so the set is unknown
+rather than empty and any declared service is withheld, exactly as before the
+block existed: silence is never read as "declares nothing". Two things the block
+does not buy. A redeclaration stays withheld, because the block carries the
+service name and not its shape. And a wire carrying a WITHDRAWAL row (`-C`, the
+replacement wave) is declined outright: the fold decides a withdrawal in full,
+and re-deriving which provisions survive it on this side would be a second
+implementation of that reasoning.
 
 Two obligations for a consumer of an admission, both from the ASYMMETRIC clause:
 an admission is a compile-time judgment scoped to `gate_version().frontier` and

@@ -117,13 +117,23 @@ it already handled. Widening the surface is the self-host type layer's lane
 
 `issue_admission_into(source, manifest)` asks the same question against a running
 composition. The empty manifest is the empty composition, so it is
-`issue_admission` byte for byte. Against a NON-EMPTY manifest only a candidate
-that DECLARES NOTHING is admitted, and the reason is the item-186 row wire rather
-than the certifier: a row carries a component name, a provision key and a realm,
-and no service shapes, so a declared `service Store` may collide with a `Store`
-the running composition already holds in a different shape and the wire cannot
-say. The reference refuses exactly that pair. Carrying the running shapes on the
-wire is the remaining half of issue #346.
+`issue_admission` byte for byte. Against a NON-EMPTY manifest the candidate
+carries one obligation more: nothing it declares may REDECLARE a service the
+running composition already declares. That is the only interaction the reference
+has between an interface-only candidate and a running manifest, and it is gated
+there on the §5 compatibility relation — the type layer — so a redeclaration is
+withheld while a fresh interface is admitted.
+
+The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
+header followed by one `:S` row per declared service (`revl.manifest_wire`
+renders it). The header is the load-bearing half. A wire without it CLAIMS
+NOTHING about the running services, so the set is unknown rather than empty and
+any declared service is withheld, exactly as before the block existed — silence
+is never read as "declares nothing". Two things the block still does not buy: a
+redeclaration stays withheld, because the block carries the service name and not
+its shape; and a wire carrying a WITHDRAWAL row (`-C`) is declined outright,
+because the fold decides a withdrawal in full and this surface does not re-derive
+which provisions survive it.
 
 An issued admission serialises `{"verdict":"admitted","admitted":true,
 "code":null,"message":null}` — byte-identical to `revl.gate`'s own wire for a py
@@ -269,7 +279,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:ff812ef1fa7f9b20"
+    // frontier "selfhost-admit:685b438c69ad1f3e"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the

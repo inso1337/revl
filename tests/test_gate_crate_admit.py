@@ -494,14 +494,16 @@ def test_a_withheld_admission_is_the_verdict_wire_verbatim(consumer):
 
 
 def test_the_manifest_admission_arm_reads_its_manifest(consumer):
-    """`issue_admission_into` against a RUNNING composition.
+    """`issue_admission_into` against a RUNNING composition described by a wire
+    that makes NO claim about the running services.
 
     The empty manifest is the empty composition, so it must answer exactly what
-    the standalone arm answers. A non-empty one must NOT: the item-186 row wire
-    carries no service shapes, so a candidate that DECLARES a service cannot be
-    certified against a running composition even though the same bytes are
-    admitted standalone. That gap is issue #346's remaining half, and it is held
-    here so it cannot be closed by guessing."""
+    the standalone arm answers. A wire carrying only provision and requirement
+    rows must NOT: it says nothing about which services the composition already
+    declares, so a candidate that DECLARES a service cannot be certified against
+    it even though the same bytes are admitted standalone. Silence is never read
+    as "declares nothing" - that reading is the wave-through the crate exists to
+    prevent, and this holds it whether or not the service block below exists."""
     declaring = "service Store {\n  fn get(key: Str) -> Str\n}\n"
     silent = "// nothing to add\n"
     running = "Kv/store/;App/app/;App<store"
@@ -757,6 +759,240 @@ def test_the_manifest_arm_issues_no_admission_either(manifest_agreement):
         "the crate's manifest arm produced something a consumer could read as an "
         "admission:\n  "
         + "\n  ".join(f"{name}: {verdict}" for name, verdict in offenders))
+
+
+# ----------------------------------------- the service block (issue #346)
+#
+# The block is what turns the manifest admission arm from "only a candidate that
+# declares nothing" into a real answer, so its wire is built the way an
+# embedder's is - `revl.manifest_wire` over a composition the reference compiled
+# - rather than spelled by hand here.
+
+ENUMERATED_MANIFEST = manifest_wire(compile_source(HELD_RUNNING, "held.rvl"))
+_FRESH_INTERFACE = "service Ledger {\n  fn append(row: Str) -> Int\n}\n"
+_REDECLARED_INTERFACE = "service Store {\n  fn get(key: Str) -> Str\n}\n"
+
+# Two more running compositions, so the matrix below is not one composition's
+# accident: one that ISOLATES its provision into a realm (so `manifest_wire`
+# renders the replacement wave's realm-bearing requirement row `C<k/r` beside the
+# block) and one that declares no service at all.
+REALMED_RUNNING = """
+service Store {
+  fn get(key: Str) -> Str
+}
+service AppSvc {
+  fn snapshot() -> Str
+}
+component Kv provides store: Store {
+  isolate store in realm("t1")
+  provide store { fn get(key) = key }
+}
+component App requires store: Store provides app: AppSvc {
+  isolate store in realm("t1")
+  provide app { fn snapshot() = store.get("x") }
+}
+"""
+
+BARE_RUNNING = """
+component Solo {
+  let n = effect Map.new() undo n.drop()
+}
+"""
+
+# Interface-only candidates: the only family the arm can certify at all, chosen
+# to straddle the rule - fresh names, redeclarations (identical and drifted), a
+# name taken by a running COMPONENT or a provision KEY rather than a service, and
+# aliases in each of those positions.
+_INTO_MATRIX_CANDIDATES = (
+    ("nothing", "// nothing to add\n"),
+    ("fresh_service", "service Ledger {\n  fn append(row: Str) -> Int\n}\n"),
+    ("fresh_services_two",
+     "service Ledger {\n  fn append(row: Str) -> Int\n}\n"
+     "service Clock {\n  fn now() -> Int\n}\n"),
+    ("redeclare_identical", "service Store {\n  fn get(key: Str) -> Str\n}\n"),
+    ("redeclare_drifted", "service Store {\n  fn get(key: Str) -> Int\n}\n"),
+    ("redeclare_widened",
+     "service Store {\n  fn get(key: Str) -> Str\n  fn extra() -> Int\n}\n"),
+    ("redeclare_appsvc", "service AppSvc {\n  fn snapshot() -> Int\n}\n"),
+    ("name_of_a_component", "service Kv {\n  fn f() -> Int\n}\n"),
+    ("name_of_a_key", "service store {\n  fn f() -> Int\n}\n"),
+    ("alias_only", "type Key = Str\n"),
+    ("alias_of_a_running_service", "type Store = Str\n"),
+    ("alias_and_service",
+     "type Key = Str\nservice Ledger {\n  fn append(row: Key) -> Int\n}\n"),
+)
+
+
+def test_the_service_block_is_on_the_wire_the_reference_renders():
+    """The block is the projection's, not the test's: `manifest_wire` renders the
+    `!services` header and one `:S` row per service the compiled composition
+    declares, in declaration order. A hand-spelled wire here would let the two
+    sides agree on a shape neither produces."""
+    assert ENUMERATED_MANIFEST.endswith(";!services;:Store;:AppSvc"), \
+        ENUMERATED_MANIFEST
+    assert ENUMERATED_MANIFEST.startswith(
+        "Kv/store/;App/app/;App<store"), ENUMERATED_MANIFEST
+
+
+def test_a_fresh_interface_is_admitted_into_an_enumerated_composition(consumer):
+    """THE admission the service block buys (issue #346).
+
+    A candidate declaring a service the running composition does NOT declare has
+    no running toucher for the reference's compatibility relation to protect, so
+    the reference admits it INTO the composition. With the running names on the
+    wire the crate can see that and admit it too - and this is an admission the
+    crate did not issue before, so the reference's own answer is asserted beside
+    it rather than assumed.
+
+    The SAME bytes against the SAME composition described WITHOUT the block stay
+    withheld, which is what proves the block is read rather than the rule
+    loosened."""
+    base = compile_source(HELD_RUNNING, "held.rvl")
+    assert _py_admit_into(_FRESH_INTERFACE, base) is True, (
+        "the reference must ADMIT this candidate into the running composition; "
+        "if that changed, the crate must not admit it either")
+
+    into = _crate_verdicts(consumer, [_FRESH_INTERFACE],
+                           "--admission-into", ENUMERATED_MANIFEST)
+    assert into[0]["admitted"] is True, (
+        "a candidate whose declarations are all fresh must be admitted into an "
+        f"enumerated composition: {into[0]}")
+    assert into[0] == {"verdict": "admitted", "admitted": True, "code": None,
+                       "message": None}, (
+        "an issued admission must be `revl.gate`'s admission wire verbatim: "
+        f"{into[0]}")
+
+    unenumerated = _crate_verdicts(consumer, [_FRESH_INTERFACE],
+                                   "--admission-into",
+                                   "Kv/store/;App/app/;App<store")
+    assert unenumerated[0]["admitted"] is False, (
+        "without the service block the wire makes no claim about the running "
+        f"services, so the same candidate must be withheld: {unenumerated[0]}")
+
+
+def test_a_redeclared_interface_is_withheld_from_an_enumerated_composition(consumer):
+    """The half the block does NOT close, held so it cannot be closed by guessing.
+
+    A candidate redeclaring a service the composition already declares is gated
+    by the reference on the compatibility relation the type layer decides. The
+    wire carries the NAME, not the shape, so even a byte-identical redeclaration
+    is withheld here: "identical" is not a question this gate can ask."""
+    base = compile_source(HELD_RUNNING, "held.rvl")
+    # the reference ADMITS this one - an identical redeclaration drifts from
+    # nothing - so the withholding below is the crate being conservative, not the
+    # crate agreeing.
+    assert _py_admit_into(_REDECLARED_INTERFACE, base) is True
+
+    into = _crate_verdicts(consumer, [_REDECLARED_INTERFACE],
+                           "--admission-into", ENUMERATED_MANIFEST)
+    assert into[0]["admitted"] is False, (
+        "a redeclaration of a running service must stay withheld until the type "
+        f"layer can decide it: {into[0]}")
+    assert into[0]["verdict"] == "no_objection", into[0]
+
+
+def test_the_block_and_the_replacement_wave_rows_on_one_wire(consumer):
+    """The interaction the two item-186 additions create, which neither addition
+    tested on its own.
+
+    A wire carrying the replacement wave's REALM-BEARING requirement rows and the
+    service block still certifies: the surface reads `C<k/r` per (key, realm)
+    rather than tripping over the `/`. A wire carrying a WITHDRAWAL row does NOT,
+    block or no block - the fold decides a withdrawal in full, and re-deriving
+    which provisions survive it here would be a second implementation of that
+    reasoning."""
+    realmed = compile_source(REALMED_RUNNING, "realmed.rvl")
+    wire = manifest_wire(realmed)
+    assert "App<store/t1" in wire.split(";"), wire
+    assert "!services" in wire.split(";"), wire
+    assert _py_admit_into(_FRESH_INTERFACE, realmed) is True
+
+    into = _crate_verdicts(consumer, [_FRESH_INTERFACE], "--admission-into", wire)
+    assert into[0]["admitted"] is True, (
+        "a realm-bearing requirement row must not cost the arm its answer: "
+        f"{into[0]}")
+
+    withdrawn = manifest_wire(realmed, replacing=("Kv",))
+    assert withdrawn.split(";")[-1] == "-Kv", withdrawn
+    declined = _crate_verdicts(consumer, [_FRESH_INTERFACE],
+                               "--admission-into", withdrawn)
+    assert declined[0]["admitted"] is False, (
+        f"a wire carrying a withdrawal row must be declined: {declined[0]}")
+
+
+def test_a_malformed_service_block_is_never_admitted_into(consumer):
+    """Every way the block can be wrong fails CLOSED. A `:S` row nobody claimed
+    with a header, a doubled header, a duplicate name, a name that is not one -
+    each of them is a wire this gate will not admit against, rather than one it
+    reads optimistically."""
+    silent = "// nothing to add\n"
+    for wire in ("Kv/store/;:Store",
+                 "Kv/store/;!services;:Store;!services;:AppSvc",
+                 "Kv/store/;!services;:Store;:Store",
+                 "Kv/store/;!services;:9bad",
+                 "Kv/store/;!services;:",
+                 "Kv/store/;!services;:A/b",
+                 "Kv/store/;!service;:Store"):
+        got = _crate_verdicts(consumer, [silent], "--admission-into", wire)
+        assert got[0]["admitted"] is False, f"{wire}: {got[0]}"
+
+
+def test_an_oversized_service_block_is_declined_rather_than_decided(consumer):
+    """The block costs rows, and the row bound is a FAIL-CLOSED bound: the fold
+    consumes a stack frame per row, so a wire past `MANIFEST_ROW_LIMIT` is
+    declined rather than folded. A composition large enough for its service block
+    to cross that line therefore loses the arm's answer, which is the direction
+    this gate is allowed to err in - it must never gain an admission by it."""
+    limit = _generated_manifest_row_limit()
+    wire = ";".join(["Kv/store/", "!services"]
+                    + [f":S{i}" for i in range(limit)])
+    assert len(wire.split(";")) > limit
+    got = _crate_verdicts(consumer, ["// nothing to add\n"],
+                          "--admission-into", wire)
+    assert got[0]["admitted"] is False, got[0]
+    assert got[0]["verdict"] == "outside_frontier", got[0]
+
+
+def test_the_manifest_admission_arm_never_overclaims(consumer):
+    """THE release-blocking direction, on the arm the service block widened.
+
+    Every (running composition, candidate) pair in the matrix is asked of BOTH
+    tiers: the crate's `issue_admission_into` over the wire `manifest_wire`
+    renders, and the reference's `revl.gate.admit_into` over the compiled
+    composition itself. An admission the reference does not make is a host
+    running code the reference never admitted, and there is no allowance for one.
+
+    The matrix straddles the rule deliberately: fresh names, a redeclaration that
+    drifts and one that does not, a service named after a running COMPONENT or
+    provision KEY rather than a running service, and aliases in each position,
+    across a plain composition, one that isolates into a realm (so the wave's
+    `C<k/r` rows ride beside the block), and one that declares no service. It
+    also asserts the arm FIRES, so a regression to "admit nothing" reds here
+    rather than passing quietly.
+    """
+    from revl import gate as py_gate
+
+    overclaims = []
+    admitted = 0
+    for running_src in (HELD_RUNNING, REALMED_RUNNING, BARE_RUNNING):
+        base = compile_source(running_src, "running.rvl")
+        wire = manifest_wire(base)
+        assert "!services" in wire.split(";"), wire
+        sources = [src for _, src in _INTO_MATRIX_CANDIDATES]
+        wires = _crate_verdicts(consumer, sources, "--admission-into", wire)
+        for (name, src), got in zip(_INTO_MATRIX_CANDIDATES, wires):
+            if got["admitted"] is not True:
+                continue
+            admitted += 1
+            if py_gate.admit_into(src, dict(base)).admitted is not True:
+                overclaims.append((name, running_src.split(chr(10))[1], got))
+    assert not overclaims, (
+        "the crate ADMITTED a candidate INTO a composition the reference does "
+        "not admit it into:\n  "
+        + "\n  ".join(f"{n} (into {r}): {g}" for n, r, g in overclaims))
+    assert admitted >= 12, (
+        "the manifest admission arm fired on too few pairs to have measured "
+        f"anything ({admitted}); a gate that admits nothing must not pass here")
 
 
 def test_every_manifest_refusal_is_a_real_reference_manifest_refusal(

@@ -82,12 +82,40 @@ C<*k         requirement: the same, multi-realm bound (item 162)               (
 -C           replacing: component C is withdrawn by this admission             (wave 1)
 C=k:T        handoff: C exports state of type T at key k                       (wave 2)
 !halted      header: the composition is halted; every admission refuses       (slice 3)
+!services    header: the `:S` rows are the WHOLE running service set          (item 346)
+:S           service: the running composition declares service S              (item 346)
 ```
 
 Provision rows are exactly today's; a manifest of provision rows parses as
 before. `parse_manifest` becomes `parse_manifest_rows` over the tagged kinds
 and unknown kinds refuse by name rather than being skipped (a row that parses
 and does nothing is worse than one that refuses).
+
+The SERVICE BLOCK (issue #346) is the one kind the fold accepts and computes
+nothing from, and the rule above is what decides that it may: a service
+declaration contributes no provision, no requirement, no graph node and no
+withdrawable component, so there is nothing for G2/ROUTE/G3 or the
+unmet-consumer check to fold it into at any wire. `-C` and `C=k:T` are the
+contrast: each of them CHANGES what the fold must compute, which is why one is
+folded in full and the other still refuses. A malformed `:S` name is held to the
+same bare-identifier rule a `-C` name is, and refuses the same way.
+
+Its consumer is the rust crate's admission certifier
+(`crates/revl-gate/src/admission.rs`), which parses the wire itself and needs the
+running service NAMES to tell a fresh interface from a redeclaration of a running
+one: the reference gates the second on the compatibility relation of §5
+(`revl.admission._admit_service_replacement`, reached only when the declared name
+is already in the ambient service table) and admits the first outright.
+
+The `!services` HEADER carries the whole weight. Without it the wire makes no
+claim about the running services, so a reader must treat the set as UNKNOWN, not
+empty: reading an absent block as "the composition declares nothing" would admit
+a redeclaration the reference refuses, which is the wave-through the gate exists
+to prevent. The block sits between the composition rows and the withdrawal rows,
+because it describes the composition and a withdrawal acts on what precedes it,
+so `-C` stays last and the provision/requirement rows keep their exact positions
+and order. That leaves the G3 DFS seed order (`mnames`, which a `:S` row does not
+touch) provably unchanged.
 
 Because `selfhost/lower.rvl` is a digest input of the gate crate, this slice
 regenerates BOTH `tools/build_gate_crate.py` and `tools/build_gate_wasm.py`
