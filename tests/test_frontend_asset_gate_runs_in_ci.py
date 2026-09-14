@@ -201,3 +201,93 @@ def test_the_typecheck_leg_carries_no_named_exemption():
         "reads (gap G4). Regenerate it: `revl export client --lang ts "
         "--service NotesApi` over examples/app/notes.rvl."
     )
+
+
+# --- half 3: lock drift reds a job somebody actually watches (#1081) ------- #
+#
+# `frontend-assets` did exactly what it was built to do and it still was not
+# enough. Its `npm ci` went red because `examples/app/frontend/package.json` and
+# `package-lock.json` fell out of sync, and `npm ci` fails at dependency
+# resolution -- BEFORE the vite build and vue-tsc legs above. So for the whole
+# time that lasted, the frontend was not built or typechecked on any PR, which is
+# gap G5 again with a red check in front of it instead of a green one. Nobody
+# acted on the red because `frontend-assets` is not a required check.
+#
+# `npm ci` failing IS the drift guard. The gap was WHERE it ran. So the same
+# check also runs in a job branch protection actually enforces, as
+# `npm ci --dry-run`: it resolves the lock against `package.json` and exits
+# non-zero on the EUSAGE mismatch without installing anything (0.3s, no network,
+# since the lock carries every `resolved` URL). The build and typecheck legs stay
+# in `frontend-assets`, which is the job that pays for a real install.
+#
+# The root-entry check in test_app_frontend_725.py
+# (`test_the_frontend_tree_is_pinned_and_the_lockfile_does_not_drift`) is not a
+# substitute: it compares the lock's root ranges to `package.json` and passes
+# happily on a TRANSITIVE placement that npm cannot resolve, which is the shape
+# that broke here (a missing `cac@7.0.0`).
+from test_required_checks_pinned import ENFORCED_TODAY  # noqa: E402
+
+#: how a step spells the offline lock-sync check.
+_SYNC_STEP = ("examples/app/frontend", "npm ci")
+
+
+def _lock_sync_steps(job: str) -> list[str]:
+    return [
+        s for s in _steps(_job_block(job))
+        if all(part in s for part in _SYNC_STEP)
+    ]
+
+
+def test_lock_sync_is_checked_by_an_enforced_job():
+    """The lock and `package.json` must go out of sync in a job that BLOCKS a
+    merge, not only in one nobody is watching. Without this the next drift is
+    invisible again for as long as it takes someone to read a non-required
+    job's log."""
+    carriers = sorted(j for j in ENFORCED_TODAY if _lock_sync_steps(j))
+    assert carriers, (
+        "no server-enforced job checks that examples/app/frontend's "
+        "package.json and package-lock.json are in sync. `npm ci` (or "
+        "`npm ci --dry-run`, which resolves without installing) is that check; "
+        f"put it back in one of {sorted(ENFORCED_TODAY)}. Issue #1081: while "
+        "that check lived only in the non-required `frontend-assets` job, a "
+        "drifted lock kept the frontend from being built or typechecked on any "
+        "PR and no merge was blocked."
+    )
+
+
+def test_the_enforced_lock_sync_check_cannot_go_quiet():
+    """A guard that can skip, or whose exit status is swallowed, is a note. Same
+    reason the legs above may not be gated."""
+    for job in sorted(j for j in ENFORCED_TODAY if _lock_sync_steps(j)):
+        block = _job_block(job)
+        assert "continue-on-error" not in block, (
+            f"`{job}` sets continue-on-error, so a drifted lockfile would be a "
+            "green run with a warning."
+        )
+        for step in _lock_sync_steps(job):
+            assert "|| true" not in step and "|| :" not in step, (
+                f"the lock-sync step of `{job}` swallows its exit status: {step}"
+            )
+            assert "npm install" not in step, (
+                "`npm install` REWRITES the lock to whatever resolves today "
+                "instead of failing on the mismatch, which is the opposite of "
+                "a drift guard. Use `npm ci` (optionally `--dry-run`)."
+            )
+        line = next(
+            ln for ln in block.splitlines()
+            if all(part in ln for part in _SYNC_STEP)
+        )
+        assert "if:" not in line, (
+            f"the lock-sync step of `{job}` is conditional: {line.strip()}"
+        )
+
+
+def test_the_lock_the_guard_reads_is_the_one_the_legs_install_from():
+    """Anti-vacuity: both files have to exist for the check to mean anything,
+    and the guard must name the frontend project, not some other npm tree the
+    repo also installs."""
+    assert (FRONTEND / "package.json").is_file()
+    assert (FRONTEND / "package-lock.json").is_file()
+    for job in sorted(j for j in ENFORCED_TODAY if _lock_sync_steps(j)):
+        for step in _lock_sync_steps(job):
+            assert "examples/app/frontend" in step, step

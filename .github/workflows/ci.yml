@@ -818,6 +818,19 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[test]"
       - run: cd backends/typescript && npm ci
+      # issue #1081: the frontend's `package.json` and `package-lock.json` went
+      # out of sync (a dependabot bump rewrote the lock under a newer npm and
+      # dropped an optional peer's placement), so `npm ci` in `frontend-assets`
+      # failed BEFORE the vite build and vue-tsc legs it exists to run. The
+      # frontend was therefore not built or typechecked on any PR for as long as
+      # that lasted, and nobody saw it, because `frontend-assets` is not a
+      # required check. This step is the same sync check in a job that IS
+      # required. `--dry-run` resolves the lock against `package.json` and exits
+      # non-zero on the EUSAGE mismatch WITHOUT installing anything: measured at
+      # 0.3s, no network (the lock carries every `resolved` URL), so the guard
+      # costs a required job nothing. `frontend-assets` still runs the real
+      # `npm ci` and the legs.
+      - run: cd examples/app/frontend && npm ci --dry-run
       - run: cd backends/typescript && npx vitest run
       # issue #198: `tsc --noEmit` below covers `runtime.ts`, `demo.ts` and
       # `golden/**` — everything EXCEPT the modules the suite above just

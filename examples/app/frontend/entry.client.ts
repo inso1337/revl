@@ -36,8 +36,14 @@ const NotesPage = defineComponent({
   },
 })
 
+// Pages are registered through the client's router service
+// (`client/plugins/router.ts:319`), which is the spelling
+// docs/design/526-webui-asset-alignment.md records and the one
+// `@cordisjs/client`'s own `app/home` and `app/settings` extensions use. A bare
+// `ctx.page(...)` is a backward-compatibility mixin that the package no longer
+// declares on `Context`, so `vue-tsc` reports TS2339 on it.
 export default defineExtension((ctx) => {
-  ctx.page({
+  ctx.client.router.page({
     path: '/notes',
     name: 'Notes',
     component: NotesPage,
