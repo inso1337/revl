@@ -3385,3 +3385,200 @@ def test_ambient_malformed_service_row_refuses_naming_the_row(admit_ambient):
         "MANIFEST|manifest service row `:A/b` does not name a service")
     assert admit_ambient(clean, "!service") == (
         "MANIFEST|unrecognized manifest header row `!service`")
+# ---------------------------------------------- item 186 / issue #1036: ROUTE
+# ROWS, and the per-realm loss of a ROUTED RUNNING consumer.
+#
+# Wave part 1 left one live reference/gate divergence in the FALSE-ADMIT
+# direction, and named it rather than reporting it under a tag that does not
+# describe it. Route rows were absent from the wire, so when a routed running
+# consumer's realm lost its provider the reference refused it (item 162's
+# link-time per-realm check, which walks the ambient entries too) and the gate
+# ADMITTED: the running consumer stranded, with nothing said anywhere.
+#
+# The wire grows one row kind, `C>k/r1,r2` — the realms a running component
+# binds a key across, in declaration order. The requirement row's `*` marker
+# said a key was routed; this says WHERE, which is the half the per-realm check
+# needs. `admit_ambient` then runs that check over the running composition's
+# routes, under ITEM 162's OWN TAG AND MESSAGE: the withdrawal check answers
+# "this key became unmet", this one answers "this realm has no provider", and
+# reporting the second under the first's name would teach the reader the wrong
+# rule.
+#
+# FAILURE DIRECTION: fail-CLOSED. Every refusal here is an admission that does
+# not happen; the running composition keeps running, its routed consumer still
+# bound to the providers it has. The scope is exactly the reference's — a realm
+# named by a route with no provider in the resulting per-(key, realm) table —
+# and the two non-vacuity controls below pin that a legitimate routed
+# replacement and an untouched routed key both still admit, on BOTH sides.
+
+_R_SVCS = ("service Kv { fn get(k: Str) -> Str }\n"
+           "service Api { fn go(k: Str) -> Str }\n")
+_R_STORE_A = ('component StoreA provides kv: Kv {\n'
+              '  isolate kv in realm("r1")\n'
+              '  provide kv { fn get(k) { return k } }\n'
+              '}\n')
+_R_STORE_B = ('component StoreB provides kv: Kv {\n'
+              '  isolate kv in realm("r2")\n'
+              '  provide kv { fn get(k) { return k } }\n'
+              '}\n')
+_R_ROUTER = ('component Router requires kv: Kv provides api: Api {\n'
+             '  isolate kv in realms("r1", "r2") strategy(round_robin)\n'
+             '  provide api { fn go(k) { return kv.get(k) } }\n'
+             '}\n')
+#: The running composition: two per-realm providers and a router bound across
+#: both. The smallest shape in which a realm can lose its provider.
+_R_M = _R_SVCS + _R_STORE_A + _R_STORE_B + _R_ROUTER
+
+#: `StoreB` redeclared WITHOUT its `kv` provision: realm `r2` loses its only
+#: provider while `Router` keeps routing across it.
+_R_X_DROPS = (_R_SVCS + 'component StoreB provides other: Api {\n'
+              '  provide other { fn go(k) { return k } }\n'
+              '}')
+#: The legitimate routed replacement: same name, same key, same realm.
+_R_X_KEEPS = (_R_SVCS + 'component StoreB provides kv: Kv {\n'
+              '  isolate kv in realm("r2")\n'
+              '  provide kv { fn get(k) { return k } }\n'
+              '}')
+#: An unrelated arrival: nothing the route depends on moves.
+_R_X_FRESH = (_R_SVCS + 'component Fresh provides other: Api {\n'
+              '  provide other { fn go(k) { return k } }\n'
+              '}')
+
+_R_LOST_R2 = (
+    "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no "
+    "component provides `kv` in realm `r2` (item 162: every routed realm "
+    "needs a provider)")
+
+
+def test_manifest_wire_renders_the_route_rows():
+    """`manifest_wire` renders a running component's multi-realm bind as
+    `C>k/r1,r2`, in the realm order the route declared — the order the per-realm
+    check walks, so which realm a refusal names first is the reference's choice,
+    not an accident.
+
+    A route row is a COMPOSITION row: it says what one running component binds
+    across which realms, so it sits WITH its component, after that component's
+    requirement rows and ahead of the service block, which describes the whole
+    composition. The withdrawal rows stay last, because a withdrawal acts on
+    everything that precedes it."""
+    from revl import manifest_wire
+    ir = compile_source(_R_M, "running.rvl")
+    rows = manifest_wire(ir).split(";")
+    assert "Router>kv/r1,r2" in rows, rows
+    # the routed marker stays: it is what keeps the routed key out of the
+    # single-realm table and out of the withdrawal check
+    assert rows.index("Router<*kv") < rows.index("Router>kv/r1,r2"), rows
+    # ... and the whole ordering of the combined wire, in one line
+    assert rows == ["StoreA/kv/r1", "StoreB/kv/r2", "Router/api/", "Router<*kv",
+                    "Router>kv/r1,r2", "!services", ":Kv", ":Api"], rows
+    # the withdrawal row stays last, after the service block
+    assert manifest_wire(ir, replacing=("StoreB",)).split(";")[-1] == "-StoreB"
+    # a composition with no route renders no route row (the earlier slices are
+    # byte-identical)
+    assert ">" not in manifest_wire(compile_source(_W_M, "running.rvl"))
+
+
+def test_a_wire_carrying_both_a_service_block_and_a_route_row(admit_ambient):
+    """The two row kinds that landed together, on one wire. The service block is
+    inert for the fold and the route row is not, so the interaction to pin is
+    that neither disturbs the other: the block moves no verdict, the route legs
+    still refuse the realm that lost its provider, and a `:S` row sitting after
+    the route rows does not swallow them."""
+    from revl import manifest_wire
+    wire = manifest_wire(compile_source(_R_M, "running.rvl"))
+    assert "!services" in wire.split(";") and "Router>kv/r1,r2" in wire.split(";")
+    assert admit_ambient(_R_X_DROPS, wire) == _R_LOST_R2
+    assert admit_ambient(_R_X_DROPS, wire) == _ref_ambient(_R_X_DROPS, _R_M)
+    # the block really is inert here: stripping it changes no verdict, in both
+    # the refusing and the admitting direction
+    blockless = ";".join(r for r in wire.split(";")
+                         if r != "!services" and not r.startswith(":"))
+    assert admit_ambient(_R_X_DROPS, blockless) == _R_LOST_R2
+    assert admit_ambient(_R_X_KEEPS, wire) == admit_ambient(_R_X_KEEPS, blockless) == ""
+    # and the combined wire is nowhere near the fold's row bound
+    assert len(wire.split(";")) < 512
+
+
+def test_oracle_b_a_routed_running_consumer_loses_a_realms_provider(
+        admit_ambient):
+    """ORACLE B, the refusal this closes. `StoreB` is redeclared without `kv`,
+    so realm `r2` has no provider while the RUNNING `Router` still routes
+    across it. Both sides refuse with the same string, under item 162's tag.
+
+    Fails on main in the ADMISSION direction: the wire carried no route legs,
+    so the gate could not ask which realms `Router` routed and admitted."""
+    got = _gate_ambient(admit_ambient, _R_X_DROPS, _R_M)
+    assert got == _R_LOST_R2, got
+    assert got == _ref_ambient(_R_X_DROPS, _R_M)
+
+
+def test_oracle_b_routed_realm_loss_through_an_explicit_withdrawal_row(
+        admit_ambient):
+    """The same loss reached through an explicit `-StoreB` row: the incoming
+    text mentions `StoreB` nowhere. Both sides refuse identically."""
+    got = _gate_ambient(admit_ambient, _R_X_FRESH, _R_M, replacing=("StoreB",))
+    assert got == _R_LOST_R2, got
+    assert got == _ref_ambient(_R_X_FRESH, _R_M, replacing=("StoreB",))
+
+
+def test_the_route_row_is_what_closes_the_routed_realm_loss(admit_ambient):
+    """The row is LOAD-BEARING. The SAME admission against the pre-#1036 wire —
+    routed marker, no legs — is invisible to the gate and admits, while the
+    reference refuses it. This is the divergence, pinned to the row that
+    removes it, so a projection that stopped rendering route rows would red
+    here rather than quietly reopening the false admit."""
+    from revl import manifest_wire
+    ir = compile_source(_R_M, "running.rvl")
+    legless = ";".join(row for row in manifest_wire(ir).split(";")
+                       if ">" not in row)
+    assert admit_ambient(_R_X_DROPS, legless) == ""
+    assert _ref_ambient(_R_X_DROPS, _R_M) == _R_LOST_R2
+
+
+def test_oracle_b_a_legitimate_routed_replacement_still_admits(admit_ambient):
+    """NON-VACUITY. The ordinary routed hot-swap — same name, same key, same
+    realm — ADMITS on both sides. The check refuses a realm with no provider,
+    not a realm whose provider changed hands."""
+    got = _gate_ambient(admit_ambient, _R_X_KEEPS, _R_M)
+    assert got == "", got
+    assert got == _ref_ambient(_R_X_KEEPS, _R_M) == ""
+
+
+def test_oracle_b_a_routed_key_that_stays_provided_is_untouched(admit_ambient):
+    """NON-VACUITY, the other side. Nothing the route depends on is withdrawn —
+    an unrelated component arrives — so the routed running consumer is not
+    reasoned about at all and both sides admit. Passes on main too."""
+    got = _gate_ambient(admit_ambient, _R_X_FRESH, _R_M)
+    assert got == "", got
+    assert got == _ref_ambient(_R_X_FRESH, _R_M) == ""
+
+
+def test_oracle_b_a_routed_running_consumer_still_carries_its_g3_edges(
+        admit_ambient):
+    """The legs are EDGES as well as an existence check: the reference builds
+    one provider -> consumer edge per routed realm for an ambient entry too. A
+    cycle that closes through a ROUTED running consumer is therefore seen,
+    where before the route row the wire contributed no edge at all and the
+    cycle was missed."""
+    cyclic = (_R_SVCS + 'component StoreB requires api: Api provides kv: Kv {\n'
+              '  isolate kv in realm("r2")\n'
+              '  provide kv { fn get(k) { return api.go(k) } }\n'
+              '}')
+    got = _gate_ambient(admit_ambient, cyclic, _R_M)
+    assert got == "G3|dependency cycle: Router -> StoreB -> Router (G3)", got
+    assert got == _ref_ambient(cyclic, _R_M)
+
+
+def test_a_malformed_route_row_refuses_rather_than_dropping_the_legs(
+        admit_ambient):
+    """A route row the gate cannot read is a garbled wire and refuses by name,
+    exactly as a garbled withdrawal row does. Fail-closed: a row that parses
+    into a route with no legs is the blindness this row kind removes."""
+    clean = (_W_SVCS + 'component Fresh provides other: C {\n'
+             '  provide other { fn g(k) { return k } }\n'
+             '}')
+    assert admit_ambient(clean, "Router/api/;Router>kv") == (
+        "MANIFEST|manifest route row `Router>kv` does not name a component, "
+        "a key and its realms")
+    assert admit_ambient(clean, "Router/api/;>kv/r1") == (
+        "MANIFEST|unrecognized manifest row `>kv/r1`")

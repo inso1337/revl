@@ -174,7 +174,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
 /// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
 /// bounds the admissions, and a consumer caching an admission compares THIS
 /// before trusting it against a gate built from another tree.
-pub(crate) const SURFACE_ID: &str = "admission-interface:a5b654d77bea0c14";
+pub(crate) const SURFACE_ID: &str = "admission-interface:1adaa8ac918bd256";
 
 /// The tail every certificate carries, so the two halves of the basis line
 /// cannot drift apart.
@@ -491,8 +491,8 @@ struct Running<'a> {
 /// admission surface can account for, `None` otherwise.
 ///
 /// The accountable kinds are the provision (`C/k/r`), the requirement in its
-/// three spellings (`C<k`, `C<k/r`, `C<*k`) and the service block (`!services`,
-/// `:S`). Everything else declines the wire, which is a withheld admission and
+/// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`) and the
+/// service block (`!services`, `:S`). Everything else declines the wire, which is a withheld admission and
 /// not a refusal: a `!halted` header, a handoff row, and — deliberately, even
 /// though the fold has a full answer for it — a WITHDRAWAL row (`-C`). A
 /// withdrawal changes which provisions survive and can strand a running
@@ -509,6 +509,15 @@ struct Running<'a> {
 /// check exists to catch a bogus wire, not to re-derive the link. And a `:S` row
 /// only counts inside a block a `!services` header CLAIMED: a service list nobody
 /// vouched for is not a list an admission may rest on.
+///
+/// A ROUTE row (issue #1036) is READ and counted as nothing. Its key is already
+/// on the wire as a `C<*k` requirement and already carries the by-key
+/// obligation; the legs say which realms it binds, and a per-realm obligation
+/// here would be the same re-derivation of the link the by-key rule above
+/// declines. Reading it is the point: a row this function cannot parse declines
+/// the WHOLE wire, so leaving route rows out would have silently withheld the
+/// admission surface from every routed composition — the shape of the bug the
+/// `C<*k` and `C<k/r` spellings had here until they were read.
 fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
     let mut provided: Vec<&str> = Vec::new();
     let mut required: Vec<&str> = Vec::new();
@@ -537,6 +546,21 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
         if row.starts_with('-') {
             // A withdrawal. The fold decides it; this surface does not.
             return None;
+        }
+        if let Some((component, spec)) = row.split_once('>') {
+            // `C>k/r1,r2` — the realms a running component binds `k` across. It
+            // is read BEFORE the provision fallback because it carries a `/` of
+            // its own and would otherwise look like a provision whose component
+            // name is `C>k`.
+            let (key, realms) = spec.split_once('/')?;
+            if !is_wire_name(component) || !is_wire_name(key) {
+                return None;
+            }
+            // an empty label is the shared realm, exactly as on a provision row
+            if realms.split(',').any(|r| !r.is_empty() && !is_wire_name(r)) {
+                return None;
+            }
+            continue;
         }
         if let Some((component, spec)) = row.split_once('<') {
             if component.is_empty() || spec.is_empty() || component.contains('/') {

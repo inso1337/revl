@@ -9,6 +9,7 @@ rows joined by ``;``, the kind of each row set by its leading marker
     C<k       requirement: component C requires key k in the shared realm
     C<k/r     requirement: the same, resolved in realm r
     C<*k      requirement: the same, multi-realm bound (item 162)
+    C>k/r,r   route:       the realms C binds k across (the legs of that bind)
     -C        replacing:   component C is withdrawn by this admission
     !halted   header:      the composition is halted; every admission refuses
     !services header:      the `:S` rows below ENUMERATE the running
@@ -78,6 +79,24 @@ def _declared_services(ir: dict) -> list[str] | None:
     return list(services)
 
 
+def _route_rows(name: str, entry: dict) -> list[str]:
+    """The route rows of `entry`: one per routed key, carrying the realms of the
+    bind in declaration order.
+
+    The requirement row's `*` marker says a key is routed; this says WHERE, and
+    it is what lets the gate run item 162's per-realm provider check over a
+    RUNNING consumer — the check the reference runs over every `_link` entry,
+    ambient ones included, and the one the gate was blind to while the wire
+    carried no legs (issue #1036). The strategy name is deliberately not
+    rendered: no refusal on this surface names it, and a field nothing reads is
+    a field that drifts.
+    """
+    rows = []
+    for key, route in (entry.get("routes") or {}).items():
+        rows.append(f"{name}>{key}/" + ",".join(route.get("realms") or []))
+    return rows
+
+
 def _requirement_row(name: str, key: str, entry: dict) -> str:
     """One requirement row for `key`, carrying the realm the running consumer
     resolves it in — which is what makes the gate's per-(key, realm) reasoning
@@ -96,8 +115,9 @@ def _requirement_row(name: str, key: str, entry: dict) -> str:
 def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
     """The ambient-admission wire for the composition manifest of `ir`.
 
-    Provision rows come first per component, then requirement rows, components
-    in manifest (declaration) order — the node order the gate's G3 union graph
+    Provision rows come first per component, then requirement rows, then the
+    route rows of the same component, components in manifest (declaration)
+    order — the node order the gate's G3 union graph
     seeds its DFS from, so a cross-manifest cycle is named identically to the
     single-source composition of the manifest ++ the incoming text. The
     withdrawal rows of `replacing` follow, after the composition they act on.
@@ -107,6 +127,14 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
     withdraws nothing, exactly as on the reference side. The components the
     incoming TEXT redeclares are NOT rendered here — the gate derives that
     implicit half from the text itself, as `compile_files` does.
+
+    A route row is a COMPOSITION row — it says what one running component binds
+    across which realms — so it sits with its component, after that component's
+    requirement rows and ahead of the service block. That keeps the per-component
+    grouping the wire already has, keeps the running composition's routes in the
+    order `_link` walks its entries (which fixes which realm a refusal names
+    first), and leaves both the provision/requirement positions and the `mnames`
+    DFS seed order untouched.
 
     The SERVICE BLOCK sits between the composition rows and the withdrawal rows:
     it describes the composition, and a withdrawal acts on what precedes it. So
@@ -124,6 +152,7 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
             rows.append(f"{name}/{key}/{realm}")
         for key in entry.get("inject") or []:
             rows.append(_requirement_row(name, key, entry))
+        rows.extend(_route_rows(name, entry))
     services = _declared_services(ir)
     if services is not None:
         rows.append(SERVICES_HEADER)

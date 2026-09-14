@@ -79,6 +79,7 @@ C/k/r        provision: component C provides key k in realm r ("" = shared)   (l
 C<k          requirement: component C requires key k                           (slice 3)
 C<k/r        requirement: the same, resolved in realm r                        (wave 1)
 C<*k         requirement: the same, multi-realm bound (item 162)               (wave 1)
+C>k/r,r      route: the realms C binds k across, in declaration order          (#1036)
 -C           replacing: component C is withdrawn by this admission             (wave 1)
 C=k:T        handoff: C exports state of type T at key k                       (wave 2)
 !halted      header: the composition is halted; every admission refuses       (slice 3)
@@ -218,10 +219,62 @@ requirement, and a withdrawal of the consumer itself. It lives in
 
 Still open for the wave: the `C=k:T` handoff row and its compatibility check
 (part 2, still blocked on the self-host type layer), and the 419c refusal
-ordering (part 3). Route rows are still absent from the wire, so a routed
-RUNNING consumer whose realm loses its provider is refused by the reference
-(item 162) and admitted by the gate; the withdrawal check stays out of that
-case rather than reporting it under the wrong tag.
+ordering (part 3).
+
+**Route rows, and the routed realm loss (2026-09-14, issue #1036).** The wire
+grows one more kind:
+
+```
+C>k/r1,r2    route: the realms the running component C binds key k across
+```
+
+The requirement row's `*` marker said a running consumer's key was ROUTED; this
+row says WHERE. Without it the gate could not ask the question item 162 answers,
+so a routed running consumer whose realm lost its provider was refused by the
+reference and ADMITTED by the gate: the running consumer stranded with nothing
+said anywhere. `admit_ambient` now runs the per-realm provider check over the
+running composition's routes, in the order `_link` walks its entries (the
+ambient ones first), and reports under **item 162's own tag and message**. The
+withdrawal check still skips a routed key: it answers "this key became unmet",
+this one answers "this realm has no provider", and a refusal carrying a name
+that does not describe it teaches the reader the wrong rule.
+
+The legs are edges as well as an existence check. The reference builds one
+provider-to-consumer edge per routed realm for an ambient entry too, so a cycle
+that closes through a routed running consumer is seen now where the legless wire
+contributed no edge at all.
+
+Failure direction: fail-CLOSED. Every refusal here is an admission that does not
+happen; the running composition keeps running, its routed consumer still bound
+to the providers it has. The scope is exactly the reference's — a realm named by
+a route row with no provider in the resulting per-(key, realm) table — and the
+non-vacuity controls in oracle B pin that a legitimate routed replacement (same
+name, same key, same realm) and a routed key nothing withdraws both still admit.
+A garbled route row refuses by name, as a garbled withdrawal row does, rather
+than parsing into a route with no legs.
+
+The row costs wire budget like any other: `MANIFEST_ROW_LIMIT` counts
+`;`-separated segments, not kinds, so a wire of route rows over the bound is an
+`outside_frontier` decline ahead of the fold, never an admission
+(`crates/revl-gate`'s `route_rows_past_the_bound_are_declined_and_not_admitted_into`).
+On the admission surface a route row is READ and counted as nothing:
+`manifest_shape` validates its component, key and realm labels, and leaves the
+counts to the `C<*k` requirement row, which already carries the by-key
+obligation. Reading it is the point — a row that surface cannot parse declines
+the WHOLE wire, so leaving route rows out would have silently withheld the
+admission arm from every routed composition, which is the shape of the bug the
+`C<*k` and `C<k/r` spellings had there until #1044 read them.
+
+Where the row sits, on the combined wire: a route row is a COMPOSITION row, so
+it rides with its component, after that component's requirement rows and ahead
+of the item-346 service block, which describes the whole composition; the
+withdrawal rows stay last, because a withdrawal acts on everything before it.
+The provision and requirement rows keep their exact positions, so the G3 DFS
+seed order (`mnames`) is unchanged. A rendered wire therefore reads, in full:
+
+```
+StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2;!services;:Kv;:Api
+```
 
 ## Relation to the other decisions in this batch
 
@@ -245,7 +298,13 @@ case rather than reporting it under the wrong tag.
 3. **Halted header.** `admit_ambient(X, "!halted;A/a/")` refuses every `X`,
    naming the halt.
 4. **Unknown row kind.** `admit_ambient(X, "?A/a/")` refuses naming the row.
-5. **Oracle B (the wave's exit).** For a corpus of `(M, X, R)` triples covering
+5. **A routed running consumer's lost realm (#1036).** `M` runs `StoreA` (`kv`
+   in `r1`), `StoreB` (`kv` in `r2`) and a `Router` routing `kv` across both;
+   `X` redeclares `StoreB` without the provision. Both sides refuse
+   `ROUTE|multi-realm bind of `kv` in Router names realm `r2` ...`. Stripping
+   the route rows from the wire reproduces the admission the gate used to give,
+   which pins which row closed it.
+6. **Oracle B (the wave's exit).** For a corpus of `(M, X, R)` triples covering
    plain replacement, an unmet consumer, a realm-separated non-conflict and a
    handoff mismatch, the first verdict string agrees byte-for-byte between the
    reference wrapper and `admit_ambient` over `manifest_wire(IR(M))`.

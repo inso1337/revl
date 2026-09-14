@@ -873,8 +873,8 @@ struct Running<'a> {
 /// admission surface can account for, `None` otherwise.
 ///
 /// The accountable kinds are the provision (`C/k/r`), the requirement in its
-/// three spellings (`C<k`, `C<k/r`, `C<*k`) and the service block (`!services`,
-/// `:S`). Everything else declines the wire, which is a withheld admission and
+/// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`) and the
+/// service block (`!services`, `:S`). Everything else declines the wire, which is a withheld admission and
 /// not a refusal: a `!halted` header, a handoff row, and — deliberately, even
 /// though the fold has a full answer for it — a WITHDRAWAL row (`-C`). A
 /// withdrawal changes which provisions survive and can strand a running
@@ -891,6 +891,15 @@ struct Running<'a> {
 /// check exists to catch a bogus wire, not to re-derive the link. And a `:S` row
 /// only counts inside a block a `!services` header CLAIMED: a service list nobody
 /// vouched for is not a list an admission may rest on.
+///
+/// A ROUTE row (issue #1036) is READ and counted as nothing. Its key is already
+/// on the wire as a `C<*k` requirement and already carries the by-key
+/// obligation; the legs say which realms it binds, and a per-realm obligation
+/// here would be the same re-derivation of the link the by-key rule above
+/// declines. Reading it is the point: a row this function cannot parse declines
+/// the WHOLE wire, so leaving route rows out would have silently withheld the
+/// admission surface from every routed composition — the shape of the bug the
+/// `C<*k` and `C<k/r` spellings had here until they were read.
 fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
     let mut provided: Vec<&str> = Vec::new();
     let mut required: Vec<&str> = Vec::new();
@@ -919,6 +928,21 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
         if row.starts_with('-') {
             // A withdrawal. The fold decides it; this surface does not.
             return None;
+        }
+        if let Some((component, spec)) = row.split_once('>') {
+            // `C>k/r1,r2` — the realms a running component binds `k` across. It
+            // is read BEFORE the provision fallback because it carries a `/` of
+            // its own and would otherwise look like a provision whose component
+            // name is `C>k`.
+            let (key, realms) = spec.split_once('/')?;
+            if !is_wire_name(component) || !is_wire_name(key) {
+                return None;
+            }
+            // an empty label is the shared realm, exactly as on a provision row
+            if realms.split(',').any(|r| !r.is_empty() && !is_wire_name(r)) {
+                return None;
+            }
+            continue;
         }
         if let Some((component, spec)) = row.split_once('<') {
             if component.is_empty() || spec.is_empty() || component.contains('/') {
@@ -2017,7 +2041,8 @@ fn manifest_rows(manifest: &str) -> usize {
 ///
 /// `manifest` is the row wire (`docs/design/186-ambient-admission-guarantees.md`):
 /// `C/k/r` for a provision (`r` is the realm, `""` for shared), `C<k` for a
-/// requirement, `!halted` for a halted composition, joined by `;`. The empty
+/// requirement, `C>k/r,r` for the realms a running component routes a key
+/// across, `!halted` for a halted composition, joined by `;`. The empty
 /// string is the empty composition, so `admit_into(source, "")` is
 /// `admit(source)` byte for byte — this arm generalises [`admit`] rather than
 /// re-implementing it.
@@ -2462,6 +2487,24 @@ component CacheLayer requires store: Store provides store: Store {\n\
     }
 
     #[test]
+    fn route_rows_past_the_bound_are_declined_and_not_admitted_into() {
+        // A new row kind costs wire budget like any other: the bound counts
+        // `;`-separated SEGMENTS, not kinds, so a wire of route rows over it is
+        // declined ahead of the fold. The clause that matters is the second —
+        // the answer is a frontier decline with no admission in it, never a
+        // quiet fold of a wire whose depth could abort the stack.
+        let wire = "Router>kv/r1,r2;".repeat(MANIFEST_ROW_LIMIT + 1);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+        assert!(
+            is_row_bound_refusal(&verdict),
+            "a route-row wire over the bound must be declined: {:?}",
+            verdict,
+        );
+        assert!(verdict.is_undecided());
+        assert!(verdict.to_json().contains("\"admitted\":false"));
+    }
+
+    #[test]
     fn a_manifest_under_the_row_bound_is_still_folded() {
         // Non-vacuity in the other direction: a ceiling, not a wall. The wire
         // below the bound is folded exactly as it was before the bound existed,
@@ -2623,6 +2666,34 @@ component CacheLayer requires store: Store provides store: Store {\n\
         // decides a withdrawal, this surface declines the wire.
         let withdrawn = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc;-Kv";
         assert!(!issue_admission_into(FRESH, withdrawn).is_admitted());
+    }
+
+    #[test]
+    fn a_routed_composition_is_still_readable_by_the_admission_surface() {
+        // Issue #1036 put ROUTE rows on the wire, and a row this surface cannot
+        // parse declines the WHOLE wire. So a routed composition must stay
+        // readable, or the arm would go silently dead for every composition that
+        // uses `realms(...)` — the shape of the bug the `C<*k` and `C<k/r`
+        // spellings had here until they were read.
+        const ROUTED: &str = "StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;\
+Router>kv/r1,r2;!services;:Kv;:Api";
+        const FRESH: &str = "service Cache {\n  fn lookup(key: Str) -> Str\n}\n";
+        let into = issue_admission_into(FRESH, ROUTED);
+        assert!(into.is_admitted(), "{:?}", into);
+        // and the counts are the ones the requirement rows give: the route row
+        // carries legs, not a second requirement.
+        match &into {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains("its 3 provision rows resolve its 1 requirement rows"),
+                        "{}", basis)
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        // a garbled route row still declines the wire, as every unreadable row does
+        for bad in ["Router>kv", "Router>/r1", "Router>kv/r1,-"] {
+            let wire = format!("StoreA/kv/r1;{};!services;:Kv", bad);
+            assert!(!issue_admission_into(FRESH, &wire).is_admitted(), "{:?}", bad);
+        }
     }
 
     #[test]
@@ -3409,7 +3480,8 @@ impl Session {
     ///
     /// `manifest` is the ROW WIRE the item-186 wire defines — `C/k/r` for a
     /// provision (`r` the realm, `""` for shared), `C<k` for a requirement,
-    /// `!halted` for a halted composition, joined by `;` — the same input
+    /// `C>k/r,r` for a running component's routed realms, `!halted` for a
+    /// halted composition, joined by `;` — the same input
     /// [`crate::admit_into`] takes. It is a PARAMETER and not a projection of
     /// [`Session::live`] on purpose: a [`Composition`] carries the component
     /// names and the keys the generation provides, and a manifest also needs the
@@ -5877,8 +5949,9 @@ holds conflicts (`G2`), a route into a realm the union does not provide dangles
 (`G3`). The decision is the native fold `selfhost/lower.rvl::admit_ambient`,
 compiled to rust like `admit`, and the manifest arrives as item 186's row wire
 (`docs/design/186-ambient-admission-guarantees.md`): `C/k/r` for a provision
-(`r` the realm, `""` for shared), `C<k` for a requirement, `!halted` for a
-halted composition, joined by `;`. The empty manifest is the empty composition,
+(`r` the realm, `""` for shared), `C<k` for a requirement, `C>k/r,r` for the
+realms a running component routes a key across, `!halted` for a halted
+composition, joined by `;`. The empty manifest is the empty composition,
 so `admit_into(source, "")` is `admit(source)` byte for byte — the arm
 generalises `admit` rather than re-implementing it.
 
