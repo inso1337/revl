@@ -385,6 +385,42 @@ component StoreB provides kv: Kv {
 # Programs the reference admits — the gate must admit them too. Kept
 # reference-clean (no out-of-slice defect), so "" is the only agreement.
 ACCEPTED_PROGRAMS = [
+    # ---- the provide-method return annotation (item 391) -------------------
+    # A provide method may RESTATE the return type its service already declares.
+    # The reference parses it and leaves any mismatch to the type layer
+    # (`t7_provide_param_annotation_mismatch.rvl` is the parameter twin, a T1).
+    # `p_prov_methods` read the `{`/`=` straight off the end of the parameter
+    # list, so an annotated method failed the whole component with `BAD|bad
+    # provide block in component <C>` — a false rejection of legal programs AND,
+    # on a program the reference refuses, a parse-stage BAD standing where the
+    # real verdict should be (the census filed three documents as
+    # `tag-mismatch/G4->BAD` for exactly this reason). The step is conditional,
+    # so both unannotated forms are pinned beside the annotated ones: an
+    # unconditional step would eat the `{` or `=` of a bare method instead.
+    ("provide method restates its return type", """service Counter {
+  fn size() -> Int
+  fn bump(n: Int) -> Int
+  fn label(n: Int) -> Str
+  fn flag() -> Bool
+}
+component Tally provides counter: Counter {
+  provide counter {
+    fn size() -> Int { return 0 }
+    fn bump(n) { return n + 1 }
+    fn label(n) -> Str = n.to_str()
+    fn flag() = true
+  }
+}
+"""),
+    ("async provide method restates its return type", """service Feed {
+  async fn head() -> Int
+}
+component Reader provides feed: Feed {
+  provide feed {
+    async fn head() -> Int { return 1 }
+  }
+}
+"""),
     # The accepting twin of the single-case-alias G1 rejections: a MULTI-case
     # variant registers each case name as a constructor, builtin-spelled names
     # included (`type T = Foo | Str` makes `Str(...)` a real case), so both
