@@ -14,6 +14,12 @@
 //     the subscription. Multi-source teardown rides the one bracket the
 //     subscribe registers: `close` closes the merge, which detaches it from both
 //     sources, and each source is left to its own bracket.
+//   Chain    — the Slice 2 derived-stream combinator chain (`map`/`filter`/
+//     `take`, §1). Each link is a DERIVED stream owned by the subscription, so
+//     the whole chain unwinds off the ONE bracket the `subscribe` registers. A
+//     filtered item never reaches the body, a mapped one reaches it transformed,
+//     and a spent `take(n)` synthesises the `Closed` terminal that ends the loop
+//     — the same three answers the py reference gives for the same source.
 //   Iterate  — `every o in sub { … }` (Slice 4, §4.7): the async-iteration form,
 //     a plain blocking `next` loop on this tier. Each delivered item runs the
 //     effectful body (an emission to a required Sink); a `Closed` terminal ends
@@ -44,6 +50,15 @@ service Sink { emission fn write(v: Str) }
 component Iterate requires sink: Sink {
   let src = effect Stream.source() undo src.close()
   let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+
+component Chain requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.filter(x => x != "skip").map(x => x + "!").take(2)
+              undo sub.close()
   every o in sub {
     emit sink.write(o)
   }

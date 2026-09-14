@@ -31,14 +31,16 @@
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
         },
-        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every \u2026 in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on \u2026 as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted.": {
+        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every \u2026 in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on \u2026 as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone.": {
           "_document_holds_stream": 3,
           "_flag_stream": 1,
           "_flag_stream_event": 2,
           "_is_stream_next": 7,
           "_raw_go_ident": 3,
-          "_refuse_unlowered_stream_surface": 7,
-          "_stream_head": 4
+          "_refuse_unlowered_stream_surface": 5,
+          "_stream_chain": 13,
+          "_stream_head": 4,
+          "_stream_stage_arrow": 16
         },
         "Code-point scan-loop recognition/rendering requires Str length/charAt/charCodeAt builtin IR. Those stdlib calls and helper preambles are an explicit Go deferral; ordinary while/for and break/continue are already covered.": {
           "_go_v3_scan_read": 14,
@@ -281,7 +283,7 @@
     "java": {
       "statements": 2587,
       "uncovered": {
-        "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every \u2026 in` / `on \u2026 as` loop (`_emit_stream_iter`), the `on \u2026 as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json.": {
+        "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every \u2026 in` / `on \u2026 as` loop (`_emit_stream_iter`), the `on \u2026 as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone.": {
           "_body_holds_stream": 1,
           "_body_holds_stream_event": 7,
           "_document_holds_stream": 1,
@@ -291,8 +293,10 @@
           "_emit_stream_runtime": 1,
           "_java_event_field": 14,
           "_r1_marker_lines": 12,
-          "_refuse_unlowered_stream_surface": 7,
-          "_stream_head": 4
+          "_refuse_unlowered_stream_surface": 5,
+          "_stream_chain": 11,
+          "_stream_head": 4,
+          "_stream_stage_arrow": 9
         },
         "`Map` subscript lowering (issue #957): `_uses_map_index.walk` answers whether the document reads a `Map` subscript and `_emit_map_index_helper` renders the static `revlMapIndex` it lowers to. emit_java_corpus/maps.rvl exercises the Map METHODS, not the subscript, and a document that added one would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)). The reference half is pinned by tests/test_cross_tier_execution.py. Porting the arm to selfhost/emit_java.rvl is the corpus work that retires this entry.": {
           "_emit_map_index_helper": 1,
@@ -949,11 +953,13 @@
           "_main": 11,
           "cargo_toml": 1
         },
-        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation.": {
+        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone.": {
           "_is_stream_next": 7,
-          "_refuse_unlowered_stream_surface": 7,
+          "_refuse_unlowered_stream_surface": 5,
+          "_stream_chain": 12,
           "_stream_event_host_rust": 1,
           "_stream_head": 4,
+          "_stream_stage_arrow": 10,
           "_subscription_binds": 1,
           "_uses_stream_event": 1
         },

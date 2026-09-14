@@ -782,16 +782,21 @@ def test_wasm_still_refuses_the_fan_in():
 
 @pytest.mark.parametrize("tier", ["go", "rust", "java"])
 @pytest.mark.parametrize(("head", "want"), [
-    ("subscribe a.map(x => x) undo sub.close()", "combinator chain"),
     ("subscribe a policy drop_oldest undo sub.close()", "drop_oldest"),
     ("subscribe a policy block drain 5s undo sub.close()", "block"),
 ])
 def test_blocking_tiers_refuse_the_slice_2_surface_they_do_not_lower(tier, head, want):
-    """Slice 2's combinator chain and its three non-default backpressure
-    policies run on the py reference tier only. A blocking tier that emitted a
-    subscription while SILENTLY dropping the chain, the lossy policy or the
-    drain window would run and quietly disagree with the reference — the worst
-    outcome available. Both refuse by name instead."""
+    """Slice 2's three non-default backpressure policies and its `block`-policy
+    drain window run on the py reference tier only. The drain window is the one
+    that must stay refused on principle: its resume fires on the deterministic
+    test clock, which no blocking tier carries, so a lowering would resume EARLY
+    and quietly disagree with the reference. A blocking tier that emitted a
+    subscription while SILENTLY dropping the lossy policy or the window would
+    run and answer differently from the reference — the worst outcome
+    available. All three refuse by name instead.
+
+    The combinator chain is no longer on this list: it IS lowered on all three
+    (see `test_the_blocking_tiers_lower_the_combinator_chain`)."""
     emit = _tier_emit(tier)
     ir = compile_source(
         "component C {\n"
@@ -804,6 +809,72 @@ def test_blocking_tiers_refuse_the_slice_2_surface_they_do_not_lower(tier, head,
     msg = str(excinfo.value)
     assert want in msg
     assert "not lowered" in msg and "backend py" in msg
+
+
+_CHAIN_HEAD = """
+component C {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe a.filter(x => x != "skip").map(x => x + "!").take(2)
+              undo sub.close()
+  await sub.next()
+}
+"""
+
+
+@pytest.mark.parametrize(("tier", "want"), [
+    ("go", 'StreamSubscribe(StreamTake(StreamMap(StreamFilter(a, '
+           'func(x string) bool { return (x != "skip") }), '
+           'func(x string) string { return (x + "!") }), 2), "error", 0)'),
+    ("rust", 'Stream::subscribe(&Stream::take(&Stream::map(&Stream::filter(&a, '
+             '|x: String| -> bool { (x != "skip") }), '
+             '|x: String| -> String { format!("{}{}", x, String::from("!")) }), '
+             '2usize), "error", 0usize)'),
+    ("java", 'Stream.subscribe(Stream.take(Stream.map(Stream.filter(a, '
+             '(x) -> !revlEq(x, "skip")), (x) -> (x + "!")), 2), "error", 0)'),
+])
+def test_the_blocking_tiers_lower_the_combinator_chain(tier, want):
+    """Slice 2's derived-stream chain on the three blocking tiers (§1).
+
+    Each link is a DERIVED stream nested INSIDE the subscription's acquisition,
+    left to right, so the LAST link is the subscription's immediate upstream —
+    the same nesting the py reference builds from its `stages=[…]` list, which
+    is what makes the four tiers agree item for item. There is still exactly ONE
+    bracket: the chain is owned by the subscription, never by a bracket of its
+    own, so `close` unwinds the whole chain and each plain source is left to its
+    own inverse."""
+    assert want in _tier_emit(tier).emit(compile_source(_CHAIN_HEAD, "s.rvl"))
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+def test_a_combinator_chain_is_still_one_bracket_on_the_blocking_tiers(tier):
+    """The chain is a DERIVED stream owned by the subscription (§1), so a
+    three-link chain registers the SAME single inverse a Slice 1 subscription
+    does. A link with a bracket of its own would break the LIFO close-order
+    proof the core guarantee rests on."""
+    chained = _tier_emit(tier).emit(compile_source(_CHAIN_HEAD, "s.rvl"))
+    plain = _tier_emit(tier).emit(compile_source(
+        "component C {\n"
+        "  let a = effect Stream.source() undo a.close()\n"
+        "  let sub = subscribe a undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n", "s.rvl"))
+    inverse = {"go": "return func() error { sub.Close(); return nil }",
+               "rust": "sub_undo.close(); Ok(())",
+               "java": "() -> sub.close()"}[tier]
+    assert chained.count(inverse) == plain.count(inverse) == 1
+
+
+def test_the_general_arrow_refusal_still_stands_on_the_blocking_tiers():
+    """Lowering the combinator transform did NOT open arrow values in component
+    position. The stage renderer is scoped to a one-parameter transform over the
+    tier's stream item — a known interface and a known item type — so the
+    general limit go and java declare is untouched, and
+    `tests/test_expr_dispatcher_conformance.py` keeps pinning it as data.
+
+    A bare arrow in a component body still refuses on both, which is what stops
+    this slice from having quietly widened the tier surface."""
+    assert "arrow" in _tier_emit("go").EXPR_REFUSED["component"]
+    assert "arrow" in _tier_emit("java").EXPR_REFUSED
 
 
 @pytest.mark.parametrize("tier", ["go", "rust", "java"])

@@ -421,7 +421,8 @@ def _expr(node, env: _Env, expected=None) -> str:
         # `next` is parked: teardown never has to wait for the provider.
         _flag_stream()
         _refuse_unlowered_stream_surface(node, "cordis-go")
-        stream = _stream_head(node.get("stream") or {}, env)
+        stream = _stream_chain(node.get("stream") or {},
+                               node.get("stages") or [], env, "cordis-go")
         policy = node.get("policy") or "error"
         capacity = int(node.get("buffer") or 0)
         return "StreamSubscribe(%s, %s, %d)" % (stream, _go_string(policy),
@@ -2542,19 +2543,16 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
 def _refuse_unlowered_stream_surface(node, tier: str) -> None:
     """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
 
-    Slice 2 shipped `map`/`filter`/`take` and the three non-default backpressure
-    policies on the py reference tier only; Slice 3 lowered subscribe/next/close
-    and the `merge` fan-in here. Emitting a subscription that SILENTLY dropped a
-    combinator chain, a lossy policy or a drain window would be the worst
-    outcome available: the program would run and quietly disagree with the
-    reference tier. Refuse by name instead, the same call the wasm tier makes
-    for the whole surface."""
-    if node.get("stages"):
-        raise EmitError(
-            "a stream combinator chain (`map`/`filter`/`take`) is not lowered "
-            "on the %s tier; the derived-stream chain runs on the py reference "
-            "tier (item 130 Slice 2) while this tier lowers subscribe / next / "
-            "close and `merge` (Slice 3) — try `--backend py`" % tier)
+    The derived combinator chain (`map`/`filter`/`take`) IS lowered here now —
+    see `_stream_chain`. What is left are the three non-default backpressure
+    policies and the `block`-policy drain window, and the drain window is the
+    one that must stay refused on principle: its resume fires on the
+    deterministic test clock, which this tier does not carry, so lowering it
+    would resume EARLY and quietly disagree with the reference. Emitting a
+    subscription that SILENTLY dropped a lossy policy or a drain window is the
+    worst outcome available — the program would run and answer differently from
+    the py reference — so refuse by name instead, the same call the wasm tier
+    makes for the whole surface."""
     policy = node.get("policy") or "error"
     if policy != "error":
         raise EmitError(
@@ -2602,6 +2600,71 @@ def _stream_head(node, env) -> str:
                          for src in node.get("sources") or [])
         return "StreamMerge(%s)" % args
     return _expr(node, env)
+
+
+def _stream_stage_arrow(stage: dict, env, tier: str) -> str:
+    """Render ONE combinator's pure transform as a Go closure over the tier's
+    stream item (item 130 Slice 2, rule 3.5).
+
+    The general `arrow` value has no lowering in the stc-go component world (see
+    `_expr`), and that limit stands: an arrow in an arbitrary component position
+    still has no type to render against. A combinator's transform is a different
+    animal — ONE parameter, ONE pure expression, and a known item type (stream
+    items are `string` on this tier, the same recovery `every … in` makes) — so
+    it is rendered here against that type instead of through the general arrow
+    arm. Nothing else in a component body gains an arrow lowering.
+
+    The purity of the body is the FRONTEND's guarantee (lower.py refuses a stage
+    whose transform reaches an effect or a suspension), so this renders a plain
+    expression and never a bracket.
+    """
+    fn = stage.get("fn") or {}
+    params = fn.get("params") or []
+    if fn.get("kind") != "arrow" or len(params) != 1:
+        raise EmitError(
+            "a `%s` combinator needs a one-parameter pure arrow on the %s tier "
+            "(item 130 rule 3.5)" % (stage.get("stage"), tier))
+    name = params[0]
+    ret = "bool" if stage.get("stage") == "filter" else "string"
+    surface = "Bool" if stage.get("stage") == "filter" else "Str"
+    saved_params = set(env.params)
+    saved_types = dict(env.var_types)
+    env.params = saved_params | {name}
+    env.var_types[name] = "Str"
+    try:
+        body = _expr(fn.get("body"), env, surface)
+    finally:
+        env.params = saved_params
+        env.var_types = saved_types
+    return "func(%s string) %s { return %s }" % (_safe_local(name), ret, body)
+
+
+def _stream_chain(head, stages, env, tier: str) -> str:
+    """The `subscribe` head wrapped in its derived-stream combinator chain
+    (item 130 Slice 2, §1).
+
+    Left to right, so `src.filter(p).map(f)` filters first and the LAST link is
+    the subscription's immediate upstream — the same nesting the py reference
+    builds from its `stages=[…]` list, so the two tiers agree item for item.
+    Every link is DERIVED and owned by the subscription, so the whole chain
+    unwinds off the ONE bracket the `subscribe` registers."""
+    out = _stream_head(head, env)
+    for stage in stages:
+        kind = stage.get("stage")
+        if kind == "take":
+            count = stage.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                raise EmitError(
+                    "`take` needs a positive whole count, got %r" % (count,))
+            out = "StreamTake(%s, %d)" % (out, count)
+        elif kind == "map":
+            out = "StreamMap(%s, %s)" % (out, _stream_stage_arrow(stage, env, tier))
+        elif kind == "filter":
+            out = "StreamFilter(%s, %s)" % (out,
+                                            _stream_stage_arrow(stage, env, tier))
+        else:  # pragma: no cover — the parser admits exactly three combinators
+            raise EmitError("unknown stream combinator %r" % (kind,))
+    return out
 
 
 def _is_stream_next(expr) -> bool:
@@ -7053,11 +7116,15 @@ var (
 // stream is itself a terminal-delivering provider another `merge` can take.
 type Stream struct {
 	mu          sync.Mutex
-	kind        string // "source" | "merge"
+	kind        string // "source" | "merge" | "stage"
+	stage       string // "" | "map" | "filter" | "take" (a combinator link)
+	mapFn       func(string) string
+	predFn      func(string) bool
+	remaining   int       // items a `take(n)` link still forwards
 	subs        []*Subscription
-	down        []*Stream // merged streams fed by this one
-	up          []*Stream // sources feeding this merged stream
-	pending     int       // upstream sources not yet terminal (merged only)
+	down        []*Stream // derived streams fed by this one
+	up          []*Stream // sources feeding this derived stream
+	pending     int       // upstream sources not yet terminal (derived only)
 	state       string    // "open" | "closed" | "faulted"
 	faultReason string
 	released    bool
@@ -7092,6 +7159,60 @@ func StreamMerge(a *Stream, b *Stream) *Stream {
 	a.attachDown(m)
 	b.attachDown(m)
 	return m
+}
+
+// streamStage opens one link of a derived-stream combinator chain — `map(f)`,
+// `filter(p)` or `take(n)` (design §1, Slice 2). A link is BOTH a subscriber of
+// its upstream and an upstream of the next link, so a chain is
+// `Stream -> stage -> … -> Subscription` and neither the provider nor the
+// subscription needs to know the chain is there.
+//
+// A link is DERIVED — owned by the subscription below it, never a bracket of its
+// own — so `sub.Close()` unwinds the whole chain down to (but not including) the
+// provider, which is left to its OWN bracket. That is what keeps teardown one
+// LIFO stack. The transforms are G6-pure (rule 3.5), enforced at admission, so a
+// link never introduces an effect, a suspension or a failure path of its own.
+func streamStage(up *Stream, kind string) *Stream {
+	s := &Stream{kind: "stage", stage: kind, state: "open", pending: 1,
+		up: []*Stream{up}}
+	_revlStreamMu.Lock()
+	_revlStreams = append(_revlStreams, s)
+	_revlStreamMu.Unlock()
+	hostRecord("stream.stage " + kind)
+	revlHostAcquire()
+	up.attachDown(s)
+	return s
+}
+
+// StreamMap is `map(f)`: every item is transformed by a pure arrow.
+func StreamMap(up *Stream, f func(string) string) *Stream {
+	s := streamStage(up, "map")
+	s.mu.Lock()
+	s.mapFn = f
+	s.mu.Unlock()
+	return s
+}
+
+// StreamFilter is `filter(p)`: an item the predicate rejects is not forwarded.
+// A rejection is NOT backpressure — the provider's emit succeeded, this derived
+// stream simply has nothing to carry — so the link still reports acceptance.
+func StreamFilter(up *Stream, p func(string) bool) *Stream {
+	s := streamStage(up, "filter")
+	s.mu.Lock()
+	s.predFn = p
+	s.mu.Unlock()
+	return s
+}
+
+// StreamTake is `take(n)`: the derived stream ends with a `Closed` TERMINAL
+// after n ACCEPTED items (never silence, §4.3), and detaches from its upstream
+// so the provider stops feeding it.
+func StreamTake(up *Stream, n int) *Stream {
+	s := streamStage(up, "take")
+	s.mu.Lock()
+	s.remaining = n
+	s.mu.Unlock()
+	return s
 }
 
 func (s *Stream) attachDown(m *Stream) {
@@ -7142,21 +7263,87 @@ func (s *Stream) Emit(item string) bool {
 	return true
 }
 
-func (s *Stream) forward(item string) {
+// forward carries one item to this stream's consumer and into any derived stream
+// fed by it, applying this link's combinator first when it is one.
+//
+// It answers downstream ACCEPTANCE, exactly as the py reference does: an `error`
+// overflow anywhere below reaches the provider through the chain rather than
+// being swallowed by a link, which is also what `take(n)` counts — an item the
+// consumer never accepted does not spend the budget.
+func (s *Stream) forward(item string) bool {
 	s.mu.Lock()
 	if s.state != "open" {
 		s.mu.Unlock()
-		return
+		return false
+	}
+	stage, mapFn, predFn := s.stage, s.mapFn, s.predFn
+	// `take(n)` RESERVES its slot under the lock and refunds it if the delivery
+	// is refused, rather than reading the budget here and decrementing it after
+	// the forward. Two concurrent emits could otherwise both observe
+	// `remaining == 1` and deliver n+1 items — a divergence from the py
+	// reference (single-threaded, so it cannot have the race) that would only
+	// show under load.
+	reserved, last := false, false
+	if stage == "take" {
+		if s.remaining <= 0 {
+			s.mu.Unlock()
+			return false
+		}
+		s.remaining--
+		reserved = true
+		last = s.remaining == 0
 	}
 	subs := append([]*Subscription(nil), s.subs...)
 	downs := append([]*Stream(nil), s.down...)
+	ups := append([]*Stream(nil), s.up...)
 	s.mu.Unlock()
+	switch stage {
+	case "map":
+		item = mapFn(item)
+	case "filter":
+		if !predFn(item) {
+			// a predicate rejection is not backpressure: the provider's emit
+			// succeeded, this derived stream simply has nothing to forward.
+			return true
+		}
+	}
+	accepted := true
 	for _, sub := range subs {
-		sub.deliver(item)
+		if !sub.deliver(item) {
+			accepted = false
+		}
 	}
 	for _, d := range downs {
-		d.forward(item)
+		if !d.forward(item) {
+			accepted = false
+		}
 	}
+	if reserved {
+		if !accepted {
+			// refused downstream: the item never landed, so it does not spend
+			// the budget (the py reference decrements only on acceptance).
+			s.mu.Lock()
+			s.remaining++
+			s.mu.Unlock()
+		} else if last {
+			// `take(n)` is exhausted: the derived stream ends with a `Closed`
+			// TERMINAL pushed downstream (never silence, §4.3), and this link
+			// detaches from its upstream so the provider stops feeding it. The
+			// link itself stays live until the subscription's bracket inverse
+			// closes it, so the chain still unwinds as one LIFO stack.
+			hostRecord("stream.take exhausted")
+			for _, u := range ups {
+				u.detachDown(s)
+			}
+			for _, sub := range subs {
+				sub.terminate("closed", "")
+			}
+			for _, d := range downs {
+				d.upstreamTerminal("closed", "")
+			}
+		}
+	}
+	return accepted
 }
 
 // Close is the provider's terminal-delivering inverse (§9 Part B) and, for a
@@ -7171,7 +7358,7 @@ func (s *Stream) Close() bool {
 	}
 	release := !s.released
 	s.released = true
-	kind := s.kind
+	kind, stage := s.kind, s.stage
 	subs := append([]*Subscription(nil), s.subs...)
 	downs := append([]*Stream(nil), s.down...)
 	ups := append([]*Stream(nil), s.up...)
@@ -7195,7 +7382,11 @@ func (s *Stream) Close() bool {
 		}
 	}
 	if release {
-		hostRecord("stream." + kind + " close")
+		if kind == "stage" {
+			hostRecord("stream.stage close " + stage)
+		} else {
+			hostRecord("stream." + kind + " close")
+		}
 		revlHostRelease()
 	}
 	return first
@@ -7308,20 +7499,25 @@ func StreamSubscribe(src *Stream, policy string, capacity int) *Subscription {
 	return sub
 }
 
-func (sub *Subscription) deliver(item string) {
+// deliver buffers one item under the declared overflow policy (§4.4). It answers
+// whether the delivery was ACCEPTED — a false is backpressure the provider sees
+// through the chain, never a silent drop.
+func (sub *Subscription) deliver(item string) bool {
 	sub.mu.Lock()
 	dead := sub.closed || sub.termed
 	sub.mu.Unlock()
 	if dead {
-		return
+		return false
 	}
 	select {
 	case sub.items <- item:
+		return true
 	default:
 		switch sub.policy {
 		case "", "error":
 			hostRecord("stream.overflow")
 			sub.terminate("faulted", "overflow")
+			return false
 		default:
 			panic("revl: backpressure policy " + sub.policy +
 				" is not lowered on the cordis-go tier")

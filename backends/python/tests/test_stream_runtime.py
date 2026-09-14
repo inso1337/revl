@@ -938,6 +938,51 @@ async def test_the_iteration_composes_with_the_combinator_chain(trace):
     assert runtime_mod.Stream.pending() == 0, "the whole chain unwound (no residue)"
 
 
+# The SAME program the three blocking tiers now run against their own runtimes
+# (backends/go/testdata/stream_130.rvl, backends/rust/scenarios/stream.rvl,
+# backends/java/scenarios/stream_130.rvl, each as `component Chain`). It is here
+# so the reference answer the four tiers are held to is asserted in one place: a
+# chain that compiled on a tier and delivered a DIFFERENT list from this one
+# would be far worse than the refusal the blocking tiers used to give.
+_ITER_CHAIN_MAPPED = """
+service Sink { emission fn write(v: Str) }
+component Chain requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.filter(x => x != "skip").map(x => x + "!").take(2)
+              undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_chain_scenario_the_blocking_tiers_mirror(trace):
+    """The reference answer for the cross-tier `Chain` scenario: a filtered item
+    never reaches the body, a mapped one reaches it TRANSFORMED, and a spent
+    `take(2)` synthesises the `Closed` terminal the loop ends on — with the whole
+    chain still riding the ONE bracket the `subscribe` registered."""
+    module = _module(_ITER_CHAIN_MAPPED, "stream_chain_mirror")
+    root, sink = _sink_root()
+    c = root.plugin(module.Chain)
+    await _flush()
+
+    src = runtime_mod.Stream.last_source()
+    for item in ("skip", "one", "skip", "two", "three"):
+        src.emit(item)
+    await _flush()
+
+    assert sink.written == ["one!", "two!"]
+    ops = [e for e in _ops(trace) if e.startswith("stream")]
+    assert "stream.take exhausted" in ops, \
+        "take(2) synthesises its own Closed terminal"
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED
+    assert runtime_mod.Stream.pending() == 0, "the whole chain unwound (no residue)"
+
+
 # ===========================================================================
 # Slice 5 — typed EVENTS: `on <Event> as <x> in <sub> { … }` (§6)
 # ===========================================================================

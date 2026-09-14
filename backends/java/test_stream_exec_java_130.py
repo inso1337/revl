@@ -114,9 +114,10 @@ def test_merge_opens_inside_the_subscriptions_acquisition():
     ONE bracket the subscribe registers."""
     src = _emit_java(FIXTURE)
     assert 'var sub = Stream.subscribe(Stream.merge(a, b), "error", 0);' in src
-    # one bracket per subscribing component (Consumer, Parked, Fanin, Iterate) and
-    # NO extra bracket for the derived merge — it is owned by the subscription.
-    assert src.count("() -> sub.close()") == 4
+    # one bracket per subscribing component (Consumer, Parked, Fanin, Iterate,
+    # Chain) and NO extra bracket for the derived merge or for any link of the
+    # Slice 2 combinator chain — each is owned by the subscription.
+    assert src.count("() -> sub.close()") == 5
     fanin = src[src.index("class FaninPlugin"):src.index("class IteratePlugin")]
     assert fanin.count("fx.track(") == 3, (
         "the fan-in grew a bracket of its own; multi-source teardown must ride "

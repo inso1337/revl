@@ -688,3 +688,159 @@ func TestEmitted_Iteration_UnloadWhileParkedClosesTheStream(t *testing.T) {
 		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
 	}
 }
+
+// -------------------------------------------------------------------------
+// Slice 2 — the derived-stream combinator chain, executed.
+//
+// The compile-time half proves the chain EMITS; only running it proves the
+// three answers agree with the py reference, which is the whole point of
+// lowering it here rather than leaving it refused:
+//
+//   * `filter(p)` drops an item without it ever reaching the body, and a
+//     rejection is NOT backpressure (the provider's emit still succeeds);
+//   * `map(f)` reaches the body TRANSFORMED;
+//   * `take(n)` ends the derived stream with a `Closed` TERMINAL after n
+//     accepted items — the loop ends on it, the terminal never enters the body,
+//     and a later emit is not delivered;
+//   * the whole chain unwinds off the ONE bracket the `subscribe` registered:
+//     no stream residue and no live host resource after unload.
+// -------------------------------------------------------------------------
+
+func TestEmitted_CombinatorChain_FiltersMapsAndEndsOnTake(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	sink := &collectSink{}
+	provider := root.Load(sinkProvider(sink))
+	if err := provider.Ready(bg()); err != nil {
+		t.Fatalf("SinkProvider: %v", err)
+	}
+
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadChain(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+
+	waitFor(t, "the chain to subscribe", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+	// One PROVIDER plus three derived links (filter, map, take) — every link is
+	// a live stream owned by the subscription below it.
+	waitFor(t, "the three combinator links to open", func() bool {
+		return len(StreamProviders()) == 4
+	})
+	src := StreamProviders()[0]
+	if src.kind != "source" {
+		t.Fatalf("the first stream is %q, want the provider", src.kind)
+	}
+
+	src.Emit("skip")   // filtered: never reaches the body
+	src.Emit("one")    // -> "one!"
+	src.Emit("skip")   // filtered again
+	src.Emit("two")    // -> "two!", which spends take(2)
+	src.Emit("three")  // past take(2): never delivered
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("the chain activation failed: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a spent take(n) never ended the loop")
+	}
+
+	if g := sink.snapshot(); !reflect.DeepEqual(g, []string{"one!", "two!"}) {
+		t.Fatalf("delivered items = %v, want [one! two!] — filtered items never "+
+			"reach the body, mapped ones reach it transformed, and take(2) bounds it", g)
+	}
+	marks := HostMarks()
+	if marksIndex(marks, "stream.take exhausted") < 0 {
+		t.Fatalf("take(2) did not synthesise its terminal: %v", marks)
+	}
+
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after unload = %d, want 0 (the whole chain "+
+			"must unwind off the one subscribe bracket)", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
+	}
+}
+
+// The core guarantee still holds THROUGH a chain: unloading the owner while the
+// loop is parked trips the cancel channel, resolves the park as `Closed`, and
+// the ONE bracket inverse closes every derived link down to (but not including)
+// the provider, which is left to its own bracket.
+func TestEmitted_CombinatorChain_UnloadWhileParkedUnwindsTheWholeChain(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	sink := &collectSink{}
+	provider := root.Load(sinkProvider(sink))
+	if err := provider.Ready(bg()); err != nil {
+		t.Fatalf("SinkProvider: %v", err)
+	}
+
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadChain(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+	waitFor(t, "the chain to park in next", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+
+	// The provider never emits an item the chain forwards, so the loop is parked.
+	// An orderly close of the source reaches the consumer THROUGH all three links.
+	StreamProviders()[0].Close()
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("an orderly source close must end the loop cleanly: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the terminal never reached the consumer through the chain")
+	}
+	if g := sink.snapshot(); len(g) != 0 {
+		t.Fatalf("the body ran on a terminal: delivered %v, want none", g)
+	}
+
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+	marks := HostMarks()
+	for _, want := range []string{
+		"stream.stage close take",
+		"stream.stage close map",
+		"stream.stage close filter",
+	} {
+		if marksIndex(marks, want) < 0 {
+			t.Fatalf("the chain did not unwind (%s missing): %v", want, marks)
+		}
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after unload = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
+	}
+}

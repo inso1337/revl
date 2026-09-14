@@ -10,7 +10,7 @@
 //! neither deadlock teardown nor leak.
 
 use revl_stream_scn::{
-    consumer, fanin, handler, iterate, parked, revl_stream_live_subscriptions,
+    chain, consumer, fanin, handler, iterate, parked, revl_stream_live_subscriptions,
     revl_stream_marks, revl_stream_pending, revl_stream_providers, revl_stream_reset, Sink,
     Stream, StreamNext, STREAM_BUFFER_CAPACITY,
 };
@@ -758,4 +758,106 @@ fn event_contract_is_bounded_and_validates_before_it_dedups() {
         ),
         other => panic!("a malformed item did not fault: {:?}", other),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 — the derived-stream combinator chain, executed (§1).
+//
+// The compile-time half proves the chain EMITS; only running it proves the three
+// answers agree with the py reference, which is the whole point of lowering it
+// here rather than leaving it refused:
+//
+//   * `filter(p)` drops an item without it ever reaching the body, and a
+//     rejection is NOT backpressure (the provider's emit still succeeds);
+//   * `map(f)` reaches the body TRANSFORMED;
+//   * `take(n)` ends the derived stream with a `Closed` TERMINAL after n
+//     accepted items — the loop ends on it, the terminal never enters the body,
+//     and a later emit is not delivered;
+//   * the whole chain unwinds off the ONE bracket the `subscribe` registered.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn combinator_chain_filters_maps_and_ends_on_take() {
+    reset();
+    let got = Arc::new(Mutex::new(Vec::<String>::new()));
+    let rx = drive_stream_consumer("Chain", chain, got.clone(), true);
+
+    wait_for("the chain to subscribe", || {
+        revl_stream_live_subscriptions() == 1
+    });
+    // one PROVIDER plus three derived links (filter, map, take) — every link is
+    // a live stream owned by the subscription below it.
+    wait_for("the three combinator links to open", || {
+        revl_stream_providers().len() == 4
+    });
+    let providers = revl_stream_providers();
+    assert_eq!(providers[0].kind(), "source", "the first stream is the provider");
+
+    providers[0].emit(String::from("skip")); // filtered: never reaches the body
+    providers[0].emit(String::from("one")); // -> "one!"
+    providers[0].emit(String::from("skip")); // filtered again
+    providers[0].emit(String::from("two")); // -> "two!", which spends take(2)
+    providers[0].emit(String::from("three")); // past take(2): never delivered
+
+    let outcome = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a spent take(n) never ended the loop");
+    assert_eq!(outcome, "disposed", "{}", outcome);
+    assert_eq!(
+        snapshot(&got),
+        vec!["one!", "two!"],
+        "filtered items never reach the body, mapped ones reach it transformed, \
+         and take(2) bounds it"
+    );
+    let marks = revl_stream_marks();
+    assert!(
+        mark_index(&marks, "stream.take exhausted").is_some(),
+        "take(2) did not synthesise its terminal: {:?}",
+        marks
+    );
+    assert_eq!(revl_stream_pending(), 0, "residue: {:?}", marks);
+}
+
+/// The core guarantee still holds THROUGH a chain: an orderly source close
+/// reaches the parked consumer through every link, and the ONE bracket inverse
+/// closes each derived link down to (but not including) the provider.
+#[test]
+fn combinator_chain_unwinds_off_the_one_bracket() {
+    reset();
+    let got = Arc::new(Mutex::new(Vec::<String>::new()));
+    let rx = drive_stream_consumer("Chain", chain, got.clone(), true);
+
+    wait_for("the chain to park in next", || {
+        revl_stream_live_subscriptions() == 1
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "the loop left the park with no item and no terminal"
+    );
+
+    revl_stream_providers()[0].close();
+
+    let outcome = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the terminal never reached the consumer through the chain");
+    assert_eq!(outcome, "disposed", "{}", outcome);
+    assert!(
+        snapshot(&got).is_empty(),
+        "the body ran on a terminal: {:?}",
+        snapshot(&got)
+    );
+    let marks = revl_stream_marks();
+    for want in [
+        "stream.stage close take",
+        "stream.stage close map",
+        "stream.stage close filter",
+    ] {
+        assert!(
+            mark_index(&marks, want).is_some(),
+            "the chain did not unwind ({} missing): {:?}",
+            want,
+            marks
+        );
+    }
+    assert_eq!(revl_stream_pending(), 0, "residue: {:?}", marks);
 }
