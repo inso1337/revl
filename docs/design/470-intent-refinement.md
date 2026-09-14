@@ -7,8 +7,7 @@ three slices: the semantic kernel `src/revl/intent.py` (the `Intent` record, the
 `tests/test_470_intent_refinement.py`), and the source surface that finally
 holds a declaration and compares a crossing against it (the `within` and
 `acting` clauses, with coverage in `tests/test_470_intent_surface.py`). Section
-3 names the three landed lines and section 4 names the three stages that stay
-open.
+3 names the four landed lines and section 4 names the stages that stay open.
 
 Companion docs: [441-goal-contracts.md](441-goal-contracts.md),
 [442-typed-delegation.md](442-typed-delegation.md),
@@ -281,10 +280,63 @@ compiles, and both AST fields default to `None`, so a method and an emit that
 write neither clause lower to byte-identical IR. The check lives entirely in
 lower, keyed off the declaration, and contributes no IR key of its own.
 
+### 3.4 Slice 4: the declaration bounds the operation, not its `emit` steps
+
+**Landed: the completeness half of slice 3's rule.** Slice 3 closed one hole per
+crossing, at the crossing: an `emit` step under a declaration must state what it
+does. The demand it could not make from there is the one the whole feature rests
+on, because a declaration is only as strong as the crossings it sees, and an
+`emit` step is not the only way a provide-method body reaches a boundary. Three
+other spellings do, and each of them let a body declare `within { object:
+fs.write(path="/tmp"), verbs: [ingest] }` and then reach `/etc` with no refusal
+at all:
+
+- a DIRECT CALL to an `emission` extern (`let n = wr(row)`). A host emission
+  extern needs no `emit` marker, so the G4 scope check counts it as a crossing
+  and item 470 never saw it.
+- a VALUE-POSITION emission (`let r = emit svc.op(...)`, the `EmitExpr` the
+  parser admits wherever a unary sits). Its marker is inside an expression, so
+  no trailing clause can reach it, and it is not an `EmitStmt` at all.
+- a HELPER HOP: a plain `fn` the body calls that itself reaches an emission.
+  The same G4 check follows it transitively; slice 3's per-step check does not.
+
+So the rule is restated over the whole body. Under a declaration the only
+crossing spelling admitted is an `emit` step that states itself, and whatever
+the body still reaches once those steps are removed is a crossing that states
+nothing. `lower._check_intent_completeness` runs the residue through
+`_method_emissions`, the SAME analysis the G4 provider upper bound reads, so the
+check inherits that analysis's transitive reach and its vocabulary instead of
+inventing a second one, and it refuses with the objects the declaration names.
+
+The direction is the kernel's, not the cone's: a crossing INSIDE the declared
+cone is refused too when it states nothing, because the finding is "this cannot
+be shown to refine the declaration" and not "this object is outside it". The
+same crossing written as `emit wr(row) acting { verb: ingest }` compiles, so the
+rule bounds the spelling and never the boundary.
+
+It is keyed off `decl.within` exactly as slice 3 is, and returns before it
+builds anything when no intent is declared, so no existing program reaches it
+and the byte-identical-IR property slice 3 pinned is unchanged.
+
+One consequence is worth stating rather than discovering: a VALUE-RETURNING
+crossing has no stating spelling today. `let r = emit svc.op(...)` is how an
+emission that returns data is written, and it can carry no clause, so under a
+declaration it is refused with no rewrite available other than dropping the
+returned value. The slot for it is a trailing `acting` on the binding statement
+rather than on the expression, and it is named in section 4 as open work.
+
 ## 4. Explicit non-goals for this note
 
-Three stages are named and deliberately not started; each is a separate,
+Four stages are named and deliberately not started; each is a separate,
 independently reviewable change:
+
+0. **The stating slot for a value-returning crossing.** Slice 4 refuses
+   `let r = emit svc.op(...)` under a declaration because the marker sits inside
+   an expression and no clause can trail it. The honest surface is an `acting`
+   clause on the BINDING STATEMENT (`let r = emit svc.op(...) acting { verb: … }`),
+   which is a `let` grammar change rather than an expression one, plus the
+   per-crossing check slice 3 already runs. Until it lands, an operation that
+   declares an intent must discard what its crossings return.
 
 1. **The class-(c) approval gate.** Today the gate compares the grant against the
    request with `_grant_covers` / `_grant_within`. Routing that comparison
@@ -296,6 +348,16 @@ independently reviewable change:
    is an intent refinement rather than an authority-versus-request comparison.
    `cap_order`'s ceiling erasure into `remainingUses` interacts with this and
    must be settled there, not here.
+
+   It has no source-side half to land first, which is worth recording because it
+   is the obvious thing to reach for. `let l = effect lease <cap> … undo
+   l.revoke()` is lowered only from a COMPONENT ACTIVATION body
+   (`lower._lower_lease_step` has exactly one caller, in the component-body
+   loop), and `within { … }` declares an intent on a SERVICE OPERATION, so no
+   declaration is ever in scope where a lease is acquired. Comparing a lease
+   against a declared intent therefore needs either a declaration surface the
+   activation body can carry or the runtime path in `mcp/session.py`, and the
+   runtime path is the one this stage names.
 3. **The operator profile.** A surface that declares an operator's intent so the
    `TOOL_VERB` management actions can be checked against it.
 
