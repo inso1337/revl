@@ -839,3 +839,267 @@ def test_this_guard_cannot_itself_skip():
         "extra, so a plain `pip install -e '.[test]'` job cannot even collect "
         "it. Put it back in pyproject.toml."
     )
+
+
+# --------------------------------------------------------------------------
+# THE THIRD HALF: skips gated on the cordis-py RUNTIME (issue #1067).
+#
+# The docstring at the top of this file names what the two halves above still
+# do not catch: "a toolchain-probe skip that does NOT go through a `revl.test`
+# tier runner. tests/test_time_coeffect.py probing for backends/python/.venv by
+# hand is one." That is the largest such class in the suite, not a corner:
+# roughly ninety files in `tests/` gate on the cordis-py runtime, either with
+# `find_spec("cordis")` or with a hand-rolled probe for the interpreter at
+# `backends/python/.venv/bin/python`.
+#
+# It bit the same way the others did. `tests/test_app_notes_725.py
+# ::test_dev_once_boots_the_app_and_proves_no_residue` greps the `revl dev`
+# output for the line naming the frontend entry it registered. Item 459 F1 made
+# the asset handle carry a ROOT-RELATIVE path, the unit tests beside it were
+# updated, that grep was not, and it went red. It stayed red because from a
+# plain development venv the whole leg reports SKIPPED, so nobody running
+# `pytest tests/` locally saw anything at all.
+#
+# The question this section asks is the same one both halves above ask, and it
+# reuses the same `_pytest_targets` / `_covers` helpers: is the gate open in a
+# job that actually runs the file? For a runtime probe that means a job which
+# runs `backends/python/setup.sh` AND hands pytest a target collecting the file.
+# `frontend-cordis` is that job today, and item 430 records why it exists.
+#
+# What this does NOT claim: it does not make the job required, and it does not
+# make a missing runtime a failure the way `REVL_REQUIRE_TIERS` does for a
+# tier. It asserts the weaker, checkable thing -- that the gate is open
+# somewhere in CI -- which is exactly the property that was true here and false
+# in items 430 and 433. Whether `frontend-cordis` blocks a merge is a branch
+# protection decision, not one this suite can make.
+# --------------------------------------------------------------------------
+
+#: The command that provisions the runtime every probe below looks for. A job
+#: that does not run it cannot open these gates, whatever it collects.
+_CORDIS_SETUP = "backends/python/setup.sh"
+
+#: Text in a skip condition that makes it a cordis-runtime gate. `.venv` is the
+#: hand-rolled interpreter probe (`ROOT / "backends" / "python" / ".venv" /
+#: ...`); `cordis` covers `find_spec("cordis")` and the import probes.
+_RUNTIME_TOKENS = ("cordis", ".venv")
+
+#: Files whose runtime gate is knowingly open in no CI job. Same contract as
+#: every other registry here: it may only shrink, and an entry needs a reason
+#: that survives "why can no job just run it?". Empty is the correct state.
+_RUNTIME_NOT_RUN_IN_CI: dict[str, str] = {}
+
+
+def _skip_conditions(tree: ast.Module) -> list[ast.expr]:
+    """The condition expression of every conditional-skip marker in a module.
+
+    Both spellings, since `tests/` uses both: the marker applied directly to a
+    test, and the marker bound to a module-level name (`needs_cordis = ...`)
+    and reused. The call carries the condition either way, so one scan sees
+    both. A keyword `condition=` is read as well as the positional form.
+    """
+    found: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else (
+            func.id if isinstance(func, ast.Name) else None)
+        if name not in _SKIP_MARKERS:
+            continue
+        if node.args:
+            found.append(node.args[0])
+        for kw in node.keywords:
+            if kw.arg == "condition":
+                found.append(kw.value)
+    return found
+
+
+#: Spelled as data rather than as `pytest.mark.<name>` attribute access, which
+#: `test_this_guard_cannot_itself_skip` above forbids anywhere in this file.
+_SKIP_MARKERS = frozenset({"skipif"})
+
+
+def _runtime_gated_files() -> dict[str, list[str]]:
+    """Repo-relative test file -> the runtime skip conditions it carries.
+
+    A condition counts when it names the runtime itself, or when it reads a
+    module-level constant that does -- `not CORDIS_PY.exists()` says nothing on
+    its own, and `CORDIS_PY = ROOT / "backends" / "python" / ".venv" / ...`
+    above it is the whole gate.
+    """
+    out: dict[str, list[str]] = {}
+    for path in _test_sources():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - a broken test file is its own failure
+            continue
+        runtime_names: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            value = ast.unparse(node.value)
+            if any(token in value for token in _RUNTIME_TOKENS):
+                runtime_names |= {t.id for t in node.targets
+                                  if isinstance(t, ast.Name)}
+        gates: set[str] = set()
+        for condition in _skip_conditions(tree):
+            text = ast.unparse(condition)
+            reads = {n.id for n in ast.walk(condition) if isinstance(n, ast.Name)}
+            if any(token in text for token in _RUNTIME_TOKENS) or (
+                    reads & runtime_names):
+                gates.add(text)
+        if gates:
+            out[path.relative_to(ROOT).as_posix()] = sorted(gates)
+    return out
+
+
+#: A single- or double-quoted run of characters, removed before deciding that a
+#: `run:` line invokes pytest.
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _command_lines(run: str) -> str:
+    """The `run:` lines that INVOKE pytest, dropping the ones that merely name it.
+
+    A `run:` block can embed a python snippet whose PROSE contains the word:
+    the sandbox jobs print `::error::pytest wrote no junit report` when the
+    junit file is missing. `_pytest_targets` reads such a line as a pytest call
+    with no path arguments, which it reports as ".", meaning "collects the
+    whole rootdir". One of those inside any provisioning job would satisfy
+    every file below at once and this check could never fail again -- the exact
+    mistake the rest of this file exists to catch. So the word has to survive
+    with its quoted segments removed before the line counts as a command.
+    """
+    return "\n".join(
+        line for line in run.splitlines() if "pytest" in _QUOTED.sub("", line)
+    )
+
+
+def _runtime_provisioning_jobs() -> list[tuple[str, list[str]]]:
+    """(job, pytest targets) for every CI job that installs the cordis runtime.
+
+    Per JOB rather than per step: `setup.sh` and the pytest invocation are two
+    separate steps of the same job, and it is the job that carries the venv
+    from one to the other.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for path in sorted(WORKFLOWS.rglob("*.yml")) + sorted(WORKFLOWS.rglob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job, spec in (doc.get("jobs") or {}).items():
+            runs = [str((step or {}).get("run", ""))
+                    for step in (spec or {}).get("steps") or []]
+            if not any(_CORDIS_SETUP in run for run in runs):
+                continue
+            targets: list[str] = []
+            for run in runs:
+                targets += _pytest_targets(_command_lines(run))
+            out.append((job, targets))
+    return out
+
+
+def _runtime_gaps(gated: dict[str, list[str]],
+                  jobs: list[tuple[str, list[str]]]) -> list[str]:
+    """Gated files no provisioning job collects. The comparison itself, kept
+    free of both the workflow reader and the source scanner so the control
+    below can drive it with a job list it writes."""
+    return sorted(
+        rel for rel in gated
+        if rel not in _RUNTIME_NOT_RUN_IN_CI
+        and not any(_covers(target, rel) for _job, targets in jobs
+                    for target in targets)
+    )
+
+
+def test_every_cordis_gated_test_runs_in_a_job_that_provisions_the_runtime():
+    """No runtime-gated test may pass by never running (issue #1067).
+
+    `pytest tests/` on a checkout with no cordis-py reports these files as
+    SKIPPED, and a skip is the same colour as a pass. So some CI job must both
+    run `backends/python/setup.sh` and hand pytest a target that collects the
+    file; otherwise the gate is shut everywhere and the assertions underneath
+    it are decoration.
+    """
+    jobs = _runtime_provisioning_jobs()
+    assert jobs, (
+        f"no CI job runs `{_CORDIS_SETUP}`, so every cordis-gated test in "
+        "tests/ skips everywhere. That is item 430 exactly: 398 tests across "
+        "81 modules executing nowhere while the dashboard stayed green."
+    )
+    gated = _runtime_gated_files()
+    assert gated, (
+        "no test in tests/ gates on the cordis-py runtime any more. If the "
+        "guards were genuinely removed, delete this check deliberately and say "
+        "so on the roadmap rather than letting it pass by measuring nothing."
+    )
+    missing = _runtime_gaps(gated, jobs)
+    assert not missing, (
+        "these tests skip themselves when the cordis-py runtime is absent, and "
+        "no CI job both installs it and collects them, so they run NOWHERE:\n"
+        + "\n".join(f"  {rel}" for rel in missing)
+        + f"\n\nAdd them to a job that runs `{_CORDIS_SETUP}` (`frontend-cordis` "
+        "collects the whole root suite for this reason, item 430), or "
+        "enumerate them in _RUNTIME_NOT_RUN_IN_CI with a reason."
+    )
+
+
+def test_the_runtime_coverage_check_can_actually_fail():
+    """A check that cannot fail proves nothing, and this file is about exactly
+    that class of mistake, so the comparison is driven both ways here rather
+    than trusted. Same job list shape the workflow reader produces: narrowed to
+    a directory that does not hold the root suite, every gated file is a gap;
+    widened to the root suite, none is."""
+    gated = _runtime_gated_files()
+    assert gated
+
+    narrowed = [("frontend-cordis", ["backends/python/tests/"])]
+    assert _runtime_gaps(gated, narrowed) == sorted(
+        rel for rel in gated if rel not in _RUNTIME_NOT_RUN_IN_CI)
+
+    assert _runtime_gaps(gated, [("frontend-cordis", ["tests/"])]) == []
+
+    # the catch-all target is the way this check would quietly stop being able
+    # to fail, so the filter that keeps prose from producing one is driven too
+    prose = 'print("::error::pytest wrote no junit report - the run did not start")'
+    assert _pytest_targets(_command_lines(prose)) == []
+    real = "backends/python/.venv/bin/python -m pytest tests/ -q"
+    assert _pytest_targets(_command_lines(real)) == ["tests/"]
+    assert "." not in [t for _job, targets in _runtime_provisioning_jobs()
+                       for t in targets]
+    # and a job that collects everything but installs nothing is not a job at
+    # all here: the reader only ever yields jobs that ran the setup script.
+    assert _runtime_gaps(gated, []) == sorted(
+        rel for rel in gated if rel not in _RUNTIME_NOT_RUN_IN_CI)
+
+
+def test_the_scanner_sees_both_spellings_of_the_runtime_gate():
+    """The two shapes `tests/` actually uses, pinned against real files so a
+    scanner that quietly stops matching one of them is a red rather than a
+    shorter list. `tests/test_app_notes_725.py` is issue #1067's own file and
+    carries both: a `find_spec("cordis")` marker and a hand-rolled probe for
+    the interpreter under `backends/python/.venv`."""
+    gated = _runtime_gated_files()
+    conditions = " ".join(gated.get("tests/test_app_notes_725.py", []))
+    assert "find_spec" in conditions, gated.get("tests/test_app_notes_725.py")
+    assert "exists()" in conditions, gated.get("tests/test_app_notes_725.py")
+    # the interpreter-path spelling on its own, in a file that has no other gate
+    assert "tests/test_lifecycle_exec.py" in gated
+
+
+def test_no_stale_runtime_exemptions():
+    """The exemption registry may only shrink, like every other one here."""
+    gated = _runtime_gated_files()
+    jobs = _runtime_provisioning_jobs()
+    for rel, reason in sorted(_RUNTIME_NOT_RUN_IN_CI.items()):
+        assert rel in gated, (
+            f"{rel} is exempted from the runtime-coverage check but no longer "
+            "gates on the cordis-py runtime. Drop the entry rather than "
+            "leaving the excuse behind."
+        )
+        assert not any(_covers(target, rel) for _job, targets in jobs
+                       for target in targets), (
+            f"{rel} is exempted but a CI job that installs the runtime now "
+            "collects it. The gap closed; drop the entry."
+        )
+        assert len(reason.strip()) >= _MIN_REASON_CHARS, (
+            f"{rel}: a one-liner is not a reason. Say why no job can run it."
+        )
