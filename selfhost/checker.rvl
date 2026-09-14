@@ -1174,6 +1174,7 @@ fn calls_in(e: Expr, acc: List[Str]) -> List[Str] {
     Arrow(a)   => calls_in(a.body, acc),
     Match(m)   => arms_calls(m.arms, 0, calls_in(m.scrut, acc)),
     Templ(t)   => parts_calls(t.parts, 0, acc),
+    RecUpd(r)  => inits_calls(r.upds, 0, calls_in(r.base, acc)),
   }
 }
 
@@ -1330,6 +1331,7 @@ fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {
     Arrow(a)   => walk_expr(a.body, marked, ck),
     Match(m)   => walk_arms(m.arms, 0, marked, walk_expr(m.scrut, marked, ck)),
     Templ(t)   => walk_parts(t.parts, 0, marked, ck),
+    RecUpd(r)  => walk_inits(r.upds, 0, marked, walk_expr(r.base, marked, ck)),
   }
 }
 
