@@ -77,8 +77,10 @@ Rows joined by `;`. Kind by the leading character:
 ```
 C/k/r        provision: component C provides key k in realm r ("" = shared)   (landed)
 C<k          requirement: component C requires key k                           (slice 3)
--C           replacing: component C is withdrawn by this admission             (wave)
-C=k:T        handoff: C exports state of type T at key k                       (wave)
+C<k/r        requirement: the same, resolved in realm r                        (wave 1)
+C<*k         requirement: the same, multi-realm bound (item 162)               (wave 1)
+-C           replacing: component C is withdrawn by this admission             (wave 1)
+C=k:T        handoff: C exports state of type T at key k                       (wave 2)
 !halted      header: the composition is halted; every admission refuses       (slice 3)
 ```
 
@@ -114,7 +116,7 @@ Two oracles, one per regime:
 | slice | delivers | precondition |
 |---|---|---|
 | **3 (now)** | requirement rows on the wire; G3 over the union graph in `link_refusals(pg, seed)`; the `!halted` header; `manifest_wire(ir)` projection; oracle A extended to G3 and pinned in `tests/test_selfhost_lower.py`; gate crate and wasm gate regenerated | none beyond the regen |
-| **wave, part 1** | `-C` rows, G2 against `M \ R`, the unmet-consumer refusal, oracle B | the reference wrapper returning the first verdict string |
+| **wave, part 1** (landed) | `-C` rows, G2 against `M \ R`, the unmet-consumer refusal on both the reference and the native gate, oracle B | the reference wrapper returning the first verdict string |
 | **wave, part 2** | `C=k:T` rows and the handoff compatibility check | the self-host type layer (docs/design/457-selfhost-type-layer.md): `compatible` cannot be ported to `lower.rvl` before the types it compares exist there |
 | **wave, part 3** | 419c closure: line-ordered collecting of ambient refusals against internal ones for the multi-refusal corpus (slice 2 ordered the single-conflict case) | parts 1-2, so the corpus can carry multi-refusal programs |
 
@@ -147,8 +149,51 @@ twice. Re-providing the key in a different realm does not satisfy a
 shared-realm consumer, which is the case a realm-blind check would have wrongly
 admitted.
 
-Still open for the wave: the `-C` and `C=k:T` row kinds on the wire, the same
-refusal inside `selfhost/lower.rvl`'s `admit_ambient`, and oracle B.
+**Wave part 1, the native gate and oracle B (2026-09-14).** `-C` rows on the
+wire, G2/ROUTE/G3 against `M \ R`, the same unmet-consumer refusal inside
+`selfhost/lower.rvl`'s `admit_ambient`, and the differential that builds the
+running manifest on both sides.
+
+The wire grows three shapes, all backward compatible (a slice-3 wire renders
+and parses byte for byte as before):
+
+```
+-C           replacing: component C is withdrawn by this admission
+C<k/r        requirement: the same as C<k, resolved in realm r
+C<*k         requirement: the same as C<k, multi-realm bound (item 162)
+```
+
+A requirement row carried no realm before, which was enough for the G3 edge it
+existed for and is not enough for a per-(key, realm) unmet-consumer check: a
+consumer isolated into realm `r` would have read as a shared-realm one and the
+loss would have been missed. The routed marker keeps a multi-realm bind out of
+the single-realm table, so a stray shared-realm provider cannot shadow a route's
+own targets and the withdrawal check leaves a routed loss to the item-162 check,
+exactly as the reference does. `manifest_wire(ir, replacing=R)` renders all
+three, so the wire says what `compile_files(paths, manifest=IR(M), replacing=R)`
+says.
+
+`R` reaches the gate two ways, mirroring `compile_files`: the explicit `-C`
+rows, and the implicit replacement a component performs by redeclaring a running
+name. A `-C` row that does not name a bare component is a garbled wire and
+refuses, as an unknown row kind does.
+
+Oracle B, the exit test the roadmap asked item 186 for: the reference compiles
+`M` to `IR(M)`, `manifest_wire(IR(M), replacing=R)` renders the wire, and the
+first `TAG|message` of `compile_source(X, manifest=IR(M), replacing=R)` is
+compared byte for byte with `admit_ambient(X, wire)`. It covers plain
+replacement, an unmet consumer reached implicitly and explicitly, a
+realm-separated re-provision, a realm-separated non-conflict, an already-unmet
+requirement, and a withdrawal of the consumer itself. It lives in
+`tests/test_selfhost_lower.py`; the gate's own in-language cases live in
+`selfhost/lower.rvl` and ride into `crates/revl-gate` with the generated crate.
+
+Still open for the wave: the `C=k:T` handoff row and its compatibility check
+(part 2, still blocked on the self-host type layer), and the 419c refusal
+ordering (part 3). Route rows are still absent from the wire, so a routed
+RUNNING consumer whose realm loses its provider is refused by the reference
+(item 162) and admitted by the gate; the withdrawal check stays out of that
+case rather than reporting it under the wrong tag.
 
 ## Relation to the other decisions in this batch
 

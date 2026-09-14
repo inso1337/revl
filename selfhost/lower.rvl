@@ -4538,10 +4538,18 @@ fn non_template_comps(comps: List[CompD], templates: List[Str]) -> List[CompD] {
 // A resolved provider entry: which component provides `key` in realm `rlm`.
 type Prov3 = { key: Str, rlm: Str, comp: Str }
 
-// item 186 slice 3: a manifest REQUIREMENT row `C<k` — component `C` consumes
-// key `k` (shared realm; the requirement wire carries no realm). Its only role
-// is the G3 union graph (`manifest_edges`).
-type MReq = { comp: Str, key: Str }
+// item 186 slice 3: a manifest REQUIREMENT row — component `comp` consumes key
+// `key`. Two roles: the G3 union graph (`manifest_edges`) and, since the
+// replacement wave, the unmet-consumer check (`withdrawal_refusals`).
+//
+// `rlm` is the realm the running consumer resolves the key in (`C<k/r`; "" —
+// the bare `C<k` row — is the shared realm), mirroring lower.py's
+// `_realm(entry, key)`, which reads ONE isolate map for both the provision and
+// the requirement role. `routed` marks a multi-realm bind (`C<*k`, item 162):
+// its legs resolve per-realm, not through the single-realm table, so it seeds
+// no shared-realm edge and the withdrawal check leaves it to the link-time
+// per-realm provider check rather than reporting one loss twice.
+type MReq = { comp: Str, key: Str, rlm: Str, routed: Bool }
 
 fn find_provider(ps: List[Prov3], key: Str, rlm: Str, i: Int) -> Str {
   if (i >= ps.length()) { return "" }
@@ -4832,14 +4840,19 @@ fn link_refusals(pg: Prog, seed: List[Prov3], seedReqs: List[MReq],
 }
 
 // item 186 slice 3: one edge per manifest requirement `C<k` — the running
-// component `C` consumes `k`, so its provider (in the union provision table,
-// shared realm — the wire's requirement rows carry no realm) must precede it.
-// A key `C` provides itself adds no self-edge (mirrors `route_edges` /
-// `scan_reqs`, and a self-cycle in an already-running manifest is impossible).
+// component `C` consumes `k`, so its provider (in the union provision table, in
+// the realm the row names) must precede it. A key `C` provides itself adds no
+// self-edge (mirrors `route_edges` / `scan_reqs`, and a self-cycle in an
+// already-running manifest is impossible). A ROUTED requirement (`C<*k`) is
+// skipped for the same reason `scan_reqs` skips one: its legs resolve
+// per-realm, and a stray shared-realm provider must not shadow the route's own
+// targets. The wire carries no route legs, so a routed running consumer
+// contributes no edge at all rather than a wrong one.
 fn manifest_edges(reqs: List[MReq], i: Int, provs: List[Prov3],
                   succ: Map[Str, List[Str]]) -> Map[Str, List[Str]] {
   if (i >= reqs.length()) { return succ }
-  let provider = find_provider(provs, reqs[i].key, "", 0)
+  if (reqs[i].routed) { return manifest_edges(reqs, i + 1, provs, succ) }
+  let provider = find_provider(provs, reqs[i].key, reqs[i].rlm, 0)
   if (provider == "" || provider == reqs[i].comp) {
     return manifest_edges(reqs, i + 1, provs, succ)
   }
@@ -6861,19 +6874,31 @@ pub fn admit_tag(src: Str) -> Str {
 //     stays two-arg: the wire grows by TAGGED row kinds, not a third argument,
 //     so the crate signature the gate digests does not move.
 //
-// The surface still behind the WAVE (item 186): service REPLACEMENT (`-C` rows)
-// and G2 against `M \ R`, the unmet-consumer refusal, `handoff` STATE
-// compatibility (`C=k:T` rows, blocked on the self-host type layer), and a
-// reference-side ambient oracle that builds a running manifest on BOTH sides. A
-// `-C` or `C=k:T` row in the wire therefore REFUSES here (fail-closed) rather
-// than being silently mis-admitted. See
-// docs/design/186-ambient-admission-guarantees.md.
+//   * WAVE PART 1 — service REPLACEMENT. The wire grows `-C` rows (the
+//     withdrawn set `R`, the wire's carrier for `compile_files`' `replacing=`),
+//     a component in the incoming text implicitly withdraws the running one it
+//     redeclares by name, G2/ROUTE/G3 run against `M \ R ∪ X`, and the one
+//     thing that union cannot see — a provision that is simply GONE, stranding
+//     a RETAINED running consumer — is refused by `withdrawal_refusals`,
+//     byte-identical to the reference's `_admit_provision_withdrawal`. Its
+//     oracle is oracle B: the reference compiles `M` to `IR(M)`,
+//     `revl.manifest_wire(ir, replacing=R)` renders the wire, and the verdicts
+//     of `admit_ambient(X, wire)` and `compile_files([X], manifest=IR(M),
+//     replacing=R)` agree byte for byte.
+//
+// The surface still behind the WAVE (item 186): `handoff` STATE compatibility
+// (`C=k:T` rows), blocked on the self-host type layer — such a row therefore
+// REFUSES here (fail-closed) rather than being silently mis-admitted — and the
+// item-419c multi-refusal ORDERING of an ambient refusal against an internal
+// one. See docs/design/186-ambient-admission-guarantees.md.
 //
 // The manifest is the linker's already-live composition, serialised as rows
 // joined by ";" — provisions "<component>/<key>/<realm>" (realm "" = shared),
-// requirements "<component><<key>", and the "!halted" header — e.g.
-// "Store/db/;KvA/kv/tenant_a;Store<net". An empty manifest is the empty table,
-// so `admit_ambient(src, "")` == `admit_src(src)` exactly.
+// requirements "<component><<key>" (with "<key>/<realm>" for a realm-resolved
+// one and "*<key>" for a multi-realm bind), withdrawals "-<component>", and the
+// "!halted" header — e.g. "Store/db/;KvA/kv/tenant_a;Store<net;-KvA". An empty
+// manifest is the empty table, so `admit_ambient(src, "")` == `admit_src(src)`
+// exactly.
 
 // The head of `s` up to the first `sep` (one char), and the remainder past it.
 // `rest` "" when `sep` is absent — the whole of `s` is the head.
@@ -6886,15 +6911,18 @@ fn cut(s: Str, sep: Str) -> Cut {
 }
 
 // item 186: the parsed running manifest. `provs` seed G2/ROUTE (slices 1-2);
-// `reqs` seed the G3 union graph (slice 3); `mnames` are the manifest's
-// component names in wire order (the G3 DFS seed order). `halted` (the `!halted`
-// header, item 443) makes every admission refuse; `bad` (non-"") is a wire that
-// does not parse — an unknown row kind, or a `-C` / `C=k:T` row whose semantics
-// (replacement / handoff) are the deferred wave — and REFUSES admission by
-// name rather than being silently skipped (a row that parses and does nothing
-// is worse than one that refuses).
+// `reqs` seed the G3 union graph (slice 3) and the unmet-consumer check (the
+// replacement wave); `mnames` are the manifest's component names in wire order
+// (the G3 DFS seed order). `repl` is the explicitly WITHDRAWN set (`-C` rows,
+// the replacement wave) — the wire's carrier for `compile_files`' `replacing=`,
+// so `R` is a property of the admission CALL and never something the incoming
+// text can assert about itself. `halted` (the `!halted` header, item 443) makes
+// every admission refuse; `bad` (non-"") is a wire that does not parse — an
+// unknown row kind, or a `C=k:T` handoff row whose type layer is still the
+// deferred wave — and REFUSES admission by name rather than being silently
+// skipped (a row that parses and does nothing is worse than one that refuses).
 type Manifest = { provs: List[Prov3], reqs: List[MReq], mnames: List[Str],
-                  halted: Bool, bad: Str }
+                  repl: List[Str], halted: Bool, bad: Str }
 
 fn add_mname(names: List[Str], name: Str) -> List[Str] {
   if (contains(names, name)) { return names }
@@ -6906,13 +6934,39 @@ fn ident_led(row: Str) -> Bool {
   return c.is_alpha() || c == "_"
 }
 
+// A BARE component name: a non-empty identifier run and nothing else. A `-C`
+// withdrawal row carries a name and no field, so anything carrying a separator
+// (`-Kv/store/`, `-A<b`) is a garbled wire, not a withdrawal — and a wire the
+// gate cannot read must refuse rather than quietly withdraw a component that
+// does not exist.
+fn bare_ident(s: Str, i: Int) -> Bool {
+  if (s.length() == 0) { return false }
+  if (i >= s.length()) { return true }
+  if (i == 0 && !ident_led(s)) { return false }
+  if (i > 0 && !ty_word_char(s.slice(i, i + 1))) { return false }
+  return bare_ident(s, i + 1)
+}
+
+// Parse a requirement row's key part (everything after the `<`): `k` is the
+// shared realm, `k/r` names a realm, `*k` is a multi-realm bind (item 162).
+fn parse_mreq(comp: Str, spec: Str) -> MReq {
+  if (spec.slice(0, 1) == "*") {
+    return { comp: comp, key: spec.slice(1, spec.length()), rlm: "",
+             routed: true }
+  }
+  let b = cut(spec, "/")
+  return { comp: comp, key: b.s, rlm: b.rest, routed: false }
+}
+
 // Parse one manifest row into `man` by its LEADING kind marker (docs/design/
 // 186-ambient-admission-guarantees.md, "The wire"):
 //   C/k/r   provision  (landed)   -> a Prov3 row
 //   C<k     requirement (slice 3) -> an MReq row + a graph node
+//     C<k/r   the same, resolved in realm `r` (the wave)
+//     C<*k    the same, MULTI-REALM bound (the wave)
 //   !halted header     (slice 3)  -> the halt flag
-//   -C      replacing  (wave)     -> REFUSE (deferred)
-//   C=k:T   handoff     (wave)    -> REFUSE (deferred)
+//   -C      replacing  (wave)     -> a withdrawn component name
+//   C=k:T   handoff     (deferred) -> REFUSE (needs the self-host type layer)
 //   anything else                 -> REFUSE (unknown row kind)
 // A `bad` already set rides through unchanged (first offending row wins).
 fn parse_row(row: Str, man: Manifest) -> Manifest {
@@ -6920,40 +6974,50 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
   if (row.slice(0, 1) == "!") {
     if (row == "!halted") {
       return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-               halted: true, bad: "" }
+               repl: man.repl, halted: true, bad: "" }
     }
     return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-             halted: man.halted,
+             repl: man.repl, halted: man.halted,
              bad: tagged("MANIFEST", "unrecognized manifest header row `".concat(row).concat("`")) }
   }
   if (row.slice(0, 1) == "-") {
+    // a withdrawal names a component, nothing more: `-C`. A name carrying a
+    // separator is a garbled row, not a withdrawal, and a wire the gate cannot
+    // read fails closed rather than withdrawing nothing in silence.
+    let name = row.slice(1, row.length())
+    if (!bare_ident(name, 0)) {
+      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+               repl: man.repl, halted: man.halted,
+               bad: tagged("MANIFEST", "manifest replacement row `".concat(row)
+                 .concat("` does not name a component")) }
+    }
     return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-             halted: man.halted,
-             bad: tagged("MANIFEST", "manifest replacement row `".concat(row)
-               .concat("` needs the deferred replacement wave (item 186)")) }
+             repl: contains(man.repl, name) ? man.repl : man.repl.push(name),
+             halted: man.halted, bad: "" }
   }
   if (ident_led(row)) {
     if (row.indexOf("=") != 0 - 1) {
       return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-               halted: man.halted,
+               repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
                  .concat("` needs the deferred handoff/type-layer wave (item 186)")) }
     }
     if (row.indexOf("<") != 0 - 1) {
       let a = cut(row, "<")
-      return { provs: man.provs, reqs: man.reqs.push({ comp: a.s, key: a.rest }),
-               mnames: add_mname(man.mnames, a.s), halted: man.halted, bad: "" }
+      return { provs: man.provs, reqs: man.reqs.push(parse_mreq(a.s, a.rest)),
+               mnames: add_mname(man.mnames, a.s), repl: man.repl,
+               halted: man.halted, bad: "" }
     }
     if (row.indexOf("/") != 0 - 1) {
       let a = cut(row, "/")
       let b = cut(a.rest, "/")
       return { provs: man.provs.push({ key: b.s, rlm: b.rest, comp: a.s }),
                reqs: man.reqs, mnames: add_mname(man.mnames, a.s),
-               halted: man.halted, bad: "" }
+               repl: man.repl, halted: man.halted, bad: "" }
     }
   }
   return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-           halted: man.halted,
+           repl: man.repl, halted: man.halted,
            bad: tagged("MANIFEST", "unrecognized manifest row `".concat(row).concat("`")) }
 }
 
@@ -6967,8 +7031,137 @@ fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: Str) -> Manifest {
-  return parse_manifest_rows(m, { provs: [], reqs: [], mnames: [],
+  return parse_manifest_rows(m, { provs: [], reqs: [], mnames: [], repl: [],
                                   halted: false, bad: "" })
+}
+
+// ------------------------------------- item 186, the replacement wave (part 1)
+//
+// `compile_files(X, manifest=M, replacing=R)` links the candidate against
+// `M \ R`, so G2 and G3 run over `M \ R ∪ X`. That union is the right one for
+// CONFLICTS — two providers of one key, a cycle that closes through the
+// manifest — but it cannot see a LOSS. A key `R` provided and nothing provides
+// again simply vanishes from the provider table, and a RETAINED running
+// consumer of it produces no edge at all, so the link has nothing to say: the
+// swap is admitted and the consumer deactivates into PENDING at runtime holding
+// its resources, with no diagnostic anywhere in the gate.
+//
+// docs/design/186-ambient-admission-guarantees.md decides the direction under
+// "Replacement semantics": such a replacement is REFUSED by default, there is
+// no opt-in to strand consumers, and a composition that wants a key gone
+// unloads the consumer first. The reference landed that rule in
+// `admission._admit_provision_withdrawal`; this is its port, message included,
+// so `admit_ambient` and `compile_files` agree byte-for-byte (oracle B).
+//
+// Direction of every refusal here: FAIL-CLOSED. The admission is what does not
+// happen; the running composition keeps running untouched.
+//
+// Scope is deliberately narrow, so it cannot over-refuse. Only the transition
+// met -> unmet refuses. A requirement already unmet BEFORE the admission stays
+// admissible — an incremental composition legitimately admits a consumer before
+// its provider — because only the met -> unmet transition is caused by the
+// admission under review. A ROUTED requirement is left to the item-162
+// per-realm provider check, so one loss is never reported twice. And the match
+// is per-(key, realm): re-providing a withdrawn key in a DIFFERENT realm does
+// not satisfy a shared-realm consumer, which is exactly the case a realm-blind
+// check would have wrongly admitted.
+
+// The names this admission DROPS from the running composition: the explicit
+// `-C` rows plus every running component the incoming text redeclares by name
+// (the implicit replacement `compile_files` performs with
+// `{comp.name for comp in merged.components}`). Templates are included, exactly
+// as the reference includes every declared component in that set.
+fn dropped_names(comps: List[CompD], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= comps.length()) { return acc }
+  let n = comps[i].name
+  return dropped_names(comps, i + 1, contains(acc, n) ? acc : acc.push(n))
+}
+
+// The provision rows whose component is (`wantDropped`) or is not (otherwise)
+// in `drop` — the withdrawn half and the retained half of the running table.
+fn split_provs(ps: List[Prov3], drop: List[Str], wantDropped: Bool, i: Int,
+               acc: List[Prov3]) -> List[Prov3] {
+  if (i >= ps.length()) { return acc }
+  let dropped = contains(drop, ps[i].comp)
+  return split_provs(ps, drop, wantDropped, i + 1,
+                     dropped == wantDropped ? acc.push(ps[i]) : acc)
+}
+
+fn keep_reqs(rs: List[MReq], drop: List[Str], i: Int,
+             acc: List[MReq]) -> List[MReq] {
+  if (i >= rs.length()) { return acc }
+  return keep_reqs(rs, drop, i + 1,
+                   contains(drop, rs[i].comp) ? acc : acc.push(rs[i]))
+}
+
+fn keep_names(ns: List[Str], drop: List[Str], i: Int,
+              acc: List[Str]) -> List[Str] {
+  if (i >= ns.length()) { return acc }
+  return keep_names(ns, drop, i + 1,
+                    contains(drop, ns[i]) ? acc : acc.push(ns[i]))
+}
+
+// Every provision the incoming text declares, per (key, realm). Spawn templates
+// are excluded: a template is instantiated into a fresh per-instance realm, so
+// its provisions can never stand in for a withdrawn STATIC one (decision 5/6,
+// and the reference's `templates` guard).
+fn comp_provs(c: CompD, pks: List[ProvKey], ki: Int,
+              acc: List[Prov3]) -> List[Prov3] {
+  if (ki >= pks.length()) { return acc }
+  return comp_provs(c, pks, ki + 1,
+                    acc.push({ key: pks[ki].key, rlm: pks[ki].rlm, comp: c.name }))
+}
+
+fn live_provs(comps: List[CompD], i: Int, acc: List[Prov3]) -> List[Prov3] {
+  if (i >= comps.length()) { return acc }
+  return live_provs(comps, i + 1, comp_provs(comps[i], comps[i].provKeys, 0, acc))
+}
+
+// The (key, realm) pairs the withdrawn set provided that NOTHING in the
+// resulting composition (the retained running entries plus the incoming text)
+// provides again. `comp` carries the withdrawn provider's name for the
+// diagnostic; the FIRST withdrawn provider of a pair wins, mirroring the
+// reference's `setdefault`.
+fn lost_provs(wp: List[Prov3], resulting: List[Prov3], i: Int,
+              acc: List[Prov3]) -> List[Prov3] {
+  if (i >= wp.length()) { return acc }
+  if (find_provider(resulting, wp[i].key, wp[i].rlm, 0) != ""
+      || find_provider(acc, wp[i].key, wp[i].rlm, 0) != "") {
+    return lost_provs(wp, resulting, i + 1, acc)
+  }
+  return lost_provs(wp, resulting, i + 1, acc.push(wp[i]))
+}
+
+fn withdrawal_msg(key: Str, rlm: Str, provider: Str, consumer: Str) -> Str {
+  return "this admission withdraws the running provider of `".concat(key)
+    .concat("`").concat(realm_where(rlm)).concat(" (`").concat(provider)
+    .concat("`) and nothing provides it again, but the running component `")
+    .concat(consumer).concat("` still requires it (G2)")
+}
+
+// The candidate component that replaced the withdrawn provider carries the
+// line. A withdrawal named only by a `-C` row has no source position in this
+// text, so the refusal reports line 0 rather than inventing one — exactly the
+// reference's `next((c.line for c in program.components if c.name == provider), 0)`.
+fn text_line_or_zero(comps: List[CompD], name: Str, i: Int) -> Int {
+  if (i >= comps.length()) { return 0 }
+  if (comps[i].name == name) { return comps[i].line }
+  return text_line_or_zero(comps, name, i + 1)
+}
+
+// At most ONE withdrawal refusal per admission: the reference raises on the
+// first stranded consumer it reaches, and the wire preserves its iteration
+// order (entries in manifest order, each entry's requirement rows in `inject`
+// order), so the same consumer is named.
+fn withdrawal_refusals(reqs: List[MReq], lost: List[Prov3], comps: List[CompD],
+                       i: Int) -> List[Verd] {
+  if (i >= reqs.length()) { return [] }
+  let r = reqs[i]
+  if (r.routed) { return withdrawal_refusals(reqs, lost, comps, i + 1) }
+  let provider = find_provider(lost, r.key, r.rlm, 0)
+  if (provider == "") { return withdrawal_refusals(reqs, lost, comps, i + 1) }
+  return [mk_verd(tagged("G2", withdrawal_msg(r.key, r.rlm, provider, r.comp)),
+                  text_line_or_zero(comps, provider, 0))]
 }
 
 // Admit `src` against a running `manifest`. The INTERNAL refusals (a component
@@ -7011,6 +7204,25 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   // replacement legitimately overrides what the manifest already holds).
   let nl = collect_nonlink(ts, pg)
   if (nl.done) { return pick_min(nl.refs) }
+  // REPLACEMENT (the item-186 wave, part 1). `drop` is what this admission
+  // withdraws from the running composition: the explicit `-C` rows plus every
+  // running component the incoming text redeclares by name, exactly
+  // `compile_files`' `set(replacing) | {comp.name for comp in components}`.
+  // The link below then runs against `M \ R ∪ X` — so a provision that MOVED
+  // provider is no longer a G2 conflict — and `withdrawal_refusals` covers the
+  // one thing that union cannot see: a provision that is simply GONE, with a
+  // retained running consumer left stranded. Both halves are no-ops when the
+  // wire carries no withdrawal, so slices 1-3 are byte-identical.
+  let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
+  let drop = dropped_names(pg.comps, 0, man.repl)
+  let keptProvs = split_provs(man.provs, drop, false, 0, [])
+  let keptReqs = keep_reqs(man.reqs, drop, 0, [])
+  let keptNames = keep_names(man.mnames, drop, 0, [])
+  let lost = lost_provs(split_provs(man.provs, drop, true, 0, []),
+                        live_provs(live, 0, keptProvs), 0, [])
+  // the reference runs `_admit_provision_withdrawal` BEFORE `_link`, so the
+  // withdrawal verdicts go into the sink first and win a tie on the line.
+  let wrefs = append_verds(nl.refs, withdrawal_refusals(keptReqs, lost, pg.comps, 0))
   // the LINK is the half the running manifest reshapes. Seed the per-(key,
   // realm) provider table with the manifest's live provisions and run the SAME
   // G2/ROUTE/G3 scan the single-source path runs, so:
@@ -7025,8 +7237,8 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   //     is seen, byte-identical to `admit_src(manifest_text ++ src)`.
   // Ordered against the internal refusals by `(line, seq)`, so an ambient link
   // refusal competes with an internal one exactly as in the composed text.
-  return pick_min(append_verds(nl.refs,
-    link_refusals(pg, man.provs, man.reqs, man.mnames)))
+  return pick_min(append_verds(wrefs,
+    link_refusals(pg, keptProvs, keptReqs, keptNames)))
 }
 
 // ============================================================ interchange IR
@@ -10947,13 +11159,78 @@ test "an unknown manifest row kind refuses naming the row" {
     == "MANIFEST|unrecognized manifest row `?A/a/`"
 }
 
-// The wire's deferred kinds (`-C` replacement, `C=k:T` handoff) are recognized
-// by the grammar but fail closed until their wave lands, rather than admitting
-// as if no replacement/handoff were requested.
-test "a replacement row refuses until the deferred wave lands" {
+// A `-C` row that does not name a component is a garbled wire: it refuses
+// rather than withdrawing nothing in silence.
+test "a malformed replacement row refuses rather than withdrawing nothing" {
   let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
-  assert admit_ambient(clean, "OldStore/db/;-OldStore")
-    == "MANIFEST|manifest replacement row `-OldStore` needs the deferred replacement wave (item 186)"
+  assert admit_ambient(clean, "OldStore/db/;-OldStore/db/")
+    == "MANIFEST|manifest replacement row `-OldStore/db/` does not name a component"
+}
+
+// ---- the replacement wave, part 1 (item 186) ----
+//
+// A withdrawal that strands a RETAINED running consumer is refused, FAIL-CLOSED:
+// the running composition keeps running and the admission is what does not
+// happen. `Old` provides `db`, `Store` (retained) requires it, and the incoming
+// text redeclares `Old` without the provision.
+test "a withdrawn provision a retained running consumer requires is refused" {
+  let svc = "service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } "
+  let x = "component Old provides other: C { provide other { fn g(k) { return k } } }"
+  assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db")
+    == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+// The same loss reached through an explicit `-Old` row: the incoming text does
+// not mention `Old` at all, so `R` is a property of the admission CALL.
+test "an explicit withdrawal row strands the same consumer" {
+  let svc = "service C { fn g(k: Str) -> Str } "
+  let x = "component Fresh provides other: C { provide other { fn g(k) { return k } } }"
+  assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db;-Old")
+    == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+// NON-VACUITY: the ordinary hot-swap admits. G2 runs against `M \ R`, so the
+// withdrawn provider's own provision is no longer in the seeded table and the
+// replacement does not conflict with the component it replaces.
+test "a legitimate replacement that re-provides the key admits" {
+  let svc = "service D { fn q(s: Str) -> Int } "
+  let x = "component Old provides db: D { provide db { fn q(s) { let x = s   return 1 } } }"
+  assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db") == ""
+}
+
+// Scope: only the transition met -> unmet refuses. `Store` requires `db` and
+// nothing ever provided it, so withdrawing `Old` (which provides something no
+// one consumes) loses nothing.
+test "a requirement already unmet before the admission stays admissible" {
+  let svc = "service C { fn g(k: Str) -> Str } "
+  let x = "component Old provides other: C { provide other { fn g(k) { return k } } }"
+  assert admit_ambient(svc.concat(x), "Old/aux/;Store/cache/;Store<db") == ""
+}
+
+// Per-(key, realm): re-providing the withdrawn key in ANOTHER realm does not
+// satisfy a shared-realm consumer. This is the case a realm-blind check would
+// have wrongly admitted.
+test "re-providing a withdrawn key in another realm does not satisfy the consumer" {
+  let svc = "service D { fn q(s: Str) -> Int } "
+  let x = "component Old provides db: D { isolate db in realm(\"t1\") provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db")
+    == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+// The composition's own escape hatch: unload the consumer in the same
+// admission and the key is free to go.
+test "withdrawing the consumer too releases the withdrawn key" {
+  let svc = "service C { fn g(k: Str) -> Str } "
+  let x = "component Fresh provides other: C { provide other { fn g(k) { return k } } }"
+  assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db;-Old;-Store") == ""
+}
+
+// A ROUTED running consumer (`C<*k`) is left to the item-162 per-realm provider
+// check, so one loss is never reported twice.
+test "a routed running requirement is not reported by the withdrawal check" {
+  let svc = "service C { fn g(k: Str) -> Str } "
+  let x = "component Fresh provides other: C { provide other { fn g(k) { return k } } }"
+  assert admit_ambient(svc.concat(x), "Old/db/r1;Store/cache/;Store<*db;-Old") == ""
 }
 
 test "a handoff row refuses until the deferred type layer lands" {

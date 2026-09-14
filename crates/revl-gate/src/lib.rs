@@ -839,9 +839,11 @@ component CacheLayer requires store: Store provides store: Store {\n\
 
     #[test]
     fn a_deferred_manifest_row_is_refused_not_skipped() {
-        // Replacement (item 186) belongs to a wave this crate has not landed, and
-        // a row it cannot honour is REFUSED rather than dropped: skipping a row
-        // is the wave-through this crate exists to prevent.
+        // Handoff (item 186) belongs to a wave this crate has not landed, and a
+        // row it cannot honour is REFUSED rather than dropped: skipping a row is
+        // the wave-through this crate exists to prevent. A `-C` withdrawal row is
+        // honoured now, but only when it names a component: a garbled one refuses
+        // for the same reason.
         for rows in [
             "Kv/store/;-Kv/store/",
             "Kv/store/;Kv/store=Int",
