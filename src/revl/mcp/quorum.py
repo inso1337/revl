@@ -55,6 +55,10 @@ authorized nothing, and its receipt would name a fire that never happened.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+from dataclasses import dataclass
+
 from .approval import _canon, _sha
 
 #: The receipt's own kind tag, so a receipt is legible as a receipt and can
@@ -66,6 +70,185 @@ RECEIPT_KIND = "revl.quorum.receipt"
 #: reading an older receipt refuses it rather than re-deriving a digest over a
 #: shape it does not know.
 RECEIPT_VERSION = 1
+
+
+# --------------------------------------------------------------------------- #
+# Whose cast is it: binding the identity of a vote (issue #979)                #
+# --------------------------------------------------------------------------- #
+#
+# Slice 1 and Slice 2 both took the cast's identity from `as_token`, a STRING
+# the caller chose. The count was of distinct NAMES, so one operator satisfied
+# `require 2 of {alice, bob, carol}` by asserting two of the names in turn:
+# distinctness of names is not distinctness of principals, and multi-party
+# control is about the second.
+#
+# What identity is actually available here decides what can be bound. Two
+# things, and only two:
+#
+#   * the SESSION's own operator, bound once at serve time from
+#     `--operator-profile`/`--operator`. Not caller-asserted — it is process
+#     configuration the caller on the wire cannot choose — but there is exactly
+#     one of it per session, so on its own it can supply one cast and never N.
+#   * a VOTE CREDENTIAL the operator profile declares for an operator, issued
+#     out of band and presented with the cast. The profile stores the SHA-256
+#     digest, so the file is not a list of secrets; a cast naming an operator
+#     other than the session's own must present a credential that hashes to
+#     that operator's digest.
+#
+# Everything else at this boundary is a string the caller typed. So the rule is:
+# a cast is attributed to the session's bound operator, or to an operator whose
+# declared credential the caller proved, and to nothing else. An identity that
+# is ambiguous or unbindable REFUSES — there is no path here that admits on a
+# name alone.
+#
+# The PRINCIPAL is the distinctness unit and is derived, not asserted: the
+# session binding is one principal, and each distinct credential digest is one
+# principal. Two profile entries that share one secret are therefore ONE
+# principal and can supply only one of the N (`same-principal`), which a count
+# of names could never see.
+#
+# What this proves, stated narrowly: N counted casts required N distinct
+# secrets, or N-1 distinct secrets plus the session's serve-time identity. What
+# it does NOT prove is that N humans consented — a credential is bearer, it can
+# be shared, delegated or stolen, and every cast still arrives over one
+# session's wire, so an operator who has collected two secrets still satisfies a
+# two-of-M rule. Closing that needs a per-caller authenticated transport (items
+# 39 / 55) where each cast arrives on its own authenticated connection and is
+# signed over the question's binding, so a captured credential is not replayable
+# and the count is of connections rather than of strings. See
+# `docs/design/471-quorum-approval.md`, Decision 7.
+
+#: Domain separator for the principal id recorded in the decision graph. The id
+#: is a hash OF the credential digest, never the digest itself: the graph is
+#: durable, readable and copied into audits, and a row carrying the verifier
+#: would let a reader of the record forge future casts.
+_PRINCIPAL_DOMAIN = b"revl.quorum.principal\x00"
+
+
+@dataclass(frozen=True)
+class Cast:
+    """A cast whose identity is BOUND: who it counts for, which principal
+    supplied it, and what bound it.
+
+    `how` is `"session"` (the serve-time operator binding) or `"credential"` (a
+    proven vote credential). It is recorded on the decision graph so an audit
+    reads what each cast rested on rather than assuming."""
+
+    voter: str
+    principal: str
+    how: str
+
+
+@dataclass(frozen=True)
+class UnboundCast:
+    """A cast whose identity could not be bound, and therefore is refused.
+
+    `reason` is the machine token written to the `quorum-refused` row;
+    `asserted` is the name the caller CLAIMED, recorded so the graph shows who
+    was attempted rather than a blank."""
+
+    reason: str
+    message: str
+    asserted: str
+
+
+def _principal_of_credential(digest: str) -> str:
+    return "cred:" + hashlib.sha256(
+        _PRINCIPAL_DOMAIN + digest.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_cast(*, as_token, as_secret, bound, registry):
+    """Bind one cast's identity, or refuse it.
+
+    Returns a :class:`Cast` when the identity is bound and an
+    :class:`UnboundCast` when it is not. FAIL CLOSED is the whole contract:
+    every path that cannot prove who is casting returns `UnboundCast`, and there
+    is no branch that falls back to believing `as_token`.
+
+    `bound` is the session's :class:`revl.mcp.operator.Operator` (or None when
+    no profile is bound); `registry` is the whole
+    :class:`revl.mcp.operator.OperatorRegistry` the session was served with, which
+    is what a credential is checked against.
+
+    The four ways a cast is refused, each named so the refusal is actionable:
+
+      * `unnamed-credential` - a credential with no `asToken` beside it. The
+        session will not search the profile for whichever identity a secret
+        happens to open: a cast says who it is for, and the credential proves
+        that claim;
+      * `unbound-identity` - a name other than the session's own with no
+        operator profile to check it against. A session served without a profile
+        has exactly one identity, so a second one cannot be bound at all;
+      * `unknown-operator` / `unkeyed-identity` - the profile does not carry the
+        named operator, or carries it with no declared vote credential. Neither
+        can be proven, so neither is believed;
+      * `unproven-identity` - a name the profile knows, presented with a missing
+        or wrong credential.
+    """
+    bound_token = getattr(bound, "token", None) if bound is not None else None
+    secret = as_secret if as_secret not in (None, "") else None
+    if as_token is None or as_token == "":
+        if secret is not None:
+            return UnboundCast(
+                "unnamed-credential",
+                "a vote credential was presented with no `asToken` beside it: a "
+                "cast names the operator it counts for and the credential proves "
+                "that name, so the session will not resolve an identity by "
+                "searching the profile for whichever secret matches (roadmap "
+                "item 471, issue #979)",
+                bound_token or "")
+        return Cast(bound_token or "", f"session:{bound_token or ''}", "session")
+
+    if as_token == bound_token and secret is None:
+        # naming the session's own identity adds nothing to assert: it is the
+        # serve-time binding either way.
+        return Cast(bound_token, f"session:{bound_token}", "session")
+
+    if registry is None:
+        return UnboundCast(
+            "unbound-identity",
+            f"`{as_token}` cannot be bound on this session: it is served with no "
+            f"operator profile, so the only identity it has is its own bound "
+            f"operator (`{bound_token or 'none'}`) and a second one cannot be "
+            f"proven. A quorum counts DISTINCT PRINCIPALS, and a name with "
+            f"nothing behind it is not one (roadmap item 471, issue #979, fail "
+            f"closed)",
+            as_token)
+    operator = registry.get(as_token)
+    if operator is None:
+        return UnboundCast(
+            "unknown-operator",
+            f"the operator profile declares no operator `{as_token}`, so a cast "
+            f"attributed to it cannot be proven (known: "
+            f"{', '.join(sorted(registry.operators)) or 'none'}) (roadmap item "
+            f"471, issue #979, fail closed)",
+            as_token)
+    if not operator.vote_key:
+        return UnboundCast(
+            "unkeyed-identity",
+            f"operator `{as_token}` declares no vote credential, so a cast "
+            f"attributed to it rests on the caller's word alone. Give it an "
+            f"`operator {as_token} key sha256:<digest>` line and present the "
+            f"secret as `asSecret` (roadmap item 471, issue #979, fail closed)",
+            as_token)
+    if secret is None:
+        return UnboundCast(
+            "unproven-identity",
+            f"a cast attributed to `{as_token}` must present that operator's "
+            f"vote credential as `asSecret`: the name alone is asserted by the "
+            f"caller, and a quorum that counts asserted names counts one "
+            f"operator N times (roadmap item 471, issue #979, fail closed)",
+            as_token)
+    presented = hashlib.sha256(str(secret).encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(presented, operator.vote_key):
+        return UnboundCast(
+            "unproven-identity",
+            f"the credential presented for `{as_token}` does not match the one "
+            f"the operator profile declares, so the cast is not that operator's "
+            f"(roadmap item 471, issue #979, fail closed)",
+            as_token)
+    return Cast(as_token, _principal_of_credential(operator.vote_key),
+                "credential")
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +483,8 @@ def escalate(session, arguments: dict) -> dict:
     ticket_hash = _require_hash(arguments, "escalation")
     return session.escalate_ticket(
         ticket_hash, reason=arguments.get("reason"),
-        as_token=arguments.get("asToken"))
+        as_token=arguments.get("asToken"),
+        as_secret=arguments.get("asSecret"))
 
 
 def revoke_question(session, arguments: dict) -> dict:
@@ -312,7 +496,8 @@ def revoke_question(session, arguments: dict) -> dict:
     ticket_hash = _require_hash(arguments, "revoking a pending question")
     return session.revoke_ticket(
         ticket_hash, reason=arguments.get("reason"),
-        as_token=arguments.get("asToken"))
+        as_token=arguments.get("asToken"),
+        as_secret=arguments.get("asSecret"))
 
 
 def override(session, arguments: dict) -> dict:
@@ -333,7 +518,8 @@ def override(session, arguments: dict) -> dict:
     ticket_hash = _require_hash(arguments, "an override")
     return session.override_ticket(
         ticket_hash, reason=arguments.get("reason"),
-        as_token=arguments.get("asToken"))
+        as_token=arguments.get("asToken"),
+        as_secret=arguments.get("asSecret"))
 
 
 def decision_report(session, arguments: dict) -> dict:

@@ -33,14 +33,17 @@ whole protocol - tickets, ledger, WAL records, votes - exercised end to end
 without a live composition. `test_standing_approval.py` proves the crossing
 itself against the live runtime.
 
-Note for the reader: cast identity is supplied as `as_token` because a session
-binds exactly ONE operator (see the design note's "honest bounds" section), so
-the second and later votes are indivisible from the same session's protocol by
-construction. What the protocol guarantees is that the COUNT is of distinct
-named approvers, not of repeats.
+Note for the reader: a session binds exactly ONE operator, so the second and
+later votes here are driven with `as_token` plus that operator's VOTE
+CREDENTIAL, which is what makes them casts by another principal rather than
+strings this session typed (issue #979). The identity binding itself - the
+attack it refuses, what it proves and what it does not - is pinned by
+`tests/test_979_quorum_identity_binding.py`; this suite takes it as given and
+holds the protocol on top of it.
 """
 
 import copy
+import hashlib
 import importlib.util
 import os
 import sys
@@ -114,6 +117,21 @@ _SOURCE_TWO_CAPS = (
 
 _THREE = ("alice", "bob", "carol")
 
+# issue #979: a cast's identity is BOUND, never asserted. A vote attributed to
+# an operator other than the session's own must present that operator's vote
+# credential, so the suite drives the second and later casts with the secret the
+# profile declares a digest of. `as_token` alone is refused now, which is what
+# `tests/test_979_quorum_identity_binding.py` pins; here it is only the shape
+# every multi-party cast takes.
+_SECRETS = {name: f"{name}-secret-for-tests"
+            for name in ("alice", "bob", "carol", "dave", "mallory", "root")}
+
+_PROFILE = "".join(
+    f"operator {name} key sha256:"
+    f"{hashlib.sha256(secret.encode()).hexdigest()}\n"
+    f"operator {name} may approve, override on *\n"
+    for name, secret in sorted(_SECRETS.items()))
+
 
 def _quorum(require=2, approvers=_THREE, ttl_ms=None):
     return ApprovalRule("announce", ttl_ms, require, tuple(approvers))
@@ -134,7 +152,12 @@ def _harness(tmp_path, *, rules=None, token="alice", source=_SOURCE, clock=None,
     session._class_map = ClassMap(ir)
     session.sandbox = Policy(
         approval_rules=tuple(rules if rules is not None else [_quorum()]))
-    session.operator = op.Operator(token=token)
+    # issue #979: the session runs AS `token` and is served with the WHOLE
+    # registry, which is what a cast attributed to another operator is proven
+    # against (`revl mcp serve --operator-profile FILE --operator TOKEN`).
+    session.operator_registry = op.parse_profile(_PROFILE)
+    session.operator = session.operator_registry.get(token) or op.Operator(
+        token=token)
     if clock is not None:
         session._clock_ms = lambda: clock["now"]
     return session
@@ -257,14 +280,16 @@ def test_two_distinct_votes_admit_the_crossing_and_one_does_not(quorum):
     through, and the WAL carries the whole decision graph."""
     ticket = _ticket(quorum)
 
-    first = quorum.approve_ticket(ticket["hash"], as_token="bob")
+    first = quorum.approve_ticket(ticket["hash"], as_token="bob",
+                                  as_secret=_SECRETS["bob"])
     assert first["approved"] is False and first["counted"] == 1
     assert first["outstanding"] == ["alice", "carol"]
 
     # one vote is not a quorum: the crossing is still refused
     assert _cross(quorum) is not None
 
-    second = quorum.approve_ticket(ticket["hash"], as_token="carol")
+    second = quorum.approve_ticket(ticket["hash"], as_token="carol",
+                                   as_secret=_SECRETS["carol"])
     assert second["approved"] is True and second["counted"] == 2
     assert second["satisfiedBy"] == "votes"
 
@@ -280,8 +305,8 @@ def test_the_minted_approval_is_an_ordinary_ledger_entry(quorum):
     ticket hash, the reach-closure candidate hash, the component, the session and
     the round, single-use and consumed before the fire."""
     ticket = _ticket(quorum)
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
-    quorum.approve_ticket(ticket["hash"], as_token="carol")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    quorum.approve_ticket(ticket["hash"], as_token="carol", as_secret=_SECRETS["carol"])
     (entry,) = quorum._ledger
     assert entry["hash"] == ticket["hash"]
     assert entry["candidateHash"] == ticket["candidateHash"]
@@ -301,9 +326,9 @@ def test_a_single_vote_never_admits_a_quorum_ticket(quorum):
     quorum demands DISTINCT votes, so a repeated yes is refused rather than
     counted and the crossing stays refused."""
     ticket = _ticket(quorum)
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
     with pytest.raises(SessionError, match="already voted"):
-        quorum.approve_ticket(ticket["hash"], as_token="bob")
+        quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
     assert _cross(quorum) is not None
     assert quorum._counted(quorum._quorums[ticket["hash"]]) == 1
 
@@ -335,8 +360,9 @@ def test_the_proposers_vote_does_not_count_toward_any_other_vote(quorum):
     ticket = _ticket(quorum)
     with pytest.raises(SessionError):
         quorum.approve_ticket(ticket["hash"])
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
-    final = quorum.approve_ticket(ticket["hash"], as_token="carol")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    final = quorum.approve_ticket(ticket["hash"], as_token="carol",
+                                  as_secret=_SECRETS["carol"])
     assert final["counted"] == 2
     assert "alice" in final["outstanding"]
 
@@ -609,11 +635,12 @@ def test_a_quorum_gated_lease_loads_only_after_its_own_votes(tmp_path):
     assert _kinds(session) == ["quorum-open"]
     lease_ticket = refused.ticket
 
-    assert session.approve_ticket(lease_ticket["hash"], vote="approve",
-                                  as_token="bob")["counted"] == 1
+    one = session.approve_ticket(lease_ticket["hash"], vote="approve",
+                                 as_token="bob", as_secret=_SECRETS["bob"])
+    assert one["counted"] == 1
     assert _gate(session, ir) is not None, "one vote is not two"
     voted = session.approve_ticket(lease_ticket["hash"], vote="approve",
-                                   as_token="carol")
+                                   as_token="carol", as_secret=_SECRETS["carol"])
     assert voted["outcome"] == "satisfied"
     for route in ({"ticket_hash": lease_ticket["hash"], "uses": 3},
                   {"capability": _LEASE_CAP, "uses": 3}):
@@ -658,7 +685,8 @@ def test_a_quorum_gated_lease_is_refused_until_the_votes_arrive(tmp_path):
     for stage, votes in (("no votes", ()), ("one vote", ("bob",))):
         for name in votes:
             session.approve_ticket(_gate(session, ir).ticket["hash"],
-                                   vote="approve", as_token=name)
+                                   vote="approve", as_token=name,
+                                   as_secret=_SECRETS[name])
         refused = _gate(session, ir)
         assert refused is not None, f"admitted with {stage}"
         assert refused.ticket["kind"] == "lease"
@@ -696,7 +724,8 @@ def test_a_lease_refusal_is_reasoned_and_names_the_route_that_answers_it(tmp_pat
     assert "re-run the load" in message, "the route that unblocks it"
 
     for name in ("bob", "carol"):
-        session.approve_ticket(refused.ticket["hash"], vote="approve", as_token=name)
+        session.approve_ticket(refused.ticket["hash"], vote="approve", as_token=name,
+                               as_secret=_SECRETS[name])
     assert _gate(session, ir) is None, "the named route is the one that works"
 
 
@@ -707,7 +736,8 @@ def test_a_denied_lease_question_is_not_an_answer(tmp_path):
     session, ir = _lease_harness(tmp_path)
     ticket = _gate(session, ir).ticket
 
-    denied = session.approve_ticket(ticket["hash"], vote="deny", as_token="bob")
+    denied = session.approve_ticket(ticket["hash"], vote="deny", as_token="bob",
+                                    as_secret=_SECRETS["bob"])
     assert denied.get("outcome") is None or denied["outcome"] != "satisfied"
     assert _gate(session, ir) is not None
     assert session._grants == []
@@ -721,7 +751,8 @@ def test_a_spent_lease_decision_answers_only_once(tmp_path):
     session, ir = _lease_harness(tmp_path)
     ticket = _gate(session, ir).ticket
     for name in ("bob", "carol"):
-        session.approve_ticket(ticket["hash"], vote="approve", as_token=name)
+        session.approve_ticket(ticket["hash"], vote="approve", as_token=name,
+                               as_secret=_SECRETS[name])
     assert _gate(session, ir) is None
     assert session._ledger[0]["consumed"] is True
 
@@ -740,7 +771,8 @@ def test_the_lease_bridge_refuses_a_forged_or_foreign_decision(tmp_path):
     session, ir = _lease_harness(tmp_path)
     lease_ticket = _gate(session, ir).ticket
     for name in ("bob", "carol"):
-        session.approve_ticket(lease_ticket["hash"], vote="approve", as_token=name)
+        session.approve_ticket(lease_ticket["hash"], vote="approve", as_token=name,
+                               as_secret=_SECRETS[name])
     (entry,) = session._ledger
     record = session._quorums[entry["requestId"]]
     assert session._satisfied_decision_for(lease_ticket) is entry
@@ -772,7 +804,8 @@ def test_the_lease_bridge_is_scoped_to_lease_tickets(tmp_path):
     session = _harness(tmp_path)
     ticket = _ticket(session)
     for name in ("bob", "carol"):
-        session.approve_ticket(ticket["hash"], vote="approve", as_token=name)
+        session.approve_ticket(ticket["hash"], vote="approve", as_token=name,
+                               as_secret=_SECRETS[name])
     (entry,) = session._ledger
     assert session._satisfied_decision_for(ticket) is entry
 
@@ -791,7 +824,8 @@ def test_a_lease_decision_does_not_outlive_the_ticket_it_answered(tmp_path):
     session, ir = _lease_harness(tmp_path)
     lease_ticket = _gate(session, ir).ticket
     for name in ("bob", "carol"):
-        session.approve_ticket(lease_ticket["hash"], vote="approve", as_token=name)
+        session.approve_ticket(lease_ticket["hash"], vote="approve", as_token=name,
+                               as_secret=_SECRETS[name])
     assert session._satisfied_decision_for(lease_ticket) is not None, \
         "there IS a satisfied answer for this ticket"
 
@@ -810,8 +844,8 @@ def test_a_vote_is_bound_to_one_question_and_does_not_carry_to_another(quorum):
     hashes. Votes against the first are not votes against the second, so the
     second still raises its own ticket and demands its own quorum."""
     first = _ticket(quorum, ("sink.log", "a"))
-    quorum.approve_ticket(first["hash"], as_token="bob")
-    quorum.approve_ticket(first["hash"], as_token="carol")
+    quorum.approve_ticket(first["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    quorum.approve_ticket(first["hash"], as_token="carol", as_secret=_SECRETS["carol"])
 
     second = _ticket(quorum, ("sink.log", "b"))
     assert second["hash"] != first["hash"]
@@ -826,8 +860,8 @@ def test_the_minted_approval_is_bound_to_the_candidate_hash(quorum):
     ticket claiming a different one is not covered by it: that is what stops a
     vote from surviving a swap of the code it was cast against."""
     ticket = _ticket(quorum)
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
-    quorum.approve_ticket(ticket["hash"], as_token="carol")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    quorum.approve_ticket(ticket["hash"], as_token="carol", as_secret=_SECRETS["carol"])
     assert quorum._find_standing_approval(ticket) is not None
 
     forged = dict(ticket, candidateHash="sha256:" + "0" * 64)
@@ -842,8 +876,8 @@ def test_votes_on_a_question_that_changed_under_the_swap_are_not_counted(
     ticket."""
     voted = _harness(tmp_path, name="before.json")
     ticket = _ticket(voted)
-    voted.approve_ticket(ticket["hash"], as_token="bob")
-    voted.approve_ticket(ticket["hash"], as_token="carol")
+    voted.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    voted.approve_ticket(ticket["hash"], as_token="carol", as_secret=_SECRETS["carol"])
     assert _cross(voted) is None
 
     swapped = _harness(tmp_path, name="after.json", source=_SOURCE_SWAPPED)
@@ -861,11 +895,12 @@ def test_votes_expire_with_the_tickets_own_ttl(tmp_path):
     clock = {"now": 1_000}
     session = _harness(tmp_path, rules=[_quorum(ttl_ms=30_000)], clock=clock)
     ticket = _ticket(session)
-    session.approve_ticket(ticket["hash"], as_token="bob")
+    session.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
 
     clock["now"] += 30_001
     with pytest.raises(SessionError, match="lapsed"):
-        session.approve_ticket(ticket["hash"], as_token="carol")
+        session.approve_ticket(ticket["hash"], as_token="carol",
+                               as_secret=_SECRETS["carol"])
     assert _cross(session) is not None
 
     expired = [r for r in _records(session) if r["record"] == "quorum-expired"]
@@ -883,10 +918,12 @@ def test_an_expired_question_stays_expired_however_the_clock_moves(tmp_path):
     ticket = _ticket(session)
     clock["now"] += 5_000
     with pytest.raises(SessionError, match="lapsed"):
-        session.approve_ticket(ticket["hash"], as_token="bob")
+        session.approve_ticket(ticket["hash"], as_token="bob",
+                               as_secret=_SECRETS["bob"])
     clock["now"] = 0
     with pytest.raises(SessionError, match="lapsed"):
-        session.approve_ticket(ticket["hash"], as_token="bob")
+        session.approve_ticket(ticket["hash"], as_token="bob",
+                               as_secret=_SECRETS["bob"])
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +940,7 @@ def test_a_vote_whose_question_no_longer_matches_the_live_candidate_is_refused(
     record = quorum._quorums[ticket["hash"]]
     record["candidateHash"] = "sha256:" + "0" * 64
     with pytest.raises(SessionError, match="no longer matches the live candidate"):
-        quorum.approve_ticket(ticket["hash"], as_token="bob")
+        quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
     (row,) = [r for r in _records(quorum) if r["record"] == "quorum-refused"]
     assert row["reason"] == "stale-candidate" and row["voter"] == "bob"
     assert row["candidateHash"] == "sha256:" + "0" * 64
@@ -919,20 +956,23 @@ def test_a_denial_closes_the_question_and_is_recorded_as_a_denial(tmp_path):
     session = _harness(tmp_path, rules=[
         _quorum(2, ("alice", "bob", "carol", "dave"))])
     ticket = _ticket(session)
-    first = session.approve_ticket(ticket["hash"], vote="deny", as_token="bob")
+    first = session.approve_ticket(ticket["hash"], vote="deny", as_token="bob",
+                                   as_secret=_SECRETS["bob"])
     assert first["approved"] is False and first["outcome"] is None
     assert first["counted"] == 0
     assert not [r for r in _records(session)
                 if r["record"] == "quorum-denied"]
 
-    final = session.approve_ticket(ticket["hash"], vote="deny", as_token="carol")
+    final = session.approve_ticket(ticket["hash"], vote="deny", as_token="carol",
+                                   as_secret=_SECRETS["carol"])
     assert final["outcome"] == "denied"
     (row,) = [r for r in _records(session) if r["record"] == "quorum-denied"]
     assert row["denied"] == ["bob", "carol"] and row["reason"] == "denied"
     assert row["counted"] == 0 and row["require"] == 2
 
     with pytest.raises(SessionError, match="already denied"):
-        session.approve_ticket(ticket["hash"], as_token="bob")
+        session.approve_ticket(ticket["hash"], as_token="bob",
+                               as_secret=_SECRETS["bob"])
     assert _cross(session) is not None
 
 
@@ -945,11 +985,14 @@ def test_a_question_made_unreachable_by_a_denial_closes_as_denied(tmp_path):
     session = _harness(tmp_path, rules=[
         _quorum(3, ("alice", "bob", "carol", "dave"))])
     ticket = _ticket(session)
-    assert session.approve_ticket(ticket["hash"], as_token="bob")["outcome"] is None
-    third = session.approve_ticket(ticket["hash"], as_token="carol")
+    assert session.approve_ticket(ticket["hash"], as_token="bob",
+                                  as_secret=_SECRETS["bob"])["outcome"] is None
+    third = session.approve_ticket(ticket["hash"], as_token="carol",
+                                   as_secret=_SECRETS["carol"])
     assert third["counted"] == 2 and third["outcome"] is None
 
-    final = session.approve_ticket(ticket["hash"], vote="deny", as_token="dave")
+    final = session.approve_ticket(ticket["hash"], vote="deny", as_token="dave",
+                                   as_secret=_SECRETS["dave"])
     assert final["outcome"] == "denied"
     (row,) = [r for r in _records(session) if r["record"] == "quorum-denied"]
     assert row["reason"] == "denied" and row["counted"] == 2
@@ -964,7 +1007,7 @@ def test_the_emergency_override_admits_and_is_never_recorded_as_a_quorum(quorum)
     votes, and the count it actually reached is carried beside the count it
     demanded."""
     ticket = _ticket(quorum)
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
 
     result = quorum.override_ticket(ticket["hash"], reason="on-call, rollout")
     assert result["approved"] is True and result["satisfiedBy"] == "override"
@@ -1001,8 +1044,8 @@ def test_an_override_cannot_bypass_a_question_that_is_already_decided(quorum):
     refused: the point of an override is the case no vote can settle, and using
     it where a vote already decided would be an unaudited bypass."""
     ticket = _ticket(quorum)
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
-    quorum.approve_ticket(ticket["hash"], as_token="carol")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    quorum.approve_ticket(ticket["hash"], as_token="carol", as_secret=_SECRETS["carol"])
     with pytest.raises(SessionError, match="already satisfied"):
         quorum.override_ticket(ticket["hash"], reason="too late")
 
@@ -1022,16 +1065,17 @@ def test_escalation_closes_the_vote_path_and_only_an_approver_may_escalate(quoru
     override), and a bystander cannot close somebody else's question."""
     ticket = _ticket(quorum)
     with pytest.raises(SessionError, match="cannot escalate"):
-        quorum.escalate_ticket(ticket["hash"], as_token="mallory")
+        quorum.escalate_ticket(ticket["hash"], as_token="mallory",
+                               as_secret=_SECRETS["mallory"])
 
     result = quorum.escalate_ticket(ticket["hash"], reason="stalled",
-                                    as_token="bob")
+                                    as_token="bob", as_secret=_SECRETS["bob"])
     assert result["escalated"] is True and result["outcome"] == "escalated"
     (row,) = [r for r in _records(quorum) if r["record"] == "quorum-escalated"]
     assert row["by"] == "bob" and row["reason"] == "stalled"
 
     with pytest.raises(SessionError, match="already escalated"):
-        quorum.approve_ticket(ticket["hash"], as_token="bob")
+        quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
     assert _cross(quorum) is not None
 
 
@@ -1042,18 +1086,20 @@ def test_revocation_stops_the_votes_counting_and_only_an_insider_may_revoke(
     record says who closed it and which votes it withdrew."""
     ticket = _ticket(quorum)
     with pytest.raises(SessionError, match="cannot revoke"):
-        quorum.revoke_ticket(ticket["hash"], as_token="mallory")
+        quorum.revoke_ticket(ticket["hash"], as_token="mallory",
+                             as_secret=_SECRETS["mallory"])
 
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
     result = quorum.revoke_ticket(ticket["hash"], reason="wrong build",
-                                  as_token="alice")
+                                  as_token="alice", as_secret=_SECRETS["alice"])
     assert result["revoked"] is True and result["by"] == "alice"
     assert result["withdrewVotes"] == []
     (row,) = [r for r in _records(quorum) if r["record"] == "quorum-revoked"]
     assert row["reason"] == "wrong build" and row["counted"] == 1
 
     with pytest.raises(SessionError, match="already revoked"):
-        quorum.approve_ticket(ticket["hash"], as_token="carol")
+        quorum.approve_ticket(ticket["hash"], as_token="carol",
+                              as_secret=_SECRETS["carol"])
     assert _cross(quorum) is not None
 
 
@@ -1066,7 +1112,8 @@ def test_an_unnamed_approver_cannot_be_counted(quorum):
     counted: the set of humans a rule counts is the set it names."""
     ticket = _ticket(quorum)
     with pytest.raises(SessionError, match="not one of the approvers"):
-        quorum.approve_ticket(ticket["hash"], as_token="mallory")
+        quorum.approve_ticket(ticket["hash"], as_token="mallory",
+                              as_secret=_SECRETS["mallory"])
     (row,) = [r for r in _records(quorum) if r["record"] == "quorum-refused"]
     assert row["reason"] == "unknown-approver" and row["voter"] == "mallory"
     assert quorum.quorum_state(ticket["hash"])["counted"] == 0
@@ -1077,7 +1124,8 @@ def test_an_unparseable_vote_is_refused_rather_than_coerced(quorum):
     read as consent."""
     ticket = _ticket(quorum)
     with pytest.raises(SessionError, match="unparseable vote"):
-        quorum.approve_ticket(ticket["hash"], vote="maybe", as_token="bob")
+        quorum.approve_ticket(ticket["hash"], vote="maybe", as_token="bob",
+                              as_secret=_SECRETS["bob"])
     (row,) = [r for r in _records(quorum) if r["record"] == "quorum-refused"]
     assert row["reason"] == "malformed-vote"
     assert _cross(quorum) is not None
@@ -1117,7 +1165,8 @@ def test_a_single_party_ticket_cannot_be_answered_with_a_vote(tmp_path):
     with pytest.raises(SessionError, match="cannot be answered with a vote"):
         session.approve_ticket(ticket["hash"], vote="deny")
     with pytest.raises(SessionError, match="cannot be answered with a vote"):
-        session.approve_ticket(ticket["hash"], as_token="bob")
+        session.approve_ticket(ticket["hash"], as_token="bob",
+                               as_secret=_SECRETS["bob"])
     assert session.approve_ticket(ticket["hash"])["approved"] is True
 
 
@@ -1133,7 +1182,7 @@ def test_quorum_state_reports_the_graph_and_the_refusals(quorum):
     ticket = _ticket(quorum)
     with pytest.raises(SessionError):
         quorum.approve_ticket(ticket["hash"])
-    quorum.approve_ticket(ticket["hash"], as_token="bob")
+    quorum.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
 
     state = quorum.quorum_state(ticket["hash"])
     assert state["quorum"] is True and state["require"] == 2
@@ -1162,8 +1211,9 @@ def test_a_reissued_question_owes_its_own_quorum(tmp_path):
     are not re-counted against it."""
     session = _harness(tmp_path)
     ticket = _ticket(session)
-    session.approve_ticket(ticket["hash"], as_token="bob")
-    session.approve_ticket(ticket["hash"], as_token="carol")
+    session.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    session.approve_ticket(ticket["hash"], as_token="carol",
+                           as_secret=_SECRETS["carol"])
     assert _cross(session) is None
 
     again = _ticket(session)
@@ -1180,8 +1230,9 @@ def test_the_quorum_records_consume_no_wal_sequence(tmp_path):
     replay sequence the effect records carry is untouched."""
     session = _harness(tmp_path)
     ticket = _ticket(session)
-    session.approve_ticket(ticket["hash"], as_token="bob")
-    session.approve_ticket(ticket["hash"], as_token="carol")
+    session.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
+    session.approve_ticket(ticket["hash"], as_token="carol",
+                           as_secret=_SECRETS["carol"])
     document = _replay.WriteAheadLog.read(session._approval_wal().path)
     assert document["header"]["walVersion"] == _replay.WAL_VERSION
     assert all("seq" not in record for record in document["records"])
@@ -1192,7 +1243,7 @@ def test_the_quorum_graph_dies_with_the_session(tmp_path):
     ledger it keys into is. A vote cannot outlive the session that recorded it."""
     session = _harness(tmp_path)
     ticket = _ticket(session)
-    session.approve_ticket(ticket["hash"], as_token="bob")
+    session.approve_ticket(ticket["hash"], as_token="bob", as_secret=_SECRETS["bob"])
     assert session._quorums
     session._reset()
     assert session._quorums == {}
@@ -1234,17 +1285,20 @@ def test_the_approve_tool_carries_a_vote_to_the_protocol(tmp_path, monkeypatch):
     assert _cross(session) is not None
 
     first = server._tool_approve(
-        {"hash": ticket["hash"], "asToken": "bob", "vote": "approve"})
+        {"hash": ticket["hash"], "asToken": "bob",
+         "asSecret": _SECRETS["bob"], "vote": "approve"})
     assert first["ok"] is True and first["counted"] == 1
     assert first["approved"] is False
     assert _cross(session) is not None
 
-    second = server._tool_approve({"hash": ticket["hash"], "asToken": "carol"})
+    second = server._tool_approve({"hash": ticket["hash"], "asToken": "carol",
+                                   "asSecret": _SECRETS["carol"]})
     assert second["ok"] is True and second["approved"] is True
     assert _cross(session) is None
 
     grant = server._tool_approve(
-        {"hash": ticket["hash"], "uses": 2, "asToken": "bob"})
+        {"hash": ticket["hash"], "uses": 2, "asToken": "bob",
+         "asSecret": _SECRETS["bob"]})
     assert grant["ok"] is False
     assert "ONE operator" in grant["diagnostics"][0]["message"]
 

@@ -445,7 +445,17 @@ the rule does not carry, or from a name that already voted is refused and
 recorded. The standing-grant shape is refused outright for such a crossing: one
 operator's standing authority is not N distinct approvers.
 
-- Inputs: `hash`; `capability`; `uses`; `ttlMs`; `vote`; `asToken`.
+`asToken` is not believed on its own. Naming anyone but this session's own bound
+operator requires that operator's VOTE CREDENTIAL in `asSecret`, the secret whose
+SHA-256 digest the operator profile declares as its `key`; without it the cast is
+refused and recorded (`unbound-identity`, `unknown-operator`, `unkeyed-identity`,
+`unproven-identity`). Distinctness is counted over the PRINCIPAL a cast proved,
+not over the name it used, so two operators issued one secret supply one vote
+between them. What that buys and what it does not is in
+[Vote credentials](operator-capabilities.md#vote-credentials-multi-party-approval):
+N counted votes required N distinct secrets, which is not the same as N humans.
+
+- Inputs: `hash`; `capability`; `uses`; `ttlMs`; `vote`; `asToken`; `asSecret`.
 
 ### `revl_revoke`
 
@@ -466,7 +476,7 @@ proposer or an approver the rule names may close it; a bystander is refused and
 the refusal recorded. A pending question and a minted grant are two different
 objects, so they are two branches of one verb and not two spellings of one.
 
-- Inputs: `capability`; `requestId`; `hash`; `reason`; `asToken`.
+- Inputs: `capability`; `requestId`; `hash`; `reason`; `asToken`; `asSecret`.
 
 ### `revl_escalate`
 
@@ -484,7 +494,7 @@ before it is raised. The outcome is the named `escalated`, readable back through
 `revl_quorum`. Gated by the `approve` operator verb: saying a question cannot be
 answered as written is the same authority as answering it.
 
-- Inputs: `hash` (required); `reason`; `asToken`.
+- Inputs: `hash` (required); `reason`; `asToken`; `asSecret`.
 
 ### `revl_override`
 
@@ -507,7 +517,12 @@ trusted to cast one of N votes is not thereby trusted to stand in for all of
 them, so a profile grants or withholds the emergency path at its own address:
 `may approve on payments` authorizes votes and no override at all.
 
-- Inputs: `hash` (required); `reason` (required); `asToken`.
+Who an override is attributed to is bound the same way a vote is: `asToken`
+naming anyone but this session's bound operator requires that operator's
+`asSecret`. An override recorded against a name the caller merely typed is an
+unattributable act wearing somebody else's name.
+
+- Inputs: `hash` (required); `reason` (required); `asToken`; `asSecret`.
 
 ### `revl_quorum`
 

@@ -58,6 +58,7 @@ Grammar (blank lines and `#` comments ignored):
     operator <token> may     <verb>[, ...] on <subject>[, ...]
     operator <token> may not <verb>[, ...] on <subject>[, ...]
     operator <token> may     <verb>[, ...]                        # on *
+    operator <token> key     sha256:<64 hex>                      # item 471
 
 * **verbs** — `load`, `swap`, `edit`, `unload`, `restore`, `snapshot`, `undo`
   (`rollback` is accepted as an alias for `undo`), `commit`, `approve`,
@@ -71,12 +72,21 @@ Grammar (blank lines and `#` comments ignored):
   **deny wins** over any allow (exactly as in the boundary policy). An operator
   is **closed by default**: a verb with no allow that selects the target is
   refused.
+* **key** — the operator's **vote credential**, used by multi-party approval
+  (item 471) to bind who cast a vote. It is the SHA-256 **digest** of a secret
+  you issue to that operator out of band, never the secret: the profile is a
+  file that gets read, copied and diffed, and one carrying the secrets would
+  hand every voter identity to anyone who can read it. A line that is not a
+  64-character hex digest (with or without the `sha256:` prefix) is a parse
+  error, and one token may declare at most one key. See
+  [Vote credentials](#vote-credentials-multi-party-approval) below.
 
 ### The JSON equivalent
 
 ```json
 { "operators": [
     { "token": "alice",
+      "key": "sha256:<64 hex>",
       "grants": [
         {"verbs": ["swap", "plan"], "on": ["tenant_a*"]},
         {"verbs": ["snapshot"],     "on": ["*"]},
@@ -99,6 +109,59 @@ the stdio transport carries a single session, so one served process is one
 operator. When the transport later carries a per-caller **session token** (item
 39), the same registry maps each token to its operator with no change to the
 gate — the token *is* the operator's name.
+
+## Vote credentials (multi-party approval)
+
+A `require N of {a, b, c}` approval rule (item 471) admits a crossing only once
+N distinct approvers have each voted. A session runs as ONE operator, so the
+other votes name their operator with `asToken` on `revl_approve`. Until issue
+#979 that name was taken at face value, which meant one operator could satisfy
+`require 2 of {...}` by asserting two of the names in turn: the count was of
+distinct names, and multi-party control is about distinct principals.
+
+A cast is now attributed to a **bound** identity or it is refused:
+
+* naming **this session's own operator**, or naming nobody, attributes the cast
+  to the identity bound at serve time. That is process configuration, not
+  something the caller on the wire chooses;
+* naming **anyone else** requires that operator's vote credential, passed as
+  `asSecret` on the same call. The session hashes it and compares against the
+  `key` the profile declares for that token;
+* everything else refuses, by name: `unbound-identity` (no profile to check
+  against), `unknown-operator`, `unkeyed-identity` (no `key` declared),
+  `unproven-identity` (credential missing or wrong), `unnamed-credential` (a
+  secret with no `asToken` beside it). Each refusal is written to the decision
+  graph before it is raised.
+
+The distinctness unit is the **principal**, which is derived rather than
+asserted: the session binding is one principal and each distinct credential
+digest is one principal. Two operators issued the SAME secret are therefore one
+principal and supply one vote between them (`same-principal`), which a count of
+names cannot see. The graph records a hash of the credential digest, never the
+digest, so an audit can tell the principals apart without carrying the verifier.
+
+Issue a credential by choosing a secret, hashing it, and putting the digest in
+the profile:
+
+```
+$ printf %s "$SECRET" | shasum -a 256
+operator bob key sha256:<the digest>
+operator bob may approve on payments*
+```
+
+The same binding governs `revl_escalate`, `revl_revoke` (its question branch)
+and `revl_override`: an override recorded against a name the caller merely typed
+is an unattributable act wearing somebody else's name.
+
+**What this proves, and what it does not.** N counted votes required N distinct
+secrets. It does not prove N humans consented: a credential is a bearer token,
+it can be shared, delegated or stolen, and every cast still arrives over one
+session's wire, so an operator who has collected two secrets still satisfies a
+two-of-M rule. Closing that needs a per-caller authenticated transport (item 39)
+where each cast arrives on its own authenticated connection and is signed over
+the question's binding, so a captured credential is not replayable. Treat the
+quorum as binding against mistake and against a single operator's unaided
+assertion, and as advisory against an operator who has collected the secrets.
 
 ## Per-verb gating
 
