@@ -252,13 +252,44 @@ declared at `subscribe`; there are no unbounded buffers. Policies:
 | `error` (default) | terminal `Faulted(overflow)`; subscription closes | deterministic, no silent loss; the safe default |
 | `drop_newest` | discard the incoming item | lossy-tolerant telemetry |
 | `drop_oldest` | evict the buffer head | latest-wins gauges |
-| `block` | provider suspends until the consumer drains | py/ts only; refused on tiers that cannot suspend the provider |
+| `block` | provider suspends until the consumer drains | back-pressured ingestion, where losing an item is worse than slowing the producer |
 
 `Paused` (the reserved state index) is the `block`-policy state: a subscription
 whose buffer is full and whose policy is `block` is `Stream[T, Paused]` until
 drained. Default `error` was chosen over `drop_*` so that v1 never loses data
 silently; a lossy stream is an explicit opt-in, matching the language's
 "asynchrony is a declared property" stance (async-extern.md §3).
+
+"The provider suspends" is a REFUSED DELIVERY, not a blocked call: the host's
+`emit` returns false, the subscription enters `Paused`, and the provider re-emits
+once it is `Active` again. That is why `block` needs no ability to park a
+provider thread and lowers on every emitting tier.
+
+**Shipped on all five emitting tiers.** py is the reference, ts mirrors it, and
+go, java and rust each carry the same four arms, mirrored from
+`Subscription._deliver` statement for statement and proved by running: a drop is
+recorded with the item it lost, a pause and a resume are recorded as such, and
+the refused `emit` is traced as `stream.emit <item> refused` so backpressure is
+never a silent loss on any tier. The blocking tiers resume EAGERLY, at the `next`
+that makes room, which is what the reference does when no window is declared.
+
+The one thing those three tiers still refuse by name is the `drain` WINDOW
+below, whose resume is driven by the deterministic test clock. Lowering it
+without that clock would resume early and quietly disagree with the reference,
+which is worse than refusing. The §1 combinator chain came off that list in its
+own landing, so `_refuse_unlowered_stream_surface` on each blocking tier is now
+a single check.
+
+**A policy and a chain on one subscription share one signal.** The acceptance a
+`deliver` answers is the same boolean a `take(n)` link counts, and `take(n)`
+spends its budget only on an ACCEPTED item. So a `block` pause must not consume
+a slot: a consumer that asked for two items receives two, the pause is traced,
+and the derived stream's `Closed` terminal lands after the second item rather
+than the first. A tier where the pause and the chain used different signalling
+would drop the second item with no overflow, no drop mark and no fault, which is
+the silent loss this section exists to rule out. Pinned on the reference by
+`test_a_block_pause_does_not_spend_the_take_budget` and mirrored on all three
+blocking tiers.
 
 ### 4.5 Replay — ONLY IF THE PROVIDER DECLARES IT
 
