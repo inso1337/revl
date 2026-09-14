@@ -225,7 +225,8 @@ PATH_FAMILIES: dict[str, tuple[str, ...]] = {
     "inverse-source": ("resolve_sidecar",),
     "syscall-time": ("open_confined_write", "write_through", "snapshot_preimage",
                      "confirm_landed", "replace_confined",
-                     "install_captured_sidecar", "remove_confined",
+                     "install_captured_sidecar", "park_captured_sidecar",
+                     "install_parked_sidecar", "remove_confined",
                      "mkdir_confined", "rmdir_confined", "close_handle",
                      "discard_write"),
 }
@@ -254,6 +255,8 @@ SYSCALL_PATH_ARGS: dict[str, tuple[int, ...]] = {
     "confirm_landed": (),
     "replace_confined": (0, 1),
     "install_captured_sidecar": (0, 1),
+    "park_captured_sidecar": (0, 1),
+    "install_parked_sidecar": (0, 1),
     "remove_confined": (0,),
     "mkdir_confined": (0,),
     "rmdir_confined": (0,),
@@ -1833,11 +1836,15 @@ def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
 
 
 def _refuse_drifted_identity(st, capture, fields: tuple[str, ...], real: str,
-                             sentence: str) -> None:
+                             sentence: str,
+                             noun: str = "the captured preimage") -> None:
     """Compare `st` against a recorded `capture` over `fields`, or do nothing
     when the witness recorded none. Named separately so the two stages of
     `install_captured_sidecar` state the same comparison twice rather than
-    inlining two subtly different ones."""
+    inlining two subtly different ones, and shared with the `unrm` side
+    (`install_parked_sidecar`, issue #1038) so both inverses compare one way.
+    `noun` names what the file failed to be, which is the only thing that
+    differs between the preimage sidecar and the garbage one."""
     if not isinstance(capture, dict) or not capture:
         return
     observed = _capture_of(st)
@@ -1847,9 +1854,171 @@ def _refuse_drifted_identity(st, capture, fields: tuple[str, ...], real: str,
         raise FsOpError(
             "EIDENTITY",
             f"{sentence} ({', '.join(drifted)} differ); the reversal was "
-            "refused rather than install a file that is not the captured "
-            "preimage",
+            f"refused rather than install a file that is not {noun}",
             real)
+
+
+def _parked_stat(real: str, what: str):
+    """`lstat` of `real` taken through its parent's directory fd, refusing a
+    symlink. The `unrm` peer of `_checked_stat` (issue #1038).
+
+    `_checked_stat` asserts two constants about the preimage sidecar, that it is
+    a regular file and that it has one link, because `snapshot_preimage` created
+    that file and knows what it made. The garbage sidecar is not that: it is the
+    CALLER's own file, moved into the slot by a rename, so `rm` parks a
+    directory as readily as a file, parks a file that already carried a second
+    hardlink, and parks a file whose mode denies read. Those facts are recorded
+    by `park_captured_sidecar` and checked against the record in
+    `_refuse_substituted_kind`; asserting them as constants here would refuse an
+    honest reversal, which is over-refusal rather than hardening.
+
+    One statement IS constant: `rm` never parks a symlink, because
+    `resolve_within` realpaths the leaf before the rename. So a symlink in the
+    slot is a substitution, and it gets the `EOUTSIDE` the preimage side answers
+    for the same case.
+
+    The stat is an `lstat` through the already-walked directory fd rather than
+    an `fstat` on an `O_RDONLY` open, for the permission reason above: opening a
+    write-only file to check it would refuse a reversal `rm` accepted. The
+    parent chain is still walked one `O_NOFOLLOW` component at a time and the
+    leaf is not followed, so no link on the path is traversed."""
+    parent, leaf = _split(real)
+    try:
+        dirfd = _open_dirfd(parent)
+    except (FileNotFoundError, NotADirectoryError):
+        raise FsOpError(
+            "ERACE", f"the {what}'s directory disappeared mid-inverse",
+            real) from None
+    try:
+        try:
+            st = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise FsOpError(
+                "ERACE", f"the {what} disappeared mid-inverse, so the reversal "
+                "cannot be shown to have installed what was captured",
+                real) from None
+    finally:
+        os.close(dirfd)
+    if stat.S_ISLNK(st.st_mode):
+        raise ConfinementError(
+            "EOUTSIDE", f"the {what} may not be a symlink", real)
+    return st
+
+
+def _refuse_substituted_kind(st, capture, real: str, what: str) -> None:
+    """The two refusals `_checked_stat` states as constants for the preimage
+    sidecar, stated against the capture instead (issue #1038).
+
+    * a different file TYPE than the one that was parked is `EOUTSIDE`, the code
+      the preimage side answers for a non-regular sidecar;
+    * MORE links than it was parked with is `EMULTILINK`, the code the forward
+      `open_confined_write` answers for a multiply-linked target: a name linked
+      to the sidecar since it was parked is a live alias whoever holds the other
+      name keeps after the rename.
+
+    Split out so both stages of `install_parked_sidecar` state the same two
+    refusals rather than inlining two subtly different ones. A witness with no
+    capture has nothing to compare against and keeps only the symlink refusal
+    `_parked_stat` applies to everything."""
+    if not isinstance(capture, dict) or not capture:
+        return
+    parked_mode = capture.get("mode")
+    if isinstance(parked_mode, int) and \
+            stat.S_IFMT(st.st_mode) != stat.S_IFMT(parked_mode):
+        raise ConfinementError(
+            "EOUTSIDE",
+            f"the {what} is not the kind of file that was parked, so the "
+            "reversal was refused rather than install it over the target",
+            real)
+    parked_links = capture.get("nlink")
+    if isinstance(parked_links, int) and st.st_nlink > parked_links:
+        raise FsOpError(
+            "EMULTILINK",
+            f"the {what} is linked from a name it was not parked with "
+            f"({st.st_nlink} links now, {parked_links} when it was parked), so "
+            "installing it would hand a live alias to whoever holds the other "
+            "name",
+            real)
+
+
+def park_captured_sidecar(src_real: str, dst_real: str) -> dict:
+    """Park `src_real` in the garbage slot `dst_real` and return the parked
+    inode's captured identity (issue #1038).
+
+    The forward half of the `unrm` check, and the `rm` peer of what
+    `snapshot_preimage` records for `restore` (issue #1016). `write` has a held
+    descriptor to capture from; `rm` has none, because its sidecar is not a copy
+    it made but the removed file itself, moved by a rename. So the capture is
+    taken immediately after the rename, from the fresh `O_EXCL`-unique leaf
+    inside the garbage directory's own fd, never from a re-walked path string,
+    and it records the stamps AS THE PARK LEFT THEM: a rename bumps the inode's
+    `ctime`, so capturing before it would record a `ctime_ns` no honest sidecar
+    could still have."""
+    replace_confined(src_real, dst_real)
+    return _capture_of(_parked_stat(dst_real, "garbage sidecar"))
+
+
+def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
+    """Install `rm`'s garbage sidecar back over its target, but only while the
+    sidecar is still demonstrably the file that was parked (issue #1038).
+
+    `unrm`'s peer of `install_captured_sidecar`, which does this for `restore`'s
+    preimage sidecar (issue #1016). The gap is identical and reached through a
+    separate witness and a separate inverse: `resolve_sidecar` proves the SLOT
+    is a garbage sidecar this workspace owns, and nothing at all about the FILE
+    sitting in it. A parked file lives in `.revl-fs-garbage` for the whole life
+    of an activation, so a same-UID writer inside the workspace has that window
+    to rewrite it in place, swap it for another inode with the same bytes, link
+    a second name to it, or replace it with something that is not a file. The
+    inverse then renamed the result over the target and the abort reported a
+    clean, residue-free reversal.
+
+    The same three refusals as the preimage side, with the same codes:
+    `EOUTSIDE` for a symlink or a different file type, `EMULTILINK` for a link
+    added since the park, `EIDENTITY` for drifted `(dev, ino)` or `mode`/`size`/
+    `mtime_ns`/`ctime_ns`. `(dev, ino)` is what a same-bytes replacement cannot
+    forge; `ctime_ns` is what makes an in-place rewrite visible without
+    re-reading the bytes, and unlike `mtime_ns` an unprivileged writer cannot
+    set it back with `utimes`.
+
+    The one difference from `install_captured_sidecar` is where the type and
+    link-count expectations come from. The preimage sidecar is a file this
+    module created, so they are constants there. The garbage sidecar is the
+    caller's own file, so they are facts `park_captured_sidecar` recorded, and
+    they are compared against the record (`_refuse_substituted_kind`). That is
+    the difference between refusing a substitution and refusing an honest `rm`
+    of a directory or of an already-hardlinked file.
+
+    The check runs again on the INSTALLED result, because the rename is by name:
+    re-checking afterwards is what closes the window between the check and the
+    syscall, the same way `confirm_landed` re-establishes the forward write
+    rather than trusting its pre-syscall check. The second pass drops
+    `ctime_ns`, which the rename itself legitimately bumps
+    (`INSTALLED_CAPTURE_FIELDS`).
+
+    A refusal RAISES, so the teardown loop records it as `restore-residue`
+    against the crossing it was reverting, the outcome item 243 rule 6 already
+    defines for an inverse that cannot complete, through the same merged-residue
+    Record schema a refused `restore` reaches. No flag, no WAL version, no new
+    verdict. The failure direction is deliberate: a sidecar that cannot be shown
+    to be the parked one is reported as residue rather than silently installed
+    over the target.
+
+    `capture` is the witness's recorded `park_captured_sidecar` capture. A
+    witness that carries none (a durable record written before this key existed,
+    replayed by `revl recover`) keeps the caller-independent symlink refusal and
+    still installs; refusing every such replay would strand a recoverable WAL."""
+    before = _parked_stat(src_real, "garbage sidecar")
+    _refuse_substituted_kind(before, capture, src_real, "garbage sidecar")
+    _refuse_drifted_identity(
+        before, capture, SIDECAR_CAPTURE_FIELDS, src_real,
+        "the garbage sidecar changed since it was parked", "the parked file")
+    replace_confined(src_real, dst_real)
+    after = _parked_stat(dst_real, "unremoved target")
+    _refuse_substituted_kind(after, capture, dst_real, "unremoved target")
+    _refuse_drifted_identity(
+        after, capture, INSTALLED_CAPTURE_FIELDS, dst_real,
+        "the unremoved target is not the parked file", "the parked file")
 
 
 def remove_confined(real: str) -> None:

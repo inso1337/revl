@@ -461,6 +461,51 @@ Both tiers carry it (`install_captured_sidecar` in
 swapped, re-linked and non-regular sidecars, the post-install re-check, and the
 untampered control that must stay silent.
 
+## The same check on `unrm`'s garbage sidecar (#1038)
+
+`unrm` reached its sidecar through a separate witness and a separate inverse, so
+none of the section above applied to it. The exposure was identical: `rm` parks
+the removed file in `.revl-fs-garbage` for the whole life of an activation, and
+`resolve_sidecar` proved only that the SLOT was a garbage sidecar this workspace
+owns. A same-UID writer inside the workspace had that window to rewrite the
+parked file in place, swap it for another inode with the same bytes, link a
+second name to it, or replace it with something that is not a file; `unrm` then
+renamed the result back over the original path and the abort reported a clean
+reversal.
+
+`rm` now records the parked file's identity (`park_captured_sidecar` /
+`parkCapturedSidecar`), the witness carries it as a superset `capture` key
+beside the unchanged `path` and `garbage`, and the canonical inverse checks it
+at syscall time (`install_parked_sidecar` / `installParkedSidecar`), then checks
+the installed result again with `ctime_ns` dropped because the rename bumps it.
+The refusals are the ones the preimage side already spells: `EOUTSIDE`,
+`EMULTILINK`, `EIDENTITY`.
+
+There is one deliberate difference from the preimage side, and it is about not
+over-refusing. `restore`'s sidecar is a file the module made, so "regular file"
+and "one link" are constants it can assert. `rm`'s sidecar is the CALLER's own
+file, moved by a rename: `rm` accepts a directory, a file that already carried a
+second hardlink, and a file whose mode denies read. So the file type and the
+link count are not constants here, they are facts the capture recorded, and the
+inverse compares them against the record. A directory replacing a parked regular
+file is still `EOUTSIDE`; a link added since the park is still `EMULTILINK`; an
+honest `rm` of a directory still reverses. For the same reason the sidecar is
+`lstat`ed through the chain-checked parent rather than opened: opening a
+write-only file to check it would refuse a reversal `rm` accepted.
+
+The failure direction matches: a sidecar that cannot be shown to be the parked
+one is reported as `restore-residue` through the existing merged residue Record
+schema, never installed over the target, and an untampered `unrm` stays exactly
+as quiet as before. A witness with no capture, a durable record written before
+this key existed, keeps the symlink refusal and still installs, so a recoverable
+WAL is not stranded. No opt-in flag, no WAL version, no new verdict vocabulary.
+
+`tests/test_fs_unrm_sidecar_identity_1038.py` and
+`backends/typescript/tests/fs_unrm_sidecar_identity.test.ts` pin the tampered,
+swapped, re-linked and non-regular sidecars, the post-install re-check, the
+end-to-end abort that must surface the residue record, and the controls that
+must stay silent.
+
 ## Honest caveats
 
 These are load-bearing limits, documented so the reversibility claim is not

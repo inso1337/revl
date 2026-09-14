@@ -197,6 +197,7 @@ export const PATH_FAMILIES: Record<string, readonly string[]> = {
   'inverse-source': ['resolveSidecar'],
   'syscall-time': ['openConfinedWrite', 'writeThrough', 'snapshotPreimage',
     'confirmLanded', 'replaceConfined', 'installCapturedSidecar',
+    'parkCapturedSidecar', 'installParkedSidecar',
     'removeConfined', 'mkdirConfined', 'rmdirConfined', 'closeHandle',
     'discardWrite'],
 }
@@ -224,6 +225,8 @@ export const SYSCALL_PATH_ARGS: Record<string, readonly number[]> = {
   confirmLanded: [],
   replaceConfined: [0, 1],
   installCapturedSidecar: [0, 1],
+  parkCapturedSidecar: [0, 1],
+  installParkedSidecar: [0, 1],
   removeConfined: [0],
   mkdirConfined: [0],
   rmdirConfined: [0],
@@ -1116,6 +1119,179 @@ function rawInstallCapturedSidecar(
     'the restored target is not the captured preimage')
 }
 
+/** `lstat` of `real` with the parent chain checked, refusing a symlink. The
+ * `unrm` peer of `rawInstallCapturedSidecar`'s `observe` (issue #1038), and the
+ * ts peer of py `_parked_stat`.
+ *
+ * The preimage side asserts two constants about its sidecar, a regular file
+ * with one link, because `snapshotPreimage` created that file and knows what it
+ * made. The garbage sidecar is the CALLER's own file, moved into the slot by a
+ * rename: `fsRm` parks a directory as readily as a file, parks a file that
+ * already carried a second hardlink, and parks a file whose mode denies read.
+ * Those facts are recorded by `parkCapturedSidecar` and checked against the
+ * record in `refuseSubstitutedKind`; asserting them as constants would refuse an
+ * honest reversal, which is over-refusal rather than hardening.
+ *
+ * One statement is constant: `fsRm` never parks a symlink, because
+ * `resolveWithin` realpaths the leaf before the rename, so a symlink in the slot
+ * is a substitution and gets the same `EOUTSIDE`. The stat is an `lstat` rather
+ * than an open for the permission reason above: opening a write-only file to
+ * check it would refuse a reversal `fsRm` accepted. */
+function parkedStat(real: string, what: string): fs.BigIntStats {
+  const [parent] = splitLeaf(real)
+  try {
+    assertRealDirChain(parent)
+  } catch (e) {
+    if (e instanceof FsOpError) throw e
+    throw new FsOpError(
+      'ERACE', `the ${what}'s directory disappeared mid-inverse`, real)
+  }
+  let st: fs.BigIntStats
+  try {
+    st = fs.lstatSync(real, { bigint: true })
+  } catch {
+    throw new FsOpError(
+      'ERACE',
+      `the ${what} disappeared mid-inverse, so the reversal cannot be shown `
+      + 'to have installed what was captured',
+      real,
+    )
+  }
+  if (st.isSymbolicLink()) {
+    throw new FsOpError('EOUTSIDE', `the ${what} may not be a symlink`, real)
+  }
+  return st
+}
+
+/** The file-type bits of a `mode`, as a string, so an observed `BigIntStats`
+ * mode and a recorded decimal-string one compare the same way. */
+function fileTypeOf(mode: string): string {
+  return String(BigInt(mode) & 0xf000n)
+}
+
+/** The two refusals the preimage side states as constants, stated against the
+ * capture instead (issue #1038): a different file TYPE than what was parked is
+ * `EOUTSIDE`, and MORE links than it was parked with is `EMULTILINK` — a name
+ * linked to the sidecar since the park is a live alias whoever holds the other
+ * name keeps after the rename. A witness with no capture has nothing to compare
+ * against and keeps only `parkedStat`'s symlink refusal. Peer of py
+ * `_refuse_substituted_kind`. */
+function refuseSubstitutedKind(
+  observed: SidecarCapture, capture: SidecarCapture | null | undefined,
+  real: string, what: string,
+): void {
+  if (capture === null || capture === undefined) return
+  if (capture.mode !== undefined
+    && fileTypeOf(observed.mode) !== fileTypeOf(capture.mode)) {
+    throw new FsOpError(
+      'EOUTSIDE',
+      `the ${what} is not the kind of file that was parked, so the reversal `
+      + 'was refused rather than install it over the target',
+      real,
+    )
+  }
+  if (capture.nlink !== undefined
+    && BigInt(observed.nlink) > BigInt(capture.nlink)) {
+    throw new FsOpError(
+      'EMULTILINK',
+      `the ${what} is linked from a name it was not parked with `
+      + `(${observed.nlink} links now, ${capture.nlink} when it was parked), `
+      + 'so installing it would hand a live alias to whoever holds the other '
+      + 'name',
+      real,
+    )
+  }
+}
+
+/** Compare `observed` against a recorded `capture` over `fields`, or do nothing
+ * when the witness recorded none. Peer of py `_refuse_drifted_identity`. */
+function refuseDriftedIdentity(
+  observed: SidecarCapture, capture: SidecarCapture | null | undefined,
+  fields: readonly (keyof SidecarCapture)[], real: string, sentence: string,
+  noun: string,
+): void {
+  if (capture === null || capture === undefined) return
+  const drifted = fields.filter((f) => capture[f] !== undefined
+    && capture[f] !== observed[f])
+  if (drifted.length > 0) {
+    throw new FsOpError(
+      'EIDENTITY',
+      `${sentence} (${drifted.join(', ')} differ); the reversal was refused `
+      + `rather than install a file that is not ${noun}`,
+      real,
+    )
+  }
+}
+
+/** Park `srcReal` in the garbage slot `dstReal` and return the parked inode's
+ * captured identity (issue #1038). Peer of py `park_captured_sidecar`.
+ *
+ * The forward half of the `fsUnrm` check, and the `fsRm` peer of what
+ * `snapshotPreimage` records for `fsRestore`. `fsWrite` has a held descriptor to
+ * capture from; `fsRm` has none, because its sidecar is not a copy it made but
+ * the removed file itself, moved by a rename. So the capture is taken right
+ * after the rename, on the fresh `O_EXCL`-unique leaf inside the chain-checked
+ * garbage directory, and it records the stamps AS THE PARK LEFT THEM: a rename
+ * bumps the inode's `ctime`, so capturing before it would record a `ctimeNs` no
+ * honest sidecar could still have. */
+function rawParkCapturedSidecar(
+  srcReal: string, dstReal: string,
+): SidecarCapture {
+  replaceConfined(srcReal, dstReal)
+  return captureOf(parkedStat(dstReal, 'garbage sidecar'))
+}
+
+/** Install `fsRm`'s garbage sidecar back over its target, but only while the
+ * sidecar is still demonstrably the file that was parked (issue #1038). Peer of
+ * py `install_parked_sidecar`, and of `rawInstallCapturedSidecar` on the
+ * preimage side (issue #1016).
+ *
+ * The gap is identical and reached through a separate witness and a separate
+ * inverse: `resolveSidecar` proves the SLOT is a garbage sidecar this workspace
+ * owns, and nothing about the FILE sitting in it. A parked file lives in
+ * `.revl-fs-garbage` for the whole life of an activation, so a same-UID writer
+ * inside the workspace has that window to rewrite it in place, swap it for
+ * another inode with the same bytes, link a second name to it, or replace it
+ * with something that is not a file. The inverse then renamed the result over
+ * the target and the abort reported a clean, residue-free reversal.
+ *
+ * The same three refusals as the preimage side, with the same codes: `EOUTSIDE`
+ * for a symlink or a different file type, `EMULTILINK` for a link added since
+ * the park, `EIDENTITY` for drifted `(dev, ino)` or `mode`/`size`/`mtimeNs`/
+ * `ctimeNs`. The one difference is where the type and link-count expectations
+ * come from: the preimage sidecar is a file this module created, so they are
+ * constants there; the garbage sidecar is the caller's own file, so they are
+ * facts `parkCapturedSidecar` recorded and are compared against the record.
+ * That is the difference between refusing a substitution and refusing an honest
+ * `fsRm` of a directory or of an already-hardlinked file.
+ *
+ * The check runs again on the INSTALLED result, because the rename is by name,
+ * exactly as `rawInstallCapturedSidecar` re-checks; the second pass drops
+ * `ctimeNs`, which the rename legitimately bumps.
+ *
+ * A refusal THROWS, which the teardown loop records as `restore-residue` — the
+ * outcome item 243 rule 6 already defines for an inverse that cannot complete.
+ * A sidecar that cannot be shown to be the parked one is reported as residue
+ * rather than silently installed. A witness carrying no capture (a durable
+ * record written before this key existed) keeps the symlink refusal and still
+ * installs; refusing every such replay would strand a recoverable WAL. */
+function rawInstallParkedSidecar(
+  srcReal: string, dstReal: string,
+  capture: SidecarCapture | null | undefined,
+): void {
+  const before = captureOf(parkedStat(srcReal, 'garbage sidecar'))
+  refuseSubstitutedKind(before, capture, srcReal, 'garbage sidecar')
+  refuseDriftedIdentity(
+    before, capture, SIDECAR_CAPTURE_FIELDS, srcReal,
+    'the garbage sidecar changed since it was parked', 'the parked file')
+  replaceConfined(srcReal, dstReal)
+  const after = captureOf(parkedStat(dstReal, 'unremoved target'))
+  refuseSubstitutedKind(after, capture, dstReal, 'unremoved target')
+  refuseDriftedIdentity(
+    after, capture, INSTALLED_CAPTURE_FIELDS, dstReal,
+    'the unremoved target is not the parked file', 'the parked file')
+}
+
 /** `unlink` with the parent chain-checked. A missing target is a no-op: an
  * inverse must be idempotent on replay (item 243 rule 5). `unlink` does not
  * follow a symlink at the leaf, so a planted link is removed, never traversed. */
@@ -1226,6 +1402,8 @@ const RAW: Record<string, (...a: never[]) => unknown> = {
   confirmLanded: rawConfirmLanded as (...a: never[]) => unknown,
   replaceConfined: rawReplaceConfined as (...a: never[]) => unknown,
   installCapturedSidecar: rawInstallCapturedSidecar as (...a: never[]) => unknown,
+  parkCapturedSidecar: rawParkCapturedSidecar as (...a: never[]) => unknown,
+  installParkedSidecar: rawInstallParkedSidecar as (...a: never[]) => unknown,
   removeConfined: rawRemoveConfined as (...a: never[]) => unknown,
   mkdirConfined: rawMkdirConfined as (...a: never[]) => unknown,
   rmdirConfined: rawRmdirConfined as (...a: never[]) => unknown,
@@ -1276,6 +1454,12 @@ export const replaceConfined = GUARD.replaceConfined as typeof rawReplaceConfine
 /** family 4, see `rawInstallCapturedSidecar`. */
 export const installCapturedSidecar =
   GUARD.installCapturedSidecar as typeof rawInstallCapturedSidecar
+/** family 4, see `rawParkCapturedSidecar`. */
+export const parkCapturedSidecar =
+  GUARD.parkCapturedSidecar as typeof rawParkCapturedSidecar
+/** family 4, see `rawInstallParkedSidecar`. */
+export const installParkedSidecar =
+  GUARD.installParkedSidecar as typeof rawInstallParkedSidecar
 /** family 4, see `rawRemoveConfined`. */
 export const removeConfined = GUARD.removeConfined as typeof rawRemoveConfined
 /** family 4, see `rawMkdirConfined`. */
@@ -1312,7 +1496,14 @@ export interface WriteWitness {
   capture?: SidecarCapture | null
 }
 /** `rm`'s witness: the original path and where the target was parked. */
-export interface RmWitness { path: string; garbage: string }
+export interface RmWitness {
+  path: string
+  garbage: string
+  /** the parked file's identity at park time, which `fsUnrm` re-checks before
+   * installing it back (issue #1038). Optional: a witness written before this
+   * key existed carries none and still unrms. */
+  capture?: SidecarCapture | null
+}
 /** `move`'s witness: the resolved source and destination. */
 export interface MoveWitness { from: string; to: string }
 /** `mkdir`'s witness: the created directory. */
@@ -1391,8 +1582,12 @@ export function fsRm(p: string): FsResult<RmWitness> {
     // refused if it is a symlink, so a planted `.revl-fs-garbage` link can no
     // longer park the removed file outside the boundary.
     const parked = freshSidecar(garbageDir(), 'rm')
-    replaceConfined(target, parked)
-    return { kind: 'Ok', value: { path: target, garbage: parked } }
+    // the park IS the capture: `fsRm`'s sidecar is the removed file itself,
+    // moved by a rename, so its identity is recorded from the slot the rename
+    // just filled (issue #1038) and `fsUnrm` can prove the file it installs
+    // back is the file that was parked. A SUPERSET key, like `fsWrite`'s.
+    const capture = parkCapturedSidecar(target, parked)
+    return { kind: 'Ok', value: { path: target, garbage: parked, capture } }
   } catch (e) {
     if (e instanceof FsOpError) return { kind: 'Err', value: e.asError() }
     throw e
@@ -1484,7 +1679,17 @@ export function fsUnrm(w: RmWitness): void {
   const parked = resolveSidecar(w.garbage, 'garbage')
   // rename the parked file back. idempotent, once moved back (garbage gone),
   // a second replay is a no-op.
-  if (lexistsConfined(parked)) replaceConfined(parked, target)
+  //
+  // `resolveSidecar` proves the SLOT is one this workspace owns; it cannot
+  // prove the FILE in it is still the file `fsRm` parked there. So the install
+  // re-checks the sidecar against the identity captured at park time and
+  // re-checks the installed result afterwards, exactly as `fsRestore` does for
+  // its preimage sidecar (issue #1038). A drifted sidecar throws, which the
+  // teardown loop records as restore-residue; it is never silently installed
+  // over the target. An honest unrm is quiet.
+  if (lexistsConfined(parked)) {
+    installParkedSidecar(parked, target, w.capture)
+  }
 }
 
 /** Inverse of `fsMove`: move it back. Both endpoints confined, idempotent. */
@@ -1600,6 +1805,8 @@ export interface RevlFsHost {
   closeHandle: typeof closeHandle
   replaceConfined: typeof replaceConfined
   installCapturedSidecar: typeof installCapturedSidecar
+  parkCapturedSidecar: typeof parkCapturedSidecar
+  installParkedSidecar: typeof installParkedSidecar
   removeConfined: typeof removeConfined
   mkdirConfined: typeof mkdirConfined
   rmdirConfined: typeof rmdirConfined
@@ -1628,6 +1835,8 @@ const HOST: RevlFsHost = {
   closeHandle,
   replaceConfined,
   installCapturedSidecar,
+  parkCapturedSidecar,
+  installParkedSidecar,
   removeConfined,
   mkdirConfined,
   rmdirConfined,
