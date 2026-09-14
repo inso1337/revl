@@ -258,10 +258,25 @@ class Grant:
 
 @dataclass(frozen=True)
 class Operator:
-    """One operator identity: a token and the grants bound to it."""
+    """One operator identity: a token, the grants bound to it, and — when the
+    profile declares one — the digest of the vote credential that binds a cast
+    to this identity.
+
+    ``vote_key`` is the SHA-256 hex digest of a secret the deployer issues to
+    this operator out of band, never the secret itself: the profile file is a
+    configuration artifact that gets read, copied and diffed, and a file that
+    carried the secrets would hand every voter identity to anyone who can read
+    it. The session verifies a presented credential by hashing it and comparing
+    against this digest (:func:`revl.mcp.quorum.resolve_cast`).
+
+    ``None`` means the profile declares no credential for this operator, which
+    is not a default-open: a cast attributed to an operator with no declared
+    credential cannot be proven and is refused (roadmap item 471 / issue #979).
+    """
 
     token: str
     grants: tuple[Grant, ...] = ()
+    vote_key: str | None = None
 
     def allows(self, verb: str, labels: frozenset[str]) -> tuple[bool, Grant | None]:
         """Decide one (verb, target) pair. Deny wins over allow; an allow must
@@ -310,17 +325,50 @@ def _split(text: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
+def _parse_vote_key(value: str, source: str | None, lineno: int) -> str:
+    """One operator's vote-credential DIGEST, normalised to bare lowercase hex.
+
+    Accepts `<64 hex>` or `sha256:<64 hex>`; the algorithm prefix is a migration
+    slot, so a profile written today says which hash it meant. Anything else is a
+    profile error rather than a credential nothing can match: a typo that parsed
+    as an unmatchable digest would silently make the operator unable to vote, and
+    an operator who cannot be proven is refused at the cast — a refusal is the
+    right outcome for a missing credential and the wrong one for a malformed
+    line the author could have been told about.
+    """
+    digest = value.strip()
+    if digest.lower().startswith("sha256:"):
+        digest = digest[len("sha256:"):].strip()
+    digest = digest.lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ProfileError(
+            source, lineno,
+            f"a vote credential is the SHA-256 HEX DIGEST of the operator's "
+            f"secret (64 hex characters, optionally `sha256:`-prefixed), never "
+            f"the secret itself: {value.strip()!r}")
+    return digest
+
+
 def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
     """The line DSL (blank lines and ``#`` comments ignored). Grammar:
 
         operator <token> may     <verb>[, ...] on <subject>[, ...]
         operator <token> may not <verb>[, ...] on <subject>[, ...]
         operator <token> may     <verb>[, ...]                       # on *
+        operator <token> key     sha256:<hex>                        # item 471
 
     A verb of ``*`` matches every management verb; a subject of ``*`` matches
     every component and realm. ``on`` may be omitted to mean ``on *``.
+
+    The ``key`` line declares the DIGEST of this operator's vote credential, so
+    a multi-party cast attributed to the operator can be proven rather than
+    asserted (issue #979). It is orthogonal to the grants: an operator may have
+    grants and no key (it can act on this session's own authority but cannot be
+    named by a cast from elsewhere), a key and no grants (it can be proven as a
+    voter without holding any management verb), or both.
     """
     operators: dict[str, list[Grant]] = {}
+    keys: dict[str, str] = {}
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -332,6 +380,16 @@ def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
         token = parts[1]
         rest = parts[2]
         low = rest.lower()
+        if low.startswith("key "):
+            if token in keys:
+                raise ProfileError(
+                    source, lineno,
+                    f"operator `{token}` already declares a vote credential: two "
+                    f"credentials for one identity would make it ambiguous which "
+                    f"principal a cast proved")
+            keys[token] = _parse_vote_key(rest[len("key "):], source, lineno)
+            operators.setdefault(token, [])
+            continue
         for verb, allow in (("may not ", False), ("may ", True)):
             if low.startswith(verb):
                 clause = rest[len(verb):]
@@ -354,7 +412,8 @@ def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
                                f"profile line names no subject: {raw.strip()!r}")
         operators.setdefault(token, []).append(Grant(verbs, subjects, allow))
     return OperatorRegistry(
-        {t: Operator(t, tuple(g)) for t, g in operators.items()}, source)
+        {t: Operator(t, tuple(g), keys.get(t)) for t, g in operators.items()},
+        source)
 
 
 def _parse_json(text: str, source: str | None) -> OperatorRegistry:
@@ -362,8 +421,12 @@ def _parse_json(text: str, source: str | None) -> OperatorRegistry:
 
     { "operators": [
         { "token": "alice",
+          "key": "sha256:<64 hex>",
           "grants": [ {"verbs": ["swap"], "on": ["tenant_a*"]},
                       {"verbs": ["unload"], "on": ["*"], "deny": true} ] } ] }
+
+    ``key`` (or ``voteKey``) is the digest of the operator's vote credential,
+    exactly as in the DSL's ``key`` line.
     """
     try:
         doc = json.loads(text)
@@ -384,7 +447,10 @@ def _parse_json(text: str, source: str | None) -> OperatorRegistry:
                 raise ProfileError(source, 1,
                                    f"a grant for `{token}` names no verb")
             grants.append(Grant(verbs, subjects, not g.get("deny")))
-        operators[token] = Operator(token, tuple(grants))
+        raw_key = entry.get("key") or entry.get("voteKey")
+        operators[token] = Operator(
+            token, tuple(grants),
+            _parse_vote_key(raw_key, source, 1) if raw_key else None)
     return OperatorRegistry(operators, source)
 
 
