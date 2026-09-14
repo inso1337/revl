@@ -891,10 +891,14 @@ jobs:
       # refuses to install past it.
       - run: cd examples/app/frontend && npm ci
       # the whole asset surface of item 459: the app's frontend (build + source
-      # map + vue-tsc) and the reference shape it is copied from.
+      # map + vue-tsc), the reference shape it is copied from, and the map chain
+      # (a real `vite build` over a template-rendered `.ts`, composed with the
+      # template's own map). Every leg gated on the toolchain lives here,
+      # because a gated leg in a job that does not install the toolchain reads
+      # as a pass.
       - env:
           REVL_REQUIRE_FRONTEND_TOOLCHAIN: "1"
-        run: pytest tests/test_app_frontend_725.py tests/test_webui_entry_asset_ref_459.py -q
+        run: pytest tests/test_app_frontend_725.py tests/test_webui_entry_asset_ref_459.py tests/test_sourcemap_chain_459.py -q
 
   backend-wasm:
     runs-on: ubuntu-latest

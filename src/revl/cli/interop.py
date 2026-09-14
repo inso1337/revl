@@ -1,4 +1,4 @@
-"""Per-command CLI handlers: fmt and the bridge family (mcp / serve / import / export / contract).
+"""Per-command CLI handlers: fmt, sourcemap and the bridge family (mcp / serve / import / export / contract).
 
 Pure move — per-command CLI handlers, byte-identical behavior; see revl.__main__ for dispatch.
 """
@@ -518,3 +518,60 @@ def _run_contract(args) -> int:
     else:
         print(render(result, args.consumer, provider_label))
     return 0 if result["satisfied"] else 1
+
+
+def _run_sourcemap(args: argparse.Namespace) -> int:
+    """`revl sourcemap compose` — chain a generated file's map into the
+    bundler's (item 459 F2, docs/frontend-assets.md).
+
+    `stdlib/template.rvl` maps rendered text back to the template that produced
+    it; a bundler maps its output back to the files it read. When a rendered
+    file is one of those, the two maps meet nowhere and a browser stack trace
+    stops at the generated file. This composes them into one document.
+
+    Reads exactly the paths on its own command line. A `sources` or
+    `sourceMappingURL` entry INSIDE a map is a label that is compared and copied
+    as text and never opened: a map is a build artifact, and a composer that
+    resolved the paths it names would be a file-read primitive reachable from
+    one.
+    """
+    from ..sourcemap import SourceMapError, compose
+
+    def _read(path_str: str):
+        try:
+            with open(path_str, encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read {path_str}: {error}", file=sys.stderr)
+            return None
+
+    outer = _read(args.map)
+    if outer is None:
+        return 1
+
+    # `--through` is repeatable so a bundle built from several rendered files
+    # chains each of them; the composition is applied in the order given, and
+    # each step's output is the next step's outer map.
+    for spec in args.through:
+        name, _, path_str = spec.partition("=")
+        if not path_str:
+            name, path_str = None, spec
+        inner = _read(path_str)
+        if inner is None:
+            return 1
+        try:
+            outer = compose(outer, inner, name)
+        except SourceMapError as error:
+            print(f"error: {path_str}: {error}", file=sys.stderr)
+            return 1
+
+    text = json.dumps(outer, separators=(",", ":"), sort_keys=False)
+    if args.output:
+        try:
+            Path(args.output).write_text(text + "\n", encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+            return 1
+    else:
+        print(text)
+    return 0

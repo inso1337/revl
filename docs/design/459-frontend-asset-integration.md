@@ -4,7 +4,7 @@
 **Builds on:** docs/design/526-webui-asset-alignment.md,
 docs/design/530-webui-entry-surface.md,
 docs/design/525-webapp-slice4-frontend.md ·
-**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · INSERTION-SITE SOURCE MAP LANDED (F2, less the bundler chain) · REMAINDER NAMED BELOW
+**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · SOURCE MAPS LANDED (F2, insertion site + bundler chain) · REMAINDER NAMED BELOW
 
 ## Purpose
 
@@ -203,16 +203,106 @@ author writes `attr="{{html:x}}"`).
   of a `<script>` element carrying the map: a second escaper here would be a
   second thing to get wrong, the same argument F1 makes about a second jail.
 
-  What it does NOT claim: composing this map with the bundler's. A template
-  rendered into a `.ts` that Vite then bundles has two maps and nothing chains
-  them, so devtools follow Vite's back to the generated file and stop. That
-  chain is what is left of F2. The module is pure revl, so F6 does not reach it.
-  Guard: `tests/test_template_source_map_459.py`, whose map checks are decoded
-  by an independent VLQ reader and whose thirteen-mutation neutering proof makes
-  the gate's ability to fail a measured fact rather than a claim.
-- **F3 - template control flow.** `{{if}}`, `{{for}}`, includes, layout
-  inheritance, blocks and a per-directory default context. Every hole is
-  explicit and flat in stage 1.
+  THE BUNDLER CHAIN LANDED TOO. `src/revl/sourcemap.py` composes the template's
+  map with the bundler's, and `revl sourcemap compose` is the door, so a browser
+  stack trace in a bundle built from rendered text walks back to the template
+  rather than stopping at the generated file.
+
+  Four decisions worth naming, because each of them is a place where a composer
+  can be wrong quietly. The composition is DEFINED as the walk a consumer would
+  do by hand (`compose(outer, inner) . resolve == inner . resolve . outer .
+  resolve`, no interpolation, since the format licenses none), which is what the
+  suite drives position by position rather than asserting a sample. A mapping
+  into the generated file that the inner map does not cover is BLANKED to a
+  1-field mapping rather than kept (which would point at a file the composed map
+  no longer lists) or deleted (which would let the previous mapping on the line
+  spill forward over a region nothing knows anything about). A NAME is taken
+  from the inner mapping when it has one, because that is the name that names
+  something in the file the composed map opens. And the composer never OPENS a
+  path a map names: `sources`, `sourceRoot`, `file` and `sourceMappingURL` are
+  attacker-shaped strings arriving from a build artifact, so filling a missing
+  `sourcesContent` from disk would be a file-read primitive reachable from one.
+  That is not a jail, it is the absence of anything to jail, which is the
+  stronger form of the same argument F1 makes about not writing a second jail.
+
+  It is a TOOLCHAIN step and not a stdlib one, and that is a fact about the
+  pipeline rather than a preference: the inner map is produced by a revl program
+  at render time and the outer one by the bundler afterwards, so no process sees
+  both. The stdlib half stays pure revl, so F6 reaches neither half.
+
+  What it does NOT claim: resolution finer than the inner map carries.
+  `render_mapped` records one segment per generated line of copied text plus one
+  per inserted value, so a bundled position inside copied text composes to the
+  start of its template line. Line provenance, which is what a stack trace asks
+  for, is exact. An index map (`sections`) is refused rather than composed
+  per-section.
+
+  Guards: `tests/test_template_source_map_459.py` for the insertion-site half,
+  whose map checks are decoded by an independent VLQ reader and whose
+  thirteen-mutation neutering proof makes the gate's ability to fail a measured
+  fact rather than a claim; `tests/test_sourcemap_chain_459.py` for the chain,
+  with nineteen mutations, an independently written resolver, inner maps
+  produced by the shipped `stdlib/template.rvl` rather than by fixtures built to
+  agree, and one leg that runs a real `vite build` over a template-rendered
+  `.ts` and resolves a position in the resulting BUNDLE back to the `.tpl` line
+  and hole name that produced it.
+- **F3 - template control flow. STILL DEFERRED, on a stated precondition.**
+  `{{if}}`, `{{for}}`, includes, layout inheritance, blocks and a per-directory
+  default context. Every hole is explicit and flat in stage 1, and that is the
+  property the feature costs, so the deferral is argued here rather than left as
+  a line item somebody picks up as a syntax exercise.
+
+  Stage 1's safety property is that escaping is never optional. Three separate
+  mechanisms carry it, and F3's four pieces take one away each:
+
+  1. **The slot grammar is exactly `{{context:name}}`.** That is WHY `{{&x}}`,
+     `{{{x}}}`, `{{x|raw}}` and `{{ x }}` are refused: they are refused as a
+     SHAPE, not as a blacklist of the raw forms somebody thought of. A `{{if}}`
+     needs a condition, and a condition is an expression. Widening the slot to
+     hold a directive turns every one of those refusals into a blacklist, and
+     "an expression, a filter or a directive cannot be smuggled through the
+     slot" stops being a property of the grammar.
+  2. **Bindings are one flat list, and both `unknown-binding` and
+     `duplicate-binding` are answerable by reading it.** `{{for}}` replaces that
+     with a scoped environment. "Which value landed here" then stops being a
+     question about the call and becomes a question about a frame, and the two
+     refusals become scope-relative.
+  3. **A context outside the closed set is an `Err`, never a fall-through to
+     some default escaper.** A per-directory DEFAULT context is the direct
+     negation of that sentence. The two cannot both hold.
+
+  The fourth piece, **includes and layouts, is the real blocker**, and it is the
+  autoescaping-inheritance question this note deferred at stage 1. An included
+  template declares the context of its own holes; the site that includes it
+  decides which context those holes actually land in. `{{html:x}}` in a partial
+  is correct inside a `<p>` and is a live breakout inside a `<script>` in the
+  layout that included it. There are three ways to settle that and stage 1 has
+  already ruled out two:
+
+  - **infer the context at the include site** by parsing the surrounding markup.
+    Refused, for the reason stage 1 gives above: an HTML parser that is wrong
+    about where a tag ends is an escaping bug, not a rendering bug.
+  - **re-escape the included output** for the site's context. Escaping an
+    already-escaped document corrupts it (`&amp;` becomes `&amp;amp;`), and
+    "escape values, not templates" is a stage-1 decision for exactly that
+    reason.
+  - **declare the context at the include site and CHECK it** against the
+    contexts the include declares, refusing a mismatch. This is the only sound
+    option, and it is a context ALGEBRA rather than a syntax addition: a
+    template needs a declared context signature, the check is per hole, and a
+    partial reused at two different contexts is either two partials or a
+    parameterised one.
+
+  So F3 is not one feature. It is a syntax change gated on a design that does
+  not exist: what a template's declared context signature is, what an include
+  site declares, and what a mismatch does. Shipping `{{if}}`/`{{for}}` alone
+  would deliver the syntax people reach for and leave the escaping question open
+  at precisely the site that reopens it, which is how an autoescaping engine
+  ends up with a `|raw` filter. The stage-1 `script` residual already shows the
+  cost of an escaper whose site is not visible at the hole, at ONE site;
+  control flow multiplies those sites.
+
+  What would lift the deferral is that separate note, not a slice of this one.
 - **F4 - the exemplary app.** Issue #725 (blocked on #724) and the slice-4
   frontend gap G3 (`docs/design/525-webapp-slice4-frontend.md`). Item 459's
   stated exit is app-gated on 462 and cannot close before it.
@@ -222,9 +312,13 @@ author writes `attr="{{html:x}}"`).
   record (the reactive state), the RPC surface is the component's declared
   provisions, and `revl export client --lang ts --face webui --component NAME`
   projects both into the TypeScript the browser reads with `useRpc<T>()`.
-- **F6 - tiers.** Anything disk-backed (F1) will start at `py`/`ts`, the
-  precedent set by `stdlib/fs.rvl` and `stdlib/shell.rvl`. `stdlib/template.rvl`
-  itself is pure and is not tier-limited.
+- **F6 - tiers.** Anything disk-backed at RUN time will start at `py`/`ts`, the
+  precedent set by `stdlib/fs.rvl` and `stdlib/shell.rvl`; reading a template
+  from disk is the case that is still open. It does not reach what has landed:
+  `stdlib/template.rvl` (holes, escaping, `render_mapped`, `source_map`) is pure
+  revl and runs on every tier, F1's `asset` resolution happens in the COMPILER
+  rather than in emitted code, and F2's bundler chain is a toolchain step that
+  emits nothing.
 - **F7 - a `--face webui` CLI verb. LANDED.** `revl export client --lang ts
   --face webui --component NAME` renders a component's channel contract. It emits
   no ASSET: the entry is still contributed through the coeffect, and the verb
@@ -288,6 +382,23 @@ described (absolute, missing, directory, `..` escape, symlink escape, empty,
 computed path, in-memory without sources, bare source string, untrusted author),
 and the typed half in both directions. Two control cases hold before and after
 the change, so a green run is not explained by the harness compiling nothing.
+
+`tests/test_sourcemap_chain_459.py` covers F2's bundler chain. Its corpus INNER
+maps are produced by the shipped `stdlib/template.rvl` compiled and executed on
+the py tier, not by fixtures written to agree with the composer; its VLQ reader,
+mapping decoder and resolver are written from the Source Map v3 field layout and
+share no code with `src/revl/sourcemap.py`; and the central check sweeps every
+generated position of every case and asserts the composed map answers exactly
+what the two-step walk answers. The confinement half makes every filesystem door
+raise for the duration of a `compose` call, and one of the nineteen mutations is
+a composer that fills a missing `sourcesContent` from disk, so that check is
+known to be able to fail rather than asserted to be. The end-to-end leg renders a
+template into a `.ts`, runs a real `vite build`, composes, and resolves a
+position in the bundle back to the `.tpl` line and hole name; it is gated on the
+frontend toolchain exactly like the other `frontend-assets` legs, and that job
+runs it with `REVL_REQUIRE_FRONTEND_TOOLCHAIN=1` so the skip cannot read as a
+pass. Two controls exercise only pre-existing surface and hold on both sides of
+the change.
 
 `tests/test_template_stdlib.py` compiles a consumer that reaches the module
 through `use`, pins the public surface and the absence of externs, runs the

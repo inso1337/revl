@@ -13,9 +13,10 @@ The verb set, in the order the parser declares it:
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
-quarantine  analyze  test  mcp  import  export  serve  run  dev  recover
-estop  slo  branch  compare  replay  why  metrics  trace  profile
-attest  dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
+quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
+dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
+profile  attest  dash  repair  bundle  emit  verify  deploy
+deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -1323,7 +1324,7 @@ with the bundle staging and pinned SSH host key.
 revl deploy-admit --key host.pub --host-key host.key --runtime-version python=3.14
 ```
 
-## Interop: MCP, import, export, serve
+## Interop: MCP, import, export, source maps, serve
 
 ### `revl mcp`
 
@@ -1492,6 +1493,49 @@ provides nothing is refused rather than projected as half a contract.
   - `--component NAME` - export this component's browser channel (`webui`).
 - `-o`, `--output PATH` - output path (default: stdout).
 - `--json-diagnostics` - structured diagnostic on rejection.
+
+### `revl sourcemap`
+
+Compose Source Map v3 documents. One subcommand.
+
+`revl sourcemap compose MAP` - rewrite every mapping of MAP that points INTO a
+generated file through that file's own map, so one document reaches the original
+([frontend-assets.md](frontend-assets.md), item 459 F2). The case it exists for:
+`stdlib/template.rvl` maps rendered text back to the template that produced it,
+a bundler maps its output back to the files it read, and when a rendered file is
+one of those inputs nothing composes the two, so devtools follow the bundler's
+map back to the generated file and stop.
+
+It compiles nothing and takes no `.rvl` files. The composition is defined as the
+walk a consumer would do holding both documents (the last mapping on the line at
+or before the column, no interpolation), mappings into other sources pass
+through untouched, and a mapping the inner map does not cover becomes a 1-field
+mapping rather than being kept or deleted.
+
+A source map is a build artifact, so this reads exactly the paths on its own
+command line: a `sources`, `sourceRoot`, `file` or `sourceMappingURL` entry
+INSIDE a document is compared and copied as text and is never opened.
+
+- `MAP` - the OUTER map, the bundler's, describing the artifact a browser loads
+  (required).
+- `--through [NAME=]MAP` - an INNER map: one generated input's own, the document
+  `stdlib/template.rvl`'s `source_map` writes. `NAME` is how the OUTER map
+  spells that input in its `sources`; without it the inner map's own `file` is
+  used. Repeatable, applied in order (required). A `NAME` naming no source of
+  the outer map is refused rather than returning the outer map unchanged, and a
+  `NAME` whose path suffix matches two different sources is refused as
+  ambiguous.
+- `-o`, `--output PATH` - output path (default: stdout).
+
+```bash
+revl sourcemap compose dist/console.js.map \
+  --through generated.ts=build/generated.ts.map \
+  -o dist/console.js.map
+```
+
+Exits 1 naming the document and the reason on any refusal: a version that is not
+3, an index map (`sections`), a malformed `mappings` run, an index outside its
+array, or a `sourcesContent` whose length does not match `sources`.
 
 ### `revl serve`
 

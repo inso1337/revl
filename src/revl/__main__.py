@@ -39,7 +39,8 @@ from .cli.change import (
     _run_apply, _run_branch, _run_canary, _run_compare, _run_estop, _run_plan,
     _run_quarantine, _run_recover, _run_repair, _run_replay, _run_undo)
 from .cli.interop import (
-    _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve)
+    _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve,
+    _run_sourcemap)
 from .cli.observe import (
     _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
     _run_history_query, _run_metrics, _run_profile, _run_trace, _run_why)
@@ -1235,6 +1236,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_import(args)
     if args.command == "export":
         return _run_export(args)
+    if args.command == "sourcemap":
+        return _run_sourcemap(args)
     if args.command == "plan":
         return _run_plan(args)
     if args.command == "apply":
