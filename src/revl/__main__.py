@@ -1254,6 +1254,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "simulate":
         return _run_simulate(args)
 
+    # `revl retention-receipt` (item 472) MUST be routed before the shared
+    # compile step, and not merely for convenience: past a `retention` policy's
+    # deadline the composition that persists a value under it is refused
+    # (`G-RETAIN`), and that refusal is the reason the erasure is being
+    # requested. A receipt verb behind the compile gate would be unusable in
+    # the one case it exists for.
+    if args.command == "retention-receipt":
+        from .cli.retention import _run_retention_receipt  # noqa: PLC0415
+        return _run_retention_receipt(args)
+
     try:
         profile = None
         if getattr(args, "taint_strict", False):

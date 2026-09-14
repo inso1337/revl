@@ -142,8 +142,11 @@ SCOPE = {
         "reported landed, `unresolved` is an offset owed that did not land, and "
         "`bare` is a crossing nothing was done about. Compensation is not "
         "inversion (paper §6.1): a compensated row still left the system.",
-        "retention deadlines. No type in this tree carries one, so no receipt "
-        "records one (docs/design/472-retention-erasure-receipts.md).",
+        "retention deadlines. `Retained[T, P]` carries one and `revl "
+        "retention-receipt` signs a receipt over a policy's replicas and "
+        "derivatives, but THIS document is over a realm's erase report and "
+        "records no deadline, residence or legal hold "
+        "(docs/design/472-retention-erasure-receipts.md).",
     ],
     "reference": "docs/erase-report.md; docs/design/472-retention-erasure-receipts.md",
 }
