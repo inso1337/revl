@@ -1,0 +1,38 @@
+// item 130 Slice 5 / item 391: the typed `event` declaration. An event IS a
+// record with a contract (§6), so the reference parser appends an ordinary
+// record `TypeDecl` beside the `EventDecl` and the `types` section carries the
+// same entry a `type` spelling would. The self-host gate REFUSED the head
+// outright (`unexpected token at top level`) because `event` lexes as an
+// `ident`, and `lower_to_ir` dropped the record with it.
+//
+// The last three lines of this file are the negative controls: `event` is a
+// CONTEXTUAL keyword, recognised only as `event IDENT (` / `event IDENT {`, so
+// a parameter, a record field and a local named `event` must keep parsing.
+
+event OrderPlaced(key: order_id) { order_id: Str, quantity: Int }
+
+event Shipped(key: shipment_id, window: 8) {
+  shipment_id: Str,
+  carrier: Str,
+}
+
+type Receipt = { order_id: Str, total: Int }
+
+fn line_total(o: OrderPlaced, unit: Int) -> Int { return o.quantity * unit }
+
+pub fn receipt(o: OrderPlaced, unit: Int) -> Receipt {
+  return { order_id: o.order_id, total: line_total(o, unit) }
+}
+
+fn carrier_of(s: Shipped) -> Str { return s.carrier }
+
+// -- negative controls ------------------------------------------------------
+
+type Envelope = { event: Str, seq: Int }
+
+fn describe(event: Str) -> Str { return event }
+
+fn unwrap(e: Envelope) -> Str {
+  let event = e.event
+  return describe(event)
+}

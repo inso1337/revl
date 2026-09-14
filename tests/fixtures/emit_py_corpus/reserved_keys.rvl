@@ -1,0 +1,39 @@
+// item 158 / item 237 / item 391: a NAME in record-FIELD position. A field name
+// is always followed by `:` / `=` / end-of-access, so no keyword reading is
+// grammatically possible there, and the reference broadens the plain `ident`
+// with the five contextual cordis-domain nouns plus the three component-grammar
+// ones (`_record_key_name`). The self-host expression parser read only `ident`,
+// so a record literal, a `.field` read and a record TYPE's field list all failed
+// on a field named `config` — silently, because a failed statement lowers to
+// nothing rather than to a diagnostic.
+//
+// `plain` is the negative control on every shape: an ordinary identifier field
+// must keep lowering exactly as it did.
+
+type Envelope = {
+  config: Int,
+  component: Int,
+  requires: Int,
+  realm: Int,
+  intercept: Int,
+  isolate: Int,
+  in: Int,
+  with: Int,
+  plain: Int,
+}
+
+fn built(n: Int) -> Envelope {
+  return { config: n, component: n, requires: n, realm: n, intercept: n,
+           isolate: n, in: n, with: n, plain: n }
+}
+
+fn summed(e: Envelope) -> Int {
+  return e.config + e.component + e.requires + e.realm + e.intercept
+       + e.isolate + e.in + e.with + e.plain
+}
+
+fn bumped(e: Envelope) -> Envelope {
+  return { e | config = e.config + 1, with = e.plain }
+}
+
+fn optional_read(e: Opt[Envelope]) -> Opt[Int] { return e?.config }
