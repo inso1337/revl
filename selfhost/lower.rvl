@@ -233,7 +233,8 @@
 
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
-                    is_bad, expr_at, params_at, type_at, nesting_limit }
+                    is_bad, expr_at, params_at, type_at, nesting_limit,
+                    is_record_key }
 
 // ================================================================ IR model
 //
@@ -399,12 +400,60 @@ fn boot_names(ts: List[Token]) -> List[Str] {
   return out
 }
 
+// item 130 Slice 5: `event <Name>(key: <field>) { <fields> }` is a CONTEXTUAL
+// keyword, the `boot` discipline. The reference (parser.py `_parse_program`)
+// recognises the head only in the shape `event IDENT (` / `event IDENT {`, so
+// `emission fn log(event: Str)` keeps parsing and neither lexer's KEYWORDS table
+// needs the word. Recognised on exactly those three tokens here for the same
+// reason: anything looser would swallow a parameter or a record field named
+// `event`.
+//
+// Without this the gate answered `BAD|unexpected token at top level` — a FALSE
+// REFUSAL of every document that declares a typed event
+// (`backends/rust/scenarios/stream.rvl`, `backends/go/testdata/stream_event_130.rvl`,
+// `backends/java/scenarios/stream_event_130.rvl`), because `event` lexes as an
+// `ident` and `p_top` refuses every non-keyword head.
+fn at_event(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (!(t.kind == "ident" && t.text == "event")) { return false }
+  if (!atk(ts, i + 1, "ident")) { return false }
+  return atk(ts, i + 2, "(") || atk(ts, i + 2, "{")
+}
+
+// Index just past the `}` closing the field body of the `event` declaration at
+// `i`, or `i + 1` when the declaration is malformed (the reference raises there;
+// this gate carries no verdict for the shape, so it steps one token and lets the
+// ordinary top-level dispatch resume).
+fn close_paren(ts: List[Token], i: Int) -> Int {
+  var depth = 0
+  var j = i
+  while (j < ts.length()) {
+    if (atk(ts, j, "(")) { depth += 1 }
+    else {
+      if (atk(ts, j, ")")) {
+        depth -= 1
+        if (depth == 0) { return j + 1 }
+      }
+    }
+    j += 1
+  }
+  return 0 - 1
+}
+
+fn event_decl_end(ts: List[Token], i: Int) -> Int {
+  var j = i + 2
+  if (atk(ts, j, "(")) { j = close_paren(ts, j) }
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return i + 1 }
+  let e = close_brace(ts, j)
+  return e == 0 - 1 ? i + 1 : e
+}
+
 // Whether a token starts a TOP-LEVEL declaration — where a `type` declaration's
 // token span ends. Kept next to `type_ctors`, its only reader.
 fn at_top_decl(ts: List[Token], i: Int) -> Bool {
   return atw(ts, i, "type") || atw(ts, i, "fn") || atw(ts, i, "extern")
       || atw(ts, i, "service") || atw(ts, i, "component") || atw(ts, i, "use")
-      || atw(ts, i, "test") || at_boot(ts, i)
+      || atw(ts, i, "test") || at_boot(ts, i) || at_event(ts, i)
 }
 
 // `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
@@ -2076,6 +2125,9 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   if (i >= ts.length() || atk(ts, i, "eof")) { return pg }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return p_top(ts, i + 1, pg) }
+  // a typed `event` declaration contributes an ordinary record type and a
+  // contract table; admission reads neither, so it is stepped over WHOLE.
+  if (at_event(ts, i)) { return p_top(ts, event_decl_end(ts, i), pg) }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
@@ -5873,6 +5925,7 @@ fn cfg_owners_walk(ts: List[Token], i: Int, a: CfgAcc) -> CfgAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return cfg_owners_walk(ts, i + 1, a) }
+  if (at_event(ts, i)) { return cfg_owners_walk(ts, event_decl_end(ts, i), a) }
   if (t.kind != "kw") { return cfg_owners_walk(ts, skip_line(ts, i), a) }
   if (at_pub_prefix(ts, i)) { return cfg_owners_walk(ts, i + 1, a) }
   if (t.text == "use") { return cfg_owners_walk(ts, skip_line(ts, i), a) }
@@ -6653,9 +6706,11 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   if (i >= ts.length() || atk(ts, i, "eof")) { return no_verd() }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return fb_refusal(ts, i + 1) }
+  if (at_event(ts, i)) { return fb_refusal(ts, event_decl_end(ts, i)) }
   if (t.kind != "kw") { return fb_refusal(ts, skip_line(ts, i)) }
   if (at_pub_prefix(ts, i)) { return fb_refusal(ts, i + 1) }
-  if (t.text == "use" || t.text == "type") { return fb_refusal(ts, skip_line(ts, i)) }
+  if (t.text == "type") { return fb_refusal(ts, type_decl_end(ts, i + 1)) }
+  if (t.text == "use") { return fb_refusal(ts, skip_line(ts, i)) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
     if (e != 0 - 1) { return fb_refusal(ts, e) }
@@ -8996,11 +9051,35 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     Rec(r)      => infer_record_ty(r.fields, env),
     Lst(l)      => infer_list_ty(l.items, env),
     Arrow(a)    => "",
-    Match(m)    => "",
+    Match(m)    => infer_match_ty(m, env),
     Templ(t)    => "Str",
     Hole(h)     => h.ty,
     Bad(m)      => "",
   }
+}
+
+// A `match` YIELDS a value, and the reference's checker types it by unifying the
+// arm bodies. This returned "" — so `t += match o { Some(v) => v, None => 0 }`
+// lost the `operands` tag the lowering stamps on typed arithmetic, the one
+// annotation in this projection a backend cannot re-derive. Each arm body is
+// inferred under the arm's payload binding, exactly as `lir_match` lowers it,
+// and `join_ty` is the same meet `If` already uses: any disagreement answers ""
+// and stamps nothing, so this can only ADD an annotation the reference has,
+// never invent one it does not.
+fn infer_match_ty(m: MatchN, env: List[Bind]) -> Str {
+  let scrutTy = infer(m.scrut, env)
+  var out = ""
+  var i = 0
+  while (i < m.arms.length()) {
+    let a = m.arms[i]
+    let pay = arm_payload(scrutTy, a.pat, env)
+    var inner = a.bind == "" ? env : env_mut_put(env, a.bind, false)
+    if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
+    let bt = infer(a.body, inner)
+    out = i == 0 ? bt : join_ty(out, bt)
+    i += 1
+  }
+  return out
 }
 
 // The lowering's operand-type annotation for `+ - * / %` (lower.py's `bin`
@@ -9212,6 +9291,41 @@ fn case_add(a: CaseAcc, name: Str, adt: Str, payload: Str) -> CaseAcc {
 
 // One `type <Name> = <case> | <case>` declaration's cases, read exactly the way
 // `ir_type_cases` reads them for the `types` section.
+// The `field <Type>.<name>` bindings one record BODY contributes to the type
+// environment. `is_record_key`, not a bare `ident`: a field named `config` is a
+// field, and this table is what stamps `operands` on arithmetic over `r.config`.
+fn rec_field_binds(ts: List[Token], lo: Int, hi: Int, nm: Str,
+                   acc: List[Bind]) -> List[Bind] {
+  var binds = acc
+  var k = lo
+  var go = true
+  while (go && k < hi) {
+    if (is_record_key(tkc(ts, k)) && atk(ts, k + 1, ":")) {
+      let tr = type_at(ts, k + 2)
+      if (!tr.ok || tr.i <= k + 2) { go = false }
+      else {
+        binds = tenv_put(binds, "field ".concat(nm).concat(".").concat(tkc(ts, k).text),
+                         taint_strip(tr.ty))
+        k = tr.i
+      }
+    } else { k += 1 }
+  }
+  return binds
+}
+
+// An `event` declaration's record body, read into the same field table. The
+// reference contributes a full record `TypeDecl` for one, so every rule that
+// reads a record's fields applies to an event with no event-specific case.
+fn event_field_binds(ts: List[Token], i: Int, acc: List[Bind]) -> List[Bind] {
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "(")) { j = close_paren(ts, j) }
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return acc }
+  let bend = close_brace(ts, j)
+  if (bend == 0 - 1) { return acc }
+  return rec_field_binds(ts, j + 1, bend - 1, nm, acc)
+}
+
 fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
   // the WHOLE declaration, not its first line. A variant is routinely written
   // over several lines (`pub type Method =` then one `| Case` per line), and a
@@ -9231,18 +9345,7 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
     if (bend == 0 - 1 || atk(ts, i + 2, "[")) {
       return { a: a, i: bend == 0 - 1 ? lineHi : bend }
     }
-    var binds = a.binds
-    var k = j + 1
-    while (k < bend - 1) {
-      if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
-        let tr = type_at(ts, k + 2)
-        if (!tr.ok || tr.i <= k + 2) { break }
-        binds = tenv_put(binds, "field ".concat(nm).concat(".").concat(tkc(ts, k).text),
-                         taint_strip(tr.ty))
-        k = tr.i
-      } else { k += 1 }
-    }
-    let fields = binds
+    let fields = rec_field_binds(ts, j + 1, bend - 1, nm, a.binds)
     return { a: { binds: fields, amb: a.amb }, i: bend }
   }
   if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
@@ -9270,6 +9373,10 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return case_binds_walk(ts, i + 1, a) }
+  if (at_event(ts, i)) {
+    let eb = event_field_binds(ts, i, a.binds)
+    return case_binds_walk(ts, event_decl_end(ts, i), { binds: eb, amb: a.amb })
+  }
   if (t.kind != "kw") { return case_binds_walk(ts, skip_line(ts, i), a) }
   if (at_pub_prefix(ts, i)) { return case_binds_walk(ts, i + 1, a) }
   if (t.text == "type") {
@@ -9709,7 +9816,6 @@ fn is_compound_op(ts: List[Token], k: Str) -> Bool {
 // inside the flattened `template` token, and `||` is its own token), so a
 // depth-0 `|` inside a brace block is unambiguously the update separator.
 type RhsR = { js: Str, ty: Str, i: Int, ok: Bool }
-type UpsR = { js: Str, ok: Bool }
 
 fn top_pipe(ts: List[Token], lo: Int, hi: Int) -> Int {
   var depth = 0
@@ -9723,61 +9829,88 @@ fn top_pipe(ts: List[Token], lo: Int, hi: Int) -> Int {
   return 0 - 1
 }
 
-fn lir_updates(ts: List[Token], lo: Int, hi: Int, env: List[Bind]) -> UpsR {
+// The update clauses as PARSED NODES, so the ownership scan can ask the same
+// aliasing questions of them that it asks of an ordinary expression. Reading them
+// once, here, is what lets the token-level form reach both readers: the JSON
+// producer below and `own_one`, whose statement boundaries must be identical to
+// `lir_one_stmt`'s for a mark's token key to mean the same thing in both.
+type UpdsR = { ok: Bool, xs: List[InitN], i: Int }
+type RuR = { ok: Bool, base: Expr, upds: List[InitN], i: Int }
+
+fn ru_none() -> RuR { return { ok: false, base: NullLit, upds: [], i: 0 } }
+
+fn ru_upds(ts: List[Token], lo: Int, hi: Int) -> UpdsR {
   var i = lo
-  var out = ""
-  var first = true
-  while (i < hi && !atk(ts, i, "}")) {
+  var xs: List[InitN] = []
+  var ok = true
+  var go = true
+  while (go && i < hi && !atk(ts, i, "}")) {
     if (atk(ts, i, ",")) { i += 1 }
     else {
-      if (!atk(ts, i, "ident") || !atk(ts, i + 1, "=")) { return { js: "", ok: false } }
-      let name = tkc(ts, i).text
-      let r = expr_at(ts, i + 2)
-      if (is_bad(r.e) || r.i <= i + 2) { return { js: "", ok: false } }
-      let seg = "[".concat(jstr(name)).concat(",").concat(lir_expr(r.e, env)).concat("]")
-      out = first ? seg : out.concat(",").concat(seg)
-      first = false
-      i = r.i
+      if (!is_record_key(tkc(ts, i)) || !atk(ts, i + 1, "=")) { ok = false  go = false }
+      else {
+        let name = tkc(ts, i).text
+        let r = expr_at(ts, i + 2)
+        if (is_bad(r.e) || r.i <= i + 2) { ok = false  go = false }
+        else {
+          xs = xs.push({ name: name, value: r.e })
+          i = r.i
+        }
+      }
     }
   }
-  return { js: out, ok: true }
+  let fin = ok
+  let out = xs
+  return { ok: fin, xs: out, i: i }
+}
+
+// `{ base | field = expr, ... }` at `j`, or `ok: false` when this is not one.
+fn ru_at(ts: List[Token], j: Int) -> RuR {
+  if (!atk(ts, j, "{")) { return ru_none() }
+  let close = close_brace(ts, j)
+  if (close == 0 - 1) { return ru_none() }
+  let pipe = top_pipe(ts, j + 1, close - 1)
+  if (pipe == 0 - 1) { return ru_none() }
+  // Parse the base over the tokens BEFORE the separator `|` only. Since item 366
+  // made `|` the bitwise-OR operator, parsing from `j + 1` over the full token
+  // stream would swallow the `|` (and the update fields) as a bitwise-OR
+  // expression; bounding the slice to `[j+1, pipe)` keeps the update separator
+  // out of the base, mirroring the reference's `_suppress_bor` (which suppresses
+  // exactly this leading top-level `|`).
+  let sub = ts.slice(j + 1, pipe)
+  let base = expr_at(sub, 0)
+  if (is_bad(base.e) || base.i != sub.length()) { return ru_none() }
+  let u = ru_upds(ts, pipe + 1, close - 1)
+  if (!u.ok) { return ru_none() }
+  return { ok: true, base: base.e, upds: u.xs, i: close }
+}
+
+fn lir_updates(xs: List[InitN], i: Int, acc: Str, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return acc }
+  let seg = "[".concat(jstr(xs[i].name)).concat(",").concat(lir_expr(xs[i].value, env)).concat("]")
+  return lir_updates(xs, i + 1, acc == "" ? seg : acc.concat(",").concat(seg), env)
 }
 
 // An rvalue: an ordinary expression, or a token-level record-update.
 fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
-  if (atk(ts, j, "{")) {
-    let close = close_brace(ts, j)
-    if (close != 0 - 1) {
-      let pipe = top_pipe(ts, j + 1, close - 1)
-      if (pipe != 0 - 1) {
-        // Parse the base over the tokens BEFORE the separator `|` only. Since
-        // item 366 made `|` the bitwise-OR operator, parsing from `j + 1` over
-        // the full token stream would swallow the `|` (and the update fields)
-        // as a bitwise-OR expression; bounding the slice to `[j+1, pipe)` keeps
-        // the update separator out of the base, mirroring the reference's
-        // `_suppress_bor` (which suppresses exactly this leading top-level `|`).
-        let sub = ts.slice(j + 1, pipe)
-        let base = expr_at(sub, 0)
-        if (!is_bad(base.e) && base.i == sub.length()) {
-          let ups = lir_updates(ts, pipe + 1, close - 1, env)
-          if (ups.ok) {
-            let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(base.e, env))
-              .concat(",\"updates\":[").concat(ups.js).concat("]}")
-            return { js: js, ty: infer(base.e, env), i: close, ok: true }
-          }
-        }
-      }
-    }
+  let ru = ru_at(ts, j)
+  if (ru.ok) {
+    let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(ru.base, env))
+      .concat(",\"updates\":[").concat(lir_updates(ru.upds, 0, "", env)).concat("]}")
+    return { js: js, ty: infer(ru.base, env), i: ru.i, ok: true }
   }
   let r = expr_at(ts, j)
   if (is_bad(r.e) || r.i <= j) { return { js: "", ty: "", i: j, ok: false } }
   return { js: lir_expr(r.e, env), ty: infer(r.e, env), i: r.i, ok: true }
 }
 
-fn assign_env(env: List[Bind], name: Str, valExpr: Expr) -> List[Bind] {
+fn assign_env_ty(env: List[Bind], name: Str, inf: Str) -> List[Bind] {
   if (tenv_get(env, name) != "") { return env }
-  let inf = infer(valExpr, env)
   return inf == "" ? env : tenv_put(env, name, inf)
+}
+
+fn assign_env(env: List[Bind], name: Str, valExpr: Expr) -> List[Bind] {
+  return assign_env_ty(env, name, infer(valExpr, env))
 }
 
 // ============================================================ ownership
@@ -9837,8 +9970,12 @@ type WalkR = { st: WSt, a: WAcc }
 // `assign`/`let` (so the marker can be stamped where `lir_one_stmt` emits it);
 // `value` is the assign/let value, `if`/`while` cond, or `for` iterable; `birth`
 // is a `let`'s value kind ("list"/"maplit"/"record"/"var"/"").
+// `ru` marks a let/assign whose value is the token-level record-update: `value`
+// is then the update's BASE and `upds` its clauses, because the shape has no
+// `Expr` spelling to carry it (the shared parser's grammar does not read one).
 type OStep = { kind: Str, tok: Int, name: Str, birth: Str, value: Expr,
-               forBind: Str, then_: List[OStep], els: List[OStep], body: List[OStep] }
+               forBind: Str, then_: List[OStep], els: List[OStep], body: List[OStep],
+               ru: Bool, upds: List[InitN] }
 type OStepR = { step: OStep, i: Int }
 
 fn own_alive(m: Map[Str, Int]) -> WSt { return { live: true, m: m } }
@@ -9849,27 +9986,34 @@ fn wacc_fresh(marks: Map[Str, Int]) -> WAcc { return { marks: marks, breaks: [],
 // explicitly and NullLit stands in where there is no value expression).
 fn ostep_let(tok: Int, name: Str, birth: Str, v: Expr) -> OStep {
   return { kind: "let", tok: tok, name: name, birth: birth, value: v,
-           forBind: "", then_: [], els: [], body: [] }
+           forBind: "", then_: [], els: [], body: [], ru: false, upds: [] }
 }
 fn ostep_assign(tok: Int, name: Str, v: Expr) -> OStep {
   return { kind: "assign", tok: tok, name: name, birth: "", value: v,
-           forBind: "", then_: [], els: [], body: [] }
+           forBind: "", then_: [], els: [], body: [], ru: false, upds: [] }
+}
+// A `let`/`assign` whose value is a record-update. `birth` stays "" because
+// `record_update` is not one of `ownership.py`'s `_FRESH_KINDS`: the name it
+// binds is NOT born owned, exactly as the reference's `_step_let` decides.
+fn ostep_ru(kind: Str, tok: Int, name: Str, base: Expr, upds: List[InitN]) -> OStep {
+  return { kind: kind, tok: tok, name: name, birth: "", value: base,
+           forBind: "", then_: [], els: [], body: [], ru: true, upds: upds }
 }
 fn ostep_simple(kind: Str, v: Expr) -> OStep {
   return { kind: kind, tok: 0 - 1, name: "", birth: "", value: v,
-           forBind: "", then_: [], els: [], body: [] }
+           forBind: "", then_: [], els: [], body: [], ru: false, upds: [] }
 }
 fn ostep_if(cond: Expr, thenS: List[OStep], elseS: List[OStep]) -> OStep {
   return { kind: "if", tok: 0 - 1, name: "", birth: "", value: cond,
-           forBind: "", then_: thenS, els: elseS, body: [] }
+           forBind: "", then_: thenS, els: elseS, body: [], ru: false, upds: [] }
 }
 fn ostep_while(cond: Expr, bodyS: List[OStep]) -> OStep {
   return { kind: "while", tok: 0 - 1, name: "", birth: "", value: cond,
-           forBind: "", then_: [], els: [], body: bodyS }
+           forBind: "", then_: [], els: [], body: bodyS, ru: false, upds: [] }
 }
 fn ostep_for(bind: Str, iter: Expr, bodyS: List[OStep]) -> OStep {
   return { kind: "for", tok: 0 - 1, name: "", birth: "", value: iter,
-           forBind: bind, then_: [], els: [], body: bodyS }
+           forBind: bind, then_: [], els: [], body: bodyS, ru: false, upds: [] }
 }
 
 // A builtin method whose RECEIVER is read and not retained — `ownership.py`'s
@@ -9905,6 +10049,23 @@ fn own_write_shape(name: Str, value: Expr) -> Str {
 
 fn own_is_var(e: Expr, name: Str) -> Bool {
   return match e { Var(n) => n == name, _ => false, }
+}
+
+// One STEP's write shape. `{ p | .. }` rebinding its own base is a self-rebind
+// exactly as `out = out.push(v)` is; `ownership.py`'s `_write_shape` answers
+// `"Map"` for it (the shape only decides which birth copy a `"copy"` write would
+// need, and a record spread needs none of the List one's).
+fn ostep_shape(s: OStep) -> Str {
+  if (s.ru) {
+    return (own_is_var(s.value, s.name) && s.upds.length() > 0) ? "Map" : ""
+  }
+  return own_write_shape(s.name, s.value)
+}
+
+// The record-update gen: `_NON_RETAINING` lists "base" for a `record_update`, so
+// the spread reads its base without keeping it, and every update VALUE retains.
+fn own_gen_ru(base: Expr, upds: List[InitN], st: Map[Str, Int]) -> Map[Str, Int] {
+  return own_gen_inits(upds, 0, own_gen(base, false, st))
 }
 
 // The lowered kind of an assign/`let` value that is a fresh allocation this
@@ -10124,23 +10285,24 @@ fn own_stmts(steps: List[OStep], i: Int, st: WSt, a: WAcc) -> WalkR {
 
 fn own_stmt(s: OStep, st: WSt, a: WAcc) -> WalkR {
   if (s.kind == "let") {
-    let m1 = own_gen(s.value, true, st.m)
+    let m1 = s.ru ? own_gen_ru(s.value, s.upds, st.m) : own_gen(s.value, true, st.m)
     var m2 = m1
     if (own_is_fresh_kind(s.birth)) { m2 = m1.set(s.name, 0) }
     else { m2 = s.birth == "var" ? m1.set(s.name, 1) : m1.remove(s.name) }
     return { st: own_alive(m2), a: a }
   }
   if (s.kind == "assign") {
-    let shape = own_write_shape(s.name, s.value)
+    let shape = ostep_shape(s)
     if (shape == "") {
-      let m1 = own_gen(s.value, true, st.m)
-      let m2 = own_is_fresh_kind(own_value_kind(s.value)) ? m1.set(s.name, 0) : m1.remove(s.name)
+      let m1 = s.ru ? own_gen_ru(s.value, s.upds, st.m) : own_gen(s.value, true, st.m)
+      let fresh = !s.ru && own_is_fresh_kind(own_value_kind(s.value))
+      let m2 = fresh ? m1.set(s.name, 0) : m1.remove(s.name)
       return { st: own_alive(m2), a: a }
     }
     // a self-rebind write: the args gen normally, the receiver is the write. The
     // binding owns its object afterwards either way (in place on something nothing
     // else reaches, or the persistent copy's brand-new container).
-    let m1 = own_gen_writeargs(s.value, st.m)
+    let m1 = s.ru ? own_gen_inits(s.upds, 0, st.m) : own_gen_writeargs(s.value, st.m)
     let markv = match m1.lookup(s.name) { Some(v) => v + 1, None => 0 }
     let newlvl = match m1.lookup(s.name) { Some(v) => v, None => 0 }
     let a2: WAcc = { marks: a.marks.set(s.tok.to_str(), markv), breaks: a.breaks, conts: a.conts }
@@ -10233,19 +10395,50 @@ fn own_scan(ts: List[Token], lo: Int, hi: Int) -> List[OStep] {
   return out
 }
 
+// `lir_body`'s twin: the statement boundaries of the two readers must be
+// identical, or a write's start-token index does not key the same statement.
+type OBodyR = { xs: List[OStep], i: Int, ok: Bool }
+
+fn own_body(ts: List[Token], i: Int, hi: Int) -> OBodyR {
+  if (atk(ts, i, "{")) {
+    let e = close_brace(ts, i)
+    if (e == 0 - 1) { return { xs: [], i: i, ok: false } }
+    return { xs: own_scan(ts, i + 1, e - 1), i: e, ok: true }
+  }
+  let r = own_one(ts, i, hi)
+  if (r.i <= i) { return { xs: [], i: i, ok: false } }
+  return { xs: [r.step], i: r.i, ok: true }
+}
+
 fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
+    // a destructuring `let`. `_step_let_pattern` gens the value retaining and
+    // drops every name it binds; the names are fresh in this scope, so the drop
+    // is the "other" step's behaviour plus a no-op, and the boundary is what
+    // matters — reading it as a plain `let` would desynchronise the two scans.
+    let pat = pat_at(ts, i + 1)
+    if (pat.ok && atk(ts, pat.i, "=")) {
+      let pv = expr_at(ts, pat.i + 1)
+      if (is_bad(pv.e) || pv.i <= pat.i + 1) {
+        return { step: ostep_simple("other", NullLit), i: hi }
+      }
+      return { step: ostep_simple("other", pv.e), i: pv.i }
+    }
     let name = tkc(ts, i + 1).text
     var j = i + 2
     if (atk(ts, j, ":")) { let tr = type_at(ts, j + 1)  j = tr.i }
     if (!atk(ts, j, "=")) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let ru = ru_at(ts, j + 1)
+    if (ru.ok) { return { step: ostep_ru("let", i, name, ru.base, ru.upds), i: ru.i } }
     let r = lir_rhs(ts, j + 1, [])
     if (!r.ok) { return { step: ostep_simple("other", NullLit), i: hi } }
     let ve = expr_at(ts, j + 1)
     return { step: ostep_let(i, name, own_birth_kind(r.js), ve.e), i: r.i }
   }
   if (t.kind == "kw" && t.text == "return") {
+    let ru = ru_at(ts, i + 1)
+    if (ru.ok) { return { step: ostep_simple("return", NullLit), i: ru.i } }
     let r = expr_at(ts, i + 1)
     let ni = (is_bad(r.e) || r.i <= i + 1) ? i + 1 : r.i
     return { step: ostep_simple("return", NullLit), i: ni }
@@ -10260,17 +10453,16 @@ fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
   }
   if (t.kind == "kw" && t.text == "if") {
     let c = expr_at(ts, i + 1)
-    if (is_bad(c.e) || c.i <= i + 1 || !atk(ts, c.i, "{")) {
-      return { step: ostep_simple("other", NullLit), i: hi }
-    }
-    let tend = close_brace(ts, c.i)
-    if (tend == 0 - 1) { return { step: ostep_simple("other", NullLit), i: hi } }
-    let thenS = own_scan(ts, c.i + 1, tend - 1)
+    if (is_bad(c.e) || c.i <= i + 1) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let tb = own_body(ts, c.i, hi)
+    if (!tb.ok) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let tend = tb.i
+    let thenS = tb.xs
     var elseS: List[OStep] = []
     var nexti = tend
-    if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
-      let eend = close_brace(ts, tend + 1)
-      if (eend != 0 - 1) { elseS = own_scan(ts, tend + 2, eend - 1)  nexti = eend }
+    if (atw(ts, tend, "else") && !atw(ts, tend + 1, "if")) {
+      let eb = own_body(ts, tend + 1, hi)
+      if (eb.ok) { elseS = eb.xs  nexti = eb.i }
     }
     // the `else if` chain, recognised and ADVANCED the same way `lir_one_stmt`
     // now does — this scan's whole contract is that its statement boundaries are
@@ -10283,25 +10475,25 @@ fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
   }
   if (t.kind == "kw" && t.text == "while") {
     let c = expr_at(ts, i + 1)
-    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return { step: ostep_simple("other", NullLit), i: hi } }
-    let bend = close_brace(ts, c.i)
-    if (bend == 0 - 1) { return { step: ostep_simple("other", NullLit), i: hi } }
-    let bodyS = own_scan(ts, c.i + 1, bend - 1)
-    return { step: ostep_while(c.e, bodyS), i: bend }
+    if (is_bad(c.e)) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let wb = own_body(ts, c.i, hi)
+    if (!wb.ok) { return { step: ostep_simple("other", NullLit), i: hi } }
+    return { step: ostep_while(c.e, wb.xs), i: wb.i }
   }
   if (t.kind == "kw" && t.text == "for") {
     if (!atk(ts, i + 1, "(")) { return { step: ostep_simple("other", NullLit), i: hi } }
     let bind = tkc(ts, i + 2).text
     let it = expr_at(ts, i + 4)
-    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) {
+    if (is_bad(it.e) || !atk(ts, it.i, ")")) {
       return { step: ostep_simple("other", NullLit), i: hi }
     }
-    let bend = close_brace(ts, it.i + 1)
-    if (bend == 0 - 1) { return { step: ostep_simple("other", NullLit), i: hi } }
-    let bodyS = own_scan(ts, it.i + 2, bend - 1)
-    return { step: ostep_for(bind, it.e, bodyS), i: bend }
+    let fb = own_body(ts, it.i + 1, hi)
+    if (!fb.ok) { return { step: ostep_simple("other", NullLit), i: hi } }
+    return { step: ostep_for(bind, it.e, fb.xs), i: fb.i }
   }
   if (t.kind == "ident" && atk(ts, i + 1, "=")) {
+    let ru = ru_at(ts, i + 2)
+    if (ru.ok) { return { step: ostep_ru("assign", i, t.text, ru.base, ru.upds), i: ru.i } }
     let r = expr_at(ts, i + 2)
     if (is_bad(r.e) || r.i <= i + 2) { return { step: ostep_simple("other", NullLit), i: hi } }
     return { step: ostep_assign(i, t.text, r.e), i: r.i }
@@ -10333,7 +10525,7 @@ fn own_copies(steps: List[OStep], i: Int, marks: Map[Str, Int],
     let mv = match marks.lookup(s.tok.to_str()) { Some(v) => v, None => 0 }
     if (mv == 2) {
       let cur = match out.lookup(s.name) { Some(v) => v, None => "" }
-      if (cur != "List") { out = out.set(s.name, own_write_shape(s.name, s.value)) }
+      if (cur != "List") { out = out.set(s.name, ostep_shape(s)) }
     }
   }
   out = own_copies(s.then_, 0, marks, out)
@@ -10387,6 +10579,38 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     let mutable = t.text == "var"
+    let pat = pat_at(ts, i + 1)
+    if (pat.ok && atk(ts, pat.i, "=")) {
+      let pr = lir_rhs(ts, pat.i + 1, env)
+      if (!pr.ok) { return mk_one("", env, muts, hi) }
+      var penv = env
+      var pjs = ""
+      if (pat.kind == "record") {
+        penv = pat_bind_fields(env, pat.names, 0, mutable, pr.ty, env)
+        pjs = "{\"step\":\"let_pattern\",\"pattern\":\"record\",\"names\":["
+          .concat(pat_names_json(pat.names, 0, "")).concat("],\"value\":")
+          .concat(pr.js).concat(",\"mutable\":").concat(mutable ? "true" : "false")
+          .concat("}")
+      } else {
+        let el = parse_head(pr.ty) == "List" ? type_arg1(pr.ty) : ""
+        penv = pat_bind_env(env, pat.names, 0, mutable, el)
+        if (pat.rest != "") {
+          penv = env_mut_put(penv, pat.rest, mutable)
+          if (pr.ty != "") { penv = tenv_put(penv, pat.rest, pr.ty) }
+        }
+        pjs = "{\"step\":\"let_pattern\",\"pattern\":\"list\",\"names\":["
+          .concat(pat_names_json(pat.names, 0, "")).concat("],\"rest\":")
+          .concat(pat.rest == "" ? "null" : jstr(predeclared_mangle(pat.rest)))
+          .concat(",\"value\":").concat(pr.js)
+          .concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
+      }
+      var pmuts = muts
+      if (mutable) {
+        pmuts = pat_muts(muts, pat.names, 0)
+        if (pat.rest != "") { pmuts = pmuts.push(pat.rest) }
+      }
+      return mk_one(pjs, penv, pmuts, pr.i)
+    }
     let name = tkc(ts, i + 1).text
     var j = i + 2
     var declared = ""
@@ -10418,12 +10642,15 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     return mk_one(js, env2, mutable ? muts.push(name) : muts, r.i)
   }
   if (t.kind == "kw" && t.text == "return") {
-    let r = expr_at(ts, i + 1)
-    if (is_bad(r.e) || r.i <= i + 1) {
+    // an rvalue, not only an expression: `return { r | class = r.class_ }` is a
+    // record-update in return position, and the shared parser's grammar has no
+    // node for it.
+    let r = lir_rhs(ts, i + 1, env)
+    if (!r.ok) {
       return mk_one("{\"step\":\"return\",\"expr\":null}", env, muts, i + 1)
     }
     let js = "{\"step\":\"return\",\"expr\":"
-      .concat(apply_ret_markers(lir_expr(r.e, env), ret, infer(r.e, env))).concat("}")
+      .concat(apply_ret_markers(r.js, ret, r.ty)).concat("}")
     return mk_one(js, env, muts, r.i)
   }
   if (t.kind == "kw" && t.text == "assert") {
@@ -10444,17 +10671,18 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
   }
   if (t.kind == "kw" && t.text == "if") {
     let c = expr_at(ts, i + 1)
-    if (is_bad(c.e) || c.i <= i + 1 || !atk(ts, c.i, "{")) { return mk_one("", env, muts, hi) }
-    let tend = close_brace(ts, c.i)
-    if (tend == 0 - 1) { return mk_one("", env, muts, hi) }
-    let thenjs = lir_stmts(ts, c.i + 1, tend - 1, env, muts, ret, marks, births)
+    if (is_bad(c.e) || c.i <= i + 1) { return mk_one("", env, muts, hi) }
+    let tb = lir_body(ts, c.i, hi, env, muts, ret, marks, births)
+    if (!tb.ok) { return mk_one("", env, muts, hi) }
+    let tend = tb.i
+    let thenjs = tb.js
     var elsejs = "null"
     var nexti = tend
-    if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
-      let eend = close_brace(ts, tend + 1)
-      if (eend != 0 - 1) {
-        elsejs = "[".concat(lir_stmts(ts, tend + 2, eend - 1, env, muts, ret, marks, births)).concat("]")
-        nexti = eend
+    if (atw(ts, tend, "else") && !atw(ts, tend + 1, "if")) {
+      let eb = lir_body(ts, tend + 1, hi, env, muts, ret, marks, births)
+      if (eb.ok) {
+        elsejs = "[".concat(eb.js).concat("]")
+        nexti = eb.i
       }
     }
     // `else if` — the shape this reader did not have. It is not a third branch
@@ -10479,41 +10707,42 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
   }
   if (t.kind == "kw" && t.text == "while") {
     let c = expr_at(ts, i + 1)
-    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return mk_one("", env, muts, hi) }
-    let bend = close_brace(ts, c.i)
-    if (bend == 0 - 1) { return mk_one("", env, muts, hi) }
-    let bodyjs = lir_stmts(ts, c.i + 1, bend - 1, env, muts, ret, marks, births)
+    if (is_bad(c.e)) { return mk_one("", env, muts, hi) }
+    let wb = lir_body(ts, c.i, hi, env, muts, ret, marks, births)
+    if (!wb.ok) { return mk_one("", env, muts, hi) }
     let js = "{\"step\":\"while\",\"cond\":".concat(lir_expr(c.e, env))
-      .concat(",\"body\":[").concat(bodyjs).concat("]}")
-    return mk_one(js, env, muts, bend)
+      .concat(",\"body\":[").concat(wb.js).concat("]}")
+    return mk_one(js, env, muts, wb.i)
   }
   if (t.kind == "kw" && t.text == "for") {
     if (!atk(ts, i + 1, "(")) { return mk_one("", env, muts, hi) }
     let bind = tkc(ts, i + 2).text
     let it = expr_at(ts, i + 4)
-    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) {
-      return mk_one("", env, muts, hi)
-    }
-    let bend = close_brace(ts, it.i + 1)
-    if (bend == 0 - 1) { return mk_one("", env, muts, hi) }
+    if (is_bad(it.e) || !atk(ts, it.i, ")")) { return mk_one("", env, muts, hi) }
     let iterTy = infer(it.e, env)
     var inner = env_mut_put(env, bind, false)
     if (parse_head(iterTy) == "List") {
       let el = type_arg1(iterTy)
       if (el != "") { inner = tenv_put(inner, bind, el) }
     }
-    let bodyjs = lir_stmts(ts, it.i + 2, bend - 1, inner, muts, ret, marks, births)
+    let fb = lir_body(ts, it.i + 1, hi, inner, muts, ret, marks, births)
+    if (!fb.ok) { return mk_one("", env, muts, hi) }
     let js = "{\"step\":\"for\",\"bind\":".concat(jstr(predeclared_mangle(bind))).concat(",\"iterable\":")
-      .concat(lir_expr(it.e, env)).concat(",\"body\":[").concat(bodyjs).concat("]}")
-    return mk_one(js, env, muts, bend)
+      .concat(lir_expr(it.e, env)).concat(",\"body\":[").concat(fb.js).concat("]}")
+    return mk_one(js, env, muts, fb.i)
   }
   if (t.kind == "ident" && atk(ts, i + 1, "=")) {
     let name = t.text
-    let r = expr_at(ts, i + 2)
-    if (is_bad(r.e) || r.i <= i + 2) { return mk_one("", env, muts, hi) }
+    // `lir_rhs`, not `expr_at`: the rvalue of an assignment can be the
+    // token-level record-update (`p = { p | x = p.y }`), which the shared
+    // parser's grammar cannot carry. Reading it with `expr_at` failed, the whole
+    // statement was dropped AND `lir_stmts` gave up on the rest of the block, so
+    // a loop body holding one lowered as `[]`.
+    let r = lir_rhs(ts, i + 2, env)
+    if (!r.ok) { return mk_one("", env, muts, hi) }
     let js = "{\"step\":\"assign\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
-      .concat(lir_expr(r.e, env)).concat(own_marker(marks, i)).concat("}")
-    return mk_one(js, assign_env(env, name, r.e), muts, r.i)
+      .concat(r.js).concat(own_marker(marks, i)).concat("}")
+    return mk_one(js, assign_env_ty(env, name, r.ty), muts, r.i)
   }
   if (t.kind == "ident" && is_compound_op(ts, tkc(ts, i + 1).kind) && atk(ts, i + 2, "=")) {
     let name = t.text
@@ -10529,6 +10758,117 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
   if (is_bad(r.e) || r.i <= i) { return mk_one("", env, muts, hi) }
   return mk_one("{\"step\":\"expr\",\"expr\":".concat(lir_expr(r.e, env)).concat("}"),
                 env, muts, r.i)
+}
+
+// ------------------------------------------------------------ destructuring
+//
+// `let { a, b } = r` / `var [head, ...rest] = xs` lower to ONE `let_pattern`
+// step (lower.py `_lower_let_pattern_stmt`). The reader here had no branch for
+// either spelling: it read the token after `let` as the bound NAME, found `{`
+// where it wanted `=`, and gave up on the whole enclosing block — so
+// `tests/fixtures/emit_ts_corpus/destructuring.rvl` lowered every one of its
+// functions with an empty body. `...` is three `.` tokens (the lexer has no
+// spread operator), and a record pattern's names are read with `is_record_key`
+// for the same reason its literal's keys are.
+type PatR = { kind: Str, names: List[Str], rest: Str, i: Int, ok: Bool }
+
+fn pat_none(i: Int) -> PatR { return { kind: "", names: [], rest: "", i: i, ok: false } }
+
+fn pat_record(ts: List[Token], i: Int) -> PatR {
+  var j = i + 1
+  var names: List[Str] = []
+  var ok = true
+  var go = true
+  while (go && j < ts.length() && !atk(ts, j, "}")) {
+    if (atk(ts, j, ",")) { j += 1 }
+    else {
+      if (!is_record_key(tkc(ts, j))) { ok = false  go = false }
+      else { names = names.push(tkc(ts, j).text)  j += 1 }
+    }
+  }
+  if (!ok || !atk(ts, j, "}") || names.length() == 0) { return pat_none(i) }
+  let ns = names
+  return { kind: "record", names: ns, rest: "", i: j + 1, ok: true }
+}
+
+fn pat_list(ts: List[Token], i: Int) -> PatR {
+  var k = i + 1
+  var binds: List[Str] = []
+  var rest = ""
+  var ok2 = true
+  var go2 = true
+  while (go2 && k < ts.length() && !atk(ts, k, "]")) {
+    if (atk(ts, k, ",")) { k += 1 }
+    else {
+      if (atk(ts, k, ".") && atk(ts, k + 1, ".") && atk(ts, k + 2, ".")
+          && atk(ts, k + 3, "ident")) {
+        rest = tkc(ts, k + 3).text
+        k += 4
+      } else {
+        if (!atk(ts, k, "ident")) { ok2 = false  go2 = false }
+        else { binds = binds.push(tkc(ts, k).text)  k += 1 }
+      }
+    }
+  }
+  if (!ok2 || !atk(ts, k, "]") || binds.length() == 0) { return pat_none(i) }
+  let bs = binds
+  let rs = rest
+  return { kind: "list", names: bs, rest: rs, i: k + 1, ok: true }
+}
+
+fn pat_at(ts: List[Token], i: Int) -> PatR {
+  if (atk(ts, i, "{")) { return pat_record(ts, i) }
+  if (atk(ts, i, "[")) { return pat_list(ts, i) }
+  return pat_none(i)
+}
+
+fn pat_names_json(names: List[Str], i: Int, acc: Str) -> Str {
+  if (i >= names.length()) { return acc }
+  let seg = jstr(predeclared_mangle(names[i]))
+  return pat_names_json(names, i + 1, acc == "" ? seg : acc.concat(",").concat(seg))
+}
+
+fn pat_bind_env(env: List[Bind], names: List[Str], i: Int, mutable: Bool,
+                ty: Str) -> List[Bind] {
+  if (i >= names.length()) { return env }
+  var e = env_mut_put(env, names[i], mutable)
+  if (ty != "") { e = tenv_put(e, names[i], ty) }
+  return pat_bind_env(e, names, i + 1, mutable, ty)
+}
+
+fn pat_bind_fields(env: List[Bind], names: List[Str], i: Int, mutable: Bool,
+                   recTy: Str, outer: List[Bind]) -> List[Bind] {
+  if (i >= names.length()) { return env }
+  var e = env_mut_put(env, names[i], mutable)
+  let ft = infer_field(recTy, names[i], outer)
+  if (ft != "") { e = tenv_put(e, names[i], ft) }
+  return pat_bind_fields(e, names, i + 1, mutable, recTy, outer)
+}
+
+fn pat_muts(muts: List[Str], names: List[Str], i: Int) -> List[Str] {
+  if (i >= names.length()) { return muts }
+  return pat_muts(muts.push(names[i]), names, i + 1)
+}
+
+// The BODY of an `if`/`else`/`while`/`for`. The reference reads a brace block OR
+// a single statement (`self.block() if self.at("{") else [self.fn_stmt()]`, in
+// `if_stmt`/`while_stmt`/`for_stmt`), and this reader demanded the brace: a
+// braceless `if (key.length() <= 8) return key` was not a statement it
+// recognised, so the whole enclosing body lowered as `[]` — every statement, not
+// only the conditional.
+type BodyR = { js: Str, i: Int, ok: Bool }
+
+fn lir_body(ts: List[Token], i: Int, hi: Int, env: List[Bind], muts: List[Str],
+            ret: Str, marks: Map[Str, Int], births: Map[Str, Str]) -> BodyR {
+  if (atk(ts, i, "{")) {
+    let e = close_brace(ts, i)
+    if (e == 0 - 1) { return { js: "", i: i, ok: false } }
+    return { js: lir_stmts(ts, i + 1, e - 1, env, muts, ret, marks, births),
+             i: e, ok: true }
+  }
+  let r = lir_one_stmt(ts, i, hi, env, muts, ret, marks, births)
+  if (r.i <= i) { return { js: "", i: i, ok: false } }
+  return { js: r.js, i: r.i, ok: true }
 }
 
 fn lir_stmts(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
@@ -10608,6 +10948,7 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored) }
+  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored) }
   if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
   if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
   if (t.text == "test") {
@@ -10615,7 +10956,15 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
     if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored) }
     return fns_walk(ts, skip_line(ts, i), acc, cases, colored)
   }
-  if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
+  if (t.text == "type") {
+  // a `type` is stepped over to the end of the DECLARATION, not of its first
+  // LINE. A record written one field per line left the cursor inside the body,
+  // where a field named with a KEYWORD (`component: Int`, `config: Int`) is a
+  // top-level declaration head to this walker: `type Envelope = {` then
+  // `component: Int,` on its own line minted a component named ":". Same span
+  // `type_ctors` and `p_top` already read.
+    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored)
+  }
   if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored) }
   let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
   if (t.text == "fn" || public_fn) {
@@ -10818,6 +11167,7 @@ fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
   if (i >= ts.length() || atk(ts, i, "eof")) { return { js: acc, ok: ok } }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls) }
+  if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls) }
   if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls) }
   if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls) }
   if (t.text == "extern") {
@@ -10826,6 +11176,7 @@ fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
     let acc2 = ex.ok ? (acc == "" ? ex.js : acc.concat(", ").concat(ex.js)) : acc
     return externs_walk(ts, ni, acc2, ok && ex.ok, decls)
   }
+  if (t.text == "type") { return externs_walk(ts, type_decl_end(ts, i + 1), acc, ok, decls) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
     if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls) }
@@ -10862,7 +11213,10 @@ fn ir_type_fields(ts: List[Token], lo: Int, hi: Int) -> Str {
   var out = ""
   var first = true
   while (k < hi && !atk(ts, k, "}")) {
-    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+    // `is_record_key`, not a bare `ident`: a record TYPE reads its field names
+    // with the reference's `_record_key_name` too, so `{ config: Int }` declares
+    // a field and does not silently drop one.
+    if (is_record_key(tkc(ts, k)) && atk(ts, k + 1, ":")) {
       let nm = tkc(ts, k).text
       let tr = type_at(ts, k + 2)
       let seg = jstr(nm).concat(":").concat(jstr(tr.ty))
@@ -10941,10 +11295,39 @@ fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
   return { js: "", i: lineHi }
 }
 
+// The `types` entry a typed `event` contributes. The contract clause
+// (`(key: f[, window: n])`) carries no type information, so only the brace body
+// is read, with exactly `ir_type_decl`'s record reader.
+fn ir_event_decl(ts: List[Token], i: Int) -> LirFn {
+  let hi = event_decl_end(ts, i)
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "(")) { j = close_paren(ts, j) }
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return { js: "", i: hi } }
+  let bend = close_brace(ts, j)
+  if (bend == 0 - 1) { return { js: "", i: hi } }
+  let fields = ir_type_fields(ts, j + 1, bend - 1)
+  // the reference refuses a field-less `event`, so an empty table is not the
+  // empty-variant shape `ir_type_decl` reads it as — no entry is produced.
+  if (fields == "") { return { js: "", i: hi } }
+  let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"record\", \"fields\": {")
+    .concat(fields).concat("}}")
+  return { js: js, i: bend }
+}
+
 fn types_walk(ts: List[Token], i: Int, acc: Str) -> Str {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return types_walk(ts, i + 1, acc) }
+  // An `event` declaration IS a record declaration with a contract clause (item
+  // 130 §6): the reference parser appends an ordinary `TypeDecl` beside the
+  // `EventDecl`, so the `types` section carries the same entry a `type` spelling
+  // would produce. Without this the section lost the entry entirely.
+  if (at_event(ts, i)) {
+    let d = ir_event_decl(ts, i)
+    let acc3 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
+    return types_walk(ts, d.i, acc3)
+  }
   if (t.kind != "kw") { return types_walk(ts, skip_line(ts, i), acc) }
   if (at_pub_prefix(ts, i)) { return types_walk(ts, i + 1, acc) }
   if (t.text == "type") {
@@ -10970,6 +11353,7 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a) }
+  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a) }
   if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a) }
   if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a) }
   if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a) }
@@ -10980,7 +11364,13 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
     return ir_walk(ts, skip_line(ts, i), na)
   }
   if (t.text == "type") {
-    return ir_walk(ts, skip_line(ts, i), mk_iracc(a.svcs, a.comps, true, a.v2))
+  // a `type` is stepped over to the end of the DECLARATION, not of its first
+  // LINE. A record written one field per line left the cursor inside the body,
+  // where a field named with a KEYWORD (`component: Int`, `config: Int`) is a
+  // top-level declaration head to this walker: `type Envelope = {` then
+  // `component: Int,` on its own line minted a component named ":". Same span
+  // `type_ctors` and `p_top` already read.
+    return ir_walk(ts, type_decl_end(ts, i + 1), mk_iracc(a.svcs, a.comps, true, a.v2))
   }
   if (t.text == "extern") {
     return ir_walk(ts, p_extern(ts, i, empty_prog()).i,

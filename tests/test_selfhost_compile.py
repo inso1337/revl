@@ -363,6 +363,12 @@ JAVA_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
     "lists.rvl", "maps.rvl", "records.rvl", "adts.rvl", "optmatch.rvl",
     "match_ignored.rvl", "float_numeric.rvl",
+    # item 391: the branch/value shapes `selfhost/lower.rvl` did not read — the
+    # block-bodied `if` in value position, the empty template, the token-level
+    # record-update as a `return` rvalue — so this document was a lower.rvl gap
+    # rather than an emitter one. It compiles byte-exact through the fully
+    # native chain now and moves up out of JAVA_LOWER_GAP_DOCS.
+    "branch_shapes.rvl",
     # the component/service surface the java native emitter covers
     "service.rvl", "services_multi.rvl", "comp_config_req.rvl",
     "comp_config_provide.rvl", "comp_multi_effect.rvl", "comp_fail.rvl",
@@ -432,7 +438,7 @@ JAVA_LOWER_GAP_DOCS = [
     "comp_host_map.rvl", "comp_host_map_generic.rvl",
     # component metadata / branch shapes / map inference
     "metadata_null.rvl", "component_format.rvl", "component_branches.rvl",
-    "branch_shapes.rvl", "map_inference.rvl",
+    "map_inference.rvl",
     # whole-program documents that combine several of the above
     "../../../backends/go/scenarios/tagger.rvl",
     "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",

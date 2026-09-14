@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import itertools
 import json
 import os
 import signal
@@ -37,6 +38,7 @@ import sys
 import time
 import types
 from pathlib import Path
+from typing import NamedTuple
 
 from . import hostref as _hostref
 from ._paths import backends_root
@@ -49,6 +51,38 @@ from . import taint
 from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
+
+# item 1046 (#1046): driver identity for the `sys.modules` key `_emit_module`
+# registers each emitted generation under. `sys.modules` is process-global, so
+# that key has to carry the identity of the driver that emitted the generation,
+# not just that driver's own generation number. It used to be `revl_run_gen{N}` from `_Driver.generation`
+# (per driver, from 0): two live compositions in one process — a `revl run`
+# hosting a second driver, an MCP session alongside a test's own, two `Session`
+# objects — both emit `revl_run_gen1`, the second overwrites the first's entry,
+# and either driver's `_evict_dead_modules` then pops a key belonging to the
+# other. The name was not the identity it was being used as.
+#
+# This counter hands each `_Driver` a distinct ordinal for the life of the
+# process (see `_Driver._gen_prefix`), so `revl_run_gen_d{driver}_{generation}`
+# is unique by construction. `next()` on an `itertools.count` is atomic, so
+# drivers built concurrently still get distinct ordinals. `sys.modules` is
+# per-process, so a process-local ordinal is exactly the identity the key needs
+# — and it keeps the name deterministic and readable in a traceback. The
+# `revl_run_gen` prefix is preserved: it is what a sweep over the generation
+# namespace matches on.
+_DRIVER_SEQ = itertools.count(1)
+
+
+class _Generation(NamedTuple):
+    """One emitted generation's `sys.modules` registration (items 541, 1046).
+
+    `module` is the exact object the driver registered, kept so the eviction
+    sweep reclaims the key only while it still holds that object. `components`
+    is the set of component names the generation defined, which is what decides
+    whether anything it defined is still live."""
+
+    module: types.ModuleType
+    components: frozenset
 
 
 def _host_usage(raw) -> tuple:
@@ -1059,16 +1093,18 @@ class _Driver:
         self.routers: dict[tuple, _Router] = {}
         self._route_disposers: dict[str, list] = {}
         self.generation = 0
-        # item 541 (#541): every `_emit_module` registers a `revl_run_gen{N}`
+        # item 541 (#541): every `_emit_module` registers a generation module
         # entry in `sys.modules` (the emitted record dataclasses need it at
         # class-creation time). Nothing ever removed it, so a long-lived
         # session — swap/reload, or a run of admit+abort/commit turns — pinned
         # one whole emitted module (source, code objects, class dicts) per
         # generation for the life of the PROCESS (201 modules / tens of MB after
-        # 200 admits). This maps each live generation's module name to the set
-        # of component names it defined, so a generation whose components are
-        # all disposed can have its `sys.modules` entry reclaimed.
-        self._gen_modules: dict[str, frozenset] = {}
+        # 200 admits). This maps each live generation's module name to the
+        # module object and the set of component names it defined, so a
+        # generation whose components are all disposed can have its
+        # `sys.modules` entry reclaimed — and reclaimed only if the entry is
+        # still the very object this driver put there (#1046).
+        self._gen_modules: dict[str, _Generation] = {}
         self.emitted: tuple = ("", "")  # (filename, source) of the last emit
         # crash-recovery WAL (roadmap item 47): --wal implies recording, since
         # the accumulator it persists is what recording captures.
@@ -1348,6 +1384,27 @@ class _Driver:
 
     # -- emit + load -------------------------------------------------------
 
+    @property
+    def _gen_prefix(self) -> str:
+        """This driver's own slice of the process-global generation namespace
+        (#1046), allocated on first use and stable for the driver's life.
+
+        Every module name the driver registers is `{_gen_prefix}{generation}`.
+        No other driver ever mints a name with this prefix, so one driver's
+        entries cannot overwrite another's and its eviction sweep cannot reach
+        another's — which is the whole property `revl_run_gen{N}` lacked.
+
+        Allocated here rather than in `__init__` so it holds for EVERY `_Driver`
+        object, including the `__new__`-built partial drivers the unit tests use
+        to exercise `_emit_module` without a runtime. A driver that never emits
+        never takes an ordinal. The `revl_run_gen` prefix is preserved: it is
+        what a sweep over the generation namespace matches on."""
+        prefix = self.__dict__.get("_gen_prefix_value")
+        if prefix is None:
+            prefix = f"revl_run_gen_d{next(_DRIVER_SEQ)}_"
+            self.__dict__["_gen_prefix_value"] = prefix
+        return prefix
+
     def _evict_dead_modules(self) -> None:
         """Reclaim `sys.modules` entries for emitted generations whose
         components are all gone (item 541 / #541).
@@ -1369,10 +1426,19 @@ class _Driver:
         self-contained (one never imports another), so evicting one leaves
         every other live generation intact."""
         live = set(self.fibers) | set(self._route_disposers)
-        for name in list(self._gen_modules):
-            if not (self._gen_modules[name] & live):
-                del self._gen_modules[name]
-                sys.modules.pop(name, None)
+        for name, gen in list(self._gen_modules.items()):
+            if gen.components & live:
+                continue
+            del self._gen_modules[name]
+            # #1046: pop the key only while it still holds THIS driver's own
+            # module object. `_gen_prefix` already makes the name unmistakably
+            # this driver's, so in a well-behaved process the check always
+            # holds — but object identity, not the name, is the property the
+            # sweep depends on, and checking it here is what makes the sweep
+            # unable to reclaim something it does not own no matter what else
+            # in the process writes to `sys.modules`.
+            if sys.modules.get(name) is gen.module:
+                del sys.modules[name]
 
     def _emit_module(self, ir: dict) -> types.ModuleType:
         # item 541: a generation supersedes the ones already disposed (a
@@ -1398,7 +1464,7 @@ class _Driver:
         if reset is not None:
             reset()
         source = self.emit.emit(ir)
-        module = types.ModuleType(f"revl_run_gen{self.generation}")
+        module = types.ModuleType(f"{self._gen_prefix}{self.generation}")
         filename = f"<revl-run gen{self.generation}>"
         # kept so a replay recorder can quote the emitted line a step came
         # from — exec'd modules are invisible to linecache
@@ -1416,8 +1482,8 @@ class _Driver:
         # item 541: track the module against the components it defines, so
         # `_evict_dead_modules` can drop its `sys.modules` entry once they are
         # all disposed.
-        self._gen_modules[module.__name__] = frozenset(
-            c["name"] for c in _components(ir))
+        self._gen_modules[module.__name__] = _Generation(
+            module, frozenset(c["name"] for c in _components(ir)))
         exec(compile(source, filename, "exec"), module.__dict__)
         # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
         # install the resolved config for each document-global config extern into
