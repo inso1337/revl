@@ -452,7 +452,10 @@ class StreamIterStmt:
 
     `bind` is the item name; `subject` names the subscription (a bare
     identifier — a `Subscription` is a host-local with no nominal type, so it
-    can be spelled no other way).
+    can be spelled no other way). `subject` is `None` for an `on <Event> as <x>
+    { … }` handler that dropped its `in <sub>` clause: that form resolves its
+    source from the component's required `Stream[<Event>]` coeffect and the
+    lowering registers the subscription bracket itself (item 130 §6c).
 
     `event` is Slice 5 (§6): the typed-event handler `on <Event> as <x> in <sub>
     { … }` parses to THIS node with the event's name recorded, because an event
@@ -755,6 +758,14 @@ class ComponentDecl:
     # the feature are byte-identical. This is a GENERAL wiring feature (a
     # hand-written wrapper uses it too, not an adapter special case).
     require_carry: dict = field(default_factory=dict)
+    # item 130 §4.5/§6c: the replay declaration a `requires <k>: Stream[T]`
+    # carries. Once the source is a coeffect the provider is on the other side
+    # of the injection, so the REQUIREMENT is where its durability claim is
+    # stated: it is the contract the wiring must satisfy, and it is what a
+    # `subscribe <k> replay(…)` in the body is admitted against. key ->
+    # `ReplaySpec`. Empty for every component with no stream requirement, so a
+    # program that does not use the feature is byte-identical.
+    require_replay: dict = field(default_factory=dict)
     # item 350: the composition's BOOT component (`boot component X { ... }`) —
     # the one declared arrival point for host-injected environment values. Its
     # `config {}` block is the ENVIRONMENT CONTRACT: the exhaustive, typed list
@@ -3793,12 +3804,103 @@ class Parser:
             return f"{first}::{local}"
         return first
 
+    def _capability_annotation(self, kw: str, key: str):
+        """The capability after `<key>:` in a `requires`/`provides` clause — a
+        service name, or (on `requires` only) a `Stream[T]` with an optional
+        `replay(…)` declaration. Answers `(rendered type, ReplaySpec | None)`.
+
+        A required `Stream[T]` is item 130's coeffect wiring (§4.3, §6b). A
+        coeffect is a DECLARED REQUIREMENT, so a required stream is resolved by
+        the same layer that resolves a required service: the wiring supplies it,
+        and a component whose stream requirement is unmet stays PENDING under R2
+        exactly as an unmet service does. The consequence the item cares about is
+        that the source is no longer acquired in the consumer's own body — which
+        is what lets an `on <Event> as <x>` handler resolve its stream from the
+        component's declaration instead of naming a local `subscribe` bind, and
+        what lets the SAME consumer be re-activated against a stream that
+        outlives its activation.
+
+        Two shapes are refused by name rather than admitted approximately:
+
+        * `provides <k>: Stream[T]` — provider-side stream provision is not this
+          slice. A `provide` block answers method CALLS; a stream provider has to
+          push items over time, which is a different protocol, and admitting the
+          declaration while nothing could emit on it would be a capability the
+          wiring graph reports as satisfiable and no program can satisfy.
+        * a STATE INDEX on a requirement (`Stream[T, Active]`). The index is what
+          `subscribe` PRODUCES (§1: `subscribe : Stream[T] -> Stream[T, Active]`);
+          a requirement names the unsubscribed capability, so an index here would
+          declare a requirement for something no provider can hand over."""
+        if not (self.at("ident", "Stream") and self.peek_ahead(1).kind == "["):
+            svc = self.expect("ident", what="a service name after `:`").value
+            if self.at("ident", "replay") and self.peek_ahead(1).kind == "(":
+                raise self.err(
+                    self.peek().line,
+                    f"`requires {key}: {svc} replay(…)` — only a required "
+                    f"`Stream[T]` declares a replay backlog",
+                    hint="replay is a stream provider's durability claim, so it "
+                         "goes on a stream requirement (`requires "
+                         f"{key}: Stream[T] replay(<n>)`) or on a locally "
+                         "acquired source (item 130 §4.5)")
+            return svc, None
+        stream_line = self.peek().line
+        if kw != "requires":
+            raise self.err(
+                stream_line,
+                f"`provides {key}: Stream[...]` — a component cannot provide a "
+                f"stream",
+                hint="provider-side stream provision is not part of item 130's "
+                     "v1 surface: a `provide` block answers method calls, while a "
+                     "stream provider pushes items over time. Acquire the source "
+                     "with `let src = effect Stream.source() undo src.close()`, "
+                     "or take one as a requirement with `requires "
+                     f"{key}: Stream[T]` (item 130 §6b)")
+        self.next()                                  # `Stream`
+        self.next()                                  # `[`
+        elem = self.type_()
+        if self.at(","):
+            self.next()
+            index = self.type_()
+            raise self.err(
+                stream_line,
+                f"`requires {key}: Stream[{elem}, {index}]` — a required stream "
+                f"carries no state index",
+                hint="the index is what `subscribe` produces (`subscribe` takes "
+                     "`Stream[T]` and yields `Stream[T, Active]`), so a "
+                     f"requirement names the unsubscribed capability: `requires "
+                     f"{key}: Stream[{elem}]` (item 130 §1)")
+        self.expect("]")
+        if self.at("?"):
+            raise self.err(
+                stream_line,
+                f"`requires {key}: Stream[{elem}]?` — a requirement is not "
+                f"optional",
+                hint="an unmet requirement leaves the component PENDING (R2); "
+                     "there is no `Opt` requirement to test. Drop the `?` "
+                     "(item 130 §4.3)")
+        # item 130 §4.5 + §6c: the PROVIDER-side replay declaration, carried on
+        # the REQUIREMENT because that is where the provider contract lives once
+        # the source is a coeffect. A locally acquired source declares its
+        # backlog on its own `effect Stream.source() replay(…)`; a required one
+        # is acquired by the wiring, so the declaration is what the requirement
+        # obliges the wiring to supply — and it is what a `subscribe <k>
+        # replay(…)` in the body is admitted against, by the same §4.5 rule.
+        # Parsed by `_parse_replay_qual`, the one routine both other ends use, so
+        # the three spellings cannot drift.
+        replay = None
+        if self.at("ident", "replay") and self.peek_ahead(1).kind == "(":
+            replay = self._parse_replay_qual(where="requires")
+        return f"Stream[{elem}]", replay
+
     def component(self, boot: bool = False) -> ComponentDecl:
         line = self.expect("kw", "component").line
         name = self.expect("ident").value
         requires: list[tuple[str, str, int]] = []
         provides: list[tuple[str, str, int]] = []
         require_carry: dict = {}
+        # item 130 §6c: `requires <k>: Stream[T] replay(…)` — the §4.5 provider
+        # declaration a stream REQUIREMENT carries. key -> ReplaySpec.
+        require_replay: dict = {}
         while self.at("kw", "requires") or self.at("kw", "provides"):
             kw = self.next().value
             target = requires if kw == "requires" else provides
@@ -3806,8 +3908,10 @@ class Parser:
                 bline = self.peek().line
                 local = self._provision_key(what="a requirement or provision key")
                 self.expect(":")
-                svc = self.expect("ident").value
+                svc, replay_decl = self._capability_annotation(kw, local)
                 target.append((local, svc, bline))
+                if replay_decl is not None:
+                    require_replay[local] = replay_decl
                 # item 296: an optional `carrying(tok, ...)` clause on a
                 # *require* binding declares the capability tokens this alias's
                 # emission crossings contribute (alias token carry-over). A
@@ -3853,7 +3957,8 @@ class Parser:
         self.expect("}")
         return ComponentDecl(name, config, requires, provides, body, line,
                              require_carry=require_carry, boot=boot,
-                             liveness_ms=liveness_ms)
+                             liveness_ms=liveness_ms,
+                             require_replay=require_replay)
 
     # -- item 426 S1: the composition document -----------------------------
 
@@ -6117,36 +6222,36 @@ class Parser:
         immediately after the await, and a `Faulted` that is not caught) are
         literally the same code, not a second implementation that could drift.
 
-        The `in <sub>` clause names the subscription the handler pulls, and it
-        is the one place this surface departs from §6's `on <Event> as <x> { … }`
-        sketch. That sketch resolves the event's stream through the provide/
-        inject graph — "the event source is the provided `Stream[T]`" — which
-        needs a REQUIRED `Stream[T]` capability the language does not have yet
-        (`subscribe`'s own diagnostic says so: a required stream capability is a
-        later slice). Naming the subscription explicitly keeps the source
-        honest, and keeps every Slice 2/3 qualifier — `policy`, `buffer`,
-        `drain`, the combinator chain, `merge` — available to an event consumer,
-        which an implicit `subscribe` would have stranded."""
+        The `in <sub>` clause is OPTIONAL. With it, the handler pulls the named
+        subscription. Without it, §6's own shape applies — "the event source is
+        the provided `Stream[T]`" — and the source is resolved from the
+        component's `requires <k>: Stream[<Event>]` coeffect, which the lowering
+        desugars into the subscription bracket plus this iteration. The clause is
+        kept rather than replaced because naming a subscription is the only way
+        to reach the Slice 2/3 qualifiers — `policy`, `buffer`, `drain`, the
+        combinator chain, `merge` — which an implicit `subscribe` cannot spell.
+        `subject` is `None` for the clause-free form."""
         kw = self.expect("ident", "on")
         event = self.expect("ident", what="the event's name after `on`").value
         self.expect("kw", "as")
         bind = self.expect("ident",
                            what=f"the item name after `on {event} as`").value
-        if not self.at("kw", "in"):
-            tok = self.peek()
-            raise self.err(
-                tok.line,
-                f"`on {event} as {bind}` needs the subscription it handles: "
-                f"`on {event} as {bind} in <sub> {{ … }}`",
-                hint="an event handler is the Slice 4 iteration with a contract "
-                     "on each item (item 130 §6), so it pulls a subscription a "
-                     "`subscribe … undo …` bracket already owns — which is what "
-                     "keeps the event's teardown the SAME single LIFO bracket a "
-                     "plain stream's is")
-        self.next()
-        subject = self._iteration_subject(
-            bind, f"`on {event} as {bind} in …`")
-        body = self._iteration_body(bind, subject.head, kw.line,
+        # The `in <sub>` clause is OPTIONAL (item 130 §6b, deviation 1 lifted).
+        # Without it the handler resolves its stream from the component's own
+        # `requires <k>: Stream[<Event>]` declaration — §6's original shape,
+        # "the event source is the provided `Stream[T]`" — which the required-
+        # stream coeffect makes resolvable. The clause is kept, not replaced,
+        # because naming a subscription is the only way to reach the Slice 2/3
+        # qualifiers (`policy`, `buffer`, `drain`, the combinator chain,
+        # `merge`) an implicit `subscribe` cannot spell.
+        subject = None
+        if self.at("kw", "in"):
+            self.next()
+            subject = self._iteration_subject(
+                bind, f"`on {event} as {bind} in …`")
+        subject_hint = subject.head if subject is not None \
+            else f"<the {event} stream>"
+        body = self._iteration_body(bind, subject_hint, kw.line,
                                     form="`on … as`",
                                     head=f"`on {event} as {bind}`")
         return StreamIterStmt(bind, subject, body, kw.line, event=event)

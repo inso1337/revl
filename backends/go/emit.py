@@ -2036,9 +2036,33 @@ def _default_lit(value, t):
     return str(value)
 
 
+def _refuse_required_stream(component: dict, tier: str) -> None:
+    """Refuse a component that declares a required `Stream[T]` coeffect on a
+    tier that does not lower one (item 130 §6b).
+
+    The reference tier resolves the requirement through the same injection that
+    resolves a required service, so the subscription opens on a stream the wiring
+    supplied. This tier has no such seam: its requirement resolution is typed
+    against a SERVICE, and a `Stream[T]` is not one. Emitting anyway rendered the
+    requirement's type as the literal text `Stream[T]` — a name no compiler on
+    this tier has — so the failure landed in the host toolchain instead of here.
+    Refused by name at the declaration, the same call every other unlowered piece
+    of the stream surface makes."""
+    for key, svc in (component.get("requires") or {}).items():
+        if isinstance(svc, str) and svc.startswith("Stream["):
+            raise EmitError(
+                "%s requires `%s: %s`, and a required `Stream[T]` coeffect is "
+                "not lowered on the %s tier: the stream arrives through the "
+                "wiring, and this tier resolves a requirement against a SERVICE. "
+                "Acquire the source in the body instead (`let src = effect "
+                "Stream.source() undo src.close()`), or try `--backend py` "
+                "(item 130 §6b)" % (component.get("name"), key, svc, tier))
+
+
 def _emit_component(comp, services, out):
     global _BIND_HOST, _REQ_SERVICE, _BIND_MAP_VALUE, _BIND_IS_PTR
     name = comp["name"]
+    _refuse_required_stream(comp, "cordis-go")
     cname = _camel(name)
     requires = comp.get("requires", {}) or {}
     provides = comp.get("provides", {}) or {}

@@ -5596,7 +5596,54 @@ class Stream:
         forward path before any live item, so it takes the declared buffer and
         policy exactly as a live item does — a backlog bigger than the buffer is
         ordinary backpressure, not a special case, and there is no second
-        delivery path for a replayed item to diverge on."""
+        delivery path for a replayed item to diverge on.
+
+        `source` is normally a local `Stream.source()` acquisition, but under
+        item 130's required-`Stream[T]` coeffect it is whatever the WIRING
+        injected for the requirement key. That is the one place rule 3.6 cannot
+        be discharged statically — the frontend has no acquisition to read an
+        inverse off — so the shape is checked HERE rather than assumed. A value
+        that is not a stream has no terminal to deliver, which is exactly the
+        silent-vanish state §9 Part B forbids, so it is refused by name at the
+        injection point instead of failing later inside a parked `next`. The
+        check runs BEFORE the replay bookkeeping below, which reads the source's
+        own backlog: a non-stream would otherwise reach that read and answer an
+        empty backlog, which is a vacuous replay rather than a refusal."""
+        if not isinstance(source, (StreamSource, StreamStage)):
+            raise TypeError(
+                "subscribe expected a stream, got %s. A required `Stream[T]` is "
+                "satisfied by a stream the wiring provides; a value that is not "
+                "one delivers no terminal, so an outstanding `next` on it could "
+                "never be resolved (item 130 rule 3.6, design §9 Part B)"
+                % type(source).__name__)
+        if replay:
+            # §4.5's rule at the INJECTION POINT. For a locally acquired source
+            # the frontend already compared this request to that source's own
+            # declaration; for a required `Stream[T]` coeffect it compared it to
+            # the REQUIREMENT's declaration, and nothing yet checked that the
+            # stream the wiring actually supplied backs it. Unchecked, a resume
+            # against a provider holding no such backlog would answer an empty
+            # one and read as "nothing happened while we were down" — a vacuous
+            # durability claim, which is the single thing §4.5 exists to keep off
+            # the wire. Refused by name here instead.
+            declared = getattr(source, "_replay", None) or {}
+            want_cursor = replay.get("cursor")
+            if want_cursor is not None:
+                if declared.get("cursor") != want_cursor:
+                    raise TypeError(
+                        "subscribe asked to resume the durable cursor %r, and "
+                        "the provided stream declares %r. A required "
+                        "`Stream[T] replay(from: …)` obliges the WIRING to "
+                        "supply a provider holding that cursor; one that does "
+                        "not would answer an empty backlog and read as an "
+                        "uneventful gap (item 130 §4.5, §4.9)"
+                        % (want_cursor, declared.get("cursor")))
+            elif "count" not in declared:
+                raise TypeError(
+                    "subscribe asked for a last-n backlog and the provided "
+                    "stream declares none. A `replay(<n>)` requirement obliges "
+                    "the wiring to supply a provider that holds one "
+                    "(item 130 §4.5)")
         upstream: Any = source
         for kind, arg in stages or []:
             upstream = StreamStage(upstream, kind, arg)

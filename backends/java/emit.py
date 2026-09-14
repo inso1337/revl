@@ -7479,6 +7479,29 @@ def _emit_component_modern(
 
 
 
+def _refuse_required_stream(component: dict, tier: str) -> None:
+    """Refuse a component that declares a required `Stream[T]` coeffect on a
+    tier that does not lower one (item 130 §6b).
+
+    The reference tier resolves the requirement through the same injection that
+    resolves a required service, so the subscription opens on a stream the wiring
+    supplied. This tier has no such seam: its requirement resolution is typed
+    against a SERVICE, and a `Stream[T]` is not one. Emitting anyway rendered the
+    requirement's type as the literal text `Stream[T]` — a name no compiler on
+    this tier has — so the failure landed in the host toolchain instead of here.
+    Refused by name at the declaration, the same call every other unlowered piece
+    of the stream surface makes."""
+    for key, svc in (component.get("requires") or {}).items():
+        if isinstance(svc, str) and svc.startswith("Stream["):
+            raise EmitError(
+                "%s requires `%s: %s`, and a required `Stream[T]` coeffect is "
+                "not lowered on the %s tier: the stream arrives through the "
+                "wiring, and this tier resolves a requirement against a SERVICE. "
+                "Acquire the source in the body instead (`let src = effect "
+                "Stream.source() undo src.close()`), or try `--backend py` "
+                "(item 130 §6b)" % (component.get("name"), key, svc, tier))
+
+
 def _emit_component(
     component: dict,
     services: dict,
@@ -7496,6 +7519,7 @@ def _emit_component(
     override with the other is how `f(R)` came to be implemented by
     `f(Object)`, which javac reports as the class not being abstract.
     """
+    _refuse_required_stream(component, "cordis4j")
     if _component_needs_modern(component):
         return _emit_component_modern(
             component, services, types, functions, externs, components,

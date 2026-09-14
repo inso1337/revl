@@ -15,9 +15,14 @@ streams by design, having no async host seam — now lowers the type, the
 subscribe/next/close bracket, `merge`, `every … in` and `on … as`. §4.5's
 provider-declared `replay(n)`/`replay(from: <durable>)` and the §4.9
 reconstructible crash-recovery case it gates have since landed on py, the tier
-that owns the WAL; every other tier refuses `replay` by name. Still open: the
-required-`Stream[T]` coeffect wiring that would let `on E as e { … }` drop its
-`in <sub>` clause.
+that owns the WAL; every other tier refuses `replay` by name. So has the
+required-`Stream[T]` coeffect (§6c): `requires <k>: Stream[T]` on py, refused by
+name on every other tier, and with it the handler that resolves its source from
+the declaration instead of naming a subscription. Those two together close §4.9
+END TO END rather than at the WAL — the coeffect is what lets a source outlive
+the activation that reads it, and the durable cursor is what lets a second
+activation resume where the first stopped — and the program that does it is
+§4.9's own.
 
 Base: `origin/main` @ `e513772`. Every `file:line` anchor below was read at
 that sha. Every "admitted"/"refused" claim about *today's* checker is a claim
@@ -458,6 +463,36 @@ reconstructible case, and it is gated on the same declaration that gates replay,
 so the two durability claims cannot diverge. Default stays non-reconstructible;
 the honest report is the deliverable, not automatic resurrection.
 
+**The cross-process case, as one program.** Re-issuing that descriptor into a
+NEW process needs the source to be something the new process can be WIRED to,
+rather than something the old activation acquired — which is what the required
+`Stream[T]` coeffect (§6c) supplies. Both halves are needed and neither is
+enough: with the cursor alone, a fresh process acquires a fresh provider and
+"resuming" a cursor into a log nobody else holds is not a resume; with the
+coeffect alone, a fresh process is wired to the right stream and starts at the
+live edge, so the outage is lost. Together they are writable:
+
+```revl
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated] replay(from: "fulfiller-cursor"),
+                             ship: Ship {
+  let sub = subscribe feed replay(from: "fulfiller-cursor") undo sub.close()
+  on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+}
+```
+
+Process A handles two orders and is killed mid-stream; four more are emitted
+while nothing consumes; process B is a fresh activation of that same program
+wired to that same stream, and it resumes AT the cursor — it receives exactly
+the four it missed, in order, and is not re-delivered the two A had already
+handled. That run is
+`backends/python/tests/test_stream_runtime.py::test_a_crashed_consumer_resumes_from_its_durable_cursor_in_a_fresh_process`,
+with the cursor-free twin beside it as the control: identical program, identical
+timing, and the outage is gone. §4.9 is therefore proven end to end rather than
+at the WAL.
+
 **Shipped (py).** The mechanism is one disposer, not a second teardown path. A
 cursor subscription registers `sub.durable_undo()` in place of the usual
 `lambda: sub.close()`. Calling it is exactly `close()` — the author's own
@@ -556,15 +591,16 @@ itself is built ONCE above the loop.
 
 Three deviations from §6 as written, each stated rather than quiet:
 
-1. **The handler names its subscription (`in <sub>`).** §6's `on <Event> as e
-   { … }` resolves the event's stream through the provide/inject graph — "the
-   event source is the provided `Stream[T]`" — which needs a REQUIRED
-   `Stream[T]` capability the language does not have (`subscribe`'s own
-   diagnostic says a required stream capability is a later slice). Naming the
-   subscription keeps the source honest and keeps every Slice 2/3 qualifier
-   (`policy`, `buffer`, `drain`, the combinator chain, `merge`) available to an
-   event consumer, which an implicit `subscribe` would have stranded. When the
-   coeffect wiring lands, the clause can become optional.
+1. **The handler names its subscription (`in <sub>`)** — LIFTED, the clause is
+   now optional. §6's `on <Event> as e { … }` resolves the event's stream
+   through the provide/inject graph ("the event source is the provided
+   `Stream[T]`"), which needed a REQUIRED `Stream[T]` capability the language
+   did not have. It has one now (§6c), so a handler with no clause resolves the
+   component's required stream whose element IS the event, and desugars to the
+   subscription bracket plus the Slice 4 iteration. The clause stays rather than
+   being replaced, because naming a subscription is the only way to reach the
+   Slice 2/3 qualifiers (`policy`, `buffer`, `drain`, the combinator chain,
+   `merge`), which an implicit `subscribe` would have stranded.
 2. **The key is REQUIRED and the dedup window is BOUNDED.** §6 lists handler
    idempotency and duplicate handling as obligations events deliver; an event
    with no key delivers neither, so a key-less `event` is refused. The window is
@@ -594,15 +630,112 @@ components. A typed event always brings a record declaration with it, so an
 event program would have emitted a bare struct and silently never subscribed.
 That path now refuses a dropped component that holds a stream, by name.
 
-Still open on §6: the `replay(...)` row (§4.5), the reconstructible
-crash-recovery case (§4.9), and the required-`Stream[T]` coeffect wiring that
-would let a handler drop its `in <sub>` clause. Rust and then java graduated the
+Every §6 row is now delivered: the `replay(...)` row is §4.5's provider
+declaration, and the reconstructible crash-recovery case is §4.9's, which §6c's
+coeffect completes across a process boundary. Rust and then java graduated the
 typed-event handler: each lowers to the same blocking `next` loop the plain
 `every … in` emits, plus the additive contract gate. Java constructs the
 validated item into the event's record class field by field, the JDK shipping no
 JSON binder the way go's `encoding/json` and rust's `serde` do; an event field
 shape that reading does not cover (a union, `Opt`, `Map` or `Bytes`) is refused
 by name rather than bound approximately.
+
+### 6c. The required `Stream[T]` coeffect, as shipped
+
+A component may DECLARE the stream it consumes instead of acquiring it:
+
+```revl
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+  on OrderCreated as e { emit ship.dispatch(e.order_id) }
+}
+```
+
+A coeffect is a declared requirement, so a required stream rides the SAME wiring
+a required service rides: it lands in the component's `requires` under its
+declared type, enters the emitted inject set, and leaves an unmet component
+PENDING under R2. That is §4.3's two-layer split made concrete — the coeffect
+layer resolves the capability, the resource layer owns the subscription — and it
+adds no second kind of wiring.
+
+What the declaration buys, in order of weight:
+
+1. **The handler can drop its `in <sub>` clause.** `on <Event> as <x> { … }`
+   resolves the component's required stream whose ELEMENT is the event and
+   desugars to `every <x> in subscribe(<that stream>) { … }`. The bracket it
+   builds is an ordinary subscription bracket, produced by the same lowering the
+   explicit form goes through, so the core guarantee (§0) rides machinery Slice 1
+   already proved. The synthesized subscription is anonymous: it never enters the
+   component's locals, so there is no half-spelled form where the author reaches
+   the handle the handler owns.
+2. **The stream outlives the activation.** Before this, a source and its
+   subscription were acquired in one body, so the stream died with the consumer
+   and the same consumer could not be re-activated against the stream it had been
+   reading. With the source declared, a crashed consumer's replacement is wired to
+   the same stream. That is the structural half §4.9 was blocked on, and with
+   §4.5's durable cursor stated on the requirement the two halves compose into
+   the cross-process program §4.9 now runs end to end.
+
+Resolution is BY TYPE, and its failure direction is a refusal. A handler whose
+required `Stream[T]` cannot be resolved is refused by name: no stream requirement
+at all, none carrying this event, or more than one carrying it (ambiguous). It
+never binds nothing and never picks a candidate, because a handler silently
+attached to the wrong stream compiles and then behaves differently from the
+program the author wrote.
+
+Three things the declaration does NOT change:
+
+* **Rule 3.1 is unchanged.** Single-consumer holds across the requirement key, so
+  two subscriptions to one required stream are refused exactly as two
+  subscriptions to one local source are — including the case where one of them is
+  a handler's implicit one.
+* **Rule 3.6 moves, it does not vanish.** There is no local acquisition to read an
+  inverse off, so the no-silent-vanish obligation is discharged at the coeffect
+  boundary: §4.3 already assigns the terminal to that layer, and the reference
+  runtime checks the injected value IS a stream at `subscribe` rather than
+  assuming it. A requirement satisfied by something with no terminal to deliver
+  fails there, by name, instead of parking a `next` forever.
+* **A stream is a capability, not a value.** It is read in a `subscribe` head and
+  nowhere else — not bound, not passed, not stored — because a second handle on a
+  single-consumer resource with no bracket behind it is the shape §3 exists to
+  refuse. Method calls on a required stream are refused by name for the same
+  reason: it is a requirement, but it is not a service.
+
+**Where a required stream's replay declaration lives.** §4.5 gives replay one
+owner, the provider, and that does not change — only the place it is written
+does. A locally acquired source states its backlog on its own acquisition; a
+required one is acquired by the wiring, so the declaration rides the
+REQUIREMENT: `requires <k>: Stream[T] replay(<n>)` or `replay(from: "<name>")`.
+That is the same statement made about the same thing — this stream holds this
+backlog — moved to the side the contract is now stated on, and it is what a
+`subscribe <k> replay(…)` in the body is admitted against. One rule reads both:
+`_admit_replay` resolves the declaration from the acquisition or from the
+requirement and then runs the identical comparisons, so the two sites cannot
+answer differently, and every §4.5 refusal (wrong shape, a cursor the provider
+did not declare, more items than it holds, a fan-in, a chain) applies to a
+requirement verbatim and names it.
+
+The declaration is an obligation on the WIRING, so it is also checked there. The
+frontend compared the body's request to the requirement, and nothing it can see
+knows what was actually injected — so the reference runtime refuses, by name, a
+stream that does not hold the declared backlog, at the same injection point the
+rule-3.6 shape check sits at. Unchecked, a resume against a provider holding no
+such cursor would answer an empty backlog and read as an uneventful outage: the
+vacuous durability claim §4.5 exists to keep off the wire.
+
+Provider-side `provides <k>: Stream[T]` is NOT part of this: a `provide` block
+answers method calls, and a stream provider pushes items over time. It is refused
+by name rather than admitted as a capability the wiring graph would report as
+satisfiable and no program could satisfy.
+
+Tier status: py lowers the coeffect. go, rust, java, ts and wasm refuse a
+component that declares a required stream, by name and at the DECLARATION rather
+than at the subscription. Those tiers resolve a requirement against a SERVICE;
+before the refusal they rendered the requirement's type as the literal text
+`Stream[T]`, which none of their compilers has, so the failure landed in the host
+toolchain instead of in revl.
 
 ## 7. Slices
 
