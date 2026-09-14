@@ -21,6 +21,7 @@ clock (§8) — each with its refusal, and each still refused on wasm.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -1930,10 +1931,12 @@ def test_a_plain_record_cannot_stand_in_for_an_event():
     assert "is a `type`, not an `event`" in msg
 
 
-def test_a_handler_needs_the_subscription_it_pulls():
-    """The `in <sub>` clause is where this surface departs from §6's sketch: the
-    sketch resolves the event's stream through the provide/inject graph, which
-    needs a REQUIRED `Stream[T]` capability that is a later slice."""
+def test_a_handler_with_no_clause_does_not_capture_a_local_subscription():
+    """Dropping `in <sub>` resolves the handler's source from the component's
+    REQUIRED `Stream[T]` coeffect (§6b) — never from whatever subscription
+    happens to be in scope. A component that owns a local source and no stream
+    requirement has nothing to resolve, and says so; silently capturing `sub`
+    would make the clause's presence change which stream a handler reads."""
     msg = _refusal("""
     event E(key: id) { id: Str }
     component C {
@@ -1942,7 +1945,8 @@ def test_a_handler_needs_the_subscription_it_pulls():
       on E as e { fail "x" }
     }
     """)
-    assert "needs the subscription it handles" in msg
+    assert "has no stream to resolve" in msg
+    assert "requires no `Stream[...]`" in msg
 
 
 def test_a_handler_over_something_that_is_not_a_subscription_is_refused():
@@ -2403,3 +2407,548 @@ def test_a_multifile_build_carries_event_declarations_into_the_merged_program(
     assert steps[0]["event"]["key"] == "order_id"
     assert steps[0]["event"]["window"] == 64
     assert steps[0]["event"]["schema"]["required"] == ["order_id", "quantity"]
+
+
+# ---------------------------------------------------------------------------
+# The required `Stream[T]` coeffect (§4.3, §6b): `requires <k>: Stream[T]`, and
+# the handler that resolves its source from it instead of naming a subscription
+# ---------------------------------------------------------------------------
+
+_COEFFECT = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+  on OrderCreated as e { emit ship.dispatch(e.order_id) }
+}
+"""
+
+
+def _coeffect_component(src: str = _COEFFECT) -> dict:
+    return compile_source(src, "s.rvl")["components"][0]
+
+
+def test_a_required_stream_is_an_ordinary_requirement_on_the_wiring_graph():
+    """A coeffect is a DECLARED REQUIREMENT, so a required stream rides the same
+    wiring the item's other requirements ride: it lands in `requires` under its
+    declared type, which is what puts it in the emitted inject set and leaves an
+    unmet one PENDING under R2 (§4.3, the coeffect-layer half)."""
+    comp = _coeffect_component()
+    assert comp["requires"] == {"feed": "Stream[OrderCreated]", "ship": "Ship"}
+
+
+def test_the_handler_desugars_to_the_bracket_plus_the_iteration():
+    """§6: `on <Event> as <x> { … }` desugars to `every <x> in subscribe(<the
+    Event stream>) { … }`. Two steps, and the first is an ORDINARY subscription
+    bracket — same `let-effect` step, same `subscribe: true`, same default
+    `error` policy, same `close` inverse — so the core guarantee (§0) rides the
+    machinery Slice 1 proved rather than a second lowering."""
+    body = _coeffect_component()["body"]
+    assert [step["step"] for step in body] == ["let-effect", "stream-iter"]
+    bracket, loop = body
+    assert bracket["subscribe"] is True and bracket["policy"] == "error"
+    assert bracket["acquire"] == {
+        "kind": "subscribe",
+        "stream": {"kind": "req", "name": "feed"},
+        "policy": "error",
+    }
+    assert bracket["undo"] == {"kind": "call",
+                               "target": {"kind": "name", "id": bracket["bind"]},
+                               "method": "close", "args": []}
+    assert loop["subject"] == {"kind": "name", "id": bracket["bind"]}
+    assert loop["event"]["name"] == "OrderCreated"
+
+
+def test_the_implicit_and_explicit_handlers_lower_to_the_same_steps():
+    """The non-vacuity control for the desugaring: writing the bracket by hand
+    and letting the handler resolve it produce the SAME two steps, modulo the
+    subscription's name. If they ever diverged, the clause's presence would
+    change the program rather than only its spelling."""
+    explicit = compile_source("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+      let sub = subscribe feed undo sub.close()
+      on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+    }
+    """, "s.rvl")["components"][0]["body"]
+    implicit = _coeffect_component()["body"]
+
+    def _rename(steps, bind):
+        dumped = json.dumps(steps)
+        return json.loads(dumped.replace(f'"{bind}"', '"<sub>"'))
+
+    assert _rename(explicit, explicit[0]["bind"]) == \
+        _rename(implicit, implicit[0]["bind"])
+
+
+def test_the_synthesized_subscription_cannot_be_named():
+    """The desugared bracket is ANONYMOUS: it is never entered in the component's
+    locals, so there is no half-spelled form where the author reaches the handle
+    the handler owns — no second `every` over it, no hand-written `close`, and no
+    collision with a local of the same spelling."""
+    bind = _coeffect_component()["body"][0]["bind"]
+    msg = _refusal("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+      on OrderCreated as e { emit ship.dispatch(e.order_id) }
+      every o in %s { emit ship.dispatch("x") }
+    }
+    """ % bind)
+    assert "needs a live subscription" in msg
+
+
+def test_a_handler_with_no_required_stream_is_refused_by_name():
+    """The failure direction. A coeffect is a declared requirement, so a handler
+    whose required `Stream[T]` cannot be resolved REFUSES — it never binds
+    nothing and never picks an arbitrary subscription."""
+    msg = _refusal("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires ship: Ship {
+      on OrderCreated as e { emit ship.dispatch(e.order_id) }
+    }
+    """)
+    assert "has no stream to resolve" in msg
+    assert "requires no `Stream[...]`" in msg
+    assert "requires <key>: Stream[OrderCreated]" in msg
+
+
+def test_a_handler_whose_event_is_not_the_required_element_is_refused_by_name():
+    """Resolution is BY TYPE — §6's "the event source is the provided
+    `Stream[T]`" — so a component holding a stream of some OTHER element has
+    nothing to resolve, and the refusal says which stream it looked at."""
+    msg = _refusal("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    event Shipped(key: id) { id: Str }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires feed: Stream[Shipped], ship: Ship {
+      on OrderCreated as e { emit ship.dispatch(e.order_id) }
+    }
+    """)
+    assert "has no required `Stream[OrderCreated]` to resolve" in msg
+    assert "`feed: Stream[Shipped]`" in msg
+
+
+def test_two_required_streams_of_one_event_are_ambiguous_and_refused():
+    """The other failure direction, and the one a "pick the first" resolution
+    would hide: two candidates is a program whose author has not said which
+    stream the handler pulls."""
+    msg = _refusal("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires a: Stream[OrderCreated],
+                                 b: Stream[OrderCreated], ship: Ship {
+      on OrderCreated as e { emit ship.dispatch(e.order_id) }
+    }
+    """)
+    assert "is ambiguous" in msg
+    assert "`a`, `b`" in msg
+
+
+def test_two_events_over_two_required_streams_each_resolve():
+    """Resolution by element type is what makes several handlers in one
+    component unambiguous: two events are two element types."""
+    body = compile_source("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    event Shipped(key: id) { id: Str }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires orders: Stream[OrderCreated],
+                                 ships: Stream[Shipped], ship: Ship {
+      on OrderCreated as e { emit ship.dispatch(e.order_id) }
+      on Shipped as s { emit ship.dispatch(s.id) }
+    }
+    """, "s.rvl")["components"][0]["body"]
+    assert [step["step"] for step in body] == \
+        ["let-effect", "stream-iter", "let-effect", "stream-iter"]
+    assert body[0]["acquire"]["stream"] == {"kind": "req", "name": "orders"}
+    assert body[2]["acquire"]["stream"] == {"kind": "req", "name": "ships"}
+
+
+def test_rule_3_1_holds_across_the_requirement_key():
+    """Single-consumer is unchanged by where the stream came from: two
+    subscriptions to one required stream are refused exactly as two
+    subscriptions to one local source are."""
+    msg = _refusal("""
+    component C requires feed: Stream[Int] {
+      let a = subscribe feed undo a.close()
+      let b = subscribe feed undo b.close()
+    }
+    """)
+    assert "required stream `feed` is already subscribed" in msg
+    assert "rule 3.1" in msg
+
+
+def test_an_explicit_subscription_and_a_handler_contend_for_one_requirement():
+    """Same rule, reached the other way: the handler's implicit `subscribe` is a
+    real subscription, so it contends with a hand-written one on the same key
+    instead of quietly sharing it."""
+    msg = _refusal("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+      let sub = subscribe feed undo sub.close()
+      on OrderCreated as e { emit ship.dispatch(e.order_id) }
+    }
+    """)
+    assert "required stream `feed` is already subscribed" in msg
+
+
+def test_the_explicit_form_keeps_every_qualifier_on_a_required_stream():
+    """Dropping the clause loses no expressiveness because the clause stays: a
+    handler that needs a policy, a buffer or a combinator chain writes the
+    `subscribe` itself, on the same required stream."""
+    body = compile_source("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+      let sub = subscribe feed.take(3) policy drop_oldest buffer 2
+        undo sub.close()
+      on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+    }
+    """, "s.rvl")["components"][0]["body"]
+    acquire = body[0]["acquire"]
+    assert acquire["stream"] == {"kind": "req", "name": "feed"}
+    assert acquire["stages"] == [{"stage": "take", "count": 3}]
+    assert acquire["policy"] == "drop_oldest" and acquire["buffer"] == 2
+
+
+def test_a_required_stream_merges_with_a_local_source():
+    """A required stream is a stream: the Slice 3 fan-in takes one pointwise,
+    with rules 3.1 and 3.6 applied to each operand on its own terms."""
+    acquire = compile_source("""
+    component C requires feed: Stream[Int] {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe merge(feed, src) undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl")["components"][0]["body"][1]["acquire"]
+    assert acquire["stream"] == {
+        "kind": "stream-merge",
+        "sources": [{"kind": "req", "name": "feed"},
+                    {"kind": "name", "id": "src"}],
+    }
+
+
+def test_a_required_stream_is_not_a_service():
+    """The one confusion the surface invites. A required stream is declared the
+    way a required service is, so a method call on it is refused by name rather
+    than resolved against a service table the requirement was never in."""
+    msg = _refusal("""
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires feed: Stream[Int], ship: Ship {
+      emit feed.dispatch("x")
+    }
+    """)
+    assert "`feed.dispatch` — `feed` is a required `Stream[Int]`, not a service" \
+        in msg
+    assert "the only operation on it is `subscribe`" in msg
+
+
+@pytest.mark.parametrize("body", [
+    'emit ship.dispatch(feed)',
+    'let sub = subscribe feed.map(x => feed) undo sub.close()',
+])
+def test_a_required_stream_is_read_only_in_a_subscribe_head(body):
+    """A `Stream[T]` is a capability to ACQUIRE a subscription, not a value: a
+    stream that could be bound, passed or stored would be a second handle on a
+    single-consumer resource with no bracket behind it."""
+    msg = _refusal("""
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires feed: Stream[Int], ship: Ship {
+      %s
+    }
+    """ % body)
+    assert "required stream `feed` is read outside a `subscribe`" in msg
+
+
+def test_a_requirement_carries_no_state_index():
+    """The index is what `subscribe` PRODUCES (`Stream[T]` -> `Stream[T,
+    Active]`), so a requirement names the unsubscribed capability."""
+    msg = _refusal("component C requires feed: Stream[Int, Active] { }")
+    assert "a required stream carries no state index" in msg
+
+
+def test_a_requirement_is_not_optional():
+    msg = _refusal("component C requires feed: Stream[Int]? { }")
+    assert "a requirement is not optional" in msg
+
+
+def test_a_component_cannot_provide_a_stream():
+    """Provider-side stream provision is not this slice, and is refused rather
+    than admitted as a capability the wiring graph reports as satisfiable and no
+    program can satisfy."""
+    msg = _refusal("component C provides feed: Stream[Int] { }")
+    assert "a component cannot provide a stream" in msg
+
+
+def test_a_service_named_stream_is_untouched():
+    """`Stream` is not a keyword: a service that happens to be called `Stream`
+    still resolves as a service, because only `Stream[` — the type application —
+    enters the coeffect path."""
+    comp = compile_source("""
+    service Stream { emission fn go(v: Str) }
+    component C requires s: Stream { emit s.go("x") }
+    """, "s.rvl")["components"][0]
+    assert comp["requires"] == {"s": "Stream"}
+
+
+def test_python_emits_the_required_stream_as_an_injected_key():
+    """The reference tier resolves the requirement through the SAME injection
+    that resolves a required service: the subscription opens on the committed
+    view of the key, and the key is in the inject set, so an unmet requirement
+    pends rather than subscribing to nothing."""
+    code = _tier_emit("python").emit(compile_source(_COEFFECT, "s.rvl"))
+    assert "Stream.subscribe(_revl_ctx.feed, 'error', _revl_ctx)" in code
+    assert "'inject': ['feed', 'ship']," in code
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript", "wasm"])
+def test_the_other_tiers_refuse_a_required_stream_by_name(tier):
+    """A stream form that compiled on a tier and behaved differently from the py
+    reference would be worse than a refusal. These tiers resolve a requirement
+    against a SERVICE; before this refusal they rendered the requirement's type
+    as the literal text `Stream[T]`, which no compiler on those tiers has."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_COEFFECT, "s.rvl"))
+    msg = str(excinfo.value)
+    assert "requires `feed: Stream[OrderCreated]`" in msg
+    assert "not lowered on the" in msg
+    assert "--backend py" in msg
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript", "wasm"])
+def test_a_declared_but_unsubscribed_required_stream_is_refused_too(tier):
+    """The refusal is at the DECLARATION, not at the subscription: a requirement
+    nothing subscribes to still shapes the emitted requirement resolution, so
+    admitting it would emit an unresolvable key."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source("""
+        service Ship { emission fn dispatch(id: Str) }
+        component C requires feed: Stream[Int], ship: Ship {
+          emit ship.dispatch("x")
+        }
+        """, "s.rvl"))
+    assert "requires `feed: Stream[Int]`" in str(excinfo.value)
+
+
+def test_a_stream_free_program_is_byte_identical():
+    """Byte-identity (§10.9): the coeffect adds nothing to a program that does
+    not declare a required stream — requirement lowering is untouched."""
+    comp = compile_source("""
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires ship: Ship { emit ship.dispatch("x") }
+    """, "s.rvl")["components"][0]
+    assert comp["requires"] == {"ship": "Ship"}
+    assert [step["step"] for step in comp["body"]] == ["emit"]
+
+
+def test_a_multifile_build_carries_a_required_stream(tmp_path):
+    """The CLI path merges each module into a synthetic program before lowering;
+    pin that the merge carries the requirement's stream type, since the merge is
+    where the event table was lost once already."""
+    source = tmp_path / "s.rvl"
+    source.write_text(_COEFFECT)
+    ir = compile_files([str(source)])
+    comp = ir["components"][0]
+    assert comp["requires"]["feed"] == "Stream[OrderCreated]"
+    assert [step["step"] for step in comp["body"]] == ["let-effect", "stream-iter"]
+
+
+# ---------------------------------------------------------------------------
+# §4.5 meets §6c: the replay declaration a stream REQUIREMENT carries, and the
+# cross-restart program the two halves compose into
+# ---------------------------------------------------------------------------
+
+_CROSS_RESTART = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated] replay(from: "fulfiller-cursor"),
+                             ship: Ship {
+  let sub = subscribe feed replay(from: "fulfiller-cursor") undo sub.close()
+  on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+}
+"""
+
+
+def _coeffect_replay(requirement: str, request: str) -> str:
+    return """
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires feed: Stream[OrderCreated]%s, ship: Ship {
+      let sub = subscribe feed%s undo sub.close()
+      on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+    }
+    """ % (requirement, request)
+
+
+def test_the_cross_restart_replay_program_compiles():
+    """§4.9's case, as ONE program. It needs both halves and neither alone: the
+    coeffect puts the provider in the wiring so a second activation can be wired
+    to the stream the first was reading, and the durable cursor is what lets that
+    activation resume where the first stopped rather than at the live edge."""
+    comp = compile_source(_CROSS_RESTART, "s.rvl")["components"][0]
+    assert comp["requires"]["feed"] == "Stream[OrderCreated]"
+    assert comp["stream_replay"] == {"feed": {"cursor": "fulfiller-cursor"}}
+    bracket = comp["body"][0]
+    assert bracket["acquire"]["stream"] == {"kind": "req", "name": "feed"}
+    assert bracket["acquire"]["replay"] == {"cursor": "fulfiller-cursor"}
+    assert bracket["replay"] == {"cursor": "fulfiller-cursor"}
+
+
+def test_a_request_against_an_undeclaring_requirement_is_refused():
+    """§4.5's rule does not bend for a coeffect: a request is admitted only
+    against a DECLARATION, and only where the declaration lives moves."""
+    msg = _refusal(_coeffect_replay("", " replay(3)"))
+    assert "requires a provider that declares it" in msg
+    assert "requires feed: Stream[T] replay(<n>)" in msg
+
+
+def test_a_last_n_backlog_may_be_declared_on_a_requirement_too():
+    comp = compile_source(_coeffect_replay(" replay(8)", " replay(3)"),
+                          "s.rvl")["components"][0]
+    assert comp["stream_replay"] == {"feed": {"count": 8}}
+    assert comp["body"][0]["acquire"]["replay"] == {"count": 3}
+
+
+@pytest.mark.parametrize("requirement,request_,expected", [
+    (' replay(from: "cur")', ' replay(from: "other")',
+     "declares the durable cursor `cur`, not `other`"),
+    (' replay(2)', ' replay(9)', "asks for more than required stream `feed`"),
+    (' replay(from: "cur")', ' replay(3)',
+     "declares a durable cursor, so a subscription resumes FROM it"),
+    (' replay(4)', ' replay(from: "cur")',
+     "declares a last-n backlog, not a durable cursor"),
+])
+def test_the_four_comparisons_name_the_requirement_not_a_missing_source(
+        requirement, request_, expected):
+    """Every §4.5 comparison runs unchanged against a requirement's declaration,
+    and each names the requirement. Before this they resolved the declaration
+    from a local bind, so a required stream reached them with `src_name` of
+    `None` and the whole family collapsed into the undeclared refusal."""
+    msg = _refusal(_coeffect_replay(requirement, request_))
+    assert expected in msg
+
+
+def test_replay_on_a_non_stream_requirement_is_refused_by_name():
+    msg = _refusal("""
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires ship: Ship replay(3) { emit ship.dispatch("x") }
+    """)
+    assert "only a required `Stream[T]` declares a replay backlog" in msg
+
+
+def test_a_requirements_cursor_must_be_a_literal_name():
+    """The cursor IS the descriptor a fresh process re-issues from, so it has to
+    be writable into the WAL as it stands — the same rule the provider-side
+    declaration follows, through the same routine."""
+    msg = _refusal("""
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires feed: Stream[Int] replay(from: 3), ship: Ship {
+      emit ship.dispatch("x")
+    }
+    """)
+    assert "a durable replay cursor must be a literal name" in msg
+
+
+def test_a_declaring_requirement_nothing_asks_for_is_admitted():
+    """A declaration the body never consumes is fine — exactly as a declaring
+    local source that is subscribed without a `replay(…)` is. The declaration is
+    an obligation on the WIRING, not on the body."""
+    comp = compile_source("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires feed: Stream[OrderCreated] replay(from: "cur"),
+                         ship: Ship {
+      on OrderCreated as e { emit ship.dispatch(e.order_id) }
+    }
+    """, "s.rvl")["components"][0]
+    assert comp["stream_replay"] == {"feed": {"cursor": "cur"}}
+    assert "replay" not in comp["body"][0]["acquire"]
+
+
+def test_a_local_source_declaration_is_unaffected_by_a_sibling_requirement():
+    """The two declaration sites do not leak into each other: a component may
+    hold both, and each `subscribe` is admitted against the one its own stream
+    carries."""
+    comp = compile_source("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires feed: Stream[OrderCreated] replay(3), ship: Ship {
+      let src = effect Stream.source() replay(5) undo src.close()
+      let sub = subscribe src replay(5) undo sub.close()
+      on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+    }
+    """, "s.rvl")["components"][0]
+    assert comp["stream_replay"] == {"feed": {"count": 3}}
+    assert comp["body"][1]["acquire"]["replay"] == {"count": 5}
+
+
+def test_a_replay_free_component_carries_no_stream_replay_key():
+    """Additive (§10.9): the key appears only when a requirement declares."""
+    comp = compile_source(_COEFFECT, "s.rvl")["components"][0]
+    assert "stream_replay" not in comp
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript", "wasm"])
+def test_the_other_tiers_refuse_the_cross_restart_program_at_the_requirement(tier):
+    """Both halves are py-only, and the requirement is the earlier of the two —
+    the tier cannot resolve the key at all, so that is the honest refusal rather
+    than one about a backlog it would never reach."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_CROSS_RESTART, "s.rvl"))
+    msg = str(excinfo.value)
+    assert "requires `feed: Stream[OrderCreated]`" in msg
+    assert "--backend py" in msg
+
+
+def test_python_emits_the_resume_against_the_injected_stream():
+    code = _tier_emit("python").emit(compile_source(_CROSS_RESTART, "s.rvl"))
+    assert ("Stream.subscribe(_revl_ctx.feed, 'error', _revl_ctx, "
+            "replay={'cursor': 'fulfiller-cursor'})") in code
+    assert "'inject': ['feed', 'ship']," in code
+
+
+def test_a_local_source_replay_program_is_unchanged_by_the_coeffect_path():
+    """The non-vacuity control for the `_admit_replay` refactor, and it passes on
+    main too. §4.5's existing shape — the declaration on the acquisition, the
+    request on the `subscribe` — lowers to exactly what it lowered to before the
+    requirement became a second place a declaration can live."""
+    comp = compile_source("""
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires ship: Ship {
+      let src = effect Stream.source() replay(from: "orders") undo src.close()
+      let sub = subscribe src replay(from: "orders") undo sub.close()
+      on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+    }
+    """, "s.rvl")["components"][0]
+    assert "stream_replay" not in comp
+    assert comp["body"][0]["replay"] == {"cursor": "orders"}
+    assert comp["body"][1]["acquire"] == {
+        "kind": "subscribe",
+        "stream": {"kind": "name", "id": "src"},
+        "policy": "error",
+        "replay": {"cursor": "orders"},
+    }
+
+
+def test_the_undeclared_refusal_still_names_the_source_for_a_local_stream():
+    """The refusal family split by where the declaration lives, and the LOCAL
+    arm must be untouched: its hint still points at the acquisition, not at a
+    requirement the program does not have. Passes on main too."""
+    msg = _refusal("""
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires ship: Ship {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src replay(3) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "requires a provider that declares it" in msg
+    assert "let src = effect Stream.source() replay(<n>) undo src.close()" in msg

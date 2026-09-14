@@ -1455,3 +1455,379 @@ async def test_a_declared_provider_with_no_consumer_request_replays_nothing():
     sub.close()
     src.close()
     assert runtime_mod.Stream.pending() == 0
+
+
+# ---------------------------------------------------------------------------
+# The required `Stream[T]` coeffect (§4.3, §6b) — run, not read
+#
+# The source is no longer acquired in the consumer's own body: it is DECLARED as
+# a requirement and supplied by the wiring, so the stream outlives the
+# activation that reads it. These pin that the three properties the guarantee
+# rests on survive the new path — a `Closed` ends the loop without becoming an
+# item, a `Faulted` is NOT caught so the activation fails and the prefix reverts
+# with the subscription bracket on it, and a withdrawal reaches a parked `next`
+# — plus the two the coeffect adds: an unmet requirement PENDS instead of
+# subscribing to nothing, and a requirement satisfied by something that is not a
+# stream is refused at the injection point.
+# ---------------------------------------------------------------------------
+
+_COEFFECT = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+  on OrderCreated as e {
+    emit ship.dispatch(e.order_id)
+  }
+}
+"""
+
+
+def _wired(module_name: str, src: str = _COEFFECT):
+    """A root context with the stream and the sink both supplied by the WIRING.
+
+    `feed` is provided exactly the way `ship` is — one `provide` call on the
+    root — which is the whole claim: a required stream is an ordinary
+    requirement on the same graph, not a second kind of wiring."""
+    module = _module(src, module_name)
+    root = Context()
+    source = runtime_mod.StreamSource()
+    ship = _Ship()
+    root.provide("feed", source)
+    root.provide("ship", ship)
+    return module, root, source, ship
+
+
+@pytest.mark.asyncio
+async def test_a_wired_stream_reaches_a_handler_that_names_no_subscription(trace):
+    """The ergonomics claim, executed: `on OrderCreated as e { … }` with no `in
+    <sub>` resolves the component's required stream, subscribes to it, and
+    delivers each item to the body. The bracket is real — `stream.subscribe` is
+    traced — and it closes on unload with no residue."""
+    module, root, source, ship = _wired("coeffect_delivery")
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+
+    source.emit(_order("o1"))
+    source.emit(_order("o2"))
+    await _flush()
+    assert ship.dispatched == ["o1", "o2"]
+
+    ops = _ops(trace)
+    assert "stream.subscribe" in ops, "the handler registered a real bracket"
+
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED
+    assert "stream.close" in _ops(trace), "the bracket inverse ran"
+    # the source is the WIRING's, not this activation's, so it is still open —
+    # and that is the point of the coeffect. The subscription is what had to go.
+    assert all(s._closed for s in runtime_mod.Stream._subs), "no dangling listener"
+
+
+@pytest.mark.asyncio
+async def test_a_closed_terminal_ends_the_handler_and_is_not_an_item(trace):
+    """The terminal is not a value: a provider close ENDS the loop, and the body
+    never runs for it. Same rule as the explicit form, re-proved on the path that
+    reaches the subscription through the wiring."""
+    module, root, source, ship = _wired("coeffect_closed")
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+    source.emit(_order("o1"))
+    await _flush()
+    source.close()
+    await _flush()
+
+    assert ship.dispatched == ["o1"], "the terminal never became an item"
+    assert c.state is FiberState.ACTIVE, "an orderly close is not a failure"
+    c.dispose()
+    await _flush()
+    assert runtime_mod.Stream.pending() == 0, "no residue"
+
+
+@pytest.mark.asyncio
+async def test_a_faulted_terminal_is_not_caught_and_reverts_the_prefix(trace):
+    """`Faulted` RAISES out of the handler rather than reading as an end of
+    stream, so the activation fails and the accumulated prefix reverts LIFO with
+    the subscription bracket on it (§4.3, A8). If the coeffect path had caught
+    it, a dead provider would have looked like a clean end of stream."""
+    module, root, source, ship = _wired("coeffect_faulted")
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+    source.emit(_order("o1"))
+    await _flush()
+    source.fault("provider aborted")
+    await _flush()
+
+    assert ship.dispatched == ["o1"]
+    assert c.state is FiberState.FAILED, "the fault aborted the activation"
+    assert "stream.close" in _ops(trace), \
+        "the subscription bracket reverted with the prefix"
+    assert all(s._closed for s in runtime_mod.Stream._subs)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_reaches_a_next_parked_on_a_wired_stream(trace):
+    """§9 Part A through the coeffect: an owner withdrawn while parked on a
+    provider that never emits still closes, with no deadlock behind the park."""
+    module, root, source, ship = _wired("coeffect_parked")
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED
+    assert "stream.close" in _ops(trace)
+    assert all(s._closed for s in runtime_mod.Stream._subs), "no dangling listener"
+
+
+@pytest.mark.asyncio
+async def test_an_unmet_stream_requirement_pends_instead_of_subscribing(trace):
+    """The coeffect-layer half of §4.3: an unmet requirement leaves the component
+    PENDING under R2. A required stream is on the same graph, so a consumer whose
+    stream has no provider waits for one — it does not subscribe to nothing, and
+    no bracket is registered."""
+    module = _module(_COEFFECT, "coeffect_pending")
+    root = Context()
+    root.provide("ship", _Ship())
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+
+    assert c.state is FiberState.PENDING, "an unmet stream requirement pends"
+    assert "stream.subscribe" not in _ops(trace), "nothing was subscribed"
+
+    # ... and it activates once the wiring supplies the stream.
+    source = runtime_mod.StreamSource()
+    root.provide("feed", source)
+    await _flush()
+    assert c.state is FiberState.ACTIVE
+    assert "stream.subscribe" in _ops(trace)
+    c.dispose()
+    await _flush()
+
+
+@pytest.mark.asyncio
+async def test_a_requirement_met_by_a_non_stream_is_refused_at_the_injection():
+    """Rule 3.6 is the one admission rule the frontend cannot discharge for a
+    required stream: there is no local acquisition to read an inverse off. So the
+    shape is checked where the value arrives. A value that is not a stream has no
+    terminal to deliver, which is exactly the silent-vanish state §9 Part B
+    forbids — refused by name rather than parked on forever."""
+    module = _module(_COEFFECT, "coeffect_bad_injection")
+    root = Context()
+    root.provide("feed", object())
+    root.provide("ship", _Ship())
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+
+    assert c.state is FiberState.FAILED, \
+        "the injection is refused, not parked on"
+    assert runtime_mod.Stream.pending() == 0, "nothing was left half-subscribed"
+
+
+@pytest.mark.asyncio
+async def test_the_stream_outlives_the_activation_across_a_restart(trace):
+    """The structural half of §4.9 the coeffect delivers.
+
+    Before it, a source and its subscription were acquired in the SAME body, so
+    the stream died with the activation and a consumer could not be re-activated
+    against the stream it had been reading — the cross-process case could not be
+    spelled at all. With the source declared as a requirement, the stream belongs
+    to the wiring: activation #1 reads items and is torn down (the crash), and a
+    SECOND activation of the same component, wired to the same stream, keeps
+    reading it.
+
+    What this does NOT claim is replay. A restarted consumer here resumes at the
+    live edge; resuming from a durable cursor is `replay(from: …)` (§4.5), whose
+    provider-declared surface is a separate change. This pins the half that was
+    structurally impossible, and it is the half §4.9 was blocked on."""
+    module = _module(_COEFFECT, "coeffect_restart")
+    source = runtime_mod.StreamSource()
+
+    root_a = Context()
+    ship_a = _Ship()
+    root_a.provide("feed", source)
+    root_a.provide("ship", ship_a)
+    first = root_a.plugin(module.Fulfiller)
+    await _flush()
+    source.emit(_order("o1"))
+    await _flush()
+    assert ship_a.dispatched == ["o1"]
+
+    first.dispose()                      # the crash: the activation goes away
+    await _flush()
+    assert first.state is FiberState.DISPOSED
+    assert source.state == "open", "the stream is the wiring's, not the fiber's"
+
+    # the restart: a second activation, wired to the SAME stream
+    root_b = Context()
+    ship_b = _Ship()
+    root_b.provide("feed", source)
+    root_b.provide("ship", ship_b)
+    second = root_b.plugin(module.Fulfiller)
+    await _flush()
+    assert second.state is FiberState.ACTIVE
+
+    source.emit(_order("o2"))
+    await _flush()
+    assert ship_b.dispatched == ["o2"], \
+        "the restarted consumer reads the stream the first one was reading"
+    assert ship_a.dispatched == ["o1"], "the dead activation took no further item"
+
+    second.dispose()
+    await _flush()
+    assert all(s._closed for s in runtime_mod.Stream._subs)
+
+
+# ---------------------------------------------------------------------------
+# §4.9 END TO END: a cross-restart replay, written as one revl program
+#
+# This is the case the item circled from both sides. §4.5's durable cursor gave
+# a crashed subscription a re-issuable descriptor, but the source and its
+# subscription were still acquired in the SAME body, so "a fresh process picks
+# the subscription up where it stopped" could not be spelled: the fresh process
+# would acquire a fresh provider, and resuming a cursor into a log nobody else
+# held is not a resume. §6c's required `Stream[T]` moves the provider to the
+# WIRING, and the requirement is where its durability claim is stated — so the
+# two halves compose into one program, and this runs it.
+# ---------------------------------------------------------------------------
+
+_CROSS_RESTART = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated] replay(from: "fulfiller-cursor"),
+                             ship: Ship {
+  let sub = subscribe feed replay(from: "fulfiller-cursor") undo sub.close()
+  on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+}
+"""
+
+
+def _process(module, source):
+    """One PROCESS: a fresh root context wired to the SAME stream.
+
+    The stream is the wiring's, so it is passed in rather than built here — that
+    is the whole point of the coeffect. `Stream._cursors` is the durable store
+    the cursor's position lives in; it outlives a context exactly as a real one
+    outlives a process."""
+    root = Context()
+    ship = _Ship()
+    root.provide("feed", source)
+    root.provide("ship", ship)
+    return root.plugin(getattr(module, "Fulfiller")), ship
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_consumer_resumes_from_its_durable_cursor_in_a_fresh_process(trace):
+    """§4.9's exit case, end to end rather than at the WAL.
+
+    Process A consumes two orders and is killed mid-stream. Four more are
+    emitted while nothing is consuming. Process B — a fresh activation of the
+    SAME program, wired to the SAME stream — resumes at the recorded cursor: it
+    sees exactly what it missed, in order, and does NOT re-deliver what A had
+    already handled. Both halves are load-bearing and the test would pass
+    without either being right, so both are asserted: the missed items ARE
+    delivered (the resume happened) and the handled ones are NOT (it resumed at
+    the cursor rather than at the start of the backlog)."""
+    module = _module(_CROSS_RESTART, "cross_restart")
+    source = runtime_mod.StreamSource(replay={"cursor": "fulfiller-cursor"})
+
+    first, ship_a = _process(module, source)
+    await _flush()
+    assert first.state is FiberState.ACTIVE
+    source.emit(_order("o1"))
+    source.emit(_order("o2"))
+    await _flush()
+    assert ship_a.dispatched == ["o1", "o2"]
+    recorded = runtime_mod.Stream.cursor_at("fulfiller-cursor")
+    assert recorded == 1, "the cursor advanced with the items A handled"
+
+    first.dispose()                       # the crash
+    await _flush()
+    assert first.state is FiberState.DISPOSED
+    assert source.state == "open", "the stream is the wiring's, not the fiber's"
+
+    # the outage: emitted with nothing consuming, held by the provider's backlog
+    for oid in ("o3", "o4", "o5", "o6"):
+        source.emit(_order(oid))
+    await _flush()
+    assert ship_a.dispatched == ["o1", "o2"], "the dead activation took nothing"
+
+    second, ship_b = _process(module, source)
+    await _flush()
+    assert second.state is FiberState.ACTIVE
+    assert ship_b.dispatched == ["o3", "o4", "o5", "o6"], \
+        "the fresh process resumed at the cursor and caught up on the outage"
+    assert "o1" not in ship_b.dispatched and "o2" not in ship_b.dispatched, \
+        "it resumed AT the cursor, not at the start of the provider's backlog"
+
+    # ... and it keeps reading live items from there
+    source.emit(_order("o7"))
+    await _flush()
+    assert ship_b.dispatched == ["o3", "o4", "o5", "o6", "o7"]
+    assert runtime_mod.Stream.cursor_at("fulfiller-cursor") == 6
+
+    second.dispose()
+    await _flush()
+    assert all(s._closed for s in runtime_mod.Stream._subs), \
+        "both subscriptions closed on their own brackets"
+
+
+@pytest.mark.asyncio
+async def test_the_same_program_without_the_cursor_loses_the_outage(trace):
+    """The non-vacuity control for the test above, and the measure of what the
+    cursor buys. Identical program and identical timing with `replay(from: …)`
+    dropped from BOTH ends: process B subscribes at the live edge, so everything
+    emitted during the outage is gone. That is §4.5's default and correct; it is
+    also exactly what a resume is not."""
+    live_only = _CROSS_RESTART \
+        .replace(' replay(from: "fulfiller-cursor"),', ',') \
+        .replace(' replay(from: "fulfiller-cursor") undo', ' undo')
+    module = _module(live_only, "cross_restart_live_only")
+    source = runtime_mod.StreamSource()
+
+    first, ship_a = _process(module, source)
+    await _flush()
+    source.emit(_order("o1"))
+    await _flush()
+    assert ship_a.dispatched == ["o1"]
+    first.dispose()
+    await _flush()
+
+    for oid in ("o2", "o3"):
+        source.emit(_order(oid))
+    await _flush()
+
+    second, ship_b = _process(module, source)
+    await _flush()
+    assert ship_b.dispatched == [], "no cursor, no resume: the outage is lost"
+    source.emit(_order("o4"))
+    await _flush()
+    assert ship_b.dispatched == ["o4"], "it reads only from where it subscribed"
+    second.dispose()
+    await _flush()
+
+
+@pytest.mark.asyncio
+async def test_a_wiring_that_supplies_a_stream_holding_no_such_cursor_is_refused():
+    """The claim is checked where it is satisfied. The frontend admitted the
+    request against the REQUIREMENT's declaration, and nothing there can know
+    what the wiring actually injected — so a provider holding no such cursor is
+    refused at the injection point. Unchecked it would answer an empty backlog,
+    which reads as an uneventful outage: the vacuous durability claim §4.5
+    exists to keep off the wire."""
+    module = _module(_CROSS_RESTART, "cross_restart_bad_wiring")
+    source = runtime_mod.StreamSource()        # declares no backlog at all
+
+    root = Context()
+    root.provide("feed", source)
+    root.provide("ship", _Ship())
+    c = root.plugin(module.Fulfiller)
+    await _flush()
+
+    assert c.state is FiberState.FAILED, \
+        "a resume against a provider that holds no such cursor is refused"
+    assert runtime_mod.Stream.pending() == 1, \
+        "only the wiring's own source is live: nothing was half-subscribed"
