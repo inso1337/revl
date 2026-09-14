@@ -117,11 +117,17 @@ def _measure(args, slo) -> int:
     ir = _contract_ir(args)
     contract = slo.contract_from_ir(ir)
     events = _events(_read_json(args.trace, "the trace")) if args.trace else []
+    # The PER-CALL latency population, when the run left a WAL: item 250 Slice
+    # 3a writes one `model-decision` record per model completion, at the
+    # crossing. That is the run's own sample set, where the trace's `emit` hops
+    # are the crossings a step-back walk visited; `slo.observations` prefers the
+    # former and names which it used, inside the signed receipt.
+    decisions = slo.decisions_from_wal(args.wal)
     monitor = slo.Monitor(
         contract, composition=args.composition, generation=args.generation,
         latch=args.latch, wal=args.wal, key=slo.resolve_key(args.key),
-        signer=args.signer, events=events)
-    verdict = monitor.observe()
+        signer=args.signer, events=events, decisions=decisions)
+    verdict = monitor.seal() if args.seal else monitor.observe()
     if verdict is None:
         # Inert, and it says so: a composition with no `slo` block declares no
         # objective, so there is nothing to measure and nothing is written.

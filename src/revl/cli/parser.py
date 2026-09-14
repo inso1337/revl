@@ -1287,8 +1287,9 @@ def build_parser() -> argparse.ArgumentParser:
     slo_cmd.add_argument(
         "--trace", default=None, metavar="FILE",
         help="a recorded causal trace (`revl run --trace FILE`, or a JSON list "
-             "of events). The measurement reads ONLY this: no metrics backend "
-             "is called and no service is scraped")
+             "of events). The measurement reads this and the --wal records and "
+             "nothing else: no metrics backend is called and no service is "
+             "scraped")
     slo_cmd.add_argument(
         "--generation", type=int, default=0, metavar="N",
         help="the generation the measurement belongs to; it is carried inside "
@@ -1300,9 +1301,10 @@ def build_parser() -> argparse.ArgumentParser:
              "`revl estop` arms and a running composition watches (item 443)")
     slo_cmd.add_argument(
         "--wal", default=None, metavar="FILE",
-        help="the session's write-ahead log; derives the latch as FILE.estop "
-             "when --latch is omitted, and names the log `revl recover` "
-             "reconciles from")
+        help="the session's write-ahead log; supplies the PER-CALL latency "
+             "population from its `model-decision` records (item 250), derives "
+             "the latch as FILE.estop when --latch is omitted, and names the "
+             "log `revl recover` reconciles from")
     slo_cmd.add_argument(
         "--key", default=None, metavar="PATH",
         help="the receipt signing key file (else REVL_SLO_KEY_FILE, else "
@@ -1311,6 +1313,13 @@ def build_parser() -> argparse.ArgumentParser:
     slo_cmd.add_argument(
         "--signer", default=None, metavar="TOKEN",
         help="who issued the receipt, recorded inside the signed body")
+    slo_cmd.add_argument(
+        "--seal", action="store_true",
+        help="sign the receipt even when nothing breached — the GENERATION "
+             "BOUNDARY reading, and what a live `Session` does at its own "
+             "boundary. Without it a clean run is measured and reported and no "
+             "receipt is issued, because in flight a receipt is the account of "
+             "an action taken")
     slo_cmd.add_argument(
         "--receipt", default=None, metavar="FILE",
         help="a receipt to act on: with --verify, the one to check; with "

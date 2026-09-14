@@ -31,8 +31,10 @@ has landed, so this note is not introducing the surface.
 | the safe pause | landed (slice 2) | `slo.pause`, the E-Stop latch's first move under `verdict: paused`, `resumable: true` |
 | the SLO receipt | landed (slice 2) | `slo.RECEIPT_KIND`, its own domain tag, `slo.verify_receipt`, `slo.attach_generation` |
 | the rollout gate's E4 | landed (slice 2) | `slo.gate_rollout` / `slo.admit_rollout`, `revl slo --gate` |
-| the `slo` trace event | absent | `why_runtime.SCHEMA_VERSION` is 2, three event kinds. Slice 2 reads the events that exist rather than adding a fourth |
-| the producer inside `Session` | absent | nothing calls `Monitor` from a live generation yet; the measurement runs over a RECORDED trace through `revl slo` |
+| the `slo` trace event | absent, and NO LONGER a prerequisite for the percentile | `why_runtime.SCHEMA_VERSION` is still 2. See "the per-call population, found rather than added" below: item 250's `model-decision` WAL record already is the per-call observation |
+| the producer inside `Session` | landed (slice 5) | `Session._seal_generation` at every generation boundary, `Session.slo_observe` in flight; the contract is bound off the composition document by `_slo_bind` / `_slo_discover` |
+| the pause as a state the session is in | landed (slice 5) | `Session._refuse_if_paused` refuses a call while a pause is in force, `slo.latch_state` / `slo.paused` tell a pause from a halt fail-closed, `state()["slo"]` reports it |
+| the pause as a member of the FIBER state set | absent | `cordis.fiber.FiberState` has no `PAUSED` member and this item does not add one; see "what the pause is and is not" below |
 
 Two of the five datums are gated. `SLO_BACKED_BY` maps `p95_latency` to item
 260's `time` ceiling and `max_pending_tasks` to its `calls` ceiling;
@@ -493,13 +495,47 @@ new per-call trace event. Extends `metrics.py`, keeps its degrade discipline, an
 produces a receipt at generation end with `unmeasurable` on the three datums it
 cannot reach. No response is taken.
 
-**Slice 5: the live producer and the pause as a lifecycle state.** The per-datum
-`on breach` clause and the response dispatch landed with slice 2 over a recorded
-trace; what remains is the IN-FLIGHT half. `Session` has to run the monitor at
-the generation boundary and attach the receipt to its own history entry
-(`slo.attach_generation` is the function it would call), and the pause has to
-become a member of item 460's lifecycle state set with its conformance coverage,
-rather than only a latch record whose `verdict` reads `paused`.
+**Slice 5, landed: the live producer and the pause as a state the session is
+in.** `Session` binds the contract off the composition document at load
+(`_slo_bind`, `_slo_discover` — the two documents are different documents: an
+`slo` block lives on the composition row table's IR and a session runs the
+PROGRAM ir `compile_files` produced, which carries no `slo` key), records the
+causal trace because a contract was declared (`_slo_arm_trace`), and runs
+`slo.Monitor` at every point a live generation stops being the live one: a swap,
+before the teardown that ends it; an apply; and the session teardown. Each seal
+measures, dispatches the declared response on a breach, signs the receipt
+whether or not anything breached, and files it on that generation's own history
+entry through `slo.attach_generation`; `history_document()` exports it.
+`Session.slo_observe` is the same contract run IN FLIGHT without consuming the
+generation's population, which is the verb a self-improvement campaign drives
+between calls. A pause in force refuses a call (`_refuse_if_paused`) and is
+reported by `state()["slo"]`, so the declared response is a stop rather than a
+line in a document. `tests/test_slo_473_live_producer.py` pins it.
+
+**What the pause is and is not.** It is a state the SESSION is in: reported,
+refusing, and lifted by removing the latch. It is NOT a member of
+`cordis.fiber.FiberState`, and this slice deliberately adds no member there —
+the fiber-state set is the cordis runtime's, item 460's fiber-state conformance
+tests are unchanged, and a fiber under a paused session still reads `ACTIVE`
+because it IS active: it holds its resources and owes its entries, and only
+dispatch is stopped. Growing the fiber state set is a runtime change with its
+own argument and remains open.
+
+**The per-call population, found rather than added.** The plan below assumed a
+fourth `why_runtime` event kind and a `SCHEMA_VERSION` bump before `p95_latency`
+could be a per-call percentile. It does not need one. Item 250 Slice 3a already
+writes one `model-decision` record per model completion, AT THE CROSSING, to the
+WAL, carrying the same `runtime.revl_model_hop` payload the trace hop carries —
+the revl-measured bracket included. `slo.decisions_from_wal` reads those records
+and `slo.observations` prefers them over the trace's `emit` hops, which are the
+crossings a step-back walk visited rather than the calls the run made. The two
+are never pooled: they describe the same crossings, keyed on one another by
+`(component, stepIndex)`, so pooling would count every completion twice and
+halve the rank a p95 selects. Which population a verdict was over is named on
+the verdict (`measurement`) and inside the signed body
+(`observed.latencySource`). A fourth event kind is still the right answer for a
+crossing that is NOT a model completion; it is no longer a prerequisite for this
+item.
 
 **Slice 6: the rollout gate's remaining halves.** E4 landed with slice 2 as
 `slo.gate_rollout` and `revl slo --gate`, reading a verified predecessor receipt.
@@ -532,15 +568,30 @@ on a datum whose composition declared a response has taken that response and the
 receipt names it, and every datum this tree cannot measure reads `unmeasurable`
 with a reason rather than `holding`.
 
-Slice 2 meets the second half over a RECORDED generation and not yet over a live
-one. `revl slo --composition C --trace T --generation N --key K` measures the
-declared contract, dispatches the declared response, and issues a receipt
-`attach_generation` files against generation N; `revl slo --gate` refuses the
-next rollout by name on that receipt. What stays open for the exit statement as
-written is the PRODUCER: `Session` does not yet run the monitor at its own
-generation boundary, so the receipt is attached by the operator's verb rather
-than by the generation that earned it. Everything the producer would call is in
-place and tested (slice 5).
+Both halves are met. Slice 1 refuses the contradicting composition at compile
+time. Slice 2 measures a RECORDED generation through `revl slo`. Slice 5 is the
+LIVE half: a running `Session` measures its own generation, takes the declared
+response on a live breach — a pause genuinely stops it — and files a verifiable
+`revl.slo-receipt` on its own generation-history entry, with one closed verdict
+per declared datum and `unmeasurable` plus a reason for every datum this tree
+cannot reach.
+
+Three things a reader must NOT infer from that, each stated because the receipt
+itself states them:
+
+* A receipt is issued only when a signing key is configured
+  (`REVL_SLO_KEY` / `REVL_SLO_KEY_FILE`). Without one the generation is measured
+  and reported `unsigned`, and nothing is filed — an unsigned measurement is not
+  a receipt.
+* Three of the five datums are still `unmeasurable`, each with the reason naming
+  what would have to exist: `success_rate` needs the declared denominator of
+  slice 3's `of`, and `recovery_time` and `approval_wait` need timestamps on WAL
+  records, a durable-format change. A receipt naming five objectives is not five
+  objectives held.
+* The window and the sample floor of slice 3 are still unwritten, so a verdict
+  is over the whole of one generation's population. `PERCENTILE_MIN_SAMPLES`
+  keeps a handful of samples from being printed as a p95, and that is a floor,
+  not a window.
 
 ## Relates to
 
