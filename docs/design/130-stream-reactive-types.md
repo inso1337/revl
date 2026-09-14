@@ -302,6 +302,26 @@ one item or a terminal), `close` (trip the cancel token, release the listener).
 | **rust** | erases: `next` is a `crossbeam` `select!` on the item and cancel receivers; `close` drops the sender |
 | **wasm** | **REFUSES.** wasm has no async host seam (backends/wasm/emit.py:1251 already refuses awaited effect steps; lifecycle.py:134 refuses `advance`). A `subscribe`/`next` lowered here refuses with the same honest `EmitError`: "a stream subscription suspends a fiber; this tier awaits only `Job.run(name)`; streams live on the hosted and blocking backends (py/ts/go/java/rust)." |
 
+**The Slice 2 combinator chain on the blocking tiers.** `map`/`filter`/`take`
+lower on go, java and rust as derived-stream links in each tier's own stream
+runtime, nested inside the subscription's acquisition so the chain still rides
+the ONE bracket the `subscribe` registers. The transform is the part that needed
+a decision: go and java refuse an arrow VALUE in a component body (go has no
+arrow lowering there, java has no functional interface to target), and that
+limit stands. A combinator's transform is not a general arrow — one parameter,
+one pure expression, and a known item type, since stream items are the tier's
+string on all three — so each emitter renders it against that known type and
+interface (`func(string) string`, `java.util.function.Function<String,String>`,
+`|x: String| -> String`) rather than through the general arrow arm. Nothing else
+in a component body gains an arrow lowering.
+
+What those three tiers still refuse is the lossy backpressure policies and the
+`block`-policy drain window. The window is the one that must stay refused on
+principle: its resume fires on the deterministic clock of §8, which no blocking
+tier carries, so a lowering would resume EARLY and answer differently from the
+reference. A refusal is worse than a lowering; it is much better than a silent
+disagreement.
+
 The go/java/rust "erases to blocking" reading is the async family's family-2
 argument (async-extern.md §2): those tiers' methods are blocking, ordering
 within a task is promised and interleaving is not, so a stream consumer that
