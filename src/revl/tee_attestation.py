@@ -24,7 +24,8 @@ Three objects
   each of those makes the requirement unfalsifiable.
 * :class:`EnclaveEvidence` is what the attester returns: the peer it is about,
   the bundle, the measurement, the region, the challenge it answers, its
-  validity window and the network posture, all covered by a MAC.
+  validity window, the network posture and, optionally, the fingerprint of the
+  key the enclave will sign its results with, all covered by a MAC.
 * :class:`ResultReceipt` is what travels with a result: the peer, the bundle, the
   challenge and the hash of the result bytes.
 
@@ -82,9 +83,21 @@ The key separation survives both. :func:`tee_admits` refuses when the attester k
 is the peer's own offer key, when the record names that key as the platform that
 signed its quote, and when no peer key is supplied at all (the empty key
 included), because a separation that cannot be checked is not a separation.
-:func:`receipt_admits` refuses on the same ground for a receipt key; wiring
-receipts into the composition's call path is the other half of this item and is
-still open.
+:func:`receipt_admits` refuses on the same ground for a receipt key, and
+:func:`open_attested_run` refuses it one step earlier, at admission, so a run
+whose results could never be checked is never started.
+
+One admission, one delivery
+---------------------------
+The two verdicts are one call path. :func:`open_attested_run` admits a peer and
+returns an :class:`AttestedRun`; :meth:`AttestedRun.accept_result` is how a
+result arrives. The run carries the peer, the bundle and the challenge the
+ADMISSION decided and owns its own delivery ledger, so a composition cannot
+accept a result for a run it never admitted, cannot correlate a delivery against
+a different run's facts, and cannot defeat the replay check by handing the
+delivery a fresh ledger each time. ``peer_offer.offer_admission`` and
+``placement.admit_run_for_process`` are the same path at the pool and
+placement-file tiers.
 
 Fail-closed, everywhere
 -----------------------
@@ -112,7 +125,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, MutableSet, Optional
 
@@ -407,6 +420,7 @@ class EnclaveEvidence:
     issued_at: str
     expires_at: str
     outbound_network: str = OUTBOUND_FORBIDDEN
+    receipt_key_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         _require_text(self.peer_id, "the attested peer")
@@ -421,6 +435,12 @@ class EnclaveEvidence:
                 f"outbound_network must be one of "
                 f"{', '.join(repr(p) for p in _OUTBOUND_POSTURES)}, got "
                 f"{self.outbound_network!r}")
+        if self.receipt_key_id is not None and (
+                not isinstance(self.receipt_key_id, str)
+                or not _KEY_ID_RE.fullmatch(self.receipt_key_id)):
+            raise TeeError(
+                f"receipt_key_id must be a key fingerprint (16 lowercase hex "
+                f"digits) or absent, got {self.receipt_key_id!r}")
 
     def body(self, sign_alg: str = SIGN_ALG) -> dict:
         """The signed body: every member except the signature (or the quote), in a
@@ -430,13 +450,19 @@ class EnclaveEvidence:
         ``sign_alg`` is part of the body rather than appended to it, so a record
         cannot be re-presented as though a different verifier had decided it: the
         bytes a hardware quote binds and the bytes a MAC covers differ in this
-        member, and each refuses the other's."""
+        member, and each refuses the other's.
+
+        ``receipt_key_id`` appears only when the attester set one, so an evidence
+        that names no receipt key has exactly the bytes it had before the member
+        existed. When it IS set, the signature and (on the hardware path) the
+        quote's ``report_data`` cover it like every other claim, which is what
+        makes it a BINDING rather than a hint: see :func:`open_attested_run`."""
         if sign_alg not in EVIDENCE_SIGN_ALGS:
             raise TeeError(
                 f"sign_alg must be one of "
                 f"{', '.join(repr(a) for a in EVIDENCE_SIGN_ALGS)}, got "
                 f"{sign_alg!r}")
-        return {
+        body = {
             "kind": EVIDENCE_KIND,
             "version": EVIDENCE_VERSION,
             "peer_id": self.peer_id,
@@ -449,6 +475,9 @@ class EnclaveEvidence:
             "outbound_network": self.outbound_network,
             "sign_alg": sign_alg,
         }
+        if self.receipt_key_id is not None:
+            body["receipt_key_id"] = self.receipt_key_id
+        return body
 
 
 def sign_evidence(evidence: EnclaveEvidence, attester_key: bytes) -> dict:
@@ -665,6 +694,14 @@ def _validate_evidence(record: Mapping, sign_alg: str) -> str:
     kid = record.get("key_id")
     if not isinstance(kid, str) or not _KEY_ID_RE.fullmatch(kid):
         return f"envelope refused: key_id is not a key fingerprint ({kid!r})"
+    receipt_kid = record.get("receipt_key_id")
+    if receipt_kid is not None and (not isinstance(receipt_kid, str)
+                                    or not _KEY_ID_RE.fullmatch(receipt_kid)):
+        # Present but unreadable is refused rather than treated as absent: a
+        # member that cannot be compared would otherwise silently downgrade a
+        # bound receipt key to an unbound one.
+        return (f"envelope refused: receipt_key_id is present but is not a key "
+                f"fingerprint ({receipt_kid!r})")
     return ""
 
 
@@ -1107,3 +1144,219 @@ def receipt_admits(record: Mapping, *, enclave_key: bytes, peer_key: bytes,
     replay_ledger.add(delivered)
     return True, ("admitted: the result is signed by the attested enclave, bound to "
                   "the admitted run, and fresh")
+
+
+# --------------------------------------------------------------------------
+# The call path: one admission, and the delivery it authorizes
+# --------------------------------------------------------------------------
+#
+# `tee_admits` and `receipt_admits` are two verdicts about the same run, and
+# until this seam existed nothing held them together: a composition could admit
+# a peer and then accept whatever came back, or call `receipt_admits` with
+# `peer_id`, `bundle` and `nonce` it re-derived rather than the ones the
+# admission actually decided. Three failures follow from that, and all three are
+# fail-OPEN, which is the direction this item exists to forbid:
+#
+#   1. NO DELIVERY GATE. Nothing forces the result half to be checked at all.
+#   2. RE-SUPPLIED CORRELATION. The delivery is only as good as the caller's
+#      memory of what was admitted; a caller that passes a different run's nonce
+#      accepts a result the placement never authorized.
+#   3. A PER-CALL LEDGER. `receipt_admits` refuses when no delivery ledger is
+#      supplied, but a caller passing a FRESH ledger each time satisfies that
+#      check while permitting unlimited replay.
+#
+# :class:`AttestedRun` closes all three by making the admission the only way to
+# reach a delivery. The run is produced BY :func:`open_attested_run` (or by
+# `peer_offer.offer_admission` / `placement.admit_run_for_process` above it), it
+# carries the peer, bundle and challenge the admission decided rather than
+# taking them again, and it owns its delivery ledger.
+
+
+#: Appended to every delivery verdict reached for a run whose attestation did
+#: not name the key its results are signed with. Same discipline as
+#: `tee_quote.DEV_ROOT_NOTE`: a weaker verdict says so in its own reason text
+#: rather than being indistinguishable from a strong one.
+RECEIPT_KEY_UNBOUND_NOTE = (
+    "[receipt key unbound: the attestation did not name the key this result was "
+    "checked against, so the key is operator configuration rather than an "
+    "attested fact]")
+
+
+def receipt_key_binding(enclave_key: bytes) -> str:
+    """The fingerprint an attester puts in ``EnclaveEvidence.receipt_key_id`` to
+    bind the run's results to the key the enclave will sign them with.
+
+    It is :func:`~revl.attest.key_id` of the key, so it discloses no key
+    material, and it is the same construction ``key_id`` uses everywhere else in
+    the module."""
+    key = _key_bytes(enclave_key)
+    if not key:
+        raise TeeError("the receipt-signing key must be non-empty bytes")
+    return key_id(key)
+
+
+@dataclass(frozen=True)
+class AttestedRun:
+    """One admitted attested run, and the only path a result may arrive by.
+
+    Constructed by :func:`open_attested_run` on a successful admission and by
+    nothing else that a composition should reach for: its existence IS the
+    statement that this peer was admitted for this bundle under this challenge.
+    :meth:`accept_result` then checks a result against the run's own facts, so
+    the delivery cannot disagree with the admission about which run it belongs
+    to.
+
+    The keys are kept out of ``repr`` and out of equality, so a run can be
+    logged or compared without disclosing key material.
+    """
+
+    peer_id: str
+    bundle: str
+    nonce: str
+    hardware_rooted: bool
+    receipt_key_bound: bool
+    admission_reason: str
+    peer_key: bytes = field(repr=False, compare=False)
+    enclave_key: bytes = field(repr=False, compare=False)
+    delivery_ledger: MutableSet[tuple[str, str]] = field(
+        repr=False, compare=False, default_factory=set)
+
+    @property
+    def delivered(self) -> bool:
+        """Has a result already been accepted for this run? A run delivers once;
+        a second result is a replay and is refused."""
+        return bool(self.delivery_ledger)
+
+    def accept_result(self, record: Mapping, result: Any, *,
+                      now: Optional[datetime] = None,
+                      max_age_s: float = DEFAULT_MAX_AGE_S) -> tuple[bool, str]:
+        """Accept ``result`` only when ``record`` is a receipt that proves it came
+        from THIS run. Returns ``(accepted, reason)`` and refuses rather than
+        raises on a malformed receipt (the module docstring records the one
+        inherited exception, a non-ASCII ``signature`` string).
+
+        The verdict is :func:`receipt_admits`, reached with the peer, the bundle
+        and the challenge the ADMISSION decided and with the run's own delivery
+        ledger, so a caller cannot weaken it by supplying different ones. A
+        verdict reached under the development MAC verifier, or for a run whose
+        attestation did not name the receipt key, carries the corresponding note
+        in its reason: an accepted result still says what it was accepted on."""
+        accepted, reason = receipt_admits(
+            record,
+            enclave_key=self.enclave_key,
+            peer_key=self.peer_key,
+            peer_id=self.peer_id,
+            bundle=self.bundle,
+            nonce=self.nonce,
+            result=result,
+            now=now,
+            max_age_s=max_age_s,
+            replay_ledger=self.delivery_ledger)
+        if not accepted:
+            return False, reason
+        notes = ""
+        if not self.hardware_rooted:
+            notes += f" {DEV_ROOT_NOTE}"
+        if not self.receipt_key_bound:
+            notes += f" {RECEIPT_KEY_UNBOUND_NOTE}"
+        return True, reason + notes
+
+
+def open_attested_run(record: Mapping, requirement: TeeRequirement, *,
+                      peer_id: str, peer_key: bytes, enclave_key: bytes,
+                      attester_key: Optional[bytes] = None,
+                      root: Optional[AttestationRoot] = None,
+                      require_hardware_root: bool = False,
+                      require_bound_receipt_key: bool = True,
+                      now: Optional[datetime] = None,
+                      replay_ledger: Optional[MutableSet[tuple[str, str]]] = None
+                      ) -> tuple[Optional["AttestedRun"], str]:
+    """Admit a peer for an attested run AND open the path its result must arrive
+    by. Returns ``(run, reason)`` with ``run`` set only on admission, and
+    ``(None, reason)`` on every refusal; it refuses rather than raises on a
+    malformed proof, for the same reason :func:`tee_admits` does.
+
+    The admission verdict is :func:`tee_admits`, unchanged and reached with the
+    same arguments, and a refusal is returned with that function's reason text
+    verbatim, so this path and ``offer_eligible`` cannot disagree about whether a
+    peer is admitted.
+
+    Two gates are this function's own, and both run so that the composition
+    learns BEFORE the worker is asked to run anything:
+
+    * **the receiving key exists and is not the peer's.** A run whose results
+      would be checked with the peer's own offer key proves nothing about the
+      enclave, and :func:`receipt_admits` refuses it at delivery. Refusing at
+      admission is the same verdict taken earlier, when the composition can still
+      choose another peer instead of discovering it holds an unusable result;
+    * **the receipt key is the one the attestation named.** ``receipt_key_id`` in
+      the evidence is covered by the attester's signature and, on the hardware
+      path, by the quote's ``report_data``, so it is an attested fact: the
+      enclave states which key it will sign results with. A composition holding a
+      different key is refused, because a receipt that verifies under some other
+      key the operator provisioned says nothing about the enclave that was
+      admitted here. ``require_bound_receipt_key=True`` (the default) also
+      refuses an evidence that names NO receipt key, because an unnamed key is
+      exactly the ambiguous case; pass ``False`` for the pre-binding evidence
+      shape, and every delivery verdict then carries
+      :data:`RECEIPT_KEY_UNBOUND_NOTE`.
+
+    The binding gate runs AFTER the admission, so the module's order (prove
+    authenticity, then read the claim) holds and a stated fingerprint is one the
+    attester signed rather than one a hostile record asserted. A run refused
+    there has therefore consumed its challenge: the proof was valid and the
+    challenge is spent, and the composition must issue a new one. That is the
+    fail-closed direction, and it is pinned by a test."""
+    enclave = _key_bytes(enclave_key)
+    peer = _key_bytes(peer_key)
+    if not enclave:
+        return None, (
+            "no receiving key provided, so a result could not be checked against "
+            "the enclave that produced it; an attested run whose results cannot "
+            "be checked is refused before the worker is asked to run it, because "
+            "the alternative is an attested placement delivering an unattested "
+            "result")
+    if peer and enclave == peer:
+        return None, (
+            "the results would be verified with the peer's own offer key, so a "
+            "receipt would prove nothing about the enclave: a peer can sign a "
+            "result it fabricated outside the attested environment. The run is "
+            "refused before it starts rather than after a result has arrived")
+
+    admitted, reason = tee_admits(
+        record, requirement,
+        peer_id=peer_id,
+        peer_key=peer_key,
+        attester_key=attester_key,
+        root=root,
+        require_hardware_root=require_hardware_root,
+        now=now,
+        replay_ledger=replay_ledger)
+    if not admitted:
+        return None, reason
+
+    fingerprint = key_id(enclave)
+    stated = record.get("receipt_key_id")
+    if stated is None:
+        if require_bound_receipt_key:
+            return None, (
+                f"the attestation does not name the key the enclave signs its "
+                f"results with, so a receipt verified with {fingerprint} would "
+                f"prove only that some holder of that key signed it, not that "
+                f"the enclave admitted here did; the run is refused")
+    elif stated != fingerprint:
+        return None, (
+            f"the attestation binds this run's results to receipt key {stated!r}, "
+            f"not to the key this composition holds ({fingerprint!r}); a result "
+            f"checked against a key the enclave was not attested to hold is not "
+            f"a result from the attested run")
+
+    return AttestedRun(
+        peer_id=peer_id,
+        bundle=requirement.bundle,
+        nonce=requirement.nonce,
+        hardware_rooted=record.get("sign_alg") in QUOTE_SIGN_ALGS,
+        receipt_key_bound=stated is not None,
+        admission_reason=reason,
+        peer_key=peer,
+        enclave_key=enclave), reason

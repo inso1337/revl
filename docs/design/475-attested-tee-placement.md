@@ -230,6 +230,48 @@ driven through `offer_eligible` and `admit_peer_for_process`). The fixtures are 
 committed quotes under `tests/fixtures/tee/`, regenerable by
 `tests/fixtures/tee/generate.py` and asserted to equal a fresh generation.
 
+## The fourth slice: the delivery half (landed)
+
+The note above deferred "result flow over the wire", and the module docstring
+said the same thing in its own words: the module could sign and check a
+`ResultReceipt`, and nothing called `receipt_admits`. That is closed, and
+`docs/attested-result-delivery.md` is its reference.
+
+The seam is that an admission now PRODUCES the object a result arrives through.
+`open_attested_run` runs `tee_admits` and, on admission, returns an
+`AttestedRun`; `run.accept_result(receipt, result)` is the only delivery.
+`peer_offer.offer_admission` and `placement.admit_run_for_process` are the same
+path at the pool and placement-file tiers, and the admission verdict is
+`tee_admits`' own reason text verbatim, so no tier grows a second opinion.
+
+Three fail-OPEN shapes follow from a delivery check that is not attached to an
+admission, and the run closes all three: nothing forced the result half to be
+checked at all; `receipt_admits` took the peer, the bundle and the challenge from
+its CALLER, so the delivery was only as good as the caller's memory of what was
+admitted; and a caller handing it a fresh delivery ledger each call satisfied its
+"no ledger" refusal while replaying without limit. The run carries the
+admission's own facts and owns its ledger, and `accept_result` has no parameter
+for any of them.
+
+One gate is new rather than plumbing. `EnclaveEvidence` grows an optional
+`receipt_key_id`, the fingerprint of the key the enclave signs its results with.
+It rides in the body, so the attester's signature covers it and, on the hardware
+path, so does the quote's `report_data`: it is an attested fact, not a member the
+peer fills in. `open_attested_run` refuses a composition holding a different key,
+and by default refuses evidence that names none, because an unnamed receipt key
+is exactly the ambiguous case. The member is additive, so no committed quote
+fixture changes meaning, and the pre-binding shape still works by name and
+carries `RECEIPT_KEY_UNBOUND_NOTE` in every verdict it reaches.
+
+One asymmetry is deliberate and pinned. A run refused on the COMPOSITION's own
+misconfiguration (no receiving key, or the peer's own key named as the receiving
+key) does not burn the peer's challenge: the peer did nothing wrong, and those
+two gates run before `tee_admits`. A run refused on the receipt-key binding does
+burn it, because that gate runs after the admission (authenticity first, then the
+claim) and the proof was valid.
+
+Verification: `tests/test_tee_result_delivery.py`, 49 tests.
+
 ## Deliberately deferred
 
 * **The vendor DER chain.** Consuming Intel's PCK certificate chain and AMD's KDS
@@ -241,9 +283,6 @@ committed quotes under `tests/fixtures/tee/`, regenerable by
 * **Drift control.** A permitted measurement set that is updated, re-attested and
   provably current, rather than a static set baked into the requirement, is item
   469, in flight.
-* **Result flow over the wire.** The module can sign and check a result receipt.
-  Wiring receipts into the composition's call path, and refusing an unattested
-  result there, is the same shape as the offer-side gate and belongs with it.
 * **An attestation root in the retry dispatcher.** `lawful_retry` has no place to
   hold an attester key today, so a replay of an attested base slot refuses
   instead of choosing an attested peer. That is the safe direction and it is

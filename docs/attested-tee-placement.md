@@ -110,6 +110,15 @@ spawned):
   is the one outcome the demand exists to forbid. The refusal names the processes
   that asked for it.
 
+## The other half: the result
+
+Admitting a peer is half of what the demand says. `plc.admit_run_for_process` is
+the same admission with the result half attached: it returns the `AttestedRun` a
+result must arrive through, and `run.accept_result(receipt, result)` refuses
+anything that is not this run's result. `docs/attested-result-delivery.md` is the
+reference. `admit_peer_for_process` is unchanged and stays the entry point for a
+caller that only needs the verdict.
+
 ## Additivity
 
 The dimension is entirely opt-in, and the opt-out is byte for byte the old
