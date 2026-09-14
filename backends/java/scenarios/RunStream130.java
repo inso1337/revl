@@ -137,6 +137,8 @@ public final class RunStream130 {
         oneSourcesCloseDoesNotStrandTheConsumerOnTheOther();
         aFullBoundedBufferFaultsRatherThanDropping();
         theIterationFormRunsTheBodyPerItemAndEndsOnClosed();
+        theCombinatorChainFiltersMapsAndEndsOnTake();
+        theCombinatorChainUnwindsOffTheOneBracket();
         System.out.println("STREAM_130_OK");
     }
 
@@ -329,6 +331,63 @@ public final class RunStream130 {
         expect(scenario, markCount("stream.emit one") == 1,
             "the item was delivered more than once");
         run.disposable.dispose();
+        expectNoResidue(scenario);
+    }
+
+    // Slice 2 — the derived-stream combinator chain (§1), executed. The
+    // compile-shape half proves the chain EMITS; only running it proves the three
+    // answers agree with the py reference, which is the whole point of lowering
+    // it here rather than leaving it refused:
+    //
+    //   * `filter(p)` drops an item without it ever reaching the body, and a
+    //     rejection is NOT backpressure (the provider's emit still succeeds);
+    //   * `map(f)` reaches the body TRANSFORMED;
+    //   * `take(n)` ends the derived stream with a `Closed` TERMINAL after n
+    //     accepted items — the loop ends on it, the terminal never enters the
+    //     body, and a later emit is not delivered.
+    private static void theCombinatorChainFiltersMapsAndEndsOnTake()
+            throws Exception {
+        String scenario = "combinator chain";
+        Context ctx = fresh();
+        Activation run = new Activation("chain-activation",
+            () -> new revl.Components.ChainPlugin().apply(ctx));
+        await(scenario, "the subscription", () -> marked("stream.subscribe"));
+        // one PROVIDER plus three derived links (filter, map, take) — every link
+        // is a live stream owned by the subscription below it.
+        await(scenario, "the three combinator links",
+            () -> revl.Components.Stream.providers().size() == 4);
+        revl.Components.Stream provider = revl.Components.Stream.providers().get(0);
+        provider.emit("skip");    // filtered: never reaches the body
+        provider.emit("one");     // -> "one!"
+        provider.emit("skip");    // filtered again
+        provider.emit("two");     // -> "two!", which spends take(2)
+        provider.emit("three");   // past take(2): never delivered
+        await(scenario, "the loop to end on the spent take", run::done);
+        expect(scenario, run.failure == null, "the activation failed: " + run.failure);
+        expectDelivered(scenario, "one!", "two!");
+        markAt(scenario, "stream.take exhausted");
+        run.disposable.dispose();
+        expectNoResidue(scenario);
+    }
+
+    // The core guarantee still holds THROUGH a chain: an orderly source close
+    // reaches the parked consumer through every link, and the ONE bracket inverse
+    // closes each derived link down to (but not including) the provider.
+    private static void theCombinatorChainUnwindsOffTheOneBracket()
+            throws Exception {
+        String scenario = "combinator chain teardown";
+        Context ctx = fresh();
+        Activation run = new Activation("chain-teardown-activation",
+            () -> new revl.Components.ChainPlugin().apply(ctx));
+        await(scenario, "the subscription", () -> marked("stream.subscribe"));
+        revl.Components.Stream.providers().get(0).close();
+        await(scenario, "the terminal to reach the consumer", run::done);
+        expect(scenario, run.failure == null, "the activation failed: " + run.failure);
+        expectDelivered(scenario);
+        run.disposable.dispose();
+        markAt(scenario, "stream.stage close take");
+        markAt(scenario, "stream.stage close map");
+        markAt(scenario, "stream.stage close filter");
         expectNoResidue(scenario);
     }
 }

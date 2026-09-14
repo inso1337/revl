@@ -3373,4 +3373,4 @@ def test_stream_runtime_on_real_cordis_rs(tmp_path):
         encoding="utf-8")
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "17 passed" in result.stdout
+    assert "19 passed" in result.stdout
