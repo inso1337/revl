@@ -511,11 +511,33 @@ end).
 composition Shop {
   use "services.rvl"
 
-  slo { p95_latency: 250ms on breach pause, success_rate: 99.5 }
+  slo {
+    p95_latency: 250ms over 5m min 200 on breach pause,
+    success_rate: 99.5 over 1h min 100 of activations
+  }
 
   row @checkout from "consumer.rvl" provides checkout
 }
 ```
+
+`over`, `min` and `of` are optional and per datum, and they are what makes a
+verdict falsifiable: a target with no window is breached by one slow call in a
+year and held by none. `over` is the window the verdict is taken over, `min` the
+smallest sample that may produce one (below it the verdict is `insufficient`,
+never `holding`), and `of` names the population a rate is a rate of. Only a rate
+takes `of`, because a percentile's population is fixed by the measurement that
+produces it. The denominator registry is closed: `activations` is measured (the
+lifecycles the trace closed, and the transition each withdraw settled into), and
+`crossings` is counted without an outcome to divide by it, so a rate over it
+reads `unmeasurable` naming the missing numerator rather than silently using the
+population that does have one.
+
+The window ends at the last observation in the population, not at a wall clock:
+`ts` is a monotonic reading and is meaningful only as a difference between
+records of the same run. A population whose records carry no timestamp cannot be
+windowed at all, and a declared window over one reads `insufficient` naming the
+record that would have to be stamped. The run's own `model-decision` WAL records
+are exactly that population today.
 
 `on breach <response>` is optional and per datum. The response registry is
 closed, like the datum registry, because a response nothing implements is a
