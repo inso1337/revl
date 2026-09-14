@@ -821,6 +821,7 @@ fn self_async_expr(e: Expr) -> Str {
                                              : self_async_expr(ar.body),
     Match(m)    => or2(self_async_expr(m.scrut), self_async_arms(m.arms, 0)),
     Templ(t)    => self_async_parts(t.parts, 0),
+    RecUpd(r)   => or2(self_async_expr(r.base), self_async_inits(r.upds, 0)),
   }
 }
 
@@ -1317,6 +1318,7 @@ fn calls_in(e: Expr, acc: List[Str]) -> List[Str] {
     Arrow(a)   => calls_in(a.body, acc),
     Match(m)   => arms_calls(m.arms, 0, calls_in(m.scrut, acc)),
     Templ(t)   => parts_calls(t.parts, 0, acc),
+    RecUpd(r)  => inits_calls(r.upds, 0, calls_in(r.base, acc)),
   }
 }
 
@@ -1426,6 +1428,7 @@ fn acalls_in(e: Expr, sl: Map[Str, List[Int]], acc: List[Str]) -> List[Str] {
     Arrow(a)    => acalls_in(a.body, sl, acc),
     Match(m)    => aarms_calls(m.arms, 0, sl, acalls_in(m.scrut, sl, acc)),
     Templ(t)    => aparts_calls(t.parts, 0, sl, acc),
+    RecUpd(r)   => ainits_calls(r.upds, 0, sl, acalls_in(r.base, sl, acc)),
   }
 }
 
@@ -2487,6 +2490,7 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
                             ctx_under_arrow(ctx_bind(cx, param_names(ar.params))), a),
     Match(m)   => walk_arms(m.arms, 0, marked, cx, walk_expr(m.scrut, marked, cx, a)),
     Templ(t)   => walk_parts(t.parts, 0, marked, cx, a),
+    RecUpd(r)  => walk_inits(r.upds, 0, marked, cx, walk_expr(r.base, marked, cx, a)),
   }
 }
 
@@ -3659,6 +3663,7 @@ fn reach_scan(e: Expr, cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
     Arrow(ar)   => reach_scan(ar.body, cx, cr, a),
     Match(m)    => reach_arms(m.arms, 0, cx, cr, reach_scan(m.scrut, cx, cr, a)),
     Templ(t)    => reach_parts(t.parts, 0, cx, cr, a),
+    RecUpd(r)   => reach_inits(r.upds, 0, cx, cr, reach_scan(r.base, cx, cr, a)),
   }
 }
 
@@ -3759,6 +3764,7 @@ fn leaky_scan(e: Expr, coerced: Bool, cx: Ctx, cr: Bool) -> Str {
     Arrow(ar)   => leaky_arrow_body(ar.body, coerced, cx, cr),
     Match(m)    => or2(leaky_scan(m.scrut, false, cx, cr), leaky_arms(m.arms, 0, cx, cr)),
     Templ(t)    => leaky_parts(t.parts, 0, cx, cr),
+    RecUpd(r)   => or2(leaky_scan(r.base, false, cx, cr), leaky_inits(r.upds, 0, cx, cr)),
   }
 }
 
@@ -3835,6 +3841,7 @@ fn col_values(e: Expr, names: List[Str], acc: List[Str]) -> List[Str] {
     Arrow(ar)   => col_values(ar.body, names, acc),
     Match(m)    => col_arms(m.arms, 0, names, col_values(m.scrut, names, acc)),
     Templ(t)    => col_parts(t.parts, 0, names, acc),
+    RecUpd(r)   => col_inits(r.upds, 0, names, col_values(r.base, names, acc)),
   }
 }
 
@@ -4002,6 +4009,7 @@ fn acq_in(e: Expr) -> Str {
     Arrow(ar)   => acq_in(ar.body),
     Match(m)    => or2(acq_in(m.scrut), acq_arms(m.arms, 0)),
     Templ(t)    => acq_parts(t.parts, 0),
+    RecUpd(r)   => or2(acq_in(r.base), acq_inits(r.upds, 0)),
   }
 }
 
@@ -6249,6 +6257,9 @@ fn ext_expr_verdict(e: Expr, nm: Str, slot: Str, bound: Bool,
       ext_expr_verdict(m.scrut, nm, slot, bound, declared),
       ext_arms_verdict(m.arms, 0, nm, slot, bound, declared)]),
     Templ(t) => ext_parts_verdict(t.parts, 0, nm, slot, bound, declared),
+    RecUpd(r) => ext_first([
+      ext_expr_verdict(r.base, nm, slot, bound, declared),
+      ext_inits_verdict(r.upds, 0, nm, slot, bound, declared)]),
   }
 }
 
@@ -7899,6 +7910,8 @@ fn taint_expr_mentions(e: Expr, bn: Str) -> Bool {
     Match(m) => taint_expr_mentions(m.scrut, bn)
                 || taint_arms_mention(m.arms, 0, bn),
     Templ(t) => taint_parts_mention(t.parts, 0, bn),
+    RecUpd(r) => taint_expr_mentions(r.base, bn)
+                 || taint_inits_mention(r.upds, 0, bn),
   }
 }
 
@@ -7962,6 +7975,8 @@ fn taint_witness_receiver(e: Expr, ds: List[TaintDecl]) -> Bool {
     Match(m) => taint_witness_receiver(m.scrut, ds)
                 || taint_witness_receivers_arm(m.arms, 0, ds),
     Templ(t) => taint_witness_receivers_part(t.parts, 0, ds),
+    RecUpd(r) => taint_witness_receiver(r.base, ds)
+                 || taint_witness_receivers_init(r.upds, 0, ds),
   }
 }
 
@@ -9074,6 +9089,9 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     Arrow(a)    => "",
     Match(m)    => infer_match_ty(m, env),
     Templ(t)    => "Str",
+    // a record update yields the BASE's type with one field replaced, so the
+    // spelling is the base's (`_expr_static_type` reads the same thing).
+    RecUpd(r)   => infer(r.base, env),
     Hole(h)     => h.ty,
     Bad(m)      => "",
   }
@@ -9395,13 +9413,24 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return case_binds_walk(ts, i + 1, a) }
   if (at_event(ts, i)) {
-    let eb = event_field_binds(ts, i, a.binds)
+    // an `event` IS a record type with a contract (item 130 §6), so the
+    // reference appends an ordinary record `TypeDecl` beside it: its name is a
+    // declared type for the tparam heuristic exactly as a `type` head is.
+    let eb = tenv_put(event_field_binds(ts, i, a.binds),
+                      "decl ".concat(tkc(ts, i + 1).text), "1")
     return case_binds_walk(ts, event_decl_end(ts, i), { binds: eb, amb: a.amb })
   }
   if (t.kind != "kw") { return case_binds_walk(ts, skip_line(ts, i), a) }
   if (at_pub_prefix(ts, i)) { return case_binds_walk(ts, i + 1, a) }
   if (t.text == "type") {
-    let d = decl_cases(ts, i, a)
+    // item 391: the DECLARED type names, recorded beside the case table. The
+    // single-uppercase heuristic that makes `T` a type parameter is switched off
+    // by a declaration (`type S = A | B` is a nominal type, not a wildcard), so
+    // the marking below has to know which one-letter names are declared. The key
+    // carries a space, which no identifier may, so it can never collide with a
+    // binding.
+    let named = tenv_put(a.binds, "decl ".concat(tkc(ts, i + 1).text), "1")
+    let d = decl_cases(ts, i, { binds: named, amb: a.amb })
     return case_binds_walk(ts, d.i, d.a)
   }
   if (t.text == "test") {
@@ -9741,6 +9770,29 @@ fn lir_match(m: MatchN, env: List[Bind]) -> Str {
     .concat(",\"arms\":[").concat(arms).concat("]}")
 }
 
+// item 391: the `hole` expression — the IR's one non-executable node
+// (`_lower_hole`, docs/holes.md). Three things beyond `kind` ride on it and all
+// three were missing: the TYPE (stated by `hole[T]`, else pinned from the
+// position's declared type, which is why this takes an `expected`), the
+// PROVENANCE an agent has to be handed to go and fill the obligation
+// (`file`/`line`), and the author's `message` when one was written.
+//
+// `file` is the reference's `filename`, which is `<string>` for a lowering of a
+// source STRING — the same environment artifact as a component's `source` and
+// the top-level `manifest`, which the covered emitter surface never reads.
+//
+// A hole with NO type anywhere is a reference REFUSAL (T3: nothing in its
+// context says what it must become), and `lower_to_ir` issues no diagnostics, so
+// it stays the `bad` node it was rather than inventing a type.
+fn hole_json(h: HoleN, expected: Str) -> Str {
+  let ty = h.ty != "" ? h.ty : expected
+  if (ty == "") { return "{\"kind\":\"bad\"}" }
+  var js = "{\"kind\":\"hole\",\"type\":".concat(jstr(ty))
+    .concat(",\"file\":\"<string>\",\"line\":").concat(h.line.to_str())
+  if (h.hasMsg) { js = js.concat(",\"message\":").concat(jstr(h.msg)) }
+  return js.concat("}")
+}
+
 fn lir_expr(e: Expr, env: List[Bind]) -> Str {
   return match e {
     IntLit(v)   => "{\"kind\":\"lit\",\"value\":".concat(v).concat("}"),
@@ -9779,7 +9831,9 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
     Arrow(a)    => lir_arrow(a, env),
     Match(m)    => lir_match(m, env),
     Templ(t)    => "{\"kind\":\"interp\",\"parts\":[".concat(lir_parts(t.parts, env)).concat("]}"),
-    Hole(h)     => "{\"kind\":\"bad\"}",
+    RecUpd(r)   => "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(r.base, env))
+                     .concat(",\"updates\":[").concat(lir_updates(r.upds, 0, "", env)).concat("]}"),
+    Hole(h)     => hole_json(h, ""),
     Bad(m)      => "{\"kind\":\"bad\"}",
   }
 }
@@ -9914,6 +9968,15 @@ fn lir_updates(xs: List[InitN], i: Int, acc: Str, env: List[Bind]) -> Str {
 
 // An rvalue: an ordinary expression, or a token-level record-update.
 fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
+  return lir_rhs_exp(ts, j, env, "")
+}
+
+// The rvalue reader, with the DECLARED type of the position it is read into.
+// Only a `hole` reads it: the checker pins an unannotated hole's type from its
+// context, and an annotated `let`/`var` and a `return` are the two contexts this
+// producer has in hand. Every other node ignores `expected`, so a document with
+// no hole in it is byte-identical.
+fn lir_rhs_exp(ts: List[Token], j: Int, env: List[Bind], expected: Str) -> RhsR {
   let ru = ru_at(ts, j)
   if (ru.ok) {
     let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(ru.base, env))
@@ -9922,7 +9985,11 @@ fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
   }
   let r = expr_at(ts, j)
   if (is_bad(r.e) || r.i <= j) { return { js: "", ty: "", i: j, ok: false } }
-  return { js: lir_expr(r.e, env), ty: infer(r.e, env), i: r.i, ok: true }
+  let js = match r.e {
+    Hole(h) => hole_json(h, expected),
+    _       => lir_expr(r.e, env),
+  }
+  return { js: js, ty: infer(r.e, env), i: r.i, ok: true }
 }
 
 fn assign_env_ty(env: List[Bind], name: Str, inf: Str) -> List[Bind] {
@@ -9996,7 +10063,7 @@ type WalkR = { st: WSt, a: WAcc }
 // `Expr` spelling to carry it (the shared parser's grammar does not read one).
 type OStep = { kind: Str, tok: Int, name: Str, birth: Str, value: Expr,
                forBind: Str, then_: List[OStep], els: List[OStep], body: List[OStep],
-               ru: Bool, upds: List[InitN] }
+               ru: Bool, upds: List[InitN], binds: List[Str] }
 type OStepR = { step: OStep, i: Int }
 
 fn own_alive(m: Map[Str, Int]) -> WSt { return { live: true, m: m } }
@@ -10007,34 +10074,43 @@ fn wacc_fresh(marks: Map[Str, Int]) -> WAcc { return { marks: marks, breaks: [],
 // explicitly and NullLit stands in where there is no value expression).
 fn ostep_let(tok: Int, name: Str, birth: Str, v: Expr) -> OStep {
   return { kind: "let", tok: tok, name: name, birth: birth, value: v,
-           forBind: "", then_: [], els: [], body: [], ru: false, upds: [] }
+           forBind: "", then_: [], els: [], body: [], ru: false, upds: [], binds: [] }
 }
 fn ostep_assign(tok: Int, name: Str, v: Expr) -> OStep {
   return { kind: "assign", tok: tok, name: name, birth: "", value: v,
-           forBind: "", then_: [], els: [], body: [], ru: false, upds: [] }
+           forBind: "", then_: [], els: [], body: [], ru: false, upds: [], binds: [] }
 }
 // A `let`/`assign` whose value is a record-update. `birth` stays "" because
 // `record_update` is not one of `ownership.py`'s `_FRESH_KINDS`: the name it
 // binds is NOT born owned, exactly as the reference's `_step_let` decides.
 fn ostep_ru(kind: Str, tok: Int, name: Str, base: Expr, upds: List[InitN]) -> OStep {
   return { kind: kind, tok: tok, name: name, birth: "", value: base,
-           forBind: "", then_: [], els: [], body: [], ru: true, upds: upds }
+           forBind: "", then_: [], els: [], body: [], ru: true, upds: upds, binds: [] }
+}
+// A destructuring `let`/`var`. Modelled as "other" (it kills every name it
+// mentions) but carrying the names it BINDS, which the whole-program retention
+// summary needs: a local that shadows a module `fn` is not that `fn`, so the
+// summary entry for that name must not be read inside this body.
+fn ostep_destr(v: Expr, names: List[Str]) -> OStep {
+  return { kind: "other", tok: 0 - 1, name: "", birth: "", value: v,
+           forBind: "", then_: [], els: [], body: [], ru: false, upds: [],
+           binds: names }
 }
 fn ostep_simple(kind: Str, v: Expr) -> OStep {
   return { kind: kind, tok: 0 - 1, name: "", birth: "", value: v,
-           forBind: "", then_: [], els: [], body: [], ru: false, upds: [] }
+           forBind: "", then_: [], els: [], body: [], ru: false, upds: [], binds: [] }
 }
 fn ostep_if(cond: Expr, thenS: List[OStep], elseS: List[OStep]) -> OStep {
   return { kind: "if", tok: 0 - 1, name: "", birth: "", value: cond,
-           forBind: "", then_: thenS, els: elseS, body: [], ru: false, upds: [] }
+           forBind: "", then_: thenS, els: elseS, body: [], ru: false, upds: [], binds: [] }
 }
 fn ostep_while(cond: Expr, bodyS: List[OStep]) -> OStep {
   return { kind: "while", tok: 0 - 1, name: "", birth: "", value: cond,
-           forBind: "", then_: [], els: [], body: bodyS, ru: false, upds: [] }
+           forBind: "", then_: [], els: [], body: bodyS, ru: false, upds: [], binds: [] }
 }
 fn ostep_for(bind: Str, iter: Expr, bodyS: List[OStep]) -> OStep {
   return { kind: "for", tok: 0 - 1, name: "", birth: "", value: iter,
-           forBind: bind, then_: [], els: [], body: bodyS, ru: false, upds: [] }
+           forBind: bind, then_: [], els: [], body: bodyS, ru: false, upds: [], binds: [] }
 }
 
 // A builtin method whose RECEIVER is read and not retained — `ownership.py`'s
@@ -10085,8 +10161,8 @@ fn ostep_shape(s: OStep) -> Str {
 
 // The record-update gen: `_NON_RETAINING` lists "base" for a `record_update`, so
 // the spread reads its base without keeping it, and every update VALUE retains.
-fn own_gen_ru(base: Expr, upds: List[InitN], st: Map[Str, Int]) -> Map[Str, Int] {
-  return own_gen_inits(upds, 0, own_gen(base, false, st))
+fn own_gen_ru(base: Expr, upds: List[InitN], st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
+  return own_gen_inits(upds, 0, own_gen(base, false, st, sm), sm)
 }
 
 // The lowered kind of an assign/`let` value that is a fresh allocation this
@@ -10120,66 +10196,90 @@ fn own_birth_kind(js: Str) -> Str {
 // Drop from the state every name `e` may leave a second holder of. `retains` is
 // whether the slot `e` sits in keeps its value; the non-retaining slots below are
 // `ownership.py`'s `_NON_RETAINING`.
-fn own_gen(e: Expr, retains: Bool, st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen(e: Expr, retains: Bool, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   return match e {
     Var(n)      => retains ? st.remove(n) : st,
-    Bin(b)      => own_gen_bin(b.op, b.l, b.r, st),
-    Un(u)       => own_gen(u.e, false, st),
-    Emit(u)     => own_gen(u.e, true, st),
-    Call(c)     => own_gen_call(c.target, c.args, st),
-    Field(f)    => own_gen(f.target, false, st),
-    OptField(f) => own_gen(f.target, false, st),
-    OptCall(o)  => own_gen_args(o.args, 0, true, own_gen(o.target, false, st)),
-    Index(x)    => own_gen(x.idx, false, own_gen(x.target, false, st)),
-    If(f)       => own_gen(f.els, true, own_gen(f.then_, true, own_gen(f.cond, true, st))),
-    Rec(r)      => own_gen_inits(r.fields, 0, st),
-    Lst(l)      => own_gen_args(l.items, 0, true, st),
-    Arrow(a)    => own_gen_arrow(a, st),
-    Match(m)    => own_gen_match(m, st),
-    Templ(t)    => own_gen_parts(t.parts, 0, st),
+    Bin(b)      => own_gen_bin(b.op, b.l, b.r, st, sm),
+    Un(u)       => own_gen(u.e, false, st, sm),
+    Emit(u)     => own_gen(u.e, true, st, sm),
+    Call(c)     => own_gen_call(c.target, c.args, st, sm),
+    Field(f)    => own_gen(f.target, false, st, sm),
+    OptField(f) => own_gen(f.target, false, st, sm),
+    OptCall(o)  => own_gen_args(o.args, 0, true, own_gen(o.target, false, st, sm), sm),
+    Index(x)    => own_gen(x.idx, false, own_gen(x.target, false, st, sm), sm),
+    If(f)       => own_gen(f.els, true, own_gen(f.then_, true, own_gen(f.cond, true, st, sm), sm), sm),
+    Rec(r)      => own_gen_inits(r.fields, 0, st, sm),
+    Lst(l)      => own_gen_args(l.items, 0, true, st, sm),
+    Arrow(a)    => own_gen_arrow(a, st, sm),
+    Match(m)    => own_gen_match(m, st, sm),
+    Templ(t)    => own_gen_parts(t.parts, 0, st, sm),
+    RecUpd(r)   => own_gen_ru(r.base, r.upds, st, sm),
     _           => st,
   }
 }
 
 // `a ?? b` YIELDS `a`, so BOTH operands are retained; every other binary reads and
 // discards its operands.
-fn own_gen_bin(op: Str, l: Expr, r: Expr, st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen_bin(op: Str, l: Expr, r: Expr, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   let keep = op == "??"
-  return own_gen(r, keep, own_gen(l, keep, st))
+  return own_gen(r, keep, own_gen(l, keep, st, sm), sm)
 }
 
 // A call. A whitelisted builtin reads and does not retain its receiver; any other
 // method call retains its receiver (an unaudited builtin may hand back an alias,
 // so the conservative direction — DROP the name — is taken). Arguments retain
 // (the whole-program retention summary that would refine this is item 445 (b)).
-fn own_gen_call(target: Expr, args: List[Expr], st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen_call(target: Expr, args: List[Expr], st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   return match target {
     Field(f) => own_gen_args(args, 0, true,
-                  own_gen(f.target, own_nonretaining_method(f.name) ? false : true, st)),
-    _        => own_gen_args(args, 0, true, own_gen(target, true, st)),
+                  own_gen(f.target, own_nonretaining_method(f.name) ? false : true, st, sm), sm),
+    // item 445 (b): a call through a plain name asks the WHOLE-PROGRAM summary
+    // whether the callee keeps what it is handed, instead of assuming it does.
+    // `ret_keeps` answers "" for everything unresolved — an extern, a host root,
+    // a constructor, a callee whose argument count does not match — and "" means
+    // every argument retains, which is the assumption this replaces.
+    Var(n)   => own_gen_argkeeps(args, 0, ret_keeps(sm, n, args.length()),
+                                 own_gen(target, true, st, sm), sm),
+    _        => own_gen_args(args, 0, true, own_gen(target, true, st, sm), sm),
   }
 }
 
-fn own_gen_args(args: List[Expr], i: Int, retains: Bool, st: Map[Str, Int]) -> Map[Str, Int] {
+// The per-argument retention word for one callee: one character per parameter,
+// `"1"` where the callee may still reach the caller's object after it returns.
+// "" whenever the question is unresolved, which every reader must read as "all
+// of them retain".
+fn ret_keeps(sm: Map[Str, Str], name: Str, nargs: Int) -> Str {
+  let v = match sm.lookup(name) { Some(x) => x, None => "" }
+  return v.length() == nargs ? v : ""
+}
+
+fn own_gen_argkeeps(args: List[Expr], i: Int, keeps: Str, st: Map[Str, Int],
+                    sm: Map[Str, Str]) -> Map[Str, Int] {
   if (i >= args.length()) { return st }
-  return own_gen_args(args, i + 1, retains, own_gen(args[i], retains, st))
+  let retains = keeps == "" ? true : keeps.charAt(i) == "1"
+  return own_gen_argkeeps(args, i + 1, keeps, own_gen(args[i], retains, st, sm), sm)
 }
 
-fn own_gen_inits(fields: List[InitN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen_args(args: List[Expr], i: Int, retains: Bool, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
+  if (i >= args.length()) { return st }
+  return own_gen_args(args, i + 1, retains, own_gen(args[i], retains, st, sm), sm)
+}
+
+fn own_gen_inits(fields: List[InitN], i: Int, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   if (i >= fields.length()) { return st }
-  return own_gen_inits(fields, i + 1, own_gen(fields[i].value, true, st))
+  return own_gen_inits(fields, i + 1, own_gen(fields[i].value, true, st, sm), sm)
 }
 
-fn own_gen_parts(parts: List[PartN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen_parts(parts: List[PartN], i: Int, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   if (i >= parts.length()) { return st }
-  return own_gen_parts(parts, i + 1, own_gen(parts[i].e, false, st))
+  return own_gen_parts(parts, i + 1, own_gen(parts[i].e, false, st, sm), sm)
 }
 
 // A closure outlives the expression that built it, so everything it can see is
 // retained — its parameters (which shadow) and every name its body reads. The
 // conservative reading — drop every free name the body mentions — cannot leave a
 // captured name owned, so no in-place write can be mis-proved through an arrow.
-fn own_gen_arrow(ar: ArrowN, st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen_arrow(ar: ArrowN, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   return own_dropvars(ar.body, own_drop_params(ar.params, 0, st))
 }
 fn own_drop_params(ps: List[ParamN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
@@ -10189,17 +10289,17 @@ fn own_drop_params(ps: List[ParamN], i: Int, st: Map[Str, Int]) -> Map[Str, Int]
 
 // A `match` binds each arm's payload name (which shadows) and otherwise retains
 // its scrutinee and every arm body.
-fn own_gen_match(m: MatchN, st: Map[Str, Int]) -> Map[Str, Int] {
-  return own_gen_arms(m.arms, 0, own_gen(m.scrut, true, own_drop_arm_binds(m.arms, 0, st)))
+fn own_gen_match(m: MatchN, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
+  return own_gen_arms(m.arms, 0, own_gen(m.scrut, true, own_drop_arm_binds(m.arms, 0, st), sm), sm)
 }
 fn own_drop_arm_binds(arms: List[ArmN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
   if (i >= arms.length()) { return st }
   let s = arms[i].bind == "" ? st : st.remove(arms[i].bind)
   return own_drop_arm_binds(arms, i + 1, s)
 }
-fn own_gen_arms(arms: List[ArmN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen_arms(arms: List[ArmN], i: Int, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   if (i >= arms.length()) { return st }
-  return own_gen_arms(arms, i + 1, own_gen(arms[i].body, true, st))
+  return own_gen_arms(arms, i + 1, own_gen(arms[i].body, true, st, sm), sm)
 }
 
 // Remove every name mentioned anywhere in `e` (the closure-capture reading).
@@ -10220,6 +10320,7 @@ fn own_dropvars(e: Expr, st: Map[Str, Int]) -> Map[Str, Int] {
     Arrow(a)    => own_dropvars(a.body, own_drop_params(a.params, 0, st)),
     Match(m)    => own_dropvars_match(m, st),
     Templ(t)    => own_dropvars_parts(t.parts, 0, st),
+    RecUpd(r)   => own_dropvars_inits(r.upds, 0, own_dropvars(r.base, st)),
     _           => st,
   }
 }
@@ -10245,9 +10346,9 @@ fn own_gen_arms_drop(arms: List[ArmN], i: Int, st: Map[Str, Int]) -> Map[Str, In
 
 // The write-shape assign gens its ARGUMENTS (evaluated before the write) and never
 // its receiver `var` — the receiver IS the write, not a second reader.
-fn own_gen_writeargs(value: Expr, st: Map[Str, Int]) -> Map[Str, Int] {
+fn own_gen_writeargs(value: Expr, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
   return match value {
-    Call(c) => own_gen_args(c.args, 0, true, st),
+    Call(c) => own_gen_args(c.args, 0, true, st, sm),
     _       => st,
   }
 }
@@ -10298,15 +10399,15 @@ fn own_join_list(states: List[WSt], i: Int, acc: WSt, seen: Bool) -> WSt {
   return own_join_list(states, i + 1, acc2, true)
 }
 
-fn own_stmts(steps: List[OStep], i: Int, st: WSt, a: WAcc) -> WalkR {
+fn own_stmts(steps: List[OStep], i: Int, st: WSt, a: WAcc, sm: Map[Str, Str]) -> WalkR {
   if (i >= steps.length() || !st.live) { return { st: st, a: a } }
-  let r = own_stmt(steps[i], st, a)
-  return own_stmts(steps, i + 1, r.st, r.a)
+  let r = own_stmt(steps[i], st, a, sm)
+  return own_stmts(steps, i + 1, r.st, r.a, sm)
 }
 
-fn own_stmt(s: OStep, st: WSt, a: WAcc) -> WalkR {
+fn own_stmt(s: OStep, st: WSt, a: WAcc, sm: Map[Str, Str]) -> WalkR {
   if (s.kind == "let") {
-    let m1 = s.ru ? own_gen_ru(s.value, s.upds, st.m) : own_gen(s.value, true, st.m)
+    let m1 = s.ru ? own_gen_ru(s.value, s.upds, st.m, sm) : own_gen(s.value, true, st.m, sm)
     var m2 = m1
     if (own_is_fresh_kind(s.birth)) { m2 = m1.set(s.name, 0) }
     else { m2 = s.birth == "var" ? m1.set(s.name, 1) : m1.remove(s.name) }
@@ -10315,7 +10416,7 @@ fn own_stmt(s: OStep, st: WSt, a: WAcc) -> WalkR {
   if (s.kind == "assign") {
     let shape = ostep_shape(s)
     if (shape == "") {
-      let m1 = s.ru ? own_gen_ru(s.value, s.upds, st.m) : own_gen(s.value, true, st.m)
+      let m1 = s.ru ? own_gen_ru(s.value, s.upds, st.m, sm) : own_gen(s.value, true, st.m, sm)
       let fresh = !s.ru && own_is_fresh_kind(own_value_kind(s.value))
       let m2 = fresh ? m1.set(s.name, 0) : m1.remove(s.name)
       return { st: own_alive(m2), a: a }
@@ -10323,7 +10424,7 @@ fn own_stmt(s: OStep, st: WSt, a: WAcc) -> WalkR {
     // a self-rebind write: the args gen normally, the receiver is the write. The
     // binding owns its object afterwards either way (in place on something nothing
     // else reaches, or the persistent copy's brand-new container).
-    let m1 = s.ru ? own_gen_inits(s.upds, 0, st.m) : own_gen_writeargs(s.value, st.m)
+    let m1 = s.ru ? own_gen_inits(s.upds, 0, st.m, sm) : own_gen_writeargs(s.value, st.m, sm)
     let markv = match m1.lookup(s.name) { Some(v) => v + 1, None => 0 }
     let newlvl = match m1.lookup(s.name) { Some(v) => v, None => 0 }
     let a2: WAcc = { marks: a.marks.set(s.tok.to_str(), markv), breaks: a.breaks, conts: a.conts }
@@ -10337,18 +10438,18 @@ fn own_stmt(s: OStep, st: WSt, a: WAcc) -> WalkR {
     return { st: own_dead(), a: { marks: a.marks, breaks: a.breaks, conts: a.conts.push(st) } }
   }
   if (s.kind == "if") {
-    let m1 = own_gen(s.value, true, st.m)
-    let rt = own_stmts(s.then_, 0, own_alive(m1), a)
-    let re = own_stmts(s.els, 0, own_alive(m1), rt.a)
+    let m1 = own_gen(s.value, true, st.m, sm)
+    let rt = own_stmts(s.then_, 0, own_alive(m1), a, sm)
+    let re = own_stmts(s.els, 0, own_alive(m1), rt.a, sm)
     return { st: own_join2(rt.st, re.st), a: re.a }
   }
-  if (s.kind == "while") { return own_loop(s.body, st.m, s.value, true, a) }
+  if (s.kind == "while") { return own_loop(s.body, st.m, s.value, true, a, sm) }
   if (s.kind == "for") {
-    let m1 = own_gen(s.value, true, st.m).remove(s.forBind)
-    return own_loop(s.body, m1, NullLit, false, a)
+    let m1 = own_gen(s.value, true, st.m, sm).remove(s.forBind)
+    return own_loop(s.body, m1, NullLit, false, a, sm)
   }
   // "other" — an unmodelled statement kills every name it mentions.
-  return { st: own_alive(own_gen(s.value, true, st.m)), a: a }
+  return { st: own_alive(own_gen(s.value, true, st.m, sm)), a: a }
 }
 
 // Fixpoint over the back edge. The lattice is finite (three levels per name, and
@@ -10357,7 +10458,7 @@ fn own_stmt(s: OStep, st: WSt, a: WAcc) -> WalkR {
 // pass (only the last pass's survive), while `marks` carry forward and are
 // overwritten by key, so an optimistic early answer is replaced by the fixpoint's.
 fn own_loop(body: List[OStep], entry: Map[Str, Int], cond: Expr, hasCond: Bool,
-            a: WAcc) -> WalkR {
+            a: WAcc, sm: Map[Str, Str]) -> WalkR {
   let outerBreaks = a.breaks
   let outerConts = a.conts
   var head = entry
@@ -10370,8 +10471,8 @@ fn own_loop(body: List[OStep], entry: Map[Str, Int], cond: Expr, hasCond: Bool,
   while (it < bound) {
     if (!done) {
       var top = head
-      if (hasCond) { top = own_gen(cond, true, top) }
-      let r = own_stmts(body, 0, own_alive(top), wacc_fresh(marks))
+      if (hasCond) { top = own_gen(cond, true, top, sm) }
+      let r = own_stmts(body, 0, own_alive(top), wacc_fresh(marks), sm)
       marks = r.a.marks
       topFinal = top
       brFinal = r.a.breaks
@@ -10384,8 +10485,8 @@ fn own_loop(body: List[OStep], entry: Map[Str, Int], cond: Expr, hasCond: Bool,
   }
   if (!done) {
     var top = Map.empty()
-    if (hasCond) { top = own_gen(cond, true, top) }
-    let r = own_stmts(body, 0, own_alive(top), wacc_fresh(marks))
+    if (hasCond) { top = own_gen(cond, true, top, sm) }
+    let r = own_stmts(body, 0, own_alive(top), wacc_fresh(marks), sm)
     marks = r.a.marks
     topFinal = top
     brFinal = r.a.breaks
@@ -10442,9 +10543,11 @@ fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
     if (pat.ok && atk(ts, pat.i, "=")) {
       let pv = expr_at(ts, pat.i + 1)
       if (is_bad(pv.e) || pv.i <= pat.i + 1) {
-        return { step: ostep_simple("other", NullLit), i: hi }
+        return { step: ostep_destr(NullLit, pat.names), i: hi }
+
       }
-      return { step: ostep_simple("other", pv.e), i: pv.i }
+      let pnames = pat.rest == "" ? pat.names : pat.names.push(pat.rest)
+      return { step: ostep_destr(pv.e, pnames), i: pv.i }
     }
     let name = tkc(ts, i + 1).text
     var j = i + 2
@@ -10458,11 +10561,17 @@ fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
     return { step: ostep_let(i, name, own_birth_kind(r.js), ve.e), i: r.i }
   }
   if (t.kind == "kw" && t.text == "return") {
+    // the returned EXPRESSION is carried now. The flow-sensitive walk still
+    // reads nothing off it (a `return` ends the path, so the state after it is
+    // unreachable), but the whole-program summary does: a returned parameter is
+    // handed straight back to the caller, which is an alias by any definition.
     let ru = ru_at(ts, i + 1)
-    if (ru.ok) { return { step: ostep_simple("return", NullLit), i: ru.i } }
+    if (ru.ok) { return { step: ostep_ru("return", i, "", ru.base, ru.upds), i: ru.i } }
     let r = expr_at(ts, i + 1)
-    let ni = (is_bad(r.e) || r.i <= i + 1) ? i + 1 : r.i
-    return { step: ostep_simple("return", NullLit), i: ni }
+    if (is_bad(r.e) || r.i <= i + 1) {
+      return { step: ostep_simple("return", NullLit), i: i + 1 }
+    }
+    return { step: ostep_simple("return", r.e), i: r.i }
   }
   if (t.kind == "kw" && t.text == "assert") {
     let r = expr_at(ts, i + 1)
@@ -10569,13 +10678,251 @@ fn own_births(steps: List[OStep], i: Int, copies: Map[Str, Str],
   return own_births(steps, i + 1, copies, out)
 }
 
+
+// ================================================== whole-program retention
+//
+// Item 445 (b), ported from `src/revl/ownership.py`'s `retention_summary`. The
+// per-body analysis above must assume a call KEEPS what it is handed, and that
+// assumption is what left `stdlib/list.rvl`'s `list_dedup` quadratic:
+// `if (!list_contains(out, x)) { out = out.push(x) }` hands `out` to a call one
+// statement before the write, and `list_contains` demonstrably keeps nothing —
+// it walks the list and answers a `Bool`.
+//
+// So one whole-program question is answered FIRST: does this function retain
+// parameter i — can the object the caller passed still be reached through
+// anything once the call has returned? The rules are the same non-retaining
+// slots the per-body gen uses, with two differences that follow from asking
+// about the CALLER's object rather than about a local:
+//
+//   * `return e` RETAINS. A local's return needs no rule (nothing runs after it
+//     in that function), but a returned parameter is handed straight back.
+//   * a `for` ITERABLE does not retain. The iterator dies with the call, so
+//     iterating a parameter leaves the caller nothing new.
+//
+// The fixpoint starts optimistic (nothing retains) and only ever ADDS
+// retention, so it is a least fixpoint of a may-property and mutual recursion
+// converges to the truth. EVERYTHING UNRESOLVED RETAINS — a callee that is not
+// a module `fn`, an arity mismatch, a callee named by anything but a plain name,
+// and a name this body BINDS (a local may shadow a module `fn`, and the call
+// node is spelled identically either way).
+
+type FnOwn = { name: Str, params: List[Str], steps: List[OStep] }
+
+// The summary walk. Not the flow-sensitive one: it never re-adds a name, it
+// only drops the parameters this body may hand to something that outlives the
+// call, so there is no lattice and no loop fixpoint here.
+fn own_sum_stmts(steps: List[OStep], i: Int, st: Map[Str, Int],
+                 sm: Map[Str, Str]) -> Map[Str, Int] {
+  if (i >= steps.length()) { return st }
+  return own_sum_stmts(steps, i + 1, own_sum_stmt(steps[i], st, sm), sm)
+}
+
+fn own_sum_stmt(s: OStep, st: Map[Str, Int], sm: Map[Str, Str]) -> Map[Str, Int] {
+  if (s.kind == "if") {
+    let m = own_gen(s.value, true, st, sm)
+    return own_sum_stmts(s.els, 0, own_sum_stmts(s.then_, 0, m, sm), sm)
+  }
+  if (s.kind == "while") {
+    return own_sum_stmts(s.body, 0, own_gen(s.value, true, st, sm), sm)
+  }
+  if (s.kind == "for") {
+    // the ITERABLE is the one slot a step reads without retaining it across the
+    // call: the iterator dies with the call.
+    return own_sum_stmts(s.body, 0, st, sm)
+  }
+  if (s.ru) { return own_gen_ru(s.value, s.upds, st, sm) }
+  return own_gen(s.value, true, st, sm)
+}
+
+// Every name this body BINDS — a `let`/`assign` target, a `for` bind, a
+// destructure, an arrow parameter, a match-arm payload.
+fn own_bound_steps(steps: List[OStep], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= steps.length()) { return acc }
+  let s = steps[i]
+  var out = acc
+  if (s.name != "" && !contains(out, s.name)) { out = out.push(s.name) }
+  if (s.forBind != "" && !contains(out, s.forBind)) { out = out.push(s.forBind) }
+  out = concat_names(out, s.binds)
+  out = own_bound_expr(s.value, out)
+  out = own_bound_inits(s.upds, 0, out)
+  out = own_bound_steps(s.then_, 0, out)
+  out = own_bound_steps(s.els, 0, out)
+  out = own_bound_steps(s.body, 0, out)
+  return own_bound_steps(steps, i + 1, out)
+}
+
+fn own_bound_expr(e: Expr, acc: List[Str]) -> List[Str] {
+  return match e {
+    Bin(b)      => own_bound_expr(b.r, own_bound_expr(b.l, acc)),
+    Un(u)       => own_bound_expr(u.e, acc),
+    Emit(u)     => own_bound_expr(u.e, acc),
+    Call(c)     => own_bound_exprs(c.args, 0, own_bound_expr(c.target, acc)),
+    Field(f)    => own_bound_expr(f.target, acc),
+    OptField(f) => own_bound_expr(f.target, acc),
+    OptCall(o)  => own_bound_exprs(o.args, 0, own_bound_expr(o.target, acc)),
+    Index(x)    => own_bound_expr(x.idx, own_bound_expr(x.target, acc)),
+    If(f)       => own_bound_expr(f.els, own_bound_expr(f.then_, own_bound_expr(f.cond, acc))),
+    Rec(r)      => own_bound_inits(r.fields, 0, acc),
+    Lst(l)      => own_bound_exprs(l.items, 0, acc),
+    Arrow(a)    => own_bound_expr(a.body, concat_names(acc, param_names(a.params))),
+    Match(m)    => own_bound_arms(m.arms, 0, own_bound_expr(m.scrut, acc)),
+    Templ(t)    => own_bound_parts(t.parts, 0, acc),
+    RecUpd(r)   => own_bound_inits(r.upds, 0, own_bound_expr(r.base, acc)),
+    _           => acc,
+  }
+}
+fn own_bound_exprs(xs: List[Expr], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return own_bound_exprs(xs, i + 1, own_bound_expr(xs[i], acc))
+}
+fn own_bound_inits(xs: List[InitN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return own_bound_inits(xs, i + 1, own_bound_expr(xs[i].value, acc))
+}
+fn own_bound_parts(xs: List[PartN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return own_bound_parts(xs, i + 1, own_bound_expr(xs[i].e, acc))
+}
+fn own_bound_arms(xs: List[ArmN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  var out = acc
+  if (xs[i].bind != "" && !contains(out, xs[i].bind)) { out = out.push(xs[i].bind) }
+  return own_bound_arms(xs, i + 1, own_bound_expr(xs[i].body, out))
+}
+
+// The summary, with every name this body binds removed.
+fn own_visible(sm: Map[Str, Str], shadowed: List[Str], i: Int) -> Map[Str, Str] {
+  if (i >= shadowed.length()) { return sm }
+  return own_visible(sm.remove(shadowed[i]), shadowed, i + 1)
+}
+
+// `"1"` where the parameter is still reachable after the call, one character per
+// parameter, in declaration order. Monotone: a slot only ever rises to `"1"`.
+fn own_keeps_of(prev: Str, params: List[Str], i: Int, st: Map[Str, Int],
+                acc: Str) -> Str {
+  if (i >= params.length()) { return acc }
+  let held = prev.length() == params.length() && prev.charAt(i) == "1"
+  let escaped = match st.lookup(params[i]) { Some(v) => false, None => true }
+  return own_keeps_of(prev, params, i + 1, st,
+                      acc.concat(held || escaped ? "1" : "0"))
+}
+
+fn own_zeros(n: Int, acc: Str) -> Str {
+  if (acc.length() >= n) { return acc }
+  return own_zeros(n, acc.concat("0"))
+}
+
+fn own_params_state(params: List[Str], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= params.length()) { return st }
+  return own_params_state(params, i + 1, st.set(params[i], 0))
+}
+
+// One round: recompute every body against the current summary.
+fn own_round(fns: List[FnOwn], i: Int, sm: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= fns.length()) { return sm }
+  let f = fns[i]
+  let shadowed = own_bound_steps(f.steps, 0, f.params)
+  let visible = own_visible(sm, shadowed, 0)
+  let st = own_sum_stmts(f.steps, 0, own_params_state(f.params, 0, Map.empty()), visible)
+  let prev = match sm.lookup(f.name) { Some(v) => v, None => "" }
+  let keeps = own_keeps_of(prev, f.params, 0, st, "")
+  return own_round(fns, i + 1, sm.set(f.name, keeps))
+}
+
+fn own_sum_eq(fns: List[FnOwn], i: Int, a: Map[Str, Str], b: Map[Str, Str]) -> Bool {
+  if (i >= fns.length()) { return true }
+  let x = match a.lookup(fns[i].name) { Some(v) => v, None => "" }
+  let y = match b.lookup(fns[i].name) { Some(v) => v, None => "" }
+  if (x != y) { return false }
+  return own_sum_eq(fns, i + 1, a, b)
+}
+
+// The least fixpoint. Each round can only flip a `"0"` to a `"1"`, and there are
+// finitely many slots, so the `slots + 1` bound below is reached only by a run
+// that has already converged (the loop exits on the first unchanged round).
+fn own_fixpoint(fns: List[FnOwn], sm: Map[Str, Str], it: Int, bound: Int) -> Map[Str, Str] {
+  if (it >= bound) { return sm }
+  let next = own_round(fns, 0, sm)
+  if (own_sum_eq(fns, 0, next, sm)) { return next }
+  return own_fixpoint(fns, next, it + 1, bound)
+}
+
+fn own_slot_count(fns: List[FnOwn], i: Int, acc: Int) -> Int {
+  if (i >= fns.length()) { return acc }
+  return own_slot_count(fns, i + 1, acc + fns[i].params.length())
+}
+
+fn own_seed(fns: List[FnOwn], i: Int, sm: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= fns.length()) { return sm }
+  return own_seed(fns, i + 1, sm.set(fns[i].name, own_zeros(fns[i].params.length(), "")))
+}
+
+fn retention_summary(fns: List[FnOwn]) -> Map[Str, Str] {
+  if (fns.length() == 0) { return Map.empty() }
+  return own_fixpoint(fns, own_seed(fns, 0, Map.empty()), 0,
+                      own_slot_count(fns, 0, 0) + 2)
+}
+
+// The module `fn` bodies the summary is computed over — the same declarations
+// `fns_walk` lowers into the `functions` section, read with the same walkers so
+// the two cannot disagree about which `fn` is which. The FIRST declaration of a
+// name wins, exactly as `_lower_fns` records it.
+fn own_has_fn(fns: List[FnOwn], n: Str, i: Int) -> Bool {
+  if (i >= fns.length()) { return false }
+  if (fns[i].name == n) { return true }
+  return own_has_fn(fns, n, i + 1)
+}
+
+fn own_collect_fn(ts: List[Token], i: Int, acc: List[FnOwn]) -> List[FnOwn] {
+  let nm = tkc(ts, i + 1).text
+  let ps = params_at(ts, fn_params_i(ts, i))
+  var reti = ps.i
+  if (atk(ts, ps.i, "arrow")) { reti = type_at(ts, ps.i + 1).i }
+  if (ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")) { reti += 2 }
+  if (!atk(ts, reti, "{")) { return acc }
+  let bend = close_brace(ts, reti)
+  if (bend == 0 - 1) { return acc }
+  if (own_has_fn(acc, nm, 0)) { return acc }
+  return acc.push({ name: nm, params: param_names(ps.ps),
+                    steps: own_scan(ts, reti + 1, bend - 1) })
+}
+
+fn own_fns_walk(ts: List[Token], i: Int, acc: List[FnOwn]) -> List[FnOwn] {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return own_fns_walk(ts, i + 1, acc) }
+  if (at_event(ts, i)) { return own_fns_walk(ts, event_decl_end(ts, i), acc) }
+  if (t.kind != "kw") { return own_fns_walk(ts, skip_line(ts, i), acc) }
+  if (t.text == "use") { return own_fns_walk(ts, skip_line(ts, i), acc) }
+  if (t.text == "test") {
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return own_fns_walk(ts, e, acc) }
+    return own_fns_walk(ts, skip_line(ts, i), acc)
+  }
+  if (t.text == "type") { return own_fns_walk(ts, type_decl_end(ts, i + 1), acc) }
+  if (t.text == "extern") { return own_fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc) }
+  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  if (t.text == "fn" || public_fn) {
+    let fi = public_fn ? i + 1 : i
+    return own_fns_walk(ts, p_fn(ts, fi, empty_prog()).i, own_collect_fn(ts, fi, acc))
+  }
+  if (at_pub_prefix(ts, i)) { return own_fns_walk(ts, i + 1, acc) }
+  if (t.text == "service") { return own_fns_walk(ts, p_service(ts, i, empty_prog()).i, acc) }
+  if (t.text == "component") { return own_fns_walk(ts, p_component(ts, i, empty_prog()).i, acc) }
+  return own_fns_walk(ts, skip_line(ts, i), acc)
+}
+
+fn own_program_summary(ts: List[Token]) -> Map[Str, Str] {
+  return retention_summary(own_fns_walk(ts, 0, []))
+}
+
 // The decided markers for one function body: `marks` (assign token -> level) and
 // `births` (let token -> birth-copy shape).
 type OwnMarks = { marks: Map[Str, Int], births: Map[Str, Str] }
 
-fn own_marks(ts: List[Token], lo: Int, hi: Int) -> OwnMarks {
+fn own_marks(ts: List[Token], lo: Int, hi: Int, sm: Map[Str, Str]) -> OwnMarks {
   let steps = own_scan(ts, lo, hi)
-  let r = own_stmts(steps, 0, own_alive(Map.empty()), wacc_fresh(Map.empty()))
+  let r = own_stmts(steps, 0, own_alive(Map.empty()), wacc_fresh(Map.empty()), sm)
   let marks = r.a.marks
   let copies = own_copies(steps, 0, marks, Map.empty())
   return { marks: marks, births: own_births(steps, 0, copies, Map.empty()) }
@@ -10637,7 +10984,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     var declared = ""
     if (atk(ts, j, ":")) { let tr = type_at(ts, j + 1)  declared = tr.ty  j = tr.i }
     if (!atk(ts, j, "=")) { return mk_one("", env, muts, hi) }
-    let r = lir_rhs(ts, j + 1, env)
+    let r = lir_rhs_exp(ts, j + 1, env, declared)
     if (!r.ok) { return mk_one("", env, muts, hi) }
     // read the rhs out of the step ONCE: both the type and the JSON are used
     // more than once below, and a repeated FIELD read is what the rust tier
@@ -10666,7 +11013,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     // an rvalue, not only an expression: `return { r | class = r.class_ }` is a
     // record-update in return position, and the shared parser's grammar has no
     // node for it.
-    let r = lir_rhs(ts, i + 1, env)
+    let r = lir_rhs_exp(ts, i + 1, env, ret)
     if (!r.ok) {
       return mk_one("{\"step\":\"return\",\"expr\":null}", env, muts, i + 1)
     }
@@ -10915,14 +11262,101 @@ fn lir_stmts(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
   return out
 }
 
-fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
+// ------------------------------------------------- type parameters (item 391)
+//
+// A fn's body sees its own type parameters MARKED (`T` -> `?T`, typecheck.py's
+// `_TPARAM`/`mark_tparams`): inside the body they are universally quantified
+// wildcards, while a one-letter NOMINAL type stays an ordinary checked type.
+// The marker is a checker-internal spelling — `render_type` strips it before any
+// diagnostic — but it is NOT stripped off an arm's `payload_type`, so a generic
+// `match opt { Some(v) => … }` over an `Opt[?T]` carries `"payload_type": "?T"`
+// in the reference IR and the self-host answered the author's bare `T`.
+//
+// The set is the explicit `fn id[T](…)` names, and — only when there is no
+// explicit list (roadmap 75(c): declared means declared) — the implicit
+// single-uppercase names that are not declared types.
+
+fn is_implicit_tparam(n: Str, declared: List[Bind]) -> Bool {
+  return n.length() == 1 && is_upper_name(n)
+      && tenv_get(declared, "decl ".concat(n)) == ""
+}
+
+// The explicit `[T, U]` list written between a fn's name and its parameters.
+fn explicit_tparams(ts: List[Token], i: Int) -> List[Str] {
+  var out: List[Str] = []
+  var j = i + 2
+  if (!atk(ts, j, "[")) { return out }
+  j += 1
+  while (j < ts.length() && !atk(ts, j, "]")) {
+    if (atk(ts, j, "ident") && !contains(out, tkc(ts, j).text)) {
+      out = out.push(tkc(ts, j).text)
+    }
+    j += 1
+  }
+  return out
+}
+
+// Every type parameter mentioned anywhere in one declared type. A head is only
+// considered when it carries NO arguments, exactly as the reference's `walk`
+// does, so `List[T]` contributes `T` and never `List`.
+fn collect_tparams_ty(ty: Str, declared: List[Bind], explicit: List[Str],
+                      implicit: Bool, acc: List[Str]) -> List[Str] {
+  if (ty == "") { return acc }
+  let p = ty_parse(ty)
+  if (p.args.length() == 0) {
+    if (contains(explicit, p.head)
+        || (implicit && is_implicit_tparam(p.head, declared))) {
+      return contains(acc, p.head) ? acc : acc.push(p.head)
+    }
+    return acc
+  }
+  var out = acc
+  var k = 0
+  while (k < p.args.length()) {
+    out = collect_tparams_ty(p.args[k], declared, explicit, implicit, out)
+    k += 1
+  }
+  return out
+}
+
+fn collect_tparams(ps: List[ParamN], ret: Str, declared: List[Bind],
+                   explicit: List[Str]) -> List[Str] {
+  let implicit = explicit.length() == 0
+  var out = explicit
+  var k = 0
+  while (k < ps.length()) {
+    out = collect_tparams_ty(taint_strip(ps[k].ty), declared, explicit, implicit, out)
+    k += 1
+  }
+  return collect_tparams_ty(ret, declared, explicit, implicit, out)
+}
+
+// `T` -> `?T` inside a declared type, recursing into arguments. A no-op (and a
+// VERBATIM return, never a parse/render round-trip) when the signature declares
+// no type parameter, which is what keeps every non-generic document
+// byte-identical.
+fn mark_tparams(ty: Str, tps: List[Str]) -> Str {
+  if (ty == "" || tps.length() == 0) { return ty }
+  let p = ty_parse(ty)
+  if (p.args.length() == 0) {
+    return contains(tps, p.head) ? "?".concat(p.head) : p.head
+  }
+  var out: List[Str] = []
+  var k = 0
+  while (k < p.args.length()) { out = out.push(mark_tparams(p.args[k], tps))  k += 1 }
+  return ty_render(p.head, out)
+}
+
+fn params_env(ps: List[ParamN], acc: List[Bind], tps: List[Str]) -> List[Bind] {
   var env = acc
   var i = 0
   while (i < ps.length()) {
     // stripped: past the declaration a `Secret[T]` parameter IS a `T` (the
     // qualifier is orthogonal to the base type), and the marking lives on in
     // the IR flag rather than in the type the body is checked against.
-    if (ps[i].ty != "") { env = tenv_put(env, ps[i].name, taint_strip(ps[i].ty)) }
+    if (ps[i].ty != "") {
+      env = tenv_put(env, ps[i].name, mark_tparams(taint_strip(ps[i].ty), tps))
+    }
     i += 1
   }
   return env
@@ -10930,29 +11364,34 @@ fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
 
 // One module `fn` -> its `functions` entry. Advances past the whole fn.
 fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
-                colored: List[Str]) -> LirFn {
+                colored: List[Str], sm: Map[Str, Str]) -> LirFn {
   let nm = tkc(ts, i + 1).text
   let ps = params_at(ts, fn_params_i(ts, i))
   var reti = ps.i
   var retJson = "null"
-  var retTy = ""
+  var retBare = ""
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
     // the qualifier is stripped for BOTH the IR and the body's type
     // environment: a `Secret[T]` is a `T` everywhere past the declaration, and
     // the marking survives only as the flag `ir_params_json` stamps.
     retJson = jstr(taint_strip(tr.ty))
-    retTy = taint_strip(tr.ty)
+    retBare = taint_strip(tr.ty)
     reti = tr.i
   }
+  // the body sees the MARKED signature (`_lower_fns`: `marked_params` /
+  // `marked_returns`); the IR keeps the author's spelling, which is why
+  // `retJson` above is taken off the bare type.
+  let tps = collect_tparams(ps.ps, retBare, cases, explicit_tparams(ts, i))
+  let retTy = mark_tparams(retBare, tps)
   let cache_pure = ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")
   if (cache_pure) { reti += 2 }
   if (!atk(ts, reti, "{")) { return { js: "", i: skip_line(ts, i) } }
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return { js: "", i: ts.length() } }
-  let om = own_marks(ts, reti + 1, bend - 1)
+  let om = own_marks(ts, reti + 1, bend - 1, sm)
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
-                         params_env(ps.ps, cases), [], retTy, om.marks, om.births)
+                         params_env(ps.ps, cases, tps), [], retTy, om.marks, om.births)
   let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
@@ -10965,17 +11404,17 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
 // Collect every top-level `fn` into the `functions` list; skip other decls
 // wholesale (a nested `fn` inside a component is not a module function).
 fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
-            colored: List[Str]) -> Str {
+            colored: List[Str], sm: Map[Str, Str]) -> Str {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored) }
-  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored) }
-  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
-  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
+  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm) }
+  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm) }
+  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm) }
+  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored) }
-    return fns_walk(ts, skip_line(ts, i), acc, cases, colored)
+    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored, sm) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -10984,23 +11423,23 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
   // top-level declaration head to this walker: `type Envelope = {` then
   // `component: Int,` on its own line minted a component named ":". Same span
   // `type_ctors` and `p_top` already read.
-    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored)
+    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm)
   }
-  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored) }
+  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm) }
   let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
   if (t.text == "fn" || public_fn) {
-    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn, colored)
+    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn, colored, sm)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
-    return fns_walk(ts, f.i, acc2, cases, colored)
+    return fns_walk(ts, f.i, acc2, cases, colored, sm)
   }
   // the remaining `pub` forms (`pub type` / `pub service` / `pub extern`) carry
   // nothing this walker reads, so the prefix is stepped over and the declaration
   // it heads dispatches above. `pub fn` cannot reach here: it is the one form
   // whose prefix IS data (the `"public"` stamp), handled with the `fn` branch.
-  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored) }
-  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored) }
-  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored) }
-  return fns_walk(ts, skip_line(ts, i), acc, cases, colored)
+  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm) }
+  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored, sm) }
+  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored, sm) }
+  return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm)
 }
 
 // ================================================================ externs IR
@@ -11114,6 +11553,22 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
     hasComp = true
     k = r.i
   }
+  // item 379: the typed `config { … }` block, the LAST declaration-level clause
+  // (parser.py's `extern_decl` reads it after the teardown/approval slots and
+  // before the `= @backend` bodies). It lowers to the SAME
+  // `[{name, type, default}]` shape a component's config carries, so the
+  // producer is `ir_config` verbatim. Without this the block's `{` ended the
+  // declaration here and the whole `externs` section dropped (`ok:false`), which
+  // is silent: the IR stays well formed, it just has no externs in it.
+  var cfgJson = ""
+  var hasCfg = false
+  if (atw(ts, k, "config") && atk(ts, k + 1, "{")) {
+    let ce = close_brace(ts, k + 1)
+    if (ce == 0 - 1) { return mk_irres(false, "") }
+    cfgJson = ir_config(ts, k, ce)
+    hasCfg = true
+    k = ce
+  }
   var bodies = ""
   var bcount = 0
   while (atk(ts, k, "=") && atk(ts, k + 1, "hostbody")) {
@@ -11175,6 +11630,9 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
   if ((cls == "witnessed" || cls == "emission") && hasCaps) {
     js = js.concat(", \"capabilities\": [").concat(capsJson).concat("]")
   }
+  // an EMPTY block writes no key: the reference gates the entry on a non-empty
+  // `decl.config`, so `config { }` stays byte-identical to no block at all.
+  if (hasCfg && cfgJson != "") { js = js.concat(", \"config\": [").concat(cfgJson).concat("]") }
   if (hasUndo) { js = js.concat(", \"undo\": ").concat(undoJson) }
   if (hasComp) { js = js.concat(", \"compensate\": ").concat(compJson) }
   return mk_irres(true, js.concat("}"))
@@ -11292,7 +11750,15 @@ fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
   let lineHi = type_decl_end(ts, i + 1)
   let nm = tkc(ts, i + 1).text
   var j = i + 2
-  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  // item 391: the declaration's own type PARAMETERS (`type Box[T] = …`). The
+  // reference carries the author's `[T, U]` list here verbatim
+  // (`_lower_type_decls`); this reader stepped over the bracket and always wrote
+  // `[]`, which no corpus document noticed because none declared a generic type.
+  var tparams = ""
+  if (atk(ts, j, "[")) {
+    tparams = str_list_json(explicit_tparams(ts, i))
+    j = skip_brackets(ts, j)
+  }
   if (!atk(ts, j, "=")) { return { js: "", i: lineHi } }
   j += 1
   if (atk(ts, j, "{")) {
@@ -11301,15 +11767,18 @@ fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
     let fields = ir_type_fields(ts, j + 1, bend - 1)
     // Reference declaration lowering treats an empty field table as a variant.
     if (fields == "") {
-      return { js: jstr(nm).concat(": {\"params\": [], \"kind\": \"variant\", \"cases\": []}"), i: bend }
+      return { js: jstr(nm).concat(": {\"params\": [").concat(tparams)
+                 .concat("], \"kind\": \"variant\", \"cases\": []}"), i: bend }
     }
-    let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"record\", \"fields\": {")
+    let js = jstr(nm).concat(": {\"params\": [").concat(tparams)
+      .concat("], \"kind\": \"record\", \"fields\": {")
       .concat(fields).concat("}}")
     return { js: js, i: bend }
   }
   if (is_variant_rhs(ts, j, lineHi)) {
     let cases = ir_type_cases(ts, j, lineHi)
-    let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"variant\", \"cases\": [")
+    let js = jstr(nm).concat(": {\"params\": [").concat(tparams)
+      .concat("], \"kind\": \"variant\", \"cases\": [")
       .concat(cases).concat("]}")
     return { js: js, i: lineHi }
   }
@@ -11455,7 +11924,7 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   // reads it rather than deriving a second one.
   let pg = parse_prog_ts(ts)
   let colored = async_colored(pg.fns, async_slots_map(pg.fns))
-  let fnsjs = fns_walk(ts, 0, "", case_binds(ts), colored)
+  let fnsjs = fns_walk(ts, 0, "", case_binds(ts), colored, own_program_summary(ts))
   let typesjs = types_walk(ts, 0, "")
   let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts))
   var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")

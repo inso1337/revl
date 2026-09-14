@@ -1,0 +1,43 @@
+// An extern `config { … }` block (item 379) in the `externs` section. The block
+// is the LAST declaration-level clause — after the teardown/approval slots and
+// before the `= @backend` bodies — and the self-host extern reader did not know
+// it: the block's `{` ended the declaration, `ir_extern` answered `ok:false`,
+// and a single unreadable extern drops the WHOLE `externs` section. That is
+// silent twice over. The IR stays well formed, it just has no externs in it, and
+// every OTHER extern in the file disappears with the one that failed.
+//
+// The block lowers to the same `[{name, type, default}]` shape a component's
+// config carries, which is the point of item 379: the emitter and the driver
+// reuse the component config path verbatim.
+//
+// NEGATIVE CONTROLS:
+//   * a plain extern with NO config block, declared FIRST, which must lower
+//     exactly as before and carry no `config` key — it is also what proves the
+//     section-wide drop is gone, since it was the innocent bystander;
+//   * an `undo`-carrying extern beside the config one, so the clause ORDER
+//     (teardown before config) is exercised rather than assumed;
+//   * a config field with no default next to fields that have one, so the
+//     `default: null` entry is pinned beside the literal ones.
+
+extern pure fn plain(body: Str) -> Str = @py { return body }
+
+extern pure fn author(body: Str) -> Str
+  config { model: Str = "opus", retries: Int = 3 }
+  = @py { return _revl_config["model"] + body }
+
+extern pure fn required_only(body: Str) -> Str
+  config { endpoint: Str }
+  = @py { return _revl_config["endpoint"] + body }
+
+extern pure fn several(body: Str) -> Str
+  config { endpoint: Str, attempts: Int = 1, ratio: Float = 0.5, on: Bool = true }
+  = @py { return body }
+
+extern acquire fn open_sink(name: Str) -> SinkHandle
+  undo close_sink(result)
+  config { root: Str = "/tmp" }
+  = @py { return name }
+
+extern pure fn close_sink(h: SinkHandle) -> Str = @py { return "" }
+
+fn go(x: Str) -> Str { return author(x) }

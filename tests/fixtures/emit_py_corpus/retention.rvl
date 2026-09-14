@@ -1,0 +1,130 @@
+// The whole-program RETENTION SUMMARY — item 445 (b), the follow-on the
+// per-body ownership analysis was landed without.
+//
+// An intraprocedural analysis must assume a call KEEPS what it is handed, and
+// that assumption is what left `stdlib/list.rvl`'s `list_dedup` quadratic:
+// `if (!contains(out, x)) { out = out.push(x) }` hands `out` to a call one
+// statement before the write, and `contains` demonstrably keeps nothing — it
+// walks the list and answers a `Bool`. So one whole-program question is answered
+// first, as a least fixpoint over the call graph: does this function retain
+// parameter i?
+//
+// NEGATIVE CONTROLS — the whole value of this document is that the marker
+// appears ONLY where the summary proves it, so every marked loop has an
+// unmarked twin one call away:
+//   * `guarded_by_keeper` is `guarded_by_reader` with the probe swapped for one
+//     that STORES its parameter. Same loop, same shape, no marker;
+//   * `handed_back` returns its parameter, which is an alias by any definition
+//     even though nothing else in the body touches it — the one rule that
+//     differs from the per-body walk, where a `return` needs no rule at all;
+//   * `walked` takes its parameter as a `for` ITERABLE and keeps nothing: the
+//     other rule that differs, since the iterator dies with the call;
+//   * `even_rank` / `odd_rank` are mutually recursive and retain nothing, which
+//     is what a least fixpoint answers and a one-pass approximation cannot;
+//   * `through_a_keeper` passes its parameter along to a retaining callee, so
+//     retention propagates a step;
+//   * the unguarded `push` loop, which was already marked before any of this and
+//     must stay marked.
+
+// reads and answers a Bool: retains neither parameter
+fn reader_contains(xs: List[Str], x: Str) -> Bool {
+  for (e of xs) { if (e == x) { return true } }
+  return false
+}
+
+// puts the parameter somewhere that outlives the call: retains it
+fn keeper_contains(xs: List[Str], x: Str) -> Bool {
+  var held: List[List[Str]] = []
+  held = held.push(xs)
+  return held.length() > 0
+}
+
+// hands the parameter straight back to the caller
+fn handed_back(xs: List[Str]) -> List[Str] {
+  return xs
+}
+
+// iterates the parameter and keeps nothing
+fn walked(xs: List[Str]) -> Int {
+  var n = 0
+  for (e of xs) { n += 1 }
+  return n
+}
+
+// passes it along to something that keeps it
+fn through_a_keeper(xs: List[Str], x: Str) -> Bool {
+  return keeper_contains(xs, x)
+}
+
+// mutual recursion that retains nothing
+fn even_rank(xs: List[Str], n: Int) -> Bool {
+  if (n <= 0) { return true }
+  return odd_rank(xs, n - 1)
+}
+
+fn odd_rank(xs: List[Str], n: Int) -> Bool {
+  if (n <= 0) { return false }
+  return even_rank(xs, n - 1)
+}
+
+// THE SHAPE: the accumulator is handed to a call one statement before the write
+fn guarded_by_reader(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) {
+    if (!reader_contains(out, x)) { out = out.push(x) }
+  }
+  return out
+}
+
+// the same loop with a retaining probe: no marker
+fn guarded_by_keeper(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) {
+    if (!keeper_contains(out, x)) { out = out.push(x) }
+  }
+  return out
+}
+
+// the same loop through a transitive keeper: no marker either
+fn guarded_transitively(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) {
+    if (!through_a_keeper(out, x)) { out = out.push(x) }
+  }
+  return out
+}
+
+// the accumulator handed to a callee that returns it: still an escape
+fn guarded_by_handback(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) {
+    let seen = handed_back(out)
+    out = out.push(x)
+  }
+  return out
+}
+
+// the accumulator only ITERATED by a callee: not an escape
+fn guarded_by_walk(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) {
+    if (walked(out) < 100) { out = out.push(x) }
+  }
+  return out
+}
+
+// the plain unguarded loop, marked before any of this and still marked
+fn unguarded(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) { out = out.push(x) }
+  return out
+}
+
+// a Map accumulator, whose write method is `set` rather than `push`
+fn tallied(xs: List[Str]) -> Map[Str, Int] {
+  var seen: Map[Str, Int] = Map.empty()
+  for (x of xs) {
+    if (!reader_contains(xs, x)) { seen = seen.set(x, 1) }
+  }
+  return seen
+}
