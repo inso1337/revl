@@ -258,6 +258,9 @@ fn exact_method(op: Str) -> Str {
 }
 fn is_addsubmul(op: Str) -> Bool { return op == "+" || op == "-" || op == "*" }
 fn is_int_operand(opnd: Str) -> Bool { return opnd == "Int" || opnd == "Int32" }
+fn is_relational(op: Str) -> Bool {
+  return op == "<" || op == ">" || op == "<=" || op == ">="
+}
 
 // ---------------------------------------------------------------- lowering ctx
 // The names and type layouts visible to the expression emitters (`_V3Ctx`,
@@ -482,6 +485,14 @@ fn render_bin(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   }
   if (is_addsubmul(op) && is_int_operand(opnd)) {
     return { text: `Math.${exact_method(op)}(${left}, ${right})`, counter: c }
+  }
+  // Java has NO relational operator on `String`: `(a < b)` reached javac as
+  // "bad operand types for binary operator '<'", so a document that ordered
+  // two Str values compiled on five tiers and would not build on this one.
+  // `revlStrCmp` is the code-point order revl promises (docs/strings.md);
+  // String.compareTo would be UTF-16 code-unit order (item 458).
+  if (is_relational(op) && opnd == "Str") {
+    return { text: `(revlStrCmp(${left}, ${right}) ${op} 0)`, counter: c }
   }
   let opr = java_bin_ops(op)
   if (opr == "") { return { text: `<<UNSUPPORTED-BIN:${op}>>`, counter: c } }
@@ -1537,7 +1548,10 @@ fn map_runtime() -> List[Str] {
   o = o.push("    // long (revl Int); `keys` yields the keys in ascending canonical Str")
   o = o.push("    // (code-point) order — String.compareTo is UTF-16 code-unit order, so")
   o = o.push("    // the inline comparator walks code points to stay canonical past")
-  o = o.push("    // U+FFFF. Read-only queries, no host trace.")
+  o = o.push("    // U+FFFF. The tie-break is the SHORTER key first: `Boolean.compare(i")
+  o = o.push("    // >= a.length(), j >= b.length())` answers 1 for a and ab, and sorted")
+  o = o.push("    // a key after its own extension (item 458).")
+  o = o.push("    // Read-only queries, no host trace.")
   o = o.push("    public long size() {")
   o = o.push("        return values.size();")
   o = o.push("    }")
@@ -1550,7 +1564,7 @@ fn map_runtime() -> List[Str] {
   o = o.push("                if (ca != cb) { return Integer.compare(ca, cb); }")
   o = o.push("                i += Character.charCount(ca); j += Character.charCount(cb);")
   o = o.push("            }")
-  o = o.push("            return Boolean.compare(i >= a.length(), j >= b.length());")
+  o = o.push("            return Boolean.compare(i < a.length(), j < b.length());")
   o = o.push("        });")
   o = o.push("        return java.util.List.copyOf(ks);")
   o = o.push("    }")

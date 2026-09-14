@@ -887,13 +887,15 @@ AGREED_549 = {
 #     (tests/test_list_index_bounds_938.py), so what stays open is exactly the
 #     index no static analysis can bound — `xs[i]`, `xs[f()]` — where the
 #     bounds are a runtime property by construction.
-#   - `Map.keys()` order with astral keys: ts sorts by UTF-16 code unit, so the
-#     divergence only shows at a BMP-vs-astral boundary where unit order and
-#     code-point order actually differ (e.g. U+FFFF vs U+10000); a lone emoji
-#     key does not expose it, so it needs a hand-built boundary fixture.
-#   - `Str < Str` above the BMP: java does not compile `<` on String at all and
-#     ts compares by UTF-16 unit; `test_str_ordering_agrees_everywhere` already
-#     covers the ASCII case where all tiers agree.
+# ~~`Map.keys()` order with astral keys~~ and ~~`Str < Str` above the BMP~~ are
+# **CLOSED** (item 458). Both needed the hand-built U+FFFF / U+10000 boundary
+# fixture this note asked for, and building it found a third fault neither line
+# predicted — java's `Map.keys()` tie-break sorted a key AFTER its own
+# extension, so `["ab", "a", "b"]` came back in that order on ASCII input.
+# A relational `bin` over two `Str` now carries `operands: "Str"`, ts and java
+# route through a code-point `revlStrCmp`, and both `keys()` sorts reuse it.
+# Asserted in tests/test_458_str_ordering.py (executed on py/ts/go, and on
+# rust/java under REVL_CROSS_TIER_SLOW).
 # FIXED (asserted to AGREE in AGREED_549 above): `split("")` on an astral
 # scalar (ts/java split by UTF-16 units, now code points), `"+7".to_int()`
 # (rust accepted the leading `+`, now `None`), `div_trunc(Int.MIN, -1)`
@@ -1118,7 +1120,13 @@ def test_wasm_has_no_map_to_index():
 def test_str_ordering_agrees_everywhere():
     """Not every operator diverges — `<` on Str is lexicographic by code point
     on all three, including the case boundary. Recorded so the divergence list
-    above is not mistaken for 'arithmetic is broken generally'."""
+    above is not mistaken for 'arithmetic is broken generally'.
+
+    THREE TIERS, and that was the hole: this walks FAST_TIERS, so java's column
+    was never measured, and java did not compile `<` on a String AT ALL — not
+    only above the BMP, for `"a" < "b"`. The full matrix, the supplementary
+    plane and both `Map.keys()` orders live in tests/test_458_str_ordering.py.
+    """
     source = 'test "a" { assert "a" < "b" }\ntest "b" { assert "Z" < "a" }'
     for tier in FAST_TIERS:
         status, message = _run(tier, source)
