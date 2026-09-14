@@ -382,9 +382,125 @@ component StoreB provides kv: Kv {
 }
 """
 
+# The qualified-test fixtures below share a shape: a declaration the gate reads
+# (`_QT_HEAD`), then the test block under test, then a declaration whose verdict
+# the gate must still reach (`_QT_TAIL` — it emits through a required key, so a
+# tail the walk never parsed is silently admitted and the pairing in
+# REJECTED_PROGRAMS catches it).
+_QT_HEAD = """service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+component PgDatabase provides db: Database {
+  config { url: Str, pool_size: Int = 10 }
+  let pool = effect Pool.open(config.url, config.pool_size) undo pool.close()
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}
+"""
+
+_QT_TAIL = """component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute("INSERT INTO cache_log VALUES (1)")
+    }
+  }
+}
+"""
+
+
 # Programs the reference admits — the gate must admit them too. Kept
 # reference-clean (no out-of-slice defect), so "" is the only agreement.
 ACCEPTED_PROGRAMS = [
+    # ---- the qualified test heads (item 391) -------------------------------
+    # `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
+    # (roadmap item 37) are CONTEXTUAL keywords qualifying `test`. They lex as
+    # plain identifiers, and `p_top` refused every non-keyword head, so a
+    # document holding one failed WHOLE with `BAD|unexpected token at top
+    # level`: 20 of them in the census corpus, every `examples/lifecycle_*.rvl`
+    # among them. The refusal also took the declarations AFTER the block with
+    # it, which is what the `_QT_TAIL` pairing pins.
+    ("lifecycle test between two components",
+     _QT_HEAD + '''
+lifecycle test "cache reverts cleanly" {
+  load PgDatabase with { url: "postgres://primary:5432/app" }
+  unload PgDatabase
+  assert no_residue
+}
+''' + _QT_TAIL),
+    ("prop test between two components",
+     _QT_HEAD + '''
+prop test "addition commutes" (a: Int, b: Int) {
+  assert a + b == b + a
+}
+''' + _QT_TAIL),
+    ("fault test between two components",
+     _QT_HEAD + '''
+fault test "the pool closes" for PgDatabase {
+  fail at step 1
+  assert no residue
+}
+''' + _QT_TAIL),
+    # the `with { ... }` config slot is the one arm whose body brace is NOT the
+    # first `{` after the header, so an end-scan that took the first brace would
+    # stop inside the config block and resume mid-test
+    ("fault test with a with-block between two components",
+     _QT_HEAD + '''
+fault test "the pool closes" for PgDatabase with { url: "postgres://p:1/a" } {
+  fail at step 1
+  assert no residue
+}
+''' + _QT_TAIL),
+    # the contextual-keyword control: none of the three words is a lexer
+    # keyword, so all three stay usable as ordinary module-fn names. This one
+    # passes against the unported gate too — that is what it is for.
+    ("lifecycle, prop and fault stay ordinary identifiers", '''
+fn lifecycle(x: Int) -> Int { return x }
+fn prop(x: Int) -> Int { return x }
+fn fault(x: Int) -> Int { return x }
+service Kv { fn get(k: Str) -> Str }
+component Store provides kv: Kv {
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(k) = m.get(lifecycle(prop(fault(1)))) }
+}
+'''),
+    # ---- the timer body's own in-flight window (item 170) ------------------
+    # A timer body reaching an async op is ADMITTED and coloured async: the
+    # firing opens an `Async[T]` window the runtime awaits on the tick and
+    # cancels on unload. The reference expresses that by keeping the body in a
+    # `timer` step and pruning that step from both A1 surfaces; this gate reads
+    # a timer body out INLINE, so without the `inTimer` mark it applied rule 1
+    # and refused `examples/async_timer.rvl`, which the reference admits.
+    ("timer body reaching an async operation", '''
+service Counter {
+  fn count() -> Int
+  emission async fn tick()
+}
+component AsyncCounter provides counter: Counter {
+  let store = effect Map.new() undo store.drop()
+  provide counter {
+    fn count() = store.size()
+    async fn tick() {
+      let key = "tick"
+      effect store.insert(key, "fired")
+      undo   store.remove(key)
+    }
+  }
+}
+component Heartbeat requires counter: Counter {
+  every 10s { emit counter.tick() }
+}
+'''),
     # ---- the provide-method return annotation (item 391) -------------------
     # A provide method may RESTATE the return type its service already declares.
     # The reference parses it and leaves any mismatch to the type layer
@@ -958,6 +1074,81 @@ extern acquire fn f() undo g(1) = @py { return 1 }
 # reference's own text is the ground truth. Several are the documented
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
+    # ---- the qualified test heads, negative controls (item 391) ------------
+    # Stepping over a test block must land on the NEXT declaration, not past
+    # it: each of these puts a real refusal in the tail, so a step that
+    # overshoots turns the program silently clean.
+    ("an undeclared requirement after a lifecycle test", _QT_HEAD + '''
+lifecycle test "cache reverts cleanly" {
+  load PgDatabase with { url: "postgres://primary:5432/app" }
+  unload PgDatabase
+  assert no_residue
+}
+component UserCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute("INSERT INTO cache_log VALUES (1)")
+    }
+  }
+}
+''', "G1"),
+    ("an unmarked emission after a prop test", _QT_HEAD + '''
+prop test "addition commutes" (a: Int, b: Int) {
+  assert a + b == b + a
+}
+component Auditor requires db: Database {
+  effect db.execute("CREATE TABLE audit (id INT)")
+  undo   db.execute("DROP TABLE audit")
+}
+''', "G4"),
+    # ---- the timer A1 prune, negative controls (item 170) ------------------
+    # The prune is per-STATEMENT and only over the A1 pairing. An ordinary
+    # activation-body `emit` reaching the same async op keeps its rule-1
+    # refusal, and a timer body is still walked for every other verdict.
+    ("a non-timer emit reaching an async op is still A1", '''
+service Counter {
+  fn count() -> Int
+  emission async fn tick()
+}
+component AsyncCounter provides counter: Counter {
+  let store = effect Map.new() undo store.drop()
+  provide counter {
+    fn count() = store.size()
+    async fn tick() {
+      let key = "tick"
+      effect store.insert(key, "fired")
+      undo   store.remove(key)
+    }
+  }
+}
+component Eager requires counter: Counter {
+  emit counter.tick()
+}
+''', "A1"),
+    ("a timer body reaching an undeclared key is still G1", '''
+service Counter {
+  fn count() -> Int
+  emission fn tick()
+}
+component SyncCounter provides counter: Counter {
+  let store = effect Map.new() undo store.drop()
+  provide counter {
+    fn count() = store.size()
+    fn tick() {
+      let key = "tick"
+      effect store.insert(key, "fired")
+      undo   store.remove(key)
+    }
+  }
+}
+component Heartbeat requires counter: Counter {
+  every 10s { emit ghost.tick() }
+}
+''', "G1"),
     # item 350: two environment contracts cannot both be the exhaustive list of
     # what the host must inject, and an admission check against "the" contract
     # would silently check only one of them — so the link refuses the second.

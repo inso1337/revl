@@ -296,7 +296,15 @@ type SvcD = { name: Str, methods: List[MSig] }
 // `p_stmts` off the first token of the statement's line-run. It is the anchor a
 // component BODY refusal reports (`refusal_line`), so the collecting sink orders
 // an inline G4/A1/G1 by the same line the reference's diagnostic carries.
-type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int }
+// `inTimer` marks a statement READ OUT of an `every`/`after` timer body. The
+// reference keeps a timer body in its own `timer` step and PRUNES that step
+// from both A1 surfaces (lower.py `_async_reached_outside_provide` prunes
+// `step == "timer"`, and `_lower_timer_step` never calls
+// `_admit_effect_async`/`_admit_emit_async` over the body); this walk inlines
+// the body into setup instead, so the marker is what carries the same prune.
+// Every OTHER verdict — G1, G4, the G8 audit reach — reads a timer body exactly
+// as it reads the statements around it, which is the reference's rule too.
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
@@ -448,12 +456,75 @@ fn event_decl_end(ts: List[Token], i: Int) -> Int {
   return e == 0 - 1 ? i + 1 : e
 }
 
+// `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
+// (roadmap item 37) are CONTEXTUAL keywords that QUALIFY `test`. Each heads a
+// top-level declaration only in the shape `<word> test`, which is why none of
+// them is in either lexer's KEYWORDS table and why the gate crate's frontier
+// needs no sync: a program that uses `lifecycle`, `fault` or `prop` as an
+// ordinary identifier is untouched by this, exactly as `boot` and `event` are
+// untouched by theirs.
+//
+// Without this the gate answered `BAD|unexpected token at top level` on every
+// one of them, because the qualifier lexes as an `ident` and `p_top` refuses
+// every non-keyword head. That is a FALSE REFUSAL of 20 documents the reference
+// admits, `examples/lifecycle_*.rvl`, `examples/prop_test.rvl` and
+// `examples/uxprobe2_fault.rvl` among them — the same defect shape `at_event`
+// closed, one qualifier over.
+fn at_qual_test(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (t.kind != "ident") { return false }
+  if (!(t.text == "lifecycle" || t.text == "fault" || t.text == "prop")) {
+    return false
+  }
+  return atw(ts, i + 1, "test")
+}
+
+// Index just past the `}` closing a qualified test block at `i`, or -1 when the
+// declaration is not in that shape (the reference raises there; this gate
+// carries no verdict for a malformed test, so the caller lets the ordinary
+// top-level refusal stand rather than inventing one).
+//
+// The three qualifiers differ only between the name and the body brace, and the
+// steps below are the reference's own (parser.py `test_decl`, `prop_test_decl`,
+// `fault_test_decl`):
+//
+//   lifecycle test STR                                    '{' … '}'
+//   prop      test STR '(' params ')'                     '{' … '}'
+//   fault     test STR 'for' IDENT ['with' '{' … '}']     '{' … '}'
+//
+// A test block of any qualifier is a checker-stage concern that admission reads
+// nothing out of, so — like a plain `test` — the only thing done with one is to
+// step over it WHOLE, which is what keeps its body out of top-level dispatch.
+fn qual_test_end(ts: List[Token], i: Int) -> Int {
+  if (!at_qual_test(ts, i)) { return 0 - 1 }
+  if (!atk(ts, i + 2, "string")) { return 0 - 1 }
+  let word = tkc(ts, i).text
+  var j = i + 3
+  if (word == "prop") {
+    if (!atk(ts, j, "(")) { return 0 - 1 }
+    j = close_paren(ts, j)
+    if (j == 0 - 1) { return 0 - 1 }
+  }
+  if (word == "fault") {
+    if (!(atw(ts, j, "for") && atk(ts, j + 1, "ident"))) { return 0 - 1 }
+    j += 2
+    if (atw(ts, j, "with")) {
+      if (!atk(ts, j + 1, "{")) { return 0 - 1 }
+      j = close_brace(ts, j + 1)
+      if (j == 0 - 1) { return 0 - 1 }
+    }
+  }
+  if (!atk(ts, j, "{")) { return 0 - 1 }
+  return close_brace(ts, j)
+}
+
 // Whether a token starts a TOP-LEVEL declaration — where a `type` declaration's
 // token span ends. Kept next to `type_ctors`, its only reader.
 fn at_top_decl(ts: List[Token], i: Int) -> Bool {
   return atw(ts, i, "type") || atw(ts, i, "fn") || atw(ts, i, "extern")
       || atw(ts, i, "service") || atw(ts, i, "component") || atw(ts, i, "use")
       || atw(ts, i, "test") || at_boot(ts, i) || at_event(ts, i)
+      || at_qual_test(ts, i)
 }
 
 // `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
@@ -989,11 +1060,13 @@ fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
 // yields two statements.
 
 fn mkstmt(kind: Str, e: Expr) -> Stmt {
-  return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false, line: 0 }
+  return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false, line: 0,
+           inTimer: false }
 }
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
-  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false, line: 0 }
+  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false, line: 0,
+           inTimer: false }
 }
 
 // A forward `effect`/`emit`/`undo`/`compensate` statement carrying its item-131
@@ -1001,7 +1074,8 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 // the marker belongs to the acquisition/emission it pairs with, not the
 // position after it, so per-statement pairing can read it directly.
 fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
-  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0 }
+  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0,
+           inTimer: false }
 }
 
 // A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
@@ -1010,7 +1084,7 @@ fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
   return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target,
-           awaited: false, line: 0 }
+           awaited: false, line: 0, inTimer: false }
 }
 
 // An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
@@ -1020,7 +1094,7 @@ fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
 // composes); the post-parse `spawn_form_verdict` reports it.
 fn mkstmt_spawn_unbound(target: Str) -> Stmt {
   return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target,
-           awaited: false, line: 0 }
+           awaited: false, line: 0, inTimer: false }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -1202,7 +1276,7 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     if (b < hi) {
       let bend = close_brace(ts, b)
       if (bend != 0 - 1) {
-        return mk_srun(p_stmts(ts, b + 1, bend - 1, []), bend)
+        return mk_srun(mark_timer(p_stmts(ts, b + 1, bend - 1, [])), bend)
       }
     }
   }
@@ -1245,7 +1319,31 @@ fn stamp_lines(ss: List[Stmt], ln: Int) -> List[Stmt] {
   while (i < ss.length()) {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
-                     spawnTarget: s.spawnTarget, awaited: s.awaited, line: ln })
+                     spawnTarget: s.spawnTarget, awaited: s.awaited, line: ln,
+                     inTimer: s.inTimer })
+    i += 1
+  }
+  return out
+}
+
+// Stamp `inTimer` on every statement read out of an `every`/`after` body. The
+// reference keeps those statements inside a `timer` step, which both A1
+// surfaces prune (lower.py `_async_reached_outside_provide` returns on
+// `step == "timer"`, and `_lower_timer_step` runs no `_admit_*_async` over the
+// body); this walk inlines them into setup, so without the mark the gate
+// applied to a timer body the two rules the reference deliberately does not.
+// Item 170 is the reason the reference does not: a timer body reaching an async
+// op opens an `Async[T]` in-flight window (item 106) the runtime awaits on the
+// tick and cancels on unload, so it is ADMITTED and coloured async rather than
+// refused.
+fn mark_timer(ss: List[Stmt]) -> List[Stmt] {
+  var out: List[Stmt] = []
+  var i = 0
+  while (i < ss.length()) {
+    let s = ss[i]
+    out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
+                     spawnTarget: s.spawnTarget, awaited: s.awaited,
+                     line: s.line, inTimer: true })
     i += 1
   }
   return out
@@ -2145,6 +2243,13 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   // a typed `event` declaration contributes an ordinary record type and a
   // contract table; admission reads neither, so it is stepped over WHOLE.
   if (at_event(ts, i)) { return p_top(ts, event_decl_end(ts, i), pg) }
+  // a `lifecycle` / `prop` / `fault` qualified test block, stepped over whole.
+  // A malformed one falls through to the refusal below on purpose: the
+  // reference refuses it too, out of this slice.
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return p_top(ts, qe, pg) }
+  }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
@@ -3391,6 +3496,9 @@ fn setup_async_reach(ss: List[Stmt], i: Int, cx: Ctx, skipTear: Bool,
                      acc: Ac) -> Ac {
   if (i >= ss.length()) { return acc }
   let s = ss[i]
+  // `step == "timer"` is one of the three the reference's prune returns on,
+  // beside `provide` and `await` (item 170). Inlined here, so read off the mark.
+  if (s.inTimer) { return setup_async_reach(ss, i + 1, cx, false, acc) }
   if (s.kind == "await") { return setup_async_reach(ss, i + 1, cx, false, acc) }
   if (s.kind == "effect" || s.kind == "emit") {
     if (s.awaited || s.spawnTarget != "") {
@@ -3435,6 +3543,12 @@ fn setup_async_verdict(comp: CompD, ss: List[Stmt], scx: Ctx, cx: Ctx) -> Str {
 //     suspension — teardown is synchronous on every tier.
 fn stmt_a1_check(comp: CompD, s: Stmt, cx: Ctx) -> Str {
   if (s.spawnTarget != "") { return "" }
+  // a timer body carries its own in-flight window (item 170): the reference
+  // never runs `_admit_effect_async`/`_admit_emit_async` over one, so neither
+  // does this. Without the prune `every 10s { emit counter.tick() }` reaching an
+  // `emission async fn` was refused under rule 1 — a FALSE REFUSAL of
+  // `examples/async_timer.rvl`, which the reference admits and colours async.
+  if (s.inTimer) { return "" }
   if (s.kind == "effect") {
     let na = walk_one_stmt(s, cx, empty_ac())
     let hasReach = na.aops.length() > 0 || na.areach.length() > 0

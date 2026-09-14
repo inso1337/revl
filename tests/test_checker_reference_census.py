@@ -100,6 +100,28 @@ def test_no_admitted_document_fails_at_the_provide_block_parse(census, verdicts)
         "at the parse:\n  " + "\n  ".join(failed))
 
 
+def test_no_admitted_document_fails_at_the_top_level_parse(census, verdicts):
+    """The second one-directional invariant on this surface.
+
+    `p_top` refuses a head it cannot read, and a head it cannot read is a whole
+    document it never checked. It had no case for the `pub` visibility prefix,
+    for a named `test` block (it skipped the header LINE, then walked the body's
+    statements as top-level declarations), for the `lifecycle`/`prop`/`fault`
+    qualifiers on `test`, for a `boot component`, or for a typed `event`
+    declaration — every one of which the reference's `_parse_program` accepts.
+
+    Measured before those heads were ported: 75 of the documents the reference
+    admits were refused here, 44 of them by `pub` alone. Like the provide-block
+    invariant above, this is one-directional, needs no re-recording, and the
+    only way to red it is to reintroduce the gap."""
+    failed = sorted(
+        f"{name}: {got}" for name, (want, got) in verdicts.items()
+        if want == "" and got.startswith(census.TOP_LEVEL_REFUSALS))
+    assert not failed, (
+        "the reference admits these and the checker fails their top-level "
+        "parse:\n  " + "\n  ".join(failed))
+
+
 # The documents whose real verdict the provide-block parse refusal was HIDING.
 #
 # Every one is refused by the reference and drew a `(bad) bad provide block in
@@ -156,6 +178,50 @@ UNMASKED_UNDECIDED = {
     # unparseable, never for being wrong --
     "examples/rejections/t3_config_default_type.rvl",
     "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
+
+    # ======================================================================
+    # The second unmasking, by the TOP-LEVEL declaration heads (item 391).
+    # 22 more documents moved out of a masked `msg-mismatch/parse` and into a
+    # plain no-objection. Same shape as above: the checker never decided any of
+    # them, and a parse `(bad)` had been standing where its verdict belongs.
+    # ======================================================================
+
+    # -- a cross-file `use`: the reference needs real source paths (or
+    # `modules=`) and the census hands it one document's text. Out of this
+    # slice by construction, and out of any single-document slice --
+    "backends/go/scenarios/emitted/jsonwire/jsonwire.rvl",
+    "backends/rust/scenarios/jsonwire.rvl",
+    "examples/rejections/v2_use_private.rvl",
+    "selfhost/compile.rvl",
+    "selfhost/parser.rvl",
+    "selfhost/types.rvl",
+    "stdlib/auth.rvl",
+    "stdlib/framing.rvl",
+    "stdlib/template.rvl",
+    "tests/fixtures/v2_math_main.rvl",
+
+    # -- a diagnostic raised INSIDE a test body: which components are loaded,
+    # what a `call` names, which assertions exist, and which statements a pure
+    # `test` may hold. The checker steps a test block over WHOLE (a runner
+    # concern it reads nothing out of), so it has no verdict for any of them --
+    "dogfood/scratch-plain-test.rvl",
+    "examples/rejections/lifecycle_config_unknown_field.rvl",
+    "examples/rejections/lifecycle_double_load.rvl",
+    "examples/rejections/lifecycle_no_swap.rvl",
+    "examples/rejections/lifecycle_stmt_in_pure_test.rvl",
+    "examples/rejections/lifecycle_unknown_assertion.rvl",
+    "examples/rejections/lifecycle_unknown_component.rvl",
+    "examples/rejections/lifecycle_unknown_operation.rvl",
+
+    # -- a field read on an erased `Any`: the type layer past this slice's
+    # expression checker, the same family `t3`/`t7` above sit in --
+    "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
+    "examples/rejections/t29_field_read_on_any.rvl",
+    "examples/rejections/t30_field_read_on_any_provide_method.rvl",
+
+    # -- extern host-import provenance: a user-origin `@py` body importing a
+    # backend module. Nothing in this slice reads extern bodies --
+    "stdlib/shell.rvl",
 }
 
 

@@ -102,6 +102,17 @@ from gate_reference_census import (  # noqa: E402
 PARSE_PREFIX = "(bad) "
 PROVIDE_BLOCK_REFUSAL = "(bad) bad provide block in component "
 
+# The two refusals `p_top` issues when it cannot read a top-level declaration
+# head. Both mean "this document was never checked", and both used to fire on
+# shapes the reference's own `_parse_program` accepts: the `pub` visibility
+# prefix, a named `test` block, the `lifecycle`/`prop`/`fault` qualifiers on
+# `test`, a `boot component` and a typed `event` declaration. 75 documents the
+# reference ADMITS were refused this way before those heads were ported.
+TOP_LEVEL_REFUSALS = (
+    "(bad) unexpected token at top level",
+    "(bad) unexpected declaration",
+)
+
 
 def build_check_service_src():
     """`selfhost/checker.rvl`'s `check_service_src`, emitted to python and run.

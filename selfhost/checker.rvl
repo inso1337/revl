@@ -546,6 +546,163 @@ fn close_brace(ts: List[Token], i: Int) -> Int {
   return 0 - 1
 }
 
+// Index just past the `)` matching the `(` at i; -1 when unbalanced.
+fn close_paren(ts: List[Token], i: Int) -> Int {
+  var depth = 0
+  var j = i
+  while (j < ts.length()) {
+    if (atk(ts, j, "(")) { depth += 1 }
+    else {
+      if (atk(ts, j, ")")) {
+        depth -= 1
+        if (depth == 0) { return j + 1 }
+      }
+    }
+    j += 1
+  }
+  return 0 - 1
+}
+
+// ------------------------------------------------- the top-level declaration
+// heads this checker does not decide but MUST step over
+//
+// Every one of these is a shape the reference's `_parse_program` accepts and
+// `p_top` had no case for, so the checker answered `(bad) unexpected token at
+// top level` or `(bad) unexpected declaration` and the WHOLE document failed at
+// the parse stage — never reaching the service boundaries, the checkable core
+// of G4 or the call-site argument types this slice exists to decide. A
+// parse-stage refusal is the worst place for a gap to hide, because it reads as
+// agreement: the surface refuses, a verdict-direction comparison says "both
+// refused", and nothing was checked.
+//
+// `selfhost/lower.rvl` closed the same four gaps on the OTHER verdict surface
+// (`at_boot`, `at_event`/`event_decl_end`, `at_pub_prefix`, `test_block_end`)
+// and the ports below are those, verbatim in behaviour. Nothing here carries a
+// verdict — a boot marker, an event's field table, a visibility prefix and a
+// test body are all outside this slice — so each one is a STEP, and the point
+// of the step is that the declaration after it is reached.
+
+// item 350: `boot` is a CONTEXTUAL keyword, recognised only immediately before
+// `component`. It marks the composition's environment contract arrival point,
+// which carries no service-boundary verdict, so the walk steps the token and
+// proceeds at the `component` it heads.
+fn at_boot(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  return t.kind == "ident" && t.text == "boot" && atw(ts, i + 1, "component")
+}
+
+// item 130 Slice 5: `event <Name>(key: <field>) { <fields> }`, a CONTEXTUAL
+// keyword on the `boot` discipline. The reference recognises the head only in
+// the shape `event IDENT (` / `event IDENT {`, so `emission fn log(event: Str)`
+// keeps parsing and neither lexer's KEYWORDS table needs the word; recognised
+// on exactly those three tokens here for the same reason.
+fn at_event(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (!(t.kind == "ident" && t.text == "event")) { return false }
+  if (!atk(ts, i + 1, "ident")) { return false }
+  return atk(ts, i + 2, "(") || atk(ts, i + 2, "{")
+}
+
+// Index just past the `}` closing the field body of the `event` declaration at
+// `i`, or `i + 1` when the declaration is malformed (the reference raises
+// there; this slice carries no verdict for the shape, so it steps one token and
+// lets the ordinary top-level dispatch resume).
+fn event_decl_end(ts: List[Token], i: Int) -> Int {
+  var j = i + 2
+  if (atk(ts, j, "(")) { j = close_paren(ts, j) }
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return i + 1 }
+  let e = close_brace(ts, j)
+  return e == 0 - 1 ? i + 1 : e
+}
+
+// `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
+// before `fn`, `type`, `service` and `extern` and refuses it before `component`
+// outright, so the prefix carries no declaration shape of its own: the walk
+// steps over it and dispatches on the keyword it heads. Visibility is not a
+// service-boundary property, so nothing downstream reads the prefix itself.
+//
+// This was the single largest parse gap on this surface: 44 of the documents
+// the reference ADMITS failed here with `(bad) unexpected declaration`, every
+// `stdlib/*.rvl` and every `pub fn`-bearing selfhost source among them.
+//
+// Deliberately NOT wider than the reference: `pub component` stays a refusal,
+// and the `verified` / `commutative` / `endorse[...]` slots the reference also
+// allows after `pub` are a separate unhandled form (unhandled in their
+// unprefixed spellings here too), left to the slice that adds them.
+fn at_pub_prefix(ts: List[Token], i: Int) -> Bool {
+  if (!atw(ts, i, "pub")) { return false }
+  return atw(ts, i + 1, "fn") || atw(ts, i + 1, "type")
+      || atw(ts, i + 1, "service") || atw(ts, i + 1, "extern")
+}
+
+// Index just past a top-level `test` block's closing `}`, or -1 when the `test`
+// keyword is not in that shape.
+//
+// The reference SPELLS a test `test "<name>" { ... }` (parser.py `test_decl`
+// reads the keyword, then a string name, then the body brace), so the opening
+// `{` sits TWO tokens past the keyword. `p_top` skipped only the header LINE,
+// then walked the body's statements as if they were top-level declarations:
+// `(bad) unexpected declaration` on the body's first `let` or `assert`, on
+// programs the reference admits. A test body is a runner concern this slice
+// reads nothing out of, so it is stepped over WHOLE.
+//
+// The name-less `test {` shape is still recognised, exactly as on the other
+// surface: the reference refuses it (a missing name is a parse error there), so
+// recognising it costs no admission the reference would not already refuse.
+fn test_block_end(ts: List[Token], i: Int) -> Int {
+  if (!atw(ts, i, "test")) { return 0 - 1 }
+  if (atk(ts, i + 1, "{")) { return close_brace(ts, i + 1) }
+  if (atk(ts, i + 1, "string") && atk(ts, i + 2, "{")) {
+    return close_brace(ts, i + 2)
+  }
+  return 0 - 1
+}
+
+// `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
+// (roadmap item 37) are CONTEXTUAL keywords that QUALIFY `test`. Each heads a
+// top-level declaration only in the shape `<word> test`, which is why none is
+// in either lexer's KEYWORDS table: a program using one as an ordinary
+// identifier is untouched, exactly as `boot` and `event` leave theirs alone.
+fn at_qual_test(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (t.kind != "ident") { return false }
+  if (!(t.text == "lifecycle" || t.text == "fault" || t.text == "prop")) {
+    return false
+  }
+  return atw(ts, i + 1, "test")
+}
+
+// Index just past the `}` closing a qualified test block at `i`, or -1 when the
+// declaration is not in that shape. The three qualifiers differ only between
+// the name and the body brace, and these are the reference's own steps
+// (parser.py `test_decl`, `prop_test_decl`, `fault_test_decl`):
+//
+//   lifecycle test STR                                    '{' … '}'
+//   prop      test STR '(' params ')'                     '{' … '}'
+//   fault     test STR 'for' IDENT ['with' '{' … '}']     '{' … '}'
+fn qual_test_end(ts: List[Token], i: Int) -> Int {
+  if (!at_qual_test(ts, i)) { return 0 - 1 }
+  if (!atk(ts, i + 2, "string")) { return 0 - 1 }
+  let word = tkc(ts, i).text
+  var j = i + 3
+  if (word == "prop") {
+    if (!atk(ts, j, "(")) { return 0 - 1 }
+    j = close_paren(ts, j)
+    if (j == 0 - 1) { return 0 - 1 }
+  }
+  if (word == "fault") {
+    if (!(atw(ts, j, "for") && atk(ts, j + 1, "ident"))) { return 0 - 1 }
+    j += 2
+    if (atw(ts, j, "with")) {
+      if (!atk(ts, j + 1, "{")) { return 0 - 1 }
+      j = close_brace(ts, j + 1)
+      if (j == 0 - 1) { return 0 - 1 }
+    }
+  }
+  if (!atk(ts, j, "{")) { return 0 - 1 }
+  return close_brace(ts, j)
+}
+
 // ---------------------------------------------------------------- lists
 
 fn quote_join(xs: List[Str]) -> Str {
@@ -1110,11 +1267,25 @@ fn p_type_decl(ts: List[Token], i: Int, pg: Prog) -> PStep {
 fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   if (i >= ts.length() || atk(ts, i, "eof")) { return pg }
   let t = tkc(ts, i)
+  // the contextual-keyword heads, in the order the reference tries them. Each
+  // is a STEP: none carries a verdict this slice issues, and stepping is what
+  // lets the declarations AFTER it be checked at all.
+  if (at_boot(ts, i)) { return p_top(ts, i + 1, pg) }
+  if (at_event(ts, i)) { return p_top(ts, event_decl_end(ts, i), pg) }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return p_top(ts, qe, pg) }
+  }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
   }
+  if (at_pub_prefix(ts, i)) { return p_top(ts, i + 1, pg) }
   if (t.text == "use" || t.text == "test") {
+    if (t.text == "test") {
+      let te = test_block_end(ts, i)
+      if (te != 0 - 1) { return p_top(ts, te, pg) }
+    }
     return p_top(ts, skip_line(ts, i), pg)
   }
   if (t.text == "type") {

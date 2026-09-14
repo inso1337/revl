@@ -306,7 +306,85 @@ def _ref_check(src: str) -> str:
 
 # ------------------------------------------------------------- corpus
 
+# ------------------------------------------- the top-level declaration heads
+#
+# Every one of these is a shape the reference's `_parse_program` accepts and
+# `p_top` had no case for, so the checker answered `(bad) unexpected token at
+# top level` / `(bad) unexpected declaration` and the WHOLE document failed at
+# the parse stage — never reaching the service boundaries, the checkable core
+# of G4 or the call-site argument types this slice decides. Measured over the
+# census corpus: 75 documents the reference ADMITS were refused this way, 44 of
+# them by the `pub` prefix alone.
+#
+# The fixtures come in pairs. The ACCEPTED half puts the head before (or
+# around) a clean component; the REJECTED half puts the SAME head in front of a
+# component with a real call-site type error, so a step that overshoots the
+# declaration turns a refusal into silence and is caught. `_TH_*` are the two
+# shared tails.
+_TH_HEAD = """service Database { fn query(sql: Str) -> Int }
+"""
+
+_TH_TAIL = """component Auditor requires db: Database {
+  let rows = effect db.query("select 1") undo db.query("cleanup")
+}
+"""
+
+_TH_BAD_TAIL = """component Auditor requires db: Database {
+  let rows = effect db.query(1) undo db.query("cleanup")
+}
+"""
+
+_TH_BAD_MSG = "`db.query` argument `sql` expects `Str`, got `Int`"
+
+
 ACCEPTED_PROGRAMS = [
+    # `pub` is a visibility PREFIX, not a declaration head — the single largest
+    # parse gap on this surface, and the one that made every `stdlib/*.rvl` and
+    # every `pub fn`-bearing selfhost source unreachable to this checker.
+    ("pub fn before a component",
+     'pub fn normalize(k: Str) -> Str { return k }\n' + _TH_HEAD + _TH_TAIL),
+    ("pub type / pub service / pub extern prefixes", '''pub type Key = { id: Str }
+pub service Database { fn query(sql: Str) -> Int }
+pub extern pure fn norm(k: Str) -> Str = @py { return k }
+''' + _TH_TAIL),
+    # a `test` block was skipped by LINE, so the body's statements were walked
+    # as top-level declarations
+    ("a named test block before a component", _TH_HEAD + '''test "arith" {
+  let a = 1
+  assert a + 1 == 2
+}
+''' + _TH_TAIL),
+    # the three contextual qualifiers on `test`
+    ("a lifecycle test before a component", _TH_HEAD + '''lifecycle test "round trip" {
+  load Auditor
+  unload Auditor
+  assert no_residue
+}
+''' + _TH_TAIL),
+    ("a prop test before a component", _TH_HEAD + '''prop test "commutes" (a: Int, b: Int) {
+  assert a + b == b + a
+}
+''' + _TH_TAIL),
+    ("a fault test after the component it names",
+     _TH_HEAD + _TH_TAIL + '''fault test "reverts" for Auditor {
+  fail at step 1
+  assert no residue
+}
+service Later { fn ping() -> Int }
+component Pinger requires later: Later {
+  let r = effect later.ping() undo later.ping()
+}
+'''),
+    # the two contextual heads `selfhost/lower.rvl` already knew and this
+    # surface did not
+    ("an event declaration before a component",
+     'event Tick(key: at) { at: Int }\n' + _TH_HEAD + _TH_TAIL),
+    ("a boot component", '''service Env { fn a() -> Str }
+boot component B provides e: Env {
+  config { x: Str }
+  provide e { fn a() = config.x }
+}
+''' + _TH_HEAD + _TH_TAIL),
     # ---- the provide-method return annotation (item 391, issue #1065) ------
     # A provide method may RESTATE the return type its service already
     # declares. The reference parses it (`parser.py`'s `pmethod`, where the
@@ -420,6 +498,48 @@ def _fixture(name: str) -> str:
 
 
 REJECTED_PROGRAMS = [
+    # ---- the top-level heads, negative controls (item 391) -----------------
+    # The same head in front of a component the checker must still REFUSE.
+    # Every one of these drew a parse `(bad)` before, which a verdict-direction
+    # comparison reads as agreement while nothing was checked at all.
+    ("a bad call-site type after a pub fn",
+     'pub fn normalize(k: Str) -> Str { return k }\n' + _TH_HEAD + _TH_BAD_TAIL,
+     _TH_BAD_MSG),
+    ("a bad call-site type after a named test block", _TH_HEAD + '''test "arith" {
+  let a = 1
+  assert a + 1 == 2
+}
+''' + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a lifecycle test",
+     _TH_HEAD + '''lifecycle test "round trip" {
+  load Auditor
+  unload Auditor
+  assert no_residue
+}
+''' + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a prop test",
+     _TH_HEAD + '''prop test "commutes" (a: Int, b: Int) {
+  assert a + b == b + a
+}
+''' + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a fault test",
+     _TH_HEAD + _TH_TAIL + '''fault test "reverts" for Auditor {
+  fail at step 1
+  assert no residue
+}
+service Later { fn ping(n: Str) -> Int }
+component Pinger requires later: Later {
+  let r = effect later.ping(1) undo later.ping("x")
+}
+''', "`later.ping` argument `n` expects `Str`, got `Int`"),
+    ("a bad call-site type after an event declaration",
+     'event Tick(key: at) { at: Int }\n' + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a boot component", '''service Env { fn a() -> Str }
+boot component B provides e: Env {
+  config { x: Str }
+  provide e { fn a() = config.x }
+}
+''' + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
     ("g4 emission not declared",
      _fixture("g4_emission_not_declared.rvl"),
      "`Cache.put` is declared plain, but this implementation reaches `db.execute`"),
