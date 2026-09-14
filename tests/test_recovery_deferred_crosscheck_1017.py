@@ -36,6 +36,7 @@ if str(BACKEND) not in sys.path:
 
 import replay  # noqa: E402
 from revl import wal as wal_core  # noqa: E402
+from revl.__main__ import main  # noqa: E402
 from revl.recovery import recover, render  # noqa: E402
 
 
@@ -142,6 +143,22 @@ def test_a_balanced_activation_still_reads_clean(tmp_path):
     assert "RESIDUE" not in report["residue"]["proof"]
     assert "[CLEAN]" in render(report)
     assert seq is not None
+
+
+def test_revl_recover_exits_nonzero_on_a_lost_queue(tmp_path, capsys):
+    """The operator-visible half: `revl recover`'s exit status follows the
+    residue, so certifying a lost queue clean also exited 0 and told an operator
+    there was nothing to finish. It exits 1 now, and names the emission."""
+    path = str(tmp_path / "cli.wal")
+    _write_lost_queue_wal(path, flush=False)
+
+    assert main(["recover", "--wal", path]) == 1
+    assert "sink.enqueue" in capsys.readouterr().out
+
+    balanced = str(tmp_path / "cli-balanced.wal")
+    _write_lost_queue_wal(balanced, flush=True)
+    # the control, again at the CLI boundary: a balanced WAL still exits 0.
+    assert main(["recover", "--wal", balanced]) == 0
 
 
 def test_a_balanced_activation_names_its_confirmed_flush(tmp_path):
