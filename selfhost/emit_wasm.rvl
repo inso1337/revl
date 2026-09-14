@@ -795,6 +795,46 @@ fn fold_const(op: Str, opnd: Str, left: Str, right: Str) -> Str {
   return `(${width}.const ${v})`
 }
 
+// `_trap_free_operand`: true when `node` provably cannot trap, allocate or read
+// memory on this tier, so evaluating it where the language would have skipped it
+// is observationally identical to not evaluating it.
+//
+// One caller, one decision: whether a SHORT-CIRCUITED right operand (item 458)
+// may keep the strict single-instruction `i32.and`/`i32.or` form. The branch is
+// always the correct lowering; this only says whether the strict one is ALSO
+// correct, so the answer is false for everything it has not been taught. What it
+// has been taught is a closed list, the reference's exactly: a constant, a local
+// read, and `!`/comparison/logical combinations of those at the scalar widths.
+// Arithmetic (the checked `+ - *`, the natively trapping `/ %`), an index, a
+// field read, a call, a builtin, a `Str`/`List` operand (a memory load or an
+// allocation), an interpolation and a nested `if`/`match` all answer false.
+//
+// The reference resolves a leaf's type with `_infer_type` and answers false for a
+// name it cannot see (its `EmitError` is caught, never propagated, because the
+// caller's own lowering raises the accurate error a moment later); here the same
+// unbound name reads back as the empty type, which is not in the scalar set and
+// so answers false the same way. The reference's `kind == "name"` leaf is the
+// component path's spelling of `var`; this port lowers only the v3 fn IR, where
+// a leaf is always `var`.
+fn trap_free_operand(node: Any, s: Scope) -> Bool {
+  let k = node_kind(node)
+  if (k == "lit" || k == "var") {
+    let t = infer_val_ty(node, s)
+    return t == "Int" || t == "Int32" || t == "Bool"
+  }
+  if (k == "un") {
+    if (node_op(node) != "!") { return false }
+    return trap_free_operand(value_field(node, "operand"), s)
+  }
+  if (k == "bin") {
+    let op = node_op(node)
+    if (!is_cmp(op) && !is_bool_op(op)) { return false }
+    if (!trap_free_operand(value_field(node, "left"), s)) { return false }
+    return trap_free_operand(value_field(node, "right"), s)
+  }
+  return false
+}
+
 fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
   let op = node_op(node)
   if (op == "??") { return { wat: "<<DEFER-coalesce>>", ty: "" } }
@@ -811,6 +851,33 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
       (call ${helper})`
     if (op == "!=" || op == "!==") { wat = wat.concat(`${newline()}      (i32.eqz)`) }
     return { wat: wat, ty: op == "+" ? "Str" : "Bool" }
+  }
+  if (is_bool_op(op) && !trap_free_operand(rn, s)) {
+    // item 458. `&&`/`||` SHORT-CIRCUIT: the right operand runs only when the
+    // left one has not already decided the answer. Every other tier gets that
+    // from its host operator (`and`/`&&`); wasm has no such instruction, and
+    // `i32.and`/`i32.or` are STRICT, so a right operand that traps executed
+    // anyway and this tier alone gave a different answer for a guard the other
+    // five compile and run: `d != 0 && n % d == 0` (`i64.rem_s` traps on a zero
+    // divisor), `i < xs.length() && xs[i] > 0` (an out-of-range slot load) and
+    // `big && n * n > 0` (the checked `$int_mul` at the Int edge).
+    //
+    // The lowering is a branch, the same folded `(if (result ...))` skeleton `??`
+    // and the ternary already use on this tier, so all three control-flow forms
+    // agree by construction. `bin_instr` still answers `i32.and`/`i32.or` and is
+    // still what a trap-free right operand emits, which is why every existing
+    // golden byte holds.
+    let left = render_expr(ln, s, "Bool", depth)
+    let right = render_expr(rn, s, "Bool", depth)
+    var arms = `(then ${right.wat})
+        (else (i32.const 0))`
+    if (op == "||") {
+      arms = `(then (i32.const 1))
+        (else ${right.wat})`
+    }
+    return { wat: `${left.wat}
+      (if (result i32)
+        ${arms})`, ty: "Bool" }
   }
   // `expected` is the OPERAND type, which also picks the instruction width.
   var opnd = "Int"

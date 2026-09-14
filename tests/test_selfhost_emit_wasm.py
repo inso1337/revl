@@ -132,6 +132,13 @@ CORPUS = [
                     # to_int/to_int32 widths, the four int divisions, to_str /
                     # Str.to_int, push/concat/slice/charAt/charCodeAt/startsWith/
                     # endsWith over Str and List
+    "shortcircuit.rvl",  # item 458 / 1041: `&&`/`||` short-circuit through the
+                    # folded `(if (result i32) …)` branch when the right operand
+                    # can trap, allocate or read memory (`%`, `/`, the checked
+                    # `*`, an index, a `len`, a call, a `Str` compare), and keep
+                    # the strict single `i32.and`/`i32.or` when it provably
+                    # cannot (constants, local reads, and `!`/comparison/logical
+                    # combinations of those)
     "loopctrl.rvl", # item 379 / 391: break/continue via named labels
                     # ($revl_brk_N/$revl_top_N, inner $revl_cnt_N so `for`'s
                     # continue still runs idx++), nested-if/nested-loop targeting,
@@ -221,6 +228,7 @@ def test_selfhosted_emitter_output_scaffold(emitted):
 
 @pytest.mark.parametrize("rel", [
     "widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl", "residuals.rvl",
+    "shortcircuit.rvl",
 ])
 def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
     compiler = shutil.which("wat2wasm")
