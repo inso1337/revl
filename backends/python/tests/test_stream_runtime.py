@@ -530,6 +530,47 @@ async def test_block_through_a_chain_reaches_the_provider():
     assert runtime_mod.Stream.pending() == 0
 
 
+@pytest.mark.asyncio
+async def test_a_block_pause_does_not_spend_the_take_budget(trace):
+    """A lossy/blocking POLICY and a `take(n)` link on the SAME subscription.
+
+    The two mechanisms share one boolean — the acceptance `_deliver` answers —
+    and `take(n)` counts only ACCEPTED items. So a `block` pause must not spend
+    the budget: the item never landed, and a consumer that asked for two items
+    has to receive two. If the pause spent the slot, `take(2)` would exhaust
+    after ONE delivered item and push its `Closed` terminal early, and the
+    second item would be gone with no overflow, no drop mark and no fault — the
+    silent loss §4.4 exists to rule out.
+
+    This is the case the blocking tiers mirror (go/rust/java), where the budget
+    is RESERVED under the lock and refunded on refusal rather than decremented
+    after the forward; the observable sequence has to be this one."""
+    source = runtime_mod.Stream.source()
+    sub = _chain(source, ("take", 2), policy="block", capacity=1)
+    assert source.emit("i0") is True
+    # the buffer is full; `block` refuses and pauses, and the refusal travels UP
+    # through the take link, which must hand its slot back.
+    assert source.emit("i1") is False
+    assert sub.state == "paused"
+    assert await sub.next() == "i0"        # drains -> resumes eagerly
+    assert sub.state == "active"
+    # the budget survived the pause, so the second item is still admissible
+    assert source.emit("i1") is True
+    assert await sub.next() == "i1"
+    assert await sub.next() is runtime_mod.STREAM_CLOSED, (
+        "take(2) ends the derived stream after the SECOND accepted item")
+    ops = _ops(trace)
+    assert "stream.emit i1 refused" in ops, "the refusal is traced, never silent"
+    assert ops.count("stream.take exhausted") == 1
+    # the pause did not exhaust the budget early: the terminal lands after the
+    # second ACCEPTED item, not after the refused one.
+    assert ops.index("stream.paused") < ops.index("stream.take exhausted")
+    assert ops.index("stream.resume") < ops.index("stream.take exhausted")
+    sub.close()
+    source.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
 # ---------------------------------------------------------------------------
 # The deterministic test clock: the `block` drain window (§8)
 # ---------------------------------------------------------------------------

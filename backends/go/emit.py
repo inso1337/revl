@@ -2543,29 +2543,31 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
 def _refuse_unlowered_stream_surface(node, tier: str) -> None:
     """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
 
-    The derived combinator chain (`map`/`filter`/`take`) IS lowered here now —
-    see `_stream_chain`. What is left are the three non-default backpressure
-    policies and the `block`-policy drain window, and the drain window is the
-    one that must stay refused on principle: its resume fires on the
-    deterministic test clock, which this tier does not carry, so lowering it
-    would resume EARLY and quietly disagree with the reference. Emitting a
-    subscription that SILENTLY dropped a lossy policy or a drain window is the
-    worst outcome available — the program would run and answer differently from
-    the py reference — so refuse by name instead, the same call the wasm tier
-    makes for the whole surface."""
-    policy = node.get("policy") or "error"
-    if policy != "error":
-        raise EmitError(
-            "backpressure policy `%s` is not lowered on the %s tier; this tier "
-            "lowers the default `error` policy (a full bounded buffer faults "
-            "with `Faulted(overflow)` and closes, no silent loss). "
-            "`drop_newest`/`drop_oldest`/`block` run on the py reference tier "
-            "(item 130 §4.4) — try `--backend py`" % (policy, tier))
+    Slice 2 arrived on this tier in two landings and only one thing outlived
+    them. The derived combinator chain (`map`/`filter`/`take`) IS lowered now,
+    as derived stream links inside the subscription's acquisition (see
+    `_stream_chain`), and so are all four §4.4 backpressure policies:
+    `drop_newest`, `drop_oldest` and `block` mirror the py reference's
+    `Subscription._deliver` arm for arm, with `block` resuming EAGERLY at the
+    `next` that makes room, which is what the reference does when no window is
+    declared.
+
+    What is left is the `drain` WINDOW, and it is the one that must stay refused
+    on principle: its resume fires on the deterministic test clock, which this
+    tier does not carry, so lowering it would resume EARLY and quietly disagree
+    with the reference. Emitting a subscription that SILENTLY dropped the window
+    is the worst outcome available — the program would run and answer
+    differently from the py reference — so refuse by name instead, the same call
+    the wasm tier makes for the whole surface."""
     if node.get("drain") is not None:
         raise EmitError(
-            "a `drain` window is the `block`-policy drain interval and is not "
-            "lowered on the %s tier; it fires on the deterministic test clock, "
-            "which lives on the py reference tier (item 130 §8) — try "
+            "a `drain` window is not lowered on the %s tier; the `block` policy "
+            "itself IS lowered here with the EAGER resume (the provider "
+            "un-pauses at the `next` that makes room, exactly what the py "
+            "reference does with no window declared), but a declared window "
+            "resumes only on the deterministic test clock, which lives on the "
+            "py reference tier (item 130 §8). Lowering the window without that "
+            "clock would resume EARLY and quietly disagree — try "
             "`--backend py`" % tier)
 
 
@@ -7251,6 +7253,13 @@ func (s *Stream) detach(sub *Subscription) {
 
 // Emit delivers one item to the single consumer (and into any merged stream fed
 // by this provider). A no-op once terminal.
+//
+// The return is downstream ACCEPTANCE, not merely "the provider was open": a
+// `block` pause or an `error` overflow below reaches the provider through this
+// value rather than being swallowed, which is what makes `block` backpressure
+// (§4.4) observable at all. The trace says which it was — `stream.emit <item>`
+// on acceptance, `stream.emit <item> refused` otherwise — so a refusal is never
+// silent, and the line matches the py reference and ts tiers byte for byte.
 func (s *Stream) Emit(item string) bool {
 	s.mu.Lock()
 	open := s.state == "open"
@@ -7258,9 +7267,13 @@ func (s *Stream) Emit(item string) bool {
 	if !open {
 		return false
 	}
-	hostRecord("stream.emit " + item)
-	s.forward(item)
-	return true
+	accepted := s.forward(item)
+	if accepted {
+		hostRecord("stream.emit " + item)
+	} else {
+		hostRecord("stream.emit " + item + " refused")
+	}
+	return accepted
 }
 
 // forward carries one item to this stream's consumer and into any derived stream
@@ -7465,6 +7478,11 @@ type Subscription struct {
 	reason string
 	closed bool
 	termed bool
+	// `block`-policy backpressure (§4.4): `paused` IS the design's `Paused`
+	// state index. The resume is EAGER — it happens at the `Next` that makes
+	// room — which is exactly what the py reference does when no `drain` window
+	// is declared. A declared window is refused by the emitter on this tier.
+	paused bool
 }
 
 // StreamSubscribe opens the single-consumer subscription a `subscribe` bracket
@@ -7499,30 +7517,103 @@ func StreamSubscribe(src *Stream, policy string, capacity int) *Subscription {
 	return sub
 }
 
-// deliver buffers one item under the declared overflow policy (§4.4). It answers
-// whether the delivery was ACCEPTED — a false is backpressure the provider sees
-// through the chain, never a silent drop.
+// deliver buffers one item under the declared overflow policy (§4.4). The
+// return is whether the delivery was ACCEPTED — a `false` is backpressure the
+// provider sees, never a silent drop. The four arms mirror the py reference
+// (backends/python/runtime.py `Subscription._deliver`) statement for statement:
+//
+//	error (default)  a full bounded buffer is a terminal `Faulted(overflow)`
+//	drop_newest      discard the incoming item, RECORDED (never silent)
+//	drop_oldest      evict the buffer head, keep the newest, RECORDED
+//	block            REFUSE the delivery and pause the provider until the
+//	                 consumer drains
 func (sub *Subscription) deliver(item string) bool {
 	sub.mu.Lock()
-	dead := sub.closed || sub.termed
-	sub.mu.Unlock()
-	if dead {
+	if sub.closed || sub.termed {
+		sub.mu.Unlock()
+		return false
+	}
+	if sub.paused {
+		// `block`: the provider is SUSPENDED and stays suspended until this
+		// subscription resumes. Refusing here rather than at the capacity check
+		// is what makes the pause a state and not a per-item coincidence.
+		sub.mu.Unlock()
 		return false
 	}
 	select {
 	case sub.items <- item:
+		sub.mu.Unlock()
 		return true
 	default:
-		switch sub.policy {
-		case "", "error":
-			hostRecord("stream.overflow")
-			sub.terminate("faulted", "overflow")
-			return false
-		default:
-			panic("revl: backpressure policy " + sub.policy +
-				" is not lowered on the cordis-go tier")
-		}
 	}
+	switch sub.policy {
+	case "drop_newest":
+		// lossy-tolerant telemetry: discard the INCOMING item. Opted into at
+		// `subscribe`, and recorded — loss is never silent.
+		sub.mu.Unlock()
+		hostRecord("stream.drop_newest " + item)
+		return true
+	case "drop_oldest":
+		// latest-wins gauges: evict the buffer head, keep the newest item. The
+		// eviction and the push happen under `sub.mu`, so two providers feeding
+		// one subscription cannot interleave into a lost slot.
+		evicted := ""
+		select {
+		case evicted = <-sub.items:
+		default:
+		}
+		select {
+		case sub.items <- item:
+		default:
+		}
+		sub.mu.Unlock()
+		hostRecord("stream.drop_oldest " + evicted)
+		return true
+	case "block":
+		// the provider suspends until the consumer drains: the delivery is
+		// REFUSED (so `Emit` returns false and the provider knows) and the
+		// subscription enters the reserved `Paused` state. No implicit retry —
+		// the provider re-emits once the subscription is Active again.
+		sub.paused = true
+		sub.mu.Unlock()
+		hostRecord("stream.paused")
+		return false
+	default: // "" | "error"
+		sub.mu.Unlock()
+		hostRecord("stream.overflow")
+		sub.terminate("faulted", "overflow")
+		return false
+	}
+}
+
+// maybeResume releases a `block`-paused provider once the consumer has drained
+// an item. EAGER, matching the py reference with no `drain` window declared
+// (§4.4); a declared window is refused by this tier's emitter rather than
+// resumed early (§8).
+func (sub *Subscription) maybeResume() {
+	sub.mu.Lock()
+	if !sub.paused || sub.closed || len(sub.items) >= cap(sub.items) {
+		sub.mu.Unlock()
+		return
+	}
+	sub.paused = false
+	sub.mu.Unlock()
+	hostRecord("stream.resume")
+}
+
+// State is the design's state index (§1) as this runtime sees it: `closed` once
+// the cancel channel is tripped, `paused` while a `block`-policy buffer is full,
+// `active` otherwise.
+func (sub *Subscription) State() string {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if sub.closed {
+		return "closed"
+	}
+	if sub.paused {
+		return "paused"
+	}
+	return "active"
 }
 
 func (sub *Subscription) terminate(kind string, reason string) {
@@ -7554,6 +7645,8 @@ func (sub *Subscription) Next() (any, error) {
 	}
 	select {
 	case item := <-sub.items:
+		// draining may release a `block`-paused provider (§4.4)
+		sub.maybeResume()
 		return item, nil
 	default:
 	}
@@ -7569,6 +7662,8 @@ func (sub *Subscription) Next() (any, error) {
 	case <-sub.cancel:
 		return StreamClosed, nil
 	case item := <-sub.items:
+		// draining may release a `block`-paused provider (§4.4)
+		sub.maybeResume()
 		return item, nil
 	case <-sub.term:
 		return sub.terminal()

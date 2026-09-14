@@ -3349,7 +3349,10 @@ def test_stream_runtime_on_real_cordis_rs(tmp_path):
       * `merge` — an item from either source reaches the one consumer, the
         fan-in tears down as one LIFO stack, one source's close does not strand
         the consumer on the other, and a source's fault propagates at once;
-      * backpressure `error` — a full bounded buffer faults, no silent loss;
+      * backpressure — all four §4.4 policies: `error` faults on a full bounded
+        buffer, `drop_newest` discards the incoming item, `drop_oldest` evicts
+        the head, and `block` refuses the delivery and pauses the provider until
+        the consumer drains, each mirroring the py reference's own case;
       * §4.7/§6 the iteration loop — `every x in` and `on … as e in` — each item
         runs the body once, a `Closed` terminal ends the loop WITHOUT becoming
         an item, a `Faulted` terminal is NOT caught (the activation fails and
@@ -3373,4 +3376,4 @@ def test_stream_runtime_on_real_cordis_rs(tmp_path):
         encoding="utf-8")
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "19 passed" in result.stdout
+    assert "24 passed" in result.stdout

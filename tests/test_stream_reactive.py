@@ -782,21 +782,24 @@ def test_wasm_still_refuses_the_fan_in():
 
 @pytest.mark.parametrize("tier", ["go", "rust", "java"])
 @pytest.mark.parametrize(("head", "want"), [
-    ("subscribe a policy drop_oldest undo sub.close()", "drop_oldest"),
-    ("subscribe a policy block drain 5s undo sub.close()", "block"),
+    ("subscribe a policy block drain 5s undo sub.close()", "`drain` window"),
 ])
 def test_blocking_tiers_refuse_the_slice_2_surface_they_do_not_lower(tier, head, want):
-    """Slice 2's three non-default backpressure policies and its `block`-policy
-    drain window run on the py reference tier only. The drain window is the one
-    that must stay refused on principle: its resume fires on the deterministic
-    test clock, which no blocking tier carries, so a lowering would resume EARLY
-    and quietly disagree with the reference. A blocking tier that emitted a
-    subscription while SILENTLY dropping the lossy policy or the window would
-    run and answer differently from the reference — the worst outcome
-    available. All three refuse by name instead.
+    """The ONE piece of Slice 2 still on the py reference tier: the
+    `block`-policy drain window.
 
-    The combinator chain is no longer on this list: it IS lowered on all three
-    (see `test_the_blocking_tiers_lower_the_combinator_chain`)."""
+    It is the one that must stay refused on principle. Its resume fires on the
+    deterministic test clock, which no blocking tier carries (java refuses an
+    `advance` step outright), so a lowering would resume EARLY and quietly
+    disagree with the reference — the worst outcome available, because the
+    program would run and answer differently rather than refusing.
+
+    Two things came OFF this list, in two landings. The derived combinator chain
+    is lowered on all three now (`test_the_blocking_tiers_lower_the_combinator_chain`),
+    and so are the three non-default backpressure POLICIES
+    (`test_blocking_tiers_lower_every_backpressure_policy`, plus the executable
+    mirrors in backends/{go,rust,java}). What is left in
+    `_refuse_unlowered_stream_surface` on each tier is exactly this one check."""
     emit = _tier_emit(tier)
     ir = compile_source(
         "component C {\n"
@@ -875,6 +878,104 @@ def test_the_general_arrow_refusal_still_stands_on_the_blocking_tiers():
     this slice from having quietly widened the tier surface."""
     assert "arrow" in _tier_emit("go").EXPR_REFUSED["component"]
     assert "arrow" in _tier_emit("java").EXPR_REFUSED
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+@pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
+def test_blocking_tiers_lower_every_backpressure_policy(tier, policy):
+    """item 130 Slice 2 on the blocking tiers: all four §4.4 policies lower.
+
+    The declared policy reaches the emitted `subscribe` call as its own
+    argument, so the runtime picks the arm rather than the emitter picking it —
+    which is what keeps the four arms a single decision, mirrored from the py
+    reference, instead of four emitter shapes that can drift apart."""
+    code = _tier_emit(tier).emit(compile_source(
+        "component C {\n"
+        "  let a = effect Stream.source() undo a.close()\n"
+        f"  let sub = subscribe a policy {policy} buffer 2 undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n", "s.rvl"))
+    assert f'"{policy}", 2' in code
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+def test_the_blocking_runtimes_carry_the_reference_policy_arms(tier):
+    """The emitted runtime carries all four arms and the reserved `Paused` state
+    index, and it no longer carries the "not lowered on this tier" panic that
+    used to sit where the three non-default arms are now.
+
+    The MARKS are the load-bearing half: a drop is recorded with the item it
+    lost and a pause/resume is recorded as such, so backpressure is never a
+    silent loss on any tier (§4.4), and the mark text matches the py reference
+    and ts tiers so one trace assertion reads the same everywhere."""
+    code = _tier_emit(tier).emit(compile_source(_CONSUMER, "s.rvl"))
+    assert "stream.drop_newest " in code
+    assert "stream.drop_oldest " in code
+    assert "stream.paused" in code
+    assert "stream.resume" in code
+    assert "is not lowered on the" not in code
+
+
+@pytest.mark.parametrize(("tier", "fragment"), [
+    ("go", 'hostRecord("stream.emit " + item + " refused")'),
+    ("rust", 'format!("stream.emit {} refused", item)'),
+    ("java", '"stream.emit " + item + " refused"'),
+])
+def test_the_blocking_runtimes_report_a_refused_emit_like_the_reference(tier, fragment):
+    """`block` is only observable if the provider LEARNS it was refused, so the
+    emitted `emit` returns downstream acceptance and TRACES the refusal. The py
+    reference writes `stream.emit <item> refused` and so does ts; a blocking
+    tier that recorded an unconditional `stream.emit <item>` would read as a
+    delivery that never happened.
+
+    The assertion is the emitted RECORD CALL, not the word `refused` anywhere in
+    the file: the combinator-chain landing put "refused" in a prose comment
+    (`take(n)` refunds its slot when the delivery is refused), so a substring
+    test on the bare word passes against a runtime that never writes the line."""
+    code = _tier_emit(tier).emit(compile_source(_CONSUMER, "s.rvl"))
+    assert fragment in code
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+@pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
+def test_a_chain_and_a_lossy_policy_coexist_on_one_subscription(tier, policy):
+    """The two Slice 2 landings on one `subscribe`. Neither emitter path knew
+    about the other, and the refusal that used to stand between them is gone
+    from both, so the combined form is the one that has never been emitted.
+
+    It must emit with BOTH halves present: the chain as derived links in the
+    acquisition, and the declared policy as the subscription's own argument.
+    The runtime interaction (a `block` pause must not spend `take`'s budget,
+    because both ride the same acceptance boolean) is proved by running, on each
+    tier's own scenario and against the py reference."""
+    code = _tier_emit(tier).emit(compile_source(
+        "component C {\n"
+        "  let a = effect Stream.source() undo a.close()\n"
+        f"  let sub = subscribe a.map(x => x).take(2) policy {policy} buffer 1 "
+        "undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n", "s.rvl"))
+    assert f'"{policy}", 1' in code
+    # the chain is still there, between the provider and the subscription
+    assert ("Take(" in code) or ("take(" in code)
+    assert ("Map(" in code) or ("map(" in code)
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+def test_the_drain_refusal_says_the_block_policy_itself_is_lowered(tier):
+    """The refusal has to stay accurate or it sends an author to `--backend py`
+    for something this tier does: the window is refused, `block` is not."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(
+            "component C {\n"
+            "  let a = effect Stream.source() undo a.close()\n"
+            "  let sub = subscribe a policy block drain 5s undo sub.close()\n"
+            "  await sub.next()\n"
+            "}\n", "s.rvl"))
+    msg = str(excinfo.value)
+    assert "`block` policy itself IS lowered" in msg
+    assert "deterministic test clock" in msg
 
 
 @pytest.mark.parametrize("tier", ["go", "rust", "java"])
