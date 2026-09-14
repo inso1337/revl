@@ -148,6 +148,12 @@ def _run_mcp(args) -> int:
                           "this session runs as", file=sys.stderr)
                 return 1
             SESSION.operator = operator
+            # item 471 / issue #979: the session runs AS one operator, but a
+            # multi-party question is answered by several. The whole registry is
+            # what a cast attributed to another operator is checked against
+            # (`revl.mcp.quorum.resolve_cast`); without it, a second identity
+            # cannot be proven and every such cast is refused.
+            SESSION.operator_registry = registry
         # boundary policy (item 33): bind a policy to the session so its agent
         # sandbox is enforced and, with `leases enforced`, the item-61 lease
         # advisory becomes an admission refusal. Opt-in, like the profile above.

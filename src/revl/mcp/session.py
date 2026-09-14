@@ -326,6 +326,15 @@ class Session:
         # serve time from `--operator-profile`; the gate lives in the mcp verb
         # dispatch (`revl.mcp.server`), not here — this is only the binding.
         self.operator = None
+        # every operator the served profile declares (roadmap item 471, issue
+        # #979): the `revl.mcp.operator.OperatorRegistry` `self.operator` was
+        # selected out of. `self.operator` is the one identity the SESSION runs
+        # as; this is what a cast attributed to a DIFFERENT operator is checked
+        # against, and it is the only thing standing behind a multi-party vote
+        # that the caller did not choose. None = no profile bound, in which case
+        # a session has exactly one identity and a cast naming a second one is
+        # refused rather than believed (`revl.mcp.quorum.resolve_cast`).
+        self.operator_registry = None
         # component leases (roadmap item 61): operator-scoped, TTL-bound claims
         # on component *names* that govern who may *replace* a component (never
         # a lock on the running one, which keeps serving). The book is pure
@@ -5326,6 +5335,14 @@ class Session:
             "expiresAt": (now + ttl_ms) if ttl_ms is not None else None,
             "expiredAt": None,
             "votes": {},           # operator token -> its one vote row
+            # issue #979: derived principal -> the name it voted under. The
+            # DISTINCTNESS unit: `votes` keys on the name a cast counted for,
+            # which two casts from one principal can differ in, so the count of
+            # `votes` alone cannot tell N principals from one operator asserting
+            # N names. In-memory only (the durable form is the `principal` field
+            # on each `quorum-vote` row), because it is a projection of the rows
+            # and a second durable copy could disagree with them.
+            "principals": {},
             "outcome": None,       # None while open; else satisfied/denied/…
             "satisfiedBy": None,   # "votes" | "override", once decided
             "resolvedAt": None,
@@ -5417,6 +5434,42 @@ class Session:
                 "require": record["require"], "proposer": record["proposer"],
                 "at": self._now_ms()}
 
+    def _bind_cast(self, record: dict, action: str, *, as_token: str | None,
+                   as_secret: str | None):
+        """Resolve WHO is acting on this question, or refuse (issue #979).
+
+        The one place a multi-party act's identity is decided, for every act that
+        takes an `as_token`: the vote, the escalation, the revocation and the
+        override. Before this, each of them attributed the act to the string the
+        caller supplied, so the identity a record named was the identity the
+        caller typed — and a count of those is a count of one operator's
+        assertions, not of principals.
+
+        Delegates the decision itself to :func:`revl.mcp.quorum.resolve_cast`,
+        which is pure over (asserted name, presented credential, the session's
+        bound operator, the served registry) and returns either a bound
+        :class:`~revl.mcp.quorum.Cast` or an
+        :class:`~revl.mcp.quorum.UnboundCast`. An unbound identity is written to
+        the decision graph as a `quorum-refused` row and then raised: the refusal
+        is recorded before it is raised, like every other refusal here, so a
+        caller probing the protocol with names it cannot prove leaves a trace.
+
+        The row carries `proven: False` and the name that was ASSERTED, never the
+        credential presented against it: the graph is durable and read by
+        auditors, and a refusal row that echoed a secret would turn the audit
+        trail into a credential store."""
+        outcome = _quorum.resolve_cast(
+            as_token=as_token, as_secret=as_secret,
+            bound=getattr(self, "operator", None),
+            registry=getattr(self, "operator_registry", None))
+        if isinstance(outcome, _quorum.UnboundCast):
+            self._record_quorum("quorum-refused", {
+                **self._refusal_row(record, action, outcome.reason,
+                                    outcome.asserted),
+                "proven": False})
+            raise SessionError(outcome.message)
+        return outcome
+
     def _refuse_vote(self, record: dict, reason: str, message: str, voter: str) -> None:
         """Record a vote that was NOT counted and refuse it. Every refusal is
         written down before it is raised: a quorum whose failures are invisible is
@@ -5426,7 +5479,7 @@ class Session:
         raise SessionError(message)
 
     def _cast_vote(self, ticket: dict, rule, *, vote: str, as_token: str | None,
-                   ) -> dict:
+                   as_secret: str | None = None) -> dict:
         """Cast one approver's vote against an outstanding multi-party ticket and
         report the decision graph.
 
@@ -5438,13 +5491,21 @@ class Session:
           unidentifiable one);
         * the PROPOSER's own vote is refused, so a quorum can never be closed by
           the operator who asked for the crossing (separation of duties);
+        * an identity that cannot be BOUND is refused before anything else is
+          looked at (issue #979). A cast counts for the session's own serve-time
+          operator, or for an operator whose declared vote credential the caller
+          proved, and for nothing else; a bare `as_token` naming somebody else is
+          a string the caller typed and is refused, not believed. See
+          `_bind_cast` and `revl.mcp.quorum.resolve_cast` for what that binding
+          does and does not prove;
         * a second vote asserted under a name that already voted is refused, so
-          one NAME supplies one vote toward the N. What that does NOT close is
-          the caller-asserted identity itself: `as_token` is a string the caller
-          supplies, not a verified credential, so one operator can assert several
-          of the rule's names. Decision 5 of `docs/design/471-quorum-approval.md`
-          states that bound, and binding the name to a credential is the
-          transport item that closes it;
+          one NAME supplies one vote toward the N;
+        * a second vote from a PRINCIPAL that already voted is refused under
+          another name too. The principal is derived (the session binding, or
+          the credential digest that was proven), so two profile entries sharing
+          one secret are one principal and supply one vote between them — a
+          count of names cannot see that, and a quorum's whole content is that
+          the N are distinct;
         * a vote against a question that is already decided, escalated, revoked,
           or past its deadline is refused;
         * a vote whose question no longer matches the live candidate is refused,
@@ -5457,7 +5518,9 @@ class Session:
         closes the decision (minting the approval through the ordinary ledger) or
         leaves the question open with one more name against it."""
         record = self._open_quorum(ticket, rule)
-        voter = as_token if as_token is not None else self._operator_token()
+        cast = self._bind_cast(record, "vote", as_token=as_token,
+                               as_secret=as_secret)
+        voter = cast.voter
         if vote not in ("approve", "deny"):
             self._refuse_vote(
                 record, "malformed-vote",
@@ -5508,14 +5571,30 @@ class Session:
                 f"({record['votes'][voter]['vote']}): one operator supplies one "
                 f"vote toward {record['rule']}, and a repeat is not counted "
                 f"(roadmap item 471)", voter)
+        prior = record["principals"].get(cast.principal)
+        if prior is not None and prior != voter:
+            self._refuse_vote(
+                record, "same-principal",
+                f"`{voter}` and `{prior}` are the SAME principal on this session "
+                f"(both cast under {cast.how}), so they supply one vote between "
+                f"them, not two: {record['rule']} counts {record['require']} "
+                f"distinct principals and a count of distinct NAMES is not that "
+                f"(roadmap item 471, issue #979)", voter)
 
         now = self._now_ms()
         row = {"voteId": f"{record['requestId']}#v{len(record['votes']) + 1}",
                "voter": voter, "vote": vote, "at": now, "round": record["round"]}
         record["votes"][voter] = row
+        record["principals"][cast.principal] = voter
         self._record_quorum("quorum-vote", {
             **self._quorum_binding(record), "voteId": row["voteId"],
             "voter": voter, "vote": vote, "at": now,
+            # issue #979: WHAT bound this cast's identity, and the derived
+            # principal it counts as. The principal is a hash of the credential
+            # digest, never the digest, so the durable graph names the
+            # distinctness unit without carrying the verifier that would let a
+            # reader of the record forge the next cast.
+            "principal": cast.principal, "boundBy": cast.how,
             "counted": self._counted(record), "require": record["require"],
             "proposer": record["proposer"]})
         result = {
@@ -5615,7 +5694,8 @@ class Session:
         return result
 
     def override_ticket(self, ticket_hash: str, *, reason: str | None = None,
-                        as_token: str | None = None) -> dict:
+                        as_token: str | None = None,
+                        as_secret: str | None = None) -> dict:
         """Close a multi-party question by EMERGENCY OVERRIDE (roadmap item 471).
 
         The override exists for the case the item names: the named approvers
@@ -5654,7 +5734,8 @@ class Session:
             # graph here rather than refusing: the record is what makes the
             # override auditable.
             record = self._open_quorum(ticket, rule)
-        actor = as_token if as_token is not None else self._operator_token()
+        actor = self._bind_cast(record, "override", as_token=as_token,
+                                as_secret=as_secret).voter
         if not reason or not str(reason).strip():
             self._record_quorum(
                 "quorum-refused",
@@ -5699,7 +5780,8 @@ class Session:
                                       satisfied_by="override")
 
     def escalate_ticket(self, ticket_hash: str, *, reason: str | None = None,
-                        as_token: str | None = None) -> dict:
+                        as_token: str | None = None,
+                        as_secret: str | None = None) -> dict:
         """Hand a multi-party question up and close its vote path (roadmap item
         471).
 
@@ -5727,7 +5809,8 @@ class Session:
         record = self._quorums.get(self._quorum_request_id(ticket_hash))
         if record is None:
             record = self._open_quorum(ticket, rule)
-        actor = as_token if as_token is not None else self._operator_token()
+        actor = self._bind_cast(record, "escalate", as_token=as_token,
+                                as_secret=as_secret).voter
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
             self._record_quorum(
@@ -5768,7 +5851,8 @@ class Session:
                                    "of votes (roadmap item 471)")}
 
     def revoke_ticket(self, ticket_hash: str, *, reason: str | None = None,
-                      as_token: str | None = None) -> dict:
+                      as_token: str | None = None,
+                      as_secret: str | None = None) -> dict:
         """Withdraw a multi-party request, or veto an open one (roadmap item 471).
 
         The proposer withdraws the crossing it asked for; an approver the rule
@@ -5790,7 +5874,8 @@ class Session:
         record = self._quorums.get(self._quorum_request_id(ticket_hash))
         if record is None:
             record = self._open_quorum(ticket, rule)
-        actor = as_token if as_token is not None else self._operator_token()
+        actor = self._bind_cast(record, "revoke", as_token=as_token,
+                                as_secret=as_secret).voter
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
             self._record_quorum(
@@ -5984,7 +6069,8 @@ class Session:
                 "candidateHash": ticket["candidateHash"]}
 
     def approve_ticket(self, ticket_hash: str, *, vote: str = "approve",
-                       as_token: str | None = None) -> dict:
+                       as_token: str | None = None,
+                       as_secret: str | None = None) -> dict:
         """Mint a standing approval bound to an outstanding ticket (Decision 2/3).
         Refuses a hash the server never issued (the outstanding-ticket table) — an
         approval can only be minted for a question the server actually asked. The
@@ -6037,7 +6123,8 @@ class Session:
                 f"approve that (item 246, the outstanding-ticket table)")
         rule = self._ticket_approval_shape(ticket)
         if rule is None:
-            if vote != "approve" or as_token is not None:
+            if vote != "approve" or as_token is not None \
+                    or as_secret is not None:
                 raise SessionError(
                     f"ticket {ticket_hash} names no approver set and demands no "
                     f"quorum, so it cannot be answered with a vote: approve it "
@@ -6047,7 +6134,8 @@ class Session:
                 return self._ticket_response(existing)
             self._mint_ticket_entry(ticket)
             return self._ticket_response(ticket)
-        return self._cast_vote(ticket, rule, vote=vote, as_token=as_token)
+        return self._cast_vote(ticket, rule, vote=vote, as_token=as_token,
+                               as_secret=as_secret)
 
     # -- item 344: session-scoped standing capability grants ----------------
 

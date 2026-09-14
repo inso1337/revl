@@ -4,15 +4,21 @@ Design note for roadmap item 471 (issue #823). It records what the item asked
 for, what the tree actually had, the slice that lands with this note, and the
 parts of the item that are deliberately left to a later slice.
 
-Status: COMPLETE over two slices. Slice 1 landed with this note (the policy
+Status: COMPLETE over three slices for item 471 itself; the identity binding
+of Slice 3 leaves the transport half of issue #979 open (Decision 7). Slice 1 landed with this note (the policy
 clause, the session-side decision protocol, the durable decision graph, the
 transport property that carries a vote, and the suite that pins every refusal).
 Slice 2 landed the two halves that note left design-only: the operator verbs for
 escalate / revoke / override, each with its own tool, doc surface and verb
-gating, and the admission receipt. Decision 6 below is Slice 2's; the earlier
-decisions are Slice 1's and are edited only where they claimed something Slice 2
-changed. What remains open is named at the end, and none of it is item 471: the
-second-operator transport is a transport item (operator profiles, item 55).
+gating, and the admission receipt. Slice 3 (issue #979) binds the IDENTITY of a
+cast to a credential the caller cannot simply assert, so the count is of distinct
+principals rather than of distinct strings. It does not close #979: a caller
+holding N of the operators' credentials still satisfies `require N of M` from one
+session, which is what the per-caller transport in Decision 7 is for. Decision 6 is Slice 2's and
+Decision 7 is Slice 3's; the earlier decisions are Slice 1's and are edited only
+where they claimed something a later slice changed. What remains open is named at
+the end, and none of it is item 471: the per-caller authenticated transport is a
+transport item (item 39, item 55).
 
 ## The item's premise, measured against the tree
 
@@ -323,28 +329,26 @@ than counted. The identity of a cast is supplied as `as_token`, which is how the
 suite drives the second and later votes, and the design note says so rather than
 pretending the wire had two people on it.
 
-**`as_token` is caller-asserted, and that is the bound this slice does not
-close.** It is a NAME, not a proof of possession: nothing in `_cast_vote` (nor in
-`_tool_approve`, which forwards the property) verifies that the caller is the
-operator it names. One bound operator can therefore satisfy a
+**`as_token` was caller-asserted, and that was the bound this slice did not
+close.** It was a NAME, not a proof of possession: nothing in `_cast_vote` (nor
+in `_tool_approve`, which forwards the property) verified that the caller was the
+operator it named. One bound operator could therefore satisfy a
 `require 2 of {alice, bob, carol}` rule by asserting several of the rule's names
-(`as_token="bob"`, then `as_token="carol"`), and the crossing is admitted. What
-IS refused, and correctly, is every way of counting the same one name twice: a
+(`as_token="bob"`, then `as_token="carol"`), and the crossing was admitted. What
+WAS refused, and correctly, is every way of counting the same one name twice: a
 second cast asserted under a name that already voted is refused as
 `duplicate-voter`, and a differently-cased spelling is not one of the rule's
 names at all, so it is refused as `unknown-approver` — neither can carry the
-count, because the eligible set is compared literally. The self-quorum is a
+count, because the eligible set is compared literally. The self-quorum was a
 self-asserted identity, not a miscount.
 
-The bound is disclosed rather than papered over, and the minimal fix for a future
-round is to bind the identity to a credential: have each operator hold a token
-the session verifies (the operator profiles the slice plan already names as the
-transport item), resolve `as_token` through that binding, and record the
-authenticated subject on the `quorum-vote` row instead of reading the string the
-caller supplied. Until then, `as_token` is what it says it is: the name of a
-cast, asserted by the caller. Making several operators addressable within one
-session is a transport item (operator profiles and the item 55 verb grammar), not
-this one.
+Issue #979 closes the assertion half along the line this section already named:
+each operator holds a credential the session verifies, `as_token` resolves
+through that binding, and the graph records the authenticated subject rather than
+the string the caller supplied. Decision 7 is that work, and it states precisely
+what the credential proves and what it still does not. The other half, making
+several operators addressable within one session over their own authenticated
+connections, remains a transport item (item 39 and the item 55 verb grammar).
 
 ## Decision 6: the Slice 2 surface: the verbs, and the receipt
 
@@ -438,6 +442,96 @@ so it mints no receipt, and `revl_quorum` reports `quorum: false` with the reaso
 rather than inventing an empty graph. The clause is inert when it is not written,
 which is Decision 1's third point holding through Slice 2.
 
+## Decision 7: binding the identity of a cast (issue #979)
+
+A count of votes is not a quorum unless the votes are distinct. Slice 1 counted
+distinct NAMES, and a name was a string on the wire, so the count was of one
+operator's assertions. This decision makes it a count of PRINCIPALS.
+
+### What identity is actually available here
+
+Only two things at this boundary are not chosen by the caller:
+
+* the **session's own operator**, bound once at serve time from
+  `--operator-profile` / `--operator`. It is process configuration. But there is
+  exactly one of it per session, so on its own it supplies one cast and never N.
+  On a single session it is also always the PROPOSER (`_open_quorum` takes the
+  proposer from `_operator_token()`), and separation of duties excludes the
+  proposer from the count, so in practice it supplies none of the N;
+* a **vote credential** the operator profile declares for an operator, issued out
+  of band and presented with the cast.
+
+Everything else is a string the caller typed. So the rule is: a cast is
+attributed to the session's bound operator, or to an operator whose declared
+credential the caller proved, and to nothing else.
+
+### The mechanism
+
+The profile gains `operator <token> key sha256:<digest>` (and `"key"` in the
+JSON form). It is the DIGEST of the secret, never the secret: the profile is a
+file that gets read, copied and diffed. `revl_approve` and the three
+question-scoped verbs gain an `asSecret` property carrying the secret itself; the
+session hashes it and compares in constant time.
+
+`revl.mcp.quorum.resolve_cast` is the one place that decides, pure over (asserted
+name, presented credential, bound operator, served registry). It returns a bound
+`Cast` or an `UnboundCast`, and `Session._bind_cast` writes the unbound case to
+the decision graph as a `quorum-refused` row before raising it. The refusal
+reasons are named so a verdict is actionable: `unbound-identity`,
+`unknown-operator`, `unkeyed-identity`, `unproven-identity`,
+`unnamed-credential`.
+
+**The failure direction is CLOSED.** There is no branch that falls back to
+believing `as_token`. A session with no profile has one identity and refuses a
+second one; an operator the profile does not carry, or carries with no key,
+cannot be proven and is refused; a missing or wrong credential is refused. A
+malformed `key` line is a parse error rather than a credential nothing can
+match, so an author is told about a typo instead of discovering it as an
+unexplainable refusal.
+
+### The principal, and why it is not the name
+
+The distinctness unit is the PRINCIPAL, derived rather than asserted: the session
+binding is one principal, and each distinct credential digest is one principal.
+Two operators issued the same secret are therefore ONE principal and supply one
+vote between them (`same-principal`) even though both names are the rule's own,
+which a count of names cannot see. The `quorum-vote` row carries the principal
+and what bound it (`boundBy: session | credential`); the principal is a hash OF
+the credential digest, so the durable graph names the distinctness unit without
+carrying the verifier a reader could forge the next cast with.
+
+The receipt shape is unchanged, so `RECEIPT_VERSION` stays 1: the principal is a
+fact about the cast and lives on the graph the receipt is derived from, and
+adding a field would make every existing receipt unreadable to gain nothing the
+graph does not already answer.
+
+### The honest bound, restated
+
+What this proves: N counted votes required N distinct secrets. A caller holding
+one of the named approvers' credentials gets exactly the one vote it proves.
+
+What it does not prove: that N humans consented. A credential is a bearer token
+and can be shared, delegated or stolen; the deployer who writes the profile can
+hold all of them; and every cast still arrives over ONE session's wire, so an
+operator who has collected two secrets satisfies a two-of-M rule and the record
+will read as two principals because, to this boundary, it was. A credential
+presented once is also visible to anything that can observe the call, and a
+captured one is replayable against any question within the operator's lifetime.
+
+Closing that needs the transport item: per-caller authenticated connections
+(item 39) where each cast arrives on its own connection and is signed over the
+question's binding rather than presented as a shared secret. Until then a
+deployment should read `require N of M` as binding against mistake and against a
+single operator's unaided assertion, and as advisory against an operator who has
+collected the secrets.
+
+One thing this decision deliberately does NOT do: it does not check the named
+voter's own operator grants. Who may vote is the RULE's approver set, which is
+policy written at the crossing, and adding a second membership test in the
+session would put two authorities on one question that could disagree. An
+operator profile that wants to bound voting by component still does it with
+`may approve on <subject>` against the session's own identity.
+
 ## Slice plan
 
 Slice 1, landed: the clause and its refusals in the policy; the session-side
@@ -454,12 +548,17 @@ resolution; `Session._mint_admission_receipt`, `quorum_receipt` and
 `verify_quorum_receipt`; the doc surface for all four verbs; and
 `tests/test_471_quorum_slice2.py`.
 
-Not item 471, and still open: the second-operator transport that would let a
-quorum be gathered from more than one bound operator, which is what closes the
-`as_token` bound in Decision 5. It is a transport item (operator profiles and the
-item 55 verb grammar), and Slice 2 does not narrow or widen it: `as_token` is
-still the name of a cast, asserted by the caller, on every path including the
-three new verbs.
+Slice 3 (issue #979): the vote credential on the operator profile, the
+`resolve_cast` identity binding in `src/revl/mcp/quorum.py`, the `asSecret`
+property on `revl_approve` / `revl_revoke` / `revl_escalate` / `revl_override`,
+the derived principal on the `quorum-vote` row, and
+`tests/test_979_quorum_identity_binding.py`. Decision 7.
+
+Not item 471, and still open: the per-caller authenticated transport that would
+let a quorum be gathered from several connections rather than several strings on
+one. It is a transport item (item 39 and the item 55 verb grammar), and it is
+what would make the count a count of authenticated callers rather than of
+credentials presented on one wire.
 
 ## Exit tests
 
@@ -524,6 +623,30 @@ point of the separate verb: `test_the_override_verb_is_not_the_approve_verb` and
 `test_the_receipt_is_not_re_dated_by_a_second_read`, and
 `test_a_single_party_approval_mints_no_quorum_receipt` for the inert side.
 
+Slice 3's exits are in `tests/test_979_quorum_identity_binding.py`. The attack
+first: `test_the_self_quorum_is_refused_on_a_session_with_no_profile` drives the
+pre-fix configuration exactly (no profile, one bound operator, `as_token="bob"`
+then `as_token="carol"`) and is the test that fails on the tree before this
+slice, where it admitted the crossing;
+`test_one_caller_cannot_satisfy_two_of_m_by_asserting_two_names` is the same
+attack against a credentialed profile, and
+`test_holding_one_credential_carries_one_vote_and_not_the_quorum` is the
+realistic version where the caller genuinely holds one of the approvers'
+secrets. The non-vacuity control is
+`test_two_distinct_principals_still_satisfy_the_quorum`: two proven credentials
+still reach the count and admit the crossing, so the binding refuses the
+self-quorum without refusing the quorum. The failure direction is pinned by
+`test_an_unbindable_identity_refuses_and_is_recorded` over all six ways an
+identity fails to bind, none of which admits, with
+`test_two_names_sharing_one_credential_are_one_principal` for the derived
+principal, `test_an_override_cannot_be_attributed_to_an_unprovable_operator` and
+`test_closing_a_question_also_takes_a_bound_identity` for the other three verbs,
+and `test_the_graph_names_the_principal_and_never_the_credential` for the record.
+The profile surface is pinned by
+`test_the_profile_carries_a_digest_and_refuses_anything_else`,
+`test_the_json_profile_carries_the_same_credential` and
+`test_two_credentials_for_one_operator_are_refused`.
+
 ## Relates to
 
 * 246: the two-step ticket this extends, and the class-(c) decision chokepoint.
@@ -533,3 +656,7 @@ point of the separate verb: `test_the_override_verb_is_not_the_approve_verb` and
   pending-question revocation.
 * 476: which names 471 as a dependency.
 * issue #823: this item.
+* issue #979: the caller-asserted `as_token` residual, closed for the
+  assertion half by Decision 7 and left open for the transport half.
+* 39 / 55: the per-caller authenticated transport that would make the count
+  a count of connections.
