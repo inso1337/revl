@@ -412,9 +412,6 @@
         "backends/java/emit.py::_emit_spawn_handle: Instance token/provision lookup and unload support are emitted only when _uses_spawn/_uses_instance_get is true. Spawn/instance handles are explicitly deferred and instance_accessor.rvl reproduces the divergence.": {
           "_emit_spawn_handle": 13
         },
-        "backends/java/emit.py::_emit_stdlib_helpers: Residual source-group and transitive dependency emission needs builtin/len helpers, explicitly deferred; control.rvl/runtime_values.rvl reproduce missing stdlib output.": {
-          "_emit_stdlib_helpers": 5
-        },
         "backends/java/emit.py::_emit_v1: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. The successful legacy component/service path is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Also the item-322-Slice-2 durable WAL sink splice behind `_RECORD_MODE`: the oracle emits with the default `emit(ir)` and never `record=True`, so the call is unreachable from the corpus by construction, and `backends/java/test_emit_java.py::test_v1_v2_witnessed_record_defines_the_sink_it_calls` exercises it directly. The self-host emitters mirror the v3 path, so v1/v2 is declared out of every self-host slice (the `_v1|_v2` group in tools/selfhost_line_coverage.py).": {
           "_emit_v1": 4
         },
@@ -558,9 +555,6 @@
         },
         "backends/java/emit.py::_split_generic: This helper is used by legacy _java_type's Map branch, beyond the explicitly scalar v1/v2 signatures. v3 generic splitting uses _split_v3_types and is covered.": {
           "_split_generic": 11
-        },
-        "backends/java/emit.py::_stdlib_helpers_reached: The remaining frontier loop closes transitive dependencies once a stdlib helper is demanded. Builtin/len helpers are explicitly deferred; ordinary runtime helpers do not enter this group.": {
-          "_stdlib_helpers_reached": 5
         },
         "backends/java/emit.py::_subexprs: Recursive expression-child enumeration serves local-arrow repeatability/use counting, explicitly deferred.": {
           "_subexprs": 9
@@ -1675,6 +1669,9 @@
         },
         "selfhost/emit_java.rvl::witnessed_names: Remaining class=witnessed filtering and name insertion require extern declarations, explicitly deferred and reproduced by method_witnessed.rvl.": {
           "witnessed_names": 2
+        },
+        "selfhost/emit_java.rvl::uses_str_cmp: Only a Str comparison found in the tests or externs subtree remains. In-file tests are explicitly deferred by this port (the same residual selfhost/emit_java.rvl::uses_equality carries), and an @java extern body is verbatim text the emitter never walks, so the corpus reaches the components/functions arms and returns from them. item 458.": {
+          "uses_str_cmp": 2
         }
       },
       "uncovered_statements": 182

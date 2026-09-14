@@ -9259,11 +9259,19 @@ fn infer_match_ty(m: MatchN, env: List[Bind]) -> Str {
 
 // The lowering's operand-type annotation for `+ - * / %` (lower.py's `bin`
 // branch): the operand type when both sides agree, Float when either is Float.
+// Relational operators carry the annotation for ONE family, `Str` (item 458):
+// ts orders strings by UTF-16 code unit and java has no relational operator on
+// String at all, so both need to be told the operands are strings to reach the
+// code-point order docs/strings.md promises.
 fn operands_of(op: Str, lt: Str, rt: Str) -> Str {
   if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
     if (lt == "Int32" && rt == "Int32") { return "Int32" }
     if (lt == "Int" && rt == "Int") { return "Int" }
     if (lt == "Float" || rt == "Float") { return "Float" }
+    return ""
+  }
+  if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+    if (lt == "Str" && rt == "Str") { return "Str" }
     return ""
   }
   return ""

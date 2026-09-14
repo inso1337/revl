@@ -949,6 +949,15 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
         operands = node.get("operands")
+        if operands == "Str" and op in ("<", ">", "<=", ">="):
+            # `Str` ordering is lexicographic by CODE POINT (docs/strings.md),
+            # the same unit `length`/`charAt`/`slice` count in. JS `<` on a
+            # string compares UTF-16 CODE UNITS, which agrees only below
+            # U+FFFF: `"￿" < "\u{10000}"` is `false` here and `true` on
+            # python, go and rust, because the astral scalar begins with the
+            # high surrogate U+D800. `revlStrCmp` compares scalars.
+            return (f"(revlStrCmp({_expr(node['left'], ctx)}, "
+                    f"{_expr(node['right'], ctx)}) {op} 0)")
         if op == "/":
             # `/` is TRUE division and yields Float even on two Ints
             # (docs/arithmetic.md), so both sides become `number` whatever they
@@ -2881,18 +2890,21 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"{target}.has({args[0]})"
     # The iteration/remove step (docs/stdlib-2.0.md §Map). JS `.sort()` is
     # UTF-16 code-unit order, which diverges from the canonical (code-point)
-    # order only past U+FFFF — the inline comparator compares code points via
-    # Array.from, so supplementary-plane keys sort canonically too.
+    # order past U+FFFF, so the sort goes through `revlStrCmp`.
+    #
+    # The inline comparator this replaces split both keys into code points with
+    # `Array.from` and then compared the resulting one-scalar STRINGS with `<`
+    # — which is the same UTF-16 code-unit comparison, one level down. It
+    # therefore still misordered exactly the boundary it was written to fix:
+    # with keys `"￿"` (U+FFFF) and `"\u{10000}"`, `keys()[0]` was the astral
+    # key on this tier and the U+FFFF key on python, go, rust and java.
+    # `revlStrCmp` compares the scalars as numbers.
     # `size` answers number; revl Int is a bigint here, so BigInt() on the
     # way out, exactly as length does. remove copies before deleting.
     if method == "size":
         return f"BigInt({target}.size)"
     if method == "keys":
-        return (f"[...{target}.keys()].sort((a, b) => {{ "
-                f"const A = Array.from(a), B = Array.from(b); "
-                f"for (let i = 0; i < Math.min(A.length, B.length); i++) {{ "
-                f"if (A[i] !== B[i]) return A[i] < B[i] ? -1 : 1 }} "
-                f"return A.length - B.length }})")
+        return f"[...{target}.keys()].sort(revlStrCmp)"
     if method == "remove":
         return (f"(() => {{ const c = new Map({target}); "
                 f"c.delete({args[0]}); return c }})()")
@@ -3495,6 +3507,11 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             right = _expr(expr["right"], ctx)
             shown = json.dumps(f"{left} {op} {right}")
             condition = f"$revl_l {op} $revl_r"
+            if expr.get("operands") == "Str" and op in ("<", ">", "<=", ">="):
+                # the same code-point order `_expr` gives a `Str` comparison
+                # anywhere else; a bare `$revl_l < $revl_r` here would be
+                # UTF-16 code-unit order (see the `revlStrCmp` route in `_expr`)
+                condition = f"revlStrCmp($revl_l, $revl_r) {op} 0"
             if equality:
                 condition = "revlEq($revl_l, $revl_r)"
                 if expr["op"] in ("!=", "!=="):
@@ -3752,6 +3769,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_STR_HELPER, ""])
     if _uses_split(ir):
         out.extend([_REVL_SPLIT_HELPER, ""])
+    if _uses_str_cmp(ir):
+        out.extend([_REVL_STR_CMP_HELPER, ""])
     if _uses_parse_int(ir):
         out.extend([_REVL_PARSE_INT_HELPER, ""])
     if _uses_index(ir):
@@ -3993,6 +4012,47 @@ _STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "codepoint_at",
 _REVL_SPLIT_HELPER = """function revlSplit(s: string, sep: string): string[] {
   return sep === "" ? Array.from(s) : s.split(sep)
 }"""
+
+
+# `Str` ordering, in the one unit revl counts strings in: CODE POINTS
+# (docs/strings.md). Every comparison a `<`/`<=`/`>`/`>=` makes on a `Str`
+# goes through here, and so does the `Map.keys()` sort — the two places this
+# tier used to fall back on JS `<`, which is UTF-16 CODE UNIT order.
+#
+# The two orders agree for every pair below U+FFFF and disagree at exactly the
+# BMP/supplementary boundary: an astral scalar's first UTF-16 unit is a high
+# surrogate in D800..DBFF, which sorts BELOW U+E000..U+FFFF, so `"￿"` and
+# `"\u{10000}"` come out in the wrong relative order. `Array.from` iterates
+# Unicode scalars (the same walk `revlCps`, `revlSplit` and go's
+# `DecodeRuneInString` do), and the scalars are compared as NUMBERS —
+# comparing the one-scalar strings with `<` would reintroduce the same
+# code-unit comparison one level down, which is the bug the old inline
+# `Map.keys()` comparator had.
+_REVL_STR_CMP_HELPER = """function revlStrCmp(a: string, b: string): number {
+  const A = Array.from(a), B = Array.from(b)
+  const n = Math.min(A.length, B.length)
+  for (let i = 0; i < n; i++) {
+    const x = A[i].codePointAt(0) as number, y = B[i].codePointAt(0) as number
+    if (x !== y) return x < y ? -1 : 1
+  }
+  return A.length === B.length ? 0 : (A.length < B.length ? -1 : 1)
+}"""
+
+
+def _uses_str_cmp(node) -> bool:
+    """Does this IR order two `Str` values — a relational `bin` the frontend
+    marked `operands: "Str"`, or a `Map.keys()` (whose result is in ascending
+    canonical Str order, docs/stdlib-2.0.md §Map)?"""
+    if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("operands") == "Str"
+                and node.get("op") in ("<", ">", "<=", ">=")):
+            return True
+        if node.get("kind") == "builtin" and node.get("method") == "keys":
+            return True
+        return any(_uses_str_cmp(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_str_cmp(v) for v in node)
+    return False
 
 
 _REVL_PARSE_INT_HELPER = """function revlParseInt(s: string): bigint | undefined {

@@ -484,7 +484,9 @@ def test_the_iter_surface_emits_on_every_hosted_tier_and_wasm_refuses():
     out = {tier: _backend(tier).emit(ir)
            for tier in ("python", "typescript", "go", "java", "rust")}
     assert "sorted(" in out["python"] and "len(" in out["python"]
-    assert ".sort((" in out["typescript"] and "BigInt(" in out["typescript"]
+    # item 458: the inline comparator became the shared `revlStrCmp` — the
+    # same code-point order `<` on a `Str` now takes on this tier
+    assert ".sort(revlStrCmp)" in out["typescript"] and "BigInt(" in out["typescript"]
     assert "revlMapKeys" in out["go"] and "revlMapRemove" in out["go"]
     assert "revlMapKeys" in out["java"] and "codePointAt" in out["java"]
     assert "ks.sort()" in out["rust"]

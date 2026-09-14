@@ -799,12 +799,17 @@ export class MapHandle {
   keys(): string[] {
     this.assertLive('keys')
     // Canonical order is code-point order; JS's default sort is UTF-16
-    // code-unit order, which diverges past U+FFFF, so compare via Array.from
-    // (the same comparator emit.py inlines for the value-Map `keys`).
+    // code-unit order, which diverges past U+FFFF, so walk scalars with
+    // Array.from (the same comparator emit.py emits as `revlStrCmp` for the
+    // value-Map `keys`). The scalars are compared as NUMBERS: comparing the
+    // one-scalar strings with `<` is the same code-unit comparison one level
+    // down, and put U+10000 before U+FFFF (item 458).
     return ([...this.data.keys()] as string[]).sort((a, b) => {
       const A = Array.from(a), B = Array.from(b)
-      for (let i = 0; i < Math.min(A.length, B.length); i++) {
-        if (A[i] !== B[i]) return A[i] < B[i] ? -1 : 1
+      const n = Math.min(A.length, B.length)
+      for (let i = 0; i < n; i++) {
+        const x = A[i].codePointAt(0) as number, y = B[i].codePointAt(0) as number
+        if (x !== y) return x < y ? -1 : 1
       }
       return A.length - B.length
     })

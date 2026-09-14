@@ -1434,8 +1434,23 @@ def _stdlib_helper_source() -> list[str]:
         "private static <V> boolean revlMapHas(java.util.Map<String, V> m, String k) {",
         "    return m.containsKey(k);",
         "}",
+        "// Str ordering, in the unit revl counts strings in: CODE POINTS",
+        "// (docs/strings.md). String.compareTo compares UTF-16 code units,",
+        "// which agrees only below U+FFFF - an astral scalar starts with a",
+        "// high surrogate in D800..DBFF, so it would sort BELOW U+E000..U+FFFF.",
+        "// Java also has no relational operator on String at all, so `<` on two",
+        "// Str values routes here rather than reaching javac as `(a < b)`.",
+        "private static int revlStrCmp(String a, String b) {",
+        "    int i = 0, j = 0;",
+        "    while (i < a.length() && j < b.length()) {",
+        "        int ca = a.codePointAt(i), cb = b.codePointAt(j);",
+        "        if (ca != cb) { return Integer.compare(ca, cb); }",
+        "        i += Character.charCount(ca); j += Character.charCount(cb);",
+        "    }",
+        "    return Boolean.compare(i < a.length(), j < b.length());",
+        "}",
         "// remove copies before deleting (persistent); keys sorts a copied",
-        "// list with a code-point comparator — canonical Str order even for",
+        "// list with the code-point comparator — canonical Str order even for",
         "// supplementary-plane keys, where compareTo would misorder.",
         "private static <V> java.util.Map<String, V> revlMapRemove(java.util.Map<String, V> m, String k) {",
         "    java.util.Map<String, V> out = new java.util.HashMap<>(m);",
@@ -1444,15 +1459,7 @@ def _stdlib_helper_source() -> list[str]:
         "}",
         "private static <V> java.util.List<String> revlMapKeys(java.util.Map<String, V> m) {",
         "    java.util.List<String> ks = new java.util.ArrayList<>(m.keySet());",
-        "    ks.sort((a, b) -> {",
-        "        int i = 0, j = 0;",
-        "        while (i < a.length() && j < b.length()) {",
-        "            int ca = a.codePointAt(i), cb = b.codePointAt(j);",
-        "            if (ca != cb) { return Integer.compare(ca, cb); }",
-        "            i += Character.charCount(ca); j += Character.charCount(cb);",
-        "        }",
-        "        return Boolean.compare(i >= a.length(), j >= b.length());",
-        "    });",
+        "    ks.sort((a, b) -> revlStrCmp(a, b));",
         "    return java.util.List.copyOf(ks);",
         "}",
         "",
@@ -2107,6 +2114,15 @@ def _expr(
             # (a Java `int`) resolves to the 32-bit check with no extra code.
             exact = {"+": "addExact", "-": "subtractExact", "*": "multiplyExact"}[op]
             return f"Math.{exact}({left}, {right})"
+        if op in ("<", ">", "<=", ">=") and node.get("operands") == "Str":
+            # Java has NO relational operator on `String`: `(a < b)` reached
+            # javac as "bad operand types for binary operator '<'", so a
+            # document that ordered two `Str` values compiled on the frontend
+            # and on five tiers and would not build on this one. `revlStrCmp`
+            # is the code-point order revl promises (docs/strings.md) —
+            # `String.compareTo` would be UTF-16 code-unit order, the same
+            # boundary bug the Map.keys() comparator already avoids.
+            return f"(revlStrCmp({left}, {right}) {op} 0)"
         java_op = _JAVA_V3_BIN_OPS.get(op)
         if java_op is None:
             raise EmitError(f"unsupported binary operator {op!r}")
@@ -5163,7 +5179,10 @@ def _emit_map_runtime() -> list[str]:
         "    // long (revl Int); `keys` yields the keys in ascending canonical Str",
         "    // (code-point) order — String.compareTo is UTF-16 code-unit order, so",
         "    // the inline comparator walks code points to stay canonical past",
-        "    // U+FFFF. Read-only queries, no host trace.",
+        "    // U+FFFF. The tie-break is the SHORTER key first: `Boolean.compare(i",
+        "    // >= a.length(), j >= b.length())` answers 1 for a and ab, and sorted",
+        "    // a key after its own extension (item 458).",
+        "    // Read-only queries, no host trace.",
         "    public long size() {",
         "        return values.size();",
         "    }",
@@ -5176,7 +5195,7 @@ def _emit_map_runtime() -> list[str]:
         "                if (ca != cb) { return Integer.compare(ca, cb); }",
         "                i += Character.charCount(ca); j += Character.charCount(cb);",
         "            }",
-        "            return Boolean.compare(i >= a.length(), j >= b.length());",
+        "            return Boolean.compare(i < a.length(), j < b.length());",
         "        });",
         "        return java.util.List.copyOf(ks);",
         "    }",

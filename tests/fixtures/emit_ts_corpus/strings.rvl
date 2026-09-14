@@ -14,3 +14,13 @@ fn build(s: Str, t: Str) -> Str {
 }
 fn interp(name: Str, n: Int) -> Str { return `hi ${name} count ${n} end` }
 fn nested(a: Int, b: Int) -> Str { return `${a} plus ${b}` }
+// item 458: `Str` ordering is code-point order, which this tier reaches
+// through `revlStrCmp` — JS `<` on a string is UTF-16 code-unit order.
+fn is_before(a: Str, b: Str) -> Bool { return a < b }
+fn is_not_after(a: Str, b: Str) -> Bool { return a <= b }
+fn is_after(a: Str, b: Str) -> Bool { return a > b }
+fn is_not_before(a: Str, b: Str) -> Bool { return a >= b }
+fn ordering_asserts(a: Str, b: Str) {
+  assert a < b
+  assert a >= b
+}
