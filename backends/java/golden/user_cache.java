@@ -64,7 +64,10 @@ public final class Components {
         // long (revl Int); `keys` yields the keys in ascending canonical Str
         // (code-point) order — String.compareTo is UTF-16 code-unit order, so
         // the inline comparator walks code points to stay canonical past
-        // U+FFFF. Read-only queries, no host trace.
+        // U+FFFF. The tie-break is the SHORTER key first: `Boolean.compare(i
+        // >= a.length(), j >= b.length())` answers 1 for a and ab, and sorted
+        // a key after its own extension (item 458).
+        // Read-only queries, no host trace.
         public long size() {
             return values.size();
         }
@@ -77,7 +80,7 @@ public final class Components {
                     if (ca != cb) { return Integer.compare(ca, cb); }
                     i += Character.charCount(ca); j += Character.charCount(cb);
                 }
-                return Boolean.compare(i >= a.length(), j >= b.length());
+                return Boolean.compare(i < a.length(), j < b.length());
             });
             return java.util.List.copyOf(ks);
         }
