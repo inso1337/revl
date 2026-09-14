@@ -169,6 +169,14 @@ KNOWN_BYPASSES = {
     # -- calls and signatures --
     "examples/rejections/t10_call_arity.rvl",
     "examples/rejections/t15_generic_call_site.rvl",
+    # The same story as t29/t30, one slice later. `fn typo[T](xs: List[U])` was
+    # refused by the gate's PARSER — it did not spell a type-parameter list at
+    # all — so the census filed it as `tag-mismatch/T1->BAD`: the right verdict
+    # for the wrong reason. `p_fn` now steps over `[T, U]` the way the reference
+    # does, the parse reaches the body, and the gate's real state shows. The
+    # reference refuses the ARGUMENT TYPE in its type layer and this gate runs no
+    # type layer; its two neighbours above are the same family.
+    "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
     "examples/rejections/v2_map_set_value_mismatch.rvl",
     "examples/rejections/v2_map_value_unknown_method.rvl",
     "examples/rejections/arith_zero_divisor.rvl",

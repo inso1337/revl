@@ -474,11 +474,19 @@ fn is_builtin_type_name(name: Str) -> Bool {
 // The end of the `type` declaration whose keyword is at `kw` — the first
 // top-level declaration boundary at or after `kw + 1`, exactly the span the
 // original single-pass scan ran the inner loop over.
+//
+// `pub` stops the scan as well as the declaration heads themselves. It is not a
+// head — `at_top_decl` deliberately does not name it — but it is the FIRST token
+// of the declaration that follows, and a reader that resumes from this index has
+// to see it: stopping one token later, on the `fn` behind the `pub`, hands the
+// next reader a function whose visibility prefix has already been eaten, and it
+// lowers an exported function as private. That is the same shape as the
+// extern-neighbour divergence, reached from the other side.
 fn type_decl_end(ts: List[Token], start: Int) -> Int {
   var j = start
   var depth = 0
   while (j < ts.length() && !atk(ts, j, "eof")
-         && (depth > 0 || !at_top_decl(ts, j))) {
+         && (depth > 0 || !(at_top_decl(ts, j) || atw(ts, j, "pub")))) {
     let t = tkc(ts, j)
     if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
     if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
@@ -1389,6 +1397,37 @@ fn ret_at(ts: List[Token], i: Int) -> Int {
   return i
 }
 
+// The first PARAMETER token of a `fn` declaration whose keyword sits at `i`.
+//
+// Not `i + 3`. A module `fn` may carry a TYPE-PARAMETER list between its name
+// and its parameters (`fn list_map[T, U](xs: List[T], f: (T) -> U)`, item 6,
+// docs/generics.md), and every reader here assumed the parameter list opened
+// at `i + 2`. On a generic declaration that walked `params_at` into `[T, U]`,
+// found no `{` where the body should be, and gave up: the admission gate
+// answered `expected { after fn signature` for a declaration the reference
+// compiler accepts, and the IR producer dropped the whole function out of
+// `functions`. `stdlib/list.rvl` lost three of its seven and `stdlib/render.rvl`
+// its only one, silently, because a dropped function looks exactly like a file
+// that never declared it.
+//
+// Type parameters are ERASED, which is why stepping over them is the whole
+// fix: the reference IR for `fn list_map[T, U](...)` is shaped exactly like a
+// plain fn's, spelling `List[T]` in the parameter type and nothing anywhere
+// about `T` itself. Bracket depth is counted rather than scanning for the
+// first `]`, so a bound that ever nests stays in one piece.
+fn fn_params_i(ts: List[Token], i: Int) -> Int {
+  if (!atk(ts, i + 2, "[")) { return i + 3 }
+  var j = i + 3
+  var depth = 1
+  while (depth > 0 && j < ts.length() && !atk(ts, j, "eof")) {
+    if (atk(ts, j, "[")) { depth += 1 }
+    if (atk(ts, j, "]")) { depth -= 1 }
+    j += 1
+  }
+  // `j` is past the `]`; the parameters open at the `(` that follows it
+  return j + 1
+}
+
 // `extern <class>[caps] [(confined: p)] [async|deferred] fn name(params)
 //  -> T [= @host {..}]*`, where `<class>` is `emission`/`acquire`/`pure`
 // (reserved keywords) or `witnessed` (item 243, a CONTEXTUAL keyword the lexer
@@ -1458,7 +1497,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
 
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, i + 1).text
-  let ps = params_at(ts, i + 3)
+  let ps = params_at(ts, fn_params_i(ts, i))
   var rti = ret_at(ts, ps.i)
   let cachePure = ati(ts, rti, "cache") && atw(ts, rti + 1, "pure")
   if (cachePure) { rti += 2 }
@@ -2049,6 +2088,14 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
       let e = test_block_end(ts, i)
       if (e != 0 - 1) { return p_top(ts, e, pg) }
     }
+    // a `type` is skipped to the end of the DECLARATION, not of its first line.
+    // A variant written one `| Case` per line left the cursor on a continuation
+    // line, whose first token is a `|` and not a keyword, so the gate answered
+    // `unexpected token at top level` — a FALSE REFUSAL of a shape the reference
+    // accepts, and of `stdlib/a2a.rvl` and `stdlib/http.rvl` with it. The same
+    // span `type_ctors` already reads, so a brace-bearing record declaration
+    // spread over lines is covered by the same step.
+    if (t.text == "type") { return p_top(ts, type_decl_end(ts, i + 1), pg) }
     return p_top(ts, skip_line(ts, i), pg)
   }
   if (t.text == "extern") {
@@ -8603,8 +8650,14 @@ fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind]) -> Str {
   var out = ""
   var i = 0
   while (i < args.length()) {
-    var e = lir_expr(args[i], env)
-    if (i < ptypes.length()) { e = apply_arg_markers(e, ptypes[i], infer(args[i], env)) }
+    let expected = i < ptypes.length() ? ptypes[i] : ""
+    // an ARROW argument is lowered against the parameter it is checked against,
+    // so an unannotated lambda carries the signature the declaration gave it
+    var e = match args[i] {
+      Arrow(ar) => lir_arrow_at(ar, env, expected),
+      _ => lir_expr(args[i], env),
+    }
+    if (expected != "") { e = apply_arg_markers(e, expected, infer(args[i], env)) }
     out = i == 0 ? e : out.concat(",").concat(e)
     i += 1
   }
@@ -8756,7 +8809,14 @@ fn case_add(a: CaseAcc, name: Str, adt: Str, payload: Str) -> CaseAcc {
 // One `type <Name> = <case> | <case>` declaration's cases, read exactly the way
 // `ir_type_cases` reads them for the `types` section.
 fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
-  let lineHi = line_end(ts, i, ts.length())
+  // the WHOLE declaration, not its first line. A variant is routinely written
+  // over several lines (`pub type Method =` then one `| Case` per line), and a
+  // line-bounded read collected only the cases that happened to share a line
+  // with the `=`. The rest stayed absent from the case table, so `Completed`
+  // lowered as `{"kind":"var"}` — a reference to a binding that does not exist —
+  // where the reference lowers `{"kind":"adt","type":"TaskState",…}`. Same span
+  // `type_ctors` already reads for the gate.
+  let lineHi = type_decl_end(ts, i + 1)
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
@@ -8820,7 +8880,7 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
   if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a) }
   if (t.text == "fn") {
     let fi = i
-    let ps = params_at(ts, fi + 3)
+    let ps = params_at(ts, fn_params_i(ts, fi))
     let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : "Unit"
     var param_types: List[Str] = []
     var pi = 0
@@ -8950,30 +9010,150 @@ fn is_host_root_recv(recv: Expr) -> Bool {
   return match recv { Var(n) => is_host_root(n), _ => false, }
 }
 
-fn lir_arrow(a: ArrowN, env: List[Bind]) -> Str {
+// ---------------------------------------------------------- arrow captures
+//
+// An arrow literal SNAPSHOTS the mutable names its body reads. The IR's
+// `captures` list is what every emitter binds BY VALUE at arrow-creation time
+// (docs/closures.md §Backends), because python, typescript and go would
+// otherwise close over the enclosing local by REFERENCE and the arrow would see
+// a write that happened after it was made. This lowering wrote `"captures":[]`
+// on every arrow — a WRONG VALUE, not an absent annotation, so it is the one
+// shape in this file a backend could act on and get a different answer from the
+// reference's. It stood because no document in the globbed corpus had an arrow
+// that reads a `var`.
+//
+// `var`-ness reaches here the way the ADT case table does: under a reserved key
+// (`"mut <name>"`), which no identifier can spell, so the mutable set rides the
+// `env` that every lowering function already threads instead of a second
+// parameter through twenty signatures. A binding that SHADOWS a `var` with
+// something immutable — a `let`, a `for` bind, a match-arm bind, an arrow
+// parameter — writes the key back to "", and `tenv_get`'s last-wins scan makes
+// the shadow win.
+fn mut_key(n: Str) -> Str { return "mut ".concat(n) }
+
+fn env_mut_put(env: List[Bind], n: Str, mutable: Bool) -> List[Bind] {
+  return tenv_put(env, mut_key(n), mutable ? "1" : "")
+}
+
+fn env_mut_clear_params(env: List[Bind], ps: List[ParamN], i: Int) -> List[Bind] {
+  if (i >= ps.length()) { return env }
+  return env_mut_clear_params(env_mut_put(env, ps[i].name, false), ps, i + 1)
+}
+
+fn env_is_mut(env: List[Bind], n: Str) -> Bool {
+  return tenv_get(env, mut_key(n)) == "1"
+}
+
+fn cap_add(acc: List[Str], n: Str) -> List[Str] {
+  return contains(acc, n) ? acc : acc.push(n)
+}
+
+fn cap_exprs(xs: List[Expr], i: Int, env: List[Bind], bound: List[Str],
+             acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cap_exprs(xs, i + 1, env, bound, cap_free(xs[i], env, bound, acc))
+}
+
+fn cap_inits(xs: List[InitN], i: Int, env: List[Bind], bound: List[Str],
+             acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cap_inits(xs, i + 1, env, bound, cap_free(xs[i].value, env, bound, acc))
+}
+
+fn cap_arms(xs: List[ArmN], i: Int, env: List[Bind], bound: List[Str],
+            acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  let a = xs[i]
+  let inner = a.bind == "" ? bound : bound.push(a.bind)
+  return cap_arms(xs, i + 1, env, bound, cap_free(a.body, env, inner, acc))
+}
+
+// `_mutable_free_vars` (src/revl/lower.py), arm for arm. The shapes it does NOT
+// descend into are as load-bearing as the ones it does: an optional access
+// (`?.`), an optional call, a `${...}` interpolation and a hole contribute
+// nothing, so a name read only there is not captured. That is the reference's
+// answer, and byte agreement is against the reference rather than against a
+// tidier rule.
+fn cap_free(e: Expr, env: List[Bind], bound: List[Str], acc: List[Str]) -> List[Str] {
+  return match e {
+    Var(n)      => (!contains(bound, n) && env_is_mut(env, n)) ? cap_add(acc, n) : acc,
+    Arrow(a)    => cap_free(a.body, env, union_into(bound, param_names(a.params)), acc),
+    Bin(b)      => cap_free(b.r, env, bound, cap_free(b.l, env, bound, acc)),
+    Un(u)       => cap_free(u.e, env, bound, acc),
+    Call(c)     => cap_exprs(c.args, 0, env, bound, cap_free(c.target, env, bound, acc)),
+    Field(f)    => cap_free(f.target, env, bound, acc),
+    Index(x)    => cap_free(x.idx, env, bound, cap_free(x.target, env, bound, acc)),
+    If(f)       => cap_free(f.els, env, bound,
+                     cap_free(f.then_, env, bound, cap_free(f.cond, env, bound, acc))),
+    Rec(r)      => cap_inits(r.fields, 0, env, bound, acc),
+    Lst(l)      => cap_exprs(l.items, 0, env, bound, acc),
+    Match(m)    => cap_arms(m.arms, 0, env, bound, cap_free(m.scrut, env, bound, acc)),
+    _           => acc,
+  }
+}
+
+// The `captures` array body, sorted and mangled exactly as the reference writes
+// it (`sorted(...)`, then `_predeclared_mangle` per name).
+fn arrow_captures_json(a: ArrowN, env: List[Bind]) -> Str {
+  let names = sort_strs(cap_free(a.body, env, param_names(a.params), []))
+  var out = ""
+  var i = 0
+  while (i < names.length()) {
+    let seg = jstr(predeclared_mangle(names[i]))
+    out = i == 0 ? seg : out.concat(",").concat(seg)
+    i += 1
+  }
+  return out
+}
+
+fn lir_arrow(a: ArrowN, env: List[Bind]) -> Str { return lir_arrow_at(a, env, "") }
+
+// `expected` is the declared function type of the position the arrow sits in —
+// the reference's CHECKING position, and "" where there is none.
+//
+// It matters because an arrow's signature is routinely not written on the arrow.
+// `drive(y => seed(y), x)` annotates nothing, yet the reference IR carries
+// `"param_types": ["Str"], "returns": "Async[Str]", "async": true`, because the
+// checker checked the arrow against `drive`'s declared `(Str) -> Async[Str]`
+// parameter and wrote the resolved signature back onto the node. Reading the
+// arrow alone can only ever answer "unannotated", which is how the colour
+// dropped off every arrow in ARGUMENT position while item 391's entry-side
+// colour was already exact.
+//
+// `async` is stamped from the RESOLVED return type and nothing else, which is
+// the reference's rule C2: the colour is a certificate that some declaration
+// promised to await this arrow, so it may come from a checking position and
+// never from the author's own annotation.
+fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str) -> Str {
+  let expPs = fn_param_types(expected)
+  let expRet = function_return_ty(expected)
   var pn = ""
-  var allTyped = a.params.length() > 0
-  var inner = env
+  var pt = ""
+  // vacuously true for a zero-parameter arrow, which is the reference's answer
+  // too: `_arrow_signature_known` asks that EVERY declared parameter type be
+  // known, and `() => s.length()` declares none, so `"param_types": []` and the
+  // inferred `"returns"` go in. Starting from `a.params.length() > 0` withheld
+  // both keys from every `()` arrow.
+  var allTyped = true
+  var inner = env_mut_clear_params(env, a.params, 0)
   var i = 0
   while (i < a.params.length()) {
     let p = a.params[i]
+    let pty = p.ty != "" ? p.ty : (i < expPs.length() ? expPs[i] : "")
     pn = i == 0 ? jstr(p.name) : pn.concat(",").concat(jstr(p.name))
-    if (p.ty == "") { allTyped = false } else { inner = tenv_put(inner, p.name, p.ty) }
+    pt = i == 0 ? jstr(pty) : pt.concat(",").concat(jstr(pty))
+    if (pty == "") { allTyped = false } else { inner = tenv_put(inner, p.name, pty) }
     i += 1
   }
-  var s = "{\"kind\":\"arrow\",\"params\":[".concat(pn).concat("],\"captures\":[],\"body\":")
+  var s = "{\"kind\":\"arrow\",\"params\":[".concat(pn).concat("],\"captures\":[")
+    .concat(arrow_captures_json(a, env)).concat("],\"body\":")
     .concat(lir_expr(a.body, inner))
+  let rt = expRet != "" ? expRet : infer(a.body, inner)
   if (allTyped) {
-    var pt = ""
-    var j = 0
-    while (j < a.params.length()) {
-      pt = j == 0 ? jstr(a.params[j].ty) : pt.concat(",").concat(jstr(a.params[j].ty))
-      j += 1
-    }
-    let bt = infer(a.body, inner)
     s = s.concat(",\"param_types\":[").concat(pt).concat("],\"returns\":")
-      .concat(jstr(bt == "" ? "Any" : bt))
+      .concat(jstr(rt == "" ? "Any" : rt))
   }
+  if (parse_head(rt) == "Async") { s = s.concat(",\"async\":true") }
   return s.concat("}")
 }
 
@@ -9015,7 +9195,7 @@ fn lir_match(m: MatchN, env: List[Bind]) -> Str {
   while (i < m.arms.length()) {
     let a = m.arms[i]
     let pay = arm_payload(scrutTy, a.pat, env)
-    var inner = env
+    var inner = a.bind == "" ? env : env_mut_put(env, a.bind, false)
     if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
     var arm = "{\"pattern\":".concat(jstr(a.pat))
       .concat(",\"bind\":").concat(a.bind == "" ? "null" : jstr(predeclared_mangle(a.bind)))
@@ -9688,6 +9868,13 @@ fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
       let eend = close_brace(ts, tend + 1)
       if (eend != 0 - 1) { elseS = own_scan(ts, tend + 2, eend - 1)  nexti = eend }
     }
+    // the `else if` chain, recognised and ADVANCED the same way `lir_one_stmt`
+    // now does — this scan's whole contract is that its statement boundaries are
+    // that reader's, so a write's start-token index means the same thing in both
+    if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) {
+      let r = own_one(ts, tend + 1, hi)
+      if (r.i > tend + 1) { elseS = [r.step]  nexti = r.i }
+    }
     return { step: ostep_if(c.e, thenS, elseS), i: nexti }
   }
   if (t.kind == "kw" && t.text == "while") {
@@ -9809,7 +9996,8 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     let rty = r.ty
     let rjs = r.js
     let bindty = declared != "" ? declared : rty
-    let env2 = bindty == "" ? env : tenv_put(env, name, bindty)
+    let env1 = env_mut_put(env, name, mutable)
+    let env2 = bindty == "" ? env1 : tenv_put(env1, name, bindty)
     // An annotated `let`/`var` is a checking position, so the reference stamps
     // the same two markers here that it stamps on a call argument and a return:
     // `_mark_widen` (Int/Int32 -> Float, Int32 -> Int) and then
@@ -9865,6 +10053,22 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
         nexti = eend
       }
     }
+    // `else if` — the shape this reader did not have. It is not a third branch
+    // kind: the reference nests the trailing `if` as the SOLE step of the else
+    // list, which is exactly what lowering the `if` at `tend + 1` as one
+    // statement produces. Without it the chain read as a bare `if` whose else was
+    // empty, `nexti` stopped at the first `}`, and the next thing `lir_stmts` saw
+    // was the word `else` — not a statement it recognises, so it gave up on the
+    // block. Both halves were lost silently: every `else if` branch, AND every
+    // statement after the chain (`stdlib/escape.rvl`'s `i += 1`, the increment
+    // that ends the loop).
+    if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) {
+      let r = lir_one_stmt(ts, tend + 1, hi, env, muts, ret, marks, births)
+      if (r.js != "" && r.i > tend + 1) {
+        elsejs = "[".concat(r.js).concat("]")
+        nexti = r.i
+      }
+    }
     let js = "{\"step\":\"if\",\"cond\":".concat(lir_expr(c.e, env))
       .concat(",\"then\":[").concat(thenjs).concat("],\"else\":").concat(elsejs).concat("}")
     return mk_one(js, env, muts, nexti)
@@ -9889,10 +10093,10 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     let bend = close_brace(ts, it.i + 1)
     if (bend == 0 - 1) { return mk_one("", env, muts, hi) }
     let iterTy = infer(it.e, env)
-    var inner = env
+    var inner = env_mut_put(env, bind, false)
     if (parse_head(iterTy) == "List") {
       let el = type_arg1(iterTy)
-      if (el != "") { inner = tenv_put(env, bind, el) }
+      if (el != "") { inner = tenv_put(inner, bind, el) }
     }
     let bodyjs = lir_stmts(ts, it.i + 2, bend - 1, inner, muts, ret, marks, births)
     let js = "{\"step\":\"for\",\"bind\":".concat(jstr(predeclared_mangle(bind))).concat(",\"iterable\":")
@@ -9963,7 +10167,7 @@ fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
 fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
                 colored: List[Str]) -> LirFn {
   let nm = tkc(ts, i + 1).text
-  let ps = params_at(ts, i + 3)
+  let ps = params_at(ts, fn_params_i(ts, i))
   var reti = ps.i
   var retJson = "null"
   var retTy = ""
@@ -10303,7 +10507,10 @@ fn is_variant_rhs(ts: List[Token], lo: Int, hi: Int) -> Bool {
 }
 
 fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
-  let lineHi = line_end(ts, i, ts.length())
+  // the whole declaration span, for the reason `decl_cases` states: a variant
+  // written over several lines lost every case below the first one, and the
+  // `types` section reported a partial `cases` list rather than no list at all.
+  let lineHi = type_decl_end(ts, i + 1)
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
