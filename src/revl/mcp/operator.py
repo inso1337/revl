@@ -272,11 +272,33 @@ class Operator:
     ``None`` means the profile declares no credential for this operator, which
     is not a default-open: a cast attributed to an operator with no declared
     credential cannot be proven and is refused (roadmap item 471 / issue #979).
+
+    ``sign_key`` is the stronger form and the one a deployment should prefer: the
+    raw ``X || Y`` hex of the operator's ECDSA P-256 PUBLIC key. The operator
+    keeps the private half and never transmits it; a cast signs the question's
+    own binding and presents the signature. The difference from ``vote_key`` is
+    not cosmetic. A ``vote_key`` cast hands the session the secret itself, so
+    everything that can observe one honest cast — the session process, the
+    transport, a log, the proposer — can afterwards cast as that operator on
+    every future question. A ``sign_key`` cast hands over a value that verifies
+    exactly one question and nothing else.
+
+    An operator declares one or the other, never both: two credential kinds on
+    one identity would mean the weaker one is always available, so the stronger
+    would bound nothing (a profile that declares both is a parse error).
+
+    ``not_after`` (epoch ms) and ``revoked`` are the credential's LIFETIME. A
+    credential with neither is a permanent grant, which is the honest reading of
+    the profile and usually not what the deployer meant; both are checked at the
+    cast, and an expired or revoked credential REFUSES rather than counts.
     """
 
     token: str
     grants: tuple[Grant, ...] = ()
     vote_key: str | None = None
+    sign_key: str | None = None
+    not_after: int | None = None
+    revoked: bool = False
 
     def allows(self, verb: str, labels: frozenset[str]) -> tuple[bool, Grant | None]:
         """Decide one (verb, target) pair. Deny wins over allow; an allow must
@@ -349,45 +371,167 @@ def _parse_vote_key(value: str, source: str | None, lineno: int) -> str:
     return digest
 
 
+#: The signature suite a `sign` line declares. One spelling, validated rather
+#: than recorded, so a profile cannot name one curve and carry another's bytes.
+#: It is a migration slot in the same sense `sha256:` is: a second suite would
+#: be a second prefix, and a profile written today says which one it meant.
+SIGN_ALG = "p256"
+
+
+def _parse_sign_key(value: str, source: str | None, lineno: int) -> str:
+    """One operator's cast-signing PUBLIC key, normalised to bare lowercase hex.
+
+    Accepts ``p256:<128 hex>`` (raw ``X || Y``) and the SEC1 uncompressed
+    spelling ``p256:04<128 hex>``, because that is what most key tooling prints.
+
+    The point is checked to be ON THE CURVE here, at parse time, rather than at
+    the cast. An off-curve key is the VERIFIER's own misconfiguration, not a
+    peer's record, and a deployer who typo'd one should be told when the profile
+    loads instead of discovering it as an unexplainable refusal in the middle of
+    a quorum. Verifying against a point that is not on the curve is not
+    verification, so there is no tolerant reading available."""
+    raw = value.strip()
+    low = raw.lower()
+    if not low.startswith(SIGN_ALG + ":"):
+        raise ProfileError(
+            source, lineno,
+            f"a cast-signing key names its suite: `sign {SIGN_ALG}:<hex>`, the "
+            f"raw X||Y of the operator's ECDSA P-256 PUBLIC key (128 hex "
+            f"characters, or 130 with the SEC1 `04` prefix). Got {raw!r}")
+    body = low[len(SIGN_ALG) + 1:].strip()
+    if len(body) == 130 and body.startswith("04"):
+        body = body[2:]
+    if len(body) != 128 or any(c not in "0123456789abcdef" for c in body):
+        raise ProfileError(
+            source, lineno,
+            f"a P-256 cast-signing key is 128 hex characters of raw X||Y (the "
+            f"PUBLIC key, never the private scalar): {raw!r}")
+    # imported here, not at module import: `tee_quote` is pure-integer ECC that
+    # nothing else in the management plane needs, and a profile with no `sign`
+    # line should not pay for it.
+    from ..tee_quote import CURVE_P256, QuoteFormatError, _decode_public_key
+    try:
+        _decode_public_key(CURVE_P256, bytes.fromhex(body))
+    except QuoteFormatError as exc:
+        raise ProfileError(
+            source, lineno,
+            f"the declared cast-signing key for this operator is not a usable "
+            f"P-256 public key ({exc}). A signature checked against it would "
+            f"verify nothing, so the profile is refused rather than loaded")
+    return body
+
+
+def _parse_not_after(value: str, source: str | None, lineno: int) -> int:
+    """The `until <timestamp>` clause: when this credential stops binding casts.
+
+    Accepts an ISO-8601 instant (`2026-01-01T00:00:00Z`) or bare epoch
+    milliseconds. A naive timestamp — one with no offset — is REFUSED rather
+    than read as local time: the session clock is epoch-anchored, and a
+    credential whose expiry moves with the reader's timezone is a credential
+    whose lifetime nobody can state."""
+    raw = value.strip()
+    if raw.isdigit():
+        return int(raw)
+    from datetime import datetime, timezone
+    try:
+        moment = datetime.fromisoformat(raw.replace("Z", "+00:00")
+                                        if raw.endswith("Z") else raw)
+    except ValueError:
+        raise ProfileError(
+            source, lineno,
+            f"`until` takes an ISO-8601 instant with an offset "
+            f"(`2026-01-01T00:00:00Z`) or bare epoch milliseconds: {raw!r}")
+    if moment.tzinfo is None:
+        raise ProfileError(
+            source, lineno,
+            f"`until {raw}` carries no UTC offset, so the instant it names "
+            f"depends on who reads it. Write it as `{raw}Z` or with an explicit "
+            f"offset")
+    return int(moment.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def _split_until(rest: str, source: str | None, lineno: int):
+    """Peel an optional trailing `until <timestamp>` off a credential line."""
+    lowered = rest.lower()
+    marker = lowered.rfind(" until ")
+    if marker < 0:
+        return rest, None
+    return (rest[:marker],
+            _parse_not_after(rest[marker + len(" until "):], source, lineno))
+
+
 def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
     """The line DSL (blank lines and ``#`` comments ignored). Grammar:
 
         operator <token> may     <verb>[, ...] on <subject>[, ...]
         operator <token> may not <verb>[, ...] on <subject>[, ...]
         operator <token> may     <verb>[, ...]                       # on *
-        operator <token> key     sha256:<hex>                        # item 471
+        operator <token> key     sha256:<hex> [until <ts>]           # item 471
+        operator <token> sign    p256:<hex>   [until <ts>]           # issue #979
+        operator <token> revoked                                     # issue #979
 
     A verb of ``*`` matches every management verb; a subject of ``*`` matches
     every component and realm. ``on`` may be omitted to mean ``on *``.
 
-    The ``key`` line declares the DIGEST of this operator's vote credential, so
+    The ``key`` line declares the DIGEST of this operator's BEARER vote
+    credential and the ``sign`` line the PUBLIC half of its cast-signing key, so
     a multi-party cast attributed to the operator can be proven rather than
-    asserted (issue #979). It is orthogonal to the grants: an operator may have
-    grants and no key (it can act on this session's own authority but cannot be
-    named by a cast from elsewhere), a key and no grants (it can be proven as a
-    voter without holding any management verb), or both.
+    asserted (issue #979). They are orthogonal to the grants: an operator may
+    have grants and no credential (it can act on this session's own authority but
+    cannot be named by a cast from elsewhere), a credential and no grants (it can
+    be proven as a voter without holding any management verb), or both.
+
+    An operator declares ``key`` or ``sign``, never both. Both would leave the
+    bearer path permanently open beside the signed one, so the signed one would
+    bound nothing: an attacker who holds the secret does not care that a stronger
+    credential also exists.
+
+    ``until`` bounds the credential's lifetime and ``revoked`` ends it now. Both
+    are checked at the cast, and both refuse.
     """
     operators: dict[str, list[Grant]] = {}
     keys: dict[str, str] = {}
+    sign_keys: dict[str, str] = {}
+    not_after: dict[str, int] = {}
+    revoked: set[str] = set()
+
+    def _claim_credential(token: str, lineno: int) -> None:
+        if token in keys or token in sign_keys:
+            raise ProfileError(
+                source, lineno,
+                f"operator `{token}` already declares a vote credential: two "
+                f"credentials for one identity would make it ambiguous which "
+                f"principal a cast proved, and the weaker of the two would be "
+                f"the one that actually bounds it")
+
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
         parts = line.split(None, 2)
+        # `operator <token> revoked` is the one three-word form with no clause
+        # after it, so the arity check is "at least a token and something to say
+        # about it" and the emptiness is caught below with the same message.
         if len(parts) < 3 or parts[0].lower() != "operator":
             raise ProfileError(source, lineno,
                                f"expected `operator <token> may ...`: {raw.strip()!r}")
         token = parts[1]
         rest = parts[2]
         low = rest.lower()
-        if low.startswith("key "):
-            if token in keys:
-                raise ProfileError(
-                    source, lineno,
-                    f"operator `{token}` already declares a vote credential: two "
-                    f"credentials for one identity would make it ambiguous which "
-                    f"principal a cast proved")
-            keys[token] = _parse_vote_key(rest[len("key "):], source, lineno)
+        if low == "revoked":
+            revoked.add(token)
+            operators.setdefault(token, [])
+            continue
+        if low.startswith("key ") or low.startswith("sign "):
+            _claim_credential(token, lineno)
+            kind, _, body = rest.partition(" ")
+            body, until = _split_until(body, source, lineno)
+            if kind.lower() == "key":
+                keys[token] = _parse_vote_key(body, source, lineno)
+            else:
+                sign_keys[token] = _parse_sign_key(body, source, lineno)
+            if until is not None:
+                not_after[token] = until
             operators.setdefault(token, [])
             continue
         for verb, allow in (("may not ", False), ("may ", True)):
@@ -412,7 +556,9 @@ def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
                                f"profile line names no subject: {raw.strip()!r}")
         operators.setdefault(token, []).append(Grant(verbs, subjects, allow))
     return OperatorRegistry(
-        {t: Operator(t, tuple(g), keys.get(t)) for t, g in operators.items()},
+        {t: Operator(t, tuple(g), keys.get(t), sign_keys.get(t),
+                     not_after.get(t), t in revoked)
+         for t, g in operators.items()},
         source)
 
 
@@ -421,12 +567,16 @@ def _parse_json(text: str, source: str | None) -> OperatorRegistry:
 
     { "operators": [
         { "token": "alice",
-          "key": "sha256:<64 hex>",
+          "sign": "p256:<128 hex>",
+          "notAfter": "2026-01-01T00:00:00Z",
           "grants": [ {"verbs": ["swap"], "on": ["tenant_a*"]},
                       {"verbs": ["unload"], "on": ["*"], "deny": true} ] } ] }
 
-    ``key`` (or ``voteKey``) is the digest of the operator's vote credential,
-    exactly as in the DSL's ``key`` line.
+    ``key`` (or ``voteKey``) is the digest of the operator's bearer vote
+    credential and ``sign`` (or ``signKey``) the public half of its cast-signing
+    key, exactly as in the DSL's ``key`` and ``sign`` lines — one or the other,
+    never both. ``notAfter`` and ``revoked`` are the DSL's ``until`` clause and
+    ``revoked`` line.
     """
     try:
         doc = json.loads(text)
@@ -448,9 +598,22 @@ def _parse_json(text: str, source: str | None) -> OperatorRegistry:
                                    f"a grant for `{token}` names no verb")
             grants.append(Grant(verbs, subjects, not g.get("deny")))
         raw_key = entry.get("key") or entry.get("voteKey")
+        raw_sign = entry.get("sign") or entry.get("signKey")
+        if raw_key and raw_sign:
+            raise ProfileError(
+                source, 1,
+                f"operator `{token}` declares both a bearer vote credential and "
+                f"a cast-signing key: two credentials for one identity would "
+                f"leave the weaker one permanently open beside the stronger, so "
+                f"the stronger would bound nothing. Declare one")
+        raw_not_after = entry.get("notAfter") or entry.get("not_after")
         operators[token] = Operator(
             token, tuple(grants),
-            _parse_vote_key(raw_key, source, 1) if raw_key else None)
+            _parse_vote_key(raw_key, source, 1) if raw_key else None,
+            _parse_sign_key(raw_sign, source, 1) if raw_sign else None,
+            (_parse_not_after(str(raw_not_after), source, 1)
+             if raw_not_after is not None else None),
+            bool(entry.get("revoked")))
     return OperatorRegistry(operators, source)
 
 

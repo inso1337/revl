@@ -58,7 +58,9 @@ Grammar (blank lines and `#` comments ignored):
     operator <token> may     <verb>[, ...] on <subject>[, ...]
     operator <token> may not <verb>[, ...] on <subject>[, ...]
     operator <token> may     <verb>[, ...]                        # on *
-    operator <token> key     sha256:<64 hex>                      # item 471
+    operator <token> key     sha256:<64 hex>  [until <ts>]        # item 471
+    operator <token> sign    p256:<128 hex>   [until <ts>]        # issue #979
+    operator <token> revoked                                      # issue #979
 
 * **verbs** — `load`, `swap`, `edit`, `unload`, `restore`, `snapshot`, `undo`
   (`rollback` is accepted as an alias for `undo`), `commit`, `approve`,
@@ -72,13 +74,29 @@ Grammar (blank lines and `#` comments ignored):
   **deny wins** over any allow (exactly as in the boundary policy). An operator
   is **closed by default**: a verb with no allow that selects the target is
   refused.
-* **key** — the operator's **vote credential**, used by multi-party approval
-  (item 471) to bind who cast a vote. It is the SHA-256 **digest** of a secret
-  you issue to that operator out of band, never the secret: the profile is a
-  file that gets read, copied and diffed, and one carrying the secrets would
-  hand every voter identity to anyone who can read it. A line that is not a
-  64-character hex digest (with or without the `sha256:` prefix) is a parse
-  error, and one token may declare at most one key. See
+* **key** — the operator's **bearer vote credential**, used by multi-party
+  approval (item 471) to bind who cast a vote. It is the SHA-256 **digest** of a
+  secret you issue to that operator out of band, never the secret: the profile
+  is a file that gets read, copied and diffed, and one carrying the secrets
+  would hand every voter identity to anyone who can read it. A line that is not
+  a 64-character hex digest (with or without the `sha256:` prefix) is a parse
+  error.
+* **sign** — the operator's **cast-signing key**, and the form to prefer. It is
+  the raw `X || Y` hex of an ECDSA P-256 **public** key (128 hex characters, or
+  130 with the SEC1 `04` prefix); the operator keeps the private half and never
+  sends it. A cast signs the question's own binding and presents the signature
+  as `asProof`. A key that is malformed or not a point on the curve is a parse
+  error rather than a credential nothing can ever match.
+* One token declares **`key` or `sign`, never both**. Both would leave the
+  bearer path permanently open beside the signed one, so the signed one would
+  bound nothing.
+* **until** — an ISO-8601 instant with an offset (`2026-01-01T00:00:00Z`) or
+  bare epoch milliseconds, after which the credential binds no cast. A naive
+  timestamp is a parse error: an expiry that moves with the reader's timezone is
+  an expiry nobody can state.
+* **revoked** — ends the credential now, with no window to wait out. Checked
+  before the credential is verified, so a compromised key that can still produce
+  valid signatures is still refused. See
   [Vote credentials](#vote-credentials-multi-party-approval) below.
 
 ### The JSON equivalent
@@ -86,7 +104,8 @@ Grammar (blank lines and `#` comments ignored):
 ```json
 { "operators": [
     { "token": "alice",
-      "key": "sha256:<64 hex>",
+      "sign": "p256:<128 hex>",
+      "notAfter": "2026-01-01T00:00:00Z",
       "grants": [
         {"verbs": ["swap", "plan"], "on": ["tenant_a*"]},
         {"verbs": ["snapshot"],     "on": ["*"]},
@@ -124,24 +143,49 @@ A cast is now attributed to a **bound** identity or it is refused:
 * naming **this session's own operator**, or naming nobody, attributes the cast
   to the identity bound at serve time. That is process configuration, not
   something the caller on the wire chooses;
-* naming **anyone else** requires that operator's vote credential, passed as
-  `asSecret` on the same call. The session hashes it and compares against the
-  `key` the profile declares for that token;
+* naming **anyone else** requires that operator's credential on the same call.
+  Either a **signature** over this question's binding in `asProof`, checked
+  against the `sign` key the profile declares, which is the form to prefer, or, for an
+  operator declared with `key`, the bearer secret in `asSecret`, which the
+  session hashes and compares against the digest;
 * everything else refuses, by name: `unbound-identity` (no profile to check
-  against), `unknown-operator`, `unkeyed-identity` (no `key` declared),
-  `unproven-identity` (credential missing or wrong), `unnamed-credential` (a
-  secret with no `asToken` beside it). Each refusal is written to the decision
-  graph before it is raised.
+  against), `unknown-operator`, `unkeyed-identity` (no credential declared),
+  `unproven-identity` (bearer credential missing or wrong), `unsigned-cast` (a
+  `sign` operator cast for with no proof, or with a secret instead),
+  `unproven-signature` (a proof that does not verify over this question, or
+  names an operator with no `sign` key), `unbound-question` (a proof with no
+  question to verify it against), `expired-credential`, `revoked-credential`,
+  and `unnamed-credential` (a secret or proof with no `asToken` beside it). Each
+  refusal is written to the decision graph before it is raised.
 
 The distinctness unit is the **principal**, which is derived rather than
-asserted: the session binding is one principal and each distinct credential
-digest is one principal. Two operators issued the SAME secret are therefore one
+asserted: the session binding is one principal, each distinct credential digest
+is one principal, and each distinct signing key is one principal. Two operators issued the SAME secret are therefore one
 principal and supply one vote between them (`same-principal`), which a count of
 names cannot see. The graph records a hash of the credential digest, never the
 digest, so an audit can tell the principals apart without carrying the verifier.
 
-Issue a credential by choosing a secret, hashing it, and putting the digest in
-the profile:
+Issue a **signing** credential by generating a P-256 keypair, giving the
+operator the private half, and putting the public half in the profile:
+
+```
+operator bob sign p256:<the public key, raw X||Y hex> until 2026-07-01T00:00:00Z
+operator bob may approve on payments*
+```
+
+The operator signs each cast over the question's binding (`revl.mcp.quorum.
+cast_message` is the canonical message and `sign_cast` the reference signer)
+and sends the raw `R || S` hex as `asProof`. Retiring the credential is one
+line, effective on the next cast:
+
+```
+operator bob revoked
+```
+
+The older **bearer** form takes a secret and its digest instead. It still works
+and is weaker in a specific way: casting it hands the secret to the session, so
+anything that can see one honest cast can cast as that operator on every later
+question.
 
 ```
 $ printf %s "$SECRET" | shasum -a 256
@@ -154,14 +198,23 @@ and `revl_override`: an override recorded against a name the caller merely typed
 is an unattributable act wearing somebody else's name.
 
 **What this proves, and what it does not.** N counted votes required N distinct
-secrets. It does not prove N humans consented: a credential is a bearer token,
-it can be shared, delegated or stolen, and every cast still arrives over one
-session's wire, so an operator who has collected two secrets still satisfies a
-two-of-M rule. Closing that needs a per-caller authenticated transport (item 39)
-where each cast arrives on its own authenticated connection and is signed over
-the question's binding, so a captured credential is not replayable. Treat the
-quorum as binding against mistake and against a single operator's unaided
-assertion, and as advisory against an operator who has collected the secrets.
+credentials, and with `sign` those credentials never crossed the wire: a value
+captured from one cast answers that one question and nothing else: not another
+question, not another round of the same question, not another act on it, and not
+the other vote.
+
+It does **not** prove that N humans consented. A caller holding two of the named
+approvers' private keys signs twice and satisfies a two-of-M rule from one
+session, and the decision graph honestly reads as two principals because at this
+boundary it was two keys. Signing changes what must be held and what a captured
+value is worth; it does not make the count a count of people. Closing that needs
+a per-caller authenticated transport (item 39) where each cast arrives on its
+own authenticated connection and the count is of connections.
+
+So: treat `require N of M` as binding against mistake, against a single
+operator's unaided assertion, and, with `sign`, against replay and against
+anything that merely observed an earlier cast. Treat it as advisory against an
+operator who has collected the key material itself.
 
 ## Per-verb gating
 
