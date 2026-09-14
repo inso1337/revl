@@ -376,6 +376,14 @@ config a composition declares (a component with a missing required field refuses
 the run before any runtime loads); `--backend` selects the tier, and `revl test
 --all` is gated by `tests/test_cross_tier.py`.
 
+`setup.sh` wants `git`, `uv` and network access, and it clones the runtime into
+a git-ignored `.cordis-py/` that no `git archive <ref>` export can carry. A tree
+vendored by ref installs the runtime from the wheel committed alongside it
+instead: `pip install site/vendor/cordis-4.0.0-py3-none-any.whl`, whose declared
+requirements pip resolves on its own. PyPI's `cordis` is an unrelated project
+and installing it leaves the runtime missing.
+[backends/python/README.md](../backends/python/README.md) has the detail.
+
 The **rust tier is runnable** too: `--backend rust` boots the composition as a
 separate **cordis-rs process** over the same driver contract py uses, only in a
 different address space: the language-agnostic Unix-socket bridge seam the

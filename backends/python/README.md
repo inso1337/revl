@@ -36,7 +36,8 @@ crash-recovery and backwards replay (`replay.py`, `docs/replay.md`), declared
 
 ## Setup (one command)
 
-Requires `uv` and network access for the runtime clone:
+Requires `git`, `uv` and network access for the runtime clone. Without them,
+see "Obtaining the runtime without the clone" below:
 
 ```sh
 ./setup.sh
@@ -45,13 +46,45 @@ Requires `uv` and network access for the runtime clone:
 This clones [cordis-py](https://github.com/inso1337/cordis-py) at branch
 `harden-fiber-lifecycle` (the lifecycle-reentrancy-hardened fork the
 semantics depend on; upstream PR geohotstan/cordis-py#1) into `.cordis-py/`,
-**pinned to the tested commit `1316174`** (docs/contract-errata.md A8) —
+**pinned to the tested commit `1c5e6f17`** (the dict-plugin Config fix on top
+of the `1316174` A8 async-body fix, docs/contract-errata.md A8) —
 never the branch's moving HEAD, which made vintage-pinned tests fail on fresh
 worktrees through no fault of the change under test (findings-faultres).
 Update the pin in `setup.sh` deliberately when the runtime moves, and record
 why. Point `CORDIS_PY=/path/to/clone` at an existing checkout to skip the
-clone; override the pin with `CORDIS_PY_REV=<sha>`. The script creates
+clone; override the pin with `CORDIS_PY_PIN=<sha>`. The script creates
 `.venv/` and installs everything.
+
+## Obtaining the runtime without the clone
+
+`setup.sh` is the path for a checkout with `git`, `uv` and network access. A
+consumer that vendors revl by git ref has none of those guaranteed, and the
+clone cannot ride along in the export: `.cordis-py/` is listed in
+`backends/python/.gitignore`, so `git archive <ref>` never carries it and the
+first `import cordis` fails with `ModuleNotFoundError: No module named
+'cordis'`.
+
+The runtime is also committed to this repository as a wheel, packaged from the
+same pinned clone by `site/build.py`:
+
+```sh
+pip install site/vendor/cordis-4.0.0-py3-none-any.whl
+```
+
+That is the whole installation. The wheel is pure Python (`py3-none-any`,
+`Requires-Python: >=3.11`) and since issue #946 its METADATA declares `pyyaml`
+and `watchdog`, the two packages `import cordis` needs at module scope, so pip
+resolves them for you. `revl doctor` then reports `cordis-py runtime 4.0.0` and
+`revl run --backend py` boots a composition.
+
+One export note: the wheel lives under `site/vendor/`, so
+`git archive <ref> backends/python` on its own does not contain it. Export the
+whole ref, add `site/vendor` to the paths you export, or copy the wheel across
+by hand.
+
+**PyPI's `cordis` is a different project.** It is an unrelated placeholder, so
+`pip install cordis` reports success and still leaves the runtime missing.
+Install the committed wheel, or run `setup.sh`.
 
 ## Test (one command)
 
