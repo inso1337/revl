@@ -570,7 +570,24 @@ def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
     it would resume EARLY and quietly disagree with the reference. Emitting a
     subscription that SILENTLY dropped the window is the worst outcome
     available — the program would run and answer differently from the py
-    reference — so refuse by name instead."""
+    reference — so refuse by name instead.
+
+    §4.5's `replay(…)` is the other one, and it is refused for a reason of its
+    own rather than for the clock. Replay is a DURABILITY claim, and the half
+    that makes it worth anything is §4.9's: a durable cursor is what turns a
+    crashed subscription from residue into a re-issuable descriptor, and that
+    recovery surface is the WAL's, which lives on the py reference tier. A tier
+    that emitted a subscription while silently dropping the backlog would
+    deliver only live items and call it replay. Refused at the provider's
+    declaration as well as at the consumer's request, because a declared backlog
+    nothing holds is the same vacuous claim one end earlier."""
+    if node.get("replay"):
+        raise EmitError(
+            "a stream `replay(…)` is not lowered on the %s tier; replay is a "
+            "durability claim — the provider holds the backlog, and a durable "
+            "cursor is what makes a crashed subscription reconstructible rather "
+            "than residue — and that recovery surface is the py reference "
+            "tier's (item 130 §4.5, §4.9) — try `--backend py`" % tier)
     if node.get("drain") is not None:
         raise EmitError(
             "a `drain` window is not lowered on the %s tier; the `block` policy "
@@ -2018,6 +2035,12 @@ def _expr(
     if kind == "host":
         fn = node.get("fn")
         _refuse_missing_host_root(fn)
+        if node.get("replay"):
+            # item 130 §4.5: a provider-side `replay(…)` declaration this tier
+            # cannot honour. Refused rather than dropped — a declared backlog
+            # nothing holds is the same vacuous durability claim the consumer's
+            # request would be, one end earlier.
+            _refuse_unlowered_stream_surface(node)
         host, _, method = fn.partition(".")
         args = ", ".join(
             _expr(a, ctx, rename, env) for a in node.get("args") or []

@@ -124,6 +124,21 @@ REGISTRY: tuple[Seam, ...] = (
         defined_at="backends/python/runtime.py",
     ),
     Seam(
+        name="revl_durable_inverse",
+        # item 130 §4.9: the recorder asks one registered inverse whether it
+        # describes itself, so the call site passes exactly the disposer: (1, 1).
+        # A pair of stringly-named attributes on the disposer would have been the
+        # same fail-silent coupling with nothing to gate — a rename on either
+        # side would quietly stop a durable subscription claiming the
+        # reconstructibility §4.9 grants it, and a crashed one would report as
+        # closure-only residue with no error anywhere. A single `def` is what
+        # makes that checkable.
+        min_args=1,
+        max_args=1,
+        read_at="backends/python/replay.py",
+        defined_at="backends/python/runtime.py",
+    ),
+    Seam(
         name="revl_take_model_call",
         # crossing has a default, so a bare call and a one-arg call are both
         # valid: (0, 1).
@@ -394,9 +409,12 @@ def check(defs: list[Definition], reads: list[Read]) -> Report:
 # Self-test: the gate, run against the issue-#292 collision itself.
 # ---------------------------------------------------------------------------
 
-# One clean definition of every registered seam, plus the three real reads.
-# Every self-test case is this baseline PLUS one mutation, so a case proves the
-# mutation is what reddens the gate and nothing else.
+# One clean definition of every registered seam, plus every real read. Every
+# self-test case is this baseline PLUS one mutation, so a case proves the
+# mutation is what reddens the gate and nothing else. Adding a seam to the
+# REGISTRY means adding it here too: a baseline that does not carry every
+# registered seam reds every case for the same reason, which would tell you
+# nothing about the mutation under test.
 _CLEAN_RUNTIME = """
 def revl_reset_run_trace_state():
     pass
@@ -405,6 +423,9 @@ def revl_note_emission_index(component, index):
     pass
 
 def revl_take_model_call(crossing=None):
+    pass
+
+def revl_durable_inverse(disposer):
     pass
 """
 
@@ -417,6 +438,9 @@ def b(runtime):
 
 def c(runtime):
     return getattr(runtime, "revl_take_model_call", None)
+
+def d(runtime):
+    return getattr(runtime, "revl_durable_inverse", None)
 """
 
 
@@ -454,6 +478,18 @@ def self_test() -> int:
                 "runtime.py": _CLEAN_RUNTIME.replace(
                     "def revl_note_emission_index(component, index):",
                     "def revl_note_emission_index(index):",
+                ),
+                "run.py": _CLEAN_READS,
+            },
+            1,
+        ),
+        (
+            "item 130 \u00a74.9: a zero-argument `revl_durable_inverse` for a "
+            "(1,1) seam reds",
+            {
+                "runtime.py": _CLEAN_RUNTIME.replace(
+                    "def revl_durable_inverse(disposer):",
+                    "def revl_durable_inverse():",
                 ),
                 "run.py": _CLEAN_READS,
             },

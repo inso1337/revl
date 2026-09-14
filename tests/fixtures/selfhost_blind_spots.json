@@ -246,12 +246,13 @@
         "kind=lease-revoke",
         "step=approval"
       ],
-      "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs.": [
+      "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
         "kind=stream-merge",
         "kind=subscribe",
         "stage=take",
         "step=await",
-        "step=stream-iter"
+        "step=stream-iter",
+        "subscribe=<true>"
       ],
       "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
         "lifecycle=<true>",

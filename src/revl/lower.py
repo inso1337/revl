@@ -920,6 +920,12 @@ class Env:
         # source is refused (rule 3.1, single-consumer).
         self.terminal_stream_sources: set[str] = set()
         self.subscribed_sources: set[str] = set()
+        # item 130 §4.5: the PROVIDER-side replay declarations in scope, safe
+        # name -> the lowered `{"count": n}` / `{"cursor": name}` claim. A
+        # `subscribe … replay(…)` is admitted ONLY against an entry here —
+        # replay is a durability claim only the provider can make, so an
+        # undeclared request is the §4.5 compile error.
+        self.replay_sources: dict = {}
         # item 130 Slice 4: the subscriptions an `every … in` already iterates.
         # A subscription is SINGLE-CONSUMER (rule 3.1), and an iteration consumes
         # it to its terminal, so a second `every` on the same handle is a second
@@ -9707,6 +9713,139 @@ def _lower_stream_stages(sub_expr: "SubscribeExpr", env: "Env",
     return stages
 
 
+def _lower_replay_decl(spec, acquire: dict, env: "Env", filename: str,
+                       line: int) -> dict:
+    """Lower a PROVIDER-side `replay(n)` / `replay(from: "<durable>")`
+    declaration (item 130 §4.5).
+
+    §4.5 gives replay one owner: the provider. The declaration says this source
+    HOLDS a backlog — last-n in memory, or a durable cursor — and it is the only
+    thing that makes a `replay(…)` at a `subscribe` anything but an undeclared
+    argument. Two shapes, two strengths:
+
+    * `replay(n)` — the last n items, held by the provider, gone with the
+      process. Enough to give a late consumer a backlog; NOT a crash claim.
+    * `replay(from: "<durable>")` — a durable cursor NAME. It is the stronger
+      claim precisely because it is WAL-serializable: a name and a position
+      survive the process, which is what lets a crashed subscription be
+      reconstructible rather than residue (§4.9).
+
+    A cursor must therefore be a STRING LITERAL. A computed cursor could not be
+    written into the WAL as the descriptor recovery re-issues from, so admitting
+    one would ship exactly the vacuous durability claim §4.5 refuses."""
+    if acquire.get("kind") != "host" or acquire.get("fn") != "Stream.source":
+        raise RevlError(
+            filename, line,
+            "`replay` is a stream provider's declaration and this acquisition "
+            "is not a stream source",
+            hint="only `effect Stream.source()` holds a backlog to replay; write "
+                 "`let src = effect Stream.source() replay(<n>) undo "
+                 "src.close()` (item 130 §4.5)",
+            code="lifecycle", category="lifecycle")
+    if spec.count is not None:
+        return {"count": int(spec.count)}
+    return {"cursor": _replay_cursor_name(spec, env, filename, line)}
+
+
+def _replay_cursor_name(spec, env: "Env", filename: str, line: int) -> str:
+    """The durable cursor name a `replay(from: …)` spells, refusing anything but
+    a string literal (item 130 §4.5).
+
+    Shared by the provider declaration and the consumer request so the two are
+    read by one rule. The cursor IS the descriptor recovery re-issues the
+    subscription from (§4.9), so it has to be writable into the WAL exactly as
+    written; a computed one would be a durability claim with nothing durable in
+    it."""
+    cursor = _lower_expr(spec.cursor, env, mode="setup")
+    name = cursor.get("value") if cursor.get("kind") == "lit" else None
+    if not isinstance(name, str) or not name:
+        raise RevlError(
+            filename, line,
+            "a durable replay cursor must be a literal name",
+            hint="the cursor IS the descriptor a fresh process re-issues the "
+                 "subscription from, so it has to be writable into the WAL as it "
+                 "stands; write `replay(from: \"orders\")` (item 130 §4.5, §4.9)",
+            code="lifecycle", category="lifecycle")
+    return name
+
+
+def _admit_replay(spec, stream_ir: dict, env: "Env", filename: str,
+                  line: int) -> dict:
+    """Admit a CONSUMER-side `replay(…)` at a `subscribe` against the provider's
+    own declaration (item 130 §4.5).
+
+    §4.5's last sentence: an undeclared `replay` argument at a `subscribe` is a
+    compile error. That is this function — plus the three ways a declared one can
+    still be a claim the provider does not back: asking a different SHAPE than
+    the provider declared, asking for more items than it holds, and asking a
+    fan-in (no provider declared the interleaving of two backlogs, so a merged
+    replay would order items by nothing)."""
+    if stream_ir.get("kind") == "stream-merge":
+        raise RevlError(
+            filename, line,
+            "`replay` on a `merge(a, b)` fan-in has no declared order — the "
+            "backlogs of two providers do not interleave",
+            hint="a merged stream is derived, and neither source declared how "
+                 "its backlog orders against the other's. Replay one source and "
+                 "merge the live streams, or drop the `replay` (item 130 §4.5)",
+            code="lifecycle", category="lifecycle")
+    src_name = stream_ir.get("id") if stream_ir.get("kind") == "name" else None
+    declared = env.replay_sources.get(src_name)
+    if declared is None:
+        raise RevlError(
+            filename, line,
+            "`replay` at a `subscribe` requires a provider that declares it "
+            "(item 130 §4.5)",
+            hint="replay is a provider-side durability claim — the provider must "
+                 "hold the backlog and, after a crash, reconstruct it (§4.9). "
+                 "Declare it on the source: `let src = effect Stream.source() "
+                 "replay(<n>) undo src.close()`, or a durable cursor "
+                 "`replay(from: \"<name>\")`; then a `subscribe` may ask for it.",
+            code="lifecycle", category="lifecycle")
+    if spec.cursor is not None:
+        want = {"cursor": _replay_cursor_name(spec, env, filename, line)}
+        if "cursor" not in declared:
+            raise RevlError(
+                filename, line,
+                f"stream source `{src_name}` declares a last-n backlog, not a "
+                f"durable cursor",
+                hint="a last-n backlog dies with the provider; only `replay(from: "
+                     "\"<name>\")` on the SOURCE is the durable claim a cursor "
+                     "subscription reads (item 130 §4.5, §4.9)",
+                code="lifecycle", category="lifecycle")
+        if want["cursor"] != declared["cursor"]:
+            raise RevlError(
+                filename, line,
+                f"stream source `{src_name}` declares the durable cursor "
+                f"`{declared['cursor']}`, not `{want['cursor']}`",
+                hint="a cursor names the provider's own durable position; a "
+                     "consumer may only resume the one the provider declared "
+                     "(item 130 §4.5)",
+                code="lifecycle", category="lifecycle")
+        return want
+    if "count" not in declared:
+        raise RevlError(
+            filename, line,
+            f"stream source `{src_name}` declares a durable cursor, so a "
+            f"subscription resumes FROM it rather than asking for a last-n "
+            f"backlog",
+            hint=f"write `replay(from: \"{declared['cursor']}\")` — the cursor is "
+                 "the position the provider holds, and the count of items behind "
+                 "it is the provider's to decide (item 130 §4.5)",
+            code="lifecycle", category="lifecycle")
+    want = int(spec.count)
+    if want > declared["count"]:
+        raise RevlError(
+            filename, line,
+            f"`replay({want})` asks for more than stream source `{src_name}` "
+            f"declares — its backlog holds {declared['count']}",
+            hint="the provider holds the buffer, so a consumer cannot ask past "
+                 "it; raise the source's own `replay(<n>)` or lower the request "
+                 "(item 130 §4.5)",
+            code="lifecycle", category="lifecycle")
+    return {"count": want}
+
+
 def _admit_stream_operand(node, env: "Env", filename: str, line: int,
                           *, form: str) -> str:
     """Admit ONE stream operand of a `subscribe` head and answer its safe name
@@ -9871,6 +10010,41 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
         # `advance` — never wall-clock.
         acquire["drain"] = sub_expr.drain_ms
         step["drain"] = sub_expr.drain_ms
+    if getattr(sub_expr, "replay", None) is not None:
+        # §4.5: the backlog this consumer asks for, admitted only against the
+        # provider's own declaration. A durable cursor is additionally the §4.9
+        # reconstructibility gate, so it is threaded onto the STEP too — the
+        # bracket is what a crash leaves behind, and the cursor is the descriptor
+        # a fresh process re-issues it from.
+        want = _admit_replay(sub_expr.replay, stream_ir, env, filename, stmt.line)
+        if "cursor" in want:
+            # A cursor is a position in the PROVIDER's log. A derived stream
+            # drops and rewrites items, and a lossy policy discards them, so
+            # neither has a position in that log to resume from — a cursor over
+            # one would name nothing, and resuming it would silently skip. Both
+            # are refused rather than lowered into a claim nothing backs (§4.5).
+            if acquire.get("stages"):
+                raise RevlError(
+                    filename, stmt.line,
+                    "a durable replay cursor and a combinator chain do not "
+                    "compose — a derived stream has no position in the "
+                    "provider's log",
+                    hint="subscribe the source with `replay(from: …)` and apply "
+                         "`map`/`filter`/`take` to what the body does with each "
+                         "item, or drop the cursor (item 130 §4.5)",
+                    code="lifecycle", category="lifecycle")
+            if sub_expr.policy in ("drop_newest", "drop_oldest"):
+                raise RevlError(
+                    filename, stmt.line,
+                    f"a durable replay cursor and the lossy `{sub_expr.policy}` "
+                    f"policy do not compose — a discarded item would advance the "
+                    f"cursor past an item no consumer saw",
+                    hint="a cursor is a resumable position, so it needs a policy "
+                         "that never silently loses: `error` (the default) or "
+                         "`block` (item 130 §4.4, §4.5)",
+                    code="lifecycle", category="lifecycle")
+        acquire["replay"] = want
+        step["replay"] = want
     undo_reach = _first_suspension(step["undo"], env)
     if undo_reach is not None:
         raise RevlError(
@@ -10998,6 +11172,16 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                         and u.get("method") == "close" and isinstance(ut, dict) \
                         and ut.get("kind") == "name" and ut.get("id") == safe:
                     env.terminal_stream_sources.add(safe)
+            # item 130 §4.5: the provider's own replay declaration. Threaded onto
+            # the step only when DECLARED, so a replay-free program's IR is
+            # byte-identical, and recorded on `env` so a `subscribe` on this
+            # source can be admitted against it (`_admit_replay`).
+            if getattr(stmt, "replay", None) is not None:
+                decl = _lower_replay_decl(stmt.replay, acquire, env, filename,
+                                          stmt.line)
+                step["replay"] = decl
+                acquire["replay"] = decl
+                env.replay_sources[safe] = decl
             body.append(step)
         elif isinstance(stmt, EffectStmt):
             if stmt.setup:

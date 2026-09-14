@@ -885,3 +885,100 @@ def test_a_class_c_activation_body_does_not_refire_unprompted_on_resume(tmp_path
     finally:
         if armed2.loaded:
             armed2.unload()
+
+
+# ----------------------------------------------- streams: §4.9 reconstructibility
+
+
+def _subscription_disposer(*, cursor: str | None):
+    """The disposer an item-130 subscription bracket registers, built from the
+    real runtime rather than a stand-in: `lambda: sub.close()` by default, and
+    the self-describing `sub.durable_undo()` when the provider declared a
+    durable replay cursor (docs/design/130-stream-reactive-types.md §4.9)."""
+    runtime = _stream_runtime()
+    runtime.Stream.reset()
+    if cursor is None:
+        # the default bracket, built through the pre-replay API on purpose:
+        # this control has to hold whether or not replay exists.
+        sub = runtime.Stream.subscribe(runtime.Stream.source(), "error", None)
+        return lambda: sub.close()
+    decl = {"cursor": cursor}
+    source = runtime.Stream.source(replay=decl)
+    sub = runtime.Stream.subscribe(source, "error", None, replay=decl)
+    return sub.durable_undo()
+
+
+def _stream_runtime():
+    import runtime as runtime_mod  # the backend's own, already on sys.path
+    return runtime_mod
+
+
+def _subscription_wal(tmp_path, *, cursor: str | None) -> str:
+    """A WAL holding one committed subscription bracket and NO completion
+    marker: the simulated `kill -9` mid-activation."""
+    tl = replay.Timeline("Fulfiller")
+    tl.record_yield(_subscription_disposer(cursor=cursor), "activation")
+    path = str(tmp_path / f"stream-{cursor or 'plain'}.wal")
+    with replay.WriteAheadLog(path, ir={}, generation=1) as wal:
+        wal.append_timeline(tl)
+    return path
+
+
+def test_a_plain_subscription_is_a_closure_only_inverse(tmp_path):
+    """§4.9's DEFAULT, and the control for the case below. A subscription's
+    inverse is a live host listener: closure-only, with nothing of it left after
+    the process. The WAL says exactly that, and recovery never claims it closed."""
+    path = _subscription_wal(tmp_path, cursor=None)
+    [record] = [r for r in replay.WriteAheadLog.read(path)["records"]
+                if r["record"] == "effect"]
+    assert record["inverse"]["reconstructible"] is False
+    assert "closure over in-process memory" in record["inverse"]["reason"]
+    assert record["boundary"]["referent"] == replay.REFERENT_IN_PROCESS
+
+    report = recover(path, world=DictWorld())
+    assert report["verdict"] == "rolled-back"
+    assert report["ran"] == [], "nothing was re-issued, and nothing pretended to be"
+
+
+def test_a_durable_cursor_subscription_is_reconstructible_after_a_crash(tmp_path):
+    """§4.9's one reconstructible case. A provider that declared `replay(from:
+    "<name>")` makes the subscription's inverse a NAME plus a position rather
+    than a closure, so the WAL records a call a fresh process can make and
+    recovery re-issues it instead of reporting residue.
+
+    The gate is the same declaration that gates replay itself (§4.5), so the two
+    durability claims cannot diverge: no declaration, no reconstructibility."""
+    path = _subscription_wal(tmp_path, cursor="orders")
+    [record] = [r for r in replay.WriteAheadLog.read(path)["records"]
+                if r["record"] == "effect"]
+    assert record["boundary"]["class"] == "acquire"
+    assert record["boundary"]["resource"] == "cursor:orders"
+    # the cursor is a durable position — the process dying does not move it
+    assert record["boundary"]["referent"] == replay.REFERENT_OUTLIVES
+    assert record["inverse"]["reconstructible"] is True
+    assert record["inverse"]["op"] == {"receiver": "Stream", "method": "close",
+                                       "args": ["orders"]}
+
+    report = recover(path, world=DictWorld())
+    assert report["verdict"] == "rolled-back"
+    assert [e["op"]["method"] for e in report["ran"]] == ["close"]
+    assert [e["op"]["args"] for e in report["ran"]] == [["orders"]]
+    assert report["unreconstructible"] == []
+
+
+def test_the_durable_disposer_still_closes_exactly_the_subscription(tmp_path):
+    """The descriptor is the only thing §4.9 adds. The disposer itself is the
+    author's `sub.close()`, unchanged — so the in-process teardown path a
+    cursor subscription takes is the one every other bracket takes, and the
+    core guarantee (§0) is not re-implemented for it."""
+    runtime = _stream_runtime()
+    runtime.Stream.reset()
+    decl = {"cursor": "orders"}
+    source = runtime.Stream.source(replay=decl)
+    sub = runtime.Stream.subscribe(source, "error", None, replay=decl)
+    undo = sub.durable_undo()
+    assert sub.state == "active"
+    undo()
+    assert sub.state == "closed"
+    source.close()
+    assert runtime.Stream.pending() == 0

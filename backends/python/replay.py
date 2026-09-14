@@ -111,6 +111,38 @@ def _note_emission_index(component: str, index: int,
         note(component, index, sink)
 
 
+def _durable_inverse(entry: Any) -> Optional[dict]:
+    """Ask the runtime whether this registered inverse DESCRIBES ITSELF
+    (item 130 §4.9), or None when it does not.
+
+    The answer is `{"resource": ..., "op": ...}`: a durable cursor is a position
+    a provider holds, so its referent outlives the process and its inverse is a
+    call a fresh process can make. Everything else — a closure, a lambda, a
+    provision withdrawal — answers None, which is §4.9's default and the honest
+    one.
+
+    Resolved through `sys.modules` with a lazy import fallback and a None when
+    the runtime is not importable, the same contract
+    :func:`_note_emission_index` states above and for the same reason: this
+    module's promise is that a timeline is pure python over the accumulator, so
+    asking the runtime a question must never be what makes recording fail. The
+    seam is a single module-level `def` on the runtime side rather than a pair
+    of attributes on the disposer, so nothing but its name crosses this boundary
+    and `tools/check_runtime_seams.py` can assert it is defined exactly once
+    with the one argument passed here (issue #292)."""
+    mod = sys.modules.get("runtime")
+    if mod is None:
+        try:
+            import runtime as mod  # noqa: PLC0415 — lazy, keeps replay standalone
+        except Exception:  # noqa: BLE001 — recording must not depend on this
+            return None
+    describe = getattr(mod, "revl_durable_inverse", None)
+    if describe is None:
+        return None
+    answer = describe(entry)
+    return answer if isinstance(answer, dict) else None
+
+
 __all__ = [
     "GUARANTEE", "IrreversibleStep", "KINDS", "Recorder", "ReplayError",
     "Step", "Timeline",
@@ -370,7 +402,8 @@ class Step:
 
     __slots__ = ("index", "kind", "label", "effect", "file", "lineno", "source",
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
-                 "compensation", "note", "error", "scope", "undo_idempotent")
+                 "compensation", "note", "error", "scope", "undo_idempotent",
+                 "inverse_op")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -409,6 +442,15 @@ class Step:
         # declared non-idempotent, which the fork REFUSES to rewind past (Decision
         # 5). None never triggers the refusal, so byte-identity holds.
         self.undo_idempotent: Optional[bool] = None
+        # An EXPLICIT, re-issuable inverse `{"receiver","method","args"}` a
+        # self-describing disposer carried, or None for the ordinary closure
+        # case. :func:`inverse_descriptor` reads it: with one, the WAL records a
+        # call a fresh process can make; without, it records the honest
+        # "closure over in-process memory". item 130 §4.9 is the first producer
+        # — a stream subscription resumable from a DURABLE cursor, the one
+        # reactive shape whose inverse names something that outlives the
+        # process.
+        self.inverse_op: Optional[dict] = None
 
     # -- properties --------------------------------------------------------
 
@@ -670,6 +712,18 @@ class Timeline:
                 # rather than re-derived from source text (a witnessed step's
                 # activation body is emitted into the transaction runtime, so it
                 # has no code site to match: `file`/`lineno` above are None).
+                # item 130 §4.9: a disposer that DESCRIBES ITSELF. A live host
+                # listener is closure-only and its record says so; a
+                # subscription resumable from a durable cursor can name a
+                # re-issuable call and a referent that outlives the process, so
+                # recovery can state it instead of reporting unreconstructible
+                # residue. Asked of the registered inverse, exactly like the
+                # scope below — nothing is inferred from source text, and a
+                # disposer that describes nothing is untouched.
+                durable = _durable_inverse(entry)
+                if durable is not None:
+                    step.detail = {"resource": durable["resource"]}
+                    step.inverse_op = durable["op"]
                 # Only KIND_EFFECT consults a scope (the fork rewind's
                 # `_step_back_scoped` and the offline partition in
                 # `revl.branch`), so this is the one kind that must state it.
@@ -1789,8 +1843,11 @@ _QUORUM_RECORDS = frozenset({
 #: (that is the honest bound — docs/crash-recovery.md §"boundary is the cargo");
 #: the policy is a host concern, defaulting to "unknown, therefore prove it".
 _OUTLIVES_HINTS = {
+    # item 130 §4.9: a durable `Cursor` is a position in a provider's log, held
+    # by the provider and readable after a restart. It joins the OUTLIVES row
+    # for the same reason a `Lease` is there: the process dying does not move it.
     "outlives": ("File", "Path", "Dir", "Handle", "Db", "Table", "Row",
-                 "Blob", "Object", "Lock", "Lease", "Pid"),
+                 "Blob", "Object", "Lock", "Lease", "Pid", "Cursor"),
     "dies": ("Socket", "Conn", "Connection", "Stream", "Channel", "Fd",
              "Pipe", "Pool", "Session", "Client"),
 }
