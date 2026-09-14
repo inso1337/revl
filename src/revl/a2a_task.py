@@ -156,16 +156,17 @@ def _event_from_result(fault) -> str:
     return (
         '    _kind = _result.get("kind")\n'
         '    if _kind == "task":\n'
-        '        _state = (_result.get("status") or {}).get("state")\n'
-        '        if _state == "completed":\n'
-        '            _text = "".join(\n'
-        '                p.get("text", "") for a in (_result.get("artifacts") or [])\n'
-        '                for p in (a.get("parts") or [])\n'
+        + a2a_boundary.py_task_status_gate(fault, indent=8)
+        + '        if _state == "completed":\n'
+        + a2a_boundary.py_task_parts_gate(fault, indent=12)
+        + '            _text = "".join(\n'
+        '                p.get("text", "") for p in _parts\n'
         '                if p.get("kind") == "text" and isinstance(p.get("text"), str))\n'
         '            return Done(_text)\n'
         '        return Status(task_state_from_wire(_state))\n'
         '    if _kind == "message":\n'
-        '        _text = "".join(p.get("text", "") for p in (_result.get("parts") or [])\n'
+        + a2a_boundary.py_message_parts_gate(fault, indent=8)
+        + '        _text = "".join(p.get("text", "") for p in _parts\n'
         '                        if p.get("kind") == "text" and isinstance(p.get("text"), str))\n'
         '        return Message(_text)\n'
         + fault(4, '_scrub("a2a: unexpected result kind %r" % (_kind,))'))
@@ -295,7 +296,8 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
             + '    _tid = _result.get("id")\n'
             '    if not isinstance(_tid, str) or not _tid:\n'
             + fault(8, '"a2a: _start reply carried no task id"')
-            + '    return {"id": _tid, "context": _result.get("contextId")}\n')
+            + a2a_boundary.py_context_id_gate(fault)
+            + '    return {"id": _tid, "context": _ctx}\n')
     elif kind == "cancel":
         # tasks/cancel is BEST-EFFORT (item 247): a 2xx with any result is
         # enough. A transport fault still withdraws (it is a crossing that did
