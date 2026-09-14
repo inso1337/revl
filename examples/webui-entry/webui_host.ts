@@ -55,14 +55,31 @@ export interface CordisWebUI {
   addEntry(files: WebUIEntryFiles, data: unknown): unknown
 }
 
+/** A revl ASSET HANDLE (roadmap item 459 F1): what `asset "<path>"` lowers to.
+ * `path` is the resolved path RELATIVE TO THE APP ROOT (never the path as the
+ * source wrote it), and `sha256` is the digest of the file's bytes at compile
+ * time. A host that serves the file should join `path` to the app root and
+ * re-hash before serving — the compiler checked a file, the host opens one, and
+ * only re-hashing proves they are the same bytes. */
+export interface RevlAsset {
+  path: string
+  sha256: string
+}
+
 /** The revl-facing `WebUI` service surface — the exact shape `service WebUI` in
  * console.rvl declares, and what a revl component reads as `ctx.webui`. `data` is
  * the typed reactive state the component publishes; its type on the revl side is
  * the record `add_entry`'s `data` parameter declares, and the same declaration is
- * what `revl export client --face webui` projects for the browser. */
+ * what `revl export client --face webui` projects for the browser.
+ *
+ * `devSource` is an asset HANDLE, not a path string: `service WebUI` declares it
+ * as the `Asset` record, so a bare path no longer type-checks on the revl side
+ * either. `prodManifest` stays a string — a Vite manifest is a build output that
+ * does not exist when the composition is compiled, so there is nothing for the
+ * compiler to resolve or pin. */
 export interface RevlWebUI {
   add_entry(
-    devSource: string,
+    devSource: RevlAsset,
     prodManifest: string,
     routes: string[],
     data: Record<string, unknown>,
@@ -96,19 +113,19 @@ export function installRevlWebui(
 ): () => void {
   const service: RevlWebUI = {
     add_entry(
-      devSource: string,
+      devSource: RevlAsset,
       prodManifest: string,
       routes: string[],
       data: Record<string, unknown>,
     ): string {
-      const files: WebUIEntryFiles = { dev: devSource, prod: prodManifest, routes }
+      const files: WebUIEntryFiles = { dev: devSource.path, prod: prodManifest, routes }
       // The reactive object Cordis broadcasts: the component's typed state, plus
       // the methods of its declared provision. Cordis turns each function on this
       // object into an RPC method (`base/index.ts:39`), so the browser-callable
       // set is exactly that provision — nothing this adapter invents.
       webui.addEntry(files, { ...data, ...rpcMethods(ctx, options.rpcKey) })
-      // Return the dev source as a stable entry handle a revl caller can bind.
-      return devSource
+      // Return the dev source PATH as a stable entry handle a revl caller can bind.
+      return devSource.path
     },
   }
   // Ambient service registration: the key `webui` becomes `ctx.webui` for every

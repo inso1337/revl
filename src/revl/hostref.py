@@ -300,6 +300,205 @@ def program_has_ref(program) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# item 459 F1: compile-time resolution of an `asset "<path>"` handle
+# ---------------------------------------------------------------------------
+#
+# An asset is a frontend FILE (a Vite entry module, a stylesheet, a template)
+# that a revl source names by path. Before this, such a path was a bare `Str`:
+# the toolchain never opened it, so "the file exists", "the file is inside the
+# app", and "the file is still the one that was reviewed" were all unstated.
+#
+# The resolution reuses option B's machinery deliberately — the SAME
+# `_pick_root`/`_contained` containment rule, the same relative-to-the-declaring-
+# module resolution, the same origin-selected root set (item 410) — because a
+# second jail is a second thing to get wrong, and a path-confinement bug in a
+# compiler that reads files is a file-read primitive.
+#
+# Every arm below can only REFUSE. Nothing here widens what compiles: a program
+# that writes no `asset` is byte-identical, and a program that writes one either
+# gets a resolved, contained, hashed handle or a compile error naming why.
+
+def resolve_assets(program, module_dir: str, root_dirs: list[str],
+                   sources: dict[str, str], is_virtual: bool,
+                   install_root: str | None = None) -> None:
+    """Resolve every `asset "<path>"` in `program` against the root-tree jail,
+    filling the node's record fields with the root-relative path and the
+    sha256 of the file's bytes.
+
+    The five refusals, all fail-closed (each REFUSES; none falls back to a
+    default, a guess, or an unresolved handle):
+
+    1. an absolute path, or an empty one, before any filesystem access;
+    2. a path that does not exist, or is not a regular file;
+    3. a path whose resolved realpath lands OUTSIDE the jail — the composition's
+       root compile trees for a user module, or the single install entry for an
+       install-origin module (item 410). `..` segments are allowed while the
+       resolved realpath stays contained, exactly as a `ref` allows them,
+       because containment of the REALPATH is what holds (a symlink out of the
+       tree is caught by the realpath, not by the written text);
+    4. in a virtual (in-memory) compile, a path not supplied in the `sources`
+       map: an in-memory compile reads NOTHING from disk, so an asset it was
+       not given cannot be hashed. Falling back to disk there would turn every
+       in-memory compile of foreign source into a file-existence and
+       file-digest oracle over the host, which is the whole reason option B's
+       virtual arm reads only `sources`;
+    5. a file whose bytes cannot be read.
+    """
+    if not program.assets:
+        return
+    if install_root is not None:
+        jail_roots = [os.path.realpath(install_root)]
+        root_kind: str | None = "stdlib"
+    else:
+        jail_roots = [os.path.realpath(r) for r in root_dirs]
+        root_kind = None
+    for node in program.assets:
+        _reject_bad_asset_path(node, program.filename)
+        if is_virtual:
+            _resolve_asset_memory(node, module_dir, sources,
+                                  [os.path.abspath(r) for r in jail_roots],
+                                  program.filename, root_kind)
+        else:
+            _resolve_asset_disk(node, module_dir, jail_roots,
+                                program.filename, root_kind)
+
+
+def _reject_bad_asset_path(node, filename: str) -> None:
+    """Refuse the two textual escapes before any filesystem access, so neither
+    is an existence oracle. `..` is NOT one of them: containment of the
+    resolved realpath is the jail (see `resolve_assets`)."""
+    if not node.written:
+        raise RevlError(filename, node.line,
+                        "empty `asset` path",
+                        hint="name the file relative to this `.rvl`, e.g. "
+                             '`asset "./frontend/entry.client.ts"` (item 459)')
+    if os.path.isabs(node.written):
+        raise RevlError(
+            filename, node.line,
+            f"`asset` path {node.written!r} is absolute",
+            hint="an asset path is resolved relative to the declaring .rvl "
+                 "file's directory and must stay inside the root compile tree; "
+                 "absolute paths are refused (item 459 asset jail)")
+
+
+def _asset_outside_root_hint(root_kind: str | None) -> str:
+    if root_kind == "stdlib":
+        return ("an install-origin module (a stdlib or REVL_IMPORT_PATH module) "
+                "jails its assets to that one entry's tree and may never reach "
+                "into the composition's user tree (item 410 two-root jail)")
+    return ("an asset must ship with the composition, so it must sit inside "
+            "the root compile file's directory tree — the same jail a host "
+            "module `ref` resolves under (item 396 option B, item 459)")
+
+
+def _record_asset(node, rel_path: str, digest: str, root_kind: str | None) -> None:
+    """Fill the handle. AFTER this the node is an ordinary record literal
+    `{ path: "<root-relative>", sha256: "<hex>" }` that lowers, types and emits
+    on every tier with no new backend case.
+
+    The value the program sees is the ROOT-RELATIVE resolved path, never the
+    path as written: `./frontend/../frontend/entry.client.ts` and
+    `./frontend/entry.client.ts` are one handle, and a host that re-resolves the
+    handle joins it to the app root rather than to the declaring module."""
+    from .parser import ExprLit
+
+    node.rel_path = rel_path.replace(os.sep, "/")
+    node.sha256 = digest
+    node.root_kind = root_kind
+    node.fields = [("path", ExprLit(node.rel_path, node.line)),
+                   ("sha256", ExprLit(digest, node.line))]
+
+
+def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind):
+    candidate = os.path.join(module_dir, node.written)
+    if not os.path.exists(candidate):
+        raise RevlError(
+            filename, node.line,
+            f"`asset` file {node.written!r} not found (resolved to {candidate})",
+            hint="an asset path is resolved relative to the declaring .rvl "
+                 "file's directory (item 459)")
+    if not os.path.isfile(candidate):
+        raise RevlError(
+            filename, node.line,
+            f"`asset` path {node.written!r} is not a regular file (resolved to "
+            f"{candidate})",
+            hint="an asset is one file whose bytes are hashed into the handle; "
+                 "a directory has no content to pin (item 459)")
+    real = os.path.realpath(candidate)
+    root = _pick_root(real, real_roots)
+    if root is None:
+        raise RevlError(
+            filename, node.line,
+            f"`asset` file {node.written!r} resolves OUTSIDE the "
+            f"{'install' if root_kind == 'stdlib' else 'root compile'} tree "
+            f"({real} is not inside {', '.join(real_roots) or '(no root)'})",
+            hint=_asset_outside_root_hint(root_kind))
+    try:
+        with open(real, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        raise RevlError(
+            filename, node.line,
+            f"`asset` file {node.written!r} cannot be read ({exc})") from None
+    _record_asset(node, os.path.relpath(real, root),
+                  hashlib.sha256(data).hexdigest(), root_kind)
+
+
+def _resolve_asset_memory(node, module_dir, sources, real_roots, filename,
+                          root_kind):
+    key = os.path.abspath(os.path.join(module_dir, node.written))
+    root = _pick_root(key, real_roots)
+    if root is None:
+        raise RevlError(
+            filename, node.line,
+            f"`asset` file {node.written!r} resolves outside the "
+            f"{'install' if root_kind == 'stdlib' else 'root compile'} tree "
+            f"({key})",
+            hint=_asset_outside_root_hint(root_kind))
+    if key not in sources:
+        raise RevlError(
+            filename, node.line,
+            f"`asset` file {node.written!r} is not in the in-memory sources map "
+            f"(resolved key {key})",
+            hint="an in-memory compile reads nothing from disk, so an asset "
+                 "must be supplied through the same `modules=`/`sources=` map "
+                 "(item 459)")
+    _record_asset(node, os.path.relpath(key, root),
+                  hashlib.sha256(sources[key].encode("utf-8")).hexdigest(),
+                  root_kind)
+
+
+def program_has_asset(program) -> bool:
+    """True if `program` writes any `asset "..."` (used by the loaderless
+    `compile_source` refusal, mirroring `program_has_ref`)."""
+    return bool(program.assets)
+
+
+def require_resolved_asset(node, filename: str) -> None:
+    """The fail-closed backstop on the lowering path.
+
+    An `ExprAsset` reaches lowering with `rel_path` set or it does not lower at
+    all. Without this an unresolved node would lower as the EMPTY record its
+    parser default carries — a handle with no path and no digest, silently. The
+    only way to reach it is a caller that lowers a parsed program without
+    running `resolve_assets`, which is a compiler bug, so it is reported as a
+    refusal rather than trusted."""
+    from .parser import ExprAsset
+
+    if not isinstance(node, ExprAsset):
+        return  # an ordinary record literal, nothing to resolve
+    if node.rel_path is None:
+        raise RevlError(
+            filename, getattr(node, "line", 0),
+            f"internal: `asset {getattr(node, 'written', '')!r}` reached "
+            f"lowering without being resolved",
+            hint="an asset is resolved, jailed and hashed by "
+                 "`revl.hostref.resolve_assets` during module load; compile "
+                 "through `compile_files` (or `compile_source` with "
+                 "`modules=`) (item 459)")
+
+
+# ---------------------------------------------------------------------------
 # deploy-time verification for the py run driver (`plug_refs`)
 # ---------------------------------------------------------------------------
 
