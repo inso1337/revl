@@ -383,7 +383,22 @@ def _ambient_bind(witness):
     The effect is bound to the live `SessionOwner`, its newest live registry
     `Frame`, the frame's effect entry/registration order and (under a recording
     run) the durable WAL seq — exactly what a bare host write cannot establish
-    for itself (issue #623 consumer impact)."""
+    for itself (issue #623 consumer impact).
+
+    Registration goes through `Frame.transactional_method`, the runtime's
+    registration path for an inverse with NO body generator to yield its
+    disposer into (item 318, docs/design/243-witnessed-externs.md rule 5). That
+    is exactly this site: the mutation is performed by host Python, not by an
+    emitted effect step, so `write_witnessed` returns the receipt to its caller
+    and nothing ever hands the disposer to cordis. `Frame.transactional`, the
+    activation-body path, only appends to `_transactional` — which `drain` reads
+    for the WAL discharge record and residue introspection but never walks to
+    run anything. An entry parked there and never yielded has no inverse at
+    abort time and says nothing about it: `owner.begin_abort()` + `frame.drain()`
+    left the forward mutation in place and reported no residue (issue #1071).
+    `transactional_method` parks it in `_deferred_transactional`, which `drain`
+    does drain once the commit-vs-abort bit is settled, and which the mid-session
+    withdrawal branch escrows against a still-pending session verdict."""
     rt = _cordis_runtime()
     if rt is None:
         return None
@@ -395,7 +410,8 @@ def _ambient_bind(witness):
     # is restored is a no-op), exactly like `stdlib/fs.rvl`'s `restore`, so it is
     # registered declared-idempotent (item 309): it replays freely on abort and
     # needs no WAL fence.
-    return frame.transactional(_witnessed_restore, witness, undo_idempotent=True)
+    return frame.transactional_method(_witnessed_restore, witness,
+                                      undo_idempotent=True)
 
 
 def _effect_id_of(entry, rt) -> Optional[str]:
