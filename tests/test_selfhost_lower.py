@@ -2381,6 +2381,22 @@ def _nesting_limit() -> int:
 
 
 NESTING_LIMIT = _nesting_limit()
+
+
+def test_the_self_host_bound_equals_the_reference_compilers():
+    """The two bounds are one bound, asserted rather than assumed.
+
+    `selfhost/parser.rvl` states 200 because `revl.parser.NESTING_LIMIT` does.
+    Nothing held them together: the self-host side is read out of the file (so
+    this module cannot assert a stale number) and the reference side was never
+    consulted at all, so moving either one alone would have left the gate and
+    the reference refusing at different depths, silently disagreeing over a
+    whole band of inputs. Whichever side moves, the other has to move with it.
+    """
+    from revl import parser as reference_parser
+    assert NESTING_LIMIT == reference_parser.NESTING_LIMIT
+
+
 _TOO_DEEP = (f"BAD|expression nesting is deeper than the parser's limit of "
              f"{NESTING_LIMIT} levels")
 
