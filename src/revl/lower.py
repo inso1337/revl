@@ -850,12 +850,39 @@ class Env:
         # use the feature.
         self.require_carry: dict[str, tuple[str, ...]] = dict()
         _carry_src = getattr(component, "require_carry", None) or {}
+        # item 130: the required `Stream[T]` coeffect. binding -> the ELEMENT
+        # type of a `requires <k>: Stream[T]` declaration. A required stream is
+        # an ordinary requirement on the wiring graph — it rides `self.requires`
+        # so it lands in the emitted inject set and an unmet one pends under R2
+        # like any other — but it is NOT a service: it has no methods, and the
+        # only operation on it is `subscribe`. This map is what every site that
+        # would otherwise resolve `env.services[env.requires[k]]` consults first,
+        # so a stream requirement is refused BY NAME rather than looked up in a
+        # service table it was never in.
+        self.stream_requires: dict[str, str] = dict()
+        # item 130 §4.5 + §6c: the replay declaration a stream REQUIREMENT
+        # carries, binding -> the lowered `{"count": n}` / `{"cursor": name}`.
+        # The coeffect twin of `replay_sources`: a locally acquired source states
+        # its backlog on its own acquisition, a required one on the requirement,
+        # and `_admit_replay` reads whichever applies under ONE rule so the two
+        # cannot answer differently. Filled by `_lower_required_replay_decls`
+        # once the env is usable (the cursor is an expression).
+        self.stream_replay: dict[str, dict] = dict()
+        # ... and the position flag that admits a bare read of one: a `Stream[T]`
+        # is a capability, not a value, so it is read in a `subscribe` head and
+        # nowhere else (`_lower_subscribe_step` scopes this over that head).
+        self._stream_head_position = False
         for key, svc, line in component.requires:
-            if svc not in services:
-                raise RevlError(filename, line, f"unknown service `{svc}` in `requires` of {component.name}")
             binding = _key_binding(key)
             if binding in self.requires:
                 raise RevlError(filename, line, f"duplicate requirement name `{binding}` in {component.name}")
+            if svc.startswith("Stream["):
+                # the parser has already validated the shape (one argument, no
+                # state index, not optional), so the element is the bracketed
+                # text verbatim.
+                self.stream_requires[binding] = svc[len("Stream["):-1]
+            elif svc not in services:
+                raise RevlError(filename, line, f"unknown service `{svc}` in `requires` of {component.name}")
             self.requires[binding] = svc
             self.require_keys[binding] = key
             self.type_env[f"req.{binding}"] = svc
@@ -8032,6 +8059,10 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
     if root not in env.requires:
         raise RevlError(env.filename, line,
                         f"`{root}` is not a declared requirement of {env.component.name}")
+    # item 130: a required `Stream[T]` is a requirement but not a service, so a
+    # method call on it is refused by name before the service table is indexed.
+    if root in env.stream_requires:
+        _refuse_stream_requirement_as_service(env, root, method, line)
     svc = env.services[env.requires[root]]
     decl = svc.methods.get(method)
     if decl is None:
@@ -8283,6 +8314,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             return {"kind": "adt", "type": info["adt"], "case": name, "args": []}
         if name in callables:
             return {"kind": "var", "name": name}
+        if name in getattr(env, "stream_requires", {}):
+            # item 130: the key IS declared — it is a required stream, and a
+            # stream is read only in a `subscribe` head.
+            _refuse_stream_requirement_read(env, name, filename, line)
         if getattr(env, "_plain_body", False):
             declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
             raise RevlError(
@@ -9497,6 +9532,7 @@ class _FreeFnMonoEnv:
         self.async_callables = async_callables
         self.services: dict = {}
         self.requires: dict = {}
+        self.stream_requires: dict = {}
 
 
 def _colour_polymorphic_fns(fns: list, async_colored: set) -> set:
@@ -9747,6 +9783,28 @@ def _lower_replay_decl(spec, acquire: dict, env: "Env", filename: str,
     return {"cursor": _replay_cursor_name(spec, env, filename, line)}
 
 
+def _lower_required_replay_decls(env: "Env", filename: str) -> None:
+    """Lower each `requires <k>: Stream[T] replay(…)` declaration onto `env`
+    (item 130 §4.5, §6c).
+
+    The provider-side twin of `_lower_replay_decl`, and deliberately the same
+    two shapes with the same cursor rule: once the source is a coeffect the
+    provider sits on the other side of the injection, so the REQUIREMENT is
+    where its durability claim is stated — it is the contract the wiring must
+    satisfy. Validated EAGERLY, before the body is walked, so a malformed cursor
+    on a requirement nothing subscribes to is still refused; a declaration the
+    body never asks for is fine, exactly as a declaring local source that is
+    subscribed without a `replay(…)` is."""
+    specs = getattr(env.component, "require_replay", None) or {}
+    for key, spec in specs.items():
+        binding = _key_binding(key)
+        if spec.count is not None:
+            env.stream_replay[binding] = {"count": int(spec.count)}
+            continue
+        env.stream_replay[binding] = {
+            "cursor": _replay_cursor_name(spec, env, filename, spec.line)}
+
+
 def _replay_cursor_name(spec, env: "Env", filename: str, line: int) -> str:
     """The durable cursor name a `replay(from: …)` spells, refusing anything but
     a string literal (item 130 §4.5).
@@ -9789,26 +9847,46 @@ def _admit_replay(spec, stream_ir: dict, env: "Env", filename: str,
                  "its backlog orders against the other's. Replay one source and "
                  "merge the live streams, or drop the `replay` (item 130 §4.5)",
             code="lifecycle", category="lifecycle")
-    src_name = stream_ir.get("id") if stream_ir.get("kind") == "name" else None
-    declared = env.replay_sources.get(src_name)
+    # item 130 §6c: the stream may be a locally acquired source or a required
+    # `Stream[T]` coeffect, and §4.5's rule is the same either way — a request is
+    # admitted only against a DECLARATION. Only where the declaration lives moves
+    # with the stream: on the acquisition for a local source, on the requirement
+    # for a coeffect one, because that is the side the provider contract is
+    # stated on once the provider is across an injection. Resolved here, and
+    # everything below compares request to declaration without knowing which.
+    if stream_ir.get("kind") == "req":
+        src_name = stream_ir.get("name")
+        declared = env.stream_replay.get(src_name)
+        undeclared_hint = (
+            "replay is a provider-side durability claim — the provider must hold "
+            "the backlog and, after a crash, reconstruct it (§4.9). A required "
+            f"stream states it on the requirement: `requires {src_name}: "
+            "Stream[T] replay(<n>)`, or a durable cursor `replay(from: "
+            "\"<name>\")`; then a `subscribe` may ask for it (item 130 §6c).")
+        label = f"required stream `{src_name}`"
+    else:
+        src_name = stream_ir.get("id") if stream_ir.get("kind") == "name" else None
+        declared = env.replay_sources.get(src_name)
+        undeclared_hint = (
+            "replay is a provider-side durability claim — the provider must hold "
+            "the backlog and, after a crash, reconstruct it (§4.9). Declare it on "
+            "the source: `let src = effect Stream.source() replay(<n>) undo "
+            "src.close()`, or a durable cursor `replay(from: \"<name>\")`; then a "
+            "`subscribe` may ask for it.")
+        label = f"stream source `{src_name}`"
     if declared is None:
         raise RevlError(
             filename, line,
             "`replay` at a `subscribe` requires a provider that declares it "
             "(item 130 §4.5)",
-            hint="replay is a provider-side durability claim — the provider must "
-                 "hold the backlog and, after a crash, reconstruct it (§4.9). "
-                 "Declare it on the source: `let src = effect Stream.source() "
-                 "replay(<n>) undo src.close()`, or a durable cursor "
-                 "`replay(from: \"<name>\")`; then a `subscribe` may ask for it.",
+            hint=undeclared_hint,
             code="lifecycle", category="lifecycle")
     if spec.cursor is not None:
         want = {"cursor": _replay_cursor_name(spec, env, filename, line)}
         if "cursor" not in declared:
             raise RevlError(
                 filename, line,
-                f"stream source `{src_name}` declares a last-n backlog, not a "
-                f"durable cursor",
+                f"{label} declares a last-n backlog, not a durable cursor",
                 hint="a last-n backlog dies with the provider; only `replay(from: "
                      "\"<name>\")` on the SOURCE is the durable claim a cursor "
                      "subscription reads (item 130 §4.5, §4.9)",
@@ -9816,7 +9894,7 @@ def _admit_replay(spec, stream_ir: dict, env: "Env", filename: str,
         if want["cursor"] != declared["cursor"]:
             raise RevlError(
                 filename, line,
-                f"stream source `{src_name}` declares the durable cursor "
+                f"{label} declares the durable cursor "
                 f"`{declared['cursor']}`, not `{want['cursor']}`",
                 hint="a cursor names the provider's own durable position; a "
                      "consumer may only resume the one the provider declared "
@@ -9826,9 +9904,8 @@ def _admit_replay(spec, stream_ir: dict, env: "Env", filename: str,
     if "count" not in declared:
         raise RevlError(
             filename, line,
-            f"stream source `{src_name}` declares a durable cursor, so a "
-            f"subscription resumes FROM it rather than asking for a last-n "
-            f"backlog",
+            f"{label} declares a durable cursor, so a subscription resumes FROM it "
+            f"rather than asking for a last-n backlog",
             hint=f"write `replay(from: \"{declared['cursor']}\")` — the cursor is "
                  "the position the provider holds, and the count of items behind "
                  "it is the provider's to decide (item 130 §4.5)",
@@ -9837,13 +9914,60 @@ def _admit_replay(spec, stream_ir: dict, env: "Env", filename: str,
     if want > declared["count"]:
         raise RevlError(
             filename, line,
-            f"`replay({want})` asks for more than stream source `{src_name}` "
+            f"`replay({want})` asks for more than {label} "
             f"declares — its backlog holds {declared['count']}",
             hint="the provider holds the buffer, so a consumer cannot ask past "
                  "it; raise the source's own `replay(<n>)` or lower the request "
                  "(item 130 §4.5)",
             code="lifecycle", category="lifecycle")
     return {"count": want}
+
+
+def _refuse_stream_requirement_read(env: "Env", key: str, filename: str,
+                                    line: int) -> None:
+    """Refuse reading a required `Stream[T]` outside a `subscribe` head (item
+    130, the coeffect wiring).
+
+    A `Stream[T]` is a capability to ACQUIRE a subscription, not a value. The
+    only thing a program does with one is subscribe, and a subscription is
+    single-consumer — so a stream that could be bound, passed to a fn or stored
+    in a record would be a second handle on a single-consumer resource with no
+    bracket behind it. Refused by name, and named as the declared requirement it
+    is rather than as an unknown name, which is what the ordinary
+    not-a-requirement diagnostic would say about a key that IS declared."""
+    elem = env.stream_requires[key]
+    raise RevlError(
+        filename, line,
+        f"required stream `{key}` is read outside a `subscribe`",
+        hint=f"`{key}` is a `Stream[{elem}]` — a capability to acquire a "
+             f"subscription, not a value. Write `let sub = subscribe {key} undo "
+             f"sub.close()` and use `sub`; a subscription is single-consumer, so "
+             "the stream itself is never bound, passed or stored (item 130 §1)",
+        code="lifecycle", category="lifecycle")
+
+
+def _refuse_stream_requirement_as_service(env: "Env", key: str, method,
+                                          line: int) -> None:
+    """Refuse using a required `Stream[T]` as if it were a required SERVICE
+    (item 130, the coeffect wiring).
+
+    A coeffect is a declared requirement, and a required stream is declared the
+    same way a required service is — so the one confusion the surface invites is
+    calling a method on it. There is no service behind the key to resolve
+    against, so the alternative to this refusal is a `KeyError` in the service
+    table or, worse, a silently-empty method set. Refused BY NAME, naming the one
+    operation a stream has."""
+    if method is None:
+        return
+    elem = env.stream_requires[key]
+    raise RevlError(
+        env.filename, line,
+        f"`{key}.{method}` — `{key}` is a required `Stream[{elem}]`, not a "
+        f"service",
+        hint=f"a stream has no methods; the only operation on it is `subscribe`: "
+             f"`let sub = subscribe {key} undo sub.close()`, then `every x in "
+             f"sub {{ … }}` pulls the items (item 130 §1)",
+        code="lifecycle", category="lifecycle")
 
 
 def _admit_stream_operand(node, env: "Env", filename: str, line: int,
@@ -9862,6 +9986,35 @@ def _admit_stream_operand(node, env: "Env", filename: str, line: int,
       without delivering a terminal is refused (§9 Part B);
     * rule 3.1 — it must not already be consumed by another subscription or
       merge (single-consumer)."""
+    # item 130: a required `Stream[T]` coeffect operand. The stream is supplied
+    # by the WIRING, not acquired in this body, so the two admission rules split:
+    #
+    # * rule 3.6 (no-silent-vanish) is discharged at the coeffect boundary
+    #   instead of at a local `undo`. There is no acquisition here to read an
+    #   inverse off — the provider is on the other side of the injection — so the
+    #   obligation is the one §4.3 already assigns to that layer: a provider that
+    #   goes away resolves the consumer's outstanding `next` to a terminal
+    #   (`Closed`/`Faulted`), never to silence. The reference runtime enforces the
+    #   shape at the injection point (`Stream.subscribe` refuses a value that is
+    #   not a stream), so the requirement cannot be satisfied by something with no
+    #   terminal to deliver;
+    # * rule 3.1 (single-consumer) is UNCHANGED and applies to the requirement
+    #   key, so two subscriptions to one required stream are refused exactly as
+    #   two subscriptions to one local source are. The key is namespaced away from
+    #   the host-local safe names the local rule uses, so a requirement and a
+    #   local source can never collide in this set.
+    if isinstance(node, dict) and node.get("kind") == "req" \
+            and node.get("name") in getattr(env, "stream_requires", {}):
+        key = "req::" + node["name"]
+        if key in env.subscribed_sources:
+            raise RevlError(
+                filename, line,
+                f"required stream `{node['name']}` is already subscribed — a "
+                "subscription is single-consumer (rule 3.1)",
+                hint="multicast is a later item; compose fan-out from an explicit "
+                     "bridge, one bracket per consumer (item 130 §4.1)",
+                code="lifecycle", category="lifecycle")
+        return key
     src_name = node.get("id") if isinstance(node, dict) \
         and node.get("kind") == "name" else None
     if src_name is None or env.host_locals.get(src_name) != "Stream":
@@ -9937,7 +10090,8 @@ def _lower_stream_head(head, env: "Env", filename: str, line: int,
     return {"kind": "stream-merge", "sources": sources}
 
 
-def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
+def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str,
+                          *, bind_safe: str | None = None) -> dict:
     """Build the `let-effect` IR step for a `subscribe <stream> undo sub.close()`
     bracket (item 130, docs/design/130-stream-reactive-types.md §5).
 
@@ -9967,9 +10121,25 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     feeding — or holding a reference to — a fan-in whose owner is gone."""
     sub_expr: SubscribeExpr = stmt.acquire
     consumed: list[str] = []
-    stream_ir = _lower_stream_head(sub_expr.stream, env, filename, stmt.line,
-                                   consumed)
-    safe = env.bind_local(stmt.bind, stmt.line)
+    # item 130: a required `Stream[T]` is a CAPABILITY, not a value — a bare
+    # read of one is admitted in a `subscribe` head (including each operand of a
+    # `merge` fan-in) and nowhere else, so the flag scopes exactly that head and
+    # `_lower_postfix` refuses the read anywhere outside it.
+    saved_head = getattr(env, "_stream_head_position", False)
+    env._stream_head_position = True
+    try:
+        stream_ir = _lower_stream_head(sub_expr.stream, env, filename, stmt.line,
+                                       consumed)
+    finally:
+        env._stream_head_position = saved_head
+    # `bind_safe` is the ANONYMOUS bracket an `on <Event> as <x>` with no `in`
+    # clause desugars to (item 130 §6b): the subscription has no surface name, so
+    # it is not entered in `env.locals` and cannot be spelled, iterated twice or
+    # closed by hand. Every other judgment below runs on it unchanged, which is
+    # the point — the implicit handler rides the SAME bracket the explicit form
+    # does rather than a second lowering that could drift.
+    safe = bind_safe if bind_safe is not None \
+        else env.bind_local(stmt.bind, stmt.line)
     # the subscription is a host-local of the reserved `Subscription` family, so
     # `sub.next()` / `sub.close()` are checked against that verb surface (item
     # 401) and `next` is recognised as a suspension in a teardown slot (§3.4).
@@ -9979,13 +10149,21 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str) -> dict:
     # the AST, before the undo is lowered, so an emitting inverse is named for
     # what it is rather than only for the `close` it is missing (the shape check
     # further down).
-    _check_site_inverse_emission(stmt.undo, env, filename, stmt.line)
+    if stmt.undo is None:
+        # the desugared bracket's inverse, built as the IR the explicit form's
+        # `undo <sub>.close()` lowers to — the shape check below is what pins the
+        # two to the same thing.
+        undo_ir = {"kind": "call", "target": {"kind": "name", "id": safe},
+                   "method": "close", "args": []}
+    else:
+        _check_site_inverse_emission(stmt.undo, env, filename, stmt.line)
     # ... and lowered through the site-inverse entry, so the same expression also
     # gets item 423's construction-time argument judgment with the `undo` slot
     # named on `env` (item 420). The three judgments are disjoint and all three
     # are needed here: G5 reads the callee's CLASSIFICATION, 423 reads its
     # SIGNATURE, and the shape check below reads the IR the lowering produced.
-    undo = _lower_site_inverse(stmt.undo, env, slot="undo")
+    undo = undo_ir if stmt.undo is None \
+        else _lower_site_inverse(stmt.undo, env, slot="undo")
     acquire = {"kind": "subscribe", "stream": stream_ir, "policy": sub_expr.policy}
     step = {
         "step": "let-effect",
@@ -11003,6 +11181,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             raise RevlError(filename, line, f"duplicate provision key `{key}` in {comp.name}")
         provides[key] = svc
 
+    # item 130 §6c: the `requires <k>: Stream[T] replay(…)` declarations, lowered
+    # before the body so a `subscribe <k> replay(…)` below has a declaration to be
+    # admitted against and a malformed cursor is refused even where nothing asks.
+    _lower_required_replay_decls(env, filename)
+
     body = []
     provided_keys: set[str] = set()
     provide_seen_line: int | None = None
@@ -11243,8 +11426,17 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # form. Not an acquisition: the bracket it rides was registered by
             # the `subscribe` above it, and the loop only pulls that handle to
             # its terminal.
-            body.append(_lower_stream_iter_step(stmt, env, filename,
-                                                callables or set()))
+            if stmt.subject is None:
+                # ... unless the `in <sub>` clause was dropped (§6b): an
+                # `on <Event> as <x> { … }` handler resolves its source from the
+                # component's `requires <k>: Stream[<Event>]` coeffect and
+                # registers the bracket itself, so the pair of steps is exactly
+                # what the explicit form spells by hand.
+                body.extend(_lower_required_stream_handler(
+                    stmt, env, filename, callables or set()))
+            else:
+                body.append(_lower_stream_iter_step(stmt, env, filename,
+                                                    callables or set()))
         elif isinstance(stmt, AwaitStmt):
             body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
         elif isinstance(stmt, ProvideStmt):
@@ -11480,6 +11672,18 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         lowered["carry"] = {
             env.require_keys[binding]: list(tokens)
             for binding, tokens in env.require_carry.items()
+        }
+    # item 130 §4.5/§6c: the replay declarations the component's stream
+    # REQUIREMENTS carry — the durability contract the wiring must satisfy for
+    # each key. Additive and conditionally present, keyed by the QUALIFIED
+    # require key to match `requires`, so a component with no declaring stream
+    # requirement is byte-identical. It is the one place a consumer of the IR can
+    # read what a required stream is obliged to hold without re-deriving it from
+    # the `subscribe` steps, which state only what the body ASKED for.
+    if env.stream_replay:
+        lowered["stream_replay"] = {
+            env.require_keys[binding]: decl
+            for binding, decl in env.stream_replay.items()
         }
     # item 350: the boot marking, additive and conditionally present — an
     # ordinary component carries no `boot` key, so a composition that declares
@@ -12849,8 +13053,109 @@ def _lower_endorse_approval(expr: "ExprEndorse", env: Env, scope: dict,
     return {"capability": edge_scope, "expr": appr_node}
 
 
+def _resolve_required_stream(stmt: "StreamIterStmt", env: Env,
+                             filename: str) -> str:
+    """The requirement key an `on <Event> as <x> { … }` with no `in <sub>`
+    clause resolves its stream from (item 130 §6, §6b).
+
+    §6's shape is `on <Event> as <x> { … }` and its rule is "the event source is
+    the provided `Stream[T]`", so the resolution is BY TYPE: the candidates are
+    the component's required streams whose element is this event, and nothing
+    else is consulted. A component may hold several stream requirements and host
+    a handler for each without ambiguity, because two events are two element
+    types.
+
+    A coeffect is a DECLARED requirement, so the failure direction is a refusal
+    and never a guess. Three refusals, each naming what it looked at:
+
+    * the component declares no stream requirement at all;
+    * it declares some, but none carries this event;
+    * it declares more than one carrying this event — ambiguous, and picking
+      either would bind the handler to an arbitrary source.
+
+    Binding nothing, or picking the first candidate, are the two outcomes this
+    exists to prevent: a handler silently attached to the wrong stream compiles
+    and then behaves differently from the program the author wrote, which is
+    strictly worse than not compiling."""
+    event = stmt.event
+    declared = dict(env.stream_requires)
+    matches = sorted(key for key, elem in declared.items() if elem == event)
+    if len(matches) == 1:
+        return matches[0]
+    where = f"`on {event} as {stmt.bind}`"
+    spell = ", ".join(f"`{k}: Stream[{declared[k]}]`" for k in sorted(declared))
+    if not declared:
+        raise RevlError(
+            filename, stmt.line,
+            f"{where} has no stream to resolve — component "
+            f"{env.component.name} requires no `Stream[...]`",
+            hint=f"declare the source as a coeffect — `component "
+                 f"{env.component.name} requires <key>: Stream[{event}]` — and "
+                 f"the handler resolves it, or name a subscription you already "
+                 f"own with `on {event} as {stmt.bind} in <sub> {{ … }}` "
+                 "(item 130 §6b)",
+            code="lifecycle", category="lifecycle")
+    if not matches:
+        raise RevlError(
+            filename, stmt.line,
+            f"{where} has no required `Stream[{event}]` to resolve — component "
+            f"{env.component.name} requires {spell}",
+            hint=f"a handler's source is the required stream whose element IS "
+                 f"the event, so add `requires <key>: Stream[{event}]`, or name "
+                 f"a subscription with `in <sub>` (item 130 §6b)",
+            code="lifecycle", category="lifecycle")
+    raise RevlError(
+        filename, stmt.line,
+        f"{where} is ambiguous — {', '.join(f'`{k}`' for k in matches)} are all "
+        f"required as `Stream[{event}]`",
+        hint=f"subscribe the one this handler pulls and name it: `let sub = "
+             f"subscribe {matches[0]} undo sub.close()` then `on {event} as "
+             f"{stmt.bind} in sub {{ … }}`. Resolving to either would bind the "
+             "handler to an arbitrary source (item 130 §6b)",
+        code="lifecycle", category="lifecycle")
+
+
+def _lower_required_stream_handler(stmt: "StreamIterStmt", env: Env,
+                                   filename: str,
+                                   callables: set | None = None) -> list:
+    """Desugar `on <Event> as <x> { … }` — the handler with no `in <sub>` — into
+    the two steps the explicit form spells by hand: the subscription bracket,
+    then the iteration over it (item 130 §6, §6b).
+
+    §6 states the desugaring as `every <x> in subscribe(<the Event stream>) { … }`
+    and this builds exactly that, by calling `_lower_subscribe_step` on a
+    synthesized `subscribe <key> undo <sub>.close()` — so the bracket the handler
+    rides is the one Slice 1 proved, registered on the same LIFO stack, with the
+    same admission rules applied (single-consumer against the requirement key,
+    the same default `error` backpressure policy, the same inverse shape). The
+    subscription is ANONYMOUS: it is never entered in `env.locals`, so the
+    implicit form cannot be half-spelled — there is no name to iterate a second
+    time, close by hand, or collide with a local the author wrote.
+
+    The qualifiers stay with the explicit form. A handler that needs a `policy`,
+    a `buffer`, a `drain` window, a combinator chain or a `merge` writes the
+    `subscribe` itself and names it with `in <sub>`; this shape is the default
+    subscription and nothing else, which is why dropping the clause loses no
+    expressiveness."""
+    key = _resolve_required_stream(stmt, env, filename)
+    safe = _safe_name(f"sub_{key}", env._taken)
+    env._taken.add(safe)
+    synthetic = LetEffect(
+        bind=f"<{key}>",
+        acquire=SubscribeExpr(Postfix(key, [], stmt.line), "error", stmt.line),
+        undo=None,
+        line=stmt.line,
+        subscribe=True,
+    )
+    bracket = _lower_subscribe_step(synthetic, env, filename, bind_safe=safe)
+    loop = _lower_stream_iter_step(stmt, env, filename, callables,
+                                   subject_safe=safe)
+    return [bracket, loop]
+
+
 def _lower_stream_iter_step(stmt: "StreamIterStmt", env: Env, filename: str,
-                            callables: set | None = None) -> dict:
+                            callables: set | None = None,
+                            *, subject_safe: str | None = None) -> dict:
     """`every <x> in <sub> { … }` -> a `stream-iter` body step (item 130 Slice 4,
     docs/design/130-stream-reactive-types.md §1, §4.7, §5).
 
@@ -12887,7 +13192,13 @@ def _lower_stream_iter_step(stmt: "StreamIterStmt", env: Env, filename: str,
       consumer of a single-consumer subscription and is refused."""
     subject = stmt.subject
     name = getattr(subject, "head", None)
-    safe = env.locals.get(name) if name else None
+    # `subject_safe` is the anonymous bracket the implicit `on <Event> as <x>`
+    # handler just registered (see `_lower_required_stream_handler`). It is a
+    # `Subscription` host-local by construction, so the two admission rules below
+    # cannot fire on it — and it is deliberately not in `env.locals`, so no
+    # second `every` can name it.
+    safe = subject_safe if subject_safe is not None \
+        else (env.locals.get(name) if name else None)
     if safe is None or env.host_locals.get(safe) != "Subscription":
         raise RevlError(
             filename, stmt.line,
@@ -13585,6 +13896,17 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
     elif head in env.params or head in env.locals:
         node = _resolve_provision_alias(
             {"kind": "name", "id": env.params.get(head) or env.locals[head]}, env)
+    elif head in env.stream_requires:
+        # item 130: a required `Stream[T]` coeffect. The capability has no
+        # methods — `subscribe` is the whole surface — so the ONLY position a
+        # bare read is admitted in is a `subscribe` head, and any method call on
+        # it is refused by name rather than resolved against a service table the
+        # requirement was never in.
+        _refuse_stream_requirement_as_service(
+            env, head, ops[0].name if ops else None, expr.line)
+        if not getattr(env, "_stream_head_position", False):
+            _refuse_stream_requirement_read(env, head, env.filename, expr.line)
+        node = {"kind": "req", "name": head}
     elif head in env.requires:
         if not ops or ops[0].args is None:
             raise RevlError(env.filename, expr.line,
