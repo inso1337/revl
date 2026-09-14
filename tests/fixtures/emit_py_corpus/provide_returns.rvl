@@ -1,0 +1,49 @@
+// A provide method that RESTATES the return type its service already declares
+// (`fn size() -> Int`), next to the two spellings that omit it.
+//
+// The reference parses the restatement and hands it to the type layer, where a
+// mismatch against the service op is decided (`examples/rejections/
+// t7_provide_param_annotation_mismatch.rvl` is the parameter twin, a T1). The
+// self-host admission gate's `p_prov_methods` read the `{`/`=` straight off the
+// end of the parameter list, so an annotated method failed the WHOLE component
+// with `BAD|bad provide block in component <C>`. That misfire had two costs and
+// only the first was visible: it FALSELY REJECTED legal programs, and — worse,
+// because it reads as agreement — it MASKED the component's real verdict, so a
+// program the reference refuses with a G4 came back tagged BAD from a parse
+// stage that never reached the guarantee.
+//
+// Every method below is inside the covered emitter surface, so this document
+// runs through the same unmarked header/body/emitter-readiness projections as
+// every other component document rather than being pinned as a special case.
+//
+// The negative controls are the neighbours, not a separate file:
+//   * `size()` carries the annotation in the BRACE-BODY form;
+//   * `label(n) -> Str` carries it in the ARROW-SHORTHAND form (the parser has
+//     two arms and only one was fixed by stepping over `->` in one of them);
+//   * `bump(n)` and `flag()` omit it entirely, in both forms, so the step over
+//     the annotation must be conditional — a step taken unconditionally eats the
+//     `{` or `=` of an unannotated method and reproduces the same failure from
+//     the other side.
+service Counter {
+  fn size() -> Int
+  fn bump(n: Int) -> Int
+  fn label(n: Int) -> Str
+  fn flag() -> Bool
+}
+
+component Tally provides counter: Counter {
+  config {
+    start: Int = 7
+  }
+
+  provide counter {
+    fn size() -> Int {
+      return config.start
+    }
+    fn bump(n) {
+      return n + 1
+    }
+    fn label(n) -> Str = n.to_str()
+    fn flag() = true
+  }
+}

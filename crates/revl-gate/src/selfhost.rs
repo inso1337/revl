@@ -1857,20 +1857,21 @@ fn p_prov_methods(ts: Vec<Token>, i: i64, end: i64, acc: Vec<ProvM>) -> ProvMR {
     let nm = tkc(&ts, (h).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (h).checked_add(3i64).expect("revl: Int overflow"));
     let pnames = param_names(&ps.ps);
-    if atk(&ts, ps.i, "=") {
-        let le = line_end(&ts, (ps.i).checked_add(1i64).expect("revl: Int overflow"), end);
-        let r = p_stmt_run(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"), le);
-        let nx = if (r.i > (ps.i).checked_add(1i64).expect("revl: Int overflow")) { r.i } else { le };
+    let si = ret_at(ts.clone(), ps.i);
+    if atk(&ts, si, "=") {
+        let le = line_end(&ts, (si).checked_add(1i64).expect("revl: Int overflow"), end);
+        let r = p_stmt_run(ts.clone(), (si).checked_add(1i64).expect("revl: Int overflow"), le);
+        let nx = if (r.i > (si).checked_add(1i64).expect("revl: Int overflow")) { r.i } else { le };
         return p_prov_methods(ts.clone(), nx, end, acc.revl_push(ProvM { name: nm.clone(), params: pnames.clone(), body: r.ss.clone(), isAsync: masync }));
     }
-    if (!atk(&ts, ps.i, "{")) {
-        return ProvMR { xs: acc.clone(), i: ps.i, ok: false };
+    if (!atk(&ts, si, "{")) {
+        return ProvMR { xs: acc.clone(), i: si, ok: false };
     }
-    let bend = close_brace(&ts, ps.i);
+    let bend = close_brace(&ts, si);
     if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return ProvMR { xs: acc.clone(), i: ts.revl_length(), ok: false };
     }
-    let bbody = p_stmts(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
+    let bbody = p_stmts(ts.clone(), (si).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
     return p_prov_methods(ts.clone(), bend, end, acc.revl_push(ProvM { name: nm.clone(), params: pnames.clone(), body: bbody.clone(), isAsync: masync }));
 }
 
@@ -7519,7 +7520,7 @@ fn comp_has_kw(ts: &[Token], lo: i64, hi: i64, w: &str) -> bool {
     return false;
 }
 
-fn ir_component(ts: Vec<Token>, i: i64) -> IrCompR {
+fn ir_component(ts: Vec<Token>, i: i64, fname: &str) -> IrCompR {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
     let mut reqs = vec![];
@@ -7547,7 +7548,7 @@ fn ir_component(ts: Vec<Token>, i: i64) -> IrCompR {
     let hi = if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { (end).checked_sub(1i64).expect("revl: Int overflow") };
     let reqSet = bind_names(reqs.clone(), 0i64, vec![]);
     let bodyRes = cir_body(ts.clone(), lo.clone(), hi.clone(), reqSet.clone(), provs.clone(), vec![], String::from(""));
-    let mut js = (((((((String::from("{\"name\": ").revl_concat(&jstr(&nm))).revl_concat(", \"config\": [")).revl_concat(&ir_config(ts.clone(), lo.clone(), hi.clone()))).revl_concat("], \"requires\": {")).revl_concat(&ir_binds_json(&reqs))).revl_concat("}, \"provides\": {")).revl_concat(&ir_binds_json(&provs))).revl_concat("}");
+    let mut js = (((((((((String::from("{\"name\": ").revl_concat(&jstr(&nm))).revl_concat(", \"source\": ")).revl_concat(&jstr(fname))).revl_concat(", \"config\": [")).revl_concat(&ir_config(ts.clone(), lo.clone(), hi.clone()))).revl_concat("], \"requires\": {")).revl_concat(&ir_binds_json(&reqs))).revl_concat("}, \"provides\": {")).revl_concat(&ir_binds_json(&provs))).revl_concat("}");
     if bodyRes.ok {
         js = ((js.revl_concat(", \"body\": [")).revl_concat(&bodyRes.js)).revl_concat("]");
     }
@@ -10257,59 +10258,67 @@ fn types_walk(ts: Vec<Token>, i: i64, acc: String) -> String {
     return types_walk(ts.clone(), skip_line(&ts, i), acc.clone());
 }
 
-fn ir_walk(ts: Vec<Token>, i: i64, a: IrAcc) -> IrAcc {
+fn ir_walk(ts: Vec<Token>, i: i64, a: IrAcc, fname: &str) -> IrAcc {
     if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
         return a;
     }
     let t = tkc(&ts, i);
     if at_boot(&ts, i) {
-        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone());
+        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone(), fname);
     }
     if at_event(&ts, i) {
-        return ir_walk(ts.clone(), event_decl_end(&ts, i), a.clone());
+        return ir_walk(ts.clone(), event_decl_end(&ts, i), a.clone(), fname);
     }
     if (t.kind != "kw") {
-        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone());
+        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname);
     }
     if at_pub_prefix(&ts, i) {
-        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone());
+        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone(), fname);
     }
     if (t.text == "use") {
-        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone());
+        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname);
     }
     if (t.text == "test") {
         let na = mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2);
         let e = test_block_end(&ts, i);
         if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return ir_walk(ts.clone(), e, na.clone());
+            return ir_walk(ts.clone(), e, na.clone(), fname);
         }
-        return ir_walk(ts.clone(), skip_line(&ts, i), na.clone());
+        return ir_walk(ts.clone(), skip_line(&ts, i), na.clone(), fname);
     }
     if (t.text == "type") {
-        return ir_walk(ts.clone(), type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow")), mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2));
+        return ir_walk(ts.clone(), type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow")), mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2), fname);
     }
     if (t.text == "extern") {
-        return ir_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2));
+        return ir_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2), fname);
     }
     if (t.text == "fn") {
-        return ir_walk(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2));
+        return ir_walk(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2), fname);
     }
     if (t.text == "service") {
         let sv = ir_service(ts.clone(), i);
         let svcs2 = if (a.svcs == "") { sv.js } else { (a.svcs.revl_concat(", ")).revl_concat(&sv.js) };
-        return ir_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, mk_iracc(svcs2, a.comps.clone(), (a.v3 || sv.v3), a.v2));
+        return ir_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, mk_iracc(svcs2, a.comps.clone(), (a.v3 || sv.v3), a.v2), fname);
     }
     if (t.text == "component") {
-        let cp = ir_component(ts.clone(), i);
+        let cp = ir_component(ts.clone(), i, fname);
         let comps2 = if (a.comps == "") { cp.js } else { (a.comps.revl_concat(", ")).revl_concat(&cp.js) };
-        return ir_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), comps2, (a.v3 || cp.v3), (a.v2 || cp.v2)));
+        return ir_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), comps2, (a.v3 || cp.v3), (a.v2 || cp.v2)), fname);
     }
-    return ir_walk(ts.clone(), skip_line(&ts, i), a.clone());
+    return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname);
 }
 
 pub fn lower_to_ir(src: String) -> String {
+    return lower_to_ir_at(src.clone(), default_filename());
+}
+
+fn default_filename() -> String {
+    return String::from("<string>");
+}
+
+pub fn lower_to_ir_at(src: String, fname: String) -> String {
     let ts = lex_src(src.clone());
-    let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false));
+    let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false), &fname);
     let ver = if a.v3 { String::from("3") } else { if a.v2 { String::from("2") } else { String::from("1") } };
     let pg = parse_prog_ts(ts.clone());
     let colored = async_colored(&pg.fns, async_slots_map(&pg.fns));
@@ -12090,7 +12099,7 @@ pub fn type_at(ts: Vec<Token>, i: i64) -> AtTy {
 
 #[test]
 fn lower_to_ir_emits_the_services_table_for_a_simple_provider() {
-    assert!((lower_to_ir(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")) == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"));
+    assert!((lower_to_ir(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")) == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"));
 }
 
 #[test]
@@ -12100,7 +12109,7 @@ fn lower_to_ir_marks_an_emission_op_and_a_scoped_capability() {
 
 #[test]
 fn lower_to_ir_lowers_a_simple_effect_provide_body() {
-    assert!((lower_to_ir(String::from("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")) == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"));
+    assert!((lower_to_ir(String::from("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")) == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"));
 }
 
 #[test]
@@ -12125,17 +12134,17 @@ fn lower_to_ir_emits_a_record_type_declaration__types_section_() {
 
 #[test]
 fn lower_to_ir_lowers_a_config_read_in_a_provide_method__component_spine_() {
-    assert!((lower_to_ir(String::from("service Conf { fn get() -> Str } component S provides conf: Conf { config { name: Str } provide conf { fn get() = config.name } }")) == "{\"ir_version\": 1, \"services\": {\"Conf\": {\"methods\": {\"get\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"S\", \"config\": [{\"name\": \"name\", \"type\": \"Str\", \"default\": null}], \"requires\": {}, \"provides\": {\"conf\": \"Conf\"}, \"body\": [{\"step\": \"provide\", \"name\": \"conf\", \"service\": \"Conf\", \"methods\": [{\"name\": \"get\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"name\"}}]}]}]}]}"));
+    assert!((lower_to_ir(String::from("service Conf { fn get() -> Str } component S provides conf: Conf { config { name: Str } provide conf { fn get() = config.name } }")) == "{\"ir_version\": 1, \"services\": {\"Conf\": {\"methods\": {\"get\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"S\", \"source\": \"<string>\", \"config\": [{\"name\": \"name\", \"type\": \"Str\", \"default\": null}], \"requires\": {}, \"provides\": {\"conf\": \"Conf\"}, \"body\": [{\"step\": \"provide\", \"name\": \"conf\", \"service\": \"Conf\", \"methods\": [{\"name\": \"get\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"name\"}}]}]}]}]}"));
 }
 
 #[test]
 fn lower_to_ir_lowers_a_typed_provide_method_arithmetic_body__name_id__no_operands_() {
-    assert!((lower_to_ir(String::from("service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }")) == "{\"ir_version\": 1, \"services\": {\"Calc\": {\"methods\": {\"add\": {\"params\": [{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}], \"returns\": \"Int\", \"emission\": false}}}}, \"components\": [{\"name\": \"A\", \"config\": [], \"requires\": {}, \"provides\": {\"calc\": \"Calc\"}, \"body\": [{\"step\": \"provide\", \"name\": \"calc\", \"service\": \"Calc\", \"methods\": [{\"name\": \"add\", \"params\": [\"a\", \"b\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"bin\", \"op\": \"+\", \"left\": {\"kind\": \"name\", \"id\": \"a\"}, \"right\": {\"kind\": \"name\", \"id\": \"b\"}}}]}]}]}]}"));
+    assert!((lower_to_ir(String::from("service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }")) == "{\"ir_version\": 1, \"services\": {\"Calc\": {\"methods\": {\"add\": {\"params\": [{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}], \"returns\": \"Int\", \"emission\": false}}}}, \"components\": [{\"name\": \"A\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"calc\": \"Calc\"}, \"body\": [{\"step\": \"provide\", \"name\": \"calc\", \"service\": \"Calc\", \"methods\": [{\"name\": \"add\", \"params\": [\"a\", \"b\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"bin\", \"op\": \"+\", \"left\": {\"kind\": \"name\", \"id\": \"a\"}, \"right\": {\"kind\": \"name\", \"id\": \"b\"}}}]}]}]}]}"));
 }
 
 #[test]
 fn lower_to_ir_lowers_a_timer_step_with_interval_ms__component_spine_() {
-    assert!((lower_to_ir(String::from("service Log { emission fn write(msg: Str) } component P requires log: Log { every 15s { emit log.write(\"beat\") } }")) == "{\"ir_version\": 3, \"services\": {\"Log\": {\"methods\": {\"write\": {\"params\": [{\"name\": \"msg\", \"type\": \"Str\"}], \"returns\": null, \"emission\": true}}}}, \"components\": [{\"name\": \"P\", \"config\": [], \"requires\": {\"log\": \"Log\"}, \"provides\": {}, \"body\": [{\"step\": \"timer\", \"mode\": \"every\", \"interval_ms\": 15000, \"body\": [{\"step\": \"emit\", \"expr\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"log\"}, \"method\": \"write\", \"args\": [{\"kind\": \"lit\", \"value\": \"beat\"}]}}]}]}]}"));
+    assert!((lower_to_ir(String::from("service Log { emission fn write(msg: Str) } component P requires log: Log { every 15s { emit log.write(\"beat\") } }")) == "{\"ir_version\": 3, \"services\": {\"Log\": {\"methods\": {\"write\": {\"params\": [{\"name\": \"msg\", \"type\": \"Str\"}], \"returns\": null, \"emission\": true}}}}, \"components\": [{\"name\": \"P\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"log\": \"Log\"}, \"provides\": {}, \"body\": [{\"step\": \"timer\", \"mode\": \"every\", \"interval_ms\": 15000, \"body\": [{\"step\": \"emit\", \"expr\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"log\"}, \"method\": \"write\", \"args\": [{\"kind\": \"lit\", \"value\": \"beat\"}]}}]}]}]}"));
 }
 
 #[test]
@@ -12145,7 +12154,7 @@ fn lower_to_ir_emits_an_extern_with_a_verbatim__py_body__externs_section_() {
 
 #[test]
 fn lower_to_ir_emits_literal_config_field_defaults__config_schema_() {
-    assert!((lower_to_ir(String::from("service G { fn greet(w: Str) -> Str } component H provides greeting: G { config { prefix: Str = \"hi, \", count: Int = 1 } provide greeting { fn greet(w) = config.prefix } }")) == "{\"ir_version\": 1, \"services\": {\"G\": {\"methods\": {\"greet\": {\"params\": [{\"name\": \"w\", \"type\": \"Str\"}], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"H\", \"config\": [{\"name\": \"prefix\", \"type\": \"Str\", \"default\": \"hi, \"}, {\"name\": \"count\", \"type\": \"Int\", \"default\": 1}], \"requires\": {}, \"provides\": {\"greeting\": \"G\"}, \"body\": [{\"step\": \"provide\", \"name\": \"greeting\", \"service\": \"G\", \"methods\": [{\"name\": \"greet\", \"params\": [\"w\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"prefix\"}}]}]}]}]}"));
+    assert!((lower_to_ir(String::from("service G { fn greet(w: Str) -> Str } component H provides greeting: G { config { prefix: Str = \"hi, \", count: Int = 1 } provide greeting { fn greet(w) = config.prefix } }")) == "{\"ir_version\": 1, \"services\": {\"G\": {\"methods\": {\"greet\": {\"params\": [{\"name\": \"w\", \"type\": \"Str\"}], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"H\", \"source\": \"<string>\", \"config\": [{\"name\": \"prefix\", \"type\": \"Str\", \"default\": \"hi, \"}, {\"name\": \"count\", \"type\": \"Int\", \"default\": 1}], \"requires\": {}, \"provides\": {\"greeting\": \"G\"}, \"body\": [{\"step\": \"provide\", \"name\": \"greeting\", \"service\": \"G\", \"methods\": [{\"name\": \"greet\", \"params\": [\"w\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"prefix\"}}]}]}]}]}"));
 }
 
 #[test]

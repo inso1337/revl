@@ -214,6 +214,23 @@ KNOWN_BYPASSES = {
     # Closing it needs the `cap_order` (T,P)-pair cone/ceiling algebra ported
     # into the gate, a much larger change than a `with { ... }` reader.
     "examples/rejections/g4_spawn_widens_parameter.rvl",
+    # Its BUDGET twin, under the same missing algebra: `net(calls=1000)` is not
+    # within the held `net(calls=100)` ceiling, and a token-level model sees the
+    # bare `net` on both sides.
+    #
+    # It is NEW HERE and not newly admitted. It was a `tag-mismatch/G4->BAD`:
+    # both components spell an annotated provide method (`fn go() -> Int`), the
+    # gate's `p_prov_methods` could not parse one, and the whole component
+    # failed with `BAD|bad provide block in component Child` BEFORE any spawn
+    # check ran. The census read that as a refusal with the wrong tag, which
+    # flattered the gate — it was not deciding the guarantee at all. With the
+    # parse fixed the program reaches the attenuation fold and the gate's real
+    # state shows: the same token-level blindness its parameter twin above has
+    # had since item 294. t29/t30 (a `pub extern` parse refusal) and t25 (a
+    # type-parameter list) are the same story from earlier slices, and the
+    # accepted twin `examples/budget_attenuation.rvl` left `false-reject/BAD`
+    # in the same change.
+    "examples/rejections/g4_spawn_widens_budget.rvl",
 }
 
 
