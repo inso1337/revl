@@ -1158,7 +1158,7 @@
       "uncovered_statements": 533
     },
     "wasm": {
-      "statements": 2836,
+      "statements": 2864,
       "uncovered": {
         "Command-line JSON input, output directory creation and WAT-file writing are not entered by the in-process emit(ir) oracle.": {
           "<module>": 12
@@ -1194,8 +1194,8 @@
         "Remaining Str-index compatibility branch cannot be produced by current source (Str [...] is rejected in favor of charAt); other residuals reject non-List receivers or void elements.": {
           "_V3Emitter._index_expr": 4
         },
-        "Remaining arms cover explicitly deferred coalescing/Float operations, invalid/void operand refusals, and legacy List +. Current frontend rejects List + (only numeric or Str +), so that compatibility branch is not a missing accepted source corpus family.": {
-          "_V3Emitter._bin_expr": 19
+        "Remaining arms cover explicitly deferred coalescing/Float operations, invalid/void operand refusals, and legacy List +. Current frontend rejects List + (only numeric or Str +), so that compatibility branch is not a missing accepted source corpus family. Item 458 adds the `&&`/`||` short-circuit branch to the same function: every logical operand the corpus spells is a comparison of locals, which provably cannot trap and so keeps the strict i32.and/i32.or, and a document spelling a trapping operand cannot join the corpus until selfhost/emit_wasm.rvl carries the same branch lowering (it still emits the strict instruction, so byte agreement would break on the new document).": {
+          "_V3Emitter._bin_expr": 25
         },
         "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission.": {
           "_V3Emitter.emit": 13
@@ -1360,7 +1360,7 @@
           "_ComponentEmitter._route_helpers": 35,
           "_ComponentEmitter._route_op_spec": 20,
           "_ComponentEmitter._save_function_state": 1,
-          "_ComponentEmitter._scalar_operator": 24,
+          "_ComponentEmitter._scalar_operator": 26,
           "_ComponentEmitter._scoped_key": 2,
           "_ComponentEmitter._statement": 2,
           "_ComponentEmitter._tail": 17,
@@ -1370,6 +1370,9 @@
           "_ComponentEmitter._witnessed_effect_step": 37,
           "_ComponentEmitter._witnessed_extern": 5,
           "_ComponentEmitter.emit": 69
+        },
+        "The item-458 short-circuit decision for a logical operator's right operand. The corpus reaches this helper through arith.rvl and folding.rvl, whose `&&`/`||` operands are all constants, local reads and comparisons of those, so only the leaf and comparison arms run. The `!` arm, the non-dict and unbound-name guards and the closing refusal need an operand that can trap, and the document that would spell one cannot join the corpus until selfhost/emit_wasm.rvl carries the same branch lowering.": {
+          "_trap_free_operand": 6
         },
         "The remaining call paths inline a deferred arrow or raise for an indirect callee, wrong Some arity, unknown named function, wrong declared-function arity, or void argument. Expected-free Some payload inference is covered by the bare expression statement.": {
           "_V3Emitter._call_expr": 6
@@ -1384,7 +1387,7 @@
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1538
+      "uncovered_statements": 1552
     }
   },
   "selfhost": {
