@@ -32,6 +32,7 @@
    "examples/rejections/t21_int32_narrow_implicit.rvl",
    "examples/rejections/t22_int32_width_mix.rvl",
    "examples/rejections/t23_int32_remainder.rvl",
+   "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
    "examples/rejections/t26_anon_record_update_wrong_type.rvl",
    "examples/rejections/t28_bitwise_non_int32.rvl",
    "examples/rejections/t29_field_read_on_any.rvl",
@@ -85,11 +86,7 @@
    "examples/regressions/fuzz_go_letbind_valuetype.rvl",
    "examples/uxprobe2_fault.rvl",
    "examples/uxprobe2_jobs.rvl",
-   "examples/uxprobe_cache.rvl",
-   "stdlib/a2a.rvl",
-   "stdlib/http.rvl",
-   "stdlib/list.rvl",
-   "stdlib/render.rvl"
+   "examples/uxprobe_cache.rvl"
   ],
   "false-reject/G1": [
    "backends/go/testdata/stream_130.rvl",
@@ -97,9 +94,6 @@
   ],
   "tag-mismatch/G4->BAD": [
    "examples/rejections/g4_spawn_widens_budget.rvl"
-  ],
-  "tag-mismatch/T1->BAD": [
-   "examples/rejections/t25_explicit_tparam_heuristic_off.rvl"
   ]
  },
  "corpus_dirs": [
@@ -678,11 +672,11 @@
    }
   },
   "examples/rejections/t25_explicit_tparam_heuristic_off.rvl": {
-   "bucket": "tag-mismatch/T1->BAD",
+   "bucket": "false-admit/T1",
    "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected { after fn signature"
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
    },
    "reference": {
     "message": "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`",
@@ -970,7 +964,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "expected { after fn signature"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
@@ -983,54 +977,6 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected token at top level"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/a2a.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected token at top level"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/http.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected token at top level"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/list.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected { after fn signature"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/render.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected { after fn signature"
    },
    "reference": {
     "message": "",

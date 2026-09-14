@@ -1,0 +1,39 @@
+// A variant declaration written over SEVERAL LINES.
+//
+// The self-host read a `type` declaration to the end of its first LINE, so a
+// variant written the way a wide one always is — one `| Case` per line —
+// contributed only the cases that happened to share a line with the `=`. The
+// rest never entered the case table, and a bare nullary constructor then lowered
+// as `{"kind":"var","name":"Finished"}`: a reference to a binding that does not
+// exist, where the reference writes an `adt` node. `stdlib/a2a.rvl` and
+// `stdlib/http.rvl` both declare their variants this way.
+
+pub type Phase =
+    Queued
+  | Running
+  | Finished(Int)
+
+// Declared straight after, and `pub`: the span the reader takes for `Phase` has
+// to stop HERE. `pub` is not a declaration head, so a scan that only stops at
+// heads runs one token past it, and the next reader is handed a declaration
+// whose visibility prefix has already been eaten.
+pub type Mode = Fast | Slow
+
+pub fn phase_of(code: Int) -> Phase {
+  if (code == 0) { return Queued }
+  if (code == 1) { return Running }
+  return Finished(code)
+}
+
+pub fn mode_of(quick: Bool) -> Mode {
+  if (quick) { return Fast }
+  return Slow
+}
+
+pub fn phase_code(p: Phase) -> Int {
+  return match p {
+    Queued => 0,
+    Running => 1,
+    Finished(n) => n,
+  }
+}

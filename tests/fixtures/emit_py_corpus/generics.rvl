@@ -1,0 +1,30 @@
+// A module `fn` with a TYPE-PARAMETER list (roadmap item 391 / item 6,
+// docs/generics.md).
+//
+// `fn name[T](…)` was not a shape the self-host's declaration readers spelled.
+// Every one of them assumed the parameter list opened two tokens after the `fn`
+// keyword, so a generic declaration walked the parameter reader into `[T, U]`,
+// found no body where it expected one, and gave up: the admission gate answered
+// `expected { after fn signature` for a declaration the reference accepts, and
+// `lower_to_ir` left the function out of `functions` entirely. `stdlib/list.rvl`
+// lost three of its seven that way, and `stdlib/render.rvl` its only one — a
+// dropped function looks exactly like a file that never declared it, which is
+// why nothing noticed.
+//
+// Type parameters are ERASED, so the agreement this document asks for is that a
+// generic declaration lowers to exactly the shape its monomorphic neighbour
+// does, plus nothing and minus nothing.
+
+pub fn identity[T](x: T) -> T { return x }
+
+fn first_of[A, B](a: A, b: B) -> A { return a }
+
+pub fn count_all[E](xs: List[E]) -> Int { return xs.length() }
+
+// the controls, in the same document: the same shapes with no type-parameter
+// list, which lowered correctly all along and must not move
+pub fn identity_int(x: Int) -> Int { return x }
+
+fn first_of_int(a: Int, b: Str) -> Int { return a }
+
+pub fn count_ints(xs: List[Int]) -> Int { return xs.length() }

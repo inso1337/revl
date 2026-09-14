@@ -2520,12 +2520,14 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 43. The self-declared async-colour
+# `examples/rejections/`; it now stands at 44. The self-declared async-colour
 # arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
 # binding-discipline slice) moved OUT of the gap into gate/reference agreement,
-# and the `pub` prefix slice moved TWO fixtures IN: `t29`/`t30` were type-layer
-# false-admits all along, hidden behind the `pub extern` parse refusal that used
-# to stop `p_top` before it ever read their bodies. Grouped below by the
+# and two slices have moved fixtures IN by making the gate READ a body it used
+# to stop short of: the `pub` prefix slice brought `t29`/`t30` (hidden behind
+# the `pub extern` parse refusal), and the type-parameter-list slice brought
+# `t25` (hidden behind a parser that did not spell `fn name[T](…)`). All three
+# were type-layer false-admits all along. Grouped below by the
 # reference check that refuses
 # them (the family each self-host slice T1..T4 will move from "pinned gap" to
 # "agrees").
@@ -2581,6 +2583,14 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     "calls and signatures": [
         ("t10_call_arity", "T1"),
         ("t15_generic_call_site", "T1"),
+        # the third fixture this gap gained by being READ rather than by moving:
+        # `fn typo[T](xs: List[U])` was refused by the gate's PARSER, which did
+        # not spell a type-parameter list at all, so the census filed it as
+        # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. The
+        # parse now reaches the body and the gate's real state shows: the
+        # reference refuses the argument type in its TYPE layer, and the gate
+        # runs no type layer. Its two neighbours above are the same family.
+        ("t25_explicit_tparam_heuristic_off", "T1"),
         ("v2_map_set_value_mismatch", "T1"),
         ("v2_map_value_unknown_method", "T1"),
         ("arith_zero_divisor", "TYPE"),
@@ -2638,12 +2648,12 @@ _TYPE_LAYER_CASES = [
 ]
 
 
-def test_the_type_layer_gap_is_exactly_43_fixtures():
+def test_the_type_layer_gap_is_exactly_44_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 43, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 44, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 43, "a fixture is listed twice"
+    assert len(set(names)) == 44, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,

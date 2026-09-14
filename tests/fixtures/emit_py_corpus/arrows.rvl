@@ -1,0 +1,39 @@
+// The three annotations an arrow carries, and where each of them comes from.
+//
+// `captures` is the one entry in this IR a backend acts on and could get WRONG
+// rather than absent: it is the list of mutable names the arrow snapshots BY
+// VALUE at creation time (docs/closures.md §Backends), because python,
+// typescript and go would otherwise close over the enclosing local by reference
+// and see a later write. The self-host wrote `[]` on every arrow. No document in
+// this corpus had an arrow that reads a `var`, so the byte-agreement oracle
+// could not have asked.
+//
+// `param_types`/`returns` go in together when the signature is completely known.
+// They were withheld from every ZERO-parameter arrow (the condition asked for at
+// least one annotated parameter, and `() => …` declares none) and from every
+// arrow whose signature comes from the POSITION it sits in rather than from its
+// own annotations.
+
+fn apply(f: (Int) -> Int, x: Int) -> Int { return f(x) }
+
+// captures: the arrow reads a `var`, so the name is snapshotted at creation and
+// the later write is not visible through it
+pub fn snapshot() -> Int {
+  var n = 1
+  let f = x => x + n
+  n += 10
+  return f(5)
+}
+
+// the control: the same arrow over an IMMUTABLE name captures nothing
+pub fn no_capture(base: Int) -> Int {
+  let g = x => x + base
+  return g(5)
+}
+
+// a zero-parameter arrow: `param_types` is the empty list, not an absent key
+pub fn maker(s: Str) -> () -> Int { return () => s.length() }
+
+// an arrow ARGUMENT takes its signature from the parameter it is checked
+// against; nothing written on the arrow itself says `Int`
+pub fn doubled(x: Int) -> Int { return apply(v => v * 2, x) }

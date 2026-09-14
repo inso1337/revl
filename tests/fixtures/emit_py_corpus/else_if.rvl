@@ -1,0 +1,56 @@
+// `else if`.
+//
+// The statement reader recognised `else {` and nothing else, so an `else if`
+// chain lowered as a bare `if` with an empty `else` AND stopped the enclosing
+// block: the cursor came to rest on the word `else`, which is not a statement it
+// reads, so every branch below the first and every statement after the chain
+// were dropped together. `stdlib/escape.rvl` lost the `i += 1` that ends its
+// loop that way. The reference nests the trailing `if` as the sole step of the
+// else list, which is the shape asserted here.
+
+pub fn grade(n: Int) -> Str {
+  var out = "?"
+  if (n >= 90) {
+    out = "A"
+  } else if (n >= 80) {
+    out = "B"
+  } else if (n >= 70) {
+    out = "C"
+  } else {
+    out = "D"
+  }
+  out = out.concat("!")
+  return out
+}
+
+// an `else if` with no trailing `else`, inside a loop whose increment sits after
+// the chain — `escape_html`'s shape, reduced
+pub fn scan(s: Str) -> Int {
+  var hits = 0
+  var i = 0
+  while (i < s.length()) {
+    let ch = s.slice(i, i + 1)
+    if (ch == "a") {
+      hits = hits + 1
+    } else if (ch == "b") {
+      hits = hits + 2
+    }
+    i += 1
+  }
+  return hits
+}
+
+// the controls: a bare `if`, and an `if`/`else` over blocks, both of which
+// lowered correctly before and must not move
+pub fn bumped(n: Int) -> Int {
+  var s = 0
+  if (n > 0) { s = 1 }
+  s = s + 1
+  return s
+}
+
+pub fn parity(n: Int) -> Str {
+  var p = "odd"
+  if (n % 2 == 0) { p = "even" } else { p = "odd" }
+  return p
+}
