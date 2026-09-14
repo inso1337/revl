@@ -128,6 +128,13 @@ pub type WriteWitness = { path: Str, preimage: Str, created: Bool }
 
 // `rm`'s witness: the original path and where the target was parked (inside the
 // session garbage dir).
+//
+// The host record `rm` returns carries one further key, `capture`: the parked
+// file's own identity at park time, which `unrm` re-checks before installing it
+// back (issue #1038, the `unrm` peer of the `capture` `write` records for
+// `restore`). It is not a declared field for the same reason that one is not:
+// no consumer reads it, it is machinery the inverse owns, and a witness that
+// carries none is still an `RmWitness` every inverse accepts.
 pub type RmWitness = { path: Str, garbage: Str }
 
 // `move`'s witness: the resolved source and destination.
@@ -299,8 +306,17 @@ pub extern acquire fn unrm(w: RmWitness) -> Unit undo settled() = @py {
     parked = _ws.resolve_sidecar(w["garbage"], "garbage")
     # rename the parked file back. idempotent — once moved back (garbage gone),
     # a second replay is a no-op.
+    #
+    # `resolve_sidecar` proves the SLOT is one this workspace owns; it cannot
+    # prove the FILE in it is still the file `rm` parked there. So the install
+    # re-checks the sidecar against the identity captured at park time — not a
+    # symlink, the same kind of file, no link added, unchanged `(dev, ino)` and
+    # stamps — and re-checks the installed result afterwards, exactly as
+    # `restore` does for its preimage sidecar (issue #1038). A drifted sidecar
+    # raises, which the teardown loop records as restore-residue; it is never
+    # silently installed over the target. An honest unrm is quiet.
     if _ws.lexists_confined(parked):
-        _ws.replace_confined(parked, target)
+        _ws.install_parked_sidecar(parked, target, w.get("capture"))
     return
 } = @ts ref fsUnrm from "../backends/typescript/revl_fs_ts.ts"
 
@@ -395,10 +411,18 @@ pub extern witnessed[fs] fn rm(path: Str) -> Result[RmWitness, FsError]
         # refused if it is a symlink, so a planted `.revl-fs-garbage` link can
         # no longer park the removed file outside the boundary.
         parked = _ws.fresh_sidecar(_ws.garbage_dir(), "rm")
-        _ws.replace_confined(target, parked)
+        # the park IS the capture: `rm`'s sidecar is the removed file itself,
+        # moved by a rename, so its identity is recorded from the slot the
+        # rename just filled (issue #1038) and `unrm` can prove the file it
+        # installs back is the file that was parked.
+        capture = _ws.park_captured_sidecar(target, parked)
     except _ws.FsOpError as e:
         return Err(e.as_error())
-    return Ok({"path": target, "garbage": parked})
+    # `capture` is WAL-serializable data like every other witness field, and a
+    # SUPERSET key: a reader that does not know it (an older install replaying
+    # this WAL) sees the same two `RmWitness` fields it always did, and a
+    # witness that carries none still unrms.
+    return Ok({"path": target, "garbage": parked, "capture": capture})
 } = @ts ref fsRm from "../backends/typescript/revl_fs_ts.ts"
 
 // Rename `from` -> `to` (both confined).
