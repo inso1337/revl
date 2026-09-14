@@ -263,8 +263,8 @@ class Session:
         self._slo_latch: str | None = None    # where a pause/halt is written
         self._slo_signer: str | None = None   # the receipt's `signer` member
         self._slo_last: dict | None = None    # the last verdict this session took
-        self._slo_cursor = 0                  # trace events the last seal consumed
-        self._slo_decisions = 0               # completions the last seal consumed
+        self._slo_cursor = 0                  # where the LIVE generation's trace starts
+        self._slo_decisions = 0               # where the LIVE generation's completions start
         self._slo_paused: dict | None = None  # the pause this session's contract armed
         # the session commit-state owner (roadmap item 245): the deferral queue,
         # the discharge escrow, and the live-frame registry — the gate target the
@@ -1225,6 +1225,7 @@ class Session:
         self.origin = origin
         self.draft = None  # a new generation makes any uncommitted edit stale
         self._generation += 1
+        self._slo_begin_generation()
         # item 473: the successor is a rollout of its own, so its inputs are
         # read for a contract. Discovery REPLACES the binding when it finds one
         # and leaves it alone when it does not, so a swap to a composition that
@@ -1476,6 +1477,7 @@ class Session:
         self.origin = self.previous_origin
         self.previous, self.previous_origin = saved_previous, saved_previous_origin
         self._generation += 1
+        self._slo_begin_generation()
         # item 245: the reloaded predecessor is a fresh generation — install its
         # owner so its frames join the live-frame registry (else a subsequent
         # abort of the rolled-back session would restore nothing, the same bug the
@@ -1871,16 +1873,39 @@ class Session:
             self._driver.tracing = True
 
     def _slo_events(self) -> list:
-        """This generation's causal events: the ones the driver recorded since
-        the last seal. Sliced by a CURSOR rather than filtered by the `gen`
-        member, because the cursor is the one reading that cannot disagree with
-        itself — `Session._generation` and `_Driver.generation` are incremented
-        by different code on different paths (`apply` moves one and not the
-        other), and a filter on a number that drifted would silently measure the
-        empty set, which reads as a clean generation."""
+        """This generation's causal events: the ones the driver has recorded
+        since the generation BEGAN.
+
+        Sliced by a CURSOR rather than filtered by the `gen` member, because
+        the cursor is the one reading that cannot disagree with itself —
+        `Session._generation` and `_Driver.generation` are incremented by
+        different code on different paths (`apply` moves one and not the
+        other), and a filter on a number that drifted would silently measure
+        the empty set, which reads as a clean generation.
+
+        The cursor marks the start of the GENERATION and is never moved by a
+        measurement. That is what makes a receipt the account of the whole
+        generation and a second seal of the same generation idempotent: if the
+        cursor were advanced by each seal, an operator who called `slo_seal`
+        mid-generation would leave the boundary measuring only the tail, and
+        the tail's receipt would REPLACE the fuller one on the history entry.
+        """
         driver = self._driver
         events = list(getattr(driver, "_events", None) or []) if driver else []
         return events[self._slo_cursor:]
+
+    def _slo_begin_generation(self) -> None:
+        """Mark where the new generation's populations start. Called at every
+        point `_generation` is incremented, so each generation is measured over
+        its own events and its own completions and never over a predecessor's.
+        """
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        driver = self._driver
+        self._slo_cursor = len(getattr(driver, "_events", None) or []) \
+            if driver else 0
+        self._slo_decisions = len(slo.decisions_from_wal(self._slo_wal()))
+        self._slo_last = None
 
     def _slo_monitor(self, *, events: list, decisions: list):
         from .. import slo  # noqa: PLC0415 — lazy, pure
@@ -1941,11 +1966,8 @@ class Session:
         verdict = monitor.record() if seal else monitor.observe()
         if verdict is None:
             return None
-        if seal:
-            self._slo_cursor += len(events)
-            self._slo_decisions += len(decisions)
-            if monitor.receipt is not None:
-                verdict["attached"] = self._slo_attach(monitor.receipt)
+        if seal and monitor.receipt is not None:
+            verdict["attached"] = self._slo_attach(monitor.receipt)
         verdict["receipt"] = monitor.receipt
         # A pause this session's own contract armed is a SESSION-level fact from
         # here on: `slo.paused` reads the latch back and answers None for a halt,
@@ -2484,6 +2506,7 @@ class Session:
         # generation) still works, and its boundary crossings are enumerated.
         self._seal_generation()
         self._generation += 1
+        self._slo_begin_generation()
         self._record_generation(readmittable=False)
         return {
             "applied": True,
