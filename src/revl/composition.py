@@ -234,10 +234,10 @@ class RowTable:
     takes. The composition is source of truth for semantics (426 decision 7)."""
 
     __slots__ = ("name", "origin", "source", "rows", "uses", "sources", "slo",
-                 "slo_responses")
+                 "slo_responses", "slo_windows")
 
     def __init__(self, name, origin, source, rows, uses, sources=None, slo=None,
-                 slo_responses=None):
+                 slo_responses=None, slo_windows=None):
         self.name = name
         self.origin = origin
         self.source = source
@@ -260,6 +260,13 @@ class RowTable:
         # composition that declares no `slo` block — and for one that declares
         # a block and no responses, which keeps that IR additive too.
         self.slo_responses = slo_responses or {}
+        # item 473 slice 3: `<unit-bearing ir key> -> {overMs?, minSamples?,
+        # of?}` for the datums that declared a window, a sample floor or a
+        # denominator. Its own map for the same reason `slo_responses` is one:
+        # a block that declares none produces the IR it produced before this
+        # slice, and an absent entry means "no window", which the monitor reads
+        # as the whole of the generation's population.
+        self.slo_windows = slo_windows or {}
 
     def to_ir(self) -> dict:
         out = {
@@ -280,6 +287,14 @@ class RowTable:
             out["slo_on_breach"] = {
                 k: {"action": action, "divertTo": target}
                 for k, (action, target) in self.slo_responses.items()}
+        # Slice 3's window rides a third conditional key, and the members
+        # inside it are conditional too: a datum that wrote `min 200` and no
+        # window emits `{"minSamples": 200}` and not a null `overMs`, so a
+        # reader can never mistake "declared nothing" for "declared nothing
+        # here". The window is in MILLISECONDS in the key name for the reason
+        # every other SLO duration is.
+        if self.slo_windows:
+            out["slo_window"] = {k: dict(v) for k, v in self.slo_windows.items()}
         return out
 
     def slo_contract(self) -> dict:
@@ -302,6 +317,9 @@ class RowTable:
             if response is not None:
                 action, target = response
                 entry["onBreach"] = {"action": action, "divertTo": target}
+            window = self.slo_windows.get(key)
+            if window:
+                entry["window"] = dict(window)
             out[key] = entry
         return out
 
@@ -1377,6 +1395,28 @@ def _check_slo_bounds(decl: CompositionDecl, doc: str, rows: list["Row"],
             for datum, value, line in decl.slo}
 
 
+def _slo_windows(decl: CompositionDecl) -> dict[str, dict]:
+    """The declared window, sample floor and denominator per datum, keyed by
+    the unit-bearing IR name (item 473, slice 3). Only the datums that declared
+    one appear, and only the qualifiers that datum wrote, so a `slo` block from
+    before this slice yields an empty map and an unchanged IR.
+
+    The parser's surface spellings (`over`, `min`, `of`) become the IR's
+    unit-bearing ones (`overMs`, `minSamples`, `of`) here, the same rename
+    `SLO_IR_KEYS` applies to the datums themselves and for the same reason: an
+    unlabelled `300000` cannot be told from 300000 seconds once it leaves the
+    file."""
+    from .parser import SLO_IR_KEYS  # noqa: PLC0415 - lazy, avoids a cycle
+
+    names = {"over": "overMs", "min": "minSamples", "of": "of"}
+    out: dict[str, dict] = {}
+    for datum, window in decl.slo_windows.items():
+        entry = {names[k]: v for k, v in window.items() if k in names}
+        if entry:
+            out[SLO_IR_KEYS[datum]] = entry
+    return out
+
+
 def _slo_responses(decl: CompositionDecl) -> dict[str, tuple[str, str | None]]:
     """The declared `on breach` response per datum, keyed by the unit-bearing IR
     name (item 473, observed half). Only the datums that declared one appear, so
@@ -1425,7 +1465,8 @@ def resolve(decl: CompositionDecl, doc_path: str,
     # before the table is built, so a refused rollout never produces a table.
     slo = _check_slo_bounds(decl, doc, rows, uses, sources, root)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
-                    sources, slo, _slo_responses(decl))
+                    sources, slo, _slo_responses(decl),
+                    _slo_windows(decl))
 
 
 # ------------------------------------------------------------------- the fold
@@ -1763,7 +1804,8 @@ def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
     # and a layer cannot widen its way out of it.
     slo = _check_slo_bounds(decl, doc, rows, uses, sources, root)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
-                    sources, slo, _slo_responses(decl))
+                    sources, slo, _slo_responses(decl),
+                    _slo_windows(decl))
 
 
 def _reject_granted(layer: LayerDecl, rowdecl: RowDecl) -> None:

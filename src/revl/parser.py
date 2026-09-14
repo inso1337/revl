@@ -1025,6 +1025,32 @@ SLO_RESPONSES: dict[str, bool] = {
     "halt": False,
 }
 
+# The DENOMINATOR an entry may name with `of` (item 473, slice 3). A rate is a
+# numerator over a population, and the population is the half the surface used
+# to leave out: `success_rate: 99.5` alone is a number divided by whichever
+# counter a reader happened to reach for. So the denominator is DECLARED, and
+# the registry is closed for the same reason the datum registry is — a
+# denominator nothing counts is a contract with no measurement behind it.
+#
+# The value is whether THIS tree can count a success against that population.
+# `activations` can: the trace pairs a load with its withdraw and the withdraw
+# carries the transition that settled it, which is the same population and the
+# same classification `metrics._failure_metrics` already reports. `crossings`
+# cannot: the runtime records that an emit happened and never records whether
+# it succeeded, so a rate over crossings has a denominator and no numerator,
+# and `measure` answers `unmeasurable` naming exactly that rather than
+# substituting the population it does have.
+SLO_DENOMINATORS: dict[str, bool] = {
+    "activations": True,
+    "crossings": False,
+}
+
+# The datums that may name a denominator. Only a RATE has one: a percentile's
+# population is fixed by the measurement that produces it (the completion
+# bracket), and letting a document name a different one would be a second
+# meaning nothing reads. The same argument as the absent comparator.
+SLO_TAKES_DENOMINATOR = ("success_rate",)
+
 # What a live breach triggers when the datum declares no `on breach` clause.
 #
 # `pause`, not "record a receipt and carry on": a breach that changes nothing is
@@ -1090,6 +1116,15 @@ class CompositionDecl:
     # empty map is the honest reading of "the document chose no response".
     slo_responses: dict[str, tuple[str, str | None]] = field(
         default_factory=dict)
+    # item 473 slice 3: the WINDOW, the SAMPLE FLOOR and the DENOMINATOR of the
+    # datums that declared one, as `<datum> -> {overMs?, minSamples?, of?}`.
+    #
+    # A THIRD map rather than more tuple members, for the reason the second one
+    # exists: a `slo` block that writes none of the three has to parse, resolve
+    # and emit exactly the document it emitted before this slice. An absent
+    # entry is "this datum declared no window", which `slo.measure` reads as the
+    # whole of the generation's population — the pre-slice reading, preserved.
+    slo_windows: dict[str, dict] = field(default_factory=dict)
 
 
 # --- item 426 S2: layers and the fold ---------------------------------------
@@ -1524,6 +1559,37 @@ class ExprRecord:
 
 
 @dataclass
+class ExprAsset(ExprRecord):
+    """`asset "<path>"` — a RESOLVED, JAILED, CONTENT-PINNED reference to an
+    external asset file (roadmap item 459 F1, issue #722).
+
+    The node IS an `ExprRecord` (subclass, not a sibling) so nothing downstream
+    needs a new case: after resolution its `fields` hold two string literals and
+    it lowers, types and emits as the ordinary record
+    `{ path: Str, sha256: Str }` on every tier. What the keyword adds is what
+    happens BEFORE lowering, in `revl.hostref.resolve_assets`:
+
+    * `written` (the path as the source wrote it) is resolved relative to the
+      DECLARING `.rvl` file's directory, exactly like a host-module `ref`;
+    * the resolved realpath is JAILED to the root compile tree (or, for an
+      install-origin module, to that one install entry), reusing option B's
+      `_pick_root`/`_contained` rule rather than a second jail;
+    * the file's bytes are read and `sha256` is pinned into the record, so the
+      handle a component hands the host names a specific CONTENT, not a path
+      that may have changed since.
+
+    Every one of those can only REFUSE: a path that does not exist, is not a
+    regular file, is absolute, or resolves outside the jail is a compile error.
+    An `ExprAsset` whose `rel_path` is still `None` has not been through the
+    resolver and must never lower (`hostref.require_resolved_asset`).
+    """
+    written: str = ""
+    rel_path: str | None = None
+    sha256: str | None = None
+    root_kind: str | None = None
+
+
+@dataclass
 class ExprRecordUpdate:
     """`{base | f1 = e1, f2 = e2}` — functional record update.
 
@@ -1940,6 +2006,13 @@ class Program:
     # and a why-trace needs a file for every hop it names (why.py). Keyed by
     # identity like `fn_scopes`, so merging modules preserves it for free.
     decl_files: dict[int, str] = field(default_factory=dict)
+    # item 459 F1: every `asset "..."` expression the parser built, in source
+    # order, INCLUDING the ones inside a `${...}` interpolation (the sub-parser
+    # shares this list). The registry is complete by construction — the only
+    # place an `ExprAsset` is ever created appends to it — so the resolver and
+    # the untrusted-author refusal need no AST walk, and an asset can never be
+    # missed by a walker that forgot a statement kind.
+    assets: list = field(default_factory=list)
 
 
 # `===` -> `==`, `!==` -> `!=`: both spellings, one meaning (structural,
@@ -2038,6 +2111,10 @@ class Parser:
         # `revl.gate` admit. Counting the statement depth here refuses such input
         # at parse time with a diagnostic, well before an emitter is reached.
         self._stmt_nesting = 0
+        # item 459 F1: the `asset "..."` nodes built during this parse (see
+        # `Program.assets`). Shared with every `${...}` sub-parser so an asset
+        # written inside an interpolation is registered too.
+        self._assets: list = []
 
     # -- token helpers
 
@@ -2447,6 +2524,7 @@ class Parser:
                 tok = self.peek()
                 self._reject_foreign_keyword(tok)  # item 384
                 raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
+        program.assets = self._assets  # item 459 F1
         return program
 
     def use_decl(self) -> UseDecl:
@@ -3737,6 +3815,7 @@ class Parser:
         site: tuple[str, int] | None = None
         slo: list[tuple[str, int | float, int]] = []
         slo_responses: dict[str, tuple[str, str | None]] = {}
+        slo_windows: dict[str, dict] = {}
         seen: dict[str, int] = {}
         while True:
             self._skip_semis()
@@ -3810,7 +3889,7 @@ class Parser:
                         hint="a composition carries exactly ONE SLO contract: "
                              "the datums are distinct keys, so two blocks could "
                              "only disagree")
-                slo, slo_responses = self._slo_block(name, sline)
+                slo, slo_responses, slo_windows = self._slo_block(name, sline)
                 continue
             if not self.at("ident", "row"):
                 tok = self.peek()
@@ -3835,11 +3914,13 @@ class Parser:
         return CompositionDecl(name, rows, line, uses, stack=stack,
                                site=site, remotes=remotes, hosts=hosts,
                                seams=seams, places=places, slo=slo,
-                               slo_responses=slo_responses)
+                               slo_responses=slo_responses,
+                               slo_windows=slo_windows)
 
     def _slo_block(self, composition: str, line: int) -> tuple[
             list[tuple[str, int | float, int]],
-            dict[str, tuple[str, str | None]]]:
+            dict[str, tuple[str, str | None]],
+            dict[str, dict]]:
         """`slo { <datum>: <value> [on breach <response>] (, ...)* }`, the
         composition's SLO contract (roadmap item 473, issue #825). The leading
         `slo` is already consumed.
@@ -3859,15 +3940,23 @@ class Parser:
         response registry is closed for the same reason the datum registry is:
         an action nothing implements is a promise the runtime cannot keep.
 
-        Returns `(targets, responses)`: the `(datum, value, line)` triples the
-        compile-time gate already read, and a SEPARATE `datum -> (response,
-        fallback)` map for the datums that wrote a clause. Two returns rather
-        than one widened list, so a document that declares no response
+        `over <duration>`, `min <count>` and `of <denominator>` are the slice-3
+        qualifiers: the window a verdict is taken over, the smallest sample that
+        may produce one, and the population a rate is a rate OF. They are
+        optional, order-free and each refused when repeated, and they are what
+        makes a verdict falsifiable — `p95_latency: 250ms` with no window is
+        breached by one slow call in a year and held by none.
+
+        Returns `(targets, responses, windows)`: the `(datum, value, line)`
+        triples the compile-time gate already read, and two SEPARATE maps for
+        the datums that wrote a clause. Three returns rather than one widened
+        list, so a document that declares neither a response nor a qualifier
         produces the same `CompositionDecl.slo` it produced before this slice.
         """
         self.expect("{")
         out: list[tuple[str, int | float, int]] = []
         responses: dict[str, tuple[str, str | None]] = {}
+        windows: dict[str, dict] = {}
         seen: set[str] = set()
         while not self.at("}"):
             dline = self.peek().line
@@ -3891,10 +3980,13 @@ class Parser:
             seen.add(datum)
             self.expect(":")
             value = self._slo_value(datum, dline)
+            window = self._slo_qualifiers(datum, dline)
             response = self._slo_response(datum, dline)
             out.append((datum, value, dline))
             if response is not None:
                 responses[datum] = response
+            if window:
+                windows[datum] = window
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -3905,7 +3997,89 @@ class Parser:
                 hint="a composition that promises nothing should declare no "
                      "`slo` block at all; an empty one reads as a contract and "
                      "holds none (item 473)")
-        return out, responses
+        return out, responses, windows
+
+    def _slo_qualifiers(self, datum: str, line: int) -> dict:
+        """`over <duration>`, `min <count>` and `of <denominator>` after one
+        SLO datum's value (item 473, slice 3). Order-free, each at most once,
+        all optional; `{}` when the entry writes none.
+
+        `over` is the window a verdict is taken over and `min` the smallest
+        sample that may produce one. Both exist because an objective with
+        neither is not falsifiable in either direction, and both belong beside
+        the target in the SOURCE rather than in a runtime flag: a target and the
+        window it is measured over are one promise, and splitting them lets an
+        operator quietly change what the author promised.
+
+        `of` is the population a rate is a rate OF, and it is accepted only on
+        a rate. A percentile's population is fixed by the measurement that
+        produces it, so a denominator on `p95_latency` would be a second meaning
+        nothing reads — the same argument that keeps the comparator out of the
+        surface.
+        """
+        out: dict = {}
+        # `of` is a lexer KEYWORD (the `for ... of` surface) and `over`/`min`
+        # are ordinary idents, so the head test reads the token KIND for each
+        # rather than assuming the three are spelled alike. Matching `of` as an
+        # ident would silently never fire, which is the failure mode that leaves
+        # a declared denominator unread.
+        while ((self.at("ident") and self.peek().value in ("over", "min"))
+               or self.at("kw", "of")):
+            qtok = self.next()
+            name = qtok.value
+            if name in out:
+                raise self.err(
+                    qtok.line,
+                    f"duplicate `{name}` on SLO datum `{datum}`",
+                    hint="each qualifier appears once: a second one either "
+                         "repeats the first or contradicts it, and neither is "
+                         "a contract (item 473)")
+            if name == "over":
+                ms = self._duration_literal(
+                    what=f"the window `{datum}` is measured over")
+                if ms <= 0:
+                    raise self.err(
+                        qtok.line,
+                        f"`{datum} over` must be a positive window",
+                        hint="a window of zero contains no observation, so the "
+                             "verdict it produces is about nothing (item 473)")
+                out["over"] = ms
+            elif name == "min":
+                ntok = self.expect(
+                    "int", what=f"the smallest sample `{datum}` may be judged on")
+                if ntok.value <= 0:
+                    raise self.err(
+                        ntok.line,
+                        f"`{datum} min` must be a positive sample count, found "
+                        f"{ntok.value!r}",
+                        hint="the floor is the number of observations below "
+                             "which the verdict is `insufficient`; a floor of "
+                             "zero admits a verdict over an empty sample, which "
+                             "is the number this qualifier exists to stop")
+                out["min"] = ntok.value
+            else:
+                if datum not in SLO_TAKES_DENOMINATOR:
+                    takes = ", ".join(f"`{n}`" for n in SLO_TAKES_DENOMINATOR)
+                    raise self.err(
+                        qtok.line,
+                        f"`{datum}` takes no `of` denominator",
+                        hint=f"only a rate is a rate OF something ({takes}). "
+                             "A percentile's population is fixed by the "
+                             "measurement that produces it, so naming a second "
+                             "one would be a meaning nothing reads (item 473)")
+                ntok = self.peek()
+                pop = ntok.value if ntok.kind == "ident" else None
+                if pop not in SLO_DENOMINATORS:
+                    known = ", ".join(f"`{n}`" for n in SLO_DENOMINATORS)
+                    raise self.err(
+                        ntok.line,
+                        f"unknown SLO denominator {ntok.value!r} for `{datum}`",
+                        hint=f"the denominator is a CLOSED registry (item 473): "
+                             f"{known}. A population nothing counts is a rate "
+                             "with no measurement behind it")
+                self.next()
+                out["of"] = pop
+        return out
 
     def _slo_response(self, datum: str, line: int) -> tuple[str, str | None] | None:
         """The optional `on breach <response>` clause of one SLO datum (item
@@ -7154,6 +7328,10 @@ class Parser:
             # the interpolation is nested INSIDE this expression: carry the
             # depth across so `${`${`${...}`}`}` is bounded too (issue #310)
             sub._nesting = self._nesting
+            # item 459 F1: share the asset registry, so an `asset "..."` written
+            # inside an interpolation is resolved (and jailed) like any other
+            # rather than reaching lowering unresolved.
+            sub._assets = self._assets
             expr = sub.pure_expr()
             if not sub.at("eof"):
                 extra = sub.peek()
@@ -7489,6 +7667,30 @@ class Parser:
                      "is recorded on the audit's declassify surface (item 249)")
         return ExprEndorse(origin, value, reason, line, approval)
 
+    def _asset_expr(self) -> ExprAsset:
+        """`asset "<path>"` — an external asset file named by path, resolved
+        and content-pinned at compile time (item 459 F1, issue #722).
+
+        The path is a STRING LITERAL and nothing else: an expression there
+        would be a path the compiler cannot resolve, jail or hash, which is
+        exactly the untyped `Str` this form replaces. A template
+        (`asset `${x}``) is refused for the same reason, and named so.
+        """
+        line = self.next().line  # consume `asset`
+        tok = self.peek()
+        if tok.kind != "string":
+            raise self.err(
+                line,
+                "an `asset` path must be a plain string literal, not a "
+                "`${...}` template",
+                hint="the path is resolved, jailed and hashed at COMPILE time, "
+                     "so it cannot depend on a runtime value — write "
+                     '`asset "./frontend/entry.client.ts"` (item 459)')
+        self.next()
+        node = ExprAsset([], line, written=tok.value)
+        self._assets.append(node)
+        return node
+
     def _hole_expr(self) -> ExprHole:
         """`hole` [`[` Type `]`] [StringLit] — docs/holes.md.
 
@@ -7711,6 +7913,15 @@ class Parser:
                 and self.pos + 1 < len(self.toks)
                 and self.peek_ahead(1).kind in ("[", "(")):
             return self._endorse_expr()
+        # item 459 F1: `asset "<path>"` — the resolved, jailed, content-pinned
+        # external asset handle. `asset` is an ident, not a keyword (the lexer
+        # is untouched), intercepted only when a STRING LITERAL is juxtaposed
+        # after it — a shape no other expression has — so a value legitimately
+        # named `asset` is read as a variable exactly as before.
+        if (tok.kind == "ident" and tok.value == "asset"
+                and self.pos + 1 < len(self.toks)
+                and self.peek_ahead(1).kind in ("string", "template")):
+            return self._asset_expr()
         if self._is_name_tok(tok):
             # item 158: a variable *reference* is a name position too — a param
             # (or record field) named with a contextual noun must be usable, and

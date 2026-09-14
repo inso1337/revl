@@ -196,8 +196,9 @@ export const PATH_FAMILIES: Record<string, readonly string[]> = {
   'sidecar-directory': ['garbageDir', 'preimageDir', 'freshSidecar'],
   'inverse-source': ['resolveSidecar'],
   'syscall-time': ['openConfinedWrite', 'writeThrough', 'snapshotPreimage',
-    'confirmLanded', 'replaceConfined', 'removeConfined', 'mkdirConfined',
-    'rmdirConfined', 'closeHandle', 'discardWrite'],
+    'confirmLanded', 'replaceConfined', 'installCapturedSidecar',
+    'removeConfined', 'mkdirConfined', 'rmdirConfined', 'closeHandle',
+    'discardWrite'],
 }
 
 /** Read-only helpers an entry point may call. They observe and mutate nothing,
@@ -222,6 +223,7 @@ export const SYSCALL_PATH_ARGS: Record<string, readonly number[]> = {
   snapshotPreimage: [],
   confirmLanded: [],
   replaceConfined: [0, 1],
+  installCapturedSidecar: [0, 1],
   removeConfined: [0],
   mkdirConfined: [0],
   rmdirConfined: [0],
@@ -666,6 +668,11 @@ export class WriteHandle {
    * to be bound from a family 1-3 guard, and a snapshot's return value is not
    * one. */
   preimage = ''
+  /** identity of the preimage SIDECAR as `snapshotPreimage` captured it (issue
+   * #1016), carried on the witness so `fsRestore` can prove the file it is
+   * about to install is still the one that was captured. Null until a snapshot
+   * is taken. Peer of py `WriteHandle.capture`. */
+  capture: SidecarCapture | null = null
   constructor(fd: number, real: string, created: boolean, st: fs.BigIntStats) {
     this.fd = fd
     this.real = real
@@ -887,6 +894,47 @@ function rawWriteThrough(handle: WriteHandle, contents: string): void {
  * a write with no preimage is not reversible, so the honest outcome is to
  * refuse before a byte is written. The sidecar is recorded on the handle so
  * `discardWrite` can remove it when a LATER step refuses. */
+/** The sidecar facts captured at snapshot time and re-checked by the inverse
+ * (issue #1016). `dev`/`ino` name the inode (what a same-bytes replacement
+ * cannot forge), `nlink` is the hardlink control the forward path spells
+ * `EMULTILINK`, `mode`/`size` the shape, and `mtimeNs`/`ctimeNs` the stamps.
+ * `ctimeNs` is what makes an IN-PLACE rewrite visible without re-reading the
+ * bytes, and unlike `mtimeNs` an unprivileged writer cannot set it back.
+ *
+ * Peer of py `SIDECAR_CAPTURE_FIELDS`, recorded as decimal STRINGS: node's only
+ * nanosecond-resolution stat is the `bigint` one, and a bigint is not
+ * WAL-serializable. The comparison is equality either way. */
+export interface SidecarCapture {
+  dev: string
+  ino: string
+  mode: string
+  nlink: string
+  size: string
+  mtimeNs: string
+  ctimeNs: string
+}
+
+/** The subset that survives the install. A rename bumps the inode's `ctime`, so
+ * the post-install re-check compares everything BUT `ctimeNs`; comparing it
+ * would refuse every honest restore. Peer of py `INSTALLED_CAPTURE_FIELDS`. */
+const INSTALLED_CAPTURE_FIELDS = [
+  'dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs'] as const
+const SIDECAR_CAPTURE_FIELDS = [...INSTALLED_CAPTURE_FIELDS, 'ctimeNs'] as const
+
+/** The captured identity of one sidecar inode. A READ of an already-taken stat,
+ * so it reaches no syscall of its own. */
+function captureOf(st: fs.BigIntStats): SidecarCapture {
+  return {
+    dev: String(st.dev),
+    ino: String(st.ino),
+    mode: String(st.mode),
+    nlink: String(st.nlink),
+    size: String(st.size),
+    mtimeNs: String(st.mtimeNs),
+    ctimeNs: String(st.ctimeNs),
+  }
+}
+
 function rawSnapshotPreimage(handle: WriteHandle): string {
   const directory = preimageDir()
   const dst = freshSidecar(directory, 'pre')
@@ -913,6 +961,11 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     }
     fs.fchmodSync(out, handle.mode)
     fs.futimesSync(out, handle.atimeMs / 1000, handle.mtimeMs / 1000)
+    // capture the snapshot's own identity LAST, after the copy and after the
+    // mode/mtime restoration, so what is recorded is the sidecar as it is left
+    // behind (issue #1016). Read from the fd that wrote it, never by reopening
+    // the name. The inverse re-checks the file it installs against this.
+    handle.capture = captureOf(fs.fstatSync(out, { bigint: true }))
   } catch (e) {
     if (out >= 0) fs.closeSync(out)
     const message = (e as { message?: string })?.message ?? String(e)
@@ -960,6 +1013,107 @@ function rawReplaceConfined(srcReal: string, dstReal: string): void {
     }
     throw e
   }
+}
+
+/** Install an inverse's sidecar over its target, but only while the sidecar is
+ * still demonstrably the file that was captured (issue #1016). Peer of py
+ * `install_captured_sidecar`.
+ *
+ * The inverse-path member of the family the forward path already has: the write
+ * receipts bind facts to the ORIGINAL held descriptor and `confirmLanded`
+ * re-establishes the written inode's identity afterwards. Nothing bound what a
+ * restore INSTALLS. A snapshot sits in the preimage directory for the whole
+ * life of the activation, and `resolveSidecar` proves only that a path names a
+ * sidecar slot this workspace owns, not that the file in that slot is still the
+ * snapshot that was taken. So a same-UID writer could rewrite it, swap it for
+ * another inode, or hardlink it out, and the inverse would install the result
+ * and report a clean reversal.
+ *
+ * Three checks, on the way in and again on the installed result: a regular file
+ * (`EOUTSIDE`), one link (`EMULTILINK`, the control the forward
+ * `openConfinedWrite` applies to its target), and an unchanged captured
+ * identity (`EIDENTITY`). The second pass is what closes the window between the
+ * first check and the rename, which is by NAME, exactly as `confirmLanded`
+ * re-establishes the forward write rather than trusting its pre-syscall check;
+ * it drops `ctimeNs`, which the rename legitimately bumps.
+ *
+ * A refusal THROWS, which the teardown loop records as `restore-residue` — the
+ * outcome item 243 rule 6 already defines for an inverse that cannot complete.
+ * The direction is deliberate: a sidecar that cannot be shown to be the
+ * captured one is reported as residue rather than silently installed. A witness
+ * carrying no capture (a durable record written before this check existed) still
+ * gets the two caller-independent checks; refusing every such replay would
+ * strand a recoverable WAL. */
+function rawInstallCapturedSidecar(
+  srcReal: string, dstReal: string,
+  capture: SidecarCapture | null | undefined,
+): void {
+  const observe = (real: string, what: string): SidecarCapture => {
+    const [parent] = splitLeaf(real)
+    try {
+      assertRealDirChain(parent)
+    } catch (e) {
+      if (e instanceof FsOpError) throw e
+      throw new FsOpError(
+        'ERACE', `the ${what}'s directory disappeared mid-inverse`, real)
+    }
+    let fd = -1
+    try {
+      fd = fs.openSync(real, fs.constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    } catch (e) {
+      const code = errnoCode(e)
+      if (code === 'ELOOP' || code === 'ENOTDIR') {
+        throw new FsOpError(
+          'EOUTSIDE', `the ${what} may not be a symlink`, real)
+      }
+      throw new FsOpError(
+        'ERACE',
+        `the ${what} disappeared mid-inverse, so the reversal cannot be shown `
+        + 'to have installed what was captured',
+        real,
+      )
+    }
+    let st: fs.BigIntStats
+    try {
+      st = fs.fstatSync(fd, { bigint: true })
+    } finally {
+      fs.closeSync(fd)
+    }
+    if (!st.isFile()) {
+      throw new FsOpError(
+        'EOUTSIDE', `the ${what} must be a regular file`, real)
+    }
+    if (st.nlink !== 1n) {
+      throw new FsOpError(
+        'EMULTILINK',
+        `the ${what} is linked from a second name (${st.nlink} links), so `
+        + 'installing it would hand a live alias to whoever holds the other '
+        + 'name',
+        real,
+      )
+    }
+    return captureOf(st)
+  }
+  const refuse = (observed: SidecarCapture,
+    fields: readonly (keyof SidecarCapture)[],
+    real: string, sentence: string): void => {
+    if (capture === null || capture === undefined) return
+    const drifted = fields.filter((f) => capture[f] !== undefined
+      && capture[f] !== observed[f])
+    if (drifted.length > 0) {
+      throw new FsOpError(
+        'EIDENTITY',
+        `${sentence} (${drifted.join(', ')} differ); the reversal was refused `
+        + 'rather than install a file that is not the captured preimage',
+        real,
+      )
+    }
+  }
+  refuse(observe(srcReal, 'preimage sidecar'), SIDECAR_CAPTURE_FIELDS, srcReal,
+    'the preimage sidecar changed since it was captured')
+  replaceConfined(srcReal, dstReal)
+  refuse(observe(dstReal, 'restored target'), INSTALLED_CAPTURE_FIELDS, dstReal,
+    'the restored target is not the captured preimage')
 }
 
 /** `unlink` with the parent chain-checked. A missing target is a no-op: an
@@ -1071,6 +1225,7 @@ const RAW: Record<string, (...a: never[]) => unknown> = {
   snapshotPreimage: rawSnapshotPreimage as (...a: never[]) => unknown,
   confirmLanded: rawConfirmLanded as (...a: never[]) => unknown,
   replaceConfined: rawReplaceConfined as (...a: never[]) => unknown,
+  installCapturedSidecar: rawInstallCapturedSidecar as (...a: never[]) => unknown,
   removeConfined: rawRemoveConfined as (...a: never[]) => unknown,
   mkdirConfined: rawMkdirConfined as (...a: never[]) => unknown,
   rmdirConfined: rawRmdirConfined as (...a: never[]) => unknown,
@@ -1118,6 +1273,9 @@ export const snapshotPreimage =
 export const confirmLanded = GUARD.confirmLanded as typeof rawConfirmLanded
 /** family 4, see `rawReplaceConfined`. */
 export const replaceConfined = GUARD.replaceConfined as typeof rawReplaceConfined
+/** family 4, see `rawInstallCapturedSidecar`. */
+export const installCapturedSidecar =
+  GUARD.installCapturedSidecar as typeof rawInstallCapturedSidecar
 /** family 4, see `rawRemoveConfined`. */
 export const removeConfined = GUARD.removeConfined as typeof rawRemoveConfined
 /** family 4, see `rawMkdirConfined`. */
@@ -1144,7 +1302,15 @@ export const isDirConfined = GUARD.isDirConfined as typeof rawIsDirConfined
 // witnessed frame keys off, and an inverse returns `void` (Unit).
 
 /** `write`'s preimage witness, the ts mirror of `stdlib/fs.rvl`'s WriteWitness. */
-export interface WriteWitness { path: string; preimage: string; created: boolean }
+export interface WriteWitness {
+  path: string
+  preimage: string
+  created: boolean
+  /** the preimage sidecar's identity at snapshot time, which `fsRestore`
+   * re-checks before installing it (issue #1016). Optional: a witness written
+   * before this key existed carries none and still restores. */
+  capture?: SidecarCapture | null
+}
 /** `rm`'s witness: the original path and where the target was parked. */
 export interface RmWitness { path: string; garbage: string }
 /** `move`'s witness: the resolved source and destination. */
@@ -1196,7 +1362,12 @@ export function fsWrite(p: string, contents: string): FsResult<WriteWitness> {
     confirmLanded(handle)
     return {
       kind: 'Ok',
-      value: { path: handle.real, preimage, created: handle.created },
+      value: {
+        path: handle.real,
+        preimage,
+        created: handle.created,
+        capture: handle.capture,
+      },
     }
   } catch (e) {
     discardWrite(handle)   // residue-free: an Err registers no inverse
@@ -1292,8 +1463,17 @@ export function fsRestore(w: WriteWitness): void {
   // restore the preimage snapshot over the target. the rename is atomic and
   // consumes the snapshot (residue-free). idempotent, once the snapshot is
   // gone (already restored), a second replay is a no-op.
+  //
+  // `resolveSidecar` proves the SLOT is one this workspace owns; it cannot
+  // prove the FILE in it is still the snapshot `fsWrite` took. So the install
+  // re-checks the sidecar against the identity captured at snapshot time, and
+  // re-checks the installed result afterwards (issue #1016). A drifted sidecar
+  // throws, which the teardown loop records as restore-residue; it is never
+  // silently installed over the target. An honest restore is quiet.
   const preimage = resolveSidecar(w.preimage, 'preimage')
-  if (lexistsConfined(preimage)) replaceConfined(preimage, target)
+  if (lexistsConfined(preimage)) {
+    installCapturedSidecar(preimage, target, w.capture)
+  }
 }
 
 /** Inverse of `fsRm`: rename the parked file back. Confined, idempotent. */
@@ -1419,6 +1599,7 @@ export interface RevlFsHost {
   discardWrite: typeof discardWrite
   closeHandle: typeof closeHandle
   replaceConfined: typeof replaceConfined
+  installCapturedSidecar: typeof installCapturedSidecar
   removeConfined: typeof removeConfined
   mkdirConfined: typeof mkdirConfined
   rmdirConfined: typeof rmdirConfined
@@ -1446,6 +1627,7 @@ const HOST: RevlFsHost = {
   discardWrite,
   closeHandle,
   replaceConfined,
+  installCapturedSidecar,
   removeConfined,
   mkdirConfined,
   rmdirConfined,

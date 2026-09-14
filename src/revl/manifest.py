@@ -5,12 +5,15 @@
 rows joined by ``;``, the kind of each row set by its leading marker
 (docs/design/186-ambient-admission-guarantees.md, "The wire"):
 
-    C/k/r    provision:   component C provides key k in realm r ("" = shared)
-    C<k      requirement: component C requires key k in the shared realm
-    C<k/r    requirement: the same, resolved in realm r
-    C<*k     requirement: the same, multi-realm bound (item 162)
-    -C       replacing:   component C is withdrawn by this admission
-    !halted  header:      the composition is halted; every admission refuses
+    C/k/r     provision:   component C provides key k in realm r ("" = shared)
+    C<k       requirement: component C requires key k in the shared realm
+    C<k/r     requirement: the same, resolved in realm r
+    C<*k      requirement: the same, multi-realm bound (item 162)
+    -C        replacing:   component C is withdrawn by this admission
+    !halted   header:      the composition is halted; every admission refuses
+    !services header:      the `:S` rows below ENUMERATE the running
+                           composition's service declarations, exhaustively
+    :S        service:     the running composition declares service S
 
 `manifest_wire(ir)` renders `IR(M)` — the manifest of an already-compiled
 composition `M` — into exactly that wire, so a differential oracle can construct
@@ -20,6 +23,18 @@ the withdrawn set of a REPLACEMENT admission, so the wire says exactly what
 ``compile_files(paths, manifest=IR(M), replacing=R)`` says on the reference
 side. The handoff row (``C=k:T``) is the one kind still deferred, behind the
 self-host type layer.
+
+The SERVICE BLOCK (issue #346) says which services the running composition
+DECLARES, and its header is the load-bearing half. The service names are what
+decide whether a candidate's ``service S { … }`` is a fresh interface (which the
+reference admits into any composition) or a REDECLARATION of a running one
+(which the reference gates on the §5 compatibility relation,
+`revl.admission._admit_service_replacement`, and refuses when it breaks a
+running toucher). A wire carrying no ``!services`` header makes no claim about
+the running set, so a reader must treat it as UNKNOWN rather than empty: the
+difference between "declares no service" and "does not say" is the difference
+between a sound admission and a wave-through, which is why the claim is spelled
+on the wire instead of inferred from the absence of rows.
 """
 
 from __future__ import annotations
@@ -27,6 +42,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 SHARED_REALM = ""
+
+#: The header row asserting that the `:S` rows beside it are the WHOLE running
+#: service set. Without it a reader knows nothing about the running services.
+SERVICES_HEADER = "!services"
+
+#: The leading marker of a service-declaration row.
+SERVICE_MARKER = ":"
 
 
 def _components(ir: dict) -> list[dict]:
@@ -38,6 +60,22 @@ def _components(ir: dict) -> list[dict]:
     manifest = ir.get("manifest", ir) if isinstance(ir, dict) else {}
     comps = manifest.get("components") if isinstance(manifest, dict) else None
     return comps or []
+
+
+def _declared_services(ir: dict) -> list[str] | None:
+    """The running composition's service names in declaration order, or ``None``
+    when `ir` is not a whole compiled IR and the set is therefore UNKNOWN.
+
+    A manifest DICT (the ``ir["manifest"]`` half on its own) carries components
+    and no services, and an absent service table is not an empty one: returning
+    ``None`` for it is what keeps the wire from claiming a composition declares
+    no services when all that happened is that nobody asked."""
+    if not isinstance(ir, dict) or "manifest" not in ir:
+        return None
+    services = ir.get("services")
+    if not isinstance(services, dict):
+        return None
+    return list(services)
 
 
 def _requirement_row(name: str, key: str, entry: dict) -> str:
@@ -69,6 +107,13 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
     withdraws nothing, exactly as on the reference side. The components the
     incoming TEXT redeclares are NOT rendered here — the gate derives that
     implicit half from the text itself, as `compile_files` does.
+
+    The SERVICE BLOCK sits between the composition rows and the withdrawal rows:
+    it describes the composition, and a withdrawal acts on what precedes it. So
+    the withdrawal rows stay last, and a wire rendered with no `replacing` grows
+    only a suffix — the provision/requirement rows keep their exact positions and
+    order, which is what leaves the G3 DFS seed order (`mnames`, which a `:S` row
+    does not touch) provably unchanged.
     """
     rows: list[str] = []
     for entry in _components(ir):
@@ -79,5 +124,9 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
             rows.append(f"{name}/{key}/{realm}")
         for key in entry.get("inject") or []:
             rows.append(_requirement_row(name, key, entry))
+    services = _declared_services(ir)
+    if services is not None:
+        rows.append(SERVICES_HEADER)
+        rows.extend(f"{SERVICE_MARKER}{name}" for name in services)
     rows.extend(f"-{name}" for name in replacing)
     return ";".join(rows)

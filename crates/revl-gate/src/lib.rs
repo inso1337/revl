@@ -91,6 +91,19 @@
 //! (`docs/design/457-selfhost-type-layer.md`): each slice it lands is a family
 //! the certifier can then account for.
 //!
+//! [`issue_admission_into`] asks the same question against a RUNNING
+//! composition. The extra obligation is redeclaration: a candidate declaring a
+//! service the composition already declares is gated on the reference's §5
+//! compatibility relation, which is the type layer, so it is withheld; one whose
+//! declarations are all fresh has no running toucher to break and is admitted.
+//! The running names come from the item-186 wire's service block, a `!services`
+//! header followed by one `:S` row per declared service. A wire with no header
+//! makes NO claim, so the running set is unknown and any declared service is
+//! withheld — silence is not an empty composition. A wire carrying a WITHDRAWAL
+//! row (`-C`) is declined outright: the fold decides a withdrawal in full, and
+//! re-deriving which provisions survive it here would be a second implementation
+//! of that reasoning.
+//!
 //! ```no_run
 //! use revl_gate::{issue_admission, Admission};
 //!
@@ -142,14 +155,18 @@
 //! wire (`docs/design/186-ambient-admission-guarantees.md`), and the fold is
 //! `selfhost/lower.rvl::admit_ambient`, compiled to rust like [`admit`].
 //!
-//! What this arm decides is the G2/G3 legs of ambient admission and nothing
-//! else. The wire has room for row kinds the landed wave does not carry —
-//! replacement (`-C`) and handoff (`C=k:T`), both of which need the type layer —
-//! and those rows are REFUSED as `MANIFEST` rather than skipped, because a row
-//! this gate cannot honour is exactly where a stub that ignored its inputs would
-//! wave a program through. An empty `manifest` (`""`) is the empty composition,
-//! which makes [`admit_into`] byte-identical to [`admit`]: the arm is a
-//! generalisation, not a second implementation.
+//! What this arm decides is the G2/G3 legs of ambient admission, the
+//! replacement wave's withdrawals, and nothing else. The handoff row (`C=k:T`)
+//! is the one kind still deferred behind the type layer, and it is REFUSED as
+//! `MANIFEST` rather than skipped, because a row this gate cannot honour is
+//! exactly where a stub that ignored its inputs would wave a program through.
+//! The service block (`!services`, `:S`) is the one kind this fold accepts and
+//! computes nothing from, and it is the one kind whose meaning adds no provision,
+//! no requirement, no graph node and no withdrawable component: the consumer it
+//! exists for is the admission surface above, which reads the wire itself. An
+//! empty `manifest` (`""`) is the empty composition, which makes [`admit_into`]
+//! byte-identical to [`admit`]: the arm is a generalisation, not a second
+//! implementation.
 //!
 //! ```no_run
 //! use revl_gate::{admit_into, Verdict};
@@ -619,19 +636,28 @@ pub fn issue_admission(source: &str) -> Admission {
 /// The empty manifest is the empty composition, so `issue_admission_into(src,
 /// "")` is [`issue_admission`] byte for byte.
 ///
-/// Against a NON-EMPTY manifest the surface is far narrower, and the reason is
-/// the item-186 row wire rather than a gap in the certifier: a row carries a
-/// component name, a provision key and a realm, and NO SERVICE SHAPES. A
-/// candidate declaring `service Store { ... }` may collide with a `Store` the
-/// running composition already holds in a different shape — the reference
-/// refuses that pair with "service `Store` differs from the running manifest"
-/// — and no amount of care on this side can see it in the wire. So only a
-/// candidate that declares nothing is certified against a running composition,
-/// and everything else is withheld with the fold's verdict.
+/// Against a NON-EMPTY manifest the candidate carries one obligation more than
+/// it does standalone: nothing it declares may REDECLARE a service the running
+/// composition already declares. That is the only interaction the reference has
+/// between an interface-only candidate and a running manifest
+/// (`revl.admission._admit_service_replacement`, which `lower.py` reaches only
+/// when the declared name is already in the ambient service table), and a
+/// redeclaration is gated on the §5 compatibility relation, which is the type
+/// layer and therefore withheld here.
 ///
-/// Widening this is not the type layer alone: the WIRE has to carry the running
-/// composition's declared shapes first. That is the remaining half of issue
-/// #346, and naming it here is cheaper than rediscovering it.
+/// The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
+/// header followed by one `:S` row per declared service
+/// (`revl.manifest.manifest_wire`). The header is what makes the block usable —
+/// a wire without it CLAIMS NOTHING about the running services, so the set is
+/// unknown rather than empty and any declared service is withheld, exactly as it
+/// was before the block existed. Reading silence as "declares nothing" would be
+/// the wave-through this crate exists to prevent.
+///
+/// What still cannot be admitted here, and why: a candidate whose service NAME
+/// the composition already declares, even one whose shape is byte-identical to
+/// the running one (the wire carries the name, not the shape — that is the
+/// self-host type layer's lane); and anything at all against a wire carrying a
+/// WITHDRAWAL row, which the fold decides in full and this surface declines.
 pub fn issue_admission_into(source: &str, manifest: &str) -> Admission {
     if manifest.is_empty() {
         return issue_admission(source);
@@ -1080,6 +1106,32 @@ component CacheLayer requires store: Store provides store: Store {\n\
             other => panic!("expected an issued admission, got {:?}", other),
         }
         assert!(into.is_admitted());
+    }
+
+    #[test]
+    fn a_fresh_interface_is_admitted_into_an_enumerated_composition() {
+        // The item-346 service block at work, end to end. `Cache` is not a name
+        // the running composition declares, so the reference has no running
+        // toucher to protect and admits it; with the block on the wire, so does
+        // this arm. THIS IS AN ADMISSION THE CRATE DID NOT ISSUE BEFORE.
+        const FRESH: &str = "service Cache {\n  fn lookup(key: Str) -> Str\n}\n";
+        const ENUMERATED: &str = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc";
+        let into = issue_admission_into(FRESH, ENUMERATED);
+        assert!(into.is_admitted(), "{:?}", into);
+        assert_eq!(
+            into.to_json(),
+            "{\"verdict\":\"admitted\",\"admitted\":true,\"code\":null,\"message\":null}"
+        );
+        // The same bytes against the same composition described WITHOUT the
+        // block: the wire makes no claim, so the arm withholds.
+        assert!(!issue_admission_into(FRESH, RUNNING).is_admitted());
+        // A redeclaration of a running service stays withheld even with the
+        // block: whether it is an admissible replacement is the type layer.
+        assert!(!issue_admission_into(CERTIFIABLE, ENUMERATED).is_admitted());
+        // And the block does not make a WITHDRAWAL wire admissible: the fold
+        // decides a withdrawal, this surface declines the wire.
+        let withdrawn = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc;-Kv";
+        assert!(!issue_admission_into(FRESH, withdrawn).is_admitted());
     }
 
     #[test]

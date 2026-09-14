@@ -4,7 +4,7 @@
 **Builds on:** docs/design/526-webui-asset-alignment.md,
 docs/design/530-webui-entry-surface.md,
 docs/design/525-webapp-slice4-frontend.md ·
-**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · REMAINDER NAMED BELOW · FULL CLOSE 462-GATED
+**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · REMAINDER NAMED BELOW
 
 ## Purpose
 
@@ -160,12 +160,28 @@ author writes `attr="{{html:x}}"`).
 
 ## Deliberately deferred (named so the remainder is not mistaken for done)
 
-- **F1 - disk-backed asset references.** A revl source resolving an asset file
-  (CSS/JS/template) at build time, jailed to the root tree and content-pinned by
-  sha256, reusing the `src/revl/hostref.py` resolution and jail rather than
-  inventing a second one. This is what makes `dev_source`/`prod_manifest` in
-  `examples/webui-entry/console.rvl` typed handles instead of `Str`, and it is
-  the next slice of this item.
+- **F1 - disk-backed asset references. LANDED.** `asset "<path>"` resolves an
+  asset file at compile time against the root-tree jail and pins the sha256 of
+  its bytes, reusing `src/revl/hostref.py`'s resolution and containment rule
+  rather than inventing a second one. The value is the record
+  `{ path: Str, sha256: Str }` with `path` root-relative, so it lowers, types
+  and emits on every tier with no new backend case, and a bare `Str` no longer
+  type-checks where an asset is expected. `dev_source` in
+  `examples/webui-entry/console.rvl` and `examples/app/notes.rvl` is now that
+  handle, and the WebUI adapter `revl dev` installs re-hashes the file under the
+  app root, refusing a digest mismatch (the deploy-time half, mirroring
+  `hostref.plug_refs`).
+
+  What it does NOT claim. `prod_manifest` is still a `Str`: a Vite manifest is a
+  build OUTPUT that does not exist when the composition is compiled, so there is
+  nothing on disk to resolve or pin, and pinning it needs a build-time step the
+  toolchain does not have. The handle's record shape has no canonical stdlib
+  name, so each composition declares the type; writing the record by hand
+  type-checks, which is why it is a shape rather than a capability. And an
+  `asset` is refused under the untrusted-author profile (`no_extern`), so an
+  admitted turn cannot use it to probe the compile tree. Guard:
+  `tests/test_asset_handle_459.py`, with the dev-host half in
+  `tests/test_app_notes_725.py`.
 - **F2 - real source maps.** `Hole.start`/`Hole.end` are the groundwork. Mapping
   an insertion site back to a line/column in the original asset file, and
   feeding that into a bundler's source map so the browser devtools point at the
@@ -199,7 +215,54 @@ app-neutral primitive, which is the thing F1, F2 and F4 consume. The webui asset
 model and the typed channel (F5, F7) are a separate landed slice on top of it;
 what they still do not claim is F1's typed handles and F2's insertion-site map.
 
+## Stage 2 (F1): the asset handle
+
+`asset "<path>"` closes gap 1 and the asset half of gap 3. It is deliberately
+NOT a new type in the type system and NOT a new backend case: the parser builds
+an `ExprAsset` that IS an `ExprRecord` (a subclass), and the resolver fills it
+with two string literals, so everything downstream sees an ordinary record.
+
+The design decisions worth naming:
+
+- **Reuse the option B jail, do not write a second one.** `resolve_assets` lives
+  in `src/revl/hostref.py` next to `resolve_refs` and shares `_pick_root` and
+  `_contained` with it. A path-confinement bug in a compiler that reads files is
+  a file-read primitive, and two jails would drift.
+- **The value is the RESOLVED path, not the written one.** `./a/../a/x.ts` and
+  `./a/x.ts` produce one handle, and the path a host receives is relative to the
+  root compile tree, so the host joins it to the app root. A host that joined
+  the written path to its own root would be resolving a second time, under a
+  different rule.
+- **A path literal, never an expression.** `asset` takes a string literal; a
+  `${...}` template is refused at parse. Resolution, jailing and hashing happen
+  at compile time, so a path that depends on a runtime value cannot be an asset
+  by construction, and admitting one would have made the pin optional.
+- **Fail closed on the way to lowering.** An `ExprAsset` that never went through
+  the resolver would otherwise lower as the empty record its parser default
+  carries: a handle with no path and no digest, silently. Both lowering entry
+  points refuse it instead.
+- **An in-memory compile reads nothing from disk.** The virtual arm resolves
+  through the `sources` map only, exactly as option B's does. The alternative,
+  falling back to disk, would turn every in-memory compile of foreign source
+  into a file-existence and file-digest oracle over the host.
+- **`asset` is an identifier, not a keyword.** It is intercepted only when a
+  string literal is juxtaposed after it, so the lexer is untouched and a value
+  named `asset` still reads as a variable. That also keeps it out of the gate
+  crate's digest inputs.
+
+Not done by F1: `prod_manifest` (a build output, above), a canonical stdlib name
+for the handle's record shape, and any consumption of the handle beyond the
+WebUI coeffect. F2, F3 and F6 are unchanged.
+
 ## Verification
+
+`tests/test_asset_handle_459.py` covers F1: what the handle is (the resolved
+root-relative path and the real digest, recomputed from disk, with the digest
+following an edit to the file), every refusal above driven rather than
+described (absolute, missing, directory, `..` escape, symlink escape, empty,
+computed path, in-memory without sources, bare source string, untrusted author),
+and the typed half in both directions. Two control cases hold before and after
+the change, so a green run is not explained by the harness compiling nothing.
 
 `tests/test_template_stdlib.py` compiles a consumer that reaches the module
 through `use`, pins the public surface and the absence of externs, runs the

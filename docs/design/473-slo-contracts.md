@@ -34,12 +34,16 @@ has landed, so this note is not introducing the surface.
 | the `slo` trace event | absent, and NO LONGER a prerequisite for the percentile | `why_runtime.SCHEMA_VERSION` is still 2. See "the per-call population, found rather than added" below: item 250's `model-decision` WAL record already is the per-call observation |
 | the producer inside `Session` | landed (slice 5) | `Session._seal_generation` at every generation boundary, `Session.slo_observe` in flight; the contract is bound off the composition document by `_slo_bind` / `_slo_discover` |
 | the pause as a state the session is in | landed (slice 5) | `Session._refuse_if_paused` refuses a call while a pause is in force, `slo.latch_state` / `slo.paused` tell a pause from a halt fail-closed, `state()["slo"]` reports it |
+| the window, the sample floor and the denominator | landed (slice 3) | `parser._slo_qualifiers`, `SLO_DENOMINATORS`, `SLO_TAKES_DENOMINATOR`; `RowTable.slo_windows`, the conditional `slo_window` IR key; honoured by `slo.measure` through `slo.qualifiers` and `slo._windowed` |
+| `success_rate` measured | landed (slice 3), for ONE declared denominator | `of activations` divides the lifecycles the trace closed by the transitions they settled into (`metrics._lifecycles`, `metrics._is_failed`). `of crossings` stays `unmeasurable` and the reason names the missing numerator |
 | the pause as a member of the FIBER state set | absent | `cordis.fiber.FiberState` has no `PAUSED` member and this item does not add one; see "what the pause is and is not" below |
 
 Two of the five datums are gated. `SLO_BACKED_BY` maps `p95_latency` to item
 260's `time` ceiling and `max_pending_tasks` to its `calls` ceiling;
 `success_rate`, `recovery_time` and `approval_wait` are parsed, carried into the
-IR and printed, and never compared against anything.
+IR and printed, and never compared against a DECLARATION. Since slice 3
+`success_rate` is compared against an OBSERVATION when the entry declares a
+denominator the runtime can count; the other two still are not.
 
 A numbering correction, because it is easy to build on the wrong one. Roadmap
 item 460 is the service lifecycle contract ([lifecycle-contract.md](../lifecycle-contract.md),
@@ -58,10 +62,17 @@ three and keeps them apart.
 ```text
 composition_clause := ... | slo_block
 slo_block          := 'slo' '{' slo_entry (',' slo_entry)* '}'
-slo_entry          := datum ':' literal
+slo_entry          := datum ':' literal qualifier* on_breach?
+qualifier          := 'over' duration | 'min' int | 'of' denominator
+on_breach          := 'on' 'breach' ('divert' string | 'pause' | 'halt')
 datum              := 'p95_latency' | 'success_rate' | 'recovery_time'
                     | 'approval_wait' | 'max_pending_tasks'
+denominator        := 'activations' | 'crossings'
 ```
+
+The qualifiers are order-free, each at most once, and `of` is accepted only on a
+rate. `over` is canonicalized to milliseconds by the same `_duration_literal`
+the target goes through, so neither can be re-read in another unit downstream.
 
 At most one block per composition. `slo` is contextual, recognised only in the
 clause-head slot beside `row`, `remote`, `host`, `seam`, `place`, `use`, `stack`
@@ -280,10 +291,10 @@ runtime SLO is per-process and the receipt must say so, for the same reason
 `estop.tier_estop_status` reports which tiers honor a halt instead of reporting a
 stop it did not perform.
 
-### The window and the sample
+### The window and the sample (landed, slice 3)
 
-An SLO is a statistical claim over a window, and the landed surface has no
-window. `p95_latency: 250ms` with nothing else is not falsifiable in either
+An SLO is a statistical claim over a window, and the surface slice 1 landed had
+no window. `p95_latency: 250ms` with nothing else is not falsifiable in either
 direction: one slow call in a year breaches it, and so does every call. So a
 verdict needs two more facts per datum, and they belong in the source beside the
 target rather than in a runtime flag, because a target and the window it is
@@ -294,7 +305,7 @@ what the author promised.
 composition Shop {
   slo {
     p95_latency: 250ms over 5m min 200,
-    success_rate: 99.5 over 1h min 1000 of crossings
+    success_rate: 99.5 over 1h min 1000 of activations
   }
   ...
 }
@@ -311,6 +322,35 @@ degrade detected by missing data rather than by a version field.
 
 Adding `over` / `min` / `of` adds no datum, so the closed registry stays closed
 and a composition that writes none is unaffected.
+
+Three things the landed form fixes that this sketch did not say, each because
+writing it made them unavoidable.
+
+The window's END is the last observation in the population, not "now". `ts` is a
+`time.monotonic()` reading with no wall-clock meaning (see "the clock problem"
+above), so the only anchor available is another reading from the same run, and
+the last one is the honest choice for a verdict taken at a generation boundary,
+which is where a seal happens.
+
+A population whose records carry no timestamp cannot be windowed at all, and the
+answer is `insufficient` naming the record that would have to be stamped — never
+a whole-population verdict wearing the window's name. The run's own
+`model-decision` records are exactly that population: `{component, stepIndex,
+outcome, llm}` and no time. So a composition that declares `over` on
+`p95_latency` today is measured over the trace population or told, in the
+receipt, why it was not measured. Stamping that record is the durable-format
+decision the left-out below already names, and windowing the per-call population
+now depends on it too.
+
+The sketch wrote `of crossings`, and the landed registry admits the word and
+refuses the measurement. `crossings` IS counted — every recorded `emit` — and
+the runtime records no OUTCOME for one, so a rate over crossings has a
+population and nothing to divide by it. `of activations` is the member that
+measures: the population is the lifecycles the trace closed and the outcome is
+the transition each withdraw settled into, which is the same pair of numbers
+`metrics._failure_metrics` already reports rather than a second derivation of
+them. A lifecycle still open at the end of the trace is in neither the numerator
+nor the denominator, because its outcome is not yet known.
 
 ### The response, and why the escalation order is a decision
 
@@ -431,7 +471,7 @@ and the closed registry is how that scope is enforced rather than promised.
 | datum | compile-time refusable | runtime only | advisory |
 |---|---|---|---|
 | `p95_latency` | yes, against every declared `time` ceiling (E1, landed) | the percentile itself: it needs a per-call event that does not exist | no |
-| `success_rate` | no: nothing in the language declares a rate | yes, once a denominator is declared | no |
+| `success_rate` | no: nothing in the language declares a rate | yes, and since slice 3 it IS: `of activations` is measured, `of crossings` is `unmeasurable` for want of a numerator | no |
 | `recovery_time` | no | measurable only after a recovery has finished | yes, see below |
 | `approval_wait` | no: a policy ttl is a deadline, not a wait | yes, once both ends are stamped | partly, see below |
 | `max_pending_tasks` | yes, two ways: against `calls` (E1, landed) and against an `unbounded` cardinality verdict (E2) | the aggregate the datum names needs a queue owner | no |
@@ -484,16 +524,26 @@ from a live generation, so the measurement runs over a RECORDED trace through
 source named in the clause, re-admitted through the ordinary gate — not the
 standby-row vocabulary of slice 7.
 
-**Slice 3: the window, the sample floor and the denominator.** `over`, `min` and
-`of` on an entry, parsed, domain-checked and lowered to the same conditional
-`slo` key. Still no monitor. This slice is what makes a verdict falsifiable, so
-it precedes anything that produces one.
+**Slice 3, landed: the window, the sample floor and the denominator.** `over`,
+`min` and `of` on an entry, parsed, domain-checked and lowered to their own
+conditional `slo_window` IR key (a third key, not a widening of `slo`, for the
+reason `slo_on_breach` is a second one: a block that writes no qualifier emits
+the pre-slice document byte for byte). Wider than the "no monitor" shape this
+plan first proposed, because the qualifiers turned out to be readable by the
+monitor that already exists: `slo.measure` narrows the population to the
+declared window, applies the declared floor beside the structural one and takes
+the tighter, and measures `success_rate` over the declared denominator. The
+declared window is inside the signed receipt body, on the same entry as the
+target, because a target and the window it is measured over are one promise.
+`tests/test_slo_473_window.py` pins it, including the control that the same run
+breaches over its whole population and holds over its declared window.
 
-**Slice 4: measurement, for the datums reachable without a durable-format
-change.** `success_rate` over the declared denominator, and `p95_latency` over a
-new per-call trace event. Extends `metrics.py`, keeps its degrade discipline, and
-produces a receipt at generation end with `unmeasurable` on the three datums it
-cannot reach. No response is taken.
+**Slice 4: what is left of measurement.** `success_rate` over the declared
+denominator landed with slice 3 for `of activations`; what remains is a
+denominator whose members carry an outcome the runtime records per CROSSING,
+which is the missing numerator `of crossings` names, and a per-call latency
+population that carries a timestamp so `over` can be applied to it. Both are the
+same kind of work: a record has to carry something it does not carry today.
 
 **Slice 5, landed: the live producer and the pause as a state the session is
 in.** `Session` binds the contract off the composition document at load
@@ -549,7 +599,9 @@ verbs is the work.
 its G2 argument, and the divert as a response. A language change of its own size.
 
 **Left out, with the prerequisite named.** `recovery_time` and `approval_wait`
-need timestamps on WAL records, a durable-format change under `WAL_VERSION`
+need timestamps on WAL records — and since slice 3 so does any `over` applied to
+the per-call latency population, which is the same `model-decision` record. One
+durable-format change under `WAL_VERSION`
 (reader-compatible, since `wal.read_wal` keeps unknown record kinds and keys, but
 still a format decision that is not this item's to make alone).
 `max_pending_tasks` as the aggregate it names needs a queue owner and a
@@ -583,15 +635,21 @@ itself states them:
   (`REVL_SLO_KEY` / `REVL_SLO_KEY_FILE`). Without one the generation is measured
   and reported `unsigned`, and nothing is filed — an unsigned measurement is not
   a receipt.
-* Three of the five datums are still `unmeasurable`, each with the reason naming
-  what would have to exist: `success_rate` needs the declared denominator of
-  slice 3's `of`, and `recovery_time` and `approval_wait` need timestamps on WAL
-  records, a durable-format change. A receipt naming five objectives is not five
-  objectives held.
-* The window and the sample floor of slice 3 are still unwritten, so a verdict
-  is over the whole of one generation's population. `PERCENTILE_MIN_SAMPLES`
-  keeps a handful of samples from being printed as a p95, and that is a floor,
-  not a window.
+* `recovery_time` and `approval_wait` are still `unmeasurable` in every receipt,
+  each with the reason naming what would have to exist: timestamps on WAL
+  records, a durable-format change under `WAL_VERSION`. `success_rate` is
+  measurable only when the entry declares `of activations`; with no `of` it
+  reads `unmeasurable` exactly as it did before slice 3, and with `of crossings`
+  it reads `unmeasurable` for want of a numerator. A receipt naming five
+  objectives is not five objectives held.
+* The window and the sample floor are written (slice 3) and they are NOT
+  universal. A verdict is over the whole of one generation's population whenever
+  the entry declares no `over`, which is every composition written before the
+  qualifier existed. And a declared `over` cannot be applied to the run's own
+  `model-decision` population at all, because that record carries no timestamp:
+  there the verdict is `insufficient` with the missing stamp as its reason. So
+  "the contract declares a window" and "the verdict was taken over that window"
+  are two different facts, and the receipt carries both.
 
 ## Relates to
 

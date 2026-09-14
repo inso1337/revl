@@ -16,6 +16,12 @@
 // string; the frontend entry itself (`frontend/entry.client.ts`) is a normal
 // Vite/Vue source with source maps, named here only by PATH.
 //
+// THE PATH IS CHECKED. `dev_source` is an `asset` handle, not a `Str`: the path
+// is resolved against this file, jailed to the root compile tree, and its bytes
+// are hashed at compile time (item 459 F1). `prod_manifest` is still a `Str` and
+// deliberately so — a Vite manifest is a BUILD OUTPUT that does not exist when
+// the composition is compiled, so there is nothing to resolve or pin yet.
+//
 // WHY A COEFFECT, NOT A `globalThis` BRIDGE. The enabling slice (#761) reached
 // the Cordis `Context` through the retained embedder bridge
 // `globalThis.__revlWebui`, a `@ts ref` host-ref door onto an untyped seam.
@@ -46,6 +52,20 @@
 // paths at your own Vite project's dev source, built manifest, and routes, and
 // declare your own state record and provision.
 
+// A TYPED ASSET HANDLE (roadmap item 459 F1). `asset "<path>"` is not a string:
+// the compiler resolves the path relative to THIS file, refuses it if it escapes
+// the root compile tree (`..` and symlinks included — containment is checked on
+// the resolved realpath), refuses it if the file is missing or is not a regular
+// file, and pins the sha256 of its bytes into the handle. The record below is
+// the shape that handle has, so a host receiving it gets both halves: WHICH file
+// (root-relative, so the host joins it to the app root) and WHICH CONTENT.
+//
+// This is the shape, not a second declaration of it: the compiler builds the
+// record, and writing one by hand does not make a path resolved or a digest
+// true. What the type buys is that a bare `Str` no longer type-checks where an
+// asset is expected, which is the confusion F1 exists to remove.
+type Asset = { path: Str, sha256: Str }
+
 // The reactive state this entry publishes to its page. Ordinary declared record:
 // its fields are what the browser observes on the synced channel.
 type ConsoleState = { title: Str, ready: Bool }
@@ -64,7 +84,7 @@ service ConsoleRpc {
 // shape a `revl import cordis` of `@cordisjs/plugin-webui` recovers).
 service WebUI {
   emission fn add_entry(
-    dev_source: Str,
+    dev_source: Asset,
     prod_manifest: Str,
     routes: List[Str],
     data: ConsoleState,
@@ -79,7 +99,7 @@ service WebUI {
 // emission and the `console` provision on this component's boundary.
 component ConsoleUI requires webui: WebUI provides console: ConsoleRpc {
   emit webui.add_entry(
-    "./frontend/entry.client.ts",       // dev-mode source (a Vite/Vue module)
+    asset "./frontend/entry.client.ts", // dev source, resolved + jailed + pinned
     "./dist/.vite/manifest.json",       // built Vite manifest for production
     ["/console"],                       // client route patterns this entry owns
     { title: "revl console",            // the typed reactive channel

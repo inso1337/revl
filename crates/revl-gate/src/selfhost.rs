@@ -6202,7 +6202,17 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
         if (row == "!halted") {
             return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, bad: String::from("") };
         }
+        if (row == "!services") {
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
+        }
         return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest header row `").revl_concat(&row)).revl_concat("`"))) };
+    }
+    if (row.revl_slice(0i64, 1i64) == ":") {
+        let sname = row.revl_slice(1i64, row.revl_length());
+        if (!bare_ident(&sname, 0i64)) {
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name a service"))) };
+        }
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
     }
     if (row.revl_slice(0i64, 1i64) == "-") {
         let name = row.revl_slice(1i64, row.revl_length());
@@ -12412,6 +12422,32 @@ fn a_routed_running_requirement_is_not_reported_by_the_withdrawal_check() {
 fn a_handoff_row_refuses_until_the_deferred_type_layer_lands() {
     let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
     assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred handoff/type-layer wave (item 186)"));
+}
+
+#[test]
+fn the_service_block_leaves_every_ambient_verdict_unmoved() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("OldCache/cache/;!services;:D;:Other")) == ""));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;!services;:D")) == admit_ambient(clean.clone(), String::from("OldStore/db/"))));
+    assert!((admit_ambient(clean.clone(), String::from("!services")) == admit_src(clean.clone())));
+}
+
+#[test]
+fn the_service_block_does_not_disturb_a_withdrawal_refusal() {
+    let fresh = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    let bare = String::from("Db/db/;Store/cache/;Store<db;-Db");
+    let blocked = String::from("Db/db/;Store/cache/;Store<db;!services;:D;:C;-Db");
+    assert!((admit_ambient(fresh.clone(), blocked.clone()) == admit_ambient(fresh.clone(), bare.clone())));
+    assert!((admit_ambient(fresh.clone(), blocked.clone()) == "G2|this admission withdraws the running provider of `db` (`Db`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn a_malformed_service_row_refuses_naming_the_row() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from(":")) == "MANIFEST|manifest service row `:` does not name a service"));
+    assert!((admit_ambient(clean.clone(), String::from(":9bad")) == "MANIFEST|manifest service row `:9bad` does not name a service"));
+    assert!((admit_ambient(clean.clone(), String::from(":A/b")) == "MANIFEST|manifest service row `:A/b` does not name a service"));
+    assert!((admit_ambient(clean.clone(), String::from("!service")) == "MANIFEST|unrecognized manifest header row `!service`"));
 }
 
 #[test]

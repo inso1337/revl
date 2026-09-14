@@ -6950,10 +6950,11 @@ pub fn admit_tag(src: Str) -> Str {
 // The manifest is the linker's already-live composition, serialised as rows
 // joined by ";" — provisions "<component>/<key>/<realm>" (realm "" = shared),
 // requirements "<component><<key>" (with "<key>/<realm>" for a realm-resolved
-// one and "*<key>" for a multi-realm bind), withdrawals "-<component>", and the
-// "!halted" header — e.g. "Store/db/;KvA/kv/tenant_a;Store<net;-KvA". An empty
-// manifest is the empty table, so `admit_ambient(src, "")` == `admit_src(src)`
-// exactly.
+// one and "*<key>" for a multi-realm bind), withdrawals "-<component>", the
+// "!halted" header, and the item-346 SERVICE BLOCK ("!services" followed by one
+// ":<service>" row per service the composition declares) — e.g.
+// "Store/db/;KvA/kv/tenant_a;Store<net;!services;:D;-KvA". An empty manifest is
+// the empty table, so `admit_ambient(src, "")` == `admit_src(src)` exactly.
 
 // The head of `s` up to the first `sep` (one char), and the remainder past it.
 // `rest` "" when `sep` is absent — the whole of `s` is the head.
@@ -6976,6 +6977,11 @@ fn cut(s: Str, sep: Str) -> Cut {
 // unknown row kind, or a `C=k:T` handoff row whose type layer is still the
 // deferred wave — and REFUSES admission by name rather than being silently
 // skipped (a row that parses and does nothing is worse than one that refuses).
+//
+// The item-346 SERVICE BLOCK (`!services` + `:S` rows) is parsed and validated
+// but adds no field here: a service declaration is not a composition edge, so
+// there is nothing for G2/G3, the withdrawal check or the realm table to fold it
+// into. The certifier that DOES use it reads the wire directly.
 type Manifest = { provs: List[Prov3], reqs: List[MReq], mnames: List[Str],
                   repl: List[Str], halted: Bool, bad: Str }
 
@@ -7015,15 +7021,34 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 
 // Parse one manifest row into `man` by its LEADING kind marker (docs/design/
 // 186-ambient-admission-guarantees.md, "The wire"):
-//   C/k/r   provision  (landed)   -> a Prov3 row
-//   C<k     requirement (slice 3) -> an MReq row + a graph node
-//     C<k/r   the same, resolved in realm `r` (the wave)
-//     C<*k    the same, MULTI-REALM bound (the wave)
-//   !halted header     (slice 3)  -> the halt flag
-//   -C      replacing  (wave)     -> a withdrawn component name
-//   C=k:T   handoff     (deferred) -> REFUSE (needs the self-host type layer)
-//   anything else                 -> REFUSE (unknown row kind)
+//   C/k/r     provision  (landed)    -> a Prov3 row
+//   C<k       requirement (slice 3)  -> an MReq row + a graph node
+//     C<k/r     the same, resolved in realm `r` (the wave)
+//     C<*k      the same, MULTI-REALM bound (the wave)
+//   !halted   header     (slice 3)   -> the halt flag
+//   !services header     (item 346)  -> the service block is EXHAUSTIVE
+//   :S        service     (item 346) -> the running composition declares S
+//   -C        replacing  (wave)      -> a withdrawn component name
+//   C=k:T     handoff    (deferred)  -> REFUSE (needs the self-host type layer)
+//   anything else                    -> REFUSE (unknown row kind)
 // A `bad` already set rides through unchanged (first offending row wins).
+//
+// THE SERVICE BLOCK AND THIS FOLD. `!services` and `:S` are the only row kinds
+// this fold accepts and records nothing from, so the rule they are measured
+// against — a row that parses and does nothing is worse than one that refuses —
+// has to be answered rather than waved at. It is answered by what the rows MEAN:
+// a service DECLARATION contributes no provision, no requirement, no graph node
+// and no withdrawable component, so there is nothing for G2/ROUTE/G3 or the
+// unmet-consumer check to compute from it, at any wire. `-C` and `C=k:T` are the
+// contrast: each of them CHANGES what the fold must compute, which is why one is
+// folded in full and the other still refuses. The consumer the service block
+// exists for is the ADMISSION certifier (`crates/revl-gate/src/admission.rs`),
+// which parses the wire itself and uses the names to tell a fresh interface from
+// a redeclaration of a running one. What this fold still does NOT do with them is
+// the reference's §5 compatibility relation on a redeclared service: that refusal
+// needs the type layer and stays open, so an incompatible redeclaration remains a
+// no-objection here (under-refusing, the direction this gate is allowed to err
+// in) rather than being refused in the reference's words.
 fn parse_row(row: Str, man: Manifest) -> Manifest {
   if (man.bad != "") { return man }
   if (row.slice(0, 1) == "!") {
@@ -7031,9 +7056,30 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
                repl: man.repl, halted: true, bad: "" }
     }
+    // the completeness claim over the `:S` rows. It carries no data of its own —
+    // the claim is read by the admission certifier, which parses the same wire.
+    if (row == "!services") {
+      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+               repl: man.repl, halted: man.halted, bad: "" }
+    }
     return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
              repl: man.repl, halted: man.halted,
              bad: tagged("MANIFEST", "unrecognized manifest header row `".concat(row).concat("`")) }
+  }
+  if (row.slice(0, 1) == ":") {
+    // a service the running composition declares. Its name is held to the same
+    // BARE identifier rule a withdrawal name is — anything carrying a separator
+    // is a garbled row, not a declaration — and is then discarded: see the note
+    // above for why this fold has nothing to compute from it.
+    let sname = row.slice(1, row.length())
+    if (!bare_ident(sname, 0)) {
+      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+               repl: man.repl, halted: man.halted,
+               bad: tagged("MANIFEST", "manifest service row `".concat(row)
+                 .concat("` does not name a service")) }
+    }
+    return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+             repl: man.repl, halted: man.halted, bad: "" }
   }
   if (row.slice(0, 1) == "-") {
     // a withdrawal names a component, nothing more: `-C`. A name carrying a
@@ -11627,6 +11673,41 @@ test "a handoff row refuses until the deferred type layer lands" {
   let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
   assert admit_ambient(clean, "OldStore=db:D")
     == "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred handoff/type-layer wave (item 186)"
+}
+
+// The item-346 service block. It changes NO verdict this fold computes — that is
+// the claim, so it is measured: the same admissions and the same refusals hold
+// with the block on the wire and with it off, INCLUDING alongside the
+// replacement wave's withdrawal rows and realm-bearing requirement rows.
+test "the service block leaves every ambient verdict unmoved" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "OldCache/cache/;!services;:D;:Other") == ""
+  assert admit_ambient(clean, "OldStore/db/;!services;:D")
+    == admit_ambient(clean, "OldStore/db/")
+  assert admit_ambient(clean, "!services") == admit_src(clean)
+}
+
+// The block beside the replacement wave's own rows: a wire carrying BOTH a
+// withdrawal that strands a running consumer and a service block still produces
+// the withdrawal refusal, in the reference's words, unmoved by the block.
+test "the service block does not disturb a withdrawal refusal" {
+  let fresh = "service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } component Fresh provides other: C { provide other { fn g(k) { return k } } }"
+  let bare = "Db/db/;Store/cache/;Store<db;-Db"
+  let blocked = "Db/db/;Store/cache/;Store<db;!services;:D;:C;-Db"
+  assert admit_ambient(fresh, blocked) == admit_ambient(fresh, bare)
+  assert admit_ambient(fresh, blocked)
+    == "G2|this admission withdraws the running provider of `db` (`Db`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+// A malformed service row still refuses BY NAME rather than being skipped: the
+// marker is recognized, the name is not, and a wire this fold cannot read is not
+// one it admits against.
+test "a malformed service row refuses naming the row" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, ":") == "MANIFEST|manifest service row `:` does not name a service"
+  assert admit_ambient(clean, ":9bad") == "MANIFEST|manifest service row `:9bad` does not name a service"
+  assert admit_ambient(clean, ":A/b") == "MANIFEST|manifest service row `:A/b` does not name a service"
+  assert admit_ambient(clean, "!service") == "MANIFEST|unrecognized manifest header row `!service`"
 }
 
 // A requirement row whose provider is in the incoming text (not a cycle) simply

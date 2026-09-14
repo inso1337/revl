@@ -908,6 +908,19 @@ presented as evidence that does not verify is a refusal; the absence of a
 receipt is not, because the first generation of any composition has no
 predecessor.
 
+**The window a verdict was taken over.** An entry may declare `over <duration>`,
+`min <count>` and, on a rate, `of <denominator>`
+([composition-rows.md](composition-rows.md#slo-the-rollout-contract)). A
+declared window narrows the population before the verdict is taken and is
+printed on the verdict and carried inside the signed body, because a target and
+the window it was measured over are one promise. Two things it does not do. A
+window can only be applied to a population whose records carry a timestamp, and
+the run's own `model-decision` WAL records do not, so a window declared on
+`p95_latency` against that population reads `insufficient` naming the record
+rather than silently answering over the whole run. And an entry that declares no
+window is measured over the whole of the generation's population, exactly as it
+was before the qualifier existed.
+
 ### `revl branch`
 
 Session branch lineage over durable write-ahead logs (roadmap item 250): what a

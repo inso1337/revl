@@ -44,6 +44,34 @@ def _gen_modules() -> list[str]:
     return [m for m in sys.modules if m.startswith("revl_run_gen")]
 
 
+@pytest.fixture
+def a_clean_generation_namespace():
+    """Establish -- and restore -- the `revl_run_gen*` namespace this file needs.
+
+    The end-to-end claim below counts how many generation modules ONE session
+    registers and then reclaims. It used to measure that as a cross-file delta
+    against whatever the process already held, which cannot work: `_emit_module`
+    numbers the modules from a PER-DRIVER counter (`_Driver.generation`, from 0)
+    into the process-global `sys.modules`, so a generation another test left
+    behind does not offset the count, it COLLIDES by name with one of this
+    session's own. `revl_run_gen1` from an earlier file is overwritten rather
+    than added, the total comes out one short of the arithmetic, and the test
+    fails in a multi-file session while passing alone (#1021).
+
+    So the dependency is stated instead of worked around: this test needs an
+    empty generation namespace, and says so. `tests/conftest.py` stops any test
+    from leaking one in the first place; this is the local guarantee, so the file
+    is correct in any collection order and under any runner.
+    """
+    for name in _gen_modules():
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        for name in _gen_modules():
+            del sys.modules[name]
+
+
 # --------------------------------------------------------------------------- #
 # The sweep in isolation — no runtime needed. A stand-in with just the three
 # attributes `_evict_dead_modules` reads drives it exactly as `_Driver` does.
@@ -170,15 +198,11 @@ def _base_ir():
 
 
 @needs_cordis
-def test_additive_admits_keep_identical_verdicts_and_reclaim_on_unload(tmp_path):
+def test_additive_admits_keep_identical_verdicts_and_reclaim_on_unload(
+        tmp_path, a_clean_generation_namespace):
     from revl.mcp.session import Session
 
     n = 8
-    # measured as a delta: other tests in the same process may have left
-    # generation modules registered, so the claim is "this session adds none
-    # that survive its teardown", not an absolute count.
-    baseline = set(_gen_modules())
-
     session = Session()
     session.load(copy.deepcopy(_base_ir()))
 
@@ -197,14 +221,13 @@ def test_additive_admits_keep_identical_verdicts_and_reclaim_on_unload(tmp_path)
     # every admit reached the same verdict shape (admitted + its own key).
     assert verdicts == [(True, (f"turn{i}",)) for i in range(n)]
     # the turns are additive, so their generations are all still LIVE here: the
-    # base plus one per turn, over and above whatever the process already held.
-    assert len(_gen_modules()) >= len(baseline) + 1 + n
+    # base plus one per turn. The namespace started empty, so this is an
+    # absolute count and not a delta against whatever else the process ran.
+    assert len(_gen_modules()) >= 1 + n
 
     # unload disposes the whole composition; #541: every generation module this
     # session registered is reclaimed rather than pinned in `sys.modules` for the
-    # process lifetime. Without the fix, `after` grows past `baseline` by 1 + n.
+    # process lifetime. Without the fix, 1 + n of them survive.
     session.unload()
-    after = set(_gen_modules())
-    assert after <= baseline, (
-        "generation modules leaked past teardown: "
-        + ", ".join(sorted(after - baseline)))
+    after = sorted(_gen_modules())
+    assert not after, "generation modules leaked past teardown: " + ", ".join(after)

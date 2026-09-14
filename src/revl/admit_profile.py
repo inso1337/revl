@@ -251,6 +251,40 @@ def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> 
             )
 
 
+def check_no_asset(root_programs: list[Program], profile: AdmissionProfile) -> None:
+    """Refuse an `asset "<path>"` written by an untrusted author (item 459 F1).
+
+    An `asset` is a compile-time FILE READ whose path the admitted source
+    chooses. Resolution is jailed to the root compile tree and a file outside it
+    is refused, so the reach is bounded — but "which files exist inside the tree
+    I am compiled in, and what are their digests" is still an answer the gate
+    should not hand an untrusted author for free. The same profile already
+    forbids `extern` for the stronger version of that reason, so this rides the
+    `no_extern` flag rather than growing a knob.
+
+    Root-scoped and structural, exactly like `check_no_extern`: a pre-granted
+    module the turn `use`s is trusted and keeps its assets, and the refusal
+    fires on the parsed AST BEFORE any path is resolved or stat'd, so it is
+    never itself an existence oracle.
+    """
+    if not profile.no_extern:
+        return
+    for program in root_programs:
+        for node in getattr(program, "assets", None) or []:
+            raise RevlError(
+                program.filename, node.line,
+                f"admission refused: the untrusted-author profile forbids "
+                f"reading host files, but this source names the external "
+                f"`asset {node.written!r}`",
+                hint="an `asset` resolves and hashes a file from the compile "
+                     "tree at build time. An untrusted author may only COMPOSE "
+                     "pre-granted services — a frontend asset is contributed by "
+                     "the trusted composition that owns the tree (item 459)",
+                code="G8", category="admission",
+                navigate=_granted_navigate(profile.granted),
+            )
+
+
 def _realm_navigate(realms) -> dict:
     """A realm-placement refusal is author-enactable in one direction only: drop
     the clause and run in the shared realm. Naming the realm anyway is an
@@ -736,6 +770,7 @@ def enforce_source(root_programs: list[Program],
         return
     if profile.no_extern:
         check_no_extern(root_programs, profile)
+        check_no_asset(root_programs, profile)  # item 459 F1
     if profile.no_declassify:
         check_no_declassify(root_programs, profile)
     # item 334 slice 2: the realm-placement refusal, root-scoped exactly as the

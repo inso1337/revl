@@ -238,6 +238,8 @@ def contract_from_ir(ir: Mapping | None) -> dict:
         return {}
     responses = ir.get("slo_on_breach")
     responses = responses if isinstance(responses, Mapping) else {}
+    windows = ir.get("slo_window")
+    windows = windows if isinstance(windows, Mapping) else {}
     out: dict = {}
     for key, target in declared.items():
         entry = responses.get(key)
@@ -250,7 +252,46 @@ def contract_from_ir(ir: Mapping | None) -> dict:
             explicit = True
         out[key] = {"target": target, "action": action,
                     "divertTo": divert_to, "declared": explicit}
+        # Slice 3's qualifiers, carried onto the SAME entry the target is on,
+        # because the target and the window it is measured over are ONE
+        # promise. An absent `slo_window` key, or a datum absent from it,
+        # leaves `window` off the entry entirely, which `measure` reads as the
+        # pre-slice reading: the whole of the generation's population.
+        window = windows.get(key)
+        if isinstance(window, Mapping) and window:
+            out[key]["window"] = dict(window)
     return out
+
+
+def qualifiers(entry) -> tuple:
+    """The declared qualifiers of one contract entry, normalised: `(window in
+    milliseconds or None, sample floor or None, denominator name or None)`.
+
+    ONE DOOR, because three measurements read them and a call site that read a
+    declared window as absent would silently answer over a population the
+    author never promised anything about — the same fail-open `slo_datum`
+    exists to prevent on the datum spelling.
+
+    A malformed member is read as absent rather than as a crash: this reads the
+    IR, and a measurement is not the place to discover a bad document. An
+    absent qualifier is the pre-slice reading, so `(None, None, None)` is both
+    the honest answer and the compatible one.
+    """
+    if not isinstance(entry, Mapping):
+        return (None, None, None)
+    window = entry.get("window")
+    if not isinstance(window, Mapping):
+        return (None, None, None)
+
+    def number(name, cast):
+        value = window.get(name)
+        ok = (isinstance(value, (int, float))
+              and not isinstance(value, bool) and value > 0)
+        return cast(value) if ok else None
+
+    of = window.get("of")
+    return (number("overMs", float), number("minSamples", int),
+            of if isinstance(of, str) and of else None)
 
 
 def breached_keys(contract: Mapping, verdicts: Mapping) -> list[str]:
@@ -293,6 +334,51 @@ UNMEASURABLE_REASON = {
 }
 
 
+def _stamp(record) -> Optional[float]:
+    """The `ts` of one record, as a float, or `None` when it carries none.
+
+    `ts` is a `time.monotonic()` reading and is meaningful only as a DIFFERENCE
+    between records of the same run, which is exactly what a window needs and
+    all it may be used for: nothing here reads it as a wall clock.
+    """
+    value = record.get("ts") if isinstance(record, Mapping) else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _activation_observations(events) -> list:
+    """The ACTIVATION population and its outcomes: one entry per lifecycle the
+    trace closed, `{ts, failed}` (item 473, slice 3, the `of activations`
+    denominator).
+
+    Nothing new is measured. The population is the load/withdraw pairing
+    `metrics._lifecycles` already makes, and the outcome is
+    `metrics._is_failed` — the observed `ACTIVE -> FAILED` transition, which is
+    what actually happened rather than a graph-derived cause. Both are imported
+    rather than restated so the rate this module divides and the failure count
+    `revl metrics` prints can never disagree.
+
+    A lifecycle still OPEN at the end of the trace is not here, and that is the
+    honest reading: its outcome is not yet known, so counting it as a success
+    would inflate the numerator and counting it as a failure would invent one.
+    """
+    from .metrics import _is_failed  # noqa: PLC0415 — pure, reads a trace
+
+    opened: set = set()
+    out: list = []
+    for event in events:
+        identity = (event.get("component"), event.get("gen"))
+        kind = event.get("event")
+        if kind == "load":
+            opened.add(identity)
+        elif kind == "withdraw" and identity in opened:
+            opened.discard(identity)
+            out.append({"ts": _stamp(event), "failed": _is_failed(event),
+                        "component": event.get("component")})
+    return out
+
+
 def _duration_observations(events) -> dict:
     """Per-component lifecycle durations, paired load -> withdraw by
     `(component, gen)` exactly as `metrics._duration_metrics` pairs them.
@@ -331,6 +417,7 @@ def _latency_observations(events) -> dict:
     the receipt can say how many crossings it declined to measure.
     """
     samples: list = []
+    stamps: list = []
     skipped = 0
     for event in events:
         llm = event.get("llm")
@@ -342,9 +429,16 @@ def _latency_observations(events) -> dict:
         value = llm.get("latencySeconds")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             samples.append(float(value))
+            # The stamp the WINDOW is taken over (item 473, slice 3). A v1
+            # trace carries no `ts`, so a sample can be measurable and
+            # UNSTAMPED at once; `None` is kept in the aligned position rather
+            # than dropping the sample, because dropping it would narrow the
+            # population silently and a narrowed population is a different
+            # percentile.
+            stamps.append(_stamp(event))
         else:
             skipped += 1
-    return {"latencies": samples, "hostReported": skipped}
+    return {"latencies": samples, "stamps": stamps, "hostReported": skipped}
 
 
 #: The WAL record kind the live per-call latency population is read from. The
@@ -367,6 +461,7 @@ def _decision_observations(decisions) -> dict:
     to measure.
     """
     samples: list = []
+    stamps: list = []
     skipped = 0
     for record in decisions or []:
         if not isinstance(record, Mapping):
@@ -383,9 +478,16 @@ def _decision_observations(decisions) -> dict:
         value = llm.get("latencySeconds")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             samples.append(float(value))
+            # A `model-decision` record carries `{component, stepIndex,
+            # outcome, llm}` and NO timestamp — stamping it is a durable-format
+            # change under `WAL_VERSION`, which this slice does not make. The
+            # `None` is the honest carrier of that: a declared window over this
+            # population is `insufficient` with the missing stamp as the
+            # reason, never a whole-population verdict wearing a window's name.
+            stamps.append(_stamp(record))
         else:
             skipped += 1
-    return {"latencies": samples, "hostReported": skipped}
+    return {"latencies": samples, "stamps": stamps, "hostReported": skipped}
 
 
 def decisions_from_wal(path: Optional[str]) -> list:
@@ -447,14 +549,21 @@ def observations(events, decisions=None) -> dict:
         source = LATENCY_FROM_TRACE if latencies["latencies"] else LATENCY_NONE
     emissions = 0
     by_component: dict = {}
+    emitted: list = []
     for event in events:
         if event.get("event") == "emit":
             emissions += 1
             component = event.get("component")
             by_component[component] = by_component.get(component, 0) + 1
+            emitted.append({"component": component, "ts": _stamp(event)})
     return {
         "events": len(events),
         "latencies": latencies["latencies"],
+        # Aligned with `latencies`, one stamp per sample, `None` where the
+        # record carries none. A declared window is applied to THIS, and a
+        # population with an unstamped member is reported as unwindowable
+        # rather than windowed over the members that happened to be stamped.
+        "latencyStamps": latencies["stamps"],
         "latencySource": source,
         "hostReportedLatencies": latencies["hostReported"],
         "decisions": len(live["latencies"]) + live["hostReported"],
@@ -462,6 +571,11 @@ def observations(events, decisions=None) -> dict:
         "openAtEnd": durations["open"],
         "emissions": emissions,
         "emissionsByComponent": by_component,
+        # The stamped emit population, so `max_pending_tasks` can be recomputed
+        # inside a declared window instead of only over the whole run.
+        "emissionEvents": emitted,
+        # The `of activations` denominator and its outcomes.
+        "activations": _activation_observations(events),
     }
 
 
@@ -550,6 +664,149 @@ def _decide(value: Optional[float], target, direction: str, *,
             "reason": ""}
 
 
+#: The reason a declared window cannot be applied to a population, per latency
+#: source. It names the record that would have to carry a stamp, because a
+#: reason that only said "no timestamp" would leave a reader to guess which of
+#: the two populations is meant and what would fix it.
+UNWINDOWABLE_REASON = {
+    LATENCY_FROM_WAL:
+        "the declared window cannot be applied: a `model-decision` WAL record "
+        "carries {component, stepIndex, outcome, llm} and no timestamp, and "
+        "stamping it is a durable-format change under `WAL_VERSION`",
+    LATENCY_FROM_TRACE:
+        "the declared window cannot be applied: a v1 causal trace carries no "
+        "`ts` on the events this population is read from",
+}
+
+
+def _windowed(samples, stamps, window_ms) -> Optional[list]:
+    """`samples` restricted to the declared window, or `None` when the window
+    cannot be applied because some member of the population carries no stamp.
+
+    The window ENDS at the last stamped observation in the population, not at
+    "now". `ts` is a `time.monotonic()` reading with no wall-clock meaning
+    (`docs/design/473-slo-contracts.md`, "the clock problem"), so the only
+    anchor available is another reading from the same run — and the last one is
+    the honest choice for a verdict taken at a generation boundary, which is
+    where a seal happens.
+
+    `None` rather than a best-effort filter is the load-bearing part. Windowing
+    over the members that happened to be stamped would answer over a population
+    the author never named, and it would answer `holding` for a run whose
+    unstamped half is exactly the half that was slow.
+    """
+    if window_ms is None:
+        return list(samples)
+    if len(stamps) != len(samples) or any(t is None for t in stamps):
+        return None
+    if not samples:
+        return []
+    end = max(stamps)
+    floor = end - (float(window_ms) / MS_PER_SECOND)
+    return [value for value, when in zip(samples, stamps) if when >= floor]
+
+
+#: Where a sample floor came from, for the `insufficient` reason. A reader must
+#: be able to tell a DECLARED floor (the author's `min`) from a structural one,
+#: because only the first is something the author can change.
+FLOOR_DECLARED = "the declared `min`"
+FLOOR_PERCENTILE = "the smallest sample a p95 can be taken over"
+FLOOR_NONEMPTY = "a rate needs at least one member in its population"
+
+
+def _floor_verdict(target, n, floor, *, origin: str, what: str,
+                   window=None) -> dict:
+    """`insufficient`, with the floor that produced it and where the floor came
+    from."""
+    out = {"verdict": INSUFFICIENT, "observed": None, "target": target,
+           "samples": n,
+           "reason": f"{n} {what}; {origin} is {floor}"}
+    if window is not None:
+        out["window"] = window
+    return out
+
+
+#: Why a declared denominator this tree cannot count is `unmeasurable`, per
+#: denominator. The registry is closed at the surface, so the only way to reach
+#: one of these is to declare it, and the reason names the NUMERATOR that is
+#: missing rather than the population — the population is exactly the thing the
+#: runtime does have.
+DENOMINATOR_REASON = {
+    "crossings":
+        "the denominator `crossings` is counted (every recorded `emit`) and "
+        "the numerator is not: the runtime records that a crossing happened "
+        "and never records whether it succeeded, so a rate over crossings has "
+        "a population and no outcome to divide by it",
+}
+
+#: What `success_rate` says when the entry named no denominator at all. This is
+#: the PRE-SLICE reading, kept verbatim: a rate with no declared population is
+#: unmeasurable for the reason it always was, and the slice-3 `of` is the
+#: surface that answers it.
+NO_DENOMINATOR_REASON = (
+    "a rate needs a declared denominator and the surface declares none; revl "
+    "records that failures occurred, not a request population to divide them "
+    "by")
+
+
+def _success_rate(target, direction, obs, window_ms, min_samples, denominator,
+                  declared_window, registry) -> dict:
+    """`success_rate`, measured over the DECLARED denominator (item 473,
+    slice 3's `of`) or honestly refused.
+
+    Three outcomes, and the middle one is the point of the slice:
+
+      * no `of` — `unmeasurable` for the reason it always was. A rate whose
+        population nobody named is a number over whichever counter a reader
+        reaches for, and inventing one is what the design forbids.
+      * `of activations` — MEASURED. The population is the lifecycles the trace
+        closed and the outcome is the transition each withdraw settled into,
+        both read from `metrics`, so the rate this divides and the failure
+        count `revl metrics` prints are the same two numbers.
+      * `of crossings` — `unmeasurable`, and the reason names the missing
+        NUMERATOR. Declaring a population the runtime counts does not conjure
+        an outcome for its members, and substituting the population that does
+        have one would answer a question the author did not ask.
+    """
+    if denominator is None:
+        return {"verdict": UNMEASURABLE, "observed": None, "target": target,
+                "samples": 0, "reason": NO_DENOMINATOR_REASON,
+                "measurement": "none"}
+    if not registry.get(denominator):
+        reason = DENOMINATOR_REASON.get(
+            denominator,
+            f"no runtime seam counts the declared denominator `{denominator}`")
+        return {"verdict": UNMEASURABLE, "observed": None, "target": target,
+                "samples": 0, "reason": reason,
+                "measurement": f"of:{denominator}", "window": declared_window}
+    population = list(obs.get("activations") or [])
+    stamps = [entry.get("ts") for entry in population]
+    sample = _windowed(population, stamps, window_ms)
+    if sample is None:
+        return {"verdict": INSUFFICIENT, "observed": None, "target": target,
+                "samples": len(population),
+                "reason": UNWINDOWABLE_REASON[LATENCY_FROM_TRACE],
+                "measurement": f"of:{denominator}", "window": declared_window}
+    floor = max(1, min_samples or 0)
+    if len(sample) < floor:
+        out = _floor_verdict(target, len(sample), floor,
+                             origin=(FLOOR_DECLARED if min_samples is not None
+                                     else FLOOR_NONEMPTY),
+                             what=f"{denominator} in the population",
+                             window=declared_window)
+        out["measurement"] = f"of:{denominator}"
+        return out
+    failed = sum(1 for entry in sample if entry.get("failed"))
+    rate = 100.0 * (len(sample) - failed) / len(sample)
+    out = _decide(rate, target, direction, n=len(sample))
+    out["measurement"] = f"of:{denominator}"
+    out["unit"] = "pct"
+    out["failed"] = failed
+    if declared_window is not None:
+        out["window"] = declared_window
+    return out
+
+
 def measure(contract: Mapping, obs: Mapping) -> dict:
     """One verdict per declared datum. The whole of the honest scope lives
     here, so there is exactly one place that decides what revl can see.
@@ -599,9 +856,12 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
     """
     from .parser import SLO_DIRECTION, slo_datum
 
+    from .parser import SLO_DENOMINATORS  # noqa: PLC0415 - lazy, avoids a cycle
+
     if not contract:
         return {}
     latencies = list(obs.get("latencies") or [])
+    latency_stamps = list(obs.get("latencyStamps") or [])
     durations = list(obs.get("durations") or [])
     # Which population the percentile is over, named on the verdict. A p95 of
     # the crossings a replay walked and a p95 of the calls the run made are
@@ -613,41 +873,92 @@ def measure(contract: Mapping, obs: Mapping) -> dict:
         target = entry.get("target") if isinstance(entry, Mapping) else entry
         datum = slo_datum(key)
         direction = SLO_DIRECTION.get(datum or key, "upper")
+        # The slice-3 qualifiers. All three are absent for a contract written
+        # before the qualifiers existed, and every branch below is written so
+        # that all-absent reproduces the pre-slice verdict exactly.
+        window_ms, min_samples, denominator = qualifiers(entry)
+        declared_window = (None if (window_ms is None and min_samples is None
+                                    and denominator is None)
+                           else {k: v for k, v in
+                                 (("overMs", window_ms),
+                                  ("minSamples", min_samples),
+                                  ("of", denominator)) if v is not None})
         if datum == "p95_latency":
-            if len(latencies) < PERCENTILE_MIN_SAMPLES:
+            sample = _windowed(latencies, latency_stamps, window_ms)
+            if sample is None:
                 verdicts[key] = {
                     "verdict": INSUFFICIENT, "observed": None, "target": target,
                     "samples": len(latencies),
-                    "reason": f"{len(latencies)} model-hop sample(s); a p95 needs "
-                              f"at least {PERCENTILE_MIN_SAMPLES}",
-                    "measurement": source}
+                    "reason": UNWINDOWABLE_REASON.get(
+                        source, UNWINDOWABLE_REASON[LATENCY_FROM_TRACE]),
+                    "measurement": source, "window": declared_window}
+                continue
+            # Both floors apply and the tighter one decides. The structural one
+            # is a property of the statistic (`ceil(0.95 * n) < n` holds from
+            # 21), the declared one is the author's promise about how small a
+            # sample they are willing to be judged on, and honouring only one
+            # of them would let either the author or the compiler quietly
+            # weaken the other.
+            floor = max(PERCENTILE_MIN_SAMPLES, min_samples or 0)
+            if len(sample) < floor:
+                verdicts[key] = _floor_verdict(
+                    target, len(sample), floor,
+                    origin=(FLOOR_DECLARED
+                            if (min_samples or 0) >= PERCENTILE_MIN_SAMPLES
+                            else FLOOR_PERCENTILE),
+                    what="model-hop sample(s)", window=declared_window)
+                verdicts[key]["measurement"] = source
             else:
                 # The trace's seconds against the contract's milliseconds: the
                 # unit is converted on the OBSERVATION, never on the target, so
                 # what the receipt prints as `target` is the number the document
                 # declared.
-                seconds = percentile(latencies, 0.95)
+                seconds = percentile(sample, 0.95)
                 verdicts[key] = _decide(
                     None if seconds is None else seconds * MS_PER_SECOND,
-                    target, direction, n=len(latencies))
+                    target, direction, n=len(sample))
                 verdicts[key]["measurement"] = source
                 verdicts[key]["unit"] = "ms"
+                if declared_window is not None:
+                    verdicts[key]["window"] = declared_window
             continue
         if datum == "max_pending_tasks":
-            by_component = obs.get("emissionsByComponent") or {}
-            peak = max(by_component.values()) if by_component else 0
+            emitted = obs.get("emissionEvents")
+            if emitted is None:
+                by_component = obs.get("emissionsByComponent") or {}
+                emitted = [{"component": c, "ts": None}
+                           for c, n in by_component.items() for _ in range(n)]
+            stamps = [e.get("ts") for e in emitted]
+            sample = _windowed(emitted, stamps, window_ms)
+            if sample is None:
+                verdicts[key] = {
+                    "verdict": INSUFFICIENT, "observed": None, "target": target,
+                    "samples": len(emitted),
+                    "reason": UNWINDOWABLE_REASON[LATENCY_FROM_TRACE],
+                    "measurement": "perComponentEmissionPeak",
+                    "window": declared_window}
+                continue
+            counted: dict = {}
+            for event in sample:
+                name = event.get("component")
+                counted[name] = counted.get(name, 0) + 1
+            if min_samples is not None and len(sample) < min_samples:
+                verdicts[key] = _floor_verdict(
+                    target, len(sample), min_samples, origin=FLOOR_DECLARED,
+                    what="emission(s)", window=declared_window)
+                verdicts[key]["measurement"] = "perComponentEmissionPeak"
+                continue
+            peak = max(counted.values()) if counted else 0
             verdicts[key] = _decide(peak, target, direction, n=peak)
             verdicts[key]["measurement"] = "perComponentEmissionPeak"
             verdicts[key]["unit"] = "tasks"
+            if declared_window is not None:
+                verdicts[key]["window"] = declared_window
             continue
         if datum == "success_rate":
-            verdicts[key] = {
-                "verdict": UNMEASURABLE, "observed": None, "target": target,
-                "samples": 0,
-                "reason": "a rate needs a declared denominator and the surface "
-                          "declares none; revl records that failures occurred, "
-                          "not a request population to divide them by",
-                "measurement": "none"}
+            verdicts[key] = _success_rate(
+                target, direction, obs, window_ms, min_samples, denominator,
+                declared_window, SLO_DENOMINATORS)
             continue
         if datum == "recovery_time":
             verdicts[key] = {
@@ -730,10 +1041,19 @@ def build_body(*, composition, generation, contract, verdicts, action,
             "declared": scope,
         },
         "contract": {
+            # The declared WINDOW rides the same entry as the target, and only
+            # when the document declared one. A target and the window it is
+            # measured over are one promise, so a receipt that signed the first
+            # and not the second would attest to half of it — and a reader
+            # comparing two generations could not tell a widened window from a
+            # held objective.
             key: {"target": entry.get("target"),
                   "action": entry.get("action"),
                   "divertTo": entry.get("divertTo"),
-                  "declared": bool(entry.get("declared"))}
+                  "declared": bool(entry.get("declared")),
+                  **({"window": dict(entry["window"])}
+                     if isinstance(entry.get("window"), Mapping)
+                     and entry.get("window") else {})}
             for key, entry in (contract or {}).items()
         },
         "verdicts": {
@@ -1686,6 +2006,14 @@ def render(document: Mapping) -> str:
             f"  {value.get('verdict'):<13} {key:<20} "
             f"observed {observed!r} vs target {value.get('target')!r} "
             f"({value.get('samples', 0)} sample(s))")
+        # A verdict without its window is a number without the promise it was
+        # taken against, so the declared window prints on the verdict line's
+        # own block rather than only inside the signed body.
+        window = value.get("window")
+        if isinstance(window, Mapping) and window:
+            out.append("                over " + ", ".join(
+                f"{name} {window[name]}" for name in
+                ("overMs", "minSamples", "of") if name in window))
         if value.get("reason"):
             out.append(f"                {value['reason']}")
     breached = document.get("breached") or []

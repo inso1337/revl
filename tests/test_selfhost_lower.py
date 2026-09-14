@@ -3250,3 +3250,102 @@ def test_ambient_g3_cycle_survives_a_withdrawal_of_an_unrelated_component(
     got = _gate_ambient(admit_ambient, _G3_SVC + _G3_X, running,
                         replacing=("Spare",))
     assert got == "G3|dependency cycle: A -> B -> A (G3)", got
+
+
+# ------------------------------------------- the service block (issue #346)
+#
+# `manifest_wire` grew a SERVICE BLOCK: a `!services` header asserting the list
+# is exhaustive, then one `:S` row per service the running composition declares.
+# The consumer is the rust crate's admission certifier, which needs the running
+# NAMES to tell a fresh interface from a redeclaration. This fold has nothing to
+# compute from them - a service declaration is no provision, no requirement, no
+# graph node and no withdrawable component - so the property held here is that it
+# changes NO verdict.
+#
+# It is held by ORACLE B rather than by a suite of its own: the block rides on
+# every wire `manifest_wire` renders, so every oracle-B case above already runs
+# against it, and the two below name that explicitly (one over the replacement
+# wave's own rows, so the two additions are checked by one differential).
+
+
+def test_manifest_wire_projects_the_service_block():
+    """The projection renders the header and one row per declared service, in
+    declaration order, between the composition rows and the withdrawal rows: a
+    service declaration describes the composition, and a withdrawal acts on what
+    precedes it, so `-C` stays last."""
+    from revl import manifest_wire
+
+    ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
+    assert manifest_wire(ir).endswith(";!services;:A;:B"), manifest_wire(ir)
+    rows = manifest_wire(ir, replacing=("A",)).split(";")
+    assert rows[-1] == "-A"
+    assert rows[-4:-1] == ["!services", ":A", ":B"]
+    # the composition rows keep their exact positions and order, so the G3 DFS
+    # seed order cannot have moved
+    assert rows[:rows.index("!services")] == manifest_wire(ir).split(
+        ";")[:rows.index("!services")]
+
+
+def test_manifest_wire_makes_no_service_claim_for_a_manifest_dict():
+    """A manifest DICT carries components and no service table, and an absent
+    table is not an empty one. The projection emits no block for it, so a reader
+    is told nothing rather than told the composition declares nothing."""
+    from revl import manifest_wire
+
+    ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
+    assert "!services" not in manifest_wire(ir["manifest"])
+
+
+def test_oracle_b_the_service_block_moves_no_verdict(admit, admit_ambient):
+    """ORACLE B over the block: both legs derived from one artifact, with the
+    block on the wire the projection renders. The cross-manifest G3 cycle is
+    still named identically by the gate, by the single-source composition, and by
+    the reference."""
+    from revl import manifest_wire
+
+    ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
+    wire = manifest_wire(ir)
+    assert "!services" in wire.split(";"), wire
+    got = admit_ambient(_G3_SVC + _G3_X, wire)
+    assert got == "G3|dependency cycle: A -> B -> A (G3)", got
+    assert got == admit(_G3_SVC + _G3_M + _G3_X)
+    assert got == _ref_ambient(_G3_SVC + _G3_X, _G3_SVC + _G3_M)
+
+
+def test_oracle_b_the_service_block_beside_a_withdrawal(admit_ambient):
+    """ORACLE B where the two item-186 additions MEET: a wire carrying both the
+    replacement wave's withdrawal row and the service block. The unmet-consumer
+    refusal is unmoved, in the reference's own words, and the block is not what
+    decides it."""
+    fresh = _W_SVCS + ('component Fresh provides other: C {\n'
+                       '  provide other { fn g(k) { return k } }\n'
+                       '}')
+    got = _gate_ambient(admit_ambient, fresh, _W_M, replacing=("Db",))
+    assert got == _W_LOST_DB, got
+    assert got == _ref_ambient(fresh, _W_M, replacing=("Db",))
+    # and the same wire with the block STRIPPED answers identically, which is
+    # what makes "the block decides nothing here" a measurement
+    from revl import manifest_wire
+
+    ir = compile_source(_W_M, "running.rvl")
+    wire = manifest_wire(ir, replacing=("Db",))
+    stripped = ";".join(r for r in wire.split(";")
+                        if r != "!services" and not r.startswith(":"))
+    assert stripped != wire
+    assert admit_ambient(fresh, stripped) == got
+
+
+def test_ambient_malformed_service_row_refuses_naming_the_row(admit_ambient):
+    """A row whose marker is recognized and whose name is not still refuses BY
+    NAME - the block is parsed, not skipped - and it is held to the same bare
+    identifier rule the wave's withdrawal name is."""
+    clean = ("service D { fn q(s: Str) -> Int } component NewStore provides "
+             "db: D { provide db { fn q(s) { let x = s   return 0 } } }")
+    assert admit_ambient(clean, ":") == (
+        "MANIFEST|manifest service row `:` does not name a service")
+    assert admit_ambient(clean, ":9bad") == (
+        "MANIFEST|manifest service row `:9bad` does not name a service")
+    assert admit_ambient(clean, ":A/b") == (
+        "MANIFEST|manifest service row `:A/b` does not name a service")
+    assert admit_ambient(clean, "!service") == (
+        "MANIFEST|unrecognized manifest header row `!service`")
