@@ -478,16 +478,13 @@ def require_resolved_asset(node, filename: str) -> None:
     """The fail-closed backstop on the lowering path.
 
     An `ExprAsset` reaches lowering with `rel_path` set or it does not lower at
-    all. Without this an unresolved node would lower as the EMPTY record its
+    all. The callers in `lower.py` gate on `isinstance(expr, ExprAsset)` first,
+    so an ordinary record literal never reaches here and pays nothing. Without this an unresolved node would lower as the EMPTY record its
     parser default carries — a handle with no path and no digest, silently. The
     only way to reach it is a caller that lowers a parsed program without
     running `resolve_assets`, which is a compiler bug, so it is reported as a
     refusal rather than trusted."""
-    from .parser import ExprAsset
-
-    if not isinstance(node, ExprAsset):
-        return  # an ordinary record literal, nothing to resolve
-    if node.rel_path is None:
+    if getattr(node, "rel_path", "") is None:
         raise RevlError(
             filename, getattr(node, "line", 0),
             f"internal: `asset {getattr(node, 'written', '')!r}` reached "

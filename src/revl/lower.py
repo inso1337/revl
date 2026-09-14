@@ -119,6 +119,7 @@ from .parser import (
     ExprMatch,
     ExprOptCall,
     ExprOptField,
+    ExprAsset,
     ExprRecord,
     ExprRecordUpdate,
     ExprStmt,
@@ -6760,7 +6761,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # item 459 F1: an `asset "..."` IS a record, but only once the resolver
         # has filled it. Lowering an unresolved one would emit the empty record
         # its parser default carries — a handle with no path and no digest.
-        _require_resolved_asset(expr, filename)
+        if isinstance(expr, ExprAsset):
+            _require_resolved_asset(expr, filename)
         # A record is a value type (syntax-2.0 §3.5): a field is initialised by
         # *copying* the initialiser's value into the record. Reading a `var`'s
         # field into a record (`{ x: v.field }`) has always been allowed for
@@ -8578,7 +8580,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 "else": _lower_component_pure_expr(expr.otherwise, env, scope, callables,
                                                    pure_only)}
     if isinstance(expr, ExprRecord):
-        _require_resolved_asset(expr, env.filename)  # item 459 F1
+        if isinstance(expr, ExprAsset):  # item 459 F1
+            _require_resolved_asset(expr, env.filename)
         return {"kind": "record",
                 "fields": [[name, _lower_component_pure_expr(e, env, scope, callables,
                                                              pure_only)]
