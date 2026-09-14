@@ -466,6 +466,95 @@ session admitting a runtime crossing is a different thing. The module list is
 also spelled as bare `src/revl/<name>.py` names, which an `mcp/` submodule
 cannot be.
 
+### 3.7 Slice 7: the grant side gets a declaration of its own
+
+**Landed: the mint as a refinement.** Slice 3.6 read a standing grant as a
+declaration at the moment a crossing is compared against it. It could not ask
+where that declaration came from, and the answer was: from the operator, with
+nothing checking it. `operator.Grant` is verb globs over subject globs, an
+AUTHORITY rather than a declared intent, so it holds no capability, no ceiling
+and no `uses` for a mint to be compared against. An operator holding `approve`
+minted a standing grant over any capability, with any ceiling, for any number of
+uses. The authority was bounded downstream and unbounded upstream, which is the
+asymmetry slice 3.6 made visible (issue #1062).
+
+`operator.MintBound` is the declaration that side lacked, and it is a separate
+record rather than three more fields on `Grant`, because the two answer
+different questions and compose instead of overlapping. `may approve on
+payments` still decides WHO may say yes and WHERE, checked in `decide` before
+dispatch. `may mint <cap> uses <N|*> ttl <D|*>` decides WHAT MAY BE MINTED
+there. Neither states the other's dimension, so neither can disagree with it.
+
+The comparison is `refine` again, one step upstream, and it is
+DECLARATION-to-DECLARATION rather than declaration-to-spend: both sides are
+statements about a grant's bounds, not a moment of spending. So the verb
+dimension is the identity here for slice 3.6's reason (this surface still has no
+verb vocabulary, and guessing one would infer an intent nobody stated), and
+`calls` is erased from the capability spelling on both sides because
+`_mint_grant` folds it into the `uses` axis. One quantity, one rule.
+
+Three things are STATED rather than defaulted, each because its absence would be
+a bound nobody wrote:
+
+- BOTH numeric clauses are required on a line. `uses *` is a deployment saying
+  the axis is unbounded, and silence is not the same statement. This is slice
+  1's property, applied to the surface that declares rather than to the record
+  that compares.
+- There is no `may not mint`. The `may mint` lines an operator declares are the
+  whole of what it may mint, so a narrower bound is written by narrowing the
+  line. A deny-shaped second rule could disagree with the first, and then one of
+  the two would bound nothing.
+- The capability is a POINT in `cap_order`, not a glob, with `*` as the single
+  exception meaning the whole surface. A bare token already tops its own cone,
+  and two cones that are not one cone are two lines, because relatedness is
+  declared and never inferred from a shared prefix (slice 2's rule, unchanged).
+
+The refusal directions are the kernel's. A mint that bounds NO uses against a
+declaration that bounds uses is refused rather than clamped to the declared
+number: an unbounded grant cannot be shown to be within a stated bound, and
+clamping would mint something the operator did not ask for. The same holds for
+the window, and for an amount on a ceiling no declaration states.
+
+It is enforced at `session._mint_grant` and NOT at `operator.decide`, which is
+the one place this slice departs from what section 4 predicted it would need.
+`_mint_grant` is the single implementation behind every route to a standing
+grant (the `revl_approve` mint, a proactive capability mint, and the item-471
+lease bridge), and it is the first point at which all three bounded things are
+resolved: a mint from an outstanding ticket names no capability in its
+arguments, `uses` may arrive as a `calls=N` on the spelling or off a lease
+ticket, and the window may come from a policy `requires approval ttl` rule. A
+check at `decide` would see the raw arguments only, so it would be a partial one
+a ticket-route mint goes around, and two enforcement points that can disagree
+are worse than one that cannot.
+
+`apply_distillation` answers to the same declaration, because an applied item-251
+rule installs a STANDING auto-approve and that is the same authority as minting a
+standing grant. Bounding only the mint would have left the other route as the way
+around it. The rule's component glob, realm and admitted taint set are not
+dimensions a `may mint` line states, so they stay bounded by the `approve` verb's
+own subject scoping.
+
+MIGRATION is part of the design rather than a note on it. An operator that
+declares no `may mint` line mints exactly what it minted before
+(`Operator.bounds_mints`). Existing deployments legitimately mint broad grants,
+and a fix that refused every profile written before this grammar existed would
+bound nothing because nobody could deploy it. What that grandfathering leaves
+open is stated in `docs/operator-capabilities.md` rather than hidden: until an
+operator declares its first line, `approve` on it still implies minting over any
+capability, with any ceiling, for any number of uses in the session. Nothing is
+inferred on its behalf, because an inferred bound is a bound nobody stated.
+Adoption is per operator and the first line is already load-bearing: from there
+on the lines are the whole of what that operator may mint. `may mint * uses *
+ttl *` states the old behaviour instead of assuming it.
+
+`attest.RULESET_MODULES` is untouched, on the precedent slice 3.6 and #1019 both
+set: that digest identifies the FRONTEND ruleset producing a compile verdict, and
+an operator profile bounding a runtime mint is a different thing. The list is
+also spelled as bare `src/revl/<name>.py` names, which an `mcp/` submodule cannot
+be. Nothing here is reachable from the frontend, so the byte-identical-IR
+property slices 3 and 4 pinned is untouched by construction, and
+`tools/build_gate_crate.py --check` reports the gate crate in sync.
+
 ## 4. Explicit non-goals for this note
 
 Three stages stay open; each is a separate, independently reviewable change.
@@ -495,14 +584,27 @@ against.
    against a declared intent therefore needs either a declaration surface the
    activation body can carry or the runtime path in `mcp/session.py`, and the
    runtime path is the one this stage names.
-3. **The operator profile.** A surface that declares an operator's intent so the
-   `TOOL_VERB` management actions can be checked against it. Slice 3.6 sharpens
-   what this stage owes: the class-(c) gate now refines every dimension it can
-   state, and the one it cannot is the verb, because `operator.Grant` is verb
-   GLOBS over subject globs (an authority) and not a declared intent. It is also
-   where a bound on what an operator may GRANT would live: nothing today bounds
-   the capability, the ceiling or the `uses` an operator holding `approve` can
-   mint.
+3. **The operator profile. The MINT half is CLOSED by slice 3.7; the VERB half
+   stays open.** A `may mint` line declares what an operator may mint a standing
+   approval over, and `session._mint_grant` refuses a mint that cannot be shown
+   to refine it, so the capability, the ceiling and the `uses` an operator
+   holding `approve` can mint are bounded by something it stated (issue #1062).
+
+   What the stage still owes is the half it was originally named for: a verb
+   worth stating at the class-(c) gate. Slice 3.6 records that both records there
+   state the same sentinel because `operator.TOOL_VERB` names operator MANAGEMENT
+   actions and not operations performed at a boundary, and slice 3.7 does not
+   change that: a `may mint` line bounds what may be minted, not what an
+   operation does at the boundary it reaches. Giving the gate a verb needs a verb
+   vocabulary for boundary operations, which is the `docs/boundary-policy.md`
+   grammar change this note's last non-goal rules out.
+
+   Two smaller things stay open with it. A mint is bounded per operator and the
+   bound is grandfathered for a profile that declares no line, so a deployment
+   adopting it does so one operator at a time. And the dimensions a `may mint`
+   line does not state (an item-251 rule's component glob, its realm and its
+   admitted taint set) stay bounded by the `approve` verb's subject scoping
+   rather than by a declaration of their own.
 
 Also explicitly out of scope for this item, not merely deferred:
 

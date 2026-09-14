@@ -58,6 +58,7 @@ Grammar (blank lines and `#` comments ignored):
     operator <token> may     <verb>[, ...] on <subject>[, ...]
     operator <token> may not <verb>[, ...] on <subject>[, ...]
     operator <token> may     <verb>[, ...]                        # on *
+    operator <token> may mint <cap> uses <N|*> ttl <D|*>          # issue #1062
     operator <token> key     sha256:<64 hex>  [until <ts>]        # item 471
     operator <token> sign    p256:<128 hex>   [until <ts>]        # issue #979
     operator <token> revoked                                      # issue #979
@@ -74,6 +75,10 @@ Grammar (blank lines and `#` comments ignored):
   **deny wins** over any allow (exactly as in the boundary policy). An operator
   is **closed by default**: a verb with no allow that selects the target is
   refused.
+* **may mint**: what this operator may mint a **standing approval** over. See
+  [What an operator may mint](#what-an-operator-may-mint) below. It is a
+  separate declaration rather than a verb, because `approve` decides *who may
+  say yes and where* and this decides *what may be minted when they do*.
 * **key** — the operator's **bearer vote credential**, used by multi-party
   approval (item 471) to bind who cast a vote. It is the SHA-256 **digest** of a
   secret you issue to that operator out of band, never the secret: the profile
@@ -109,11 +114,121 @@ Grammar (blank lines and `#` comments ignored):
       "grants": [
         {"verbs": ["swap", "plan"], "on": ["tenant_a*"]},
         {"verbs": ["snapshot"],     "on": ["*"]},
-        {"verbs": ["unload"],       "on": ["*"], "deny": true} ] } ] }
+        {"verbs": ["unload"],       "on": ["*"], "deny": true} ],
+      "mints": [
+        {"capability": "fs.write(path=\"/tmp\")", "uses": 10, "ttl": "30m"} ]
+    } ] }
 ```
 
 Text that opens with `{` parses as JSON, otherwise as the DSL — both produce
-the same `OperatorRegistry`.
+the same `OperatorRegistry`. A `mints` entry states `capability` plus `uses`
+and one of `ttlMs` / `ttl`; the two parsers read one grammar, so every refusal
+below is reachable from either.
+
+## What an operator may mint
+
+The `approve` verb decides **who** may say yes to a class-(c) crossing and
+**where**. On its own it decided nothing else, and a standing approval has two
+more dimensions: the capability cone it covers and how long it lasts. Item 470
+stage 1 made the class-(c) gate compare a crossing against what a standing
+grant declared, and that sharpened the question this section answers, because
+the grant itself was minted with nothing to compare it against. `Grant` above
+is verb globs over subject globs, an *authority*: it holds no capability, no
+ceiling and no `uses`, so an operator holding `approve` could mint a standing
+grant over any capability, with any ceiling, for any number of uses.
+
+A `may mint` line is the declaration that side lacked (issue #1062):
+
+```
+operator ops may approve on payments
+operator ops may mint gateway.send(host="api.stripe.com") uses 20 ttl 30m
+operator ops may mint fs.write(path="/tmp", size="1MB")   uses 10 ttl 1h
+```
+
+* **capability**: a point in the capability order (`revl.cap_order`), compared
+  by the same `covers` relation the class-(c) gate uses, through
+  `intent.refine`. A bare token tops its own cone, so `may mint fs.write` covers
+  every path under it. Ceiling parameters on the spelling (`size`, `time`) are
+  the ceiling axis. `*` is every capability, and it is the **only** glob: two
+  cones that are not one cone are two lines, because relatedness between
+  capabilities is declared and never inferred from a shared prefix. A spelling
+  carrying `calls` is a parse error, because `calls` is the `uses` axis and one
+  quantity bounded by two rules lets the weaker one win.
+* **uses**: the largest `uses` a grant minted here may carry, or `*`.
+* **ttl**: the longest window it may live for (`30s`, `10m`, `1h`, `500ms`, or
+  a bare number of seconds), or `*`.
+* Both numeric clauses are **required**. An axis left out would be a bound
+  nobody stated, which is the thing the line exists to remove: unbounded is
+  written as `*`, and silence never means it.
+* There is **no `may not mint`**. The `may mint` lines an operator declares are
+  the whole of what it may mint, so a narrower bound is written by narrowing
+  the line rather than by a second rule that could disagree with the first.
+* Several lines are **alternatives**: a mint is admitted when it refines any one
+  of them.
+
+### What is refused
+
+A mint is refused when it cannot be *shown* to refine some declared line, which
+is the same fail-closed reading the kernel applies everywhere:
+
+* a capability outside every declared cone;
+* an amount above a declared ceiling, and an amount on a ceiling no declaration
+  states;
+* `uses` or `ttl` above the declared number;
+* a grant that bounds **no** uses (bounded only by its window) against a
+  declaration that bounds uses, and the same for a window against a declared
+  `ttl`. An unbounded grant cannot be within a stated bound, and it is refused
+  rather than silently clamped to the declared number, which would mint
+  something the operator did not ask for.
+
+The refusal names the declaration it violated, in the message-and-hint shape
+`revl.errors` uses.
+
+### Where it is enforced
+
+At `session._mint_grant`, the one implementation behind every route to a
+standing grant: the `revl_approve` verb's mint, a proactive `capability` mint,
+and the item-471 lease bridge. It is deliberately not at the verb gate
+(`operator.decide`), which sees the raw arguments only: a mint from an
+outstanding ticket names no capability there, `uses` may come from a `calls=N`
+on the spelling or from a lease ticket, and the window may come from a policy
+`requires approval ttl` rule. A check at the gate would be a partial one that a
+ticket-route mint goes around, and two enforcement points that can disagree are
+worse than one that cannot.
+
+`apply_distillation` (item 251) answers to the same declaration, because a
+distilled rule installs a standing auto-approve and that is the same authority
+as minting a standing grant. Each of the rule's capability spellings is checked
+with the rule's own `uses` / `ttl` as the two numeric axes. The rule's component
+glob, its realm and its admitted taint set are not dimensions a `may mint` line
+states; they stay bounded by the `approve` verb's own subject scoping.
+
+### Existing profiles
+
+An operator that declares **no** `may mint` line mints exactly what it minted
+before. That is deliberate and it is the migration path: profiles written before
+this grammar existed legitimately mint broad grants, and a change that refused
+every one of them would be a change nobody could deploy.
+
+Say plainly what that leaves open. Until an operator declares its first `may
+mint` line, `approve` on that operator still implies minting over any
+capability, with any ceiling, for any number of uses within the session, which
+is the state this section opens by describing. Nothing is inferred on its
+behalf, because an
+inferred bound would be a bound nobody stated, and that is the failure this
+whole mechanism exists to remove.
+
+Adoption is **per operator**, and the first line is already load-bearing: from
+that line on, the operator's `may mint` lines are the whole of what it may mint
+and everything outside them refuses. A deployment that wants the old behaviour
+stated rather than assumed writes it:
+
+```
+operator ops may mint * uses * ttl *
+```
+
+which bounds nothing and says so, and is worth writing because it is the
+difference between an authority nobody declared and one somebody did.
 
 ## Binding a session to an operator
 
