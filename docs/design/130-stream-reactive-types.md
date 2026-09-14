@@ -448,17 +448,28 @@ the honest report is the deliverable, not automatic resurrection.
 
 **Shipped (py).** The mechanism is one disposer, not a second teardown path. A
 cursor subscription registers `sub.durable_undo()` in place of the usual
-`lambda: sub.close()`. It calls exactly `close()` — the author's own `undo`, so
-the in-process teardown a cursor subscription takes is the one every other
-bracket takes and §0 is not re-argued for it — but it carries the cursor name,
-and the recorder reads that off the registered inverse (`replay.record_yield`,
-the same way it already reads the declared capability scope). So the WAL records
+`lambda: sub.close()`. Calling it is exactly `close()` — the author's own
+`undo`, so the in-process teardown a cursor subscription takes is the one every
+other bracket takes and §0 is not re-argued for it — but it can also state the
+cursor, and the recorder asks it to (`replay.record_yield`, beside the point
+where it already reads the declared capability scope). So the WAL records
 `{"receiver": "Stream", "method": "close", "args": ["orders"]}` with a referent
 that outlives the process, and `revl recover` re-issues it. A plain subscription
 records what it always did, the honest "closure over in-process memory". No new
 WAL version and no new record shape: this is the existing explicit-descriptor
 path (`inverse_descriptor`'s `reconstructible: true` branch) reached by a
 disposer that describes itself.
+
+The question crosses the runtime/recorder boundary as ONE declared seam,
+`revl_durable_inverse(disposer)`, registered in `tools/check_runtime_seams.py`
+and asserted there to be defined exactly once with the arity its caller uses.
+The alternative — a pair of attributes the recorder reads off the disposer by
+string name — is the issue-#292 shape: nothing checks the two halves still
+agree, and a rename on either side does not raise, it just stops a durable
+subscription from claiming the reconstructibility this section grants it. A
+durability claim that can go missing without an error is the one thing §4.5 and
+§4.9 are jointly written to prevent, so it does not get to go missing here
+either.
 
 ## 5. IR and lowering
 
