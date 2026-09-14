@@ -1752,6 +1752,16 @@ class LetStmt:
     # checking position for the right-hand side (and the only way to give an
     # un-annotated arrow a type without passing it somewhere).
     type: str | None = None
+    # roadmap item 470 stage 0: the optional `acting { … }` trailing clause on a
+    # BINDING statement — what the value-returning crossing this binding runs
+    # actually does. An `emit` STEP discards its value, so a crossing that
+    # returns data is written `let r = emit svc.op(…)` and its marker sits
+    # inside the expression where no clause can trail it; the statement is the
+    # slot that can. `None` unless the author writes one (and only a provide
+    # method can), so every existing binding's IR is byte-identical and the
+    # positional `LetStmt(name, value, mutable, line, type)` construction every
+    # existing caller uses is unchanged.
+    acting: "ActingClause | None" = None
 
 
 @dataclass
@@ -3124,6 +3134,18 @@ class Parser:
             raise self.err(line, str(exc), hint=exc.hint) from exc
         except ValueError as exc:
             raise self.err(line, str(exc)) from exc
+
+    def _at_acting_clause(self) -> bool:
+        """The contextual `acting` marker, in a slot an ordinary name can reach.
+
+        `acting` is not a reserved word, so the marker is told apart from a
+        plain identifier by the `{` that must follow it: a clause is always
+        `acting {`, while a statement that begins with the NAME `acting` is
+        followed by `=`, `(`, `.` or an operator. Without the lookahead a body
+        that binds a value called `acting` and then assigns it would be read as
+        a malformed clause on the statement above.
+        """
+        return self.at("ident", "acting") and self.peek_ahead(1).kind == "{"
 
     def _acting_clause(self) -> "ActingClause":
         """`acting { … }` — what one crossing actually does.
@@ -5133,7 +5155,16 @@ class Parser:
                          f"`let {bind} = effect … undo …`, or move the computation "
                          "into a `fn` (G6)",
                 )
-            return LetStmt(bind, self.pure_expr(), mutable, tok.line, declared)
+            bound = self.pure_expr()
+            # item 470 stage 0: `let r = emit svc.op(…) acting { verb: … }`.
+            # An `emit` STEP discards the value it produces, so an emission that
+            # RETURNS data is written in value position, where the marker sits
+            # inside an expression and no clause can trail it. The binding
+            # statement is the slot that can, and it is only a slot here: a
+            # declaration is in scope on a provide method and nowhere else, so
+            # the fn grammar never reads the clause.
+            acting = self._acting_clause() if self._at_acting_clause() else None
+            return LetStmt(bind, bound, mutable, tok.line, declared, acting)
         if tok.kind == "kw" and tok.value == "verified":
             # `verified effect … undo …` — the effect is marked for inverse
             # round-trip testing (syntax-2.0 §7, roadmap item 26). `verified`
@@ -5476,7 +5507,7 @@ class Parser:
         # lowering. Trailing, because it reads as a qualification of the step
         # rather than part of the call being emitted, and optional: without it
         # the crossing is checked exactly as it is today.
-        acting = self._acting_clause() if self.at("ident", "acting") else None
+        acting = self._acting_clause() if self._at_acting_clause() else None
         return EmitStmt(expr, line, compensate, approval, is_async, acting)
 
     def effect_form(self, line: int):

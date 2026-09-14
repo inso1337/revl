@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_source  # noqa: E402
-from revl.parser import EmitStmt, Parser  # noqa: E402
+from revl.parser import EmitStmt, LetStmt, Parser  # noqa: E402
 
 # One shape throughout: a provider whose operation declares an intent, and whose
 # body performs exactly one crossing. `cap` is what the crossed operation is
@@ -373,3 +373,170 @@ def test_the_completeness_check_contributes_no_ir():
     plain = compile_source(extern_source('emit wr("row")', within=""), "<test>")
     annotated = compile_source(extern_source(STATED), "<test>")
     assert json.dumps(plain, sort_keys=True) == json.dumps(annotated, sort_keys=True)
+
+
+# ----------------- the stating slot for a VALUE-RETURNING crossing
+#
+# Stage 0 of the design note's section 4, and the hole the completeness half
+# above opened. An `emit` STEP discards the value it produces, so an emission
+# that RETURNS data is written `let r = emit svc.op(...)` — and there the
+# marker sits inside an expression, where no clause can trail it. Under a
+# declaration that spelling was refused with no rewrite available other than
+# throwing the returned value away.
+#
+# The binding STATEMENT is the slot that can carry the clause. Once it does,
+# the check is the per-crossing one the `emit` step already runs: the verb, the
+# tenant and the scopes come off `acting`, while the object and the amount are
+# read off the crossing's own capability spelling, so the two sides still
+# cannot drift by being written twice.
+
+BOUND = 'let n = emit wr("row") acting { verb: ingest }'
+
+
+def test_a_value_returning_crossing_can_state_itself():
+    """The hole, closed: the binding compiles AND keeps its value, which is the
+    whole point — `n` is in scope afterwards."""
+    assert compile_source(
+        extern_source('let n = emit wr("row") acting { verb: ingest }'
+                      ' let m = n + 1'), "<test>")
+
+
+def test_the_same_binding_without_the_clause_is_still_refused():
+    """The control that makes the case above evidence rather than a build with
+    the check switched off: the only difference between the two programs is the
+    clause, and the unstated one is refused by the completeness half."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(extern_source('let n = emit wr("row")'), "<test>")
+    assert "through a crossing that states nothing about itself" in str(exc.value)
+
+
+def test_a_bound_crossing_carries_the_service_shape_too():
+    """The design note's own spelling of the hole, `let r = emit svc.op(...)`:
+    the slot is the binding statement, not the extern call, so a required
+    service's returning emission takes it as well."""
+    assert compile_source(source(
+        acting="", within=DECLARE_TMP).replace(
+            'emit fs.ingest("row")',
+            'let n = emit fs.ingest("row") acting { verb: ingest }'), "<test>")
+
+
+@pytest.mark.parametrize("acting,needle", [
+    (' acting { verb: read }', "does not permit"),
+    (' acting { verb: ingest, tenant: "us" }', "runs in tenant `us`"),
+])
+def test_a_bound_crossing_outside_the_declaration_is_refused(acting, needle):
+    """Every dimension the step slot checks, the binding slot checks: the
+    clause is the same record and the object and amount still come off the
+    crossing's own spelling."""
+    declare = (' within { object: fs.write(path="/tmp"), verbs: [ingest],'
+               ' tenant: "eu" }')
+    with pytest.raises(RevlError) as exc:
+        compile_source(
+            extern_source('let n = emit wr("row")' + acting, within=declare),
+            "<test>")
+    message = str(exc.value)
+    assert "this `let` exceeds the intent `Worker.run` declares" in message
+    assert needle in message
+
+
+def test_a_bound_crossing_outside_the_declared_cone_is_refused():
+    """The object dimension, read off the crossing's own spelling rather than
+    restated in the clause: `/etc` is not under the declared `/tmp`."""
+    src = EXTERN_PROGRAM.format(within=DECLARE_TMP, body=BOUND).replace(
+        '/tmp/out', '/etc/passwd')
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "<test>")
+    assert 'reaches `fs.write(path="/etc/passwd")`' in str(exc.value)
+
+
+def test_a_bound_crossing_with_no_declaration_is_refused_not_inferred():
+    """Item 470's scope note on the new slot: a clause with nothing to check it
+    against is refused rather than read as its own permission."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(extern_source(BOUND, within=""), "<test>")
+    assert "this `let` states `acting { … }`" in str(exc.value)
+    assert "declares no `within { … }` intent for it to refine" in str(exc.value)
+
+
+def test_a_bound_crossing_that_names_no_boundary_is_refused():
+    """Fail closed on the unnameable, on this slot too: a bare `emission`
+    operation names no capability, so no declared object can be SHOWN to cover
+    it."""
+    src = (
+        'service Store { emission fn ingest(row: Str) -> Int }\n'
+        'service Worker { emission fn run() -> Str' + DECLARE_TMP + ' }\n'
+        'component W requires fs: Store provides worker: Worker {\n'
+        '  provide worker { fn run() { let n = emit fs.ingest("row")'
+        ' acting { verb: ingest } return "k" } }\n'
+        '}\n'
+    )
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "<test>")
+    assert "this `let` crosses an unnameable boundary" in str(exc.value)
+
+
+def test_a_clause_on_an_unmarked_value_is_refused():
+    """The marker stays load-bearing. A clause on a value that carries no
+    `emit` would state something about a crossing that is not there while
+    leaving the real one — a bare call to an `emission` extern — unstated, so
+    the honest spellings stay `let n = emit wr(...) acting { ... }` and
+    `emit wr(...) acting { ... }`."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(
+            extern_source('let n = wr("row") acting { verb: ingest }'), "<test>")
+    assert "carries no `emit` marker" in str(exc.value)
+
+
+def test_a_clause_on_a_helper_hop_is_refused():
+    """The helper hop keeps its verdict. One clause cannot state a crossing the
+    binding does not perform, so the transitive reach stays the completeness
+    check's business."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(
+            extern_source('let n = helper("row") acting { verb: ingest }'),
+            "<test>")
+    assert "carries no `emit` marker" in str(exc.value)
+
+
+def test_a_stated_binding_is_admitted_inside_control_flow():
+    """The clause rides the statement, so it works wherever a binding does —
+    the control-flow interior shares one lowering path with the top level."""
+    assert compile_source(
+        extern_source('if (true) { ' + BOUND + ' }'), "<test>")
+
+
+def test_the_binding_slot_contributes_no_ir():
+    """The property #1007 pinned and #1031 re-proved, held for the third time
+    on the slot that finally makes a returning crossing expressible."""
+    plain = compile_source(
+        extern_source('let n = emit wr("row")', within=""), "<test>")
+    annotated = compile_source(extern_source(BOUND), "<test>")
+    assert json.dumps(plain, sort_keys=True) == json.dumps(annotated,
+                                                           sort_keys=True)
+
+
+def test_the_binding_clause_is_the_ast_default():
+    program = Parser(extern_source('let n = emit wr("row")', within=""),
+                     "<test>").parse()
+    body = program.components[0].body[0].methods[0].body
+    assert [stmt.acting for stmt in body if isinstance(stmt, LetStmt)] == [None]
+
+
+def test_positional_letstmt_construction_is_unchanged():
+    # `acting` is kept last, so the five-positional construction every existing
+    # caller uses still builds a clause-free binding.
+    assert LetStmt("n", "value", False, 1, None).acting is None
+
+
+def test_acting_is_still_an_ordinary_name_in_a_method_body():
+    """The clause is CONTEXTUAL in the new slot as well, and told apart from a
+    plain name by the `{` that must follow it — so a method that binds a value
+    called `acting` and then assigns it still compiles."""
+    src = (
+        "service Worker { fn run() -> Int }\n"
+        "component W provides worker: Worker {\n"
+        "  provide worker { fn run() { var acting = 1 acting = 2"
+        " return acting } }\n"
+        "}\n"
+    )
+    assert compile_source(src, "<test>")
