@@ -307,6 +307,38 @@ def _ref_check(src: str) -> str:
 # ------------------------------------------------------------- corpus
 
 ACCEPTED_PROGRAMS = [
+    # ---- the provide-method return annotation (item 391, issue #1065) ------
+    # A provide method may RESTATE the return type its service already
+    # declares. The reference parses it (`parser.py`'s `pmethod`, where the
+    # `-> T` sits between the parameter list and the body) and leaves any
+    # mismatch to the type layer. `p_prov_methods` here read the `{`/`=`
+    # straight off the end of the parameter list, so an annotated method failed
+    # the WHOLE component with `(bad) bad provide block in component <C>`.
+    # Its `lower.rvl` twin was the same defect and PR #1063 closed it.
+    #
+    # All four spellings are in one component on purpose. The two annotated
+    # ones are what fails against the unported checker; the two bare ones are
+    # the negative controls, because the step over the annotation must be
+    # CONDITIONAL — a step taken unconditionally eats the `{` or the `=` of an
+    # unannotated method and reproduces the same failure from the other side.
+    # Brace body and `=` shorthand are two distinct parser arms, so each form
+    # carries both controls.
+    ("provide method restates its return type", """
+service Counter {
+  fn size() -> Int
+  fn bump(n: Int) -> Int
+  fn label(n: Int) -> Str
+  fn flag() -> Bool
+}
+component Tally provides counter: Counter {
+  provide counter {
+    fn size() -> Int { return 0 }
+    fn bump(n) { return n + 1 }
+    fn label(n) -> Str = n.to_str()
+    fn flag() = true
+  }
+}
+"""),
     # a provider may be purer than its declaration: no emission, no refusal
     ("honest provider", """
 service Cache { fn put(key: Str, value: Str) }
@@ -450,6 +482,50 @@ component C {
 }
 ''',
      "`secret_put` takes 1 argument(s), 2 given"),
+    # ---- the verdicts the provide-block parse refusal was MASKING ---------
+    # The parse refusal above was not only a false rejection. On a program the
+    # reference REFUSES it stood in for the real verdict: the checker answered
+    # `(bad) bad provide block in component C` from a stage that never reached
+    # the guarantee, and a reader comparing verdict directions would have
+    # called that agreement. These three are the same three families the
+    # checker's slice already decides (G4 upper bound, unmarked emission, and a
+    # required-service argument type), each written with the annotation that
+    # used to stop them at the parse — one in the brace-body arm and two in the
+    # `=` shorthand arm, so neither arm can regress silently.
+    ("annotated provide method reaches an undeclared emission", """
+service Database { emission fn execute(sql: Str) -> Int }
+service Cache { fn put(key: Str, value: Str) }
+component C requires db: Database provides cache: Cache {
+  provide cache {
+    fn put(key, value) -> Int {
+      emit db.execute(key)
+      return 1
+    }
+  }
+}
+""",
+     "`Cache.put` is declared plain, but this implementation reaches "
+     "`db.execute`"),
+    ("annotated shorthand provide method emits unmarked", """
+service Database { emission fn execute(sql: Str) -> Int }
+service Cache { fn put(key: Str, value: Str) }
+component C requires db: Database provides cache: Cache {
+  provide cache {
+    fn put(key, value) -> Int = db.execute(key)
+  }
+}
+""",
+     "call to emission `db.execute` must be marked `emit` (G4)"),
+    ("annotated shorthand provide method mistypes a call-site argument", """
+service Database { fn query(sql: Str) -> Int }
+service Cache { fn put(key: Str) -> Int }
+component C requires db: Database provides cache: Cache {
+  provide cache {
+    fn put(key) -> Int = db.query(42)
+  }
+}
+""",
+     "`db.query` argument `sql` expects `Str`, got `Int`"),
     ("component-body extern call argument type", '''
 type SecretHandle = Opaque
 extern acquire fn secret_put(v: Str) -> SecretHandle undo secret_release(result) = @py { return 1 }
