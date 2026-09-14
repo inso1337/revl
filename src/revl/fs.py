@@ -330,7 +330,39 @@ def _cordis_runtime():
 def _witnessed_restore(witness) -> None:
     """The host inverse a `write_witnessed` effect replays on abort — the same
     contract as `stdlib/fs.rvl`'s `restore`: delete a created target, or put the
-    preimage snapshot back over a replaced one. Idempotent and confined."""
+    preimage snapshot back over a replaced one. Idempotent and confined.
+
+    The install goes through `install_captured_sidecar`, exactly as the
+    canonical `restore` does (issue #1016), so this surface reads the `capture`
+    key `witnessed_write_record` already binds instead of only recording it
+    (issue #1054). `resolve_sidecar` proves the SLOT is a preimage sidecar this
+    workspace owns; it cannot prove the FILE in that slot is still the snapshot
+    `_perform_write` took. The snapshot sits in `.revl-fs-preimage` for the
+    whole life of the activation, so a same-UID writer inside the workspace had
+    that window to rewrite it in place, swap it for another inode with the same
+    bytes, hardlink it out, or replace it with something that is not a file —
+    and the inverse renamed the result over the target and reported a clean
+    reversal.
+
+    The check is the canonical one, with the same three codes (`EOUTSIDE`,
+    `EMULTILINK`, `EIDENTITY`), run at syscall time and again on the installed
+    result with `ctime_ns` dropped because the rename itself bumps it. Nothing
+    is re-derived here: the guarded surface's sidecars come from the very same
+    `snapshot_preimage`, and the surface itself admits only a regular,
+    single-linked, owner-readable target (`open_confined_write` answers
+    `ENOTFILE` for a directory, `EMULTILINK` for an already-hardlinked file and
+    `EOUTSIDE` for a mode that denies the confinement check its open), so
+    `install_captured_sidecar`'s two constants hold here rather than needing
+    `unrm`'s capture-derived form (issue #1038).
+
+    A refusal RAISES, which the teardown loop records as `restore-residue`
+    through the existing merged-residue Record schema. The failure direction is
+    deliberate: a preimage that cannot be shown to be the captured one is
+    residue, never installed over the target. An untampered restore is as quiet
+    as before, and a witness carrying no capture (a durable record written
+    before the key existed, replayed by `revl recover`) keeps the two
+    caller-independent checks and still restores rather than stranding a
+    recoverable WAL."""
     _runtime.refuse_unknown_receipt_version(witness)
     target = _runtime.resolve_within(witness["path"])
     if witness.get("created"):
@@ -340,7 +372,8 @@ def _witnessed_restore(witness) -> None:
     if preimage:
         preimage = _runtime.resolve_sidecar(preimage, "preimage")
         if _runtime.lexists_confined(preimage):
-            _runtime.replace_confined(preimage, target)
+            _runtime.install_captured_sidecar(
+                preimage, target, witness.get("capture"))
 
 
 def _ambient_bind(witness):

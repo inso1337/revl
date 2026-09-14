@@ -506,6 +506,44 @@ swapped, re-linked and non-regular sidecars, the post-install re-check, the
 end-to-end abort that must surface the residue record, and the controls that
 must stay silent.
 
+## And on the guarded host surface's own inverse (#1054)
+
+`revl.fs.write_witnessed` is the guarded host-side witnessed write, and it
+carries its own inverse (`_witnessed_restore`) rather than routing through the
+canonical `restore` body. It was the third caller of this pattern and the only
+one in the worst state: the witness it binds already carried the `capture` key,
+and the inverse renamed the sidecar over the target without looking at it. The
+evidence was recorded and never read, so a reader seeing the key on the witness
+would reasonably assume it was in use.
+
+The inverse now installs through the same `install_captured_sidecar`, with the
+same three codes and the same two passes. Nothing is re-spelled for it.
+
+The constants question #1038 raised was checked here before anything was pinned,
+and it came out the other way. `unrm` had to derive the file type and link count
+from the capture because `rm` legitimately parks directories, already-hardlinked
+files and files whose mode denies read. The guarded write surface admits none of
+those: `open_confined_write` answers `ENOTFILE` for a directory target,
+`EMULTILINK` for an already-hardlinked one and `EOUTSIDE` for a mode that denies
+the confinement check its open, all before any preimage exists. Its sidecars come
+from the same `snapshot_preimage` as the canonical path, so "regular file" and
+"one link" are constants about a file this module made, exactly as they are for
+`restore`. The test suite pins that admitted set as its own case, so widening the
+forward guard later fails there first rather than quietly turning the inverse's
+check into an over-refusal.
+
+Everything else matches the two sections above: a refusal raises and the teardown
+loop records `restore-residue` through the merged residue Record schema, an
+untampered guarded restore stays silent, a created target is still deleted by an
+inverse that never reaches a sidecar, and a witness with no capture still
+restores so a recoverable WAL is not stranded. No opt-in flag, no WAL version, no
+new verdict vocabulary, no third settlement surface.
+
+`tests/test_fs_witnessed_restore_identity_1054.py` pins the tampered, swapped,
+re-linked and non-regular sidecars, the post-install re-check, the end-to-end
+abort that must surface the residue record, and the controls that must stay
+silent.
+
 ## Honest caveats
 
 These are load-bearing limits, documented so the reversibility claim is not
