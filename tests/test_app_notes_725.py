@@ -95,6 +95,20 @@ def test_dev_webui_rejects_escaping_entry_paths():
 
 ENTRY_REL = "frontend/entry.client.ts"
 
+#: The one line a `revl dev` run prints for the entry it registered.
+#:
+#: The path in it is the handle's, and item 459 F1 made that path ROOT-RELATIVE
+#: (`frontend/entry.client.ts`) rather than the `./frontend/...` spelling the
+#: source writes, so a host joins it to the app root instead of to the declaring
+#: module. Both runtime legs below grep for this exact string and BOTH are
+#: behind a skip gate, which is how the old `./` spelling survived that change
+#: and left the `frontend-cordis` job red (issue #1067). It is a constant, and
+#: `test_the_dev_banner_names_the_path_the_compiler_pinned` proves it against
+#: the real compiler and the real host with no runtime and no npm, so the two
+#: greps below cannot drift from the product without a red in a job that has
+#: neither.
+ENTRY_BANNER = f"entry {ENTRY_REL} -> /notes"
+
 
 def _entry_handle(digest: str | None = None) -> dict:
     """The item-459-F1 asset handle `asset "./frontend/entry.client.ts"` lowers
@@ -162,6 +176,39 @@ def test_dev_webui_refuses_a_handle_escaping_the_app_root():
         host.add_entry({"path": "../../etc/hosts", "sha256": "0" * 64},
                        "m", ["/notes"])
     assert "must be a relative path under" in str(excinfo.value)
+
+
+def test_the_dev_banner_names_the_path_the_compiler_pinned(capsys):
+    """The banner line the two runtime legs grep for, proven without a runtime.
+
+    Those legs are the only checks on the string `revl dev` prints for a
+    registered entry, and both are behind a skip gate: one on the cordis-py
+    venv, the other on that plus the node toolchain. So when item 459 F1 made
+    the asset handle carry the ROOT-RELATIVE path, the unit tests around
+    `DevWebUI` were updated and the two greps were not — they still looked for
+    the `./frontend/...` spelling, and the mismatch sat red in `frontend-cordis`
+    (issue #1067) where a plain `pytest tests/` reported a skip.
+
+    This check closes that: it takes the handle the REAL compiler lowers for
+    `examples/app/notes.rvl`, hands it to the REAL dev host, and asserts the
+    line that host prints is `ENTRY_BANNER` — the same constant both gated legs
+    now use. It needs no runtime and no npm, so it runs in the `frontend`
+    matrix. Either half moving (the compiler's path normalisation, or the
+    host's banner format) reds it there rather than only where the gate opens.
+    """
+    ir = compile_files([str(APP)])
+    console = next(c for c in ir["components"] if c["name"] == "NotesConsole")
+    emit = next(s for s in console["body"] if s.get("step") == "emit")
+    handle = {name: node["value"]
+              for name, node in emit["expr"]["args"][0]["fields"]}
+    # the compiler's half of the pin: a root-relative path, not `./`-prefixed
+    assert handle["path"] == ENTRY_REL
+
+    host = DevWebUI(ROOT / "examples" / "app")
+    host.add_entry(handle, "./frontend/dist/.vite/manifest.json", ["/notes"])
+
+    # ... and the host's half: the line it prints for that handle
+    assert ENTRY_BANNER in capsys.readouterr().out
 
 
 def test_dev_preflight_names_the_source_line():
@@ -517,7 +564,7 @@ def test_dev_once_boots_the_app_and_proves_no_residue():
         timeout=300,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "entry ./frontend/entry.client.ts -> /notes" in result.stdout
+    assert ENTRY_BANNER in result.stdout
     assert "no residue" in result.stdout
 
 
@@ -664,6 +711,6 @@ def test_dev_runs_the_app_and_its_vite_frontend_under_one_command():
     assert f"== dev frontend — http://127.0.0.1:{port} ==" in out, out
     assert f"--port {port} --strictPort" in out, out
     # ... and the same command is what loaded the composition.
-    assert "entry ./frontend/entry.client.ts -> /notes" in out, out
+    assert ENTRY_BANNER in out, out
     assert "channel state signals, strategy" in out, out
     assert "no residue" in out, out
