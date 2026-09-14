@@ -155,7 +155,7 @@
         "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior.": {
           "_go_v3_optchain": 19
         },
-        "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+        "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py.": {
           "_bridge_decode_expr": 16,
           "_bridge_encode_expr": 16,
           "_emit_go_bridge": 117,
@@ -164,7 +164,7 @@
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_v3_bridge_helpers": 52,
-          "_emit_v3_placement": 203,
+          "_emit_v3_placement": 211,
           "_go_bridge_arg_expr": 4,
           "_go_opt_inner": 4,
           "_go_result_inner": 5,
@@ -176,8 +176,8 @@
         "Remaining accumulator recognition handles .concat builtin chains rather than the covered + chains; stdlib concat emission is an explicit Go deferral.": {
           "_v3_str_concat_pieces": 6
         },
-        "Remaining assembly paths are the empty-document refusal, in-file tests, reflect structural equality, Float interpolation's ftoa helper, extern imports, and demanded Opt/Result/Map/stdlib plus integer-division helpers. Those helper-demand families are explicit Go scaffold deferrals; ordinary Float arithmetic and Int widening are covered, not excluded here. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
-          "_emit_v3_go": 62
+        "Remaining assembly paths are the empty-document refusal, in-file tests, reflect structural equality, Float interpolation's ftoa helper, extern imports, and demanded Opt/Result/Map/stdlib plus integer-division helpers. Those helper-demand families are explicit Go scaffold deferrals; ordinary Float arithmetic and Int widening are covered, not excluded here. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py.": {
+          "_emit_v3_go": 67
         },
         "Remaining branches are malformed/unresolved inference fallbacks, deferred len/builtin/Map and builtin constructors, ambiguous-record recovery, and the late Float % fallback (the frontend rejects Float remainder). Int32 complement inference and ordinary Float arithmetic/widening are now covered. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_go_v3_infer_type": 16
@@ -300,6 +300,10 @@
           "_stream_head": 4,
           "_stream_stage_arrow": 9
         },
+        "Item 458: java's `div_floor`/`div_euclid`/`mod` move from inline `Math.*` expressions to static helpers, because `Math.floorDiv` wraps at Int.MIN / -1 and `Math.abs(Long.MIN_VALUE)` is negative. `_emit_int_arith_helpers` is the block and `_uses_int_arith.walk` the demand scan; no java corpus document calls a named division, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl ports none of this family (item-429(d)). The reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py.": {
+          "_emit_int_arith_helpers": 1,
+          "_uses_int_arith.walk": 1
+        },
         "`Map` subscript lowering (issue #957): `_uses_map_index.walk` answers whether the document reads a `Map` subscript and `_emit_map_index_helper` renders the static `revlMapIndex` it lowers to. emit_java_corpus/maps.rvl exercises the Map METHODS, not the subscript, and a document that added one would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)). The reference half is pinned by tests/test_cross_tier_execution.py. Porting the arm to selfhost/emit_java.rvl is the corpus work that retires this entry.": {
           "_emit_map_index_helper": 1,
           "_uses_map_index.walk": 1
@@ -421,8 +425,8 @@
         "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Also the item-322-Slice-2 durable WAL sink splice behind `_RECORD_MODE`: the oracle emits with the default `emit(ir)` and never `record=True`, so the call is unreachable from the corpus by construction, and `backends/java/test_emit_java.py::test_v1_v2_witnessed_record_defines_the_sink_it_calls` exercises it directly. The self-host emitters mirror the v3 path, so v1/v2 is declared out of every self-host slice (the `_v1|_v2` group in tools/selfhost_line_coverage.py).": {
           "_emit_v2": 4
         },
-        "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
-          "_emit_v3": 16
+        "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458 adds one more: the `_uses_int_arith` call that pulls in the revlDivFloor/revlDivEuclid/revlMod block, on the same helper-demand boundary as the checked-division one beside it.": {
+          "_emit_v3": 17
         },
         "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
           "_emit_v3_externs": 32
@@ -1219,8 +1223,8 @@
         "Remaining branches add src/ for standalone imports or translate invalid ownerless/session-commit emissions to EmitError. In-process successful pure documents take neither exceptional path.": {
           "_refuse_deferred_emissions": 10
         },
-        "Remaining branches are checked division, indexOf/split/join helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families.": {
-          "_V3Emitter._builtin_expr": 46,
+        "Remaining branches are checked division, indexOf/split/join helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families. Item 458 adds four: the `Int.MIN / -1` arm of checked division, which answers Err(\"revl: Int overflow\") as a value where `i64.div_s` used to trap. Same deferred family as the rest of the arm; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py.": {
+          "_V3Emitter._builtin_expr": 50,
           "_V3Emitter._builtin_type": 23
         },
         "Remaining branches capture deferred arrow-valued lets or reject undeclared assignment, void binding, bare typed return, loop control outside a loop and unknown steps. Ordinary loops and scalar/local statements are covered.": {
@@ -1257,8 +1261,8 @@
         "Remaining inference includes deferred coalescing/interpolation/match/Float/component __wat, legacy List + and Str index rejected by today's frontend, and malformed/unbound/unsupported kinds and type errors. Expected-free user ADT inference is now covered.": {
           "_V3Emitter._infer_type": 41
         },
-        "Remaining literal-pool branches collect checked-division error text and interpolation/legacy-format text; checked division and interpolation are deferred, and format is component vocabulary.": {
-          "_V3Emitter._collect_string_literals.walk": 7
+        "Remaining literal-pool branches collect checked-division error text and interpolation/legacy-format text; checked division and interpolation are deferred, and format is component vocabulary. Item 458 adds two: the pooling of that arm's second Err reason (`revl: Int overflow`), which only the three quotient forms carry.": {
+          "_V3Emitter._collect_string_literals.walk": 9
         },
         "Remaining loop pools extra component descriptor strings passed by component planning; pure function literals use the covered tree traversal.": {
           "_V3Emitter._collect_string_literals": 1
@@ -1387,6 +1391,9 @@
           "_ComponentEmitter._witnessed_extern": 5,
           "_ComponentEmitter.emit": 69
         },
+        "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead.": {
+          "_refuse_required_stream": 3
+        },
         "The item-458 short-circuit decision for a logical operator's right operand. Every accepting and refusing arm is now exercised: shortcircuit.rvl spells a trapping `%`, `/` and checked `*`, an index read, a `len`, a call, a `Str` comparison and a non-`!` unary, and arith.rvl/folding.rvl the constants, local reads and comparisons that keep the strict instruction. What stays unrun is the non-dict guard's refusal and the EmitError catch (with its refusal) for a leaf name the caller cannot resolve \u2014 a malformed node and an unbound name, neither of which a document that compiles can produce.": {
           "_trap_free_operand": 3
         },
@@ -1401,9 +1408,6 @@
         "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
           "_ComponentEmitter._provide_routed": 18,
           "_assert_realm_label": 2
-        },
-        "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead.": {
-          "_refuse_required_stream": 3
         }
       },
       "uncovered_statements": 1544
@@ -1845,7 +1849,7 @@
           "emit_v3_externs": 4,
           "extern_body_defer": 2
         },
-        "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered.": {
+        "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one \u2014 no rust corpus document negates an Int32.": {
           "borrow_str_arg": 1,
           "by_value_arg": 2,
           "collect_fn_value_refs": 2,
@@ -1859,7 +1863,7 @@
           "render_component_call": 3,
           "render_inner": 5,
           "render_interp": 2,
-          "render_un": 1,
+          "render_un": 2,
           "render_var": 2,
           "str_param_readonly": 3,
           "v3_bin_ops": 3,

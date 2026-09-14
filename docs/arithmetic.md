@@ -86,10 +86,25 @@ than inheriting a host rule:
 
 `%` itself is built on python for the same reason — its native `%` floors.
 | typescript | native `/` (BigInt truncates) | built | built | built |
-| rust | native `/` | built | `div_euclid` | `rem_euclid().abs()` |
-| java | native `/` | `Math.floorDiv` | built | `Math.floorMod(a, abs(b))` |
+| rust | native `/` | built | `div_euclid` | built on `rem_euclid` |
+| java | native `/` | `revlDivFloor` | `revlDivEuclid` | `revlMod` |
 | wasm | native `i64.div_s` | `$int_div_floor` | `$int_div_euclid` | `$int_mod` |
 | go | native `/` | `revlDivFloor` | `revlDivEuclid` | `revlMod` |
+
+**No lowering may negate an operand, and none does.** That rule is not
+decoration: `-x` is partial in two's complement, and three tiers once spelled
+`div_euclid` as `b > 0 ? div_floor(a, b) : -div_floor(a, -b)`, which carries
+both halves of the failure at once. `-b` wraps for `b == Int.MIN`, so
+`(0 - 7).div_euclid(Int.MIN)` answered `-1` instead of `1`; and the leading `-`
+wraps for `b == -1`, so `Int.MIN.div_euclid(0 - 1)`, whose quotient is 2^63,
+answered `Int.MIN` with no fault at all. Every tier now truncates first and
+steps the quotient toward the divisor's sign when the truncated remainder came
+out negative, which needs no negation anywhere. The same rule retired
+`Math.abs(b)` from java's `mod` (`Math.abs(Long.MIN_VALUE)` is
+`Long.MIN_VALUE`, still negative, so `mod` against `Int.MIN` answered a
+negative remainder) and `p / b != a` from go's multiply (Go DEFINES
+`Int.MIN / -1` as `Int.MIN`, so the readback check is blind at exactly the
+product that overflows).
 
 All eight identities in `tests/test_cross_tier_execution.py`
 (`INTEGER_ARITHMETIC`) are asserted by **executing** the emitted code, not by
@@ -259,11 +274,21 @@ the host's unary minus, so `-Int.MIN` came back as 2^63 — out of the very
 range python imposes a line earlier, silently. It now goes through `_revl_i64`
 like any other subtraction, and the closure is asserted by execution. wasm had
 this right from the start: its emitter spells negation as a subtraction from
-zero through the checked helper, and rust's own `-` panics at the edge in the
-debug builds `cargo test` runs. The three tiers that used to wrap or grow now
+zero through the checked helper. The three tiers that used to wrap or grow now
 follow suit — go emits `revlSub(0, x)`, java `Math.negateExact(x)`, TypeScript
 `revlI64(-x)` — so `-Int.MIN` faults on every tier, asserted by execution
 across py/ts/go/java (`tests/test_cross_tier_execution.py`). No tier wraps.
+
+rust was the last one holding the guarantee by accident. Its bare `-` does
+panic at the edge, but only in a DEBUG profile, which is the profile
+`cargo test` happens to build; a release build wrapped. It emits
+`(x).checked_neg().expect("revl: Int overflow")` now, so the bound is imposed
+by the emitted code rather than by the profile it is compiled under. `%` moved
+for a related reason: `Int.MIN % -1` is 0 (the quotient is what does not fit,
+not the remainder), and rust's `%` panics there anyway because it computes the
+quotient on the way, so the tier faulted where the other five answer 0. It
+emits `(a).wrapping_rem(b)`, the same operation on every other input and still
+a panic on a zero divisor.
 
 ### What the wasm port took
 
@@ -608,11 +633,16 @@ Two consequences worth stating:
   operations (`arith_zero_divisor.rvl`). The refusal exists because `x.mod(0)`
   is never a program anyone meant to write; passing zero to the *checked*
   form is precisely the program it is for.
-- **Overflow behaviour is unchanged from the unchecked forms**, per tier:
-  python and TypeScript impose the 64-bit bound on the quotient (so
-  `Int.MIN.checked_div_trunc(0 - 1)` faults there), rust traps, wasm traps,
-  and java/go compute natively like their unchecked `/`. Totalising the zero
-  case did not totalise the range.
+- **A zero divisor is not the only input with no answer.** `Int.MIN / -1` is
+  2^63, one past `Int.MAX`, and the three quotient forms answer it
+  `Err("revl: Int overflow")` on every tier. That is the second half of being
+  total, and it was not always there: rust and wasm reached the host division
+  and faulted, which is what the caller asked these forms not to do. A
+  `checked_*` that can still fault is not checked. `checked_mod` is the
+  exception in both directions, because its answer at that divisor is defined:
+  the Euclidean remainder against `|-1| = 1` is 0 for every dividend, so it
+  answers `Ok(0)` and carries no overflow arm at all. Asserted by execution on
+  all six tiers in `tests/test_int_min_edges_cross_tier.py`.
 
 | tier | Result representation for the Err payload |
 |---|---|

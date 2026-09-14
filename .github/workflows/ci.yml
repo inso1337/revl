@@ -1409,7 +1409,7 @@ jobs:
       # build happens. Tracked on roadmap item 445 and asserted in
       # tests/test_env_gated_skips_run_somewhere.py (_KNOWN_WRONG_JOB), so it
       # cannot go quiet.
-      - run: backends/python/.venv/bin/python -m pytest tests/test_cross_tier_execution.py tests/test_realm_conformance.py tests/test_time_coeffect.py -q
+      - run: backends/python/.venv/bin/python -m pytest tests/test_cross_tier_execution.py tests/test_int_min_edges_cross_tier.py tests/test_realm_conformance.py tests/test_time_coeffect.py -q
         env:
           # LIVE as of item 445. This turns on the rust and java probes, the
           # 17 gates that had executed in no CI job at all.

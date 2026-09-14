@@ -182,11 +182,16 @@ def test_the_strict_form_is_kept_when_the_right_operand_cannot_trap():
 # the other five tiers emit their host's short-circuiting operator
 # ---------------------------------------------------------------------------
 
+# `remainder` is the SPELLING of `n % d` on that tier, which is not always the
+# operator: python's native `%` floors, so it builds the truncated remainder in
+# `_revl_rem`, and rust's `%` panics at `Int.MIN % -1` (whose remainder is 0),
+# so it emits `wrapping_rem` — the same operation on every other input, and
+# still a panic on a zero divisor.
 @pytest.mark.parametrize("backend,spelling,remainder", [
     ("python", " and ", "_revl_rem("),
     ("typescript", " && ", "n % d"),
     ("go", " && ", "n % d"),
-    ("rust", " && ", "n % d"),
+    ("rust", " && ", ".wrapping_rem(d)"),
     ("java", " && ", "n % d"),
 ])
 def test_the_hosted_tiers_emit_a_short_circuiting_operator(backend, spelling,

@@ -1270,13 +1270,27 @@ def _v3_builtin(method: object, target: str, args: list[str],
         # overflow (and on a zero divisor), matching the `Math.*Exact` family
         # already used for `+`/`-`/`*`/unary minus.
         return f"Math.divideExact({target}, {args[0]})"
+    # `div_floor`, `div_euclid` and `mod` all go through a static helper
+    # rather than an inline `Math.*` expression, for the same reason
+    # `div_trunc` reaches for `Math.divideExact`: the java primitives here are
+    # PARTIAL where revl's definitions are total, and each was answering a
+    # value instead of trapping or answering the wrong value outright.
+    #   * `Math.floorDiv(Int.MIN, -1)` is DOCUMENTED to overflow and return
+    #     Int.MIN — a silent wraparound where py/ts/go/rust all trap.
+    #   * the `-Math.floorDiv(a, -b)` arm of div_euclid negates twice, and both
+    #     negations are partial: `-b` wraps for b == Int.MIN and the leading
+    #     `-` wraps for b == -1.
+    #   * `Math.abs(Int.MIN)` is Int.MIN — still NEGATIVE — so `mod` against
+    #     Int.MIN ran `floorMod` against a negative modulus and answered a
+    #     negative remainder, against the "mod is never negative" guarantee.
+    # A helper also evaluates each operand exactly once, which the old
+    # `div_euclid` ternary (three mentions of the divisor) did not.
     if method == "div_floor":
-        return f"Math.floorDiv({target}, {args[0]})"
+        return f"revlDivFloor({target}, {args[0]})"
     if method == "div_euclid":
-        return (f"(({args[0]}) > 0 ? Math.floorDiv({target}, {args[0]}) "
-                f": -Math.floorDiv({target}, -({args[0]})))")
+        return f"revlDivEuclid({target}, {args[0]})"
     if method == "mod":
-        return f"Math.floorMod({target}, Math.abs({args[0]}))"
+        return f"revlMod({target}, {args[0]})"
     if method == "indexOf":
         return f"revlIndexOf({target}, {args[0]})"
     if method == "split":
@@ -2897,6 +2911,73 @@ def _uses_checked_div(ir: dict) -> bool:
     return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
 
 
+#: The named integer-division forms whose java lowering is a static helper
+#: (`div_trunc` stays inline: `Math.divideExact` is already total-or-throwing).
+#: The two `checked_*` forms below CALL those helpers, so their presence pulls
+#: the block in as well.
+_INT_ARITH_METHODS = ("div_floor", "div_euclid", "mod",
+                      "checked_div_euclid", "checked_mod")
+
+
+def _uses_int_arith(ir: dict) -> bool:
+    """True if the IR calls one of the named integer-division forms that lower
+    to `revlDivFloor`/`revlDivEuclid`/`revlMod` — gates their emission."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("method") in _INT_ARITH_METHODS:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return (walk(ir.get("functions")) or walk(ir.get("tests"))
+            or walk(ir.get("components")))
+
+
+def _emit_int_arith_helpers() -> list[str]:
+    """`div_floor` / `div_euclid` / `mod`, written so the Int.MIN edges answer
+    what every other tier answers.
+
+    Each java primitive these used to call is partial exactly where revl's
+    definition is total, and each failure was silent:
+
+    * `Math.floorDiv(Long.MIN_VALUE, -1)` is documented to overflow and return
+      `Long.MIN_VALUE`. The true quotient is 2^63, one past Int.MAX, so it must
+      TRAP — which `Math.divideExact` does, and which py/ts/go/rust all did.
+    * div_euclid's negative-divisor arm was `-Math.floorDiv(a, -b)`. `-b` wraps
+      for `b == Long.MIN_VALUE` and the leading `-` wraps for `b == -1`, so the
+      one expression carried both a wrong answer and a missing trap. The shape
+      below never negates: truncate, then step the quotient toward the
+      divisor's sign when the truncated remainder came out negative.
+    * `Math.abs(Long.MIN_VALUE)` is `Long.MIN_VALUE`, still negative, so
+      `mod(a, Int.MIN)` ran `floorMod` against a negative modulus. `mod` is
+      documented never to be negative; it was. Against Int.MIN the answer is
+      `a mod 2^63`, which is `a` when a >= 0 and `a - Long.MIN_VALUE`
+      (exact in two's complement, since the result is below 2^63) when a < 0.
+    """
+    return [
+        "// the named integer divisions (docs/arithmetic.md). Math.floorDiv,",
+        "// unary minus and Math.abs are each partial at Long.MIN_VALUE, so",
+        "// the Int.MIN edges are named here rather than wrapping silently.",
+        "private static long revlDivFloor(long a, long b) {",
+        "    long q = Math.divideExact(a, b);",
+        "    if (a % b != 0L && ((a < 0L) != (b < 0L))) { q -= 1L; }",
+        "    return q;",
+        "}",
+        "private static long revlDivEuclid(long a, long b) {",
+        "    long q = Math.divideExact(a, b);",
+        "    if (a % b < 0L) { q = b > 0L ? q - 1L : q + 1L; }",
+        "    return q;",
+        "}",
+        "private static long revlMod(long a, long b) {",
+        "    if (b == Long.MIN_VALUE) { return a >= 0L ? a : a - Long.MIN_VALUE; }",
+        "    return Math.floorMod(a, Math.abs(b));",
+        "}",
+        "",
+    ]
+
+
 def _uses_map_index(ir: dict) -> bool:
     """True if the IR reads a `Map` subscript `m[k]` — gates the static helper
     that read lowers to (issue #957). The frontend marks the node with the map's
@@ -2958,12 +3039,11 @@ def _emit_checked_div_helpers() -> list[str]:
         "private static RevlResult<Long, String> revlCheckedDivEuclid(long a, long b) {",
         f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
         '    if (a == Long.MIN_VALUE && b == -1L) { return new RevlResult.Err<>("revl: Int overflow"); }',
-        "    return new RevlResult.Ok<>(b > 0L ? Math.floorDiv(a, b)",
-        "                                      : -Math.floorDiv(a, -b));",
+        "    return new RevlResult.Ok<>(revlDivEuclid(a, b));",
         "}",
         "private static RevlResult<Long, String> revlCheckedMod(long a, long b) {",
         f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
-        "    return new RevlResult.Ok<>(Math.floorMod(a, Math.abs(b)));",
+        "    return new RevlResult.Ok<>(revlMod(a, b));",
         "}",
         "",
     ]
@@ -7969,6 +8049,11 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     stdlib_at = len(out)
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
+    # `_uses_checked_div` pulls the int-arith block in too: revlCheckedDivEuclid
+    # and revlCheckedMod are written in terms of revlDivEuclid/revlMod, so a
+    # document that reaches only for a `checked_*` form still needs them.
+    if _uses_int_arith(ir) or _uses_checked_div(ir):
+        out.extend(["    " + line if line else line for line in _emit_int_arith_helpers()])
     if _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
     if _uses_map_index(ir):
