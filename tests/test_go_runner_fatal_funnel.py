@@ -69,7 +69,7 @@ present) so none can pass on an empty line.
 from __future__ import annotations
 
 import json
-import select
+import selectors
 import shutil
 import socket
 import subprocess
@@ -240,10 +240,20 @@ def _cross(binary: str) -> tuple[int, str, str]:
             # then fail for a reason that has nothing to do with the guard. A
             # reply arriving instead means the guard did NOT halt the process,
             # and the exit-code assertion below reports that.
+            #
+            # `selectors`, not `select.select`: this file runs inside the whole
+            # `tests/` root, where the process's open descriptors run past
+            # FD_SETSIZE (1024) and `select` raises `filedescriptor out of range
+            # in select()` on a socket that happens to land above it. The
+            # default selector is kqueue/epoll, which has no such bound, so the
+            # arm reports on the funnel rather than on how many files the run
+            # before it left open.
             deadline = time.monotonic() + 120
-            while time.monotonic() < deadline and proc.poll() is None:
-                if select.select([client], [], [], 0.05)[0]:
-                    break
+            with selectors.DefaultSelector() as sel:
+                sel.register(client, selectors.EVENT_READ)
+                while time.monotonic() < deadline and proc.poll() is None:
+                    if sel.select(0.05):
+                        break
         try:
             proc.stdin.close()  # the stop signal, if the guard did not halt it
         except OSError:  # pragma: no cover - the guard already halted it

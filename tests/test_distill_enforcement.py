@@ -28,7 +28,6 @@ import importlib.util
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -115,10 +114,13 @@ def _budget(session, i: int = 0) -> tuple:
 
 
 def _session(rule: AutoApproveRule | None = None, *, operator: str | None = None,
-             policy: object = "auto"):
+             policy: object = "auto", clock=None):
     from revl.mcp.session import Session
     s = Session()
     s.approval_policy = policy
+    if clock is not None:
+        # before `load`, so the rule's `expiresAt` is minted on the test timeline
+        s._clock_ms = clock
     if rule is not None:
         s.sandbox = Policy(auto_approve_rules=(rule,))
     if operator is not None:
@@ -131,6 +133,42 @@ def _rule(host: str = STRIPE, *, component: str = "Biller*",
     return AutoApproveRule(component=component,
                            caps=(f'gwsend(host="{host}")',),
                            realm=None, admitting=admitting, uses=uses)
+
+
+def _ttl_rule(ttl_ms: int = 1) -> AutoApproveRule:
+    """The `ttl`-bounded rule the three lapse arms below share: no `uses` bound,
+    so the only thing that can refuse the second crossing is the deadline."""
+    return AutoApproveRule(component="Biller*",
+                           caps=(f'gwsend(host="{STRIPE}")',),
+                           realm=None, admitting=frozenset(), ttl_ms=ttl_ms)
+
+
+class _Clock:
+    """A settable ms clock for the `ttl` arms.
+
+    `expiresAt` is a real epoch-ms deadline, so pinning a LAPSED window against
+    the wall clock means sleeping past it and trusting a loaded machine to agree.
+    `Session._now_ms` is injectable for exactly this (item 246 invariant 3), so
+    the lapse becomes a fact of the test rather than of the machine. It does not
+    weaken what the arms assert: the load-bearing check is the exact
+    `expiresAt == deadline` equality, which is clock-free either way, and the
+    injected clock only ever ADVANCES (`_now_ms` ratchets it and refuses a
+    rewind, so a test clock could not resurrect a deadline even deliberately).
+
+    The base sits past any real wall clock on purpose: `_now_ms` clamps every
+    reading to a high-water floor, and a fork mints a FRESH `Session` that takes
+    its own first reading from the real clock. A base in the past would leave
+    that floor dominating the branch's readings; a base in the future keeps every
+    reading on both sessions the injected one."""
+
+    def __init__(self, now: int = 4_102_444_800_000):   # 2100-01-01, well past wall
+        self.now = now
+
+    def __call__(self) -> int:
+        return self.now
+
+    def advance(self, ms: int) -> None:
+        self.now += ms
 
 
 def _lines(sink: str) -> list:
@@ -503,16 +541,14 @@ def test_lapsed_ttl_is_not_resurrected_by_a_swap(sink):
     """A rule whose `ttl` window lapsed is not resurrected by a swap: the deadline
     is fixed when the rule is first materialized, never recomputed from `now` on
     the next generation."""
-    rule = AutoApproveRule(component="Biller*",
-                           caps=(f'gwsend(host="{STRIPE}")',),
-                           realm=None, admitting=frozenset(), ttl_ms=1)
+    clock = _Clock()
     ir = compile_source(_src(sink), "biller.rvl")
-    session = _session(rule)
+    session = _session(_ttl_rule(), clock=clock)
     session.load(copy.deepcopy(ir), record=True)
     deadline = session._auto_rules[0]["expiresAt"]
-    assert deadline is not None
+    assert deadline == clock.now + 1
 
-    time.sleep(0.02)                             # let the 1ms window lapse
+    clock.advance(20)                            # let the 1ms window lapse
 
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "a"])
@@ -670,7 +706,10 @@ def test_exhausted_uses_budget_survives_an_unload_and_reload(sink):
     assert session._auto_rules[0]["consumed"] is True
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "two"])
+    assert _lines(sink) == [f"send:{STRIPE}:one"]
 
+
+# ---------------------------------------------------------------------------
 # item 250: the FORK boundary must not renew a spent budget either
 # ---------------------------------------------------------------------------
 
@@ -740,13 +779,28 @@ def test_partial_uses_budget_is_carried_across_an_unload_and_reload(sink):
 def test_lapsed_ttl_is_not_resurrected_by_an_unload_and_reload(sink):
     """A lapsed `ttl` deadline is not moved forward by a teardown: it is fixed when
     the rule is first materialized, never recomputed from `now` on the next load."""
-    rule = AutoApproveRule(component="Biller*",
-                           caps=(f'gwsend(host="{STRIPE}")',),
-                           realm=None, admitting=frozenset(), ttl_ms=1)
+    clock = _Clock()
     ir = compile_source(_src(sink), "biller.rvl")
-    session = _session(rule)
+    session = _session(_ttl_rule(), clock=clock)
+    session.load(copy.deepcopy(ir), record=True)
+    deadline = session._auto_rules[0]["expiresAt"]
+    assert deadline == clock.now + 1
+
+    clock.advance(20)                            # let the 1ms window lapse
+
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "a"])
+
+    session.unload()
     session.load(copy.deepcopy(ir), record=True)
 
+    assert session._auto_rules[0]["expiresAt"] == deadline
+    with pytest.raises(ApprovalRequired):
+        session.call("gw", "send", [STRIPE, "b"])
+    assert _lines(sink) == []
+
+
+@needs_cordis
 def test_partial_uses_budget_is_carried_across_a_fork(sink):
     """A partly-spent budget crosses the fork at the count it actually reached,
     rather than restarting at the rule's declared `uses`."""
@@ -767,34 +821,33 @@ def test_partial_uses_budget_is_carried_across_a_fork(sink):
 def test_lapsed_ttl_is_not_resurrected_by_a_fork(sink):
     """The inherited rule keeps the deadline the parent opened, not a new one
     measured from the fork — so a window that lapsed in the parent stays lapsed
-    on the branch instead of being re-armed for another full ttl."""
-    rule = AutoApproveRule(component="Biller*",
-                           caps=(f'gwsend(host="{STRIPE}")',),
-                           realm=None, admitting=frozenset(), ttl_ms=1)
+    on the branch instead of being re-armed for another full ttl.
+
+    The fork must be taken from a session that still holds its recorded sources:
+    `fork_confirm` snapshots the parent, and a snapshot is the sources a live
+    admission was given. A teardown belongs to the unload/reload arm above, not
+    here."""
+    clock = _Clock()
     src = _src(sink)
     ir = compile_source(src, "biller.rvl")
-    session = _session(rule)
+    session = _session(_ttl_rule(), clock=clock)
     session.load(copy.deepcopy(ir), record=True, origin={"source": src})
     deadline = session._auto_rules[0]["expiresAt"]
-    assert deadline is not None
+    assert deadline == clock.now + 1
 
-    time.sleep(0.02)                             # let the 1ms window lapse
+    clock.advance(20)                            # let the 1ms window lapse
 
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "a"])
 
-    session.unload()
-    session.load(copy.deepcopy(ir), record=True)
-
-    assert session._auto_rules[0]["expiresAt"] == deadline
-    with pytest.raises(ApprovalRequired):
-        session.call("gw", "send", [STRIPE, "b"])
-
     branch = _fork(session)
+    branch._clock_ms = clock                     # the branch reads the same clock
 
+    # the deadline the PARENT opened, not `fork + ttl`: the equality is what pins
+    # the property, and it holds whatever the clock says.
     assert branch._auto_rules[0]["expiresAt"] == deadline
     with pytest.raises(ApprovalRequired):
-        branch.call("gw", "send", [STRIPE, "a"])
+        branch.call("gw", "send", [STRIPE, "b"])
     assert _lines(sink) == []
 
 
@@ -823,7 +876,10 @@ def test_h1_review_bind_survives_an_unload_and_reload(sink):
         == frozenset({"BillerInvoice"})
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "c"])
+    assert _lines(sink) == [f"send:{STRIPE}:a"]
 
+
+@needs_cordis
 def test_a_suspended_rule_is_not_re_reviewed_by_a_fork(sink):
     """The H1 facet of the same renewal: a rule SUSPENDED by glob growth (a member
     entered the glob that was never reviewed) must stay suspended across a fork.
@@ -879,6 +935,8 @@ def test_revoke_drops_the_spent_budget_so_a_reapply_starts_clean(sink):
         session.call("gw", "send", [STRIPE, "two"])
     assert _lines(sink) == [f"send:{STRIPE}:one"]
 
+
+@needs_cordis
 def test_a_fork_still_carries_no_approval(sink):
     """The control: carrying the rule state must not smuggle an APPROVAL across
     the fork. A crossing that prompted in the parent still prompts in the branch,
