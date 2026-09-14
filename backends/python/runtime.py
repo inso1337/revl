@@ -5105,6 +5105,66 @@ async def _stream_withdrawal_sweep() -> None:
         _STREAM_SWEEPER = None
 
 
+class _DurableClose:
+    """A subscription's bracket inverse that can DESCRIBE itself (item 130 §4.9).
+
+    Calling it is the author's `sub.close()` and nothing else, so a durable
+    subscription's in-process teardown is the path every other bracket takes and
+    §0 is not re-argued for it. What it adds is :meth:`descriptor`: the durable
+    cursor as a WAL-serializable `{resource, op}` pair, which is what lets
+    `revl recover` re-issue a crashed subscription instead of reporting
+    closure-only residue.
+
+    A CLASS rather than a closure carrying attributes. The recorder reads this
+    across a module boundary, and the two halves of a stringly-named attribute
+    pair can drift apart with no error — a rename on either side would just
+    quietly stop the §4.9 claim from being made, which is the exact fail-silent
+    shape issue #292 is about. Keeping the fields on a type the runtime owns
+    means the only thing crossing the boundary is the single declared seam
+    `revl_durable_inverse`, whose existence and arity
+    `tools/check_runtime_seams.py` gates."""
+
+    __slots__ = ("_sub", "_cursor")
+
+    def __init__(self, sub: "Subscription", cursor: str) -> None:
+        self._sub = sub
+        self._cursor = cursor
+
+    def __call__(self) -> bool:
+        return self._sub.close()
+
+    def descriptor(self) -> dict:
+        """The durable inverse as a re-issuable description.
+
+        `resource` classifies the referent (a cursor is a position a provider
+        holds, so it OUTLIVES the process); `op` is the call a fresh process
+        makes to close the subscription the cursor names."""
+        return {
+            "resource": f"cursor:{self._cursor}",
+            "op": {"receiver": "Stream", "method": "close",
+                   "args": [self._cursor]},
+        }
+
+
+def revl_durable_inverse(disposer: Any) -> Optional[dict]:
+    """The fail-silent seam `backends/python/replay.py` reads to ask whether a
+    registered inverse describes itself (item 130 §4.9).
+
+    Answers `{"resource": ..., "op": ...}` for a durable-cursor subscription's
+    bracket inverse and None for every other disposer — a closure, a lambda, a
+    provision withdrawal — which is the honest default: those are closure-only
+    and their WAL records say so.
+
+    A module-level `def`, read by name through `getattr`, because that is what
+    `tools/check_runtime_seams.py` can check: the gate asserts this is defined
+    exactly once and takes the one argument its caller passes. It is the whole
+    surface the recorder sees, so the attribute names behind it never cross a
+    module boundary and cannot drift from their reader (issue #292)."""
+    if isinstance(disposer, _DurableClose):
+        return disposer.descriptor()
+    return None
+
+
 class Subscription:
     """A single-consumer subscription (design §1, §4.6). `next()` awaits the
     next item raced against the cancel token; `close()` trips that token
@@ -5325,7 +5385,7 @@ class Subscription:
                 return STREAM_CLOSED
             await self._park()
 
-    def durable_undo(self):
+    def durable_undo(self) -> "_DurableClose":
         """The bracket inverse of a DURABLE-CURSOR subscription, as a disposer
         that describes itself (item 130 §4.9).
 
@@ -5333,20 +5393,12 @@ class Subscription:
         host listener, closure-only, so a crashed one is `unreconstructible`
         residue and `revl recover` never claims it closed. A provider that
         declared `replay(from: "<name>")` opts OUT of that, and this is the whole
-        mechanism: the disposer still calls exactly `close()`, but it carries the
-        cursor name — a WAL-serializable descriptor — so the recorder writes a
-        re-issuable `Stream.close(<cursor>)` instead of "closure over in-process
-        memory", and a fresh process can pick the subscription up where it
-        stopped. No new teardown path: the same callable, described."""
-        sub = self
-
-        def _close():
-            return sub.close()
-
-        _close.revl_resource = f"cursor:{self._cursor}"
-        _close.revl_inverse_op = {"receiver": "Stream", "method": "close",
-                                  "args": [self._cursor]}
-        return _close
+        mechanism: the disposer still calls exactly `close()`, but it can state
+        the cursor name — a WAL-serializable descriptor — so the recorder writes
+        a re-issuable `Stream.close(<cursor>)` instead of "closure over
+        in-process memory", and a fresh process can pick the subscription up
+        where it stopped. No new teardown path: the same callable, described."""
+        return _DurableClose(self, self._cursor)
 
     def close(self) -> bool:
         """The bracket inverse: trip the cancel token synchronously, release the

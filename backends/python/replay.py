@@ -111,6 +111,38 @@ def _note_emission_index(component: str, index: int,
         note(component, index, sink)
 
 
+def _durable_inverse(entry: Any) -> Optional[dict]:
+    """Ask the runtime whether this registered inverse DESCRIBES ITSELF
+    (item 130 §4.9), or None when it does not.
+
+    The answer is `{"resource": ..., "op": ...}`: a durable cursor is a position
+    a provider holds, so its referent outlives the process and its inverse is a
+    call a fresh process can make. Everything else — a closure, a lambda, a
+    provision withdrawal — answers None, which is §4.9's default and the honest
+    one.
+
+    Resolved through `sys.modules` with a lazy import fallback and a None when
+    the runtime is not importable, the same contract
+    :func:`_note_emission_index` states above and for the same reason: this
+    module's promise is that a timeline is pure python over the accumulator, so
+    asking the runtime a question must never be what makes recording fail. The
+    seam is a single module-level `def` on the runtime side rather than a pair
+    of attributes on the disposer, so nothing but its name crosses this boundary
+    and `tools/check_runtime_seams.py` can assert it is defined exactly once
+    with the one argument passed here (issue #292)."""
+    mod = sys.modules.get("runtime")
+    if mod is None:
+        try:
+            import runtime as mod  # noqa: PLC0415 — lazy, keeps replay standalone
+        except Exception:  # noqa: BLE001 — recording must not depend on this
+            return None
+    describe = getattr(mod, "revl_durable_inverse", None)
+    if describe is None:
+        return None
+    answer = describe(entry)
+    return answer if isinstance(answer, dict) else None
+
+
 __all__ = [
     "GUARANTEE", "IrreversibleStep", "KINDS", "Recorder", "ReplayError",
     "Step", "Timeline",
@@ -682,18 +714,16 @@ class Timeline:
                 # has no code site to match: `file`/`lineno` above are None).
                 # item 130 §4.9: a disposer that DESCRIBES ITSELF. A live host
                 # listener is closure-only and its record says so; a
-                # subscription resumable from a durable cursor carries the
-                # cursor as a re-issuable call and a referent that outlives the
-                # process, so recovery can name it instead of reporting
-                # unreconstructible residue. Read off the registered inverse,
-                # exactly like the scope below — nothing is inferred from source
-                # text, and a disposer that carries neither is untouched.
-                resource = getattr(entry, "revl_resource", None)
-                if isinstance(resource, str) and resource:
-                    step.detail = {"resource": resource}
-                op = getattr(entry, "revl_inverse_op", None)
-                if isinstance(op, dict):
-                    step.inverse_op = op
+                # subscription resumable from a durable cursor can name a
+                # re-issuable call and a referent that outlives the process, so
+                # recovery can state it instead of reporting unreconstructible
+                # residue. Asked of the registered inverse, exactly like the
+                # scope below — nothing is inferred from source text, and a
+                # disposer that describes nothing is untouched.
+                durable = _durable_inverse(entry)
+                if durable is not None:
+                    step.detail = {"resource": durable["resource"]}
+                    step.inverse_op = durable["op"]
                 # Only KIND_EFFECT consults a scope (the fork rewind's
                 # `_step_back_scoped` and the offline partition in
                 # `revl.branch`), so this is the one kind that must state it.
