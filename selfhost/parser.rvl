@@ -39,7 +39,19 @@ pub type ArmN = { pat: Str, bind: Str, body: Expr }
 type MatchN   = { scrut: Expr, arms: List[ArmN] }
 pub type PartN = { kind: Str, text: Str, e: Expr }
 type TemplN   = { parts: List[PartN] }
-type HoleN    = { ty: Str, msg: Str }
+// item 391: the node carries its LINE and whether a message was written.
+// `_lower_hole` stamps `file`/`line` on every hole node, and the message key is
+// present exactly when the author juxtaposed a string — `hole[Int] ""` is a
+// hole WITH an empty message, which a bare `msg == ""` test cannot tell from no
+// message at all. `HoleN` is public because the lowering reads both.
+pub type HoleN = { ty: Str, msg: Str, hasMsg: Bool, line: Int }
+// item 391: the functional record update `{ base | f = e, … }`. It was read at
+// the TOKEN level by the lowering, which could only reach the two positions a
+// statement reader looks at (a `let`/`var`/`assign` rvalue and a `return`); in
+// ARGUMENT position — `out.push({ p | x = p.x + d })` — there was no node to
+// put it in, so the whole statement holding it failed to read and, through
+// `lir_stmts`, took the rest of its block with it.
+pub type RecUpdN = { base: Expr, upds: List[InitN] }
 
 pub type Expr =
     IntLit(Str)
@@ -63,6 +75,7 @@ pub type Expr =
   | Match(MatchN)
   | Templ(TemplN)
   | Hole(HoleN)
+  | RecUpd(RecUpdN)
   | Bad(Str)
 
 // A parse result: the index after what was consumed, and the node.
@@ -221,6 +234,8 @@ pub fn render(e: Expr) -> Str {
     Templ(t)   => "(templ ".concat(render_parts(t.parts)).concat(")"),
     Hole(h)    => "(hole ".concat(h.ty == "" ? "_" : h.ty).concat(" ")
                     .concat(h.msg == "" ? "_" : h.msg).concat(")"),
+    RecUpd(r)  => "(update ".concat(render(r.base)).concat(" ")
+                    .concat(render_inits(r.upds)).concat(")"),
     Bad(m)     => "(bad)",
   }
 }
@@ -717,6 +732,85 @@ fn record_update_ahead(ts: List[Token], i: Int) -> Bool {
   return false
 }
 
+// `{ base | field = expr, … }`. The BASE is parsed over the tokens BEFORE the
+// separator only: since item 366 made `|` the bitwise-OR operator, parsing from
+// the `{` over the full stream would swallow the separator (and the update
+// clauses) as one bitwise-OR expression. Bounding the base to its own slice is
+// the reference's `_suppress_bor`, which suppresses exactly this leading
+// top-level `|`. An update clause spells `=`, not the literal's `:`, and its
+// name is broadened the same way a literal field's is (`at_record_key`).
+fn p_record_update(ts: List[Token], i: Int, d: Int) -> PR {
+  let close = ru_close(ts, i)
+  if (close == 0 - 1) { return bad("unterminated record update") }
+  let pipe = ru_pipe(ts, i + 1, close - 1)
+  if (pipe == 0 - 1) { return bad("expected | in record update") }
+  let sub = ts.slice(i + 1, pipe)
+  let base = p_expr_d(sub, 0, d + 1)
+  if (is_bad(base.e)) { return base }
+  if (base.i != sub.length()) { return bad("bad record-update base") }
+  let u = p_updates(ts, pipe + 1, close - 1, d + 1)
+  if (!u.ok) { return bad("bad record-update clause") }
+  let b = base.e
+  let xs = u.xs
+  return { i: close, e: RecUpd({ base: b, upds: xs }) }
+}
+
+// The index just past the `}` matching the opener at `i`, or -1.
+fn ru_close(ts: List[Token], i: Int) -> Int {
+  var depth = 0
+  var j = i
+  while (!at(ts, j, "eof")) {
+    let k = tk(ts, j).kind
+    if (k == "{") { depth += 1 }
+    if (k == "}") {
+      depth -= 1
+      if (depth == 0) { return j + 1 }
+    }
+    j += 1
+  }
+  return 0 - 1
+}
+
+// The depth-0 `|` in `[lo, hi)` — the update separator.
+fn ru_pipe(ts: List[Token], lo: Int, hi: Int) -> Int {
+  var depth = 0
+  var j = lo
+  while (j < hi) {
+    let k = tk(ts, j).kind
+    if (k == "{" || k == "[" || k == "(") { depth += 1 }
+    if (k == "}" || k == "]" || k == ")") { depth -= 1 }
+    if (depth == 0 && k == "|") { return j }
+    j += 1
+  }
+  return 0 - 1
+}
+
+fn p_updates(ts: List[Token], lo: Int, hi: Int, d: Int) -> Inits {
+  var j = lo
+  var xs: List[InitN] = []
+  var ok = true
+  var go = true
+  while (go && j < hi) {
+    if (at(ts, j, ",")) { j += 1 }
+    else {
+      if (!at_record_key(ts, j) || !at(ts, j + 1, "=")) { ok = false  go = false }
+      else {
+        let nm = tk(ts, j).text
+        let v = p_expr_d(ts, j + 2, d)
+        if (is_bad(v.e) || v.i <= j + 2) { ok = false  go = false }
+        else {
+          xs = xs.push({ name: nm, value: v.e })
+          j = v.i
+        }
+      }
+    }
+  }
+  let jj = j
+  let fs = xs
+  let fin = ok && xs.length() > 0
+  return { i: jj, xs: fs, ok: fin, msg: "" }
+}
+
 fn p_params(ts: List[Token], i: Int, d: Int) -> Pars {
   var j = i
   var xs = []
@@ -916,14 +1010,17 @@ fn p_primary(ts: List[Token], i: Int, d: Int) -> PR {
       j = ty_.i + 1
     }
     var msg = ""
+    var hasMsg = false
     if (at(ts, j, "string")) {
       msg = tk(ts, j).text
+      hasMsg = true
       j += 1
     }
     let jj = j
     let tt = ty
     let mm = msg
-    return { i: jj, e: Hole({ ty: tt, msg: mm }) }
+    let hm = hasMsg
+    return { i: jj, e: Hole({ ty: tt, msg: mm, hasMsg: hm, line: t.line }) }
   }
   // `if (cond) { a } else { b }` in EXPRESSION position (item 196) — the
   // block-bodied twin of the ternary, lowering to the SAME node, so both
@@ -985,16 +1082,10 @@ fn p_primary(ts: List[Token], i: Int, d: Int) -> PR {
   if (t.kind == "{") {
     // A record LITERAL's top level can never hold a bare `|`: the reference
     // reads a depth-1 `|` as the functional record-update separator
-    // `{base | f = e}` (parser.py `_record_update_ahead`), item 366. This
-    // self-host expression parser does not implement record-update (a separate
-    // feature), so mirror the reference's disambiguation and REFUSE the form
-    // rather than mis-parse the `|` as a bitwise-OR record value. Every such
-    // form the oracle presents is one the reference also rejects (its fuzz/
-    // corpus record fields use `:`, never the update `=`); a parenthesised `|`
-    // stays at depth > 1 and still lexes as bitwise OR inside a record value.
-    if (record_update_ahead(ts, i)) {
-      return bad("record update `{base | f = e}` is not supported here")
-    }
+    // `{base | f = e}` (parser.py `_record_update_ahead`), item 366. A
+    // parenthesised `|` stays at depth > 1 and still lexes as bitwise OR inside
+    // a record value.
+    if (record_update_ahead(ts, i)) { return p_record_update(ts, i, d) }
     let fs = p_inits(ts, i + 1, d + 1)
     if (!fs.ok) { return bad("bad record field") }
     return { i: fs.i, e: Rec({ fields: fs.xs }) }

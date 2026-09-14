@@ -1,0 +1,114 @@
+// The functional record update `{ base | f = e }` in ARGUMENT position
+// (item 391). It was read at the TOKEN level, which could only reach the two
+// positions a statement reader looks at: a `let`/`var`/`assign` rvalue and a
+// `return`. In an argument — `out.push({ p | x = p.x + d })` — there was no node
+// in the shared expression grammar to put it in, so the parse failed, the whole
+// statement holding it lowered to nothing, and `lir_stmts` then gave up on the
+// rest of the block. A loop body holding one lowered as `[]`.
+//
+// The node now lives in the shared `Expr` ADT, so every consumer of it — the
+// admission walkers, the taint scans, the ownership gen, the type inference and
+// the JSON producer — reads the same shape rather than one reader's private
+// token scan.
+//
+// NEGATIVE CONTROLS:
+//   * the STATEMENT-position twin of every argument-position update, which the
+//     token reader already handled and which must stay byte-identical;
+//   * an ordinary record LITERAL (`:`, not `=`) as an argument, in a list and
+//     nested, so the `{` disambiguation is exercised in both directions;
+//   * `(a | b)`, a parenthesised bitwise OR inside a record value: the `|` sits
+//     at depth > 1, so it is still the operator and not an update separator;
+//   * an update over ANOTHER name as the rvalue of a self-rebind, which is not a
+//     self-rebind and must carry no `unique` marker, beside the self-rebinding
+//     one that does.
+
+type P = { x: Int, y: Int }
+
+// the statement-position twin, which already worked
+fn bumped_statement(p: P, d: Int) -> P {
+  let q = { p | x = p.x + d }
+  return q
+}
+
+fn returned_directly(p: P, d: Int) -> P {
+  return { p | x = p.x + d, y = p.y - d }
+}
+
+// THE SHAPE: an update as a call argument
+fn shifted(ps: List[P], d: Int) -> List[P] {
+  var out: List[P] = []
+  for (p of ps) {
+    out = out.push({ p | x = p.x + d })
+  }
+  return out
+}
+
+// an update as an argument to a plain fn call, and as a nested argument
+fn area(p: P) -> Int { return p.x * p.y }
+
+fn area_shifted(p: P, d: Int) -> Int {
+  return area({ p | x = p.x + d })
+}
+
+fn area_twice_shifted(p: P, d: Int) -> Int {
+  return area({ { p | x = p.x + d } | y = p.y + d })
+}
+
+// an update inside a list literal and inside a record literal's field value
+fn pair(p: P, d: Int) -> List[P] {
+  return [{ p | x = p.x + d }, p]
+}
+
+fn wrapped(p: P, d: Int) -> P {
+  let holder = { x: area({ p | y = p.y + d }), y: p.y }
+  return holder
+}
+
+// an update in a ternary branch and in a match arm body
+fn maybe_shifted(p: P, d: Int, on: Bool) -> P {
+  return on ? { p | x = p.x + d } : p
+}
+
+fn from_opt(o: Opt[P], fallback: P, d: Int) -> P {
+  return match o {
+    Some(v) => { v | x = v.x + d },
+    None    => fallback,
+  }
+}
+
+// the record LITERAL controls: `:` fields, as an argument and nested
+fn literal_arg(d: Int) -> Int {
+  return area({ x: d, y: d })
+}
+
+fn literal_nested(d: Int) -> List[P] {
+  return [{ x: d, y: d }, { x: 0, y: 0 }]
+}
+
+// a parenthesised bitwise OR inside a record value: still the operator
+fn masked(a: Int32, b: Int32) -> Int32 {
+  let r = { x: 0, y: 0 }
+  return (a | b)
+}
+
+// the ownership control pair: a self-rebinding spread carries `unique`, an
+// update over ANOTHER name is not a self-rebind and carries none
+fn self_rebound(p: P, n: Int) -> P {
+  var q = p
+  var i = 0
+  while (i < n) {
+    q = { q | x = q.x + 1 }
+    i += 1
+  }
+  return q
+}
+
+fn rebound_from_other(p: P, n: Int) -> P {
+  var q = p
+  var i = 0
+  while (i < n) {
+    q = { p | x = p.x + i }
+    i += 1
+  }
+  return q
+}

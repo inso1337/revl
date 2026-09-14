@@ -1,0 +1,60 @@
+// The `hole` expression (item 391, docs/holes.md) — the IR's one non-executable
+// node, and the one node the self-host lowering answered `{"kind":"bad"}` for.
+//
+// Three things ride on a hole beyond its kind, and all three were missing: the
+// TYPE (stated by `hole[T]`, else pinned from the position's declared type), the
+// PROVENANCE an agent is handed to go and fill the obligation (`file`/`line`),
+// and the author's `message` when one was written. The `Hole` node carried
+// neither the line nor "was a message written", so `file`/`line` could not be
+// produced at all.
+//
+// NEGATIVE CONTROLS, beside every hole:
+//   * the FILLED twin of each shape (the same declaration with a real value),
+//     which must stay an ordinary literal and grow no hole keys;
+//   * a hole with NO message next to one with a message, which is what pins the
+//     `message` key's presence rather than its value;
+//   * `hole[Str] ""`, a hole WITH an empty message — indistinguishable from "no
+//     message" to a bare `msg == ""` test, and the reason the node carries a
+//     separate flag.
+
+// the type comes from the annotated `let`, not from the hole
+fn pinned_by_let() -> Int {
+  let cap: Int = hole "worker pool size"
+  return cap
+}
+
+fn filled_by_let() -> Int {
+  let cap: Int = 4
+  return cap
+}
+
+// the type is stated outright, with and without a message
+fn stated_with_message() -> Str {
+  let name: Str = hole[Str] "the operator's display name"
+  return name
+}
+
+fn stated_without_message() -> Str {
+  let name: Str = hole[Str]
+  return name
+}
+
+fn stated_with_empty_message() -> Str {
+  let name: Str = hole[Str] ""
+  return name
+}
+
+// a hole in RETURN position takes the fn's declared return type
+fn pinned_by_return() -> Int {
+  return hole "the retry budget"
+}
+
+fn filled_return() -> Int {
+  return 3
+}
+
+// a structural declared type, so the pinned spelling is not a bare nominal
+fn pinned_at_a_list() -> List[Str] {
+  let rows: List[Str] = hole "the rows this stage has not been written yet"
+  return rows
+}
