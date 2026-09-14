@@ -43,11 +43,22 @@ return, the peer-is-a-claim header. Three things are new, and only three:
      satisfying item 130's "provider death is a terminal, never silence" AT THE
      ADAPTER because the peer is a claim and cannot be made to promise it.
 
-SCOPE (T1, strictly): JSON-RPC 2.0 only. The REST task paths (`GET
-/v1/tasks/{id}`, `POST /v1/tasks/{id}:cancel`) are a distinct binding and stay
-refused under `long_running` (the terminal REST wire is unchanged). The stream
-sugar (T2) waits on item 130's stream-valued service operation; the ts async
-recolour waits on the async crossing. Neither is built here.
+SCOPE (T1): both JSON-body sub-transports A2A 1.0.0 defines, and only those.
+`rest=False` speaks JSON-RPC 2.0 (`message/send` / `tasks/get` / `tasks/cancel`);
+`rest=True` speaks HTTP+JSON/REST (`POST /v1/message:send`,
+`GET /v1/tasks/{id}`, `POST /v1/tasks/{id}:cancel`) against the same endpoint
+root. The two differ in the envelope and in nothing else: the four ops, the
+handle vocabulary, the compensation, the funnel, the deadline, the redirect
+refusal and the `Untrusted[T]` return are the same code on both. Two
+consequences of the REST envelope are stated where they arise rather than
+papered over — the correlation identity rides ONE WAY (there is no envelope
+`id` to echo), and the peer-authored task id becomes URL path structure, so it
+is percent-encoded whole (`a2a_boundary.py_rest_task_url`).
+
+gRPC is not a sub-transport of either: it is binary framing over HTTP/2, not a
+JSON POST, and it needs its own `through` name. The stream sugar (T2) waits on
+item 130's stream-valued service operation; the ts async recolour waits on the
+async crossing. Neither is built here.
 """
 
 from __future__ import annotations
@@ -161,15 +172,18 @@ def _event_from_result(fault) -> str:
 
 
 def task_body(kind: str, endpoint: str, base_or_skill: str, *,
-              follow_redirects: bool = False, label: str = "") -> str:
-    """One four-op crossing, Python tier, over A2A 1.0.0 JSON-RPC 2.0.
+              follow_redirects: bool = False, label: str = "",
+              rest: bool = False) -> str:
+    """One four-op crossing, Python tier, over A2A 1.0.0.
 
-    `kind` is one of `SUFFIXES`; `endpoint` is the agent's JSON-RPC HTTPS
-    endpoint (the `remote` row's `https://<host>` root, or the card's full
-    `url`); `base_or_skill` is the skill reference a `message/send` rides as
-    `revl.skill`. The body is spliced after a `_args = [...]` line the caller
-    writes, exactly as the terminal wire's `_py_body_a2a` is, so the argument
-    marshalling is identical for every op arity.
+    `kind` is one of `SUFFIXES`; `endpoint` is the agent's HTTPS endpoint (the
+    `remote` row's `https://<host>` root, or the card's full `url`);
+    `base_or_skill` is the skill reference a `message/send` rides as
+    `revl.skill`. `rest` selects the sub-transport: JSON-RPC 2.0 by default,
+    A2A 1.0.0's HTTP+JSON/REST method paths when true. The body is spliced
+    after a `_args = [...]` line the caller writes, exactly as the terminal
+    wire's `_py_body_a2a` is, so the argument marshalling is identical for
+    every op arity.
 
     Withdraw-mode only: `long_running` binds no `on_failure(result)` (the
     compensation and the `TaskEvent` feed are the settlement), so a fault is
@@ -177,6 +191,7 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     """
     if kind not in SUFFIXES:
         raise ValueError(f"unknown task op kind {kind!r}")
+    base = json.dumps(endpoint.rstrip("/"))
     url = json.dumps(endpoint)
     policy = py_policy("a2a", follow=follow_redirects)
     faults = transport_fault_class(label, op_name(base_or_skill, kind))
@@ -186,27 +201,90 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
         tail = f" from {cause}" if cause else ""
         return f"{pad}raise TransportFault({expr}){tail}\n"
 
-    # -- the request each op posts -------------------------------------------
+    # -- what each op binds off `_args` --------------------------------------
     if kind == "start":
         bind = "    _message = _args[0]\n"
-        method, params = "message/send", f'{{"message": {_message_obj(base_or_skill, with_task_id=False)}}}'
     elif kind == "reply":
         bind = "    _task = _args[0]\n    _message = _args[1]\n"
-        method, params = "message/send", f'{{"message": {_message_obj(base_or_skill, with_task_id=True)}}}'
-    elif kind == "poll":
+    else:  # poll / cancel
         bind = "    _task = _args[0]\n"
-        method, params = "tasks/get", '{"id": _task["id"]}'
-    else:  # cancel
-        bind = "    _task = _args[0]\n"
-        method, params = "tasks/cancel", '{"id": _task["id"]}'
 
-    payload = (
-        '{\n'
-        '        "jsonrpc": "2.0",\n'
-        '        "id": _corr,\n'
-        f'        "method": {json.dumps(method)},\n'
-        f'        "params": {params},\n'
-        '    }')
+    # `_start` and `_reply` SEND a Message; `_poll` and `_cancel` name a task.
+    # Only a Message can carry the correlation identity, because only a Message
+    # has metadata to carry it in.
+    sends_message = kind in ("start", "reply")
+    message_obj = _message_obj(base_or_skill, with_task_id=(kind == "reply"))
+    post_headers = ('    _r = _req.Request(_url, data=_payload,\n'
+                    '                      headers={"content-type": '
+                    '"application/json"})\n')
+
+    # Item 439: the boundary's own gates are `a2a_boundary`'s, shared with the
+    # terminal wire and the importer so a peer cannot be read differently
+    # depending on which entry point generated the client. Which of them a wire
+    # can run differs, and only that: an envelope gate needs an envelope.
+    if rest:
+        # A2A 1.0.0 HTTP+JSON/REST: the method is the PATH, the request body is
+        # the bare object and the reply IS the `Task`/`Message` — an A2A error
+        # arrives as a non-2xx status, which the transport branch already faults
+        # on. There is no envelope, so there are no envelope gates: the shape
+        # gate and the task-identity gate are what this wire can check, and
+        # `a2a_boundary` says why the third one is absent rather than emitting a
+        # check that could not fail.
+        correlation = (a2a_boundary.py_correlation(rest=True)
+                       if sends_message else "")
+        if sends_message:
+            wire = "HTTP+JSON/REST `POST " + a2a_boundary.HTTPJSON_SEND_PATH + "`"
+            url_src = ("    _url = " + base + " + "
+                       + json.dumps(a2a_boundary.HTTPJSON_SEND_PATH) + "\n")
+            request = ('    _payload = _json.dumps({"message": ' + message_obj
+                       + '}).encode()\n' + post_headers)
+        elif kind == "poll":
+            wire = "HTTP+JSON/REST `GET /v1/tasks/{id}`"
+            url_src = a2a_boundary.py_rest_task_url(base, fault)
+            request = ('    # `tasks/get` is a READ on this wire: a GET, no body,\n'
+                       '    # and the same redirect refusal as every other op.\n'
+                       '    _r = _req.Request(_url, method="GET")\n')
+        else:  # cancel
+            wire = "HTTP+JSON/REST `POST /v1/tasks/{id}:cancel`"
+            url_src = a2a_boundary.py_rest_task_url(
+                base, fault, verb=a2a_boundary.HTTPJSON_CANCEL_VERB)
+            request = ('    _payload = b"{}"\n' + post_headers)
+        unwrap = (f"        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) "
+                  "as _resp:\n            _result = _json.loads(_resp.read())\n")
+        gates = (a2a_boundary.py_result_gate(fault)
+                 + ("" if kind == "start"
+                    else a2a_boundary.py_task_identity_gate(fault)))
+    else:
+        # A2A 1.0.0 JSON-RPC 2.0: one endpoint, the method in the envelope.
+        correlation = a2a_boundary.py_correlation()
+        if sends_message:
+            method, params = "message/send", '{"message": ' + message_obj + '}'
+        elif kind == "poll":
+            method, params = "tasks/get", '{"id": _task["id"]}'
+        else:  # cancel
+            method, params = "tasks/cancel", '{"id": _task["id"]}'
+        wire = "JSON-RPC 2.0"
+        payload = ('{\n'
+                   '        "jsonrpc": "2.0",\n'
+                   '        "id": _corr,\n'
+                   f'        "method": {json.dumps(method)},\n'
+                   f'        "params": {params},\n'
+                   '    }')
+        url_src = "    _url = " + url + "\n"
+        request = ("    _payload = _json.dumps(" + payload + ").encode()\n"
+                   + post_headers)
+        unwrap = (f"        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) "
+                  "as _resp:\n            _rpc = _json.loads(_resp.read())\n")
+        gates = (a2a_boundary.py_envelope_gates(fault)
+                 + '    if _rpc.get("error"):\n'
+                 + fault(8, '_scrub("a2a: JSON-RPC error %s"'
+                            ' % (_rpc["error"].get("code"),))')
+                 + '    _result = _rpc.get("result")\n'
+                 + a2a_boundary.py_result_gate(fault)
+                 # `_start` mints the task identity; the other three name one
+                 # they already hold, so their reply must describe THAT task.
+                 + ("" if kind == "start"
+                    else a2a_boundary.py_task_identity_gate(fault)))
 
     # -- the result each op reads back ---------------------------------------
     if kind == "start":
@@ -228,33 +306,14 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     else:  # poll / reply
         handle = _event_from_result(fault)
 
-    # Item 439: the boundary's own gates, shared with the terminal wire and
-    # the importer (`a2a_boundary`) so a peer cannot be read differently
-    # depending on which entry point generated the client.
     funnel = a2a_boundary.py_funnel("_args")
-    correlation = a2a_boundary.py_correlation()
-    gates = (a2a_boundary.py_envelope_gates(fault)
-             + '    if _rpc.get("error"):\n'
-             + fault(8, '_scrub("a2a: JSON-RPC error %s"'
-                        ' % (_rpc["error"].get("code"),))')
-             + '    _result = _rpc.get("result")\n'
-             + a2a_boundary.py_result_gate(fault)
-             # `_start` mints the task identity; the other three name one they
-             # already hold, so their reply must describe THAT task.
-             + ("" if kind == "start"
-                else a2a_boundary.py_task_identity_gate(fault)))
+    header = f"    # A2A 1.0.0, {wire}, task op `{kind}`. ONE crossing.\n"
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-{faults}{funnel}{correlation}    # A2A 1.0.0 JSON-RPC 2.0, task op `{kind}`. ONE crossing.
-{bind}    _payload = _json.dumps({payload}).encode()
-    _r = _req.Request({url}, data=_payload,
-                      headers={{"content-type": "application/json"}})
-{policy}    try:
+{faults}{funnel}{correlation}{header}{bind}{url_src}{request}{policy}    try:
         # A crossing that never returns is not a crossing.
-        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:
-            _rpc = _json.loads(_resp.read())
-    except _RedirectRefused:
+{unwrap}    except _RedirectRefused:
         # NOT a transport failure: the peer declining to be the declared
         # endpoint, re-raised so it is never flattened into a feed event.
         raise

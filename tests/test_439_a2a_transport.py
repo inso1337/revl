@@ -756,12 +756,46 @@ def test_long_running_on_the_default_wire_is_refused(tmp_path):
     assert "through a2a" in str(excinfo.value)
 
 
-def test_long_running_over_rest_is_refused(tmp_path):
-    base = LR.replace("through a2a\n", "through a2a_rest\n")
-    _write_lr(tmp_path, base=base)
-    with pytest.raises(RevlError) as excinfo:
-        resolve(tmp_path)
-    assert "a2a_rest" in str(excinfo.value)
+LR_REST = LR.replace("through a2a\n", "through a2a_rest\n")
+
+
+def test_long_running_over_rest_binds_the_rest_task_paths(tmp_path):
+    """A2A 1.0.0 specifies the four Task operations over BOTH of its JSON-body
+    sub-transports, so `long_running` carries on `through a2a_rest` too — over
+    the REST method paths, not a JSON-RPC envelope posted at a REST endpoint."""
+    source = _lr_source(tmp_path, base=LR_REST)
+    assert "/v1/message:send" in source
+    assert '"/v1/tasks/"' in source
+    assert '":cancel"' in source
+    # and NOT the JSON-RPC envelope, which this peer does not speak
+    assert '"method": "tasks/get"' not in source
+    assert '"jsonrpc": "2.0"' not in source
+
+
+def test_the_rest_four_op_provider_compiles(tmp_path):
+    _write_lr(tmp_path, base=LR_REST)
+    assert compile_composition(str(tmp_path / "base.rvl"), str(tmp_path)) is not None
+
+
+def test_the_rest_four_op_header_names_the_rest_paths(tmp_path):
+    """The header an operator reads states the sub-transport and the method
+    paths it actually crosses, and says the correlation identity is one-way
+    here — the check this wire cannot make is not described as if it could."""
+    source = _lr_source(tmp_path, base=LR_REST)
+    head = source[:source.index("component")]
+    assert "over HTTP+JSON/REST, the four-op Task" in head
+    assert "GET /v1/tasks/{id}" in head
+    assert "POST /v1/tasks/{id}:cancel" in head
+    assert "rides ONE WAY on this sub-transport" in head
+
+
+def test_the_jsonrpc_four_ops_are_unchanged(tmp_path):
+    """The non-vacuity control for the pair above: `through a2a` still speaks
+    the JSON-RPC methods and knows nothing of the REST paths."""
+    source = _lr_source(tmp_path)
+    assert '"method": "tasks/get"' in source
+    assert '"method": "tasks/cancel"' in source
+    assert "/v1/tasks/" not in source
 
 
 def test_a_service_not_in_the_four_op_shape_is_refused(tmp_path):
@@ -946,6 +980,216 @@ def test_cancel_posts_tasks_cancel_and_returns_unit():
     out, calls, _Ev = _run_task_body("cancel", reply, {"id": "t-42", "context": None})
     assert out is None
     assert calls[0]["method"] == "tasks/cancel" and calls[0]["params"]["id"] == "t-42"
+
+
+# -- the same four ops over A2A 1.0.0 HTTP+JSON/REST --------------------------
+# A2A 1.0.0 specifies the Task operations over both of its JSON-body
+# sub-transports. The REST wire differs in exactly two observable ways and this
+# block pins both: the method is the PATH (and the reply is the bare
+# `Task`/`Message`, so there is no envelope to gate), and the task id — which is
+# PEER-AUTHORED, it came back from `_start` — becomes URL path structure.
+
+REST_ROOT = "https://agent.example:8443/a2a"
+
+
+def _run_rest_task_body(kind, reply, *args, status=200, label="researcher"):
+    """Execute a synthesized four-op REST `@py` body against a stubbed
+    transport. The reply IS the `Task`/`Message` on this wire, so nothing is
+    wrapped; each call is recorded as `(url, method, body)` because the method
+    and the URL are what the REST binding chooses and a GET carries no body."""
+    body = task_body(kind, REST_ROOT, "research", label=label, rest=True)
+    names = {"start": ["_a"], "poll": ["_a"], "reply": ["_a", "_b"],
+             "cancel": ["_a"]}[kind]
+    sig = ", ".join(names)
+    src = (f"def _crossing({sig}):\n    _args = [{sig}]\n"
+           + textwrap.indent(textwrap.dedent(body), "    "))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    calls = []
+
+    class _Opener:
+        def open(self, request, *a, **k):
+            calls.append((request.full_url, request.get_method(), request.data))
+            if status >= 400:
+                raise urllib.request.HTTPError(
+                    request.full_url, status, "err", {}, io.BytesIO(b""))
+            return _Resp(json.dumps(reply).encode())
+
+    class _Ev:
+        def __init__(self, tag, value=None):
+            self.tag = tag
+            self.value = value
+
+        def __eq__(self, other):
+            return (isinstance(other, _Ev) and other.tag == self.tag
+                    and other.value == self.value)
+
+    ns = {
+        "__name__": "generated",
+        "Status": lambda v: _Ev("Status", v),
+        "Done": lambda v: _Ev("Done", v),
+        "Message": lambda v: _Ev("Message", v),
+        "task_state_from_wire": lambda s: s,
+    }
+    exec(compile(src, "<rest-task-body>", "exec"), ns)
+    original = urllib.request.build_opener
+    urllib.request.build_opener = lambda *h: _Opener()
+    try:
+        return ns["_crossing"](*args), calls, _Ev
+    finally:
+        urllib.request.build_opener = original
+
+
+def test_rest_start_posts_the_bare_message_and_returns_a_task_ref():
+    reply = {"kind": "task", "id": "t-42", "contextId": "c-1",
+             "status": {"state": "working"}}
+    out, calls, _Ev = _run_rest_task_body("start", reply, "survey the field")
+    assert out == {"id": "t-42", "context": "c-1"}
+    url, method, sent = calls[0]
+    assert url == REST_ROOT + "/v1/message:send" and method == "POST"
+    sent = json.loads(sent)
+    # no envelope: the REST wire posts the bare `{ message }`
+    assert "jsonrpc" not in sent and "method" not in sent and "id" not in sent
+    assert sent["message"]["parts"] == [{"kind": "text",
+                                         "text": "survey the field"}]
+    assert sent["message"]["metadata"]["revl.skill"] == "research"
+    # the correlation identity still rides, ONE WAY, for the peer's log and ours
+    assert sent["message"]["metadata"]["revl.correlation"]
+
+
+def test_rest_poll_gets_the_task_path_and_walks_working_to_done():
+    working = {"kind": "task", "status": {"state": "working"}}
+    out, calls, _Ev = _run_rest_task_body(
+        "poll", working, {"id": "t-42", "context": None})
+    assert out == _Ev("Status", "working")
+    url, method, sent = calls[0]
+    assert url == REST_ROOT + "/v1/tasks/t-42"
+    assert method == "GET" and sent is None
+    done = {"kind": "task", "status": {"state": "completed"},
+            "artifacts": [{"parts": [{"kind": "text", "text": "the answer"}]}]}
+    out, _c, _Ev = _run_rest_task_body("poll", done,
+                                       {"id": "t-42", "context": None})
+    assert out == _Ev("Done", "the answer")
+
+
+def test_rest_reply_posts_message_send_with_the_task_id():
+    advanced = {"kind": "task", "status": {"state": "working"}}
+    out, calls, _Ev = _run_rest_task_body(
+        "reply", advanced, {"id": "t-42", "context": None}, "my input")
+    assert out == _Ev("Status", "working")
+    url, method, sent = calls[0]
+    assert url == REST_ROOT + "/v1/message:send" and method == "POST"
+    assert json.loads(sent)["message"]["taskId"] == "t-42"
+
+
+def test_rest_cancel_posts_the_cancel_verb_and_returns_unit():
+    reply = {"kind": "task", "status": {"state": "canceled"}}
+    out, calls, _Ev = _run_rest_task_body(
+        "cancel", reply, {"id": "t-42", "context": None})
+    assert out is None
+    url, method, _sent = calls[0]
+    assert url == REST_ROOT + "/v1/tasks/t-42:cancel" and method == "POST"
+
+
+def test_a_peer_authored_task_id_cannot_steer_the_rest_crossing():
+    """The load-bearing REST refusal. The task id came back from the PEER's own
+    `_start` reply, and on this sub-transport it becomes URL PATH STRUCTURE. A
+    peer that answers `_start` with `../v1/message:send` would otherwise choose
+    which request this composition sends next — same declared endpoint, a
+    different method. The id is percent-encoded WHOLE, so it stays exactly one
+    path segment and the crossing stays on the task path."""
+    hostile = "../v1/message:send"
+    working = {"kind": "task", "status": {"state": "working"}}
+    _out, calls, _Ev = _run_rest_task_body(
+        "poll", working, {"id": hostile, "context": None})
+    url, method, _sent = calls[0]
+    assert url == REST_ROOT + "/v1/tasks/..%2Fv1%2Fmessage%3Asend"
+    assert method == "GET"
+    # the peer did not reach the send path, and did not climb out of the segment
+    assert not url.endswith("/v1/message:send")
+    assert "/../" not in url
+    # the same on the cancel verb, which appends AFTER the encoded segment
+    _out, calls, _Ev = _run_rest_task_body(
+        "cancel", {"kind": "task", "status": {"state": "canceled"}},
+        {"id": hostile, "context": None})
+    assert calls[0][0] == REST_ROOT + "/v1/tasks/..%2Fv1%2Fmessage%3Asend:cancel"
+
+
+@pytest.mark.parametrize("handle", [
+    {"id": "", "context": None},
+    {"id": None, "context": None},
+    {"context": None},
+])
+def test_a_rest_task_handle_with_no_usable_id_faults(handle):
+    """The shape gate in front of the encoder: a handle carrying no usable id
+    refuses as this crossing's own declared fault, not as a `TypeError` no
+    settlement classifies."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_rest_task_body("poll", {"kind": "task"}, handle)
+    fault = excinfo.value
+    assert "no task id" in str(fault)
+    assert getattr(fault, "_revl_transport_fault", False) is True
+
+
+def test_a_rest_task_reply_about_another_task_is_refused():
+    """The envelope gate does not exist on this wire; the TASK identity gate
+    still does, and it is what stops a REST peer answering about another task
+    from being read as a lifecycle event for ours."""
+    other = {"kind": "task", "id": "t-99", "status": {"state": "completed"}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_rest_task_body("poll", other, {"id": "t-42", "context": None})
+    assert "different task" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("reply,needle", [
+    ("[1, 2]", "no result object"),
+    ('"ok"', "no result object"),
+    ("null", "no result object"),
+])
+def test_an_unshaped_rest_reply_refuses_rather_than_being_read(reply, needle):
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_rest_task_body("poll", json.loads(reply),
+                            {"id": "t", "context": None})
+    assert needle in str(excinfo.value)
+
+
+def test_the_rest_four_op_wire_funnels_the_peers_task_state():
+    """F5 at this boundary holds on the REST four-op wire too: a peer that
+    reflects the caller's own argument back as a task `state` cannot put those
+    bytes on our error channel. `_reply` is the op that carries an argument."""
+    echo = {"kind": "nonsense-" + "correlation-bait"}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_rest_task_body("reply", echo, {"id": "t", "context": None},
+                            "correlation-bait")
+    message = str(excinfo.value)
+    assert "correlation-bait" not in message
+    assert "<redacted:arg>" in message
+    assert "unexpected result kind" in message
+
+
+@pytest.mark.parametrize("kind,args", [
+    ("start", ("x",)),
+    ("poll", ({"id": "t", "context": None},)),
+    ("reply", ({"id": "t", "context": None}, "m")),
+    ("cancel", ({"id": "t", "context": None},)),
+])
+def test_a_dead_peer_faults_on_every_rest_crossing(kind, args):
+    """T0 holds identically on the REST sub-transport: every one of the four
+    crossings raises the MARKED `TransportFault` the activation runtime maps to
+    provider withdrawal, carrying the row label and the crossing."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_rest_task_body(kind, {}, *args, status=503)
+    fault = excinfo.value
+    assert getattr(fault, "_revl_transport_fault", False) is True
+    assert fault._revl_row == "researcher"
+    assert fault._revl_crossing == f"research_{kind}"
 
 
 @pytest.mark.parametrize("kind,args", [
