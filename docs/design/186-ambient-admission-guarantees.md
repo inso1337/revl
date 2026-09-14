@@ -147,7 +147,7 @@ Two oracles, one per regime:
 | **3 (now)** | requirement rows on the wire; G3 over the union graph in `link_refusals(pg, seed)`; the `!halted` header; `manifest_wire(ir)` projection; oracle A extended to G3 and pinned in `tests/test_selfhost_lower.py`; gate crate and wasm gate regenerated | none beyond the regen |
 | **wave, part 1** (landed) | `-C` rows, G2 against `M \ R`, the unmet-consumer refusal on both the reference and the native gate, oracle B | the reference wrapper returning the first verdict string |
 | **wave, part 2** | `C=k:T` rows and the handoff compatibility check | the self-host type layer (docs/design/457-selfhost-type-layer.md): `compatible` cannot be ported to `lower.rvl` before the types it compares exist there |
-| **wave, part 3** | 419c closure: line-ordered collecting of ambient refusals against internal ones for the multi-refusal corpus (slice 2 ordered the single-conflict case) | parts 1-2, so the corpus can carry multi-refusal programs |
+| **wave, part 3** (landed) | 419c closure: line-ordered collecting of ambient refusals against internal ones for the multi-refusal corpus (slice 2 ordered the single-conflict case) | part 1; the handoff row of part 2 contributes no verdict yet, so it carries no ordering |
 
 Slice 3 is small, needs no type layer, and closes the one guarantee hole that
 is a soundness gap today (a cycle hidden by the manifest). The wave is deferred
@@ -218,8 +218,7 @@ requirement, and a withdrawal of the consumer itself. It lives in
 `selfhost/lower.rvl` and ride into `crates/revl-gate` with the generated crate.
 
 Still open for the wave: the `C=k:T` handoff row and its compatibility check
-(part 2, still blocked on the self-host type layer), and the 419c refusal
-ordering (part 3).
+(part 2, still blocked on the self-host type layer).
 
 **Route rows, and the routed realm loss (2026-09-14, issue #1036).** The wire
 grows one more kind:
@@ -275,6 +274,65 @@ seed order (`mnames`) is unchanged. A rendered wire therefore reads, in full:
 ```
 StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2;!services;:Kv;:Api
 ```
+
+**Wave part 3, the 419c refusal ordering (2026-09-14).** When an ambient
+admission carries several true refusals, both sides now name the same one.
+
+Item 419c's single-source half landed with the collecting sink: `admit_src`
+reports the minimum by `(line, seq)`, which is the reference's
+`diagnostics[0]`. The ambient half is the same question with one more producer
+in the sink. The unmet-consumer WITHDRAWAL is neither an internal component
+refusal nor a link refusal, and `seq` (the append order) is what breaks a LINE
+TIE. `check_and_lower` collects `_admit_provision_withdrawal` immediately after
+the component loop and AHEAD of `_check_spawn_emission_bounds`,
+`_check_spawn_attenuation` and `_link`, whose head decides the BOOT count. The
+gate appended its withdrawal verdicts after the whole non-link sink instead,
+which put them behind the spawn bounds and the boot count. `collect_nonlink`
+now takes the ambient verdicts as an argument and splices them at the
+reference's own position; `admit_src` passes an empty list, so the
+single-source path is byte-identical.
+
+MEASURED, in the style of the item-391 passes: over 660 generated
+multi-refusal ambient admissions (ten refusal families, pairs and random
+triples/quadruples, each in three line layouts), 12 diverged before the splice
+and 0 after, in exactly two families:
+
+```
+a withdrawal tying with a G4 spawn-emission bound
+  reference  G2|this admission withdraws the running provider of `db` ...
+  gate       G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv2`
+
+a withdrawal tying with the item-350 BOOT count
+  reference  G2|this admission withdraws the running provider of `db` ...
+  gate       BOOT|a composition declares at most one `boot` component, found B1, B2
+```
+
+A tie is not only the degenerate whole-program-on-one-line case the
+single-source corpus uses: two components written on ONE source line tie as
+well, which is the `glued` layout in the test.
+
+Ambient ROUTE (item 162 over a running composition) and ambient G3 needed no
+move. Both are `_link` refusals on both sides, so they already sat at the same
+position relative to everything else, and both are anchored at
+`_link`'s `lines.get(name, 1)` default for an entry the incoming text does not
+declare, which is what `comp_line` returns for the same name.
+
+Failure direction: unchanged, fail-CLOSED. Nothing here changes WHICH
+admissions are refused; every program in the corpus is refused by both sides
+before and after, and only the NAME of the reported refusal moves. The rule
+kept is the one part 1 set when it declined to report a routed loss under the
+withdrawal tag: a refusal must carry the tag that describes the finding, so an
+admission's effect on the running composition is not reported under a spawn
+bound's or a boot count's name because the two landed on one line. The
+non-vacuity controls pin that the withdrawal did not move to the HEAD of the
+sink, only to its own place in it: an earlier-LINE spawn bound still outranks a
+later-line withdrawal, and a component's own G4 still wins a TIE with one,
+because the component loop runs ahead of the withdrawal on both sides.
+
+`tests/test_selfhost_lower.py` carries the oracle-B extension (the corpus in
+three layouts, the two closed families with their bytes, and the controls);
+`selfhost/lower.rvl` carries the in-language twins, which ride into
+`crates/revl-gate` with the generated crate.
 
 ## Relation to the other decisions in this batch
 
