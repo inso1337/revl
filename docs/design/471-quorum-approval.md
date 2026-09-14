@@ -4,18 +4,22 @@ Design note for roadmap item 471 (issue #823). It records what the item asked
 for, what the tree actually had, the slice that lands with this note, and the
 parts of the item that are deliberately left to a later slice.
 
-Status: COMPLETE over three slices for item 471 itself; the identity binding
-of Slice 3 leaves the transport half of issue #979 open (Decision 7). Slice 1 landed with this note (the policy
+Status: COMPLETE over four slices for item 471 itself; the identity binding of
+Slices 3 and 4 leaves the transport half of issue #979 open (Decision 8).
+Slice 1 landed with this note (the policy
 clause, the session-side decision protocol, the durable decision graph, the
 transport property that carries a vote, and the suite that pins every refusal).
 Slice 2 landed the two halves that note left design-only: the operator verbs for
 escalate / revoke / override, each with its own tool, doc surface and verb
 gating, and the admission receipt. Slice 3 (issue #979) binds the IDENTITY of a
 cast to a credential the caller cannot simply assert, so the count is of distinct
-principals rather than of distinct strings. It does not close #979: a caller
-holding N of the operators' credentials still satisfies `require N of M` from one
-session, which is what the per-caller transport in Decision 7 is for. Decision 6 is Slice 2's and
-Decision 7 is Slice 3's; the earlier decisions are Slice 1's and are edited only
+principals rather than of distinct strings. Slice 4 (issue #979) makes that
+credential a SIGNATURE over the question itself rather than a bearer secret, and
+gives it an expiry and a revocation path. Neither closes #979: a caller holding
+N of the operators' keys still satisfies `require N of M` from one session,
+which is what the per-caller transport is for. Decision 6 is Slice 2's,
+Decision 7 is Slice 3's and Decision 8 is Slice 4's; the earlier decisions are
+Slice 1's and are edited only
 where they claimed something a later slice changed. What remains open is named at
 the end, and none of it is item 471: the per-caller authenticated transport is a
 transport item (item 39, item 55).
@@ -518,12 +522,7 @@ will read as two principals because, to this boundary, it was. A credential
 presented once is also visible to anything that can observe the call, and a
 captured one is replayable against any question within the operator's lifetime.
 
-Closing that needs the transport item: per-caller authenticated connections
-(item 39) where each cast arrives on its own connection and is signed over the
-question's binding rather than presented as a shared secret. Until then a
-deployment should read `require N of M` as binding against mistake and against a
-single operator's unaided assertion, and as advisory against an operator who has
-collected the secrets.
+The last sentence is what Decision 8 answers. The rest still stands.
 
 One thing this decision deliberately does NOT do: it does not check the named
 voter's own operator grants. Who may vote is the RULE's approver set, which is
@@ -531,6 +530,122 @@ policy written at the crossing, and adding a second membership test in the
 session would put two authorities on one question that could disagree. An
 operator profile that wants to bound voting by component still does it with
 `may approve on <subject>` against the session's own identity.
+
+## Decision 8: the cast signs the question, and the credential has a lifetime (issue #979)
+
+Decision 7's bearer credential leaves three things open, and this decision takes
+two of them. The third is still the transport's.
+
+### What a bearer credential cannot do
+
+To cast a bearer credential you HAND IT OVER. The session receives the secret,
+the transport carries it, a log may hold it, and the proposer is watching the
+question it opened. So the first honest cast is also the moment the credential
+stops being the operator's alone: anything on that path can afterwards cast as
+that operator, on any question, for as long as the profile carries the digest.
+And because the digest comparison knows nothing about which question it is being
+asked about, a captured secret is replayable in every direction at once:
+another question, another round of the same question, another act (`revoke`,
+`override`), and the vote flipped from `approve` to `deny`.
+
+None of that is a bug in Decision 7. It is what a bearer token is.
+
+### The mechanism
+
+The profile gains `operator <token> sign p256:<hex>` (and `"sign"` in the JSON
+form): the raw `X || Y` hex of an ECDSA P-256 PUBLIC key. The operator keeps the
+private half and never transmits it. The four question-scoped verbs gain
+`asProof`, the raw `R || S` hex of a signature over the question's own binding,
+and `revl.mcp.quorum.cast_message` is the canonical message both sides compute.
+
+The verification primitive is `revl.tee_quote.ecdsa_verify`, already in the tree,
+pure-integer, and differentially tested against OpenSSL in both directions
+(`tests/test_ecdsa_differential.py`). Reusing it rather than adding a dependency
+keeps `pip install revl` dependency-free and keeps ONE ECC implementation in the
+repository to audit.
+
+Every field of the signed message is a replay it refuses. The question fields
+(`requestId`, `hash`, `candidateHash`, `component`, `kind`) stop a proof for one
+crossing answering another. `round` matters on its own: a ticket hash is the
+identity of a QUESTION and repeats verbatim whenever the same crossing is
+attempted again, so without the round a proof from the first asking would answer
+every later asking of the same call. `action` separates a vote from an
+escalation, a revocation and an override, which are different authorities; the
+override is gated by a different operator verb for exactly that reason. `vote`
+stops a captured approval being re-presented as a denial, which is not a lesser
+attack: a denial can close a question outright once the count becomes
+unreachable. `asToken` pins which row the graph is being asked to write, so a
+proof is not transferable to a second name even when the profile hands both the
+same key.
+
+**There is no downgrade.** An operator declares `key` or `sign`, never both (a
+profile declaring both is a parse error), and an operator that declares `sign` is
+cast for by proof or not at all, and `asSecret` against it is refused as
+`unsigned-cast`. If a secret were also accepted, an attacker holding the secret
+would not care that a stronger credential existed, and declaring the key would
+bound nothing.
+
+A malformed or off-curve `sign` key is a PARSE error, for the reason a malformed
+`key` line is: the alternative is a credential nothing can ever match, which the
+operator discovers as an unexplainable refusal in the middle of a quorum.
+
+### The credential's lifetime
+
+A credential with no expiry and no revocation path is a permanent grant, and
+until now that is what every one of them was. `until <timestamp>` bounds the
+window and `operator <token> revoked` ends it now; both apply to either
+credential kind, and both are checked BEFORE the credential is verified. That
+order is the point of revocation: a key is revoked precisely because somebody
+else can still produce valid signatures with it, so "the holder can prove it"
+must not be the question being asked.
+
+A declared window with no clock reading to evaluate it against also refuses. The
+alternative is admitting while unable to say whether the grant had already
+lapsed, which is the state an expiry exists to make impossible. A naive `until`
+timestamp, one with no UTC offset, is a parse error rather than a lifetime
+that moves with the reader's timezone.
+
+Revocation reaches the session's own serve-time binding too. It cannot supply
+one of the N there (on one session the bound operator is the proposer and
+separation of duties excludes it), but it can still escalate, revoke and
+override, which are the acts revocation most needs to reach.
+
+### The principal
+
+A distinct signing key is a distinct principal (`sign:<hash of the public key>`,
+its own domain separator so a digest and a public key cannot collide into one
+id). Two operators issued one key are one principal and supply one vote between
+them, exactly as two sharing one secret are. The `quorum-vote` row's `boundBy`
+gains the value `signature` beside `session` and `credential`, so an audit reads
+what each cast actually rested on. The receipt shape is unchanged and
+`RECEIPT_VERSION` stays 1: this adds no field to the receipt, only a third value
+for one that was already there.
+
+### The honest bound, again, and this one is the residual
+
+What this proves: N counted casts required N distinct credentials, and with
+`sign` those credentials never crossed the wire. A value captured from one cast
+answers that one question and nothing else.
+
+What it does NOT prove, stated as plainly as it can be: a caller holding two of
+the named approvers' PRIVATE KEYS signs twice and satisfies a two-of-M rule from
+one session, and the decision graph honestly reads as two principals because at
+this boundary it was two keys. Signing changes what must be held (a key the
+session never sees rather than a secret it is handed) and what a captured value
+is worth. It does not make the count a count of people.
+
+That is the whole of what remains of #979, and it is the transport's: per-caller
+authenticated connections (item 39) where the N casts arrive on N authenticated
+connections and the count is of the connections. `tests/test_979_signed_cast_
+binding.py::test_one_caller_holding_two_private_keys_still_satisfies_the_quorum`
+pins it as an EXPECTED ADMISSION, so the change that finally closes it reds this
+suite and forces this section to be rewritten rather than quietly left
+overstated.
+
+So a deployment should read `require N of M` as binding against mistake, against
+a single operator's unaided assertion, and, with `sign`, against replay and
+against anything that merely observed an earlier cast. It is advisory against an
+operator who has collected the key material itself.
 
 ## Slice plan
 
@@ -554,11 +669,18 @@ property on `revl_approve` / `revl_revoke` / `revl_escalate` / `revl_override`,
 the derived principal on the `quorum-vote` row, and
 `tests/test_979_quorum_identity_binding.py`. Decision 7.
 
+Slice 4 (issue #979): the `sign` / `until` / `revoked` clauses on the operator
+profile, `cast_message` / `sign_cast` and the signed branch of `resolve_cast`,
+the `asProof` property on the same four verbs, `Session._cast_binding`, the
+`signature` value of `boundBy`, and `tests/test_979_signed_cast_binding.py`.
+Decision 8.
+
 Not item 471, and still open: the per-caller authenticated transport that would
-let a quorum be gathered from several connections rather than several strings on
+let a quorum be gathered from several connections rather than several proofs on
 one. It is a transport item (item 39 and the item 55 verb grammar), and it is
 what would make the count a count of authenticated callers rather than of
-credentials presented on one wire.
+credentials presented on one wire. It is the entire residual of #979 after
+Slice 4.
 
 ## Exit tests
 
@@ -646,6 +768,48 @@ The profile surface is pinned by
 `test_the_profile_carries_a_digest_and_refuses_anything_else`,
 `test_the_json_profile_carries_the_same_credential` and
 `test_two_credentials_for_one_operator_are_refused`.
+
+Slice 4's exits are in `tests/test_979_signed_cast_binding.py`, and again the
+attack is first.
+`test_a_captured_bearer_credential_satisfies_a_later_question` PASSES and is the
+measurement: it drives the Slice-3 configuration and shows a secret captured
+from one question answering another, so the signed cases below are measured
+against a real weakness rather than a strawman. Against the signed form the same
+capture buys nothing:
+`test_a_signed_cast_is_not_replayable_against_another_question`,
+`test_a_vote_proof_does_not_authorize_another_act_on_the_question` over all
+three of escalate / revoke / override (each with its own proof accepted
+afterwards, so the refusal is about the binding and not about the act being
+unreachable),
+`test_a_proof_for_approve_cannot_be_re_presented_as_a_denial`, and
+`test_a_proof_is_not_transferable_to_another_name` (including when the profile
+hands both names one key). The no-downgrade rule is
+`test_a_signed_operator_cannot_be_cast_for_with_a_bearer_secret`, with
+`test_a_bare_name_is_still_refused_against_a_signing_profile`,
+`test_a_proof_against_an_operator_with_no_signing_key_is_refused` and
+`test_a_malformed_or_zero_proof_never_admits` (the all-zero signature and the
+empty string included) holding the fail-closed floor.
+
+The non-vacuity control is
+`test_two_distinct_signed_principals_still_admit_the_crossing`: two named
+approvers with two distinct keys reach the count and admit, with the graph
+recording `boundBy: signature` and two distinct `sign:` principals.
+`test_two_names_sharing_one_signing_key_are_one_principal` is the derived
+principal on the signed path. The credential lifetime is
+`test_an_expired_credential_binds_no_cast`,
+`test_a_credential_still_inside_its_window_counts`,
+`test_a_revoked_credential_binds_no_cast_even_with_a_valid_proof` (a correct,
+current signature, refused anyway) and
+`test_a_revoked_credential_cannot_be_worked_around_by_the_other_verbs`. The
+profile surface is `test_a_profile_may_not_declare_both_credential_kinds`,
+`test_an_unusable_signing_key_is_a_parse_error_not_a_dead_credential` (including
+a well-formed 64 bytes that is not a point on the curve),
+`test_a_naive_until_timestamp_is_refused` and
+`test_the_profile_carries_no_private_key_material`.
+
+And the bound: `test_one_caller_holding_two_private_keys_still_satisfies_the
+_quorum` is an EXPECTED ADMISSION, so the transport work that closes #979 reds
+this file and forces Decision 8's claim to be restated.
 
 ## Relates to
 

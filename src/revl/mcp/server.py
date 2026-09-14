@@ -1119,15 +1119,18 @@ def _tool_approve(arguments: dict) -> dict:
     # issue #979: the credential that PROVES `asToken`. Without it a cast
     # attributed to anyone but the session's own bound operator is refused.
     as_secret = arguments.get("asSecret")
+    # issue #979: the stronger form of the same proof - a signature over this
+    # question's binding rather than a secret handed to the session.
+    as_proof = arguments.get("asProof")
     # item 344: any of `capability`/`uses`/`ttlMs` selects the standing-grant
     # path; a bare `hash` keeps the Slice-1 single-use behaviour byte-for-byte.
     if capability is not None or uses is not None or ttl_ms is not None:
-        if as_token is not None or as_secret is not None \
+        if as_token is not None or as_secret is not None or as_proof is not None \
                 or (vote is not None and vote != "approve"):
             return _session_error(
                 "item 471: a standing grant is minted by ONE operator, so `vote`, "
-                "`asToken` and `asSecret` do not apply to it. Cast a quorum vote "
-                "against a ticket `hash` instead")
+                "`asToken`, `asSecret` and `asProof` do not apply to it. Cast a "
+                "quorum vote against a ticket `hash` instead")
         try:
             return {"ok": True, **SESSION.mint_standing_grant(
                 ticket_hash=ticket_hash, capability=capability,
@@ -1141,7 +1144,7 @@ def _tool_approve(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.approve_ticket(
             ticket_hash, vote=vote or "approve", as_token=as_token,
-            as_secret=as_secret)}
+            as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
         return _session_error(str(error))
 
@@ -2734,9 +2737,9 @@ TOOLS = [
                                            "recorded. Issue #979: the name is not "
                                            "believed on its own: naming anyone "
                                            "but this session's bound operator "
-                                           "requires that operator's `asSecret`, "
-                                           "so N counted votes need N distinct "
-                                           "credentials"},
+                                           "requires that operator's `asSecret` or "
+                                           "`asProof`, so N counted votes need N "
+                                           "distinct credentials"},
                 "asSecret": {"type": "string",
                              "description": "item 471 / issue #979: the vote "
                                             "credential of the operator named by "
@@ -2744,12 +2747,28 @@ TOOLS = [
                                             "digest that operator declares in the "
                                             "operator profile. REQUIRED whenever "
                                             "`asToken` names anyone but this "
-                                            "session's own bound operator: without "
-                                            "it the identity rests on the caller's "
-                                            "word and the cast is refused. Two "
-                                            "casts proving the same credential "
-                                            "count as ONE principal, whatever "
-                                            "names they use"}},
+                                            "session's own bound operator UNLESS "
+                                            "that operator declares a cast-signing "
+                                            "key, in which case `asProof` is the "
+                                            "only thing that binds it. Two casts "
+                                            "proving the same credential count as "
+                                            "ONE principal, whatever names they "
+                                            "use"},
+                "asProof": {"type": "string",
+                            "description": "issue #979: the STRONGER form of the "
+                                           "same proof and the one a deployment "
+                                           "should use. Raw R||S hex of a P-256 "
+                                           "signature over this question's own "
+                                           "binding (requestId, ticket hash, "
+                                           "candidate hash, component, kind, "
+                                           "round, the act, the vote and "
+                                           "`asToken`), made with the private half "
+                                           "of the key the operator profile "
+                                           "declares as `sign p256:<hex>`. Unlike "
+                                           "`asSecret` it puts no reusable secret "
+                                           "on the wire and verifies exactly one "
+                                           "question, so a captured proof is not a "
+                                           "credential for the next one"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_approve,
@@ -2801,7 +2820,8 @@ TOOLS = [
                             "description": "item 471: the operator closing the "
                                            "question when it is not the session's "
                                            "bound operator (issue #979: proven by "
-                                           "`asSecret`, never asserted)"},
+                                           "`asProof` or `asSecret`, never "
+                                           "asserted)"},
                 "asSecret": {"type": "string",
                              "description": "item 471 / issue #979: the vote "
                                             "credential of the operator named by "
@@ -2809,12 +2829,28 @@ TOOLS = [
                                             "digest that operator declares in the "
                                             "operator profile. REQUIRED whenever "
                                             "`asToken` names anyone but this "
-                                            "session's own bound operator: without "
-                                            "it the identity rests on the caller's "
-                                            "word and the cast is refused. Two "
-                                            "casts proving the same credential "
-                                            "count as ONE principal, whatever "
-                                            "names they use"}},
+                                            "session's own bound operator UNLESS "
+                                            "that operator declares a cast-signing "
+                                            "key, in which case `asProof` is the "
+                                            "only thing that binds it. Two casts "
+                                            "proving the same credential count as "
+                                            "ONE principal, whatever names they "
+                                            "use"},
+                "asProof": {"type": "string",
+                            "description": "issue #979: the STRONGER form of the "
+                                           "same proof and the one a deployment "
+                                           "should use. Raw R||S hex of a P-256 "
+                                           "signature over this question's own "
+                                           "binding (requestId, ticket hash, "
+                                           "candidate hash, component, kind, "
+                                           "round, the act, the vote and "
+                                           "`asToken`), made with the private half "
+                                           "of the key the operator profile "
+                                           "declares as `sign p256:<hex>`. Unlike "
+                                           "`asSecret` it puts no reusable secret "
+                                           "on the wire and verifies exactly one "
+                                           "question, so a captured proof is not a "
+                                           "credential for the next one"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_revoke,
@@ -2850,7 +2886,8 @@ TOOLS = [
                                            "the session's bound operator; it must "
                                            "be the proposer or one of the rule's "
                                            "named approvers (issue #979: proven by "
-                                           "`asSecret`, never asserted)"},
+                                           "`asProof` or `asSecret`, never "
+                                           "asserted)"},
                 "asSecret": {"type": "string",
                              "description": "item 471 / issue #979: the vote "
                                             "credential of the operator named by "
@@ -2858,12 +2895,28 @@ TOOLS = [
                                             "digest that operator declares in the "
                                             "operator profile. REQUIRED whenever "
                                             "`asToken` names anyone but this "
-                                            "session's own bound operator: without "
-                                            "it the identity rests on the caller's "
-                                            "word and the cast is refused. Two "
-                                            "casts proving the same credential "
-                                            "count as ONE principal, whatever "
-                                            "names they use"}},
+                                            "session's own bound operator UNLESS "
+                                            "that operator declares a cast-signing "
+                                            "key, in which case `asProof` is the "
+                                            "only thing that binds it. Two casts "
+                                            "proving the same credential count as "
+                                            "ONE principal, whatever names they "
+                                            "use"},
+                "asProof": {"type": "string",
+                            "description": "issue #979: the STRONGER form of the "
+                                           "same proof and the one a deployment "
+                                           "should use. Raw R||S hex of a P-256 "
+                                           "signature over this question's own "
+                                           "binding (requestId, ticket hash, "
+                                           "candidate hash, component, kind, "
+                                           "round, the act, the vote and "
+                                           "`asToken`), made with the private half "
+                                           "of the key the operator profile "
+                                           "declares as `sign p256:<hex>`. Unlike "
+                                           "`asSecret` it puts no reusable secret "
+                                           "on the wire and verifies exactly one "
+                                           "question, so a captured proof is not a "
+                                           "credential for the next one"}},
             "required": ["hash"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
@@ -2904,7 +2957,8 @@ TOOLS = [
                             "description": "the operator exercising the override "
                                            "when it is not the session's bound "
                                            "operator (issue #979: proven by "
-                                           "`asSecret`, never asserted)"},
+                                           "`asProof` or `asSecret`, never "
+                                           "asserted)"},
                 "asSecret": {"type": "string",
                              "description": "item 471 / issue #979: the vote "
                                             "credential of the operator named by "
@@ -2912,12 +2966,28 @@ TOOLS = [
                                             "digest that operator declares in the "
                                             "operator profile. REQUIRED whenever "
                                             "`asToken` names anyone but this "
-                                            "session's own bound operator: without "
-                                            "it the identity rests on the caller's "
-                                            "word and the cast is refused. Two "
-                                            "casts proving the same credential "
-                                            "count as ONE principal, whatever "
-                                            "names they use"}},
+                                            "session's own bound operator UNLESS "
+                                            "that operator declares a cast-signing "
+                                            "key, in which case `asProof` is the "
+                                            "only thing that binds it. Two casts "
+                                            "proving the same credential count as "
+                                            "ONE principal, whatever names they "
+                                            "use"},
+                "asProof": {"type": "string",
+                            "description": "issue #979: the STRONGER form of the "
+                                           "same proof and the one a deployment "
+                                           "should use. Raw R||S hex of a P-256 "
+                                           "signature over this question's own "
+                                           "binding (requestId, ticket hash, "
+                                           "candidate hash, component, kind, "
+                                           "round, the act, the vote and "
+                                           "`asToken`), made with the private half "
+                                           "of the key the operator profile "
+                                           "declares as `sign p256:<hex>`. Unlike "
+                                           "`asSecret` it puts no reusable secret "
+                                           "on the wire and verifies exactly one "
+                                           "question, so a captured proof is not a "
+                                           "credential for the next one"}},
             "required": ["hash", "reason"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
