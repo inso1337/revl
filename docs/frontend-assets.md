@@ -137,7 +137,10 @@ unresolved handle through:
 
 `..` is not refused textually. Containment of the resolved realpath is the whole
 jail, which is what makes the traversal row and the symlink row above come out
-the same way.
+the same way. The jail is the one option B uses, and it inherits option B's one
+residual: a HARD link inside the tree to a file outside it has no separate
+realpath, so containment cannot see through it. That is a property of the
+containment rule, not of this form, and it is the same on both doors.
 
 ### The deploy-time half
 
