@@ -111,6 +111,16 @@ _INTENTIONALLY_LOCAL: dict[str, str] = {
         "DOES execute in CI without it. It exists so a developer with the "
         "runtime somewhere else can point at it. Unset in CI is correct."
     ),
+    "CORDIS_PY": (
+        "An OVERRIDE, not a gate, and the same shape as the two above. "
+        "tests/test_cordis_wheel_records_its_source_revision_1029.py falls back "
+        "to backends/python/.cordis-py, which is exactly where "
+        "`sh backends/python/setup.sh` puts the clone by default "
+        "(CORDIS_PY=\"${CORDIS_PY:-.cordis-py}\"). The frontend-cordis job runs "
+        "setup.sh, so the content leg it guards DOES execute in CI without the "
+        "variable. It exists so a developer with the clone somewhere else can "
+        "point at it. Unset in CI is correct."
+    ),
     "REVL_CONFORMANCE_TS": (
         "Same override shape as REVL_CONFORMANCE_PY: `_ts_backend_dir` falls "
         "back to backends/typescript, and the real gate is whether "
