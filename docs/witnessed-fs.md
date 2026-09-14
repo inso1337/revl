@@ -411,6 +411,56 @@ round-trip, and the confinement refusals; the underlying identity-vs-content
 distinction (a same-bytes inode swap cannot forge the original receipt) is pinned
 in `tests/test_fs_write_receipts.py`.
 
+## The inverse path: the sidecar `restore` installs is the one it captured (#1016)
+
+The section above is the forward half of one family. The inverse half is
+`restore`, and it used to prove two things about the file it installed, that the
+SLOT is a preimage sidecar this workspace owns (`resolve_sidecar`) and that the
+target is confined, and nothing at all about the FILE sitting in that slot.
+
+A snapshot lives in `.revl-fs-preimage` for the whole life of an activation, so
+a same-UID writer inside the workspace had that entire window to rewrite it,
+swap it for another inode, or hardlink it out. The inverse then renamed the
+result over the target and the abort reported a clean, residue-free reversal.
+
+`snapshot_preimage` now captures the sidecar's own identity and the witness
+carries it, so the canonical inverse can check it. Three facts, on the way in
+and again on the installed result:
+
+* the sidecar is a regular file (`EOUTSIDE` otherwise),
+* its link count is 1 (`EMULTILINK`, the same control the forward
+  `open_confined_write` applies to its target),
+* `(dev, ino)` and the captured `mode`/`size`/`mtime_ns`/`ctime_ns` are
+  unchanged since capture (`EIDENTITY`). `(dev, ino)` is what a same-bytes
+  replacement cannot forge; `ctime_ns` is what makes an in-place rewrite visible
+  without re-reading the bytes, and unlike `mtime_ns` an unprivileged writer
+  cannot set it back with `utimes`.
+
+The second pass is there because the rename is by name: re-checking the
+installed result is what closes the window between the first check and the
+syscall, the same way `confirm_landed` re-establishes the forward write's
+identity afterwards rather than trusting its pre-syscall check. It drops
+`ctime_ns`, which the rename itself legitimately bumps.
+
+This is not an opt-in profile and adds no vocabulary. It lives in the canonical
+`restore`, so every caller gets it, and a refusal simply raises, which the
+teardown loop already records as `restore-residue` through the merged residue
+Record schema (item 243 rule 6, docs/design/teardown-contract.md). The failure
+direction is the point: a sidecar that cannot be shown to be the captured one is
+reported as residue rather than silently installed over the target, while an
+honest restore stays exactly as quiet as before. A witness that carries no
+capture, a durable record written before this key existed, keeps the two
+caller-independent checks and still restores; refusing every such replay would
+strand a recoverable WAL.
+
+Both tiers carry it (`install_captured_sidecar` in
+`backends/python/revl_fs_workspace.py`, `installCapturedSidecar` in
+`backends/typescript/revl_fs_ts.ts`, each a listed `syscall-time` entry point).
+`tests/test_fs_restore_sidecar_identity_1016.py` and
+`backends/typescript/tests/fs_restore_sidecar_identity.test.ts` pin the tampered,
+swapped, re-linked and non-regular sidecars, the post-install re-check, and the
+untampered control that must stay silent.
+
 ## Honest caveats
 
 These are load-bearing limits, documented so the reversibility claim is not

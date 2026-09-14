@@ -116,6 +116,14 @@
 // `write`'s preimage witness. `created` is true when the file did not exist
 // before the write (so `restore` deletes it rather than restoring bytes);
 // otherwise `preimage` is the snapshot path to put back.
+//
+// The host record `write` returns carries one further key, `capture`: the
+// preimage sidecar's own identity at snapshot time, which `restore` re-checks
+// before installing it (issue #1016). It is not a declared field because no
+// consumer reads it — it is machinery the inverse owns, exactly like the
+// `receipt` superset `witnessed_write_record` binds on the guarded surface, and
+// a witness that carries neither is still a `WriteWitness` every inverse
+// accepts.
 pub type WriteWitness = { path: Str, preimage: Str, created: Bool }
 
 // `rm`'s witness: the original path and where the target was parked (inside the
@@ -268,9 +276,18 @@ pub extern acquire fn restore(w: WriteWitness) -> Unit undo settled() = @py {
     # restore the preimage snapshot over the target. the rename is atomic and
     # consumes the snapshot (residue-free). idempotent — once the snapshot is
     # gone (already restored), a second replay is a no-op.
+    #
+    # `resolve_sidecar` proves the SLOT is one this workspace owns; it cannot
+    # prove the FILE in it is still the snapshot `write` took. So the install
+    # re-checks the sidecar against the identity captured at snapshot time —
+    # regular file, one link, unchanged `(dev, ino)` and stamps — and re-checks
+    # the installed result afterwards, the inverse-path peer of the forward
+    # path's write receipts and `confirm_landed` (issue #1016). A drifted
+    # sidecar raises, which the teardown loop records as restore-residue; it is
+    # never silently installed over the target. An honest restore is quiet.
     preimage = _ws.resolve_sidecar(w["preimage"], "preimage")
     if _ws.lexists_confined(preimage):
-        _ws.replace_confined(preimage, target)
+        _ws.install_captured_sidecar(preimage, target, w.get("capture"))
     return
 } = @ts ref fsRestore from "../backends/typescript/revl_fs_ts.ts"
 
@@ -353,8 +370,15 @@ pub extern witnessed[fs] fn write(path: Str, contents: Str) -> Result[WriteWitne
         return Err(e.as_error())
     finally:
         _ws.close_handle(handle)
+    # `capture` is the snapshot sidecar's own identity, recorded by
+    # `snapshot_preimage` (issue #1016) so `restore` can prove the file it
+    # installs is the one that was captured. It is WAL-serializable data like
+    # every other witness field, and a SUPERSET key: a reader that does not
+    # know it (an older install replaying this WAL) sees the same three
+    # `WriteWitness` fields it always did, and a witness that carries none (a
+    # record written before this key existed) still restores.
     return Ok({"path": handle.real, "preimage": preimage,
-               "created": handle.created})
+               "created": handle.created, "capture": handle.capture})
 } = @ts ref fsWrite from "../backends/typescript/revl_fs_ts.ts"
 
 // Remove `path` by parking it in the session garbage dir (inside the root).
