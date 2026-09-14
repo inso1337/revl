@@ -48,3 +48,18 @@ component Iterate requires sink: Sink {
     emit sink.write(o)
   }
 }
+
+// item 130 Slice 2 — the derived-stream combinator chain (`map`/`filter`/`take`,
+// §1). Each link is a DERIVED stream owned by the subscription, so the whole
+// chain unwinds off the ONE bracket the `subscribe` registers. A filtered item
+// never reaches the body, a mapped one reaches it transformed, and a spent
+// `take(n)` synthesises the `Closed` terminal the loop ends on — the same three
+// answers the py reference gives for the same source.
+component Chain requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.filter(x => x != "skip").map(x => x + "!").take(2)
+              undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
