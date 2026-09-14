@@ -106,10 +106,17 @@ def test_pyproject_states_the_gate_api_stability_contract():
     assert "docs/gate-dependency-contract.md" in text
 
 
-def test_pyproject_ships_backends_in_wheel():
+def test_pyproject_ships_backends_in_wheel(monkeypatch):
     """The build hook must map the `backends/` tree into `revl/backends`, else
     the installed package cannot resolve any emitter."""
-    sys.path.insert(0, str(_REPO))
+    # `hatch_build.py` sits at the repository root, which is ALSO the working
+    # directory `pytest tests/` runs from, so a bare `sys.path.insert(0, ...)`
+    # here leaves a second working-directory entry at `sys.path[0]` for the rest
+    # of the process. That is the exact state
+    # `tests/test_317_cwd_import_shadowing.py` asserts against -- `drop_cwd_entry()`
+    # removes ONE head entry -- so those tests passed or failed on collection
+    # order (#1021). `monkeypatch.syspath_prepend` undoes itself at teardown.
+    monkeypatch.syspath_prepend(str(_REPO))
     import hatch_build
 
     assert hatch_build.TREES["backends"] == "revl/backends"

@@ -123,3 +123,66 @@ def _isolate_cordis_runtime_state():
         yield
     finally:
         _reset_cordis_globals()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #1021: import state one test leaves behind for the next.
+# --------------------------------------------------------------------------- #
+#
+# Two independent order-dependent failures were found in one day, both of this
+# shape: a test mutates process-global import state, never puts it back, and a
+# later test reads it as if it had run alone.
+#
+#   * `tests/test_packaging.py` prepended the repository root to `sys.path` to
+#     reach `hatch_build.py`. The repository root is ALSO the working directory
+#     `pytest tests/` runs from, so what it left at `sys.path[0]` was a SECOND
+#     working-directory entry. `tests/test_317_cwd_import_shadowing.py` asserts
+#     that `drop_cwd_entry()` leaves no working-directory entry at the head, and
+#     that call removes exactly one -- so two of its tests passed or failed on
+#     collection order. That file is the cwd-shadowing regression test, so a real
+#     regression in import isolation and a test-order artefact looked identical.
+#
+#   * `revl.run._Driver._emit_module` registers a `revl_run_gen{N}` module in
+#     `sys.modules` per generation, numbered from a PER-DRIVER counter, so the
+#     names are shared across every driver in the process. A test that leaves one
+#     behind both inflates the count a later test sees and collides by name with
+#     that later test's own generations, which is what made
+#     `tests/test_issue_541_admit_module_reclaim.py` fail in a multi-file session.
+#
+# Restoring is deliberately silent rather than a failure: the point is that no
+# test can observe another's import state, whatever the collection order, and a
+# leak becomes a local matter for the test that causes it. The non-vacuity anchor
+# is `tests/test_1021_import_state_isolation.py`, which drives both halves in a
+# subprocess with and without this fixture.
+
+_GEN_MODULE_PREFIX = "revl_run_gen"
+
+
+def _generation_modules() -> set:
+    """The `revl_run_gen{N}` entries `_Driver._emit_module` registers."""
+    return {name for name in sys.modules if name.startswith(_GEN_MODULE_PREFIX)}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_import_state():
+    """Give every test the `sys.path` and generation-module namespace it sees
+    when its own file runs alone.
+
+    `sys.path` is restored wholesale, so an entry a test adds to reach a helper
+    (`hatch_build`, a `backends/<tier>` emitter, a bench module) is gone by the
+    time the next test runs. Anything the test imported through that entry stays
+    in `sys.modules`, so a later test in the same file still resolves it.
+
+    Generation modules are only ever REMOVED -- an entry the test registered and
+    did not reclaim is dropped. One a test evicted is left evicted: absent is the
+    state a file sees when it runs alone, and re-pinning a disposed generation
+    would undo exactly the reclaim #541 added.
+    """
+    path_before = list(sys.path)
+    generations_before = _generation_modules()
+    try:
+        yield
+    finally:
+        sys.path[:] = path_before
+        for name in _generation_modules() - generations_before:
+            del sys.modules[name]
