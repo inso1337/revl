@@ -10,6 +10,7 @@ teardown.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,13 @@ class DevWebUI:
     ``add_entry``'s fourth argument is the typed reactive state the component
     publishes (the ``data`` channel Cordis WebUI broadcasts).  ``data`` keeps a
     default so an entry declared before the channel landed still registers.
+
+    ``dev_source`` is an item-459-F1 ASSET HANDLE — the record
+    ``{"path": <root-relative>, "sha256": <hex>}`` an ``asset "..."`` expression
+    lowers to — and this adapter is the deploy-time half of that pin, the same
+    shape ``hostref.plug_refs`` is for a host-module ref: the compiler checked a
+    file, this process opens one, and only re-hashing proves they are the same
+    bytes.  Every arm below refuses; none repairs.
     """
 
     def __init__(self, app_root: Path) -> None:
@@ -50,34 +58,79 @@ class DevWebUI:
         #: ``data`` object; locally it is recorded so the dev run shows the channel
         #: the composition actually opened, not only the asset paths.
         self.channels: list[dict] = []
+        #: the sha256 each registered entry was pinned to at compile time, in
+        #: registration order, so a dev run can state WHICH bytes it served.
+        self.digests: list[str] = []
 
-    def add_entry(self, dev_source: str, prod_manifest: str, routes: list[str],
-                  data: dict | None = None) -> str:
-        rel = Path(dev_source)
+    def add_entry(self, dev_source: object, prod_manifest: str,
+                  routes: list[str], data: dict | None = None) -> str:
+        path, digest = self._handle(dev_source)
+        rel = Path(path)
         if rel.is_absolute() or ".." in rel.parts:
             raise RuntimeError(
-                f"WebUI entry {dev_source!r} must be a relative path under {self.app_root}"
+                f"WebUI entry {path!r} must be a relative path under {self.app_root}"
             )
         source = (self.app_root / rel).resolve()
         try:
             source.relative_to(self.app_root.resolve())
         except ValueError:
             raise RuntimeError(
-                f"WebUI entry {dev_source!r} escapes the app root {self.app_root}"
+                f"WebUI entry {path!r} escapes the app root {self.app_root}"
             ) from None
         if not source.is_file():
             raise RuntimeError(
-                f"WebUI entry {dev_source!r} does not exist under {self.app_root}"
+                f"WebUI entry {path!r} does not exist under {self.app_root}"
+            )
+        actual = hashlib.sha256(source.read_bytes()).hexdigest()
+        if actual != digest:
+            raise RuntimeError(
+                f"WebUI entry {path!r} does not match the sha256 it was compiled "
+                f"against (pinned {digest}, on disk {actual}); recompile the "
+                f"composition or restore the asset"
             )
         if not routes or any(not route.startswith("/") for route in routes):
             raise RuntimeError("WebUI entry routes must be absolute, non-empty paths")
         channel = dict(data or {})
-        self.entries.append((dev_source, prod_manifest, tuple(routes)))
+        self.entries.append((path, prod_manifest, tuple(routes)))
         self.channels.append(channel)
+        self.digests.append(digest)
         fields = ", ".join(sorted(channel)) or "(none)"
-        print(f"  webui  | entry {dev_source} -> {', '.join(routes)}", flush=True)
+        print(f"  webui  | entry {path} -> {', '.join(routes)}", flush=True)
+        print(f"  webui  | asset sha256 {digest[:12]}", flush=True)
         print(f"  webui  | channel state {fields}", flush=True)
-        return dev_source
+        return path
+
+    @staticmethod
+    def _handle(dev_source: object) -> tuple[str, str]:
+        """Read the asset handle, refusing anything that is not one.
+
+        A bare string is refused BY NAME rather than accepted as a path: it is
+        exactly the unresolved, unpinned `Str` that item 459 F1 replaced, and
+        accepting it here would make the pin optional at the one place it is
+        checked.
+        """
+        if isinstance(dev_source, str):
+            raise RuntimeError(
+                f"WebUI entry {dev_source!r} is a bare path string, not an asset "
+                f"handle; declare the parameter as the asset record "
+                f"`{{ path: Str, sha256: Str }}` and pass `asset \"...\"` "
+                f"(item 459)"
+            )
+        if not isinstance(dev_source, dict):
+            raise RuntimeError(
+                f"WebUI entry handle must be the asset record "
+                f"`{{ path: Str, sha256: Str }}`, got {type(dev_source).__name__}"
+            )
+        path = dev_source.get("path")
+        digest = dev_source.get("sha256")
+        if not isinstance(path, str) or not path:
+            raise RuntimeError(
+                "WebUI entry handle has no `path` field (item 459 asset handle)")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise RuntimeError(
+                f"WebUI entry {path!r} carries no sha256 pin; an asset handle "
+                f"without a digest cannot be verified (item 459)")
+        return path, digest
 
 
 def _app_files(args) -> list[str]:

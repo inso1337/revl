@@ -91,6 +91,9 @@ expr      := literal | IDENT | expr '.' IDENT | expr '?.' IDENT | expr '??' expr
              | expr ('&&'|'||') expr | '!' expr | expr '?' expr ':' expr
              | `template ${expr} text`  | 'match' expr '{' (pattern '=>' expr ',')+ '}'
              | 'hole' ['[' type ']'] [STRING]         -- typed obligation (docs/holes.md)
+             | 'asset' STRING                         -- external file, resolved + jailed +
+                                                         sha256-pinned at compile time
+                                                         (docs/frontend-assets.md)
 -- == and === are one operator (canonicalized to == in IR); same for != / !==.
 -- EXCLUDED (named in diagnostics): class, new, this, function, import, export,
 -- typeof, delete, try/catch, ++/--, compound-assign on non-var, async arrows

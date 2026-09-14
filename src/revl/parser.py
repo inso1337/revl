@@ -1559,6 +1559,37 @@ class ExprRecord:
 
 
 @dataclass
+class ExprAsset(ExprRecord):
+    """`asset "<path>"` — a RESOLVED, JAILED, CONTENT-PINNED reference to an
+    external asset file (roadmap item 459 F1, issue #722).
+
+    The node IS an `ExprRecord` (subclass, not a sibling) so nothing downstream
+    needs a new case: after resolution its `fields` hold two string literals and
+    it lowers, types and emits as the ordinary record
+    `{ path: Str, sha256: Str }` on every tier. What the keyword adds is what
+    happens BEFORE lowering, in `revl.hostref.resolve_assets`:
+
+    * `written` (the path as the source wrote it) is resolved relative to the
+      DECLARING `.rvl` file's directory, exactly like a host-module `ref`;
+    * the resolved realpath is JAILED to the root compile tree (or, for an
+      install-origin module, to that one install entry), reusing option B's
+      `_pick_root`/`_contained` rule rather than a second jail;
+    * the file's bytes are read and `sha256` is pinned into the record, so the
+      handle a component hands the host names a specific CONTENT, not a path
+      that may have changed since.
+
+    Every one of those can only REFUSE: a path that does not exist, is not a
+    regular file, is absolute, or resolves outside the jail is a compile error.
+    An `ExprAsset` whose `rel_path` is still `None` has not been through the
+    resolver and must never lower (`hostref.require_resolved_asset`).
+    """
+    written: str = ""
+    rel_path: str | None = None
+    sha256: str | None = None
+    root_kind: str | None = None
+
+
+@dataclass
 class ExprRecordUpdate:
     """`{base | f1 = e1, f2 = e2}` — functional record update.
 
@@ -1975,6 +2006,13 @@ class Program:
     # and a why-trace needs a file for every hop it names (why.py). Keyed by
     # identity like `fn_scopes`, so merging modules preserves it for free.
     decl_files: dict[int, str] = field(default_factory=dict)
+    # item 459 F1: every `asset "..."` expression the parser built, in source
+    # order, INCLUDING the ones inside a `${...}` interpolation (the sub-parser
+    # shares this list). The registry is complete by construction — the only
+    # place an `ExprAsset` is ever created appends to it — so the resolver and
+    # the untrusted-author refusal need no AST walk, and an asset can never be
+    # missed by a walker that forgot a statement kind.
+    assets: list = field(default_factory=list)
 
 
 # `===` -> `==`, `!==` -> `!=`: both spellings, one meaning (structural,
@@ -2073,6 +2111,10 @@ class Parser:
         # `revl.gate` admit. Counting the statement depth here refuses such input
         # at parse time with a diagnostic, well before an emitter is reached.
         self._stmt_nesting = 0
+        # item 459 F1: the `asset "..."` nodes built during this parse (see
+        # `Program.assets`). Shared with every `${...}` sub-parser so an asset
+        # written inside an interpolation is registered too.
+        self._assets: list = []
 
     # -- token helpers
 
@@ -2482,6 +2524,7 @@ class Parser:
                 tok = self.peek()
                 self._reject_foreign_keyword(tok)  # item 384
                 raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
+        program.assets = self._assets  # item 459 F1
         return program
 
     def use_decl(self) -> UseDecl:
@@ -7285,6 +7328,10 @@ class Parser:
             # the interpolation is nested INSIDE this expression: carry the
             # depth across so `${`${`${...}`}`}` is bounded too (issue #310)
             sub._nesting = self._nesting
+            # item 459 F1: share the asset registry, so an `asset "..."` written
+            # inside an interpolation is resolved (and jailed) like any other
+            # rather than reaching lowering unresolved.
+            sub._assets = self._assets
             expr = sub.pure_expr()
             if not sub.at("eof"):
                 extra = sub.peek()
@@ -7620,6 +7667,30 @@ class Parser:
                      "is recorded on the audit's declassify surface (item 249)")
         return ExprEndorse(origin, value, reason, line, approval)
 
+    def _asset_expr(self) -> ExprAsset:
+        """`asset "<path>"` — an external asset file named by path, resolved
+        and content-pinned at compile time (item 459 F1, issue #722).
+
+        The path is a STRING LITERAL and nothing else: an expression there
+        would be a path the compiler cannot resolve, jail or hash, which is
+        exactly the untyped `Str` this form replaces. A template
+        (`asset `${x}``) is refused for the same reason, and named so.
+        """
+        line = self.next().line  # consume `asset`
+        tok = self.peek()
+        if tok.kind != "string":
+            raise self.err(
+                line,
+                "an `asset` path must be a plain string literal, not a "
+                "`${...}` template",
+                hint="the path is resolved, jailed and hashed at COMPILE time, "
+                     "so it cannot depend on a runtime value — write "
+                     '`asset "./frontend/entry.client.ts"` (item 459)')
+        self.next()
+        node = ExprAsset([], line, written=tok.value)
+        self._assets.append(node)
+        return node
+
     def _hole_expr(self) -> ExprHole:
         """`hole` [`[` Type `]`] [StringLit] — docs/holes.md.
 
@@ -7842,6 +7913,15 @@ class Parser:
                 and self.pos + 1 < len(self.toks)
                 and self.peek_ahead(1).kind in ("[", "(")):
             return self._endorse_expr()
+        # item 459 F1: `asset "<path>"` — the resolved, jailed, content-pinned
+        # external asset handle. `asset` is an ident, not a keyword (the lexer
+        # is untouched), intercepted only when a STRING LITERAL is juxtaposed
+        # after it — a shape no other expression has — so a value legitimately
+        # named `asset` is read as a variable exactly as before.
+        if (tok.kind == "ident" and tok.value == "asset"
+                and self.pos + 1 < len(self.toks)
+                and self.peek_ahead(1).kind in ("string", "template")):
+            return self._asset_expr()
         if self._is_name_tok(tok):
             # item 158: a variable *reference* is a name position too — a param
             # (or record field) named with a contextual noun must be usable, and

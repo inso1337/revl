@@ -35,6 +35,7 @@ settlement on the real driver.
 """
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import os
@@ -92,13 +93,22 @@ def test_dev_webui_rejects_escaping_entry_paths():
             host.add_entry(bad, "m", ["/notes"])
 
 
+ENTRY_REL = "frontend/entry.client.ts"
+
+
+def _entry_handle(digest: str | None = None) -> dict:
+    """The item-459-F1 asset handle `asset "./frontend/entry.client.ts"` lowers
+    to: the ROOT-RELATIVE path plus the sha256 of the file's bytes. Computed
+    from the real file, so the pin the dev host verifies is the true one."""
+    real = ROOT / "examples" / "app" / ENTRY_REL
+    return {"path": ENTRY_REL,
+            "sha256": digest or hashlib.sha256(real.read_bytes()).hexdigest()}
+
+
 def test_dev_webui_records_the_declared_entry():
     host = DevWebUI(ROOT / "examples" / "app")
-    assert (
-        host.add_entry("./frontend/entry.client.ts", "m", ["/notes"])
-        == "./frontend/entry.client.ts"
-    )
-    assert host.entries == [("./frontend/entry.client.ts", "m", ("/notes",))]
+    assert host.add_entry(_entry_handle(), "m", ["/notes"]) == ENTRY_REL
+    assert host.entries == [(ENTRY_REL, "m", ("/notes",))]
 
 
 def test_dev_webui_records_the_published_reactive_channel():
@@ -106,9 +116,52 @@ def test_dev_webui_records_the_published_reactive_channel():
     its asset paths, so a dev run shows the channel the composition opened (the
     `data` half of the boundary, item 457 slice S4)."""
     host = DevWebUI(ROOT / "examples" / "app")
-    host.add_entry("./frontend/entry.client.ts", "m", ["/notes"],
+    host.add_entry(_entry_handle(), "m", ["/notes"],
                    {"strategy": "recency", "signals": 0})
     assert host.channels == [{"strategy": "recency", "signals": 0}]
+
+
+# -- the dev host is the deploy-time half of the compile-time pin (item 459 F1)
+
+def test_dev_webui_refuses_an_asset_whose_bytes_changed():
+    """The compiler checked a FILE; `revl dev` opens one. Only re-hashing proves
+    they are the same bytes, so an entry whose digest no longer matches is
+    refused NAMING both digests rather than served."""
+    host = DevWebUI(ROOT / "examples" / "app")
+    stale = _entry_handle("0" * 64)
+    with pytest.raises(RuntimeError) as excinfo:
+        host.add_entry(stale, "m", ["/notes"])
+    assert "does not match the sha256" in str(excinfo.value)
+    assert host.entries == []
+
+
+def test_dev_webui_refuses_a_bare_path_string():
+    """A bare `Str` path is the unresolved, unpinned shape item 459 F1 replaced.
+    It is refused by name, never accepted as a path — otherwise the pin would be
+    optional at the one place it is checked."""
+    host = DevWebUI(ROOT / "examples" / "app")
+    with pytest.raises(RuntimeError) as excinfo:
+        host.add_entry("./frontend/entry.client.ts", "m", ["/notes"])
+    assert "not an asset handle" in str(excinfo.value)
+
+
+def test_dev_webui_refuses_a_handle_with_no_digest():
+    """A handle whose `sha256` is missing or malformed cannot be verified, so it
+    is refused rather than registered unverified."""
+    host = DevWebUI(ROOT / "examples" / "app")
+    with pytest.raises(RuntimeError) as excinfo:
+        host.add_entry({"path": ENTRY_REL}, "m", ["/notes"])
+    assert "no sha256 pin" in str(excinfo.value)
+
+
+def test_dev_webui_refuses_a_handle_escaping_the_app_root():
+    """Path confinement is re-checked at the dev host, not assumed from the
+    compile-time jail: a handle naming a file outside the app root is refused."""
+    host = DevWebUI(ROOT / "examples" / "app")
+    with pytest.raises(RuntimeError) as excinfo:
+        host.add_entry({"path": "../../etc/hosts", "sha256": "0" * 64},
+                       "m", ["/notes"])
+    assert "must be a relative path under" in str(excinfo.value)
 
 
 def test_dev_preflight_names_the_source_line():

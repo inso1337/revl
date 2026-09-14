@@ -535,6 +535,45 @@ def _token_signature(source: str, filename: str):
         return None
 
 
+def _asset_overrides(source: str, filename: str) -> dict[str, str]:
+    """The `asset "<path>"` files *source* names, read from disk for the
+    in-memory compile above (roadmap item 459 F1).
+
+    An in-memory compile resolves an asset through the `sources` map ONLY: it
+    reads nothing from disk, which is what keeps a compile of foreign source
+    from becoming a file-existence and file-digest oracle over the host. The
+    formatter is the opposite situation — it is a CLI holding a real file in a
+    real tree, and the only thing in memory is the candidate text of that one
+    file — so it supplies the asset bytes itself and the headline IR proof keeps
+    running on asset-bearing sources. Without this the gate would fall back to
+    the (weaker, still real) token-identity proof on every such file.
+
+    Best effort by construction: a path that does not parse, does not exist, or
+    is not UTF-8 is simply not supplied, and the compile then refuses it exactly
+    as it would have. `newline=""` because the digest is over the file's bytes
+    and universal-newline translation would rewrite them.
+    """
+    from .parser import Parser
+
+    try:
+        program = Parser(source, filename).parse()
+    except Exception:  # pragma: no cover - a non-parsing source has no assets
+        return {}
+    base = os.path.dirname(os.path.abspath(filename))
+    out: dict[str, str] = {}
+    for node in getattr(program, "assets", None) or []:
+        written = getattr(node, "written", "")
+        if not written or os.path.isabs(written):
+            continue
+        target = os.path.abspath(os.path.join(base, written))
+        try:
+            with open(target, encoding="utf-8", newline="") as handle:
+                out[target] = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return out
+
+
 def _compile_ir(source: str, filename: str):
     """Compile *source* to IR, returning `(ir, None)` or `(None, error)`.
 
@@ -553,8 +592,9 @@ def _compile_ir(source: str, filename: str):
 
     try:
         if filename and os.path.isfile(filename):
-            ir = compile_files([filename],
-                               sources={os.path.abspath(filename): source})
+            overrides = {os.path.abspath(filename): source}
+            overrides.update(_asset_overrides(source, filename))
+            ir = compile_files([filename], sources=overrides)
         else:
             ir = compile_source(source, filename)
         return ir, None
