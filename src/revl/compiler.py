@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from . import parser as _ast
 from ._paths import backends_root, stdlib_root
 from .admit_profile import AdmissionProfile
+from .admit_profile import check_no_asset as _check_no_asset
 from .admit_profile import check_no_extern as _check_no_extern
 from .admit_profile import check_no_host_extern_reach as _check_no_host_extern_reach
 from .admit_profile import enforce_document as _enforce_document
@@ -20,7 +21,9 @@ from .holes import refuse_admission
 from .hostfile import _contained
 from .hostfile import program_has_body_file as _program_has_body_file
 from .hostfile import resolve_body_files as _resolve_body_files
+from .hostref import program_has_asset as _program_has_asset
 from .hostref import program_has_ref as _program_has_ref
+from .hostref import resolve_assets as _resolve_assets
 from .hostref import resolve_refs as _resolve_refs
 from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
@@ -447,6 +450,11 @@ class _ModuleLoader:
             if (is_root and root_profile is not None
                     and root_profile.no_extern):
                 _check_no_extern([program], root_profile)
+                # item 459 F1: an `asset` is a compile-time FILE READ the
+                # admitted source chooses the path of. Structural, before any
+                # asset is resolved or stat'd, so an untrusted author cannot
+                # use the refusal itself as a file-existence oracle.
+                _check_no_asset([program], root_profile)
             # item 396: resolve external host-body files under the jail,
             # replacing each HostBodyFile node with a spliced HostBody. A
             # virtual (in-memory) module resolves ONLY through the sources map
@@ -468,6 +476,16 @@ class _ModuleLoader:
             _resolve_refs(program, os.path.dirname(abs_path),
                           self._root_dirs(), self._sources, virtual is not None,
                           install_root=self._origin_install_root(abs_path))
+            # item 459 F1: resolve every `asset "<path>"` under the SAME jail
+            # the ref above resolves under (same roots, same origin rule, same
+            # containment check). After this each asset node is a record
+            # literal carrying the root-relative path and the sha256 of the
+            # file's bytes; an asset that does not exist, is not a regular
+            # file, or escapes the jail is a compile refusal here.
+            _resolve_assets(program, os.path.dirname(abs_path),
+                            self._root_dirs(), self._sources,
+                            virtual is not None,
+                            install_root=self._origin_install_root(abs_path))
             _check_user_py_body_imports(
                 program, self._origin_install_root(abs_path) is not None
                 or _contained(abs_path, os.path.realpath(str(stdlib_root()))))
@@ -602,6 +620,19 @@ def compile_source(source: str, filename: str = "<string>",
                 hint="a bare source string has no root compile tree to jail the "
                      "ref against, and `compile_source` reads nothing from disk "
                      "(item 396 option B)")
+        # item 459 F1: an `asset "..."` needs a root tree to jail against and a
+        # module directory to resolve relative to; a bare source string has
+        # neither. Refuse structurally (no IO), mirroring the ref refusal above.
+        if _program_has_asset(program):
+            node = program.assets[0]
+            raise RevlError(
+                filename, node.line,
+                f"an external `asset {node.written!r}` needs `modules=` "
+                f"(in-memory sources) or `compile_files` with a real source "
+                f"path",
+                hint="a bare source string has no root compile tree to jail the "
+                     "asset against, and `compile_source` reads nothing from "
+                     "disk (item 459)")
         document = check_and_lower(
             program, taint_strict=bool(profile and profile.taint_strict),
             untrusted=bool(profile and profile.untrusted))

@@ -295,9 +295,16 @@ service NotesConsoleRpc {
 // handle; it is an `emission` because registering a frontend is an outward effect
 // on the host (the shape a `revl import cordis` of `@cordisjs/plugin-webui`
 // recovers, design note 526).
+// A TYPED ASSET HANDLE (roadmap item 459 F1): what `asset "<path>"` produces.
+// The compiler resolves the path against THIS file, refuses it if it escapes the
+// root compile tree or does not name a regular file, and pins the sha256 of its
+// bytes — so the handle states WHICH file (root-relative) and WHICH CONTENT,
+// neither of which a bare `Str` path could.
+type Asset = { path: Str, sha256: Str }
+
 service WebUI {
   emission fn add_entry(
-    dev_source: Str,
+    dev_source: Asset,
     prod_manifest: Str,
     routes: List[Str],
     data: NotesConsoleState,
@@ -315,7 +322,7 @@ service WebUI {
 component NotesConsole requires webui: WebUI, ranking: Ranker
                        provides console: NotesConsoleRpc {
   emit webui.add_entry(
-    "./frontend/entry.client.ts",            // dev-mode Vite/Vue source
+    asset "./frontend/entry.client.ts",      // resolved + jailed + sha256-pinned
     "./frontend/dist/.vite/manifest.json",   // built Vite manifest for production
     ["/notes"],                              // client route this entry owns
     { strategy: ranking.strategy(),          // the typed reactive channel

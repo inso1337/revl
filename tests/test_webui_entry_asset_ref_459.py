@@ -174,9 +174,37 @@ def test_no_globalthis_bridge_anywhere(ts):
 
 def test_asset_paths_passed_as_external_files(ts):
     """The frontend entry and the built Vite manifest are handed to the coeffect
-    as PATHS to external files, exactly Cordis WebUI's `addEntry` shape."""
-    assert "./frontend/entry.client.ts" in ts
+    as external files, exactly Cordis WebUI's `addEntry` shape."""
+    assert '"frontend/entry.client.ts"' in ts
     assert "./dist/.vite/manifest.json" in ts
+
+
+# -- the asset is a typed, jailed, content-pinned handle (item 459 F1) --------
+
+def test_dev_source_is_a_typed_asset_handle_not_a_string(ir):
+    """`add_entry`'s `dev_source` is the declared asset record, not `Str`: a bare
+    path no longer type-checks where the frontend entry is expected."""
+    add_entry = ir["services"]["WebUI"]["methods"]["add_entry"]
+    dev = next(p for p in add_entry["params"] if p["name"] == "dev_source")
+    assert dev["type"] == "Asset"
+    assert ir["types"]["Asset"]["kind"] == "record"
+    # the production manifest is deliberately NOT a handle: it is a build output
+    # that does not exist at compile time, so there is nothing to resolve or pin.
+    prod = next(p for p in add_entry["params"] if p["name"] == "prod_manifest")
+    assert prod["type"] == "Str"
+
+
+def test_the_emitted_handle_pins_the_resolved_path_and_the_real_bytes(ts):
+    """The handle the artifact carries is the RESOLVED, root-relative path plus
+    the sha256 of the file's actual bytes — computed here from the file on disk,
+    so the pin is checked against the truth rather than against itself."""
+    import hashlib
+
+    digest = hashlib.sha256(ENTRY.read_bytes()).hexdigest()
+    assert digest in ts
+    # the path as WRITTEN in the source does not reach the artifact; the
+    # resolved, root-relative one does.
+    assert '"frontend/entry.client.ts"' in ts
 
 
 # -- the anti-pattern is absent ----------------------------------------------

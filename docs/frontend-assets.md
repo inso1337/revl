@@ -38,7 +38,11 @@ The host runtime provides WebUI as an **ambient service**. A component declares 
 first-class coeffect on it and registers its frontend entry at activation,
 naming *files only*:
 
-```revl
+```revl fragment
+// A typed asset handle: what `asset "<path>"` produces. See
+// [The asset handle](#the-asset-handle-asset-path) below.
+type Asset = { path: Str, sha256: Str }
+
 // The reactive state this entry publishes to its page: an ordinary declared
 // record. Its fields are what the browser observes on the synced channel.
 type ConsoleState = { title: Str, ready: Bool }
@@ -56,7 +60,7 @@ service ConsoleRpc {
 // `@cordisjs/plugin-webui` recovers).
 service WebUI {
   emission fn add_entry(
-    dev_source: Str,
+    dev_source: Asset,
     prod_manifest: Str,
     routes: List[Str],
     data: ConsoleState,
@@ -69,7 +73,7 @@ service WebUI {
 // boundary) and the `console` provision on this component's surface.
 component ConsoleUI requires webui: WebUI provides console: ConsoleRpc {
   emit webui.add_entry(
-    "./frontend/entry.client.ts",        // dev-mode source (a Vite/Vue module)
+    asset "./frontend/entry.client.ts",  // dev source: resolved, jailed, pinned
     "./frontend/dist/.vite/manifest.json", // built Vite manifest for production
     ["/console"],                        // client route patterns this entry owns
     { title: "revl console",             // the typed reactive channel
@@ -86,10 +90,67 @@ The four arguments are:
 
 | Argument | What it is |
 |---|---|
-| `dev_source` | the frontend's **entry module** as Vite serves it in dev — a real `.ts` file, not a bundle |
-| `prod_manifest` | the Vite **build manifest** (`build.manifest: true`), which maps entry names to hashed, emitted assets for production |
+| `dev_source` | the frontend's **entry module** as Vite serves it in dev, a real `.ts` file rather than a bundle, named by an `asset` handle so the compiler resolves, jails and content-pins it |
+| `prod_manifest` | the Vite **build manifest** (`build.manifest: true`), which maps entry names to hashed, emitted assets for production. Still a plain `Str`: a manifest is a build output, so there is nothing on disk to resolve or pin when the composition is compiled |
 | `routes` | the client-side route patterns this entry owns, so the host can mount it |
 | `data` | the **typed reactive state** the entry publishes — the object Cordis WebUI broadcasts to the browser, declared as a record instead of an untyped `T` |
+
+## The asset handle: `asset "path"`
+
+`asset "<path>"` is not sugar for a string. The compiler resolves the path,
+refuses it if it leaves the composition, reads the file, and pins the sha256 of
+its bytes. The value is the record `{ path: Str, sha256: Str }`, and `path` is
+the **resolved path relative to the root compile tree**, never the path as the
+source wrote it, so a host joins it to the app root rather than to the declaring
+module.
+
+Three things the bare `Str` could not state are now stated:
+
+| Question | Answered by |
+|---|---|
+| does the file exist, and is it one file? | the resolution refuses a missing path and a non-regular one |
+| does it live inside the app? | the jail: the resolved **realpath** must sit inside the root compile tree |
+| is it still the reviewed bytes? | the pinned sha256, re-checked when the entry is registered |
+
+The resolution is the one [`hostref`](../src/revl/hostref.py) already performs
+for a host module `ref` (design note
+[396](design/396-host-code-file-reference.md), option B): the same
+relative-to-the-declaring-module rule, the same origin-selected root set (item
+410), the same `commonpath`-over-realpath containment. It is reused rather than
+reimplemented, because a second jail is a second thing to get wrong.
+
+### What it refuses, and in which direction
+
+Every arm refuses. None repairs a path, guesses an alternative, or lets an
+unresolved handle through:
+
+| Input | Outcome |
+|---|---|
+| `asset "/etc/hosts"` | refused: absolute path, rejected textually before any filesystem access, so the refusal is not an existence oracle |
+| `asset "./frontend/gone.ts"` | refused: not found |
+| `asset "./frontend"` | refused: not a regular file |
+| `asset "../../secret.txt"` | refused: resolves outside the root compile tree |
+| a symlink inside the tree pointing out of it | refused: containment is checked on the **realpath**, and the refusal names the file actually reached |
+| an asset path written as a `${...}` template | refused at parse: resolution and hashing happen at compile time, so a path that depends on a runtime value is not an asset |
+| an in-memory compile (`compile_source(..., modules=...)`) whose asset was not supplied in the sources map | refused: an in-memory compile reads nothing from disk, so it cannot be turned into a file-existence or file-digest oracle over the host |
+| an `asset` in source admitted under the untrusted-author profile | refused as **G8**: naming a host file to read is not something an untrusted author composes, and the refusal is structural, before the path is resolved |
+
+`..` is not refused textually. Containment of the resolved realpath is the whole
+jail, which is what makes the traversal row and the symlink row above come out
+the same way. The jail is the one option B uses, and it inherits option B's one
+residual: a HARD link inside the tree to a file outside it has no separate
+realpath, so containment cannot see through it. That is a property of the
+containment rule, not of this form, and it is the same on both doors.
+
+### The deploy-time half
+
+The compiler checked a file; the process that serves it opens one. Only
+re-hashing proves they are the same bytes, so the WebUI adapter `revl dev`
+installs re-resolves the handle under the app root and refuses an entry whose
+digest no longer matches, naming both digests. It also refuses a bare path
+string outright: accepting one would make the pin optional at the only place it
+is checked. That is the same split `hostref.plug_refs` has for a host-module
+ref.
 
 ## The typed channel: `revl export client --face webui`
 
@@ -275,11 +336,16 @@ teardown. That refusal is the enforcement behind "external asset paths only".
 This page documents stage 1. The item's design note names the remainder, and
 none of it should be assumed:
 
-- **`dev_source` and `prod_manifest` are bare `Str`, not typed handles.** There
-  is no resolution, no jail, and no content pinning through
-  [`hostref`](../src/revl/hostref.py) yet, so the compiler cannot check that the
-  path exists, stays inside the app root, or refers to the same bytes between
-  builds. Design note 459 calls this **F1**, "the next slice of this item".
+- **`prod_manifest` is still a bare `Str`.** A Vite manifest is a build output:
+  it does not exist when the composition is compiled, so there is nothing to
+  resolve, jail or pin. `dev_source` is a typed handle (design note 459's
+  **F1**, the section [The asset handle](#the-asset-handle-asset-path) above);
+  pinning a built artifact needs a build-time step the toolchain does not have.
+- **The handle has no canonical stdlib name.** Its shape is the record
+  `{ path: Str, sha256: Str }`, and each composition declares that type itself,
+  as `examples/webui-entry/console.rvl` does. The compiler builds the value, so
+  writing the record by hand does not make a path resolved or a digest true, but
+  it does type-check: the record is a shape, not a capability.
 - **No source map from the *insertion site* to the original asset.** Vite's
   `build.sourcemap: true` maps the bundle to *your* sources, which is a
   different claim from mapping the place revl names the asset back to a line.
@@ -292,10 +358,13 @@ The typed reactive-state / RPC channel (design note 459 **F5**, filed as gap
 [design/525-webapp-slice4-frontend.md](design/525-webapp-slice4-frontend.md)) and
 the `--face webui` verb (**F7**) are the section above; both are landed.
 
+`stdlib/template.rvl`'s `Hole.start`/`Hole.end` remain the groundwork for F2,
+and nothing consumes them yet.
+
 The item's stated exit was app-gated on roadmap item 462 (the exemplary web
 application, issue #725, itself gated on item 461 / issue #724). Both have since
 closed, so the external gate has lifted and what remains open against item 459 is
-F1, F2, F3 and F6 above. See [v2.0-roadmap.md](v2.0-roadmap.md) items 459 and
+F2, F3 and F6 above. See [v2.0-roadmap.md](v2.0-roadmap.md) items 459 and
 462.
 
 ## Related

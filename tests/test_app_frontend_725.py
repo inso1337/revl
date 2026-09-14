@@ -191,8 +191,20 @@ def test_no_globalthis_bridge_in_the_artifact(ts):
 
 def test_asset_paths_passed_as_external_files(ts):
     """The frontend entry and the built Vite manifest are handed to the coeffect
-    as PATHS to external files, exactly Cordis WebUI's `addEntry` shape."""
-    assert "./frontend/entry.client.ts" in ts
+    as external files, exactly Cordis WebUI's `addEntry` shape.
+
+    The dev source is an item-459-F1 asset HANDLE: the emitted artifact carries
+    the root-relative resolved path (not the path as written) next to the sha256
+    the compiler pinned, so the artifact states which file AND which bytes. The
+    production manifest is still a plain path — it is a build output that does
+    not exist when the composition is compiled, so there is nothing to pin.
+    """
+    import hashlib
+
+    entry = ROOT / "examples" / "app" / "frontend" / "entry.client.ts"
+    digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+    assert '"frontend/entry.client.ts"' in ts
+    assert digest in ts
     assert "./frontend/dist/.vite/manifest.json" in ts
 
 
