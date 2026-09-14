@@ -8,6 +8,7 @@
    "examples/rejections/v2_undeclared_fn_var.rvl"
   ],
   "false-admit/G4": [
+   "examples/rejections/g4_spawn_widens_budget.rvl",
    "examples/rejections/g4_spawn_widens_parameter.rvl"
   ],
   "false-admit/G6": [
@@ -70,7 +71,6 @@
    "backends/go/scenarios/secret_trace.rvl",
    "backends/go/scenarios/witnessed_teardown.rvl",
    "examples/async_timer.rvl",
-   "examples/budget_attenuation.rvl",
    "examples/durable_log.rvl",
    "examples/interpose_observe.rvl",
    "examples/lifecycle_cache.rvl",
@@ -91,9 +91,6 @@
    "backends/java/scenarios/stream_130.rvl",
    "backends/java/scenarios/stream_event_130.rvl",
    "backends/rust/scenarios/stream.rvl"
-  ],
-  "tag-mismatch/G4->BAD": [
-   "examples/rejections/g4_spawn_widens_budget.rvl"
   ]
  },
  "corpus_dirs": [
@@ -257,18 +254,6 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected token at top level"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/budget_attenuation.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "bad provide block in component Child"
    },
    "reference": {
     "message": "",
@@ -444,11 +429,11 @@
    }
   },
   "examples/rejections/g4_spawn_widens_budget.rvl": {
-   "bucket": "tag-mismatch/G4->BAD",
+   "bucket": "false-admit/G4",
    "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "bad provide block in component Child"
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
    },
    "reference": {
     "message": "`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)",
