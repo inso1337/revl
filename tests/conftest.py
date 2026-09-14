@@ -142,12 +142,23 @@ def _isolate_cordis_runtime_state():
 #     collection order. That file is the cwd-shadowing regression test, so a real
 #     regression in import isolation and a test-order artefact looked identical.
 #
-#   * `revl.run._Driver._emit_module` registers a `revl_run_gen{N}` module in
-#     `sys.modules` per generation, numbered from a PER-DRIVER counter, so the
-#     names are shared across every driver in the process. A test that leaves one
-#     behind both inflates the count a later test sees and collides by name with
-#     that later test's own generations, which is what made
-#     `tests/test_issue_541_admit_module_reclaim.py` fail in a multi-file session.
+#   * `revl.run._Driver._emit_module` registers a `revl_run_gen*` module in
+#     `sys.modules` per generation. The name used to be `revl_run_gen{N}` from a
+#     PER-DRIVER counter, so the names were shared across every driver in the
+#     process: a test that left one behind both inflated the count a later test
+#     saw and COLLIDED by name with that later test's own generations, which is
+#     what made `tests/test_issue_541_admit_module_reclaim.py` fail in a
+#     multi-file session.
+#
+#     #1046 fixed the naming itself -- each driver now owns a distinct slice of
+#     the namespace, so a leftover generation can no longer collide with anyone,
+#     and that test now reads its own driver rather than a process-wide count.
+#     This half of the fixture stays, narrowed in purpose: not collision
+#     containment any more, just the leak hygiene its name says. A generation a
+#     test registers and does not reclaim is still a whole emitted module pinned
+#     in `sys.modules` for the rest of the session, and still something a later
+#     test can enumerate. Dropping it here would only move that cleanup into
+#     every test that drives a composition.
 #
 # Restoring is deliberately silent rather than a failure: the point is that no
 # test can observe another's import state, whatever the collection order, and a
