@@ -31,6 +31,7 @@ from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..taint import REDACTED_SECRET
 from ..typecheck import compatible
+from . import operator as _operator
 from . import quorum as _quorum
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
@@ -7378,6 +7379,12 @@ class Session:
         # to the grant had nothing left of the ceiling to read: the find path
         # admitted a crossing declaring any budget at all, and the revoke path
         # could not match the very spelling the grant was minted with.
+        # issue #1062: the spelling the operator STATED, kept before the
+        # erasure below so the mint can be compared against what the profile
+        # declares this operator may mint. The erased form is a storage
+        # decision, and comparing a declaration against a storage form is how
+        # the gate's own two predicates failed open in the first place.
+        stated_capability = capability
         declared_ceilings: dict = {}
         try:
             minted_cap = cap_order.parse_cap(capability)
@@ -7399,6 +7406,31 @@ class Session:
                 "load a policy with a `requires approval ttl` rule for this "
                 "capability. An unbounded standing grant is refused (item 344 "
                 "keeps consent bounded)")
+
+        # issue #1062 / item 470 stage 3: the mint is itself a refinement of
+        # what the operator's profile DECLARES it may mint. Item 470 stage 1
+        # made the class-(c) gate refine a crossing against what a grant
+        # declared; until this line the grant was minted unchecked, so the
+        # authority was bounded downstream and unbounded upstream — `approve`
+        # alone implied minting over any capability, with any ceiling, for any
+        # number of uses.
+        #
+        # Enforced HERE rather than in `operator.decide`, deliberately. This is
+        # the ONE implementation behind every route to a standing grant (the
+        # public verb, a proactive capability mint, and the item-471 lease
+        # bridge), and it is the first point at which the three things being
+        # bounded are resolved: a mint from an outstanding ticket names no
+        # capability in its arguments, `uses` may come from a `calls=N` in the
+        # spelling or from a lease ticket, and the window may come from a policy
+        # `requires approval ttl` rule. A check at `decide` would see the raw
+        # arguments only, so it would be a partial one an operator could route
+        # around by minting from a ticket, and two enforcement points that can
+        # disagree are worse than one that cannot.
+        mint_refusal = _operator.mint_refusal(
+            getattr(self, "operator", None), capability=stated_capability,
+            uses=uses, ttl_ms=effective_ttl)
+        if mint_refusal is not None:
+            raise SessionError(mint_refusal)
 
         now = self._now_ms()
         request_id = ("grant:" + str(len(self._grants) + 1) + ":" + capability)
@@ -7604,6 +7636,27 @@ class Session:
                 f"({rule.to_dsl()!r}) - an offer already covered by a live rule is "
                 f"refused rather than duplicated (item 251, the apply ambiguity "
                 f"refusal)")
+        # issue #1062: a distilled rule is standing auto-approval too, so the
+        # same declaration bounds it. Without this the `may mint` line would
+        # bound only one of the two ways an operator holding `approve` installs
+        # a standing yes, and the other would be the way around it. Each of the
+        # rule's capability spellings is checked against the profile, with the
+        # rule's own `uses`/`ttl` as the two numeric axes — a rule that bounds
+        # neither is an unbounded standing yes and refuses against any stated
+        # bound, which is the fail-closed direction. The rule's COMPONENT GLOB,
+        # its realm and its admitted taint set are not dimensions a `may mint`
+        # line states, so they are bounded by the `approve` verb's own subject
+        # scoping (`operator._distillation_targets`) exactly as before.
+        for cap in rule.caps:
+            refusal = _operator.mint_refusal(
+                getattr(self, "operator", None), capability=cap,
+                uses=rule.uses, ttl_ms=rule.ttl_ms)
+            if refusal is not None:
+                raise SessionError(
+                    f"{refusal}\n  a distilled rule installs a STANDING "
+                    f"auto-approve, which is the same authority as minting a "
+                    f"standing grant, so it answers to the same `may mint` "
+                    f"declaration (item 251 applies, issue #1062 bounds it)")
         self.sandbox = dataclasses.replace(
             pol, auto_approve_rules=tuple(pol.auto_approve_rules) + (rule,))
         # bind the H1 reviewed set to the offer's blast components (the enumerated
