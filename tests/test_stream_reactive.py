@@ -715,6 +715,66 @@ def test_every_other_tier_refuses_replay_by_name(tier, head):
     assert "§4.5" in msg and "§4.9" in msg and "backend py" in msg
 
 
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
+@pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
+def test_replay_is_refused_beside_a_policy_the_tier_now_lowers(tier, policy):
+    """The combination neither landing had. Since #1042 these tiers LOWER the
+    three non-default §4.4 policies, so a `subscribe` carrying both a lossy
+    policy and a `replay(…)` is the first shape where one half of a head is
+    emittable and the other is not.
+
+    The refusal must win. A tier that lowered the policy and let the backlog
+    fall off the end would emit a program that runs, drops items by a rule the
+    author declared, and never replays anything the author also declared — the
+    run-and-quietly-disagree outcome, with a durability claim as the casualty.
+    Asserted on the message, so a future landing that lowers replay has to
+    delete this test rather than let it pass vacuously."""
+    emit = _tier_emit(tier)
+    head = f"policy {policy} buffer 2 replay(2)"
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_declared("replay(4)", head), "s.rvl"))
+    assert "`replay(…)` is not lowered" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
+@pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
+def test_the_same_head_without_replay_still_lowers_its_policy(tier, policy):
+    """The control for the refusal above, and the thing that keeps it honest:
+    drop the `replay` and the identical head EMITS, carrying the declared policy
+    as the subscription's own argument. So the refusal is about replay, not a
+    blanket refusal of the head it appears in, and this tier's #1042 policy
+    lowering is untouched by this branch."""
+    code = _tier_emit(tier).emit(compile_source(
+        "component C {\n"
+        "  let src = effect Stream.source() undo src.close()\n"
+        f"  let sub = subscribe src policy {policy} buffer 2 undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n", "s.rvl"))
+    # the emitted `subscribe` CALL carrying the policy, per tier's spelling —
+    # not the bare policy word, which also appears in each runtime's own arms.
+    assert (f'"{policy}", 2' in code                       # go / java / rust
+            or f'"{policy}", ctx, {{ capacity: 2 }}' in code)  # ts
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+def test_replay_outranks_the_drain_refusal_on_a_blocking_tier(tier):
+    """Both unlowered halves on one head: a durable cursor (§4.5) and a `drain`
+    window (§8, still refused here because the deterministic clock lives on py).
+
+    Either message would be honest, so the point is that WHICH one is stable.
+    Pinned because the two refusals are about different things — the window is
+    refused for the clock, replay for the recovery surface — and a silent flip
+    would send an author to fix the wrong half of their `subscribe`."""
+    emit = _tier_emit(tier)
+    head = 'policy block buffer 2 drain 10ms replay(from: "orders")'
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(
+            _declared('replay(from: "orders")', head), "s.rvl"))
+    message = str(excinfo.value)
+    assert "`replay(…)` is not lowered" in message
+    assert "`drain` window is not lowered" not in message
+
+
 def test_wasm_still_refuses_a_replay_program_as_a_stream_program():
     emit = _tier_emit("wasm")
     with pytest.raises(emit.EmitError) as excinfo:
