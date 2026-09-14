@@ -25,6 +25,7 @@ import weakref
 from fnmatch import fnmatchcase
 
 from .. import cap_order
+from .. import intent as _intent
 from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
@@ -86,6 +87,95 @@ def _cap_covers(wide: str, narrow: str) -> bool:
                                 cap_order.parse_cap(narrow))
     except cap_order.CapError:
         return False                    # unparseable -> only exact-string matches
+
+
+# -- item 470 Slice 5: the class-(c) approval gate as an intent refinement ----
+#
+# `intent.refine` compares what was DECLARED against what is about to RUN. At
+# this gate the declaration is the operator's standing grant and the action is
+# the class-(c) crossing, which is the one pairing in the tree where a
+# declaration is held ACROSS TIME and a crossing is compared against it at the
+# moment it fires. `_cap_covers` alone cannot be that comparison: it reads one
+# dimension (the resource cone) and reads a parameter bound only on the crossing
+# as "free on the wider side, so it only narrows" (`cap_order.covers`, clause 2),
+# which for a CEILING parameter is backwards — a bigger spend is not a narrowing.
+#
+# The refusal direction here is the kernel's throughout: a crossing that cannot
+# be SHOWN to refine the grant is refused, and refused means the crossing prompts
+# for a single-use approval exactly as an ungranted one does. The gate never
+# admits on a comparison it could not make.
+
+#: The verb both sides of the gate's refinement state.
+#:
+#: `refine`'s verb dimension compares the operation an action performs against
+#: the set a declaration permits, and this gate has no verb vocabulary at all:
+#: item 470 §1 records that the tree's only `verb` notion
+#: (`mcp/operator.TOOL_VERB`) names OPERATOR MANAGEMENT actions (load / swap /
+#: approve), not operations performed at a boundary. So both records state the
+#: same single name and the dimension is the IDENTITY here: it refuses nothing
+#: and admits nothing the other dimensions did not. Stage 3 of the design note
+#: (the operator profile) is what gives this gate a verb worth stating; until
+#: then a sentinel is honest and a guessed verb would be an inferred intent,
+#: which item 470's scope note forbids.
+_GATE_VERB = "cross"
+
+#: Ceiling parameters ERASED from both sides of the gate's refinement.
+#:
+#: `calls` (and its `requests` alias, which `cap_order` resolves onto it) is
+#: METERED at this gate already: `_mint_grant` translates `calls=N` into the
+#: shipped `remainingUses` counter and `_consume_grant` spends it, so one
+#: crossing is one use and the counter IS the comparison of that quantity.
+#: Handing it to the ceiling dimension as well would compare one bound twice by
+#: two different rules and let the weaker comparison win — the exact hazard
+#: `Intent.__post_init__` refuses a ceiling parameter on an object for. Every
+#: other ceiling (`size`, `time`) is metered by NOTHING, which is why it has to
+#: survive as a declaration for the refinement to read.
+_METERED_CEILINGS = frozenset({"calls"})
+
+
+def _gate_ceilings(bounds: dict) -> tuple:
+    """The ceiling pairs this gate's refinement compares: the stated bounds
+    minus the ones `remainingUses` already meters (`_METERED_CEILINGS`)."""
+    return _intent.ceiling_params(
+        {name: value for name, value in bounds.items()
+         if name not in _METERED_CEILINGS})
+
+
+def _gate_intent(capability: str, declared_ceilings: dict | None):
+    """The `Intent` a declaration spelling states at this gate, or None when the
+    spelling does not parse (the caller then falls back to string equality, the
+    same additive fallback `_cap_covers` keeps).
+
+    `declared_ceilings` is what the operator STATED and the mint erased out of
+    the stored valuation (`grant["declaredCeilings"]`); a spelling that still
+    carries its own ceilings (a revoke spelling, which is never erased)
+    contributes them too. Tenancy is unstated (`None`) because this gate holds no
+    realm to compare, and `None` on an intent is the non-constraining side of the
+    kernel's tenant asymmetry, so it refuses nothing."""
+    try:
+        cap = cap_order.parse_cap(capability)
+    except cap_order.CapError:
+        return None
+    obj, own = cap_order.split_ceilings(cap)
+    bounds = dict(own)
+    bounds.update(declared_ceilings or {})
+    return _intent.Intent(obj, frozenset({_GATE_VERB}),
+                          _gate_ceilings(bounds), None)
+
+
+def _gate_action(capability: str, amounts: dict | None = None):
+    """The `Action` a crossing spelling presents at this gate, or None when the
+    spelling does not parse. The object valuation and the spend come off ONE
+    spelling through `cap_order.split_ceilings`, the same split `Intent.from_cap`
+    and `Action.from_cap` route through, so the declaration and the crossing
+    cannot drift apart by being read twice."""
+    try:
+        cap = cap_order.parse_cap(capability)
+    except cap_order.CapError:
+        return None
+    obj, own = cap_order.split_ceilings(cap)
+    bounds = dict(own) if amounts is None else dict(amounts)
+    return _intent.Action(obj, _GATE_VERB, _gate_ceilings(bounds), None)
 
 
 def _collect_lease_requests(ir: dict) -> list:
@@ -6680,8 +6770,62 @@ class Session:
         on token T — bit-for-bit today's identity comparison for the parameter-
         free grants every existing test mints. Grant liveness (component /
         candidate hash / session / expiry / uses) is a separate axis, applied by
-        `_live_grant_for` at the crossing."""
-        return _cap_covers(grant["capability"], capability)
+        `_live_grant_for` at the crossing.
+
+        Item 470 stage 1 routes the comparison through `intent.refine`: the grant
+        is the DECLARATION (its resource cone plus the ceilings it stated, which
+        `_mint_grant` now keeps on `declaredCeilings` instead of dropping) and the
+        crossing is the ACTION (its own cone plus the amounts its spelling
+        states). Additive by construction — a grant that states no ceiling and a
+        crossing that spends none reduce to exactly the `covers` comparison above,
+        so every parameter-free and resource-only grant is bit-for-bit unchanged.
+
+        What it ADDS is the ceiling dimension this gate never had. `covers` reads
+        a parameter bound only on the crossing as free on the wider side, so a
+        grant admitted a crossing declaring ANY budget at all, including one the
+        grant never bounded; and an unmetered ceiling the operator DID state
+        (`size`, `time`) was erased at mint and bounded nothing afterwards. Both
+        now go through `refine`'s fail-closed reading: a spend above a stated
+        bound is refused, a spend on a bound the grant does not state is refused,
+        and a crossing that states no amount against a stated bound is refused.
+        Refused here means the crossing PROMPTS single-use, never that it is
+        admitted, so the finding is always "this crossing cannot be shown to
+        refine the grant"."""
+        return self._grant_refusal(grant, capability) is None
+
+    def _grant_refusal(self, grant: dict, capability: str):
+        """WHY this grant does not cover that class-(c) crossing, as the
+        `intent.Refusal` naming the declaration it violated — or None when it
+        does cover it. `_grant_covers` is this predicate read as a bool.
+
+        Item 470's exit criterion is a refusal that names THE INTENT IT
+        VIOLATED, and a bare predicate cannot carry one, so the finding is built
+        here and the boolean is derived from it rather than the other way round.
+        The refusal's `message`/`hint` render in `errors.RevlError`'s shape, so a
+        later stage surfaces it on the prompt without a second convention."""
+        declared = _gate_intent(grant["capability"],
+                                grant.get("declaredCeilings"))
+        crossing = _gate_action(capability)
+        if declared is None or crossing is None:
+            # a spelling `cap_order` cannot parse is never widened into a match:
+            # only a byte-identical one, exactly `_cap_covers`' fallback.
+            if grant["capability"] == capability:
+                return None
+            return _intent.Refusal(
+                violation=_intent.Violation.EXTRA_CAPABILITY,
+                dimension="object",
+                declared=grant["capability"],
+                requested=capability,
+                message=(
+                    f"the crossing capability {capability!r} and the standing "
+                    f"grant {grant['capability']!r} cannot both be read as "
+                    f"points in the capability order, so neither covers the "
+                    f"other"),
+                hint=(
+                    "an uncomparable spelling is not a covered one (fail "
+                    "closed): the crossing prompts for a single-use approval "
+                    "instead (roadmap item 470)"))
+        return _intent.refine(declared, crossing)
 
     def _grant_within(self, grant: dict, capability: str) -> bool:
         """The grant-coverage predicate for the REVOKE path
@@ -6693,8 +6837,45 @@ class Session:
         bare token retires the whole cone (every narrow grant under it). This is
         the SAME `covers` relation as `_grant_covers`, evaluated with the roles
         swapped, so find and revoke agree on the parameter-free grants exactly as
-        the identity predicate did before Slice 2."""
-        return _cap_covers(capability, grant["capability"])
+        the identity predicate did before Slice 2.
+
+        Item 470 stage 1 routes this through `intent.refine` too, with the revoke
+        SPELLING as the declaration and the GRANT as the thing compared against
+        it, and with one projection the find path does not make: a ceiling the
+        revoke spelling does not state is dropped from the grant's side rather
+        than read as a spend on an unstated bound. The direction is why. On the
+        find path an unproven crossing must refuse, and refusing prompts. On the
+        revoke path a grant that is NOT retired keeps auto-approving, so a revoke
+        that retires fewer grants than the operator named is the fail-OPEN
+        direction, and `refine`'s "an amount against an unstated bound is
+        refused" rule would have made a bare-token revoke retire nothing at all
+        the moment a grant stated a ceiling.
+
+        That is also the hole this closes. `_mint_grant` erases a ceiling out of
+        the stored spelling, and this predicate compared the operator's revoke
+        spelling UNERASED, so `covers` demanded a parameter the stored grant could
+        no longer bind: revoking `model.complete(calls=3)` — the very spelling the
+        grant was minted with — matched nothing and returned a typed
+        `{"revoked": true, "count": 0}` while the grant went on auto-approving.
+        The change is monotone: a revoke spelling that states no ceiling compares
+        exactly as before, and one that does can now only retire MORE."""
+        spelling = _gate_intent(capability, None)
+        if spelling is None:
+            return capability == grant["capability"]
+        try:
+            held_cap = cap_order.parse_cap(grant["capability"])
+        except cap_order.CapError:
+            return capability == grant["capability"]
+        _obj, own = cap_order.split_ceilings(held_cap)
+        bounds = dict(own)
+        bounds.update(grant.get("declaredCeilings") or {})
+        stated = dict(spelling.ceilings)
+        held = _gate_action(
+            grant["capability"],
+            {name: value for name, value in bounds.items() if name in stated})
+        if held is None:
+            return capability == grant["capability"]
+        return _intent.refine(spelling, held) is None
 
     def _live_grant_for(self, capability: str, ticket: dict, now: int):
         """The first LIVE standing grant covering `capability` under this ticket's
@@ -7189,6 +7370,15 @@ class Session:
         # explicit `uses`); other ceiling kinds (`size`) are dropped from the
         # cone with no counter — revl does not meter bytes (scoped to a later
         # item), so an unmetered ceiling leaves boundedness to `uses`/`ttl`.
+        #
+        # item 470 stage 1: erasure is a storage decision, not a decision to
+        # FORGET. What the operator stated is kept verbatim on the entry
+        # (`declaredCeilings`) so the grant stays a DECLARATION the gate can
+        # compare a crossing against later. Without it the two predicates keyed
+        # to the grant had nothing left of the ceiling to read: the find path
+        # admitted a crossing declaring any budget at all, and the revoke path
+        # could not match the very spelling the grant was minted with.
+        declared_ceilings: dict = {}
         try:
             minted_cap = cap_order.parse_cap(capability)
         except cap_order.CapError:
@@ -7200,6 +7390,7 @@ class Session:
                 uses = calls if uses is None else min(uses, calls)
             if ceilings:
                 capability = resource_cap.to_str()
+                declared_ceilings = dict(ceilings)
 
         effective_ttl = ttl_ms if ttl_ms is not None else policy_ttl
         if uses is None and effective_ttl is None:
@@ -7225,6 +7416,11 @@ class Session:
             "consumed": False,
             "revoked": False,               # item 379: set by an early revoke
             "lease": is_lease,              # item 294: minted from an effect lease
+            # item 470 stage 1: the ceilings the mint spelling STATED, kept after
+            # the erasure above so the grant is still a declaration at the
+            # crossing. `calls` is here for the audit and is not re-compared
+            # (`_METERED_CEILINGS`): `remainingUses` above already meters it.
+            "declaredCeilings": declared_ceilings,
         }
         self._grants.append(entry)
         tk = self._tickets.get(ticket_hash) if ticket_hash else None
