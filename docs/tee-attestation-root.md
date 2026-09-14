@@ -222,9 +222,6 @@ byte shows that a broken forgery is caught, not that a well-made one is.
 * **The vendor DER chain.** Consuming Intel's PCK certificate chain and AMD's KDS
   VCEK certificate directly, in place of the one-hop `PlatformEndorsement`. Same
   root, different bytes carrying the endorsement.
-* **Result receipts in the composition call path.** `tee_attestation` can sign and
-  check a `ResultReceipt`; wiring it into the call path, and refusing an unattested
-  result there, is the offer-side gate's mirror image and is not landed.
 * **An attestation root in the `lawful_retry` dispatcher.** The dispatcher has
   nowhere to hold a root, so a replay of an attested base slot refuses rather than
   choosing an attested peer. That is the safe direction and it is pinned by a test,
@@ -237,5 +234,7 @@ byte shows that a broken forgery is caught, not that a well-made one is.
 ## Relates to
 
 * `docs/attested-tee-placement.md`: the placement-file spelling of the demand.
+* `docs/attested-result-delivery.md`: the delivery half, which this root also
+  binds through the evidence's `receipt_key_id`.
 * `docs/design/475-attested-tee-placement.md`: the design note and its deferrals.
 * `docs/design/461-verifiable-private-peer-pool.md`: the peer pool this extends.

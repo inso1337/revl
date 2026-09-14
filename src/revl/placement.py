@@ -76,7 +76,7 @@ from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
-from .peer_offer import PlacementSlot, offer_eligible
+from .peer_offer import PlacementSlot, offer_admission, offer_eligible
 from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
 from .tee_attestation import TeeError, TeeRequirement
 from .typecheck import FN_HEAD, parse_type
@@ -852,6 +852,46 @@ def admit_peer_for_process(placement: dict, process: str, offer: dict, *,
                           root=root,
                           require_hardware_root=require_hardware_root,
                           tee_ledger=tee_ledger, now=now)
+
+
+def admit_run_for_process(placement: dict, process: str, offer: dict, *,
+                          offer_key, enclave_key, attester_key=None, root=None,
+                          require_hardware_root: bool = False,
+                          require_bound_receipt_key: bool = True,
+                          tee_ledger=None,
+                          now=None, nonce: str | None = None,
+                          ):
+    """:func:`admit_peer_for_process` for the whole run: the admission AND the
+    path the process's result must come back through. Returns
+    `(run, reason)` with a `peer_offer.AttestedRun` on admission and `(None,
+    reason)` on every refusal, never raising.
+
+    The admission is the same verdict `admit_peer_for_process` reaches, through
+    the same `offer_eligible` gates, so the two surfaces cannot disagree about
+    whether a peer may run the process. What this adds is the OTHER half of what
+    the placement demanded: an attested placement receives a result only when
+    that result arrives with a receipt signed by the admitted enclave and bound
+    to the challenge this admission issued. `run.accept_result(receipt, result)`
+    is that gate, and it is the only way a result enters.
+
+    A process with no `[attest]` table is refused rather than handed a run. The
+    delivery gate is meaningful only because an attestation decided which peer,
+    which bundle and which challenge the result is bound to; a process that
+    demanded nothing has none of those, and returning a run that checked a
+    result against nothing would read as a guarantee this surface cannot make.
+    `admit_peer_for_process` is the entry point for those."""
+    slot, problem = process_placement_slot(placement, process, nonce=nonce)
+    if problem:
+        return None, f"placement: {problem}"
+    if slot is None:
+        return None, (f"placement: process {process!r} declares no `[attest]` "
+                      f"table, so it demands no attested TEE and there is no "
+                      f"attested run for a result to arrive through")
+    return offer_admission(offer, slot, offer_key, enclave_key=enclave_key,
+                           attester_key=attester_key, root=root,
+                           require_hardware_root=require_hardware_root,
+                           require_bound_receipt_key=require_bound_receipt_key,
+                           tee_ledger=tee_ledger, now=now)
 
 
 def tee_placement_diagnostic(placement: dict, *, nonce: str | None = None) -> str | None:
