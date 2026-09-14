@@ -345,12 +345,24 @@ and there is no second delivery path for a replayed item to diverge on. A cursor
 advances on CONSUMPTION rather than delivery, so the position a restart resumes
 from never claims an item the consumer did not take, and a cursor the provider
 has already trimmed past is a `Faulted("replay gap")` terminal rather than a
-silent skip. ts, go, rust and java REFUSE `replay` by name, at the declaration
-as well as at the request: the half of the claim that makes it worth anything is
-§4.9's, which is the WAL's, and a tier that delivered a backlog while calling it
-durable would run and quietly disagree with the reference. The `"replay"` slot
-§5 reserves is threaded only when declared, so a replay-free program's IR is
-byte-identical.
+silent skip.
+
+ts, go, rust and java REFUSE `replay` by name, at the declaration as well as at
+the request: the half of the claim that makes it worth anything is §4.9's, which
+is the WAL's, and a tier that delivered a backlog while calling it durable would
+run and quietly disagree with the reference. This is now the only unlowered half
+a `subscribe` head can carry alongside lowered ones — those tiers lower the
+combinator chain and all four §4.4 policies — so the refusal has to WIN over a
+head it shares. A tier that lowered the policy and let the backlog fall off the
+end would emit a program that runs, drops items by the rule the author declared,
+and never replays what the author also declared. Where a head carries both an
+unlowered `replay` and an unlowered `drain` window, the replay refusal is the
+one reported: the two are refused for different reasons, the window for the
+deterministic clock and replay for the recovery surface, and a stable answer is
+what keeps an author from fixing the wrong half.
+
+The `"replay"` slot §5 reserves is threaded only when declared, so a replay-free
+program's IR is byte-identical.
 
 ### 4.6 The minimal six-tier protocol — subscribe / next / close, wasm REFUSES
 
