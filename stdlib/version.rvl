@@ -72,6 +72,13 @@
 //        whether a name is present. Same reason as item 104: a vendored copy
 //        under the old stamp still carries the case-sensitive reader, so its
 //        author's `header_value` lookups silently miss wire-spelled names.
+//   9 -> adds the insertion-site source map to `stdlib/template.rvl` (roadmap
+//        item 459 F2, issue #722): `Pos`, `Segment`, `Rendered`, `position_at`,
+//        `render_mapped` and `source_map`. `render` is now `render_mapped` with
+//        the map dropped, so the two doors cannot answer different text for one
+//        template. Same reason as item 104: a vendored copy under the old stamp
+//        has the hole OFFSETS and no way to turn them into a line, so its author
+//        is still hand-counting newlines to say where a rendered byte came from.
 pub fn stdlib_version() -> Str {
-  return "8"
+  return "9"
 }

@@ -42,16 +42,15 @@
 //   * control flow and autoescaping inheritance (`{{if}}`, `{{for}}`, blocks,
 //     includes, layout inheritance, a per-directory default context). Every
 //     hole is explicit and flat.
-//   * source positions. A hole records its `start`/`end` offsets into the
-//     template so a later stage can map generated output back to it, but
-//     nothing maps those offsets to line/column yet. The unit is CODEPOINTS,
-//     not bytes: it is the same unit `length`/`slice`/`charCodeAt` use, so
-//     `tpl.slice(hole.start, hole.end)` is exactly the hole text on every tier.
-//     A reader who assumes bytes and writes `tpl.encode()[start:end]` silently
-//     mis-slices every template with a non-ASCII character before a hole.
 //   * HTML parsing. Context is INTENT, written by the template author (`html` /
 //     `script` / `uri`), not inferred from markup. The module never tries to
 //     find where an attribute or a script element ends.
+//   * source positions in BYTES. A hole's `start`/`end` and every `Pos` this
+//     module reports count CODEPOINTS, the same unit `length`/`slice`/
+//     `charCodeAt` use, so `tpl.slice(hole.start, hole.end)` is exactly the
+//     hole text on every tier. A reader who assumes bytes and writes
+//     `tpl.encode()[start:end]` silently mis-slices every template with a
+//     non-ASCII character before a hole.
 //
 // --------------------------------------------------------------- the surface
 // `scan` finds the holes, `escape_for` is the context -> escaper table applied
@@ -60,7 +59,15 @@
 // value is expected, and a hole name is validated as an identifier, so an
 // expression, a filter or a directive cannot be smuggled through the slot.
 //
-// Checked in tests/test_template_stdlib.py.
+// `render_mapped` is `render` plus the INSERTION-SITE MAP (design note 459
+// F2): where every span of the output came from in the template, as 0-based
+// line/column, and `source_map` writes that as a Source Map v3 document. This
+// is what `Hole.start`/`Hole.end` were recorded for. `render` is `render_mapped`
+// with the map dropped rather than a second renderer, so the two doors cannot
+// answer different text for one template.
+//
+// Checked in tests/test_template_stdlib.py and, for the map,
+// tests/test_template_source_map_459.py.
 
 use "stdlib/escape.rvl" { escape_html, escape_js, escape_uri }
 
@@ -282,10 +289,162 @@ fn duplicate_name(values: List[Binding]) -> Str {
   return ""
 }
 
+
+// ------------------------------------------------------- source positions (F2)
+//
+// Stage 1 recorded `Hole.start`/`Hole.end` so that "a later stage can map
+// generated output back to [the site]". This is that stage (design note 459
+// **F2**). It is a DIFFERENT claim from a bundler's source map: Vite's
+// `build.sourcemap` maps a bundle back to the frontend sources it was built
+// from, which says nothing about where in a TEMPLATE a rendered byte came
+// from. What is missing, and what this section supplies, is the map from a
+// position in the RENDERED OUTPUT back to the insertion site that produced it.
+//
+// Units. `Pos.line` and `Pos.column` are both 0-BASED, which is the Source Map
+// v3 unit, not the 1-based line an editor shows: the numbers here are fed to a
+// map, and converting on the way in would mean converting back on the way out.
+// A column counts CODEPOINTS, the same unit `length`/`slice`/`charCodeAt` and
+// `Hole.start`/`Hole.end` use. Source Map v3 specifies UTF-16 code units, so
+// the two agree for every character in the BMP and diverge only for an astral
+// character (above U+FFFF) BEFORE a mapping on the same line.
+//
+// Line breaks are U+000A only. A bare U+000D is an ordinary character and does
+// not start a line, which is what `String.split("\n")` and every source-map
+// generator do; in a CRLF template the CR is the last COLUMN of the line.
+
+// A 0-based line and column. See the unit note above.
+pub type Pos = { line: Int, column: Int }
+
+// One mapped span of rendered output. `generated` is where the span starts in
+// the rendered text and `original` is the template position it came from.
+// `kind` is `"text"` for template text copied through unchanged (in which case
+// `name` and `context` are "") and `"value"` for an escaped value inserted at a
+// hole, whose `original` is the position of the hole's `{{`.
+//
+// A span that crosses a generated line break is recorded once PER GENERATED
+// LINE, because a source map addresses a line and a column and cannot describe
+// a span that spills over the end of one. So every generated line that has any
+// character carries a segment at column 0.
+pub type Segment = { kind: Str, name: Str, context: Str, generated: Pos, original: Pos }
+
+// A render plus its map. `template` is the template the render was made FROM,
+// carried so that `source_map` cannot be handed a different one than the
+// segments were computed against, and so the emitted map can inline the
+// original. `text` is exactly what `render` returns.
+pub type Rendered = { template: Str, text: Str, segments: List[Segment] }
+
+// The 0-based line/column of codepoint `offset` in `tpl`, refusing an offset
+// outside it. `offset == tpl.length()` is IN range: it is the position one past
+// the last character, which is where `Hole.end` of a trailing hole points. The
+// refusal is a refusal and not a clamp: silently answering the last position
+// for an offset that is not in the template would turn a caller's arithmetic
+// bug into a map that points confidently at the wrong place.
+pub fn position_at(tpl: Str, offset: Int) -> Result[Pos, TemplateError] {
+  let n = tpl.length()
+  if (offset < 0 || offset > n) {
+    var m = "offset "
+    m = m.concat(offset.to_str())
+    m = m.concat(" is outside the template, which is ")
+    m = m.concat(n.to_str())
+    m = m.concat(" codepoints long; a position is 0..length inclusive")
+    return Err(err("offset-out-of-range", m))
+  }
+  return Ok(position_of(tpl, offset))
+}
+
+// The unchecked half of `position_at`. Private: every internal caller passes an
+// offset `scan` produced, which is in range by construction, and the public
+// door is the one that refuses.
+fn position_of(tpl: Str, offset: Int) -> Pos {
+  var line = 0
+  var column = 0
+  var i = 0
+  while (i < offset) {
+    if (tpl.charCodeAt(i) == 10) {
+      line += 1
+      column = 0
+    } else {
+      column += 1
+    }
+    i += 1
+  }
+  return { line: line, column: column }
+}
+
 // ----------------------------------------------------------------- rendering
 
-fn render_holes(tpl: Str, holes: List[Hole], values: List[Binding]) -> Result[Str, TemplateError] {
-  var out = ""
+// The render in progress: the output so far, the segments so far, and the
+// generated line/column the NEXT emitted character lands on. It is one record
+// rather than four mutable locals so that the copied-text emitter can be
+// written once and used both between holes and for the tail.
+type Cursor = { out: Str, segs: List[Segment], line: Int, column: Int }
+
+// Copy `tpl[from, to)` through unchanged and record it. Because the text is
+// copied verbatim, a generated line break inside it is a template line break at
+// the same place, so the original position after the k-th break is k lines
+// below where the span started, at column 0.
+fn emit_text(cur: Cursor, tpl: Str, from: Int, to: Int) -> Cursor {
+  if (to <= from) { return cur }
+  let at = position_of(tpl, from)
+  var segs = cur.segs.push({ kind: "text", name: "", context: "",
+                             generated: { line: cur.line, column: cur.column },
+                             original: at })
+  var line = cur.line
+  var column = cur.column
+  var oline = at.line
+  var i = from
+  while (i < to) {
+    if (tpl.charCodeAt(i) == 10) {
+      line += 1
+      column = 0
+      oline += 1
+      // a break on the LAST character opens no generated line of its own; the
+      // next span starts that line and records its own segment there.
+      if (i + 1 < to) {
+        segs = segs.push({ kind: "text", name: "", context: "",
+                           generated: { line: line, column: 0 },
+                           original: { line: oline, column: 0 } })
+      }
+    } else {
+      column += 1
+    }
+    i += 1
+  }
+  return { out: cur.out.concat(tpl.slice(from, to)), segs: segs,
+           line: line, column: column }
+}
+
+// Insert the already-escaped `value` for hole `h`, whose `{{` is at `at`. Every
+// generated line the value covers maps to the SAME insertion site: the value is
+// one crossing, and a line break inside it is a line break in the DATA, which
+// has no position in the template.
+fn emit_value(cur: Cursor, value: Str, h: Hole, at: Pos) -> Cursor {
+  var segs = cur.segs.push({ kind: "value", name: h.name, context: h.context,
+                             generated: { line: cur.line, column: cur.column },
+                             original: at })
+  var line = cur.line
+  var column = cur.column
+  var i = 0
+  let n = value.length()
+  while (i < n) {
+    if (value.charCodeAt(i) == 10) {
+      line += 1
+      column = 0
+      if (i + 1 < n) {
+        segs = segs.push({ kind: "value", name: h.name, context: h.context,
+                           generated: { line: line, column: 0 },
+                           original: at })
+      }
+    } else {
+      column += 1
+    }
+    i += 1
+  }
+  return { out: cur.out.concat(value), segs: segs, line: line, column: column }
+}
+
+fn render_holes(tpl: Str, holes: List[Hole], values: List[Binding]) -> Result[Rendered, TemplateError] {
+  var cur: Cursor = { out: "", segs: [], line: 0, column: 0 }
   var pos = 0
   for (h of holes) {
     if (!has_binding(values, h.name)) {
@@ -299,19 +458,20 @@ fn render_holes(tpl: Str, holes: List[Hole], values: List[Binding]) -> Result[St
       um = um.concat(" is no empty default")
       return Err(err("unknown-binding", um))
     }
-    out = out.concat(tpl.slice(pos, h.start))
-    out = out.concat(escape_known(h.context, binding_of(values, h.name)))
+    cur = emit_text(cur, tpl, pos, h.start)
+    cur = emit_value(cur, escape_known(h.context, binding_of(values, h.name)),
+                     h, position_of(tpl, h.start))
     pos = h.end
   }
-  out = out.concat(tpl.slice(pos, tpl.length()))
-  return Ok(out)
+  cur = emit_text(cur, tpl, pos, tpl.length())
+  return Ok({ template: tpl, text: cur.out, segments: cur.segs })
 }
 
-// Render `tpl` with `values`, escaping every inserted value for the context its
-// hole declared. Refusals, in order: a duplicate binding name, then any hole
-// `scan` rejects, then a hole with no bound value. The template text between
-// holes is copied through unchanged.
-pub fn render(tpl: Str, values: List[Binding]) -> Result[Str, TemplateError] {
+// Render `tpl` with `values` AND map the result back to the template: the
+// rendered text, plus one segment per generated line per span saying which
+// template position that line started from and, for an inserted value, which
+// hole it came from. Refusals are exactly `render`'s, in the same order.
+pub fn render_mapped(tpl: Str, values: List[Binding]) -> Result[Rendered, TemplateError] {
   let dup = duplicate_name(values)
   if (dup != "") {
     var dm = "value `"
@@ -326,6 +486,21 @@ pub fn render(tpl: Str, values: List[Binding]) -> Result[Str, TemplateError] {
   }
 }
 
+// Render `tpl` with `values`, escaping every inserted value for the context its
+// hole declared. Refusals, in order: a duplicate binding name, then any hole
+// `scan` rejects, then a hole with no bound value. The template text between
+// holes is copied through unchanged.
+//
+// This is `render_mapped` with the map dropped, rather than a second renderer,
+// so the mapped and unmapped doors cannot answer different text for one
+// template.
+pub fn render(tpl: Str, values: List[Binding]) -> Result[Str, TemplateError] {
+  return match render_mapped(tpl, values) {
+    Ok(r) => Ok(r.text),
+    Err(e) => Err(e),
+  }
+}
+
 // Render a template whose holes all take the same single value. Convenience for
 // the one-slot case (a bootstrap payload injected next to an entry, a URL built
 // from one request field); `render` is the general door.
@@ -333,4 +508,142 @@ pub fn render_one(tpl: Str, name: Str, value: Str) -> Result[Str, TemplateError]
   var one: List[Binding] = []
   one = one.push({ name: name, value: value })
   return render(tpl, one)
+}
+
+// ------------------------------------------------------------- the source map
+//
+// Source Map v3: a JSON object whose `mappings` field is a run of `;`-separated
+// generated LINES, each a run of `,`-separated segments, each segment a run of
+// base64 VLQ fields. The fields are
+//   [generated column, source index, original line, original column, name index]
+// and every one of them is a DELTA from the previous segment's value for the
+// same field. The generated column resets at each line; the other four carry
+// across lines. A 4-field segment names no symbol; the 5th field is the index
+// into `names`.
+
+// The base64 alphabet, in index order, as a literal rather than arithmetic over
+// `charCodeAt` ranges: there is nothing to get subtly wrong in a table.
+fn base64_alphabet() -> Str {
+  return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+}
+
+// Signed base64 VLQ. The sign is the LOW bit and the value is shifted up one;
+// each digit carries 5 bits with bit 6 (value 32) set when another digit
+// follows. revl has no bitwise operators, so the shift and the mask are spelled
+// with `div_floor`/`mod` exactly as `stdlib/escape.rvl`'s UTF-8 encoder is.
+fn vlq(value: Int) -> Str {
+  var rest = value * 2
+  if (value < 0) { rest = (0 - value) * 2 + 1 }
+  var out = ""
+  var more = true
+  let alphabet = base64_alphabet()
+  while (more) {
+    var digit = rest.mod(32)
+    rest = rest.div_floor(32)
+    if (rest > 0) {
+      digit = digit + 32
+    } else {
+      more = false
+    }
+    out = out.concat(alphabet.slice(digit, digit + 1))
+  }
+  return out
+}
+
+// Index of `name` in `names`, or a negative value when it is absent.
+fn name_index(names: List[Str], name: Str) -> Int {
+  var i = 0
+  for (s of names) {
+    if (s == name) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
+// The `names` array: every hole name a value segment carries, deduplicated,
+// in first-appearance order. Private: `segments` already answers "which holes
+// did this render insert", and a second public door onto the same list is a
+// second thing to keep in step.
+fn mapped_names(segments: List[Segment]) -> List[Str] {
+  var names: List[Str] = []
+  for (s of segments) {
+    if (s.kind == "value" && name_index(names, s.name) < 0) {
+      names = names.push(s.name)
+    }
+  }
+  return names
+}
+
+// The `mappings` field for `segments`. The segments arrive in generated order,
+// which is the order `render_mapped` records them in.
+fn mappings_of(segments: List[Segment], names: List[Str]) -> Str {
+  var out = ""
+  var gline = 0
+  var gcolumn = 0
+  var oline = 0
+  var ocolumn = 0
+  var nindex = 0
+  var first_on_line = true
+  for (s of segments) {
+    while (gline < s.generated.line) {
+      out = out.concat(";")
+      gline += 1
+      gcolumn = 0
+      first_on_line = true
+    }
+    if (!first_on_line) { out = out.concat(",") }
+    first_on_line = false
+    out = out.concat(vlq(s.generated.column - gcolumn))
+    gcolumn = s.generated.column
+    // one source, so its index is 0 and the delta is always 0.
+    out = out.concat(vlq(0))
+    out = out.concat(vlq(s.original.line - oline))
+    oline = s.original.line
+    out = out.concat(vlq(s.original.column - ocolumn))
+    ocolumn = s.original.column
+    if (s.kind == "value") {
+      let ni = name_index(names, s.name)
+      out = out.concat(vlq(ni - nindex))
+      nindex = ni
+    }
+  }
+  return out
+}
+
+// A Source Map v3 document for `rendered`, as JSON. `source` is the name the
+// template is known by (the path of the asset it was loaded from, or any label
+// when it has no path) and `generated_file` names the output the map describes.
+//
+// The template text is inlined as `sourcesContent`, and that is not an
+// optimisation: this module never reads a template from disk, so `source` may
+// well name nothing a devtools client can fetch. A map whose only source cannot
+// be loaded shows the consumer an empty pane.
+//
+// The JSON strings are escaped with `escape_js`, the module's existing script
+// escaper, rather than a second escaper written here: its output is already a
+// valid JSON string body (it escapes `\`, `"`, the C0 controls and U+2028/9),
+// and the three extra characters it encodes, `< > &`, are the ones that would
+// otherwise let an inlined template break out of a `<script>` element carrying
+// the map. `mappings` needs no escaping: base64, `,` and `;` only.
+pub fn source_map(rendered: Rendered, source: Str, generated_file: Str) -> Str {
+  let names = mapped_names(rendered.segments)
+  var out = "{\"version\":3,\"file\":\""
+  out = out.concat(escape_js(generated_file))
+  out = out.concat("\",\"sources\":[\"")
+  out = out.concat(escape_js(source))
+  out = out.concat("\"],\"sourcesContent\":[\"")
+  out = out.concat(escape_js(rendered.template))
+  out = out.concat("\"],\"names\":[")
+  var first = true
+  for (nm of names) {
+    if (!first) { out = out.concat(",") }
+    first = false
+    out = out.concat("\"")
+    out = out.concat(escape_js(nm))
+    out = out.concat("\"")
+  }
+  out = out.concat("],\"mappings\":\"")
+  out = out.concat(mappings_of(rendered.segments, names))
+  out = out.concat("\"}")
+  return out
 }
