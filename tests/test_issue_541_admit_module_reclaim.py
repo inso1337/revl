@@ -1,11 +1,11 @@
 """#541: the per-generation `sys.modules` reclaim + the reused admit class map.
 
-`_Driver._emit_module` registers a `revl_run_gen{N}` module in `sys.modules` for
-every generation it emits (an emitted record dataclass needs the entry at
-class-creation time). Nothing ever removed it, so a long session pinned one whole
-emitted module per generation for the life of the PROCESS — the leak #541 (P-5)
-reports (201 modules / tens of MB after 200 admits). `_Driver._evict_dead_modules`
-now reclaims a generation's entry once every component it defined is disposed:
+`_Driver._emit_module` registers a module in `sys.modules` for every generation
+it emits (an emitted record dataclass needs the entry at class-creation time).
+Nothing ever removed it, so a long session pinned one whole emitted module per
+generation for the life of the PROCESS — the leak #541 (P-5) reports (201
+modules / tens of MB after 200 admits). `_Driver._evict_dead_modules` now
+reclaims a generation's entry once every component it defined is disposed:
 immediately when a swap/reload predecessor is superseded, and at teardown for a
 whole composition (admit turns included).
 
@@ -16,6 +16,13 @@ additive turns (the reused map must classify the widened surface identically).
 
 The sweep itself is exercised without a runtime (`test_evict_*`); the end-to-end
 admit reclaim needs a live cordis composition and skips without it.
+
+Every claim here is about ONE driver's own generations, read off that driver
+(`_gen_modules`), never off a count of the process-global `revl_run_gen*`
+namespace. Since #1046 each driver owns a distinct slice of that namespace, so
+"this driver's generations" is a thing the test can name; before it, the only
+handle was a process-wide count that a generation from another file collided
+with rather than offset (#1021).
 """
 
 from __future__ import annotations
@@ -40,36 +47,16 @@ needs_cordis = pytest.mark.skipif(
 )
 
 
-def _gen_modules() -> list[str]:
-    return [m for m in sys.modules if m.startswith("revl_run_gen")]
+def _live_generations(driver) -> dict:
+    """The generation modules THIS driver currently holds in `sys.modules`.
 
-
-@pytest.fixture
-def a_clean_generation_namespace():
-    """Establish -- and restore -- the `revl_run_gen*` namespace this file needs.
-
-    The end-to-end claim below counts how many generation modules ONE session
-    registers and then reclaims. It used to measure that as a cross-file delta
-    against whatever the process already held, which cannot work: `_emit_module`
-    numbers the modules from a PER-DRIVER counter (`_Driver.generation`, from 0)
-    into the process-global `sys.modules`, so a generation another test left
-    behind does not offset the count, it COLLIDES by name with one of this
-    session's own. `revl_run_gen1` from an earlier file is overwritten rather
-    than added, the total comes out one short of the arithmetic, and the test
-    fails in a multi-file session while passing alone (#1021).
-
-    So the dependency is stated instead of worked around: this test needs an
-    empty generation namespace, and says so. `tests/conftest.py` stops any test
-    from leaking one in the first place; this is the local guarantee, so the file
-    is correct in any collection order and under any runner.
+    `driver._gen_modules` is the driver's own bookkeeping (name -> the module it
+    registered plus the components that generation defined); this cross-checks it
+    against the table it is bookkeeping FOR, so a name the driver still thinks it
+    owns but that no longer resolves to its module is not counted.
     """
-    for name in _gen_modules():
-        del sys.modules[name]
-    try:
-        yield
-    finally:
-        for name in _gen_modules():
-            del sys.modules[name]
+    return {name: gen.module for name, gen in driver._gen_modules.items()
+            if sys.modules.get(name) is gen.module}
 
 
 # --------------------------------------------------------------------------- #
@@ -85,6 +72,15 @@ class _Stub:
         self._route_disposers: dict = {}
         self._gen_modules: dict = {}
 
+    def register(self, name: str, module, components) -> None:
+        """Record a generation exactly as `_emit_module` does: the module object
+        goes into `sys.modules` under `name`, and the driver remembers both the
+        object and the components it defined (#1046 -- the sweep reclaims on the
+        object's identity, not on the name alone)."""
+        from revl.run import _Generation  # noqa: PLC0415
+        sys.modules[name] = module
+        self._gen_modules[name] = _Generation(module, frozenset(components))
+
 
 def _evict(stub):
     from revl.run import _Driver
@@ -96,8 +92,8 @@ def test_evict_reclaims_a_fully_disposed_generation():
     from revl import run  # noqa: PLC0415
     stub = _Stub()
     name = "revl_run_gen_test_541_a"
-    sys.modules[name] = run  # any module object; identity is all that matters
-    stub._gen_modules[name] = frozenset({"A", "B"})
+    # any module object; identity is all that matters
+    stub.register(name, run, {"A", "B"})
     try:
         # both components still live -> the module stays.
         stub.fibers = {"A": object(), "B": object()}
@@ -123,8 +119,7 @@ def test_evict_counts_a_router_provision_as_live():
     from revl import run  # noqa: PLC0415
     stub = _Stub()
     name = "revl_run_gen_test_541_b"
-    sys.modules[name] = run
-    stub._gen_modules[name] = frozenset({"R"})
+    stub.register(name, run, {"R"})
     try:
         # a component realized as a router lives in `_route_disposers`, not
         # `fibers`; the sweep must not evict a module still backing one.
@@ -143,9 +138,8 @@ def test_evict_leaves_a_still_live_sibling_generation_alone():
     from revl import run  # noqa: PLC0415
     stub = _Stub()
     dead, live = "revl_run_gen_test_541_dead", "revl_run_gen_test_541_live"
-    sys.modules[dead] = run
-    sys.modules[live] = run
-    stub._gen_modules = {dead: frozenset({"X"}), live: frozenset({"Y"})}
+    stub.register(dead, run, {"X"})
+    stub.register(live, run, {"Y"})
     try:
         stub.fibers = {"Y": object()}  # X gone, Y still live
         _evict(stub)
@@ -198,13 +192,13 @@ def _base_ir():
 
 
 @needs_cordis
-def test_additive_admits_keep_identical_verdicts_and_reclaim_on_unload(
-        tmp_path, a_clean_generation_namespace):
+def test_additive_admits_keep_identical_verdicts_and_reclaim_on_unload(tmp_path):
     from revl.mcp.session import Session
 
     n = 8
     session = Session()
     session.load(copy.deepcopy(_base_ir()))
+    driver = session._driver
 
     verdicts = []
     for i in range(n):
@@ -221,13 +215,18 @@ def test_additive_admits_keep_identical_verdicts_and_reclaim_on_unload(
     # every admit reached the same verdict shape (admitted + its own key).
     assert verdicts == [(True, (f"turn{i}",)) for i in range(n)]
     # the turns are additive, so their generations are all still LIVE here: the
-    # base plus one per turn. The namespace started empty, so this is an
-    # absolute count and not a delta against whatever else the process ran.
-    assert len(_gen_modules()) >= 1 + n
+    # base plus one per turn. Read off THIS driver, so it is an absolute count
+    # of what this session registered and never a delta against whatever else
+    # the process ran (#1046).
+    assert session._driver is driver, "the session re-drove a different driver"
+    live = _live_generations(driver)
+    assert len(live) >= 1 + n
 
     # unload disposes the whole composition; #541: every generation module this
     # session registered is reclaimed rather than pinned in `sys.modules` for the
     # process lifetime. Without the fix, 1 + n of them survive.
     session.unload()
-    after = sorted(_gen_modules())
-    assert not after, "generation modules leaked past teardown: " + ", ".join(after)
+    assert not driver._gen_modules
+    leaked = sorted(name for name, module in live.items()
+                    if sys.modules.get(name) is module)
+    assert not leaked, "generation modules leaked past teardown: " + ", ".join(leaked)
