@@ -224,7 +224,8 @@ PATH_FAMILIES: dict[str, tuple[str, ...]] = {
     "sidecar-directory": ("garbage_dir", "preimage_dir", "fresh_sidecar"),
     "inverse-source": ("resolve_sidecar",),
     "syscall-time": ("open_confined_write", "write_through", "snapshot_preimage",
-                     "confirm_landed", "replace_confined", "remove_confined",
+                     "confirm_landed", "replace_confined",
+                     "install_captured_sidecar", "remove_confined",
                      "mkdir_confined", "rmdir_confined", "close_handle",
                      "discard_write"),
 }
@@ -252,6 +253,7 @@ SYSCALL_PATH_ARGS: dict[str, tuple[int, ...]] = {
     "snapshot_preimage": (),
     "confirm_landed": (),
     "replace_confined": (0, 1),
+    "install_captured_sidecar": (0, 1),
     "remove_confined": (0,),
     "mkdir_confined": (0,),
     "rmdir_confined": (0,),
@@ -1047,7 +1049,7 @@ class WriteHandle:
     step uses the fd rather than re-walking the name."""
 
     __slots__ = ("fd", "real", "created", "mode", "atime_ns", "mtime_ns",
-                 "dev", "ino", "size", "preimage")
+                 "dev", "ino", "size", "preimage", "capture")
 
     def __init__(self, fd: int, real: str, created: bool, st) -> None:
         self.fd = fd
@@ -1073,6 +1075,12 @@ class WriteHandle:
         #: reaching a mutation to be bound from a family 1-3 guard, and a
         #: snapshot's return value is not one.
         self.preimage = ""
+        #: identity of the preimage SIDECAR as `snapshot_preimage` captured it
+        #: (issue #1016), carried on the witness so the inverse can prove the
+        #: file it is about to install is still the one that was captured. The
+        #: forward path's `original_receipt` names the TARGET inode; this names
+        #: the snapshot's. Empty until a snapshot is taken.
+        self.capture = {}
 
 
 #: How many times `_open_leaf` retries the open/create pair before giving up.
@@ -1471,6 +1479,11 @@ def witnessed_write_record(handle: WriteHandle, contents: str, receipt: dict,
         "path": handle.real,
         "preimage": handle.preimage,
         "created": handle.created,
+        # issue #1016: the preimage sidecar's captured identity, so the inverse
+        # can prove the snapshot it installs is the snapshot that was taken.
+        # Carried here too, not only on the plain witnessed `write`, so the
+        # guarded surface's inverse gets the same check.
+        "capture": handle.capture,
         # issue #623: the original held-target receipt, bound to the entry
         "receipt": dict(receipt),
         "new_digest": "sha256:" + hashlib.sha256(
@@ -1594,6 +1607,45 @@ def _clone_from_fd(src_fd: int, dst_dirfd: int, dst_leaf: str) -> bool:
         return False
 
 
+#: The sidecar facts captured at snapshot time and re-checked by the inverse
+#: (issue #1016). Deliberately the identity tuple `finalize_committed_sidecar`
+#: already pins on the COMMIT path, rather than a second vocabulary: `dev`/`ino`
+#: name the inode (what a same-bytes replacement cannot forge), `nlink` is the
+#: hardlink control the forward path spells `EMULTILINK`, `mode`/`size` the
+#: shape, and `mtime_ns`/`ctime_ns` the modification stamps. `ctime_ns` is what
+#: makes an IN-PLACE rewrite visible without re-reading the bytes: a write to
+#: the snapshot bumps it, and unlike `mtime_ns` an unprivileged writer cannot
+#: set it back with `utimes`.
+SIDECAR_CAPTURE_FIELDS: tuple[str, ...] = (
+    "dev", "ino", "mode", "nlink", "size", "mtime_ns", "ctime_ns")
+
+#: The subset that survives the install itself. `replace_confined` is a rename,
+#: and a rename bumps the inode's `ctime`, so the post-install re-check compares
+#: everything BUT `ctime_ns` — comparing it would refuse every honest restore.
+INSTALLED_CAPTURE_FIELDS: tuple[str, ...] = tuple(
+    f for f in SIDECAR_CAPTURE_FIELDS if f != "ctime_ns")
+
+
+def _capture_of(st) -> dict:
+    """The captured identity of one sidecar inode, as WAL-serializable data."""
+    return {"dev": st.st_dev, "ino": st.st_ino, "mode": st.st_mode,
+            "nlink": st.st_nlink, "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
+
+
+def _capture_sidecar(dirfd: int, leaf: str) -> dict:
+    """`_capture_of` the sidecar `leaf` inside the already-verified `dirfd`.
+
+    Opened `O_NOFOLLOW` and fstat'd through the fd, never stat'd by name, for
+    the same reason the forward path holds its target fd: a name re-walked at
+    the syscall is a name a competing writer can swap first."""
+    fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dirfd)
+    try:
+        return _capture_of(os.fstat(fd))
+    finally:
+        os.close(fd)
+
+
 def snapshot_preimage(handle: WriteHandle) -> str:
     """Snapshot the open target into a fresh preimage sidecar, and return the
     sidecar's path (the witness's `preimage`).
@@ -1633,6 +1685,11 @@ def snapshot_preimage(handle: WriteHandle) -> str:
                     os.utime(out, ns=(handle.atime_ns, handle.mtime_ns))
                 finally:
                     os.close(out)
+            # capture the snapshot's own identity LAST, after the copy and
+            # after the mode/mtime restoration above, so what is recorded is
+            # the sidecar as it is left behind (issue #1016). The inverse
+            # re-checks the file it is about to install against this.
+            handle.capture = _capture_sidecar(dirfd, dst_leaf)
         finally:
             os.close(dirfd)
     except OSError as exc:
@@ -1676,6 +1733,123 @@ def replace_confined(src_real: str, dst_real: str) -> None:
             os.close(dst_dirfd)
     finally:
         os.close(src_dirfd)
+
+
+def _checked_stat(real: str, what: str):
+    """`fstat` of `real` taken through its parent's directory fd on an
+    `O_NOFOLLOW` open, refusing anything that is not a regular single-linked
+    file.
+
+    The two refusals are the ones the forward path already spells: a sidecar
+    that is not a regular file is outside what the reversal machinery produced
+    (`finalize_committed_sidecar` answers `EOUTSIDE` for the same case), and a
+    multiply-linked one is the hardlink control `open_confined_write` answers
+    with `EMULTILINK` — an inode reachable by a second name is an inode another
+    writer keeps a handle on after the rename."""
+    parent, leaf = _split(real)
+    try:
+        dirfd = _open_dirfd(parent)
+    except (FileNotFoundError, NotADirectoryError):
+        raise FsOpError(
+            "ERACE", f"the {what}'s directory disappeared mid-inverse", real) from None
+    try:
+        try:
+            fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                         dir_fd=dirfd)
+        except FileNotFoundError:
+            raise FsOpError(
+                "ERACE", f"the {what} disappeared mid-inverse, so the reversal "
+                "cannot be shown to have installed what was captured",
+                real) from None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ConfinementError(
+                    "EOUTSIDE", f"the {what} may not be a symlink", real) from None
+            raise
+        try:
+            st = os.fstat(fd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
+    if not stat.S_ISREG(st.st_mode):
+        raise ConfinementError(
+            "EOUTSIDE", f"the {what} must be a regular file", real)
+    if st.st_nlink != 1:
+        raise FsOpError(
+            "EMULTILINK", f"the {what} is linked from a second name "
+            f"({st.st_nlink} links), so installing it would hand a live alias "
+            "to whoever holds the other name", real)
+    return st
+
+
+def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
+    """Install an inverse's sidecar over its target, but only while the sidecar
+    is still demonstrably the file that was captured (issue #1016).
+
+    The inverse path's member of the same family as the forward path's write
+    receipts (`original_receipt` / `expect_existing`, issue #523) and its
+    post-write `confirm_landed` (item 431(b)). Those bind what a write LANDED
+    on; nothing bound what a restore INSTALLS. A snapshot sits in the preimage
+    directory for the whole life of the activation, and `resolve_sidecar` proves
+    only that a path names a sidecar slot this workspace owns — not that the
+    file in that slot is still the snapshot that was taken. So a same-UID writer
+    could rewrite it, swap it for another inode, or hardlink it out, and the
+    inverse would install the result and report a clean reversal.
+
+    Three checks, on the way in and again on the way out:
+
+    * the sidecar is a regular file (`EOUTSIDE` otherwise),
+    * its link count is 1 (`EMULTILINK` otherwise, the same control the forward
+      `open_confined_write` applies to its target),
+    * its captured identity is unchanged (`EIDENTITY` otherwise) — `(dev, ino)`
+      catches a swap, `size`/`mtime_ns`/`ctime_ns` catch an in-place rewrite,
+      and `mode` catches a re-permissioning.
+
+    The check runs again on the INSTALLED result, because the rename itself is
+    by name: re-checking afterwards is what closes the window between the first
+    check and the syscall, the same way `confirm_landed` re-establishes the
+    forward write's identity rather than trusting the pre-syscall check. The
+    post-install comparison drops `ctime_ns`, which the rename legitimately
+    bumps (`INSTALLED_CAPTURE_FIELDS`).
+
+    A refusal RAISES, so the teardown loop records it as `restore-residue`
+    against the crossing it was reverting — the outcome item 243 rule 6 already
+    defines for an inverse that cannot complete. The failure direction is
+    deliberate: a sidecar that cannot be shown to be the captured one is
+    reported as residue rather than silently installed over the target.
+
+    `capture` is the witness's recorded `snapshot_preimage` capture. A witness
+    that carries none (a durable record written before this check existed) still
+    gets the two caller-independent checks; there is nothing to compare it
+    against, and refusing every such replay would strand a recoverable WAL."""
+    before = _checked_stat(src_real, "preimage sidecar")
+    _refuse_drifted_identity(before, capture, SIDECAR_CAPTURE_FIELDS, src_real,
+                             "the preimage sidecar changed since it was captured")
+    replace_confined(src_real, dst_real)
+    after = _checked_stat(dst_real, "restored target")
+    _refuse_drifted_identity(after, capture, INSTALLED_CAPTURE_FIELDS, dst_real,
+                             "the restored target is not the captured preimage")
+
+
+def _refuse_drifted_identity(st, capture, fields: tuple[str, ...], real: str,
+                             sentence: str) -> None:
+    """Compare `st` against a recorded `capture` over `fields`, or do nothing
+    when the witness recorded none. Named separately so the two stages of
+    `install_captured_sidecar` state the same comparison twice rather than
+    inlining two subtly different ones."""
+    if not isinstance(capture, dict) or not capture:
+        return
+    observed = _capture_of(st)
+    drifted = sorted(f for f in fields
+                     if f in capture and capture[f] != observed[f])
+    if drifted:
+        raise FsOpError(
+            "EIDENTITY",
+            f"{sentence} ({', '.join(drifted)} differ); the reversal was "
+            "refused rather than install a file that is not the captured "
+            "preimage",
+            real)
 
 
 def remove_confined(real: str) -> None:
