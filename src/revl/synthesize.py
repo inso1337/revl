@@ -763,11 +763,15 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
 def _check_long_running(is_a2a: bool, is_rest: bool, in_band: bool, *,
                         doc: str, line: int, label: str,
                         transport: str | None) -> None:
-    """`long_running` is an A2A JSON-RPC Task-lifecycle shape (item 439 T1), so
-    it is admitted only on `through a2a`. It is refused on the canonical wire
-    (there is no `tasks/get` there), on `through a2a_rest` (the REST task paths
-    are a distinct binding this slice does not build) and with
-    `on_failure(result)` (the feed IS the failure settlement)."""
+    """`long_running` is an A2A Task-lifecycle shape (item 439 T1), so it is
+    admitted on the two A2A sub-transports and nowhere else. It is refused on
+    the canonical wire (there is no `tasks/get` there) and with
+    `on_failure(result)` (the feed IS the failure settlement).
+
+    Both A2A sub-transports carry it, because A2A 1.0.0 specifies the same four
+    operations over each: `tasks/get` and `tasks/cancel` on JSON-RPC 2.0, and
+    `GET /v1/tasks/{id}` / `POST /v1/tasks/{id}:cancel` on HTTP+JSON/REST. The
+    `is_rest` flag reaches the body, not a refusal."""
     if not is_a2a:
         where = ("the default (canonical) wire" if transport is None
                  else f"`through {transport}`")
@@ -777,16 +781,8 @@ def _check_long_running(is_a2a: bool, is_rest: bool, in_band: bool, *,
             f"{where}",
             hint="the A2A Task lifecycle (`_start`/`_poll`/`_reply`/`_cancel`) is "
                  "an A2A protocol shape spoken over `tasks/get` / `tasks/cancel` "
-                 "/ `message/send`; write `through a2a` on the row (item 439 T1)")
-    if is_rest:
-        raise RevlError(
-            doc, line,
-            f"remote row `@{label}` combines `long_running` with "
-            f"`through a2a_rest`",
-            hint="T1 binds the Task lifecycle over A2A 1.0.0 JSON-RPC 2.0 only. "
-                 "The HTTP+JSON/REST task paths (`GET /v1/tasks/{id}`, "
-                 "`POST /v1/tasks/{id}:cancel`) are a distinct binding not built "
-                 "in this slice; write `through a2a` (item 439 T1)")
+                 "/ `message/send`; write `through a2a` or `through a2a_rest` on "
+                 "the row (item 439 T1)")
     if in_band:
         raise RevlError(
             doc, line,
@@ -801,7 +797,8 @@ def _check_long_running(is_a2a: bool, is_rest: bool, in_band: bool, *,
 
 
 def _task_ops(service, host: str, capability: str, redirect: str, *,
-              doc: str, line: int, label: str) -> tuple[list[str], list[str]]:
+              doc: str, line: int, label: str,
+              rest: bool = False) -> tuple[list[str], list[str]]:
     """The four-op projection's externs and provide methods (item 439 T1).
 
     Each op is ONE emission crossing exactly as the terminal wire is; the only
@@ -810,6 +807,10 @@ def _task_ops(service, host: str, capability: str, redirect: str, *,
     vocabulary rather than `Str`/`Bytes`. Every return is `Untrusted[T]` (slice
     C3): a `Done` payload a consumer reads is tainted `net` exactly as a terminal
     reply is, so it cannot reach a `Trusted[T]` sink without an `endorse`.
+
+    `rest` selects the sub-transport, and selects nothing else: the projection,
+    the shape check, the compensation and the taint are the same on both wires,
+    because A2A 1.0.0 specifies the same four operations over each.
     """
     quads = _classify_task_ops(service, doc=doc, line=line, label=label)
     externs: list[str] = []
@@ -824,7 +825,8 @@ def _task_ops(service, host: str, capability: str, redirect: str, *,
             arrow = f" -> Untrusted[{method.returns}]"
             extern = f"remote_{label}_{op}"
             body_src = a2a_task.task_body(suffix, f"https://{host}", base,
-                                          follow_redirects=follow, label=label)
+                                          follow_redirects=follow, label=label,
+                                          rest=rest)
             # The `tasks/cancel` COMPENSATION of `_start` (item 247) is the
             # consumer's to register, keyed by the `TaskRef` `_start` returns —
             # `_cancel` below is exactly that compensation as a first-class op
@@ -876,7 +878,8 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
         _check_long_running(is_a2a, is_rest, in_band, doc=doc, line=lr_line,
                             label=label, transport=transport)
         externs, provides = _task_ops(service, host, capability, redirect,
-                                      doc=doc, line=line, label=label)
+                                      doc=doc, line=line, label=label,
+                                      rest=is_rest)
     for op, method in ([] if long_running else service.methods.items()):
         if method.async_ and not method.emission:
             raise RevlError(
@@ -974,22 +977,47 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     return component, "\n\n".join([header, *externs, body]) + "\n"
 
 
-def _a2a_task_scope_lines() -> list[str]:
+def _a2a_task_scope_lines(rest: bool = False) -> list[str]:
     """The SCOPE block for a `long_running` row: the four-op Task lifecycle
-    (item 439 T1), which polls and resumes rather than crossing once."""
+    (item 439 T1), which polls and resumes rather than crossing once. `rest`
+    names the HTTP+JSON/REST method paths instead of the JSON-RPC methods; the
+    four ops and everything they decide are the same on both wires."""
+    if rest:
+        ops = [
+            "//     * `_start`  -> `POST /v1/message:send`, returns a `TaskRef`;",
+            "//     * `_poll`   -> `GET /v1/tasks/{id}`, one `TaskEvent` per call",
+            "//       (the consumer drives the loop; `is_terminal` decides when to",
+            "//       stop). The task id is PEER-AUTHORED and becomes URL path",
+            "//       structure here, so it is percent-encoded WHOLE: it is one",
+            "//       path segment and a peer cannot steer the crossing with it;",
+            "//     * `_reply`  -> `POST /v1/message:send` + `taskId`, answers an",
+            "//       `input-required` / `auth-required` prompt;",
+            "//     * `_cancel` -> `POST /v1/tasks/{id}:cancel`, the best-effort",
+            "//       COMPENSATION of `_start` (item 247) AND an explicit op.",
+        ]
+    else:
+        ops = [
+            "//     * `_start`  -> `message/send`, returns a `TaskRef` handle;",
+            "//     * `_poll`   -> `tasks/get`, one `TaskEvent` per call (the consumer",
+            "//       drives the loop; `is_terminal` decides when to stop);",
+            "//     * `_reply`  -> `message/send` + `taskId`, answers an",
+            "//       `input-required` / `auth-required` prompt;",
+            "//     * `_cancel` -> `tasks/cancel`, the best-effort COMPENSATION of",
+            "//       `_start` (item 247) AND an explicit op the consumer may call.",
+        ]
+    identity = ([
+        "//   The correlation identity rides ONE WAY on this sub-transport: REST",
+        "//   answers with the bare `Task`/`Message` and echoes no envelope `id`,",
+        "//   so a reply is checked for SHAPE and for the TASK it describes, and",
+        "//   the check this wire cannot make is not emitted as if it could.",
+    ] if rest else [])
     return [
         "//   the one argument of `_start`/`_reply` becomes the message's single",
         "//   text `Part`; the method name rides as the `revl.skill` reference.",
         "//   Version is claimed EXACTLY, never as bare \"A2A\" (decision (3)).",
         "//   SCOPE: the FOUR-OP A2A Task LIFECYCLE (item 439 T1), the explicit-",
         "//   handle surface for a long-running Task:",
-        "//     * `_start`  -> `message/send`, returns a `TaskRef` handle;",
-        "//     * `_poll`   -> `tasks/get`, one `TaskEvent` per call (the consumer",
-        "//       drives the loop; `is_terminal` decides when to stop);",
-        "//     * `_reply`  -> `message/send` + `taskId`, answers an",
-        "//       `input-required` / `auth-required` prompt;",
-        "//     * `_cancel` -> `tasks/cancel`, the best-effort COMPENSATION of",
-        "//       `_start` (item 247) AND an explicit op the consumer may call.",
+    ] + ops + [
         "//   `_cancel` is the compensation the consumer registers on `_start`,",
         "//   keyed by the returned `TaskRef`; a peer's claim to have cancelled is",
         "//   audit-grade, not a witness, so it is `compensate`, never an inverse.",
@@ -997,8 +1025,9 @@ def _a2a_task_scope_lines() -> list[str]:
         "//   `Untrusted[T]` return hold unchanged. A deadline or transport error",
         "//   is a `TransportFault` the runtime maps to WITHDRAWAL (T0) — item",
         "//   130's \"provider death is a terminal, never silence\", at the adapter.",
-        "//   The stream sugar (item 130, T2), gRPC and the REST task paths are",
-        "//   NOT this wire (item 439 T1).",
+    ] + identity + [
+        "//   The stream sugar (item 130, T2) and gRPC are NOT this wire",
+        "//   (item 439 T1).",
     ]
 
 
@@ -1009,12 +1038,15 @@ def _a2a_header_lines(rest: bool = False, long_running: bool = False) -> list[st
     this slice binds, and — the load-bearing one — that the peer is a CLAIM, not
     a checked composition (decision (2); item 329's untrusted-author case)."""
     if long_running:
+        sub = "HTTP+JSON/REST" if rest else "JSON-RPC 2.0"
         wire_lines = [
-            f"// Transport: A2A {A2A_VERSION} over JSON-RPC 2.0, the four-op Task",
+            f"// Transport: A2A {A2A_VERSION} over {sub}, the four-op Task",
             "//   lifecycle. The peer authority above is the agent's HTTPS "
-            "endpoint root.",
+            "endpoint root"
+            + ("; the REST method paths below are appended to it." if rest
+               else "."),
         ]
-        return wire_lines + _a2a_task_scope_lines() + [
+        return wire_lines + _a2a_task_scope_lines(rest=rest) + [
             "//",
             "// THE A2A PEER IS A CLAIM, NOT A CHECKED COMPOSITION. An external "
             "agent",

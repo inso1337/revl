@@ -70,6 +70,16 @@ refusal. Reporting the id a peer answered with would put peer-chosen text on
 the error channel in the very gate that exists because peer text cannot be
 trusted.
 
+**3. A peer-authored string never becomes URL structure.** The REST
+sub-transport addresses a running Task by putting its id in the path
+(`GET /v1/tasks/{id}`, `POST /v1/tasks/{id}:cancel`), and that id is the
+peer's: it came back from its own `_start` reply. `py_rest_task_url` checks it
+for shape and percent-encodes it whole, so it stays exactly one path segment
+and a peer cannot answer `_start` with `../v1/message:send` and thereby choose
+which request this composition sends next. The JSON-RPC wire carries the same
+id as a JSON member, where it is data and not structure, and needs no such
+rule; the rule exists where the wire creates the exposure.
+
 Both rules hold on BOTH tiers. The importer's coloured `@ts` body is the only
 A2A crossing off the py tier, and it carries the same correlation identity
 (`TS_CORRELATION`), the same three envelope gates (`TS_ENVELOPE_GATES`) and
@@ -101,21 +111,80 @@ REDACTED_ARG = "<redacted:arg>"
 #: blanket-replacing it would shred the diagnostic for no confidentiality gain.
 MIN_MATCHABLE_ARG = 3
 
+#: The A2A 1.0.0 HTTP+JSON/REST method paths, in the ONE place both entry points
+#: read them from. `import_a2a` re-exports `HTTPJSON_SEND_PATH` under its old
+#: private name and `synthesize` imports it from there, so the terminal wire,
+#: the four-op wire and the importer cannot drift onto three spellings of the
+#: same path. A task path is `<prefix><id>` and a cancel is that path plus the
+#: verb suffix, exactly as A2A 1.0.0 spells `GET /v1/tasks/{id}` and
+#: `POST /v1/tasks/{id}:cancel`.
+HTTPJSON_SEND_PATH = "/v1/message:send"
+HTTPJSON_TASKS_PREFIX = "/v1/tasks/"
+HTTPJSON_CANCEL_VERB = ":cancel"
 
-def py_correlation(indent: int = 4) -> str:
+#: How the REST sub-transport is named in generated comments.
+A2A_REST_LABEL = "HTTP+JSON/REST"
+
+
+def py_correlation(indent: int = 4, *, rest: bool = False) -> str:
     """Bind this crossing's correlation identity.
 
-    One value, used twice (the envelope `id` and the metadata member), so the
-    identity a peer logs is the identity its reply is checked against.
+    On JSON-RPC 2.0 one value is used twice (the envelope `id` and the metadata
+    member), so the identity a peer logs is the identity its reply is checked
+    against. On HTTP+JSON/REST there is no envelope to echo it back in, so the
+    same value rides ONE WAY in the message metadata and the comment says so:
+    a check the wire cannot make is not described as if it could.
     """
     pad = " " * indent
+    if rest:
+        carried = (
+            f"{pad}# item 439: ONE correlation identity per crossing. A2A\n"
+            f"{pad}# {A2A_REST_LABEL} has no envelope to echo it back in, so it\n"
+            f"{pad}# rides ONE WAY in the `{CORRELATION_KEY}` metadata member —\n"
+            f"{pad}# for the peer's log and ours. Nothing below checks it,\n"
+            f"{pad}# because there is nothing to check it against.\n")
+    else:
+        carried = (
+            f"{pad}# item 439: ONE correlation identity per crossing. It is the\n"
+            f"{pad}# JSON-RPC envelope `id` and the `{CORRELATION_KEY}` metadata\n"
+            f"{pad}# member, so a reply is attributable and a peer's log joins to\n"
+            f"{pad}# this crossing. A reply that does not carry it back is refused\n"
+            f"{pad}# below, never read as a verdict.\n")
+    return carried + f"{pad}_corr = str(_uuid.uuid4())\n"
+
+
+
+def py_rest_task_url(base_expr: str, fault, *, verb: str = "",
+                     indent: int = 4) -> str:
+    """Build the REST task URL for an op that names a task it already holds
+    (`_poll`, `_cancel`), from the `TaskRef` bound as `_task`.
+
+    This is the one place on the A2A surface where a PEER-AUTHORED string
+    becomes URL PATH STRUCTURE rather than a JSON member: the id came back from
+    the peer's own `_start` reply. Unencoded, a peer that answered `_start` with
+    an id of `../v1/message:send`, `x?y=1` or `x#f` would choose which path,
+    query or fragment this composition's next crossing carries — the declared
+    endpoint would stay the same and the request would stop being the one the
+    row describes. So the id is checked for shape and then percent-encoded
+    WHOLE (`safe=""`), which leaves it exactly one path segment: every reserved
+    character, every separator and every traversal dot-segment is escaped.
+
+    The shape gate is not decoration: `quote` raises `TypeError` on a non-string
+    and that is an exception no settlement classifies, so a handle that carries
+    no usable id refuses as this crossing's own declared fault instead.
+    """
+    pad = " " * indent
+    tail = f' + {json.dumps(verb)}' if verb else ""
     return (
-        f"{pad}# item 439: ONE correlation identity per crossing. It is the\n"
-        f"{pad}# JSON-RPC envelope `id` and the `{CORRELATION_KEY}` metadata\n"
-        f"{pad}# member, so a reply is attributable and a peer's log joins to\n"
-        f"{pad}# this crossing. A reply that does not carry it back is refused\n"
-        f"{pad}# below, never read as a verdict.\n"
-        f"{pad}_corr = str(_uuid.uuid4())\n")
+        f"{pad}# item 439: the task id is PEER-AUTHORED — it came back from the\n"
+        f"{pad}# peer's `_start` reply — and on {A2A_REST_LABEL} it becomes URL\n"
+        f"{pad}# PATH STRUCTURE, not a JSON member. It is checked for shape and\n"
+        f"{pad}# then percent-encoded WHOLE, so it is exactly one path segment\n"
+        f"{pad}# and a peer cannot steer this crossing off the task path.\n"
+        f"{pad}if not isinstance(_task.get(\"id\"), str) or not _task[\"id\"]:\n"
+        + fault(indent + 4, '"a2a: task handle carried no task id"')
+        + f"{pad}_url = ({base_expr} + {json.dumps(HTTPJSON_TASKS_PREFIX)}\n"
+        f"{pad}        + _urlp.quote(_task[\"id\"], safe=\"\"){tail})\n")
 
 
 def py_metadata(skill_ref: str) -> str:
