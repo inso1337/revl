@@ -303,6 +303,18 @@ class Session:
         self.previous: dict | None = None  # the generation `rollback` restores
         self.config: dict = {}
         self.recorder = None  # replay.Recorder, when loaded with record=True
+        # roadmap item 473 (issue #825), the LIVE PRODUCER. `revl.slo` is the
+        # whole decision; these five members are the seam that runs it from
+        # inside a running generation instead of over a recorded trace after
+        # the fact. All inert for a composition that declares no `slo` block.
+        self._slo_ir: dict | None = None      # the document the contract is read off
+        self._slo_composition: str | None = None  # the document a divert re-resolves
+        self._slo_latch: str | None = None    # where a pause/halt is written
+        self._slo_signer: str | None = None   # the receipt's `signer` member
+        self._slo_last: dict | None = None    # the last verdict this session took
+        self._slo_cursor = 0                  # where the LIVE generation's trace starts
+        self._slo_decisions = 0               # where the LIVE generation's completions start
+        self._slo_paused: dict | None = None  # the pause this session's contract armed
         # the session commit-state owner (roadmap item 245): the deferral queue,
         # the discharge escrow, and the live-frame registry — the gate target the
         # commit verb derives. A `runtime.SessionOwner`, created at load. None
@@ -767,6 +779,16 @@ class Session:
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
         self._history = []
+        # item 473: a fresh driver has recorded nothing and a fresh session has
+        # sealed nothing, so the producer starts at the origin of both
+        # populations. Armed here, before activation, because the load's own
+        # `load` events are part of generation 1's trace.
+        self._slo_cursor = 0
+        self._slo_decisions = 0
+        self._slo_last = None
+        self._slo_paused = None
+        self._slo_discover(origin)
+        self._slo_arm_trace()
         # item 246, Decision 2 (F6): make the refusal above TRUE. It refuses a
         # policy load without recording because "without a WAL there is no
         # durable approval spend and no audit join" — but recording alone never
@@ -1250,11 +1272,25 @@ class Session:
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
         self.previous = self.ir
         self.previous_origin = self.origin
+        # item 473: the generation ends HERE — the teardown below is the point of
+        # no return, and every earlier exit from `swap` is a refusal that leaves
+        # gen N running and so must NOT seal it. Sealed before the dispose so the
+        # measurement is of the generation that ran, with its providers still the
+        # ones it ran with.
+        self._seal_generation()
         self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = ir
         self.origin = origin
         self.draft = None  # a new generation makes any uncommitted edit stale
         self._generation += 1
+        self._slo_begin_generation()
+        # item 473: the successor is a rollout of its own, so its inputs are
+        # read for a contract. Discovery REPLACES the binding when it finds one
+        # and leaves it alone when it does not, so a swap to a composition that
+        # declares a different `slo` block is measured against the block it
+        # declares — never against its predecessor's.
+        self._slo_discover(origin)
+        self._slo_arm_trace()
         # item 245: install a fresh owner for the successor generation BEFORE its
         # load, exactly as `load` does, so every frame the successor builds joins
         # this generation's live-frame registry. Without this the successor's
@@ -1499,6 +1535,7 @@ class Session:
         self.origin = self.previous_origin
         self.previous, self.previous_origin = saved_previous, saved_previous_origin
         self._generation += 1
+        self._slo_begin_generation()
         # item 245: the reloaded predecessor is a fresh generation — install its
         # owner so its frames join the live-frame registry (else a subsequent
         # abort of the rolled-back session would restore nothing, the same bug the
@@ -1758,6 +1795,346 @@ class Session:
         return self.swap(restored, origin=restored_origin,
                          migrate="respawn") | {"rolledBack": True}
 
+    # -- the live SLO producer (roadmap item 473, issue #825) --------------
+    #
+    # The exit criterion of item 473 reads "a rollout predicted to breach a
+    # declared SLO is refused, and a live breach triggers the declared fallback
+    # or pause with an SLO receipt on the generation". `revl.slo` decides all of
+    # it and `revl slo` already runs it over a RECORDED trace. What was missing
+    # is the word LIVE: nothing called `slo.Monitor` from inside a generation,
+    # so the receipt was attached by an operator's verb rather than produced by
+    # the generation that earned it. This is that producer.
+    #
+    # Every method below short-circuits on `contract_from_ir(self.ir)` being
+    # empty, so a composition that declares no `slo` block runs exactly the code
+    # it ran before the producer existed: no trace is recorded, no WAL is read,
+    # no history entry gains a member, and `state()` is byte-identical.
+
+    def configure_slo(self, *, composition: str | None = None,
+                      root: str | None = None, latch: str | None = None,
+                      signer: str | None = None) -> dict:
+        """Bind the contract document, where this session writes a pause or a
+        halt, and who signs its receipts.
+
+        `composition` is load-bearing and is not a convenience. An `slo` block
+        is a COMPOSITION-level declaration and it lives on the composition row
+        table's document (`RowTable.to_ir`'s conditional `slo` key); a
+        `Session` runs the PROGRAM ir that `compile_files` produced from the
+        sources that composition names, which carries no `slo` key and never
+        has. The two documents are different documents, so the contract has to
+        be named rather than assumed — `load` binds it automatically when the
+        admission inputs name a composition document that declares one (see
+        `_slo_discover`), and this is the explicit door for every other way a
+        session is assembled.
+
+        The latch is bound EXPLICITLY and is never taken from the ambient
+        `REVL_ESTOP_LATCH`, for the reason `slo.pause` passes `env=False`: the
+        operator E-Stop latch is the operator's, and a contract breach helping
+        itself to it would be an operator action taken by a compiler (item 443
+        rule E8). With no latch bound, a pause derives one from the WAL
+        (`<wal>.estop`) and, failing that, reports itself NOT armed in the
+        signed receipt rather than pretending to a stop it did not perform.
+        """
+        if composition is not None:
+            self._slo_bind(composition, root)
+        if latch is not None:
+            self._slo_latch = latch
+        if signer is not None:
+            self._slo_signer = signer
+        return {"composition": self._slo_composition, "latch": self._slo_latch,
+                "signer": self._slo_signer,
+                "declared": sorted(self._slo_contract())}
+
+    def _slo_bind(self, document: str, root: str | None = None) -> bool:
+        """Read one composition document's `slo` block and bind it as this
+        session's contract. Returns whether a contract was found.
+
+        The declaration is read through `composition.sole_composition` and
+        re-keyed by `_slo_responses` / `SLO_IR_KEYS`, which is the SAME pair of
+        helpers `RowTable.to_ir` uses — so the contract a session measures and
+        the contract the compile-time `G4` gate admitted are the same keys with
+        the same units, rather than a second reading that could drift. The row
+        table is deliberately NOT resolved: resolving reads every row's source
+        to build a table this has no use for, and the `slo` block is a property
+        of the declaration alone.
+        """
+        from ..composition import _slo_responses, sole_composition  # noqa: PLC0415
+        from ..parser import SLO_IR_KEYS, parse_file  # noqa: PLC0415
+
+        decl = sole_composition(parse_file(document), document)
+        if not decl.slo:
+            return False
+        self._slo_composition = document
+        self._slo_ir = {
+            "slo": {SLO_IR_KEYS[datum]: value for datum, value, _ in decl.slo},
+            **({"slo_on_breach":
+                {key: {"action": action, "divertTo": target}
+                 for key, (action, target) in _slo_responses(decl).items()}}
+               if decl.slo_responses else {}),
+        }
+        return True
+
+    def _slo_discover(self, origin: dict | None) -> None:
+        """Bind the contract from the admission inputs, when they name a
+        composition document that declares one.
+
+        Best-effort by construction, and the direction of the failure is the
+        point: a file that is not a composition, a composition with no `slo`
+        block, a parse that raises — each leaves the session with no contract,
+        which is exactly the state it was in before item 473. A contract can
+        never be INVENTED here; it can only be found or not found. The `slo`
+        substring pre-check keeps a load that has no contract to find from
+        re-parsing its own sources.
+        """
+        for path in (origin or {}).get("files") or []:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    if "slo" not in handle.read():
+                        continue
+                if self._slo_bind(path):
+                    return
+            except Exception:        # noqa: BLE001 — see the docstring
+                continue
+
+    def _slo_contract(self) -> dict:
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        return slo.contract_from_ir(self._slo_ir or self.ir)
+
+    def _slo_wal(self) -> str | None:
+        """The live WAL this generation is journaling to, or None. It is the
+        source of the PER-CALL latency population: item 250 Slice 3a writes one
+        `model-decision` record per model completion, at the crossing, carrying
+        the same revl-measured bracket the trace hop carries."""
+        wal = self.recorder.wal if self.recorder is not None else None
+        return getattr(wal, "path", None) if wal is not None else None
+
+    def _slo_document(self) -> str | None:
+        """The composition document a divert would re-resolve: the one the
+        contract was read off. A session whose contract was bound without a
+        document names none, in which case `slo.admit_divert` refuses the
+        divert BY NAME and the receipt carries the refusal — the honest
+        outcome rather than a guess at which file was meant."""
+        return self._slo_composition
+
+    def _slo_arm_trace(self) -> None:
+        """Record the causal trace for a composition that declares a contract.
+
+        A contract is a request to be measured, and the measurement reads the
+        events the runtime records. `_Driver.tracing` is otherwise only turned
+        on by `--trace`/`--withdraw`, so without this a live generation under a
+        declared SLO recorded no `load`/`withdraw` event and every duration read
+        `insufficient`. Turned on and never off: a later generation that drops
+        the block keeps recording, because a half-traced history is worse than a
+        traced one and the cost is a dict per transition."""
+        if self._driver is not None and self._slo_contract():
+            self._driver.tracing = True
+
+    def _slo_events(self) -> list:
+        """This generation's causal events: the ones the driver has recorded
+        since the generation BEGAN.
+
+        Sliced by a CURSOR rather than filtered by the `gen` member, because
+        the cursor is the one reading that cannot disagree with itself —
+        `Session._generation` and `_Driver.generation` are incremented by
+        different code on different paths (`apply` moves one and not the
+        other), and a filter on a number that drifted would silently measure
+        the empty set, which reads as a clean generation.
+
+        The cursor marks the start of the GENERATION and is never moved by a
+        measurement. That is what makes a receipt the account of the whole
+        generation and a second seal of the same generation idempotent: if the
+        cursor were advanced by each seal, an operator who called `slo_seal`
+        mid-generation would leave the boundary measuring only the tail, and
+        the tail's receipt would REPLACE the fuller one on the history entry.
+        """
+        driver = self._driver
+        events = list(getattr(driver, "_events", None) or []) if driver else []
+        return events[self._slo_cursor:]
+
+    def _slo_begin_generation(self) -> None:
+        """Mark where the new generation's populations start. Called at every
+        point `_generation` is incremented, so each generation is measured over
+        its own events and its own completions and never over a predecessor's.
+        """
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        driver = self._driver
+        self._slo_cursor = len(getattr(driver, "_events", None) or []) \
+            if driver else 0
+        self._slo_decisions = len(slo.decisions_from_wal(self._slo_wal()))
+        self._slo_last = None
+
+    def _slo_monitor(self, *, events: list, decisions: list):
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        return slo.Monitor(
+            self._slo_contract(),
+            composition=self._slo_document(),
+            generation=self._generation,
+            latch=self._slo_latch, wal=self._slo_wal(),
+            key=slo.key_from_env(), signer=self._slo_signer,
+            events=events, decisions=decisions)
+
+    def _slo_attach(self, receipt: dict) -> bool:
+        """File a receipt against its OWN generation's history entry.
+
+        `slo.attach_generation` refuses a receipt whose `generation` is not the
+        entry's, so a receipt can never be filed under a generation it was not
+        issued against; the search below is by generation number for the same
+        reason, rather than by position in a list bounded by `HISTORY_LIMIT`.
+        """
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        for index, entry in enumerate(self._history):
+            if entry.get("generation") == receipt.get("generation"):
+                self._history[index] = slo.attach_generation(entry, receipt)
+                return True
+        return False
+
+    def _slo_run(self, *, seal: bool) -> dict | None:
+        """Run the declared contract over what this generation has done so far.
+
+        `seal=True` is the GENERATION BOUNDARY: the generation is ending, so the
+        receipt is signed whether or not anything breached, the observations are
+        CONSUMED so the next generation starts from an empty population, and the
+        receipt is filed on this generation's history entry. It takes NO action
+        (`Monitor.record`): the generation being measured is about to be
+        disposed or is already gone, so there is nothing left to divert or
+        pause, and the latch a pause writes outlives the process — a boundary
+        that dispatched would arm a stop against the SUCCESSOR, or against the
+        next process to read that latch, for a breach neither committed.
+
+        `seal=False` is the IN-FLIGHT probe a campaign drives between calls,
+        and it is the one that ACTS: a breach it sees is a breach of a
+        generation that is still running, so the declared response is
+        dispatched. Nothing is consumed, so the generation's population keeps
+        growing and the boundary still sees the whole of it.
+
+        Returns None — having touched nothing at all — when no contract is
+        declared.
+        """
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        if self._driver is None or not self._slo_contract():
+            return None
+        events = self._slo_events()
+        decisions = slo.decisions_from_wal(self._slo_wal())[self._slo_decisions:]
+        monitor = self._slo_monitor(events=events, decisions=decisions)
+        verdict = monitor.record() if seal else monitor.observe()
+        if verdict is None:
+            return None
+        if seal and monitor.receipt is not None:
+            verdict["attached"] = self._slo_attach(monitor.receipt)
+        verdict["receipt"] = monitor.receipt
+        # A pause this session's own contract armed is a SESSION-level fact from
+        # here on: `slo.paused` reads the latch back and answers None for a halt,
+        # so a halted session can never be reported as merely paused.
+        dispatch = verdict.get("dispatch") or {}
+        if dispatch.get("action") in (slo.PAUSE, slo.HALT) and dispatch.get("armed"):
+            self._slo_paused = slo.paused(dispatch.get("latch"))
+        self._slo_last = verdict
+        return verdict
+
+    def _seal_generation(self) -> dict | None:
+        """The generation boundary. Called at every point a live generation
+        stops being the live one: a swap (before the teardown that ends it), an
+        apply, and the session teardown. Never raises into the transition it is
+        recording — a measurement that cannot complete must not be able to break
+        the change it was measuring, the same discipline `_record_generation`
+        keeps for a snapshot it cannot build."""
+        try:
+            return self._slo_run(seal=True)
+        except Exception:            # noqa: BLE001 — see the docstring
+            return None
+
+    def slo_seal(self) -> dict:
+        """Seal the live generation now: measure, sign the receipt and file it
+        on this generation's history entry. The operator/agent door onto the
+        boundary act, and like every boundary it RECORDS rather than acts —
+        `slo_observe` is the verb that takes the declared response."""
+        verdict = self._seal_generation()
+        if verdict is None:
+            return {"declared": False,
+                    "note": "the running composition declares no `slo` block"}
+        return self._slo_report(verdict)
+
+    def slo_observe(self) -> dict:
+        """Measure the live generation IN FLIGHT, without consuming anything.
+
+        This is the verb a self-improvement campaign drives: it runs the same
+        contract the boundary runs, takes the same declared response on a
+        breach, and leaves the generation's population intact so the boundary
+        still measures the whole run. A breach here is a LIVE breach — the
+        generation is still running when the pause is armed.
+        """
+        verdict = self._slo_run(seal=False)
+        if verdict is None:
+            return {"declared": False,
+                    "note": "the running composition declares no `slo` block"}
+        return self._slo_report(verdict)
+
+    def _slo_report(self, verdict: dict) -> dict:
+        return {
+            "declared": True,
+            "generation": self._generation,
+            "verdicts": verdict["verdicts"],
+            "breached": verdict["breached"],
+            "notHolding": verdict["notHolding"],
+            "action": verdict["action"],
+            "dispatch": verdict.get("dispatch"),
+            "attached": verdict.get("attached", False),
+            "receipt": verdict.get("receipt"),
+            "signed": verdict.get("receipt") is not None,
+            # Stated rather than implied: with no signing key in the environment
+            # there is no receipt, and an unsigned measurement is not a receipt
+            # on the generation. `revl.slo.KEY_ENV` / `KEY_FILE_ENV` name it.
+            **({} if verdict.get("receipt") is not None else
+               {"unsigned": "no signing key (REVL_SLO_KEY / REVL_SLO_KEY_FILE), "
+                            "so this measurement carries no receipt"}),
+        }
+
+    def slo_status(self) -> dict:
+        """What the contract is, and what this session last measured against it.
+        Read-only: it takes no measurement and dispatches nothing."""
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        contract = self._slo_contract()
+        last = self._slo_last
+        return {
+            "declared": bool(contract),
+            "generation": self._generation,
+            "contract": {k: v.get("target") for k, v in contract.items()},
+            "onBreach": {k: v.get("action") for k, v in contract.items()},
+            "latch": self._slo_latch,
+            "paused": self.slo_paused(),
+            "signable": slo.key_from_env() is not None,
+            "lastVerdict": (None if last is None else
+                            {"generation": last["body"].get("generation"),
+                             "breached": last["breached"],
+                             "notHolding": last["notHolding"],
+                             "action": last["action"]}),
+            "receipts": [e["generation"] for e in self._history
+                         if e.get("sloReceipt") is not None],
+        }
+
+    def slo_paused(self) -> dict | None:
+        """The pause in force on this session, or None.
+
+        Re-read from the latch on every call rather than trusted from the member
+        set when it was armed: `revl estop --clear` removes the latch from
+        another terminal, and a session that kept reporting paused after the
+        stop was lifted would be reporting a state it is not in.
+        """
+        from .. import slo  # noqa: PLC0415 — lazy, pure
+
+        if self._slo_paused is None:
+            return None
+        live = slo.paused(self._slo_paused.get("latch"))
+        if live is None:
+            self._slo_paused = None
+        return live
+
     # -- generation history and undo (roadmap item 65) ---------------------
 
     def _record_generation(self, readmittable: bool = True) -> None:
@@ -1810,7 +2187,15 @@ class Session:
             "schemaVersion": "1.0",
             "current": self._generation,
             "generations": [
-                {"generation": e["generation"], "snapshot": e["snapshot"]}
+                {"generation": e["generation"], "snapshot": e["snapshot"],
+                 # item 473: the generation's own signed SLO receipt, present
+                 # only when it ran under a declared contract and a signing key
+                 # was configured. Additive and omit-by-default, so a history of
+                 # generations that declared no `slo` block is byte-identical,
+                 # and `revl plan`'s E4 reads THESE bytes rather than a second
+                 # derivation of them.
+                 **({"sloReceipt": e["sloReceipt"]}
+                    if e.get("sloReceipt") is not None else {})}
                 for e in self._history
             ],
         }
@@ -2177,7 +2562,9 @@ class Session:
         # to None, which means an undo *to* this generation is refused honestly
         # rather than rehydrated. Undoing *past* it (to an earlier source-backed
         # generation) still works, and its boundary crossings are enumerated.
+        self._seal_generation()
         self._generation += 1
+        self._slo_begin_generation()
         self._record_generation(readmittable=False)
         return {
             "applied": True,
@@ -2988,6 +3375,38 @@ class Session:
                 "with `revl recover --wal <file>`, or `unload` (which strands "
                 "rather than unwinds) and start a fresh session")
 
+    def _refuse_if_paused(self, verb: str) -> None:
+        """A PAUSE in force refuses a new boundary crossing (item 473).
+
+        This is the whole behavioural difference between a pause and a receipt
+        that says "we breached". `slo.pause` writes the latch; without a reader
+        that refuses, a paused session would keep dispatching and the declared
+        response would be a line in a document rather than a stop.
+
+        It is NOT `_refuse_if_halted` with a friendlier message, and the two
+        refusals must not be merged:
+
+          * a HALT is terminal — the instance is dead, its entries are STRANDED,
+            and the only way back is `revl recover --wal <file>`;
+          * a PAUSE is recoverable — the instance is ALIVE, every registered
+            entry is still owed, nothing was stranded, and the way back is to
+            lift the latch (`revl estop --clear`) and keep serving.
+
+        So the refusal says which one it is and how to leave it, and `unload`,
+        `state` and every read-only inspector stay open: a pause an operator
+        cannot look at is a pause they cannot lift.
+        """
+        record = self.slo_paused()
+        if record is None:
+            return
+        raise SessionError(
+            f"`{verb}` is refused: this session's declared `slo` contract was "
+            f"breached and the declared response PAUSED it ({record.get('reason')}). "
+            "The instance is alive and nothing is stranded — no entry was "
+            f"dropped. Lift the latch (`revl estop --clear {record.get('latch')}`) "
+            "to resume dispatching, or `unload` to end the session; "
+            "`slo_status` reports the breach that armed it")
+
     # -- session branching (roadmap item 250) ------------------------------
 
     def _fork_timeline(self, component: str | None):
@@ -3441,6 +3860,10 @@ class Session:
         from . import reflect_bridge as _reflect_bridge  # noqa: PLC0415
         if _reflect_bridge.current() is self:
             _reflect_bridge.bind(None)
+        # item 473: the teardown is the LAST generation boundary, so the final
+        # generation gets its receipt here. Before `self._driver = None`: the
+        # trace the measurement reads lives on the driver.
+        self._seal_generation()
         self._driver = None
         # the teardown boundary is the last generation boundary this session will
         # see, so settle any approval the outgoing generation spent before the
@@ -3455,6 +3878,15 @@ class Session:
         self.previous_origin = None
         self.draft = None
         self._generation = 0
+        # item 473: a fresh session has measured nothing. The PAUSE is not
+        # cleared here and that is deliberate — the latch is on disk and outlives
+        # the session, so clearing the member would only make this process blind
+        # to a stop that is still in force. `revl estop --clear` lifts it.
+        self._slo_cursor = 0
+        self._slo_decisions = 0
+        self._slo_last = None
+        self._slo_ir = None
+        self._slo_composition = None
         # the surface epoch resets with the generation: a fresh (unloaded) session
         # is at 0, and the next `load` moves it to 1 alongside the generation
         # (design 460 §3).
@@ -3992,6 +4424,7 @@ class Session:
         render = (lambda v: v) if raw else _plain
         driver = self._require()
         self._refuse_if_halted("call")   # item 443
+        self._refuse_if_paused("call")   # item 473
         namespace = driver._namespace()
         if key not in namespace:
             raise SessionError(f"no provided key {key!r} "
@@ -7399,6 +7832,7 @@ class Session:
             return {"loaded": False, "leases": self.leases.document()}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
+        paused_now = self.slo_paused()
         return {
             "loaded": True,
             "components": [
@@ -7417,6 +7851,14 @@ class Session:
             "generation": self._generation,
             "history": [e["generation"] for e in self._history],
             "canUndo": len(self._history) >= 2,
+            # item 473: present ONLY while a pause this session's own SLO
+            # contract armed is in force, so a session under no contract — and a
+            # session whose contract held — reports exactly what it reported
+            # before the producer existed.
+            **({"slo": {"paused": True, "latch": paused_now.get("latch"),
+                        "resumable": paused_now.get("resumable"),
+                        "reason": paused_now.get("reason")}}
+               if paused_now is not None else {}),
             # active component leases (item 61): holder, component, expiry — the
             # multi-agent workspace, visible before anyone acts.
             "leases": self.leases.document(),

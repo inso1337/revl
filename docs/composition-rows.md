@@ -527,10 +527,22 @@ The escalation order is by residue cost. A datum that declares no response is
 answered by `pause`, the bounded-residue floor — a breach that changed nothing
 would not be a contract, and the vocabulary has no "ignore" to ask for one.
 
-The observed half is `revl slo`: it measures a recorded run against this
-contract, takes the declared response, signs a `revl.slo-receipt` bound to the
-generation, and gates the next rollout on it. See
-[commands-reference.md](commands-reference.md#revl-slo).
+The observed half runs in two places. A LIVE session measures its own
+generation: it binds the contract off this document at load, records the causal
+trace because a contract was declared, and at every generation boundary (a swap,
+an apply, the teardown) it measures, takes the declared response and files a
+signed `revl.slo-receipt` on that generation's own history entry, which
+`history_document()` exports. A breach that pauses genuinely stops the session:
+a new call is refused, distinctly from an E-Stop, because the instance is alive
+and nothing is stranded. `revl slo` is the same contract run over a RECORDED
+trace after the fact, and it also verifies a receipt and gates the next rollout
+on it. See [commands-reference.md](commands-reference.md#revl-slo).
+
+The percentile is over the run's own completions when it wrote a WAL: item 250's
+`model-decision` record is written at the crossing, one per model completion, so
+it is a per-call population rather than the crossings a step-back walk visited.
+Which population a verdict was over is named on the verdict and inside the signed
+receipt, because the two are different claims.
 
 The datum set is closed, and each datum fixes its own unit:
 
@@ -709,7 +721,7 @@ patch the rows this document defines.
 | incremental admission | admitting a resolved delta through `admit_into` with a `replacing` withdrawal set, so the cost is one compile of the patched rows | the fold |
 | confinement | non-first-party rows compiled under the untrusted-author profile, and the per-root profile split in `compile_files` that makes a mixed-trust delta expressible in one call | roadmap 425 F1's decision |
 | the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, and a printed blind-spots block | confinement, and roadmap 428 F3 |
-| the SLO runtime, in flight | the observed half of item 473 runs today over a RECORDED trace through `revl slo`: the measurement, the declared response, the signed receipt and the rollout gate. What is left is the LIVE producer, a session running the monitor at its own generation boundary | a producer inside `Session`, and the pause as a member of item 460's lifecycle state set |
+| the SLO runtime, in flight | landed: a live `Session` measures its own generation, takes the declared response and files a signed receipt on its own history entry. What is left is the pause as a member of item 460's FIBER state set (a cordis-runtime change), `success_rate` (needs a declared denominator), and `recovery_time` / `approval_wait` (need timestamps on WAL records) | the `over` / `min` / `of` surface, and a durable-format decision |
 | distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |
 
 `open` (which fields a third-party layer may `configure`, §8.6) and `reach` (the
