@@ -274,6 +274,11 @@ def test_no_load_execution_leaf_and_parent_sentinel(tmp_path, monkeypatch):
         assert os.environ.get(leaf) == "1"
         assert os.environ.get(parent) == "1"
     finally:
+        # the sentinels are set by the HOST module, not through monkeypatch, so
+        # `delenv` above does not undo them: without this the two variables
+        # outlive the test and every later subprocess inherits them (#1021).
+        os.environ.pop(leaf, None)
+        os.environ.pop(parent, None)
         for name in ("pkg", "pkg.engine"):
             sys.modules.pop(name, None)
         sys.modules.pop("revl_run_gen1", None)
