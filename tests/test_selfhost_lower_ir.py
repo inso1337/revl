@@ -152,6 +152,7 @@ FUNCTION_EMIT_READY_DOCS = [
 COMPONENT_DOCS = [
     "services_basic.rvl", "services_config.rvl", "services_body.rvl",
     "services_methods.rvl", "services_method_effects.rvl", "services_timers.rvl",
+    "provide_returns.rvl",
 ]
 
 # The document whose `externs` section is lowered byte-exact (item 241): the
@@ -255,6 +256,11 @@ def lower_to_ir(ns):
     return ns["lower_to_ir"]
 
 
+@pytest.fixture(scope="module")
+def lower_to_ir_at(ns):
+    return ns["lower_to_ir_at"]
+
+
 def _reference_emit():
     spec = importlib.util.spec_from_file_location(
         "pyemit_reference_lower_ir", ROOT / "backends" / "python" / "emit.py")
@@ -266,7 +272,7 @@ def _reference_emit():
 def _headers(components):
     """The declaration-header projection of a component list."""
     return [
-        {"name": c["name"], "config": c["config"],
+        {"name": c["name"], "source": c.get("source"), "config": c["config"],
          "requires": c["requires"], "provides": c["provides"]}
         for c in components
     ]
@@ -530,11 +536,71 @@ def test_native_ir_matches_reference_services(lower_to_ir, rel):
 
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_component_headers(lower_to_ir, rel):
-    """Each component's config/requires/provides header is byte-identical."""
+    """Each component's source/config/requires/provides header is byte-identical."""
     src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert _headers(native["components"]) == _headers(reference["components"])
+
+
+@pytest.mark.parametrize("rel", CORPUS)
+def test_native_ir_stamps_the_component_source(lower_to_ir_at, rel):
+    """The per-component `source` key, which four census passes excluded.
+
+    It was excluded as an "environment artifact the covered emitter surface
+    never reads". Half of that is measurably true and half was never the
+    reason. TRUE: its one reader, `backends/typescript/emit_temporal.py`, puts
+    it in REFUSAL TEXT and falls back to `"<source>"`, so no emitted byte moves
+    when it is absent. NOT the reason: `source` is `comp.source or filename`,
+    and `lower_to_ir(src)` took a string and nothing else, so the producer could
+    not have stamped the key whatever any emitter did with it.
+
+    `lower_to_ir_at(src, filename)` supplies the one input that is not the
+    source text, and the key is then byte-identical to the reference for the
+    same filename — over the whole corpus, not a chosen document."""
+    src = (CORPUS_DIR / rel).read_text()
+    native = json.loads(lower_to_ir_at(src, rel))
+    reference = compile_source(src, rel)
+    assert [c.get("source") for c in native["components"]] == \
+           [c.get("source") for c in reference["components"]]
+    assert [c["name"] for c in native["components"]] == \
+           [c["name"] for c in reference["components"]]
+
+
+def test_the_text_only_entries_agree_on_the_default_filename(lower_to_ir):
+    """`lower_to_ir(src)` is the text-only entry on this side exactly as
+    `compile_source(src)` is on the other, so they must agree on what a caller
+    who named no file gets: `"<string>"`, `compile_source`'s own default. A
+    producer that stamped something else here would look correct against every
+    test that passes a filename and diverge on every one that does not."""
+    src = ("service S { fn go() -> Int }\n"
+           "component C provides s: S { provide s { fn go() = 1 } }\n")
+    native = json.loads(lower_to_ir(src))
+    assert [c["source"] for c in native["components"]] == \
+           [c["source"] for c in compile_source(src)["components"]] == ["<string>"]
+
+
+def test_no_native_ir_document_carries_a_manifest(lower_to_ir):
+    """The `manifest` half of the same exclusion, pinned rather than assumed.
+
+    `lower_to_ir` produces no `manifest` key at all, and the prior reading was
+    that this is inert because no backend emitter reads one. That is measurably
+    WRONG: `backends/wasm/emit.py` reads `manifest["templates"]` and passes
+    `is_template=` into every `_ComponentEmitter`, so a component that is a
+    spawn target emits a DIFFERENT module depending on the key. Eight documents
+    in the tree carry a non-empty `templates`.
+
+    Closing it needs the filename too — every `manifest["components"][i]` entry
+    carries a `file` — plus the link order the reference derives in `_link`, so
+    it is named here as an open gap rather than half-produced. A partial
+    manifest is worse than none: a consumer reading `loadOrder` off one would
+    get an empty list and no signal that the producer never had one.
+
+    This fails the moment the key appears, which is the point — the next pass
+    that produces it has to come here and say what it produces."""
+    for rel in COMPONENT_DOCS:
+        native = json.loads(lower_to_ir((CORPUS_DIR / rel).read_text()))
+        assert "manifest" not in native, rel
 
 
 @pytest.mark.parametrize("rel", CORPUS)

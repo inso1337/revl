@@ -7,8 +7,8 @@ with [design/526-webui-asset-alignment.md](design/526-webui-asset-alignment.md)
 [design/530-webui-entry-surface.md](design/530-webui-entry-surface.md) (the
 coeffect decision).
 
-> **Status: the asset model and the typed channel are landed; the remainder is
-> named at the end of this page.** Read
+> **Status: the asset model, the typed channel and the source-map chain are
+> landed; the remainder is named at the end of this page.** Read
 > [What is not expressible yet](#what-is-not-expressible-yet) before you plan
 > around it.
 
@@ -405,10 +405,96 @@ three extra characters it encodes, `<`, `>` and `&`, are the ones that would
 otherwise let an inlined template break out of a `<script>` element carrying the
 map.
 
-What this does **not** do is chain with the bundler's map. A template rendered
-into a `.ts` file that Vite then bundles has two maps and nothing composes them,
-so devtools follow Vite's back to the `.ts` and stop there. That composition is
-what is left of F2.
+## Chaining it with the bundler: `revl sourcemap compose`
+
+The map above is about one step, rendered text back to template. A frontend
+build has a second step, bundled asset back to the files the bundler read, and
+the bundler writes its own map for it. When a rendered file is one of those
+inputs, a browser holds two maps and composes neither, so devtools follow the
+bundler's map back to the generated file and stop there. That is the same
+provenance gap the string-embedded frontend had, one level up.
+
+`revl sourcemap compose` closes it. It reads Source Map v3 documents and writes
+one:
+
+```bash
+revl sourcemap compose dist/console.js.map \
+  --through generated.ts=build/generated.ts.map \
+  -o dist/console.js.map
+```
+
+The positional argument is the **outer** map, the bundler's. Each `--through` is
+an **inner** map, one generated input's own. `NAME=` is how the outer map spells
+that input in its `sources`; without it the inner map's own `file` is used.
+`--through` repeats, so a bundle built from several rendered files chains each
+of them in turn.
+
+It is a toolchain step rather than a stdlib one because nothing in either
+process sees both maps: the inner one is produced by a revl program at render
+time and the outer one by the bundler afterwards. The module is
+[`src/revl/sourcemap.py`](../src/revl/sourcemap.py).
+
+### What the composed map says
+
+A source-map consumer resolves a generated position by taking the last mapping
+on that line at or before the column, and it does not interpolate. So the
+composition is defined as the walk a consumer would do by hand, holding both
+documents:
+
+```
+compose(outer, inner) . resolve(l, c)  ==  inner . resolve(outer . resolve(l, c))
+```
+
+Taking that as the definition rather than as a property to approximate settles
+the three cases that otherwise get decided by accident:
+
+| Case | What the composed map does |
+|---|---|
+| a mapping into another source (a vendored runtime, a `.vue` file) | passes through untouched, so the result is a map of the whole bundle rather than of the generated fragment |
+| a mapping into the generated file that the inner map does not cover | becomes a 1-field mapping: a generated column with no original position. Keeping it would point a reader at a file the composed map no longer lists; deleting it would let the previous mapping on the line spill forward over a region nothing knows anything about |
+| a mapping with a name on both sides | takes the inner one, the hole's name, because that is the name that names something in the file the composed map opens. An outer name with no inner counterpart survives |
+
+The composed map is never finer than the inner map it was chained through, which
+is worth knowing before reading a column off it. `render_mapped` records one
+segment per generated line of copied template text plus one per inserted value,
+so a bundled position inside copied text resolves to the start of its template
+line and a position inside an inserted value resolves to the hole. Line
+provenance, which is what a stack trace asks for, is exact.
+
+### What it refuses
+
+A source map is a build artifact. Its `sources`, `sourceRoot`, `file` and
+`sourceMappingURL` fields are strings that look like paths and arrive from
+whatever wrote the file being debugged, so **the composer never opens one**.
+Source names are compared as text and copied as text, and `sourcesContent` is
+only ever the content the two documents already carried. A composer that
+resolved `sources` against the filesystem to fill in a missing `sourcesContent`
+would be a file-read primitive reachable from a build artifact. The command
+reads exactly the paths on its own command line and nothing a document names.
+
+Everything else fails closed, naming what was wrong rather than returning a
+document that chains nothing:
+
+| Input | Outcome |
+|---|---|
+| a `--through NAME` that matches no source of the outer map | refused: composing against a source that is not there returns the outer map unchanged, which reads like a success |
+| a `NAME` whose whole-path suffix matches two different sources | refused as ambiguous, naming both, rather than picking one |
+| `version` that is not 3, or an index map (`sections`) | refused: an index map has to be composed per section against its own offset, and a composer that ignored the offsets would be right only for the first one |
+| a malformed `mappings` run: a non-base64 digit, a run that ends mid-value, a field count outside 1/4/5, a delta that drives a line or column negative | refused |
+| a source or name index outside its array, or a `sourcesContent` whose length does not match `sources` | refused |
+
+`sourceRoot` is folded into the source names and dropped from the output, so the
+composed document cannot be read two ways.
+
+The guard is `tests/test_sourcemap_chain_459.py`. Its map checks are decoded by
+a VLQ reader and a resolver written from the format rather than from the
+composer, its inner maps come from the shipped `stdlib/template.rvl` rather than
+from fixtures built to agree, and a nineteen-mutation neutering proof makes the
+gate's ability to fail a measured fact. One leg builds for real: it renders a
+template into a `.ts`, runs a real `vite build` over it, composes the two maps,
+and resolves a position in the bundle back to the `.tpl` line and hole name that
+produced it. That leg runs in the `frontend-assets` job, where
+`REVL_REQUIRE_FRONTEND_TOOLCHAIN=1` turns its skip off.
 
 ## What is not expressible yet
 
@@ -425,16 +511,22 @@ none of it should be assumed:
   as `examples/webui-entry/console.rvl` does. The compiler builds the value, so
   writing the record by hand does not make a path resolved or a digest true, but
   it does type-check: the record is a shape, not a capability.
-- **The insertion-site map does not chain with the bundler's** (**F2**, the
-  remainder). The map from a rendered position back to the template line it came
-  from is landed and is the section
-  [above](#the-insertion-site-map-render_mapped-and-source_map); what is not
-  landed is composing it with Vite's own map, so that a browser stack trace in a
-  bundle built from generated text walks all the way back to the template rather
-  than stopping at the generated file.
-- **No template control flow** (`{{if}}`/`{{for}}`/includes/layouts, **F3**),
-  and **tiers** are not extended beyond py/ts (**F6**). The map itself is pure
-  revl, so F6 does not reach it.
+- **No template control flow** (`{{if}}`/`{{for}}`/includes/layouts, **F3**).
+  This is deferred on a stated precondition rather than on effort, and the
+  precondition is includes: an included template declares the context of its own
+  holes, and the site that includes it decides which context those holes
+  actually land in. `{{html:x}}` is correct inside a `<p>` and is a live
+  breakout inside a `<script>` in the layout that included it. Settling that
+  needs a declared context signature for a template and a check at the include
+  site, which is a design note of its own; the two cheaper answers, inferring
+  the context by parsing the surrounding markup and re-escaping the included
+  output, are both already ruled out by stage 1. Design note 459's F3 section
+  carries the full argument.
+- **Tiers** are not extended beyond py/ts (**F6**). Both halves of the map,
+  `render_mapped` and `source_map`, are pure revl and run on every tier, and the
+  chain above is a toolchain step rather than an emitted one, so F6 reaches
+  neither. What it still reaches is reading a template from disk at run time,
+  which needs a per-tier host body.
 
 The typed reactive-state / RPC channel (design note 459 **F5**, filed as gap
 **G3** in
@@ -446,8 +538,8 @@ the `--face webui` verb (**F7**) are the section above; both are landed.
 
 The item's stated exit was app-gated on roadmap item 462 (the exemplary web
 application, issue #725, itself gated on item 461 / issue #724). Both have since
-closed, so the external gate has lifted and what remains open against item 459 is
-the map-chaining half of F2, plus F3 and F6 above. See [v2.0-roadmap.md](v2.0-roadmap.md) items 459 and
+closed, so the external gate has lifted, and F2's map chaining has since landed
+too, so what remains open against item 459 is F3 and F6 above. See [v2.0-roadmap.md](v2.0-roadmap.md) items 459 and
 462.
 
 ## Related
