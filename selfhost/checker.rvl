@@ -803,16 +803,49 @@ type ProvR = { provs: List[Provide], setup: List[Stmt], i: Int, ok: Bool }
 
 type ProvMR = { xs: List[ProvM], i: Int, ok: Bool }
 
+// The methods of one `provide` block. The reference grammar is
+//   pmethod := 'fn' IDENT '(' params ')' ['->' T] ('=' expr | '{' stmt* '}')
+// (src/revl/parser.py `_provide`), and both optional pieces were missing here.
+//
+// THE RETURN ANNOTATION. A provide method may RESTATE the return type its
+// service already declares; the reference parses it and leaves any mismatch to
+// the type layer (`examples/rejections/t7_provide_param_annotation_mismatch.rvl`
+// is the parameter twin). This read the body token straight off the end of the
+// parameter list, so an annotated method failed the WHOLE component with
+// `bad provide block in component <C>`. `ret_at` is the step the sibling
+// `p_methods` already takes over a service declaration, and it is CONDITIONAL:
+// stepping unconditionally would eat the `{` or `=` of an unannotated method.
+//
+// THE `=` SHORTHAND. The reference makes `fn f(x) = e` a single `return e`,
+// which is what the body becomes here. Without this arm the annotation fix
+// reaches only one of the two parser arms, and the shorthand — the spelling
+// most of the tree uses — stays refused.
+//
+// Both were false rejections of legal first-party code AND, on a program the
+// reference refuses, a parse-stage refusal standing where the real verdict
+// belongs: 20 documents in the tree came back `bad provide block` from a stage
+// that never reached a guarantee. `tools/checker_reference_census.py` measures
+// this surface and `tests/test_checker_reference_census.py` holds both halves.
+// `async fn` is still unread here, but unreachably so: `p_methods` cannot parse
+// the `async` service operation such a method would implement.
 fn p_prov_methods(ts: List[Token], i: Int, end: Int,
                   acc: List[ProvM]) -> ProvMR {
   if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
   if (!atw(ts, i, "fn")) { return { xs: acc, i: i, ok: false } }
   let nm = tkc(ts, i + 1).text
   let ps = params_at(ts, i + 3)
-  if (!atk(ts, ps.i, "{")) { return { xs: acc, i: ps.i, ok: false } }
-  let bend = close_brace(ts, ps.i)
+  let si = ret_at(ts, ps.i)
+  if (atk(ts, si.i, "=")) {
+    let sh = expr_at(ts, si.i + 1)
+    if (is_bad(sh.e)) { return { xs: acc, i: si.i, ok: false } }
+    return p_prov_methods(ts, sh.i, end,
+                          acc.push({ name: nm, params: ps.ps,
+                                     body: [mkstmt("return", sh.e)] }))
+  }
+  if (!atk(ts, si.i, "{")) { return { xs: acc, i: si.i, ok: false } }
+  let bend = close_brace(ts, si.i)
   if (bend == 0 - 1) { return { xs: acc, i: ts.length(), ok: false } }
-  let body = p_stmts(ts, ps.i + 1, bend - 1, [])
+  let body = p_stmts(ts, si.i + 1, bend - 1, [])
   return p_prov_methods(ts, bend, end,
                         acc.push({ name: nm, params: ps.ps, body: body }))
 }

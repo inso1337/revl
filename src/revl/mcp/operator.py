@@ -37,9 +37,12 @@ safeguard, not a new default.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
+from .. import cap_order
+from .. import intent as _intent
 from ..errors import RevlError
 from ..why import CHAIN, TraceStep, WhyTrace
 
@@ -256,6 +259,96 @@ class Grant:
         return False
 
 
+# ------------------------------------------- what an operator may MINT
+#
+# `Grant` above is verb globs over subject globs: an AUTHORITY, not a declared
+# intent. It answers "may this operator call `approve` on this component", and
+# that is all it can answer, because there is nothing on it to compare a
+# capability, a ceiling or a `uses` count against. So an operator holding
+# `approve` could mint a standing grant (item 344) over ANY capability, with any
+# ceiling and any number of uses, and nothing checked the mint against anything:
+# the class-(c) gate refines a crossing against what the grant declared (item 470
+# stage 1) while the grant itself was minted unchecked — bounded downstream,
+# unbounded upstream.
+#
+# `MintBound` is the declaration the grant side lacked. It is deliberately NOT a
+# `Grant` with extra fields: the two answer different questions and compose
+# rather than overlap. `may approve on payments` still decides WHO may say yes
+# and WHERE (the subject dimension, checked in `decide` before dispatch); a
+# `may mint` line decides WHAT MAY BE MINTED there (the capability cone, its
+# ceilings, the uses and the window). Neither subsumes the other and neither
+# states the other's dimension twice.
+
+#: The capability spelling that declares the whole capability surface in a
+#: `may mint` line. It is the ONE unbounded object a profile can state, and it
+#: has to be WRITTEN to hold: a declaration is never inferred from silence.
+ANY_CAPABILITY = "*"
+
+#: The spelling that declares one numeric axis explicitly unbounded
+#: (`uses *`, `ttl *`). Same rule: unbounded is statable, never assumed.
+UNBOUNDED = "*"
+
+#: The verb both sides of a mint comparison state.
+#:
+#: A mint is compared DECLARATION-to-DECLARATION — the profile's `may mint` line
+#: against the spelling the operator is minting — and neither side names an
+#: operation performed at a boundary, so `refine`'s verb dimension is the
+#: identity here exactly as it is at the class-(c) gate (`session._GATE_VERB`).
+#: Guessing a verb would be inferring an intent nobody stated, which item 470's
+#: scope note forbids.
+MINT_VERB = "mint"
+
+#: The ceiling parameter the `uses` axis already meters, dropped from both sides
+#: of the capability comparison.
+#:
+#: `_mint_grant` folds a `calls=N` in the minted spelling into the shipped
+#: `remainingUses` counter, so `calls` IS the uses axis. Comparing it in the
+#: ceiling dimension as well would bound one quantity by two rules and let the
+#: weaker one win — the hazard `Intent.__post_init__` refuses a ceiling parameter
+#: on an object for. A `may mint` DECLARATION may not spell it at all (see
+#: `_parse_mint`): the uses axis has one spelling, `uses N`.
+_USES_METERED = frozenset({"calls"})
+
+_MINT_CLAUSE = re.compile(r"\s+(uses|ttl)\s+(\S+)\s*$", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class MintBound:
+    """One `may mint` line: the standing grants this operator may mint.
+
+    Three axes, all three STATED, because each of them is one of the three the
+    unbounded mint left free:
+
+    * ``capability`` is the declared cone, compared by ``cap_order.covers``
+      through ``intent.refine`` — the tree's one partial order over capability
+      spellings, read here over a declaration instead of over an authority. It
+      carries its own ceilings (``size``/``time``), which is the ceiling axis.
+      ``*`` is the whole surface, and it is the only glob: relatedness between
+      two capabilities is never inferred from a shared prefix (item 470's scope
+      note), so a profile that means two cones writes two lines.
+    * ``uses`` is the largest ``remainingUses`` a grant minted here may carry.
+      ``None`` is the explicit ``uses *``.
+    * ``ttl_ms`` is the longest window it may live for. ``None`` is ``ttl *``.
+
+    Both numeric clauses are REQUIRED on the line. A declaration that could omit
+    one would have an unstated axis, and an unstated axis is exactly what this
+    record exists to remove: `uses *` is a deployment saying so, and silence is
+    not. The same rule in the other direction is why a mint that states no bound
+    on an axis the declaration bounds is refused rather than defaulted — an
+    unbounded grant cannot be shown to be within a stated bound.
+    """
+
+    capability: str
+    uses: int | None
+    ttl_ms: int | None
+
+    def to_dsl(self) -> str:
+        """The canonical line, as a refusal renders it."""
+        uses = UNBOUNDED if self.uses is None else str(self.uses)
+        ttl = UNBOUNDED if self.ttl_ms is None else f"{self.ttl_ms}ms"
+        return f"may mint {self.capability} uses {uses} ttl {ttl}"
+
+
 @dataclass(frozen=True)
 class Operator:
     """One operator identity: a token, the grants bound to it, and — when the
@@ -299,6 +392,25 @@ class Operator:
     sign_key: str | None = None
     not_after: int | None = None
     revoked: bool = False
+    # issue #1062 / item 470 stage 3: what this operator may MINT. Appended
+    # last so every positional construction of an `Operator` keeps its meaning.
+    mints: tuple[MintBound, ...] = ()
+
+    def bounds_mints(self) -> bool:
+        """Does this operator's profile DECLARE what it may mint?
+
+        The migration hinge, and the one place the answer is read. An operator
+        that declares no `may mint` line is UNCHANGED: it mints exactly what it
+        minted before, because refusing every profile written before this
+        grammar existed would refuse every deployment that has one, and a fix
+        nobody can adopt bounds nothing. An operator that declares ONE line is
+        closed over the whole mint surface from that line on — the set of `may
+        mint` lines is the whole of what it may mint, and anything outside them
+        refuses. So adopting the bound is per-operator and its first line is
+        already load-bearing, rather than a flag that has to be flipped for the
+        declaration to mean anything.
+        """
+        return bool(self.mints)
 
     def allows(self, verb: str, labels: frozenset[str]) -> tuple[bool, Grant | None]:
         """Decide one (verb, target) pair. Deny wins over allow; an allow must
@@ -460,12 +572,120 @@ def _split_until(rest: str, source: str | None, lineno: int):
             _parse_not_after(rest[marker + len(" until "):], source, lineno))
 
 
+def _parse_ttl_ms(value: str, source: str | None, lineno: int) -> int:
+    """A `ttl` duration, in the ONE spelling the tree already reads.
+
+    `policy._parse_ttl` is the grammar a `requires approval ttl` rule and a
+    distilled rule are written in (`30s`, `10m`, `1h`, `500ms`, and a bare
+    number as seconds), and the window a `may mint` line bounds is the same
+    window those set. A second duration grammar in the same configuration file
+    would be one an author has to remember which of two rules they are under.
+    """
+    from ..policy import _parse_ttl  # noqa: PLC0415 — one ttl grammar for the tree
+    try:
+        return _parse_ttl(value)
+    except ValueError as exc:
+        raise ProfileError(source, lineno, str(exc))
+
+
+def _parse_mint_bound(value: str, kind: str, source: str | None,
+                      lineno: int) -> int | None:
+    """One `uses N` / `ttl D` clause, or `None` for the explicit `*`."""
+    raw = value.strip()
+    if raw == UNBOUNDED:
+        return None
+    if kind == "ttl":
+        ms = _parse_ttl_ms(raw, source, lineno)
+        if ms < 1:
+            raise ProfileError(source, lineno,
+                               f"`ttl {raw}` is not a window a grant can live "
+                               f"in: write a positive duration, or `ttl *`")
+        return ms
+    if not raw.isdigit() or int(raw) < 1:
+        raise ProfileError(
+            source, lineno,
+            f"`uses {raw}` is not a count of crossings: write a positive "
+            f"integer (the largest `uses` a grant minted here may carry), or "
+            f"`uses *` to declare the axis unbounded")
+    return int(raw)
+
+
+def _parse_mint(clause: str, source: str | None, lineno: int) -> MintBound:
+    """One `may mint <capability> uses <N|*> ttl <D|*>` line.
+
+    The two numeric clauses are peeled off the END (each at most once, in either
+    order) because the capability spelling in front of them may itself contain
+    spaces: `fs.write(path="/tmp", size="1MB")`. Both are REQUIRED. A line that
+    could leave one out would declare an axis by silence, and silence is what
+    this whole record exists to remove — `uses *` says it.
+    """
+    rest = clause.strip()
+    seen: dict[str, int | None] = {}
+    while True:
+        match = _MINT_CLAUSE.search(rest)
+        if match is None:
+            break
+        name = match.group(1).lower()
+        if name in seen:
+            raise ProfileError(
+                source, lineno,
+                f"`{name}` is stated twice on one `may mint` line: a bound is "
+                f"one number, and the second spelling would silently win")
+        seen[name] = _parse_mint_bound(match.group(2), name, source, lineno)
+        rest = rest[:match.start()]
+    missing = [name for name in ("uses", "ttl") if name not in seen]
+    if missing:
+        raise ProfileError(
+            source, lineno,
+            f"a `may mint` line states every axis it bounds: it is missing "
+            f"`{'` and `'.join(missing)}`. Write "
+            f"`may mint <capability> uses <N|*> ttl <D|*>` — an axis left out "
+            f"would be a bound nobody stated, and an unstated bound is the "
+            f"thing this line exists to replace (use `*` to declare one "
+            f"explicitly unbounded)")
+    spelling = rest.strip()
+    if not spelling:
+        raise ProfileError(source, lineno,
+                           "a `may mint` line names no capability: write the "
+                           "cone it may mint over, or `*` for every capability")
+    if spelling != ANY_CAPABILITY:
+        if ANY_CAPABILITY in spelling:
+            raise ProfileError(
+                source, lineno,
+                f"`{spelling}` is a glob, and a `may mint` line names a POINT "
+                f"in the capability order (`fs.write(path=\"/tmp\")`), which "
+                f"is what a mint is compared against. A bare token already "
+                f"tops its own cone, and two cones that are not one cone are "
+                f"two lines: relatedness between capabilities is declared, "
+                f"never inferred from a shared prefix")
+        try:
+            cap = cap_order.parse_cap(spelling)
+        except cap_order.CapError as exc:
+            raise ProfileError(
+                source, lineno,
+                f"`{spelling}` is not a capability spelling ({exc.args[0] if exc.args else exc}). "
+                f"A `may mint` line names a point in the capability order "
+                f"(`fs.write(path=\"/tmp\")`), which is what a mint is compared "
+                f"against; it is not a glob")
+        for name, _value in cap.params:
+            if cap_order.is_ceiling(name) and name in _USES_METERED:
+                raise ProfileError(
+                    source, lineno,
+                    f"`{name}` on a `may mint` capability would bound the same "
+                    f"quantity the `uses` clause bounds, by two rules, and the "
+                    f"weaker one would win: a mint folds `{name}=N` into the "
+                    f"grant's `remainingUses`. State it once, as `uses N`")
+        spelling = cap.to_str()
+    return MintBound(spelling, seen["uses"], seen["ttl"])
+
+
 def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
     """The line DSL (blank lines and ``#`` comments ignored). Grammar:
 
         operator <token> may     <verb>[, ...] on <subject>[, ...]
         operator <token> may not <verb>[, ...] on <subject>[, ...]
         operator <token> may     <verb>[, ...]                       # on *
+        operator <token> may mint <cap> uses <N|*> ttl <D|*>         # issue #1062
         operator <token> key     sha256:<hex> [until <ts>]           # item 471
         operator <token> sign    p256:<hex>   [until <ts>]           # issue #979
         operator <token> revoked                                     # issue #979
@@ -488,8 +708,17 @@ def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
 
     ``until`` bounds the credential's lifetime and ``revoked`` ends it now. Both
     are checked at the cast, and both refuse.
+
+    ``may mint`` is the declaration the GRANT side of a standing approval had
+    none of (issue #1062). It is orthogonal to the verb grants in the same way
+    the credential lines are: ``may approve on payments`` decides who may say
+    yes and where, and ``may mint`` decides what may be minted when they do.
+    There is deliberately no ``may not mint``: the set of ``may mint`` lines IS
+    the whole of what an operator may mint, so a narrower bound is written by
+    narrowing the line rather than by a second rule that could disagree with it.
     """
     operators: dict[str, list[Grant]] = {}
+    mints: dict[str, list[MintBound]] = {}
     keys: dict[str, str] = {}
     sign_keys: dict[str, str] = {}
     not_after: dict[str, int] = {}
@@ -520,6 +749,19 @@ def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
         low = rest.lower()
         if low == "revoked":
             revoked.add(token)
+            operators.setdefault(token, [])
+            continue
+        if low.startswith("may not mint"):
+            raise ProfileError(
+                source, lineno,
+                f"there is no `may not mint` rule: the `may mint` lines an "
+                f"operator declares are the WHOLE of what it may mint, and "
+                f"anything outside them is already refused. Narrow the `may "
+                f"mint` line instead of adding a rule that could disagree with "
+                f"it: {raw.strip()!r}")
+        if low.startswith("may mint "):
+            mints.setdefault(token, []).append(
+                _parse_mint(rest[len("may mint "):], source, lineno))
             operators.setdefault(token, [])
             continue
         if low.startswith("key ") or low.startswith("sign "):
@@ -557,9 +799,49 @@ def _parse_dsl(text: str, source: str | None) -> OperatorRegistry:
         operators.setdefault(token, []).append(Grant(verbs, subjects, allow))
     return OperatorRegistry(
         {t: Operator(t, tuple(g), keys.get(t), sign_keys.get(t),
-                     not_after.get(t), t in revoked)
+                     not_after.get(t), t in revoked,
+                     tuple(mints.get(t, ())))
          for t, g in operators.items()},
         source)
+
+
+def _parse_json_mint(token: str, entry, source: str | None) -> MintBound:
+    """One `mints` entry, read through the SAME line the DSL is read through.
+
+    The two parsers state one grammar or they are two grammars: a JSON profile
+    that admitted a bound the DSL refuses would be the shape an author reaches
+    for when the DSL says no. So the entry is rendered back into a `may mint`
+    line and parsed by `_parse_mint`, which makes every refusal above reachable
+    from here with the same wording.
+    """
+    if not isinstance(entry, dict):
+        raise ProfileError(source, 1,
+                           f"a `mints` entry for `{token}` must be an object "
+                           f"naming a `capability`, `uses` and a window")
+    capability = entry.get("capability") or entry.get("cap")
+    if not capability:
+        raise ProfileError(source, 1,
+                           f"a `mints` entry for `{token}` names no "
+                           f"`capability` (use \"*\" for every capability)")
+    if "uses" not in entry:
+        raise ProfileError(
+            source, 1,
+            f"a `mints` entry for `{token}` states no `uses`: write a positive "
+            f"integer, or \"*\" to declare the axis unbounded. An axis left out "
+            f"would be a bound nobody stated")
+    if "ttlMs" not in entry and "ttl" not in entry:
+        raise ProfileError(
+            source, 1,
+            f"a `mints` entry for `{token}` states no window: write `ttlMs` "
+            f"(milliseconds) or `ttl` (a duration), either of them \"*\". An "
+            f"axis left out would be a bound nobody stated")
+    uses = entry["uses"]
+    if "ttlMs" in entry:
+        ttl = entry["ttlMs"]
+        ttl = ttl if ttl == UNBOUNDED else f"{ttl}ms"
+    else:
+        ttl = entry["ttl"]
+    return _parse_mint(f"{capability} uses {uses} ttl {ttl}", source, 1)
 
 
 def _parse_json(text: str, source: str | None) -> OperatorRegistry:
@@ -570,13 +852,22 @@ def _parse_json(text: str, source: str | None) -> OperatorRegistry:
           "sign": "p256:<128 hex>",
           "notAfter": "2026-01-01T00:00:00Z",
           "grants": [ {"verbs": ["swap"], "on": ["tenant_a*"]},
-                      {"verbs": ["unload"], "on": ["*"], "deny": true} ] } ] }
+                      {"verbs": ["unload"], "on": ["*"], "deny": true} ],
+          "mints": [ {"capability": "fs.write(path=\"/tmp\")",
+                      "uses": 10, "ttl": "30m"} ] } ] }
 
     ``key`` (or ``voteKey``) is the digest of the operator's bearer vote
     credential and ``sign`` (or ``signKey``) the public half of its cast-signing
     key, exactly as in the DSL's ``key`` and ``sign`` lines — one or the other,
     never both. ``notAfter`` and ``revoked`` are the DSL's ``until`` clause and
     ``revoked`` line.
+
+    ``mints`` is the DSL's ``may mint`` lines (issue #1062): one entry per
+    declared cone, each stating both numeric axes. ``uses`` is a positive
+    integer or ``"*"``; the window is ``ttlMs`` (milliseconds) or ``ttl`` (the
+    DSL's duration spelling), either of them ``"*"``. Both axes are REQUIRED on
+    an entry for the reason the DSL requires both clauses: a key left out would
+    declare a bound by silence, and this record exists to remove exactly that.
     """
     try:
         doc = json.loads(text)
@@ -607,13 +898,15 @@ def _parse_json(text: str, source: str | None) -> OperatorRegistry:
                 f"leave the weaker one permanently open beside the stronger, so "
                 f"the stronger would bound nothing. Declare one")
         raw_not_after = entry.get("notAfter") or entry.get("not_after")
+        mints = tuple(_parse_json_mint(token, m, source)
+                      for m in entry.get("mints") or ())
         operators[token] = Operator(
             token, tuple(grants),
             _parse_vote_key(raw_key, source, 1) if raw_key else None,
             _parse_sign_key(raw_sign, source, 1) if raw_sign else None,
             (_parse_not_after(str(raw_not_after), source, 1)
              if raw_not_after is not None else None),
-            bool(entry.get("revoked")))
+            bool(entry.get("revoked")), mints)
     return OperatorRegistry(operators, source)
 
 
@@ -972,6 +1265,131 @@ def _refusal(operator: Operator, verb: str,
                       f"target of `{verb}`", tuple(named)),
         ])
     return why, message
+
+
+# ------------------------------------------------- the mint decision (#1062)
+
+
+def _mint_records(spelling: str):
+    """One capability spelling read as BOTH sides of a mint comparison.
+
+    A mint is compared declaration-to-declaration, so the profile's line and the
+    operator's mint spelling go through the identical reading: `split_ceilings`
+    peels the ceiling parameters off the resource valuation, the uses-metered
+    ceiling is dropped (`_USES_METERED`), and what is left is the object and the
+    ceiling dimension. Reading the two sides by two routes is how a declaration
+    and the thing compared against it drift apart, which is the whole reason
+    `Intent.from_cap` / `Action.from_cap` exist.
+
+    Returns `(Intent, Action)`, or `(None, None)` when the spelling is not a
+    point in the capability order at all (the caller then falls back to byte
+    equality, never to a match).
+    """
+    try:
+        cap = cap_order.parse_cap(spelling)
+    except cap_order.CapError:
+        return None, None
+    obj, ceilings = cap_order.split_ceilings(cap)
+    bounds = _intent.ceiling_params(
+        {name: value for name, value in ceilings.items()
+         if name not in _USES_METERED})
+    return (_intent.Intent(obj, frozenset({MINT_VERB}), bounds, None),
+            _intent.Action(obj, MINT_VERB, bounds, None))
+
+
+def _mint_bound_refusal(bound: MintBound, capability: str,
+                        uses: int | None, ttl_ms: int | None) -> str | None:
+    """Why this one `may mint` line does not admit this mint, or None when it
+    does. Checked from the narrowest authority outward, exactly as `refine`
+    orders its own dimensions: the capability cone and its ceilings first, then
+    the two numeric axes."""
+    if bound.capability != ANY_CAPABILITY:
+        declared, _ = _mint_records(bound.capability)
+        _, requested = _mint_records(capability)
+        if declared is None or requested is None:
+            if bound.capability != capability:
+                return (f"the mint names {capability!r} and the declaration "
+                        f"names {bound.capability!r}, and the two cannot both "
+                        f"be read as points in the capability order, so "
+                        f"neither covers the other")
+        else:
+            refusal = _intent.refine(declared, requested)
+            if refusal is not None:
+                return refusal.message
+
+    # The two numeric axes. Their asymmetry is the kernel's: a mint that states
+    # NO bound on an axis the declaration bounds is an unbounded grant on that
+    # axis, and an unbounded grant can never be shown to be within a stated
+    # bound. It refuses rather than defaulting to the declared number, because
+    # defaulting would silently mint something the operator did not ask for.
+    if bound.uses is not None:
+        if uses is None:
+            return (f"the mint bounds no number of uses (it is bounded only by "
+                    f"its window), and the declaration permits at most "
+                    f"`uses {bound.uses}`")
+        if uses > bound.uses:
+            return (f"the mint carries `uses {uses}`, and the declaration "
+                    f"permits at most `uses {bound.uses}`")
+    if bound.ttl_ms is not None:
+        if ttl_ms is None:
+            return (f"the mint bounds no window (it is bounded only by its "
+                    f"uses and the session), and the declaration permits at "
+                    f"most `ttl {bound.ttl_ms}ms`")
+        if ttl_ms > bound.ttl_ms:
+            return (f"the mint carries `ttl {ttl_ms}ms`, and the declaration "
+                    f"permits at most `ttl {bound.ttl_ms}ms`")
+    return None
+
+
+def mint_refusal(operator: Operator | None, *, capability: str,
+                 uses: int | None, ttl_ms: int | None) -> str | None:
+    """WHY this operator may not mint this standing grant, or None when it may.
+
+    The grant side of a standing approval as a DECLARATION (issue #1062, item
+    470 stage 3). The class-(c) gate already refines a crossing against what a
+    grant declared; this is the same reading one step upstream, where the mint
+    itself is refined against what the operator's profile declared it may mint.
+    Both numbers on this side are the grant's own bounds rather than a spend, so
+    the comparison is declaration-to-declaration and the verb dimension is the
+    identity (`MINT_VERB`).
+
+    Three answers, and only the middle one is new:
+
+    * NO PROFILE (`operator is None`) — not gated, exactly as every other verb
+      in this module is ungated without a profile. Item 55 is opt-in.
+    * a profile that declares NO `may mint` line — unchanged, and this is the
+      migration hinge (`Operator.bounds_mints`). Every profile written before
+      this grammar existed keeps minting what it minted, which is what makes
+      the change adoptable; what it leaves open is stated in
+      `docs/operator-capabilities.md` rather than hidden.
+    * a profile that declares ONE OR MORE — closed over the mint surface. The
+      mint must refine SOME declared line, and it is refused otherwise. Several
+      lines are alternatives rather than a conjunction, because a profile that
+      means two cones has to write two lines (relatedness between capabilities
+      is declared, never inferred), and requiring a mint to satisfy every line
+      at once would make the second line refuse everything the first admits.
+
+    The refusal names the declaration it violated, in `errors.RevlError`'s
+    message-plus-hint shape, because item 470's criterion is a refusal that
+    names the intent and a bare boolean carries none.
+    """
+    if operator is None or not operator.bounds_mints():
+        return None
+    findings = [(bound, _mint_bound_refusal(bound, capability, uses, ttl_ms))
+                for bound in operator.mints]
+    if any(finding is None for _bound, finding in findings):
+        return None
+    lines = "\n".join(
+        f"    `{bound.to_dsl()}`: {finding}" for bound, finding in findings)
+    plural = "" if len(findings) == 1 else "s"
+    return (f"operator `{operator.token}` may not mint a standing grant over "
+            f"`{capability}`: its profile declares what it may mint, and no "
+            f"declaration admits this one.\n"
+            f"  against {len(findings)} `may mint` declaration{plural}:\n"
+            f"{lines}\n"
+            f"  a standing grant is minted against what the profile DECLARES, "
+            f"not against the `approve` verb alone (issue #1062, roadmap item "
+            f"470 stage 3). Widen the `may mint` line, or mint within it")
 
 
 def decide(session, tool_name: str, arguments: dict) -> Decision:

@@ -220,6 +220,13 @@ pub struct MReq {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MRoute {
+    comp: String,
+    key: String,
+    rlms: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct G2R {
     provs: Vec<Prov3>,
     refs: Vec<Verd>,
@@ -328,6 +335,7 @@ pub struct Cut {
 pub struct Manifest {
     provs: Vec<Prov3>,
     reqs: Vec<MReq>,
+    routes: Vec<MRoute>,
     mnames: Vec<String>,
     repl: Vec<String>,
     halted: bool,
@@ -4133,6 +4141,16 @@ fn non_template_comps(comps: &[CompD], templates: &[String]) -> Vec<CompD> {
     return out;
 }
 
+fn find_route(rs: &[MRoute], comp: String, key: String, i: i64) -> MRoute {
+    if (i >= rs.revl_length()) {
+        return MRoute { comp: comp.clone(), key: key.clone(), rlms: vec![] };
+    }
+    if (((rs)[(i) as usize].comp == comp) && ((rs)[(i) as usize].key == key)) {
+        return (rs)[(i) as usize].clone();
+    }
+    return find_route(rs, comp.clone(), key.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
 fn find_provider(ps: &[Prov3], key: &str, rlm: &str, i: i64) -> String {
     if (i >= ps.revl_length()) {
         return String::from("");
@@ -4336,12 +4354,22 @@ fn collect_routes(comps: Vec<CompD>, ci: i64, provs: Vec<Prov3>, refs: Vec<Verd>
     return collect_routes(comps.clone(), (ci).checked_add(1i64).expect("revl: Int overflow"), provs.clone(), refs2);
 }
 
-fn link_refusals(pg: Prog, seed: Vec<Prov3>, seedReqs: Vec<MReq>, seedNames: Vec<String>) -> Vec<Verd> {
+fn collect_manifest_routes(rts: Vec<MRoute>, i: i64, provs: Vec<Prov3>, comps: Vec<CompD>, refs: Vec<Verd>) -> Vec<Verd> {
+    if (i >= rts.revl_length()) {
+        return refs;
+    }
+    let r = route_realm_scan(&(rts)[(i) as usize].rlms, 0i64, &(rts)[(i) as usize].key, &(rts)[(i) as usize].comp, &provs);
+    let refs2 = if (r != "") { refs.revl_push(mk_verd(tagged("ROUTE", &r), comp_line(&comps, &(rts)[(i) as usize].comp, 0i64))) } else { refs.clone() };
+    return collect_manifest_routes(rts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), provs.clone(), comps.clone(), refs2);
+}
+
+fn link_refusals(pg: Prog, seed: Vec<Prov3>, seedReqs: Vec<MReq>, seedRoutes: Vec<MRoute>, seedNames: Vec<String>) -> Vec<Verd> {
     let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
     let g2 = collect_g2(live.clone(), 0i64, seed.clone(), vec![]);
     let mut refs = g2.refs;
+    refs = collect_manifest_routes(seedRoutes.clone(), 0i64, g2.provs.clone(), pg.comps.clone(), refs.clone());
     refs = collect_routes(live.clone(), 0i64, g2.provs.clone(), refs.clone());
-    let seedEdges = manifest_edges(&seedReqs, 0i64, &g2.provs, std::collections::HashMap::new());
+    let seedEdges = manifest_edges(&seedReqs, &seedRoutes, 0i64, &g2.provs, std::collections::HashMap::new());
     let edges = build_edges(&live, 0i64, &g2.provs, seedEdges.clone());
     if (edges.msg != "") {
         refs.push(mk_verd(tagged("G3", &edges.msg), edges.line));
@@ -4354,18 +4382,18 @@ fn link_refusals(pg: Prog, seed: Vec<Prov3>, seedReqs: Vec<MReq>, seedNames: Vec
     return refs;
 }
 
-fn manifest_edges(reqs: &[MReq], i: i64, provs: &[Prov3], succ: std::collections::HashMap<String, Vec<String>>) -> std::collections::HashMap<String, Vec<String>> {
+fn manifest_edges(reqs: &[MReq], rts: &[MRoute], i: i64, provs: &[Prov3], succ: std::collections::HashMap<String, Vec<String>>) -> std::collections::HashMap<String, Vec<String>> {
     if (i >= reqs.revl_length()) {
         return succ;
     }
     if (reqs)[(i) as usize].routed.clone() {
-        return manifest_edges(reqs, (i).checked_add(1i64).expect("revl: Int overflow"), provs, succ.clone());
+        return manifest_edges(reqs, rts, (i).checked_add(1i64).expect("revl: Int overflow"), provs, route_edges(&find_route(rts, (reqs)[(i) as usize].comp.clone(), (reqs)[(i) as usize].key.clone(), 0i64).rlms, 0i64, &(reqs)[(i) as usize].key, (reqs)[(i) as usize].comp.clone(), provs, succ.clone()));
     }
     let provider = find_provider(provs, &(reqs)[(i) as usize].key, &(reqs)[(i) as usize].rlm, 0i64);
     if ((provider == "") || (provider == (reqs)[(i) as usize].comp)) {
-        return manifest_edges(reqs, (i).checked_add(1i64).expect("revl: Int overflow"), provs, succ.clone());
+        return manifest_edges(reqs, rts, (i).checked_add(1i64).expect("revl: Int overflow"), provs, succ.clone());
     }
-    return manifest_edges(reqs, (i).checked_add(1i64).expect("revl: Int overflow"), provs, add_edge(succ.clone(), provider.clone(), (reqs)[(i) as usize].comp.clone()));
+    return manifest_edges(reqs, rts, (i).checked_add(1i64).expect("revl: Int overflow"), provs, add_edge(succ.clone(), provider.clone(), (reqs)[(i) as usize].comp.clone()));
 }
 
 fn live_names(comps: Vec<CompD>, i: i64, acc: Vec<String>) -> Vec<String> {
@@ -6109,7 +6137,7 @@ fn collect_refusals(ts: Vec<Token>, pg: Prog) -> Vec<Verd> {
     if nl.done {
         return nl.refs;
     }
-    return append_verds(nl.refs.clone(), link_refusals(pg.clone(), vec![], vec![], vec![]));
+    return append_verds(nl.refs.clone(), link_refusals(pg.clone(), vec![], vec![], vec![], vec![]));
 }
 
 pub fn admit_src(src: String) -> String {
@@ -6213,6 +6241,14 @@ fn bare_ident(s: &str, i: i64) -> bool {
     return bare_ident(s, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
+fn split_labels(s: String, acc: &[String]) -> Vec<String> {
+    let ix = s.revl_index_of(",");
+    if (ix == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return acc.revl_push(s.clone());
+    }
+    return split_labels(s.revl_slice((ix).checked_add(1i64).expect("revl: Int overflow"), s.revl_length()), &(acc.revl_push(s.revl_slice(0i64, ix.clone()))));
+}
+
 fn parse_mreq(comp: String, spec: String) -> MReq {
     if (spec.revl_slice(0i64, 1i64) == "*") {
         return MReq { comp: comp.clone(), key: spec.revl_slice(1i64, spec.revl_length()), rlm: String::from(""), routed: true };
@@ -6227,42 +6263,50 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
     }
     if (row.revl_slice(0i64, 1i64) == "!") {
         if (row == "!halted") {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, bad: String::from("") };
         }
         if (row == "!services") {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest header row `").revl_concat(&row)).revl_concat("`"))) };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest header row `").revl_concat(&row)).revl_concat("`"))) };
     }
     if (row.revl_slice(0i64, 1i64) == ":") {
         let sname = row.revl_slice(1i64, row.revl_length());
         if (!bare_ident(&sname, 0i64)) {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name a service"))) };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name a service"))) };
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
     }
     if (row.revl_slice(0i64, 1i64) == "-") {
         let name = row.revl_slice(1i64, row.revl_length());
         if (!bare_ident(&name, 0i64)) {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest replacement row `").revl_concat(&row)).revl_concat("` does not name a component"))) };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest replacement row `").revl_concat(&row)).revl_concat("` does not name a component"))) };
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: if contains(&man.repl, &name) { man.repl } else { man.repl.revl_push(name.clone()) }, halted: man.halted, bad: String::from("") };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: if contains(&man.repl, &name) { man.repl } else { man.repl.revl_push(name.clone()) }, halted: man.halted, bad: String::from("") };
     }
     if ident_led(&row) {
         if (row.revl_index_of("=") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest handoff row `").revl_concat(&row)).revl_concat("` needs the deferred handoff/type-layer wave (item 186)"))) };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest handoff row `").revl_concat(&row)).revl_concat("` needs the deferred handoff/type-layer wave (item 186)"))) };
+        }
+        if (row.revl_index_of(">") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            let a = cut(row.clone(), ">");
+            let b = cut(a.rest.clone(), "/");
+            if (((!bare_ident(&a.s, 0i64)) || (!bare_ident(&b.s, 0i64))) || (a.rest.revl_index_of("/") == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
+                return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest route row `").revl_concat(&row)).revl_concat("` does not name a component, a key and its realms"))) };
+            }
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.revl_push(MRoute { comp: a.s.clone(), key: b.s.clone(), rlms: split_labels(b.rest.clone(), &(vec![])) }), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
         }
         if (row.revl_index_of("<") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "<");
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(parse_mreq(a.s.clone(), a.rest.clone())), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(parse_mreq(a.s.clone(), a.rest.clone())), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
         }
         if (row.revl_index_of("/") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "/");
             let b = cut(a.rest.clone(), "/");
-            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
+            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
         }
     }
-    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest row `").revl_concat(&row)).revl_concat("`"))) };
+    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest row `").revl_concat(&row)).revl_concat("`"))) };
 }
 
 fn parse_manifest_rows(m: String, man: Manifest) -> Manifest {
@@ -6275,7 +6319,7 @@ fn parse_manifest_rows(m: String, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: String) -> Manifest {
-    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], mnames: vec![], repl: vec![], halted: false, bad: String::from("") });
+    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], routes: vec![], mnames: vec![], repl: vec![], halted: false, bad: String::from("") });
 }
 
 fn dropped_names(comps: Vec<CompD>, i: i64, acc: Vec<String>) -> Vec<String> {
@@ -6299,6 +6343,13 @@ fn keep_reqs(rs: Vec<MReq>, drop: Vec<String>, i: i64, acc: Vec<MReq>) -> Vec<MR
         return acc;
     }
     return keep_reqs(rs.clone(), drop.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), if contains(&drop, &(rs)[(i) as usize].comp) { acc.clone() } else { acc.revl_push((rs)[(i) as usize].clone()) });
+}
+
+fn keep_routes(rs: Vec<MRoute>, drop: Vec<String>, i: i64, acc: Vec<MRoute>) -> Vec<MRoute> {
+    if (i >= rs.revl_length()) {
+        return acc;
+    }
+    return keep_routes(rs.clone(), drop.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), if contains(&drop, &(rs)[(i) as usize].comp) { acc.clone() } else { acc.revl_push((rs)[(i) as usize].clone()) });
 }
 
 fn keep_names(ns: Vec<String>, drop: Vec<String>, i: i64, acc: Vec<String>) -> Vec<String> {
@@ -6393,10 +6444,11 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let drop = dropped_names(pg.comps.clone(), 0i64, man.repl.clone());
     let keptProvs = split_provs(man.provs.clone(), drop.clone(), false, 0i64, vec![]);
     let keptReqs = keep_reqs(man.reqs.clone(), drop.clone(), 0i64, vec![]);
+    let keptRoutes = keep_routes(man.routes.clone(), drop.clone(), 0i64, vec![]);
     let keptNames = keep_names(man.mnames.clone(), drop.clone(), 0i64, vec![]);
     let lost = lost_provs(split_provs(man.provs.clone(), drop.clone(), true, 0i64, vec![]), live_provs(live.clone(), 0i64, keptProvs.clone()), 0i64, vec![]);
     let wrefs = append_verds(nl.refs.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64));
-    return pick_min(&append_verds(wrefs.clone(), link_refusals(pg.clone(), keptProvs.clone(), keptReqs.clone(), keptNames.clone())));
+    return pick_min(&append_verds(wrefs.clone(), link_refusals(pg.clone(), keptProvs.clone(), keptReqs.clone(), keptRoutes.clone(), keptNames.clone())));
 }
 
 fn mk_irres(ok: bool, js: String) -> IrRes {
@@ -12973,6 +13025,54 @@ fn a_routed_running_requirement_is_not_reported_by_the_withdrawal_check() {
     let svc = String::from("service C { fn g(k: Str) -> Str } ");
     let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
     assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/r1;Store/cache/;Store<*db;-Old")) == ""));
+}
+
+#[test]
+fn a_routed_running_consumer_that_loses_a_realm_s_provider_is_refused() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"));
+}
+
+#[test]
+fn without_the_route_row_the_routed_realm_loss_is_invisible() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv")) == ""));
+}
+
+#[test]
+fn a_routed_realm_re_provided_by_the_incoming_text_still_admits() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides kv: Kv { isolate kv in realm(\"r2\") provide kv { fn get(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == ""));
+}
+
+#[test]
+fn a_routed_running_consumer_whose_realms_all_stay_provided_is_untouched() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == ""));
+}
+
+#[test]
+fn a_wire_carrying_both_a_service_block_and_route_rows_refuses_the_lost_realm() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2;!services;:Kv;:Api")) == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"));
+}
+
+#[test]
+fn a_malformed_route_row_refuses_rather_than_dropping_the_legs() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("Router/api/;Router>kv")) == "MANIFEST|manifest route row `Router>kv` does not name a component, a key and its realms"));
+}
+
+#[test]
+fn a_cycle_closing_through_a_routed_running_consumer_is_refused__ambient_g3_() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB requires api: Api provides kv: Kv { isolate kv in realm(\"r2\") provide kv { fn get(k) { return api.go(k) } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;Router/api/;Router<*kv;Router>kv/r1,r2")) == "G3|dependency cycle: Router -> StoreB -> Router (G3)"));
 }
 
 #[test]

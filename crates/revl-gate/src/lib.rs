@@ -526,7 +526,8 @@ fn manifest_rows(manifest: &str) -> usize {
 ///
 /// `manifest` is the row wire (`docs/design/186-ambient-admission-guarantees.md`):
 /// `C/k/r` for a provision (`r` is the realm, `""` for shared), `C<k` for a
-/// requirement, `!halted` for a halted composition, joined by `;`. The empty
+/// requirement, `C>k/r,r` for the realms a running component routes a key
+/// across, `!halted` for a halted composition, joined by `;`. The empty
 /// string is the empty composition, so `admit_into(source, "")` is
 /// `admit(source)` byte for byte — this arm generalises [`admit`] rather than
 /// re-implementing it.
@@ -971,6 +972,24 @@ component CacheLayer requires store: Store provides store: Store {\n\
     }
 
     #[test]
+    fn route_rows_past_the_bound_are_declined_and_not_admitted_into() {
+        // A new row kind costs wire budget like any other: the bound counts
+        // `;`-separated SEGMENTS, not kinds, so a wire of route rows over it is
+        // declined ahead of the fold. The clause that matters is the second —
+        // the answer is a frontier decline with no admission in it, never a
+        // quiet fold of a wire whose depth could abort the stack.
+        let wire = "Router>kv/r1,r2;".repeat(MANIFEST_ROW_LIMIT + 1);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+        assert!(
+            is_row_bound_refusal(&verdict),
+            "a route-row wire over the bound must be declined: {:?}",
+            verdict,
+        );
+        assert!(verdict.is_undecided());
+        assert!(verdict.to_json().contains("\"admitted\":false"));
+    }
+
+    #[test]
     fn a_manifest_under_the_row_bound_is_still_folded() {
         // Non-vacuity in the other direction: a ceiling, not a wall. The wire
         // below the bound is folded exactly as it was before the bound existed,
@@ -1132,6 +1151,34 @@ component CacheLayer requires store: Store provides store: Store {\n\
         // decides a withdrawal, this surface declines the wire.
         let withdrawn = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc;-Kv";
         assert!(!issue_admission_into(FRESH, withdrawn).is_admitted());
+    }
+
+    #[test]
+    fn a_routed_composition_is_still_readable_by_the_admission_surface() {
+        // Issue #1036 put ROUTE rows on the wire, and a row this surface cannot
+        // parse declines the WHOLE wire. So a routed composition must stay
+        // readable, or the arm would go silently dead for every composition that
+        // uses `realms(...)` — the shape of the bug the `C<*k` and `C<k/r`
+        // spellings had here until they were read.
+        const ROUTED: &str = "StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;\
+Router>kv/r1,r2;!services;:Kv;:Api";
+        const FRESH: &str = "service Cache {\n  fn lookup(key: Str) -> Str\n}\n";
+        let into = issue_admission_into(FRESH, ROUTED);
+        assert!(into.is_admitted(), "{:?}", into);
+        // and the counts are the ones the requirement rows give: the route row
+        // carries legs, not a second requirement.
+        match &into {
+            Admission::Admitted { basis } => {
+                assert!(basis.contains("its 3 provision rows resolve its 1 requirement rows"),
+                        "{}", basis)
+            }
+            other => panic!("expected an issued admission, got {:?}", other),
+        }
+        // a garbled route row still declines the wire, as every unreadable row does
+        for bad in ["Router>kv", "Router>/r1", "Router>kv/r1,-"] {
+            let wire = format!("StoreA/kv/r1;{};!services;:Kv", bad);
+            assert!(!issue_admission_into(FRESH, &wire).is_admitted(), "{:?}", bad);
+        }
     }
 
     #[test]

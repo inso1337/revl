@@ -752,7 +752,8 @@ impl Session {
     ///
     /// `manifest` is the ROW WIRE the item-186 wire defines — `C/k/r` for a
     /// provision (`r` the realm, `""` for shared), `C<k` for a requirement,
-    /// `!halted` for a halted composition, joined by `;` — the same input
+    /// `C>k/r,r` for a running component's routed realms, `!halted` for a
+    /// halted composition, joined by `;` — the same input
     /// [`crate::admit_into`] takes. It is a PARAMETER and not a projection of
     /// [`Session::live`] on purpose: a [`Composition`] carries the component
     /// names and the keys the generation provides, and a manifest also needs the
