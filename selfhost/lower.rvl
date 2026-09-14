@@ -1645,6 +1645,19 @@ fn param_names(ps: List[ParamN]) -> List[Str] {
 // A provide method body is either a brace block `fn m(p) { ... }` or the arrow
 // shorthand `fn m(p) = expr` (one expression, unmarked). The shorthand is what
 // the A1 fixtures use, so it must parse.
+//
+// The signature may also RESTATE the return type the service already declares
+// (`fn go() -> Int { ... }`). The reference parses that restatement and hands
+// it to the type layer, which is where a mismatch against the service op is
+// decided (`t7_provide_param_annotation_mismatch.rvl` is the parameter twin, a
+// T1). This parser read the `=`/`{` straight off the end of the parameter list
+// and so found neither, failing the whole component with `bad provide block in
+// component <C>`. That misfire had two costs, and only the first was visible:
+// a FALSE REJECTION of legal programs, and — worse, because it looks like
+// agreement — a MASK over the component's real verdict, so a program the
+// reference refuses with a G4 came back tagged BAD from a parse stage that
+// never reached the guarantee. `ret_at` is the same step `p_methods` already
+// takes over a service declaration's return type.
 fn p_prov_methods(ts: List[Token], i: Int, end: Int,
                   acc: List[ProvM]) -> ProvMR {
   if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
@@ -1657,18 +1670,19 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
   let nm = tkc(ts, h + 1).text
   let ps = params_at(ts, h + 3)
   let pnames = param_names(ps.ps)
-  if (atk(ts, ps.i, "=")) {
-    let le = line_end(ts, ps.i + 1, end)
-    let r = p_stmt_run(ts, ps.i + 1, le)
-    let nx = r.i > ps.i + 1 ? r.i : le
+  let si = ret_at(ts, ps.i)
+  if (atk(ts, si, "=")) {
+    let le = line_end(ts, si + 1, end)
+    let r = p_stmt_run(ts, si + 1, le)
+    let nx = r.i > si + 1 ? r.i : le
     return p_prov_methods(ts, nx, end,
                           acc.push({ name: nm, params: pnames, body: r.ss,
                                      isAsync: masync }))
   }
-  if (!atk(ts, ps.i, "{")) { return { xs: acc, i: ps.i, ok: false } }
-  let bend = close_brace(ts, ps.i)
+  if (!atk(ts, si, "{")) { return { xs: acc, i: si, ok: false } }
+  let bend = close_brace(ts, si)
   if (bend == 0 - 1) { return { xs: acc, i: ts.length(), ok: false } }
-  let bbody = p_stmts(ts, ps.i + 1, bend - 1, [])
+  let bbody = p_stmts(ts, si + 1, bend - 1, [])
   return p_prov_methods(ts, bend, end,
                         acc.push({ name: nm, params: pnames, body: bbody,
                                    isAsync: masync }))
@@ -8445,7 +8459,13 @@ fn comp_has_kw(ts: List[Token], lo: Int, hi: Int, w: Str) -> Bool {
   return false
 }
 
-fn ir_component(ts: List[Token], i: Int) -> IrCompR {
+// `fname` is the one input to this producer that is NOT the source text: the
+// reference stamps `"source": comp.source or filename` between `name` and
+// `config` (`_lower_component`), and a component's provenance is by definition
+// not readable out of the component. It is threaded from `lower_to_ir_at`
+// rather than invented here, so the key is the caller's answer and not this
+// file's guess.
+fn ir_component(ts: List[Token], i: Int, fname: Str) -> IrCompR {
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   var reqs: List[Bind] = []
@@ -8469,6 +8489,7 @@ fn ir_component(ts: List[Token], i: Int) -> IrCompR {
   let reqSet = bind_names(reqs, 0, [])
   let bodyRes = cir_body(ts, lo, hi, reqSet, provs, [], "")
   var js = "{\"name\": ".concat(jstr(nm))
+    .concat(", \"source\": ").concat(jstr(fname))
     .concat(", \"config\": [").concat(ir_config(ts, lo, hi))
     .concat("], \"requires\": {").concat(ir_binds_json(reqs))
     .concat("}, \"provides\": {").concat(ir_binds_json(provs)).concat("}")
@@ -11203,19 +11224,19 @@ fn types_walk(ts: List[Token], i: Int, acc: Str) -> Str {
 
 // ---------------------------------------------------------------- top level
 
-fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
+fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str) -> IrAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a) }
-  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a) }
-  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a) }
-  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a) }
-  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a) }
+  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname) }
+  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname) }
+  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname) }
+  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname) }
+  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname) }
   if (t.text == "test") {
     let na = mk_iracc(a.svcs, a.comps, true, a.v2)
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return ir_walk(ts, e, na) }
-    return ir_walk(ts, skip_line(ts, i), na)
+    if (e != 0 - 1) { return ir_walk(ts, e, na, fname) }
+    return ir_walk(ts, skip_line(ts, i), na, fname)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -11224,29 +11245,29 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
   // top-level declaration head to this walker: `type Envelope = {` then
   // `component: Int,` on its own line minted a component named ":". Same span
   // `type_ctors` and `p_top` already read.
-    return ir_walk(ts, type_decl_end(ts, i + 1), mk_iracc(a.svcs, a.comps, true, a.v2))
+    return ir_walk(ts, type_decl_end(ts, i + 1), mk_iracc(a.svcs, a.comps, true, a.v2), fname)
   }
   if (t.text == "extern") {
     return ir_walk(ts, p_extern(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2))
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname)
   }
   if (t.text == "fn") {
     return ir_walk(ts, p_fn(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2))
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname)
   }
   if (t.text == "service") {
     let sv = ir_service(ts, i)
     let svcs2 = a.svcs == "" ? sv.js : a.svcs.concat(", ").concat(sv.js)
     return ir_walk(ts, p_service(ts, i, empty_prog()).i,
-                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2))
+                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname)
   }
   if (t.text == "component") {
-    let cp = ir_component(ts, i)
+    let cp = ir_component(ts, i, fname)
     let comps2 = a.comps == "" ? cp.js : a.comps.concat(", ").concat(cp.js)
     return ir_walk(ts, p_component(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2))
+                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname)
   }
-  return ir_walk(ts, skip_line(ts, i), a)
+  return ir_walk(ts, skip_line(ts, i), a, fname)
 }
 
 // The IR producer (SEAM 1). Returns the covered surface of the interchange IR
@@ -11254,8 +11275,31 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
 // independent of, `admit_src` — a caller admits FIRST, then lowers an admitted
 // program to this IR for the emitter.
 pub fn lower_to_ir(src: Str) -> Str {
+  return lower_to_ir_at(src, default_filename())
+}
+
+// The filename `compile_source(src)` stamps when the caller names none
+// (`src/revl/compiler.py`'s `filename: str = "<string>"`). `lower_to_ir` is the
+// text-only entry on this side exactly as `compile_source` is on that one, so
+// the two text-only entries agree on the key rather than one of them omitting
+// it.
+fn default_filename() -> Str { return "<string>" }
+
+// The IR producer with its provenance supplied. `source` (per component) and
+// `manifest["components"][i]["file"]` are the only parts of the reference IR
+// that are NOT a function of the source text — they name the file the text came
+// out of — so a producer whose whole input is a string could never have matched
+// them. Four census passes recorded that as "environment/link artifacts the
+// covered emitter surface never reads" and excluded both from the projection.
+// The first half of that is now measured and WRONG in one place:
+// `backends/wasm/emit.py` reads `manifest["templates"]` and emits a different
+// module for a component that is a spawn target. The `source` half stands —
+// its one reader (`backends/typescript/emit_temporal.py`) puts it in refusal
+// TEXT and falls back to `"<source>"` — but "never read" was never the reason
+// to omit it; not having a filename was. Given one, the producer stamps it.
+pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   let ts = lex_src(src)
-  let a = ir_walk(ts, 0, mk_iracc("", "", false, false))
+  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname)
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   // The async COLOUR is a whole-program property, so the streaming function
   // producer cannot decide it one declaration at a time: the reference runs the
@@ -11280,7 +11324,7 @@ pub fn lower_to_ir(src: Str) -> Str {
 
 test "lower_to_ir emits the services table for a simple provider" {
   assert lower_to_ir("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")
-    == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"
+    == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"
 }
 
 test "lower_to_ir marks an emission op and a scoped capability" {
@@ -11290,7 +11334,7 @@ test "lower_to_ir marks an emission op and a scoped capability" {
 
 test "lower_to_ir lowers a simple effect/provide body" {
   assert lower_to_ir("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")
-    == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"
+    == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"
 }
 
 test "lower_to_ir bumps ir_version to 3 on a module fn" {
@@ -11314,17 +11358,17 @@ test "lower_to_ir emits a record type declaration (types section)" {
 
 test "lower_to_ir lowers a config read in a provide method (component spine)" {
   assert lower_to_ir("""service Conf { fn get() -> Str } component S provides conf: Conf { config { name: Str } provide conf { fn get() = config.name } }""")
-    == """{"ir_version": 1, "services": {"Conf": {"methods": {"get": {"params": [], "returns": "Str", "emission": false}}}}, "components": [{"name": "S", "config": [{"name": "name", "type": "Str", "default": null}], "requires": {}, "provides": {"conf": "Conf"}, "body": [{"step": "provide", "name": "conf", "service": "Conf", "methods": [{"name": "get", "params": [], "body": [{"step": "return", "expr": {"kind": "config", "field": "name"}}]}]}]}]}"""
+    == """{"ir_version": 1, "services": {"Conf": {"methods": {"get": {"params": [], "returns": "Str", "emission": false}}}}, "components": [{"name": "S", "source": "<string>", "config": [{"name": "name", "type": "Str", "default": null}], "requires": {}, "provides": {"conf": "Conf"}, "body": [{"step": "provide", "name": "conf", "service": "Conf", "methods": [{"name": "get", "params": [], "body": [{"step": "return", "expr": {"kind": "config", "field": "name"}}]}]}]}]}"""
 }
 
 test "lower_to_ir lowers a typed provide-method arithmetic body (name/id, no operands)" {
   assert lower_to_ir("""service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }""")
-    == """{"ir_version": 1, "services": {"Calc": {"methods": {"add": {"params": [{"name": "a", "type": "Int"}, {"name": "b", "type": "Int"}], "returns": "Int", "emission": false}}}}, "components": [{"name": "A", "config": [], "requires": {}, "provides": {"calc": "Calc"}, "body": [{"step": "provide", "name": "calc", "service": "Calc", "methods": [{"name": "add", "params": ["a", "b"], "body": [{"step": "return", "expr": {"kind": "bin", "op": "+", "left": {"kind": "name", "id": "a"}, "right": {"kind": "name", "id": "b"}}}]}]}]}]}"""
+    == """{"ir_version": 1, "services": {"Calc": {"methods": {"add": {"params": [{"name": "a", "type": "Int"}, {"name": "b", "type": "Int"}], "returns": "Int", "emission": false}}}}, "components": [{"name": "A", "source": "<string>", "config": [], "requires": {}, "provides": {"calc": "Calc"}, "body": [{"step": "provide", "name": "calc", "service": "Calc", "methods": [{"name": "add", "params": ["a", "b"], "body": [{"step": "return", "expr": {"kind": "bin", "op": "+", "left": {"kind": "name", "id": "a"}, "right": {"kind": "name", "id": "b"}}}]}]}]}]}"""
 }
 
 test "lower_to_ir lowers a timer step with interval_ms (component spine)" {
   assert lower_to_ir("""service Log { emission fn write(msg: Str) } component P requires log: Log { every 15s { emit log.write("beat") } }""")
-    == """{"ir_version": 3, "services": {"Log": {"methods": {"write": {"params": [{"name": "msg", "type": "Str"}], "returns": null, "emission": true}}}}, "components": [{"name": "P", "config": [], "requires": {"log": "Log"}, "provides": {}, "body": [{"step": "timer", "mode": "every", "interval_ms": 15000, "body": [{"step": "emit", "expr": {"kind": "call", "target": {"kind": "req", "name": "log"}, "method": "write", "args": [{"kind": "lit", "value": "beat"}]}}]}]}]}"""
+    == """{"ir_version": 3, "services": {"Log": {"methods": {"write": {"params": [{"name": "msg", "type": "Str"}], "returns": null, "emission": true}}}}, "components": [{"name": "P", "source": "<string>", "config": [], "requires": {"log": "Log"}, "provides": {}, "body": [{"step": "timer", "mode": "every", "interval_ms": 15000, "body": [{"step": "emit", "expr": {"kind": "call", "target": {"kind": "req", "name": "log"}, "method": "write", "args": [{"kind": "lit", "value": "beat"}]}}]}]}]}"""
 }
 
 test "lower_to_ir emits an extern with a verbatim @py body (externs section)" {
@@ -11334,7 +11378,7 @@ test "lower_to_ir emits an extern with a verbatim @py body (externs section)" {
 
 test "lower_to_ir emits literal config-field defaults (config schema)" {
   assert lower_to_ir("""service G { fn greet(w: Str) -> Str } component H provides greeting: G { config { prefix: Str = "hi, ", count: Int = 1 } provide greeting { fn greet(w) = config.prefix } }""")
-    == """{"ir_version": 1, "services": {"G": {"methods": {"greet": {"params": [{"name": "w", "type": "Str"}], "returns": "Str", "emission": false}}}}, "components": [{"name": "H", "config": [{"name": "prefix", "type": "Str", "default": "hi, "}, {"name": "count", "type": "Int", "default": 1}], "requires": {}, "provides": {"greeting": "G"}, "body": [{"step": "provide", "name": "greeting", "service": "G", "methods": [{"name": "greet", "params": ["w"], "body": [{"step": "return", "expr": {"kind": "config", "field": "prefix"}}]}]}]}]}"""
+    == """{"ir_version": 1, "services": {"G": {"methods": {"greet": {"params": [{"name": "w", "type": "Str"}], "returns": "Str", "emission": false}}}}, "components": [{"name": "H", "source": "<string>", "config": [{"name": "prefix", "type": "Str", "default": "hi, "}, {"name": "count", "type": "Int", "default": 1}], "requires": {}, "provides": {"greeting": "G"}, "body": [{"step": "provide", "name": "greeting", "service": "G", "methods": [{"name": "greet", "params": ["w"], "body": [{"step": "return", "expr": {"kind": "config", "field": "prefix"}}]}]}]}]}"""
 }
 
 test "clean provider admits" {
