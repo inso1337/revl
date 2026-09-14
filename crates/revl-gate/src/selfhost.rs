@@ -6074,7 +6074,7 @@ fn closure_assign_scan(ts: &[Token]) -> Verd {
     return no_verd();
 }
 
-fn collect_nonlink(ts: Vec<Token>, pg: Prog) -> NoLink {
+fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>) -> NoLink {
     let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone()));
     let cfgv = config_data_refusal(ts.clone(), pg.clone());
     if (cfgv.v != "") {
@@ -6121,6 +6121,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog) -> NoLink {
         }
         ci = (ci).checked_add(1i64).expect("revl: Int overflow");
     }
+    refs = append_verds(refs.clone(), wrefs.clone());
     let sv = check_spawn(pg.clone(), base.clone());
     if (sv.v != "") {
         refs.push(sv.clone());
@@ -6133,7 +6134,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog) -> NoLink {
 }
 
 fn collect_refusals(ts: Vec<Token>, pg: Prog) -> Vec<Verd> {
-    let nl = collect_nonlink(ts.clone(), pg.clone());
+    let nl = collect_nonlink(ts.clone(), pg.clone(), vec![]);
     if nl.done {
         return nl.refs;
     }
@@ -6436,10 +6437,6 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
     }
-    let nl = collect_nonlink(ts.clone(), pg.clone());
-    if nl.done {
-        return pick_min(&nl.refs);
-    }
     let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
     let drop = dropped_names(pg.comps.clone(), 0i64, man.repl.clone());
     let keptProvs = split_provs(man.provs.clone(), drop.clone(), false, 0i64, vec![]);
@@ -6447,7 +6444,11 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let keptRoutes = keep_routes(man.routes.clone(), drop.clone(), 0i64, vec![]);
     let keptNames = keep_names(man.mnames.clone(), drop.clone(), 0i64, vec![]);
     let lost = lost_provs(split_provs(man.provs.clone(), drop.clone(), true, 0i64, vec![]), live_provs(live.clone(), 0i64, keptProvs.clone()), 0i64, vec![]);
-    let wrefs = append_verds(nl.refs.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64));
+    let nl = collect_nonlink(ts.clone(), pg.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64));
+    if nl.done {
+        return pick_min(&nl.refs);
+    }
+    let wrefs = nl.refs;
     return pick_min(&append_verds(wrefs.clone(), link_refusals(pg.clone(), keptProvs.clone(), keptReqs.clone(), keptRoutes.clone(), keptNames.clone())));
 }
 
@@ -13105,6 +13106,37 @@ fn a_malformed_service_row_refuses_naming_the_row() {
     assert!((admit_ambient(clean.clone(), String::from(":9bad")) == "MANIFEST|manifest service row `:9bad` does not name a service"));
     assert!((admit_ambient(clean.clone(), String::from(":A/b")) == "MANIFEST|manifest service row `:A/b` does not name a service"));
     assert!((admit_ambient(clean.clone(), String::from("!service")) == "MANIFEST|unrecognized manifest header row `!service`"));
+}
+
+#[test]
+fn a_withdrawal_tying_with_a_spawn_bound_names_the_withdrawal() {
+    let src = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }\nservice Kv2 { emission[kv2] fn write(row: Str) -> Int }\nservice Task { emission[kv2] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write(\"x\")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn a_withdrawal_tying_with_the_boot_count_names_the_withdrawal() {
+    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Env { fn a() -> Str }\nservice Env2 { fn b() -> Str }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } boot component B1 provides e1: Env { config { x: Str } provide e1 { fn a() = config.x } } boot component B2 provides e2: Env2 { config { y: Str } provide e2 { fn b() = config.y } }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn an_earlier_line_spawn_bound_still_outranks_a_later_line_withdrawal() {
+    let src = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }\nservice Kv2 { emission[kv2] fn write(row: Str) -> Int }\nservice Task { emission[kv2] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write(\"x\")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv2`"));
+}
+
+#[test]
+fn a_component_loop_refusal_still_outranks_a_tying_withdrawal() {
+    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Bus { emission fn publish(topic: Str) }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish(\"x\") undo bus.publish(\"y\") }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G4|call to emission `bus.publish` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn the_ambient_splice_leaves_the_single_source_sink_unchanged() {
+    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Bus { emission fn publish(topic: Str) }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish(\"x\") undo bus.publish(\"y\") }");
+    assert!((admit_ambient(src.clone(), String::from("")) == admit_src(src.clone())));
+    assert!((admit_src(src.clone()) == "G4|call to emission `bus.publish` must be marked `emit` (G4)"));
 }
 
 #[test]

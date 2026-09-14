@@ -3582,3 +3582,200 @@ def test_a_malformed_route_row_refuses_rather_than_dropping_the_legs(
         "a key and its realms")
     assert admit_ambient(clean, "Router/api/;>kv/r1") == (
         "MANIFEST|unrecognized manifest row `>kv/r1`")
+
+
+# ------------------------------- item 186, the REPLACEMENT wave, part 3 (419c)
+#
+# REFUSAL ORDERING when an ambient admission produces SEVERAL true refusals.
+# Item 419c's single-source half landed with the collecting sink: `admit_src`
+# reports the minimum by `(line, seq)`, the reference's `diagnostics[0]`. The
+# ambient half is the same question with one more producer in the sink — the
+# unmet-consumer WITHDRAWAL, which is neither an internal component refusal nor
+# a link refusal — and `seq` is what decides a LINE TIE.
+#
+# The reference's phase order (`check_and_lower`) is:
+#
+#     component loop -> _admit_provision_withdrawal -> _check_spawn_emission_bounds
+#                    -> _check_spawn_attenuation -> _link (BOOT, G2, ROUTE, G3)
+#
+# The gate appended the withdrawal verdicts AFTER its whole non-link sink, which
+# put them behind the spawn bounds and the BOOT count. On distinct lines that is
+# unobservable (the line decides), so the part-1 corpus — one refusal per
+# program — could not see it. On a TIE it flips the winner: measured over 660
+# generated multi-refusal admissions, 12 diverged, in exactly two families
+# (a withdrawal tying with a G4 spawn-emission bound, and a withdrawal tying
+# with the BOOT count). `collect_nonlink` now takes the ambient verdicts and
+# splices them at the reference's own phase position, so `seq` agrees too.
+#
+# A tie is not only the `_oneline` degenerate case: two components written on
+# ONE source line tie as well, which is the `glued` layout below.
+#
+# FAILURE DIRECTION: unchanged, fail-CLOSED. Nothing here changes WHICH
+# admissions are refused — every program in this corpus is refused by both sides
+# before and after — only WHICH of its true refusals is named. The standard
+# #1034 set is the one being kept: a refusal must carry the tag that describes
+# the finding, so a withdrawal must not be reported under a spawn bound's name
+# (or the reverse) merely because the two landed on one line.
+
+_MO_SVCS = (_W_SVCS
+            + "service Bus { emission fn publish(topic: Str) }\n"
+            + "service Kv2 { emission[kv2] fn write(row: Str) -> Int }\n"
+            + "service Task { emission[kv2] fn go() -> Int }\n"
+            + "service Sup { fn run() -> Int }\n"
+            + "service Env { fn a() -> Str }\n"
+            + "service Env2 { fn b() -> Str }\n")
+
+#: the implicit withdrawal: `Db` redeclared without `db`, stranding `Store`.
+_MO_WITHDRAW = ('component Db provides other: C '
+                '{ provide other { fn g(k) { return k } } }')
+#: a G4/G6 spawn-emission bound (`_check_spawn_emission_bounds`) — the reference
+#: collects this AFTER the withdrawal.
+_MO_SPAWN = (
+    'component Worker requires kv2: Kv2 provides task: Task '
+    '{ provide task { fn go() { emit kv2.write("x")  return 0 } } }\n'
+    'component Supervisor provides sup: Sup '
+    '{ provide sup { fn run() { let w = effect spawn Worker with { } '
+    'undo w.dispose()  return 0 } } }')
+#: the BOOT count (item 350), decided at the head of `_link` — also after the
+#: withdrawal on the reference.
+_MO_BOOT = ('boot component B1 provides e1: Env '
+            '{ config { x: Str } provide e1 { fn a() = config.x } }\n'
+            'boot component B2 provides e2: Env2 '
+            '{ config { y: Str } provide e2 { fn b() = config.y } }')
+#: an ordinary component-loop G4 — collected BEFORE the withdrawal on both
+#: sides, so this family never moved.
+_MO_G4 = ('component Zed requires bus: Bus '
+          '{ effect bus.publish("x") undo bus.publish("y") }')
+
+_MO_SPAWN_BOUND = ("G4|`Sup.run` is declared plain, but it spawns `Worker`, "
+                   "which emits through `kv2`")
+_MO_TWO_BOOTS = ("BOOT|a composition declares at most one `boot` component, "
+                 "found B1, B2")
+
+
+def _mo_src(fragments: list[str], layout: str) -> str:
+    """One admission text from the fragments, in one of three LINE LAYOUTS.
+
+    `separate` gives every component its own line (no tie); `glued` puts the
+    component fragments on ONE source line while the service preamble keeps its
+    own (the realistic tie); `oneline` collapses the whole program (every line
+    is 1, the `_oneline` degenerate tie the single-source corpus already uses).
+    """
+    body = "\n".join(fragments)
+    if layout == "separate":
+        return _MO_SVCS + body + "\n"
+    if layout == "glued":
+        return _MO_SVCS + _oneline(body) + "\n"
+    return _oneline(_MO_SVCS + body)
+
+
+_MO_PAIRS = [
+    ("withdrawal then spawn bound", [_MO_WITHDRAW, _MO_SPAWN]),
+    ("spawn bound then withdrawal", [_MO_SPAWN, _MO_WITHDRAW]),
+    ("withdrawal then two boots", [_MO_WITHDRAW, _MO_BOOT]),
+    ("two boots then withdrawal", [_MO_BOOT, _MO_WITHDRAW]),
+    ("withdrawal then a component G4", [_MO_WITHDRAW, _MO_G4]),
+    ("a component G4 then withdrawal", [_MO_G4, _MO_WITHDRAW]),
+    ("withdrawal, spawn bound and two boots",
+     [_MO_WITHDRAW, _MO_SPAWN, _MO_BOOT]),
+    ("two boots, a component G4 and a withdrawal",
+     [_MO_BOOT, _MO_G4, _MO_WITHDRAW]),
+]
+
+
+@pytest.mark.parametrize("layout", ["separate", "glued", "oneline"])
+@pytest.mark.parametrize("name,fragments", _MO_PAIRS,
+                         ids=[n for n, _ in _MO_PAIRS])
+def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
+                                                fragments, layout):
+    """ORACLE B over MULTI-REFUSAL admissions (item 419c, the ambient half).
+
+    Every program here carries a withdrawal refusal AND at least one internal
+    one, all true of the admission. The reference's `diagnostics[0]` and
+    `admit_ambient`'s `pick_min` must name the same one, byte for byte, in all
+    three line layouts.
+
+    Fails on main in the `glued` and `oneline` layouts of the spawn-bound and
+    two-boot rows: the tie fell to the internal refusal on the gate and to the
+    withdrawal on the reference."""
+    src = _mo_src(fragments, layout)
+    ref = _ref_ambient(src, _W_M)
+    assert ref, f"the corpus must refuse: {name}/{layout}"
+    got = _gate_ambient(admit_ambient, src, _W_M)
+    assert got == ref, (name, layout, got, ref)
+
+
+def test_oracle_b_a_withdrawal_tying_with_a_spawn_bound_names_the_withdrawal(
+        admit_ambient):
+    """The first closed family, with its bytes written out. The withdrawal and
+    the spawn-emission bound land on ONE source line, so `seq` decides, and the
+    reference collects `_admit_provision_withdrawal` ahead of
+    `_check_spawn_emission_bounds`.
+
+    Main answers `G4|...spawns `Worker`, which emits through `kv2`` here — a
+    true refusal under the wrong name for what the gate was asked: the
+    admission's effect on the RUNNING composition."""
+    src = _mo_src([_MO_WITHDRAW, _MO_SPAWN], "glued")
+    got = _gate_ambient(admit_ambient, src, _W_M)
+    assert got == _W_LOST_DB, got
+    assert got == _ref_ambient(src, _W_M)
+    # ... and the spawn bound is genuinely there to lose the tie: on its own it
+    # is what both sides report.
+    alone = _mo_src([_MO_SPAWN], "glued")
+    assert _gate_ambient(admit_ambient, alone, _W_M) == _MO_SPAWN_BOUND
+    assert _ref_ambient(alone, _W_M) == _MO_SPAWN_BOUND
+
+
+def test_oracle_b_a_withdrawal_tying_with_the_boot_count_names_the_withdrawal(
+        admit_ambient):
+    """The second closed family. The BOOT count is decided at the head of
+    `_link`, which the reference runs after the withdrawal; the gate collected
+    it in `collect_nonlink`, ahead of one. Main answers `BOOT|...found B1, B2`
+    on the tie."""
+    src = _mo_src([_MO_WITHDRAW, _MO_BOOT], "glued")
+    got = _gate_ambient(admit_ambient, src, _W_M)
+    assert got == _W_LOST_DB, got
+    assert got == _ref_ambient(src, _W_M)
+    alone = _mo_src([_MO_BOOT], "glued")
+    assert _gate_ambient(admit_ambient, alone, _W_M) == _MO_TWO_BOOTS
+    assert _ref_ambient(alone, _W_M) == _MO_TWO_BOOTS
+
+
+def test_the_withdrawal_does_not_simply_win_every_ambient_admission(
+        admit_ambient):
+    """NON-VACUITY, and the control that separates "ordered correctly" from
+    "moved to the front". Passes on main AND on the branch.
+
+    LINE still decides: with the fragments on their own lines the earlier one
+    wins whichever it is. A spawn bound declared ABOVE the withdrawal is
+    reported; the same pair with the withdrawal above reports the withdrawal.
+    Only the tie changed."""
+    spawn_first = _mo_src([_MO_SPAWN, _MO_WITHDRAW], "separate")
+    assert _gate_ambient(admit_ambient, spawn_first, _W_M) == _MO_SPAWN_BOUND
+    assert _ref_ambient(spawn_first, _W_M) == _MO_SPAWN_BOUND
+
+    withdraw_first = _mo_src([_MO_WITHDRAW, _MO_SPAWN], "separate")
+    assert _gate_ambient(admit_ambient, withdraw_first, _W_M) == _W_LOST_DB
+    assert _ref_ambient(withdraw_first, _W_M) == _W_LOST_DB
+
+
+def test_an_earlier_component_refusal_still_outranks_a_tying_withdrawal(
+        admit_ambient):
+    """NON-VACUITY, the other direction. The COMPONENT LOOP runs ahead of the
+    withdrawal on both sides, so a component's own G4 wins a tie with it — the
+    withdrawal did not move to the head of the sink, it moved to its own place
+    in it. Passes on main AND on the branch."""
+    src = _mo_src([_MO_WITHDRAW, _MO_G4], "glued")
+    expected = "G4|call to emission `bus.publish` must be marked `emit` (G4)"
+    assert _gate_ambient(admit_ambient, src, _W_M) == expected
+    assert _ref_ambient(src, _W_M) == expected
+
+
+def test_the_single_source_sink_is_unchanged_by_the_ambient_splice(admit):
+    """The splice is inert for `admit_src`: it passes an EMPTY ambient list, so
+    every single-source program — the whole `_MULTI_REFUSAL_PROGRAMS` corpus
+    included — reports exactly what it reported before. Passes on main too."""
+    for _, src in _MULTI_REFUSAL_PROGRAMS:
+        for text in (src, _oneline(src)):
+            ref_tag, ref_msg = _ref(text)
+            assert admit(text) == ref_tag + "|" + ref_msg
