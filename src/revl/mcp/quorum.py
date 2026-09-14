@@ -118,11 +118,126 @@ RECEIPT_VERSION = 1
 # and the count is of connections rather than of strings. See
 # `docs/design/471-quorum-approval.md`, Decision 7.
 
+#
+# ## What a SIGNED cast adds, and what it still does not
+#
+# The paragraph above names the bearer credential's three bounds, and a signed
+# cast (`operator <token> sign p256:<hex>`) answers two of them squarely:
+#
+#   * a bearer secret is HANDED OVER to cast it. Everything on the path — the
+#     session process, the transport, a log, a co-located reader, the proposer
+#     who is watching the question it opened — sees the secret the first time
+#     the operator votes honestly, and can cast as that operator on every later
+#     question. A signature hands over a value that verifies ONE question;
+#   * a captured bearer secret is replayable at will: against another question,
+#     another round of the same question, another action (`revoke`, `override`),
+#     and with the vote flipped from `approve` to `deny`. A signature is over
+#     the question's own binding TOGETHER WITH the action and the vote, so a
+#     captured one re-presents exactly the cast it already was, which the graph
+#     has already counted and refuses as a duplicate.
+#
+# It does NOT answer the third, and that is the one #979 is about: a caller
+# holding two operators' PRIVATE keys signs twice and satisfies a two-of-M rule
+# from one session, and the graph honestly reads as two principals because, to
+# this boundary, it was. Signing moves the thing that must be held from a value
+# the session can capture to one it never sees; it does not make the count a
+# count of people. That needs the per-caller authenticated transport, where the
+# N arrive on N connections and the count is of the connections.
+
 #: Domain separator for the principal id recorded in the decision graph. The id
 #: is a hash OF the credential digest, never the digest itself: the graph is
 #: durable, readable and copied into audits, and a row carrying the verifier
 #: would let a reader of the record forge future casts.
 _PRINCIPAL_DOMAIN = b"revl.quorum.principal\x00"
+
+#: The same, for a cast-signing key. A different domain so a bearer digest and a
+#: public key can never collide into one principal id by accident; the public key
+#: is not a secret, and the hash is for uniformity and length, not secrecy.
+_SIGNER_DOMAIN = b"revl.quorum.signer\x00"
+
+#: Domain separator and version for the bytes a cast SIGNS. It is a version of
+#: the signed payload's SHAPE: a verifier that added a field without moving this
+#: would accept a signature made over the old shape as one over the new.
+CAST_DOMAIN = b"revl.quorum.cast.v1\x00"
+
+#: The suite a signed cast uses: deterministic ECDSA over NIST P-256 with
+#: SHA-256 (`revl.tee_quote`, RFC 6979), raw `R || S` hex on the wire.
+CAST_ALG = "p256"
+
+
+def cast_message(binding: dict) -> bytes:
+    """The exact bytes a cast signs: THIS act, on THIS question, and nothing
+    else.
+
+    Every field is load-bearing, and each one is a replay the signature refuses:
+
+      * `requestId` / `hash` / `candidateHash` / `component` / `kind` — the
+        question. A signature made for one crossing does not verify against
+        another, so a captured proof is not a credential for the next question;
+      * `round` — the ticket's round. A ticket hash is the identity of a
+        QUESTION and repeats verbatim whenever the same crossing is attempted
+        again (`Session._issue_ticket`), so without the round a proof from the
+        first asking would answer every later asking of the same call;
+      * `action` — `vote`, `escalate`, `revoke` or `override`. An operator who
+        signed a vote did not thereby sign an escalation, and the emergency path
+        is a different authority (it is gated by a different verb), so it must be
+        a different signature;
+      * `vote` — `approve` or `deny`. A proof captured from a denial cannot be
+        re-presented as an approval;
+      * `asToken` — the identity the cast counts for. A proof is not
+        transferable to another name even if that name shares the key, so the
+        row the graph writes is the row the signer meant to write.
+
+    The bytes are the domain separator followed by the canonical JSON of those
+    fields, which is the same canonicalisation the receipt digest uses: sorted
+    keys, no insignificant whitespace, so two readers of one question agree on
+    the message byte for byte."""
+    return CAST_DOMAIN + _canon({
+        "requestId": binding.get("requestId"),
+        "hash": binding.get("hash"),
+        "candidateHash": binding.get("candidateHash"),
+        "component": binding.get("component"),
+        "kind": binding.get("kind"),
+        "round": binding.get("round"),
+        "action": binding.get("action"),
+        "vote": binding.get("vote"),
+        "asToken": binding.get("asToken"),
+    }).encode("utf-8")
+
+
+def sign_cast(private_key: int, binding: dict) -> str:
+    """Sign one cast, returning the raw `R || S` hex a caller puts in `asProof`.
+
+    The signer lives beside the verifier deliberately. An operator needs SOME
+    canonical way to produce the proof, and a protocol whose only implementation
+    of the signed message is inside the verifier is a protocol every client has
+    to guess at — the guesses disagree, and the disagreements are read as
+    refusals rather than as the interop bug they are. It takes the private scalar
+    and never a file: where an operator's private key lives is the operator's
+    problem and not this module's, and a helper that read keys off disk would
+    quietly become the place they get stored."""
+    from ..tee_quote import CURVE_P256, ecdsa_sign
+    return ecdsa_sign(CURVE_P256, private_key, cast_message(binding)).hex()
+
+
+def _verify_cast(public_key_hex: str, binding: dict, proof: str) -> bool:
+    """Does `proof` verify as a signature over `binding` under `public_key_hex`?
+
+    Every malformed input answers False rather than raising: a caller's proof is
+    a peer record and a bad one is a refusal, not a crash. The one thing that
+    could raise — a public key that is not on the curve — cannot reach here,
+    because the profile parser validated the point when it loaded
+    (`revl.mcp.operator._parse_sign_key`)."""
+    from ..tee_quote import CURVE_P256, QuoteFormatError, ecdsa_verify
+    try:
+        raw = bytes.fromhex(str(proof).strip())
+    except ValueError:
+        return False
+    try:
+        return ecdsa_verify(CURVE_P256, bytes.fromhex(public_key_hex),
+                            cast_message(binding), raw)
+    except QuoteFormatError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -157,7 +272,56 @@ def _principal_of_credential(digest: str) -> str:
         _PRINCIPAL_DOMAIN + digest.encode("utf-8")).hexdigest()[:16]
 
 
-def resolve_cast(*, as_token, as_secret, bound, registry):
+def _principal_of_signer(public_key_hex: str) -> str:
+    return "sign:" + hashlib.sha256(
+        _SIGNER_DOMAIN + public_key_hex.encode("utf-8")).hexdigest()[:16]
+
+
+def _lifetime_refusal(operator, now_ms):
+    """Is this operator's credential still in force at `now_ms`, or is the cast
+    refused before its proof is even looked at?
+
+    Both checks come BEFORE the credential is verified, so a revoked operator's
+    still-valid signature and a still-known secret are refused on the same
+    ground: the question is not whether the holder can prove the credential, it
+    is whether the credential still binds anything.
+
+    A declared window with no clock to evaluate it against also refuses. That is
+    the fail-closed reading and the only safe one: the alternative is to admit
+    while unable to say whether the grant had already lapsed, which is exactly
+    the state an expiry exists to make impossible."""
+    if getattr(operator, "revoked", False):
+        return UnboundCast(
+            "revoked-credential",
+            f"the operator profile marks `{operator.token}`'s vote credential "
+            f"REVOKED, so no cast is attributed to it: a revoked identity is "
+            f"refused whether or not the holder can still prove the credential "
+            f"(roadmap item 471, issue #979, fail closed)",
+            operator.token)
+    not_after = getattr(operator, "not_after", None)
+    if not_after is None:
+        return None
+    if now_ms is None:
+        return UnboundCast(
+            "expired-credential",
+            f"`{operator.token}`'s vote credential is declared valid only until "
+            f"{not_after}, and this cast carries no clock reading to evaluate "
+            f"that against. A credential whose window cannot be checked is not "
+            f"in force (roadmap item 471, issue #979, fail closed)",
+            operator.token)
+    if now_ms > not_after:
+        return UnboundCast(
+            "expired-credential",
+            f"`{operator.token}`'s vote credential lapsed at {not_after} and it "
+            f"is now {now_ms}: an expired credential binds no cast. Issue a "
+            f"fresh one and update the operator profile (roadmap item 471, "
+            f"issue #979, fail closed)",
+            operator.token)
+    return None
+
+
+def resolve_cast(*, as_token, as_secret=None, bound, registry,
+                 as_proof=None, binding=None, now_ms=None):
     """Bind one cast's identity, or refuse it.
 
     Returns a :class:`Cast` when the identity is bound and an
@@ -170,25 +334,62 @@ def resolve_cast(*, as_token, as_secret, bound, registry):
     :class:`revl.mcp.operator.OperatorRegistry` the session was served with, which
     is what a credential is checked against.
 
-    The four ways a cast is refused, each named so the refusal is actionable:
+    `as_proof` is the raw `R || S` hex of a signature over `binding` (see
+    :func:`cast_message`), `binding` the question-and-act this cast is for, and
+    `now_ms` the session clock the credential's own lifetime is checked against.
+    All three are optional in the SIGNATURE only so an existing bearer-credential
+    call site keeps working unchanged; a cast against an operator that declares a
+    signing key needs all of them and refuses without them.
 
-      * `unnamed-credential` - a credential with no `asToken` beside it. The
-        session will not search the profile for whichever identity a secret
-        happens to open: a cast says who it is for, and the credential proves
-        that claim;
+    The ways a cast is refused, each named so the refusal is actionable:
+
+      * `unnamed-credential` - a credential or a proof with no `asToken` beside
+        it. The session will not search the profile for whichever identity a
+        secret happens to open: a cast says who it is for, and the credential
+        proves that claim;
       * `unbound-identity` - a name other than the session's own with no
         operator profile to check it against. A session served without a profile
         has exactly one identity, so a second one cannot be bound at all;
       * `unknown-operator` / `unkeyed-identity` - the profile does not carry the
-        named operator, or carries it with no declared vote credential. Neither
-        can be proven, so neither is believed;
+        named operator, or carries it with no declared credential of either
+        kind. Neither can be proven, so neither is believed;
       * `unproven-identity` - a name the profile knows, presented with a missing
-        or wrong credential.
+        or wrong bearer credential;
+      * `unsigned-cast` - a name whose profile entry binds casts BY SIGNATURE,
+        presented with no proof (or with a bearer secret instead). There is no
+        downgrade here: an operator that declares a signing key cannot be cast
+        for by presenting a secret, because if it could then declaring the key
+        would bound nothing;
+      * `unproven-signature` - a proof that does not verify over this question's
+        binding under the operator's declared key, is malformed, or names an
+        operator that declares no signing key to check it against;
+      * `unbound-question` - a proof with no question binding to verify it
+        against. A signature is only ever a signature OVER something, and a
+        verifier with nothing to verify against cannot be made to admit;
+      * `revoked-credential` / `expired-credential` - the credential is no
+        longer in force, checked before the proof is looked at.
     """
     bound_token = getattr(bound, "token", None) if bound is not None else None
     secret = as_secret if as_secret not in (None, "") else None
+    proof = as_proof if as_proof not in (None, "") else None
+    def _session_cast():
+        """The serve-time binding, or the refusal that says it no longer holds.
+
+        The binding is process configuration rather than a credential, but a
+        REVOKED operator is a revoked operator: if the profile says this identity
+        no longer acts, the session's own binding to it does not resurrect it.
+        It cannot supply one of the N anyway - on one session the bound operator
+        is the proposer and separation of duties excludes it - but it can still
+        escalate, revoke and override, which are the acts revocation most needs
+        to reach."""
+        if bound is not None:
+            lapsed_session = _lifetime_refusal(bound, now_ms)
+            if lapsed_session is not None:
+                return lapsed_session
+        return Cast(bound_token or "", f"session:{bound_token or ''}", "session")
+
     if as_token is None or as_token == "":
-        if secret is not None:
+        if secret is not None or proof is not None:
             return UnboundCast(
                 "unnamed-credential",
                 "a vote credential was presented with no `asToken` beside it: a "
@@ -197,12 +398,12 @@ def resolve_cast(*, as_token, as_secret, bound, registry):
                 "searching the profile for whichever secret matches (roadmap "
                 "item 471, issue #979)",
                 bound_token or "")
-        return Cast(bound_token or "", f"session:{bound_token or ''}", "session")
+        return _session_cast()
 
-    if as_token == bound_token and secret is None:
+    if as_token == bound_token and secret is None and proof is None:
         # naming the session's own identity adds nothing to assert: it is the
         # serve-time binding either way.
-        return Cast(bound_token, f"session:{bound_token}", "session")
+        return _session_cast()
 
     if registry is None:
         return UnboundCast(
@@ -223,13 +424,65 @@ def resolve_cast(*, as_token, as_secret, bound, registry):
             f"{', '.join(sorted(registry.operators)) or 'none'}) (roadmap item "
             f"471, issue #979, fail closed)",
             as_token)
+    lapsed = _lifetime_refusal(operator, now_ms)
+    if lapsed is not None:
+        return lapsed
+    if operator.sign_key:
+        # A signing key is not a stronger OPTION beside the secret, it REPLACES
+        # it. An operator that declares one is cast for by proof or not at all,
+        # which is why `asSecret` here is a refusal and not a fallback.
+        if proof is None:
+            return UnboundCast(
+                "unsigned-cast",
+                f"operator `{as_token}` binds its casts by SIGNATURE, so this "
+                f"cast must carry `asProof`: the raw R||S hex of a P-256 "
+                f"signature over this question's binding "
+                f"(`revl.mcp.quorum.cast_message`). "
+                + ("A bearer `asSecret` does not stand in for it - a secret that "
+                   "crossed the wire once is replayable against every later "
+                   "question, which is the property the signing key exists to "
+                   "remove. " if secret is not None else "")
+                + "(roadmap item 471, issue #979, fail closed)",
+                as_token)
+        if not binding:
+            return UnboundCast(
+                "unbound-question",
+                f"a signed cast attributed to `{as_token}` arrived with no "
+                f"question binding to verify it against. A signature proves a "
+                f"statement about ONE question, and a verifier handed no "
+                f"question has nothing to check, so it refuses rather than "
+                f"treating the proof as self-evident (roadmap item 471, issue "
+                f"#979, fail closed)",
+                as_token)
+        if not _verify_cast(operator.sign_key, binding, proof):
+            return UnboundCast(
+                "unproven-signature",
+                f"the proof presented for `{as_token}` is not a valid P-256 "
+                f"signature over THIS question's binding under the key the "
+                f"operator profile declares. A signature made for another "
+                f"question, another round, another act, or the other vote is a "
+                f"signature about something else, and is refused here exactly as "
+                f"a forged one is (roadmap item 471, issue #979, fail closed)",
+                as_token)
+        return Cast(as_token, _principal_of_signer(operator.sign_key),
+                    "signature")
+    if proof is not None:
+        return UnboundCast(
+            "unproven-signature",
+            f"a signed cast was attributed to `{as_token}`, but the operator "
+            f"profile declares no cast-signing key for it, so there is nothing "
+            f"to verify the proof against. Give it an `operator {as_token} sign "
+            f"p256:<hex>` line (roadmap item 471, issue #979, fail closed)",
+            as_token)
     if not operator.vote_key:
         return UnboundCast(
             "unkeyed-identity",
             f"operator `{as_token}` declares no vote credential, so a cast "
             f"attributed to it rests on the caller's word alone. Give it an "
-            f"`operator {as_token} key sha256:<digest>` line and present the "
-            f"secret as `asSecret` (roadmap item 471, issue #979, fail closed)",
+            f"`operator {as_token} sign p256:<public key hex>` line and sign the "
+            f"question's binding into `asProof` - or, for the weaker bearer "
+            f"form, an `operator {as_token} key sha256:<digest>` line presented "
+            f"as `asSecret` (roadmap item 471, issue #979, fail closed)",
             as_token)
     if secret is None:
         return UnboundCast(
@@ -484,7 +737,8 @@ def escalate(session, arguments: dict) -> dict:
     return session.escalate_ticket(
         ticket_hash, reason=arguments.get("reason"),
         as_token=arguments.get("asToken"),
-        as_secret=arguments.get("asSecret"))
+        as_secret=arguments.get("asSecret"),
+        as_proof=arguments.get("asProof"))
 
 
 def revoke_question(session, arguments: dict) -> dict:
@@ -497,7 +751,8 @@ def revoke_question(session, arguments: dict) -> dict:
     return session.revoke_ticket(
         ticket_hash, reason=arguments.get("reason"),
         as_token=arguments.get("asToken"),
-        as_secret=arguments.get("asSecret"))
+        as_secret=arguments.get("asSecret"),
+        as_proof=arguments.get("asProof"))
 
 
 def override(session, arguments: dict) -> dict:
@@ -519,7 +774,8 @@ def override(session, arguments: dict) -> dict:
     return session.override_ticket(
         ticket_hash, reason=arguments.get("reason"),
         as_token=arguments.get("asToken"),
-        as_secret=arguments.get("asSecret"))
+        as_secret=arguments.get("asSecret"),
+        as_proof=arguments.get("asProof"))
 
 
 def decision_report(session, arguments: dict) -> dict:

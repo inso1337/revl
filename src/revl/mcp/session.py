@@ -5916,8 +5916,25 @@ class Session:
                 "require": record["require"], "proposer": record["proposer"],
                 "at": self._now_ms()}
 
+    def _cast_binding(self, record: dict, action: str, *, as_token: str | None,
+                      vote: str | None) -> dict:
+        """What a SIGNED cast signs: the question's binding plus the act being
+        taken on it (issue #979, `revl.mcp.quorum.cast_message`).
+
+        It is `_quorum_binding` widened by three fields the question itself does
+        not carry, because a signature over the question alone would be a
+        signature over "something about this question" rather than over this act:
+        the ACTION separates a vote from an escalation, a revocation and an
+        override (which are three different authorities); the VOTE separates an
+        approval from a denial; and the asserted TOKEN pins which row the graph
+        is being asked to write, so a proof is not transferable to a second name
+        that happens to share the key."""
+        return {**self._quorum_binding(record), "action": action,
+                "vote": vote, "asToken": as_token}
+
     def _bind_cast(self, record: dict, action: str, *, as_token: str | None,
-                   as_secret: str | None):
+                   as_secret: str | None, as_proof: str | None = None,
+                   vote: str | None = None):
         """Resolve WHO is acting on this question, or refuse (issue #979).
 
         The one place a multi-party act's identity is decided, for every act that
@@ -5927,9 +5944,19 @@ class Session:
         caller typed — and a count of those is a count of one operator's
         assertions, not of principals.
 
+        Two credential kinds reach it. A BEARER secret (`as_secret`), which the
+        caller hands over and the session hashes; and a SIGNATURE (`as_proof`)
+        over this question's own binding, which the session checks against the
+        public key the profile declares and which never puts the operator's key
+        material on the wire at all. The second is the one a deployment should
+        use: a secret that crossed the wire once is replayable against every
+        later question by anything that saw it, and the session itself is one of
+        the things that saw it.
+
         Delegates the decision itself to :func:`revl.mcp.quorum.resolve_cast`,
-        which is pure over (asserted name, presented credential, the session's
-        bound operator, the served registry) and returns either a bound
+        which is pure over (asserted name, presented credential, the question
+        binding, the clock, the session's bound operator, the served registry)
+        and returns either a bound
         :class:`~revl.mcp.quorum.Cast` or an
         :class:`~revl.mcp.quorum.UnboundCast`. An unbound identity is written to
         the decision graph as a `quorum-refused` row and then raised: the refusal
@@ -5941,7 +5968,10 @@ class Session:
         auditors, and a refusal row that echoed a secret would turn the audit
         trail into a credential store."""
         outcome = _quorum.resolve_cast(
-            as_token=as_token, as_secret=as_secret,
+            as_token=as_token, as_secret=as_secret, as_proof=as_proof,
+            binding=self._cast_binding(record, action, as_token=as_token,
+                                       vote=vote),
+            now_ms=self._now_ms(),
             bound=getattr(self, "operator", None),
             registry=getattr(self, "operator_registry", None))
         if isinstance(outcome, _quorum.UnboundCast):
@@ -5961,7 +5991,8 @@ class Session:
         raise SessionError(message)
 
     def _cast_vote(self, ticket: dict, rule, *, vote: str, as_token: str | None,
-                   as_secret: str | None = None) -> dict:
+                   as_secret: str | None = None,
+                   as_proof: str | None = None) -> dict:
         """Cast one approver's vote against an outstanding multi-party ticket and
         report the decision graph.
 
@@ -6001,7 +6032,8 @@ class Session:
         leaves the question open with one more name against it."""
         record = self._open_quorum(ticket, rule)
         cast = self._bind_cast(record, "vote", as_token=as_token,
-                               as_secret=as_secret)
+                               as_secret=as_secret, as_proof=as_proof,
+                               vote=vote)
         voter = cast.voter
         if vote not in ("approve", "deny"):
             self._refuse_vote(
@@ -6177,7 +6209,8 @@ class Session:
 
     def override_ticket(self, ticket_hash: str, *, reason: str | None = None,
                         as_token: str | None = None,
-                        as_secret: str | None = None) -> dict:
+                        as_secret: str | None = None,
+                        as_proof: str | None = None) -> dict:
         """Close a multi-party question by EMERGENCY OVERRIDE (roadmap item 471).
 
         The override exists for the case the item names: the named approvers
@@ -6217,7 +6250,7 @@ class Session:
             # override auditable.
             record = self._open_quorum(ticket, rule)
         actor = self._bind_cast(record, "override", as_token=as_token,
-                                as_secret=as_secret).voter
+                                as_secret=as_secret, as_proof=as_proof).voter
         if not reason or not str(reason).strip():
             self._record_quorum(
                 "quorum-refused",
@@ -6263,7 +6296,8 @@ class Session:
 
     def escalate_ticket(self, ticket_hash: str, *, reason: str | None = None,
                         as_token: str | None = None,
-                        as_secret: str | None = None) -> dict:
+                        as_secret: str | None = None,
+                        as_proof: str | None = None) -> dict:
         """Hand a multi-party question up and close its vote path (roadmap item
         471).
 
@@ -6292,7 +6326,7 @@ class Session:
         if record is None:
             record = self._open_quorum(ticket, rule)
         actor = self._bind_cast(record, "escalate", as_token=as_token,
-                                as_secret=as_secret).voter
+                                as_secret=as_secret, as_proof=as_proof).voter
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
             self._record_quorum(
@@ -6334,7 +6368,8 @@ class Session:
 
     def revoke_ticket(self, ticket_hash: str, *, reason: str | None = None,
                       as_token: str | None = None,
-                      as_secret: str | None = None) -> dict:
+                      as_secret: str | None = None,
+                      as_proof: str | None = None) -> dict:
         """Withdraw a multi-party request, or veto an open one (roadmap item 471).
 
         The proposer withdraws the crossing it asked for; an approver the rule
@@ -6357,7 +6392,7 @@ class Session:
         if record is None:
             record = self._open_quorum(ticket, rule)
         actor = self._bind_cast(record, "revoke", as_token=as_token,
-                                as_secret=as_secret).voter
+                                as_secret=as_secret, as_proof=as_proof).voter
         if record["approvers"] and actor != record["proposer"] \
                 and actor not in record["approvers"]:
             self._record_quorum(
@@ -6552,7 +6587,8 @@ class Session:
 
     def approve_ticket(self, ticket_hash: str, *, vote: str = "approve",
                        as_token: str | None = None,
-                       as_secret: str | None = None) -> dict:
+                       as_secret: str | None = None,
+                       as_proof: str | None = None) -> dict:
         """Mint a standing approval bound to an outstanding ticket (Decision 2/3).
         Refuses a hash the server never issued (the outstanding-ticket table) — an
         approval can only be minted for a question the server actually asked. The
@@ -6606,7 +6642,7 @@ class Session:
         rule = self._ticket_approval_shape(ticket)
         if rule is None:
             if vote != "approve" or as_token is not None \
-                    or as_secret is not None:
+                    or as_secret is not None or as_proof is not None:
                 raise SessionError(
                     f"ticket {ticket_hash} names no approver set and demands no "
                     f"quorum, so it cannot be answered with a vote: approve it "
@@ -6617,7 +6653,7 @@ class Session:
             self._mint_ticket_entry(ticket)
             return self._ticket_response(ticket)
         return self._cast_vote(ticket, rule, vote=vote, as_token=as_token,
-                               as_secret=as_secret)
+                               as_secret=as_secret, as_proof=as_proof)
 
     # -- item 344: session-scoped standing capability grants ----------------
 
