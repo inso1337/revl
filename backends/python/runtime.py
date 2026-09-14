@@ -4724,8 +4724,14 @@ class StreamSource:
     subscribed, or merged again — with no second class of stream."""
 
     DEFAULT_CAPACITY = 8
+    #: How many items a `replay(from: "<name>")` provider holds behind its
+    #: durable cursor (item 130 §4.5). BOUNDED, like every other stream buffer:
+    #: a cursor further back than this is a replay GAP, which the subscription
+    #: faults on rather than silently resuming from the wrong place.
+    DEFAULT_REPLAY_CAPACITY = 64
 
-    def __init__(self, kind: str = "source", up: "list | None" = None) -> None:
+    def __init__(self, kind: str = "source", up: "list | None" = None,
+                 replay: "dict | None" = None) -> None:
         self._subs: list = []
         self._state = "open"          # open | closed | faulted
         self._kind = kind             # source | merge
@@ -4733,8 +4739,42 @@ class StreamSource:
         self._down: list = []                 # merged streams fed by this one
         self._pending = len(self._up)         # upstreams not yet terminal
         self._reason: Optional[str] = None
+        # item 130 §4.5: the DECLARED replay claim, `{"count": n}` or
+        # `{"cursor": name}`, or None for the default (no backlog — a consumer
+        # sees only items emitted after `subscribe` returns). The backlog is
+        # held here, on the PROVIDER, because that is exactly what the
+        # declaration claims: replay is a durability claim only a provider can
+        # make, and a consumer that asks for one the provider did not declare is
+        # a compile error, never an empty backlog at runtime.
+        self._replay = dict(replay) if replay else None
+        self._backlog: list = []      # [(seq, item)], bounded by the claim
+        self._next_seq = 0
         Stream._sources.append(self)
         _record(f"stream.{kind} open")
+
+    @property
+    def _replay_capacity(self) -> int:
+        """How many items this provider holds, 0 when it declared no replay."""
+        if not self._replay:
+            return 0
+        if "count" in self._replay:
+            return int(self._replay["count"])
+        return self.DEFAULT_REPLAY_CAPACITY
+
+    def _hold(self, item: Any) -> None:
+        """Record one emitted item in the declared backlog (item 130 §4.5).
+
+        Runs on every emission, subscriber or not — the whole point of replay is
+        that a consumer subscribing LATER still sees what was emitted before it
+        arrived. The backlog is bounded by the declaration, so a provider that
+        declared `replay(8)` costs 8 items and nothing more."""
+        cap = self._replay_capacity
+        if cap <= 0:
+            return
+        self._backlog.append((self._next_seq, item))
+        self._next_seq += 1
+        while len(self._backlog) > cap:
+            self._backlog.pop(0)
 
     @property
     def state(self) -> str:
@@ -4759,6 +4799,12 @@ class StreamSource:
         discard instead."""
         if self._state != "open":
             return False
+        # §4.5: the declared backlog is recorded BEFORE delivery, and whether or
+        # not anyone is listening — a replay claim is about items a consumer
+        # subscribing later still gets, so an emission with no subscriber is
+        # exactly the case it exists for. A no-op on a provider that declared no
+        # replay, so the default path is untouched.
+        self._hold(item)
         accepted = self._forward(item)
         _record(f"stream.emit {item}" if accepted
                 else f"stream.emit {item} refused")
@@ -5078,7 +5124,9 @@ class Subscription:
     def __init__(self, source: Any, policy: str = "error",
                  ctx: Any = None,
                  capacity: int = StreamSource.DEFAULT_CAPACITY,
-                 drain_ms: Optional[int] = None) -> None:
+                 drain_ms: Optional[int] = None,
+                 cursor: Optional[str] = None,
+                 cursor_pos: int = -1) -> None:
         if policy not in self.POLICIES:  # pragma: no cover — checker invariant
             raise ValueError(f"unknown backpressure policy {policy!r}")
         # the IMMEDIATE upstream: the provider, or the last link of a combinator
@@ -5095,6 +5143,13 @@ class Subscription:
         self._paused = False
         self._drain_ms = drain_ms
         self._drain: Any = None
+        # item 130 §4.5/§4.9: the DURABLE cursor this subscription resumes from
+        # and advances, or None. `_cursor_pos` is the seq of the last item the
+        # consumer actually took — the position a fresh process would re-issue
+        # this subscription from, which is what makes the bracket reconstructible
+        # (§4.9) rather than the closure-only residue a live listener is.
+        self._cursor = cursor
+        self._cursor_pos = cursor_pos
         # item 416b: the wake event a parked `next` blocks on, created lazily
         # because a subscription may be constructed with no running loop.
         self._wake: Any = None
@@ -5251,6 +5306,15 @@ class Subscription:
                 return STREAM_CLOSED
             if self._buffer:
                 item = self._buffer.pop(0)
+                # §4.5: a durable cursor advances on CONSUMPTION, not delivery —
+                # the position a restart resumes from must not claim an item the
+                # consumer never saw. Exact by construction: a cursor
+                # subscription carries no combinator chain and no lossy policy
+                # (both refused at compile time), so every item the provider
+                # forwarded reaches this pop, in order.
+                if self._cursor is not None:
+                    self._cursor_pos += 1
+                    Stream._cursors[self._cursor] = self._cursor_pos
                 # draining may release a `block`-paused provider (§4.4)
                 self._maybe_resume()
                 return item
@@ -5260,6 +5324,29 @@ class Subscription:
                     raise StreamFaulted(reason or "faulted")
                 return STREAM_CLOSED
             await self._park()
+
+    def durable_undo(self):
+        """The bracket inverse of a DURABLE-CURSOR subscription, as a disposer
+        that describes itself (item 130 §4.9).
+
+        §4.9's default is honest and bleak: a subscription's inverse is a live
+        host listener, closure-only, so a crashed one is `unreconstructible`
+        residue and `revl recover` never claims it closed. A provider that
+        declared `replay(from: "<name>")` opts OUT of that, and this is the whole
+        mechanism: the disposer still calls exactly `close()`, but it carries the
+        cursor name — a WAL-serializable descriptor — so the recorder writes a
+        re-issuable `Stream.close(<cursor>)` instead of "closure over in-process
+        memory", and a fresh process can pick the subscription up where it
+        stopped. No new teardown path: the same callable, described."""
+        sub = self
+
+        def _close():
+            return sub.close()
+
+        _close.revl_resource = f"cursor:{self._cursor}"
+        _close.revl_inverse_op = {"receiver": "Stream", "method": "close",
+                                  "args": [self._cursor]}
+        return _close
 
     def close(self) -> bool:
         """The bracket inverse: trip the cancel token synchronously, release the
@@ -5353,10 +5440,26 @@ class Stream:
     _sources: list = []
     _subs: list = []
     _stages: list = []
+    #: item 130 §4.5/§4.9: durable cursor name -> the seq of the last item a
+    #: consumer took. This is the WAL-serializable half of a replay claim: a
+    #: name and an integer, which is exactly why a cursor subscription is
+    #: RECONSTRUCTIBLE after a crash while a plain one is closure-only residue.
+    _cursors: dict = {}
 
     @classmethod
-    def source(cls) -> StreamSource:
-        return StreamSource()
+    def source(cls, replay: Optional[dict] = None) -> StreamSource:
+        """Open a provider. `replay` is its §4.5 declaration — `{"count": n}` or
+        `{"cursor": name}` — threaded from the frontend, or None for the default
+        (no backlog). Emitted only when DECLARED, so a replay-free program still
+        emits the exact zero-argument call."""
+        return StreamSource(replay=replay)
+
+    @classmethod
+    def cursor_at(cls, name: str) -> int:
+        """The durable position recorded under `name`, or -1 if it has none.
+        The residue/recovery probe: a fresh process reads this to re-issue the
+        subscription where the crashed one stopped (§4.9)."""
+        return cls._cursors.get(name, -1)
 
     @classmethod
     def is_closed(cls, value: Any) -> bool:
@@ -5400,16 +5503,61 @@ class Stream:
     def subscribe(cls, source: StreamSource, policy: str = "error",
                   ctx: Any = None, *, stages: Optional[list] = None,
                   capacity: int = StreamSource.DEFAULT_CAPACITY,
-                  drain_ms: Optional[int] = None) -> Subscription:
+                  drain_ms: Optional[int] = None,
+                  replay: Optional[dict] = None) -> Subscription:
         """Open a single-consumer subscription, optionally through a derived
         combinator chain (Slice 2). `stages` is the emitted `[(kind, arg), …]`
         list — `('map', fn)`, `('filter', pred)`, `('take', n)` — applied
         left to right, so the LAST link is the subscription's immediate
-        upstream and the chain closes downstream-first on the bracket inverse."""
+        upstream and the chain closes downstream-first on the bracket inverse.
+
+        `replay` is the §4.5 backlog this consumer asked for and the provider
+        declared: `{"count": k}` (the last k items) or `{"cursor": name}` (resume
+        the durable cursor). The backlog is delivered through the PROVIDER's own
+        forward path before any live item, so it takes the declared buffer and
+        policy exactly as a live item does — a backlog bigger than the buffer is
+        ordinary backpressure, not a special case, and there is no second
+        delivery path for a replayed item to diverge on."""
         upstream: Any = source
         for kind, arg in stages or []:
             upstream = StreamStage(upstream, kind, arg)
-        return Subscription(upstream, policy, ctx, capacity, drain_ms)
+        cursor = (replay or {}).get("cursor")
+        cursor_pos = -1
+        backlog: list = []
+        if replay:
+            held = list(getattr(source, "_backlog", ()) or ())
+            if cursor is not None:
+                recorded = cls._cursors.get(cursor)
+                if recorded is None:
+                    # A cursor with no recorded position resumes at the OLDEST
+                    # item the provider still holds, and says so. The buffer is
+                    # bounded (§4.4), so "from the beginning of time" is a claim
+                    # no provider can back; the honest start is what it has.
+                    cursor_pos = (held[0][0] - 1) if held else -1
+                    _record(f"stream.replay cursor {cursor} fresh")
+                else:
+                    cursor_pos = recorded
+                    oldest = held[0][0] if held else cursor_pos + 1
+                    if oldest > cursor_pos + 1:
+                        # A GAP: the provider trimmed past where this cursor
+                        # stopped. Resuming anyway would silently skip items,
+                        # which is the one thing §4.4's default forbids, so this
+                        # is a `Faulted` terminal like any other.
+                        sub = Subscription(upstream, policy, ctx, capacity,
+                                           drain_ms, cursor, cursor_pos)
+                        _record(f"stream.replay gap {cursor}")
+                        sub._terminate("faulted", f"replay gap on cursor {cursor}")
+                        return sub
+                backlog = [item for seq, item in held if seq > cursor_pos]
+            else:
+                want = int(replay.get("count") or 0)
+                backlog = [item for _seq, item in held[-want:]] if want else []
+        sub = Subscription(upstream, policy, ctx, capacity, drain_ms,
+                           cursor, cursor_pos)
+        for item in backlog:
+            _record(f"stream.replay {item}")
+            source._forward(item)
+        return sub
 
     @classmethod
     def pending(cls) -> int:
@@ -5438,6 +5586,7 @@ class Stream:
         cls._sources.clear()
         cls._subs.clear()
         cls._stages.clear()
+        cls._cursors.clear()
         # item 416b: a reset between runs drops the park registry too, so the
         # sweeper from a finished loop cannot hold a dead subscription alive.
         _STREAM_PARKED.clear()

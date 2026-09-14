@@ -370,7 +370,8 @@ class Step:
 
     __slots__ = ("index", "kind", "label", "effect", "file", "lineno", "source",
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
-                 "compensation", "note", "error", "scope", "undo_idempotent")
+                 "compensation", "note", "error", "scope", "undo_idempotent",
+                 "inverse_op")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -409,6 +410,15 @@ class Step:
         # declared non-idempotent, which the fork REFUSES to rewind past (Decision
         # 5). None never triggers the refusal, so byte-identity holds.
         self.undo_idempotent: Optional[bool] = None
+        # An EXPLICIT, re-issuable inverse `{"receiver","method","args"}` a
+        # self-describing disposer carried, or None for the ordinary closure
+        # case. :func:`inverse_descriptor` reads it: with one, the WAL records a
+        # call a fresh process can make; without, it records the honest
+        # "closure over in-process memory". item 130 §4.9 is the first producer
+        # — a stream subscription resumable from a DURABLE cursor, the one
+        # reactive shape whose inverse names something that outlives the
+        # process.
+        self.inverse_op: Optional[dict] = None
 
     # -- properties --------------------------------------------------------
 
@@ -670,6 +680,20 @@ class Timeline:
                 # rather than re-derived from source text (a witnessed step's
                 # activation body is emitted into the transaction runtime, so it
                 # has no code site to match: `file`/`lineno` above are None).
+                # item 130 §4.9: a disposer that DESCRIBES ITSELF. A live host
+                # listener is closure-only and its record says so; a
+                # subscription resumable from a durable cursor carries the
+                # cursor as a re-issuable call and a referent that outlives the
+                # process, so recovery can name it instead of reporting
+                # unreconstructible residue. Read off the registered inverse,
+                # exactly like the scope below — nothing is inferred from source
+                # text, and a disposer that carries neither is untouched.
+                resource = getattr(entry, "revl_resource", None)
+                if isinstance(resource, str) and resource:
+                    step.detail = {"resource": resource}
+                op = getattr(entry, "revl_inverse_op", None)
+                if isinstance(op, dict):
+                    step.inverse_op = op
                 # Only KIND_EFFECT consults a scope (the fork rewind's
                 # `_step_back_scoped` and the offline partition in
                 # `revl.branch`), so this is the one kind that must state it.
@@ -1789,8 +1813,11 @@ _QUORUM_RECORDS = frozenset({
 #: (that is the honest bound — docs/crash-recovery.md §"boundary is the cargo");
 #: the policy is a host concern, defaulting to "unknown, therefore prove it".
 _OUTLIVES_HINTS = {
+    # item 130 §4.9: a durable `Cursor` is a position in a provider's log, held
+    # by the provider and readable after a restart. It joins the OUTLIVES row
+    # for the same reason a `Lease` is there: the process dying does not move it.
     "outlives": ("File", "Path", "Dir", "Handle", "Db", "Table", "Row",
-                 "Blob", "Object", "Lock", "Lease", "Pid"),
+                 "Blob", "Object", "Lock", "Lease", "Pid", "Cursor"),
     "dies": ("Socket", "Conn", "Connection", "Stream", "Channel", "Fd",
              "Pipe", "Pool", "Session", "Client"),
 }

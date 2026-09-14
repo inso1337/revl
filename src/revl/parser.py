@@ -311,6 +311,12 @@ class LetEffect:
     # refused at parse. Threaded onto the lowered step as `"mode"` only when it is
     # not `owned`, so a non-shared program's IR is byte-identical to before.
     mode: str = "owned"
+    # item 130 §4.5: the PROVIDER-side replay declaration a stream source may
+    # carry — `effect Stream.source() replay(8) undo src.close()`. A `ReplaySpec`
+    # or None. Only a `Stream.source()` acquisition may carry one (lower.py
+    # refuses it anywhere else); absent, the source holds no backlog and every
+    # `replay(…)` at a `subscribe` on it is the §4.5 undeclared-argument error.
+    replay: object = None
 
 
 @dataclass
@@ -356,6 +362,42 @@ class StreamStage:
     line: int
 
 
+def _refuse_unbound_replay(parser, replay, line: int) -> None:
+    """An unbound `effect … replay(…)` is refused (item 130 §4.5).
+
+    A replay declaration says THIS provider holds a backlog, and the only way to
+    consume that backlog is `subscribe <source> replay(…)`, which names the
+    source. An unbound acquisition has no name, so the declaration could never be
+    honoured — the same reason `subscribe` itself must be bound."""
+    if replay is None:
+        return
+    raise parser.err(
+        line,
+        "a `replay` declaration needs a bound stream source",
+        hint="replay is consumed by name — `subscribe <source> replay(n)` — so "
+             "the provider must be bound: `let src = effect Stream.source() "
+             "replay(<n>) undo src.close()` (item 130 §4.5)")
+
+
+@dataclass
+class ReplaySpec:
+    """A `replay(n)` / `replay(from: "<durable>")` declaration (item 130 §4.5).
+
+    Replay is a DURABILITY claim, and §4.5 gives it one owner: the PROVIDER
+    declares it (`effect Stream.source() replay(8) undo src.close()`), and only
+    then may a consumer ask for a backlog (`subscribe src replay(3)`). The same
+    node carries both ends, so the two can be compared field for field and a
+    consumer can never claim more than the provider holds.
+
+    Exactly one of `count`/`cursor` is set. `count` is a last-n backlog, held in
+    memory by the provider and gone with the process. `cursor` is a DURABLE
+    cursor name, and it is the stronger claim: it is WAL-serializable, so it is
+    the one shape that makes a crashed subscription reconstructible (§4.9)."""
+    count: object          # int (last-n), or None
+    cursor: object         # the durable cursor expression, or None
+    line: int
+
+
 @dataclass
 class SubscribeExpr:
     """`subscribe <stream>[.<combinator>…] [policy P] [buffer N] [drain <dur>]`
@@ -381,6 +423,10 @@ class SubscribeExpr:
     stages: list = field(default_factory=list)
     buffer: object = None      # int capacity, or None for the runtime default
     drain_ms: object = None    # int ms (block policy only), or None
+    # item 130 §4.5: the backlog this consumer asks for, or None for the default
+    # (live items only). Admitted ONLY against a provider that declared replay
+    # (`_admit_replay`); an undeclared one is the §4.5 compile error.
+    replay: object = None      # a `ReplaySpec`, or None
 
 
 @dataclass
@@ -5089,10 +5135,10 @@ class Parser:
                              "revl does not model (see the frontier in "
                              "src/revl/typecheck.py); drop the annotation",
                     )
-                acquire, undo, line, setup, is_async, mode = \
+                acquire, undo, line, setup, is_async, mode, replay = \
                     self.effect_form(tok.line)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
-                                 is_async, mode=mode)
+                                 is_async, mode=mode, replay=replay)
             # item 130: `let sub = subscribe <stream> undo sub.close()` — a
             # subscription bracket. It is deliberately the `effect … undo …`
             # shape (a subscription IS an acquisition), so the bracket
@@ -5109,11 +5155,12 @@ class Parser:
                              "whose state index the checker tracks; drop the "
                              "annotation (item 130)",
                     )
-                (stream, stages, policy, buffer, drain_ms, undo,
+                (stream, stages, policy, buffer, drain_ms, replay, undo,
                  line) = self.subscribe_form(tok.line, bind)
                 return LetEffect(
                     bind,
-                    SubscribeExpr(stream, policy, line, stages, buffer, drain_ms),
+                    SubscribeExpr(stream, policy, line, stages, buffer, drain_ms,
+                                  replay),
                     undo, line, subscribe=True)
             # item 246: `let a = await approval[C] { fields }` — an acquisition-
             # shaped suspension that yields an `Approval[C]`. Allowed in the
@@ -5177,7 +5224,7 @@ class Parser:
                                f"expected `effect` after `verified`, found {tok2.value!r}",
                                hint="inside a body, `verified` marks an effect for inverse "
                                     "round-trip testing: `verified effect … undo …`")
-            acquire, undo, line, setup, is_async, mode = \
+            acquire, undo, line, setup, is_async, mode, replay = \
                 self.effect_form(tok.line)
             if mode == "shared":
                 raise self.err(
@@ -5187,10 +5234,11 @@ class Parser:
                     hint="write `let h = effect shared <cap>.open() undo "
                          "h.close()`; the binding is holder #1 of the shared "
                          "grant (item 308, S1)")
+            _refuse_unbound_replay(self, replay, line)
             return EffectStmt(acquire, undo, line, setup, verified=True,
                               is_async=is_async)
         if tok.kind == "kw" and tok.value == "effect":
-            acquire, undo, line, setup, is_async, mode = \
+            acquire, undo, line, setup, is_async, mode, replay = \
                 self.effect_form(tok.line)
             if mode == "shared":
                 raise self.err(
@@ -5200,6 +5248,7 @@ class Parser:
                     hint="write `let h = effect shared <cap>.open() undo "
                          "h.close()`; the binding is holder #1 of the shared "
                          "grant (item 308, S1)")
+            _refuse_unbound_replay(self, replay, line)
             return EffectStmt(acquire, undo, line, setup, is_async=is_async)
         if tok.kind == "kw" and tok.value == "subscribe":
             # item 130: a subscription must be bound — its inverse `close` names
@@ -5553,7 +5602,7 @@ class Parser:
                 )
             self.next()
             undo = self.pure_expr()
-            return acquire, undo, line, [], is_async, mode
+            return acquire, undo, line, [], is_async, mode, None
         # capability leases: `effect lease fs.write(path="/tmp") ttl 10m undo
         # l.revoke()` (item 294 Slice 2). A lease is a ticket-gated acquisition of
         # a standing grant over the capability's cone; its inverse is its own
@@ -5583,7 +5632,7 @@ class Parser:
                          f"{acquire.capability} … undo l.revoke()` (G4, item 294)")
             self.next()
             undo = self.pure_expr()
-            return acquire, undo, line, [], is_async, mode
+            return acquire, undo, line, [], is_async, mode, None
         # ownership modes `shared` / `transfer` (item 308, issue #96): the acquire
         # binding may carry an explicit ownership mode marker between `effect` and
         # the acquisition — `effect shared <cap>.open() undo …` / `effect transfer
@@ -5649,6 +5698,16 @@ class Parser:
             setup = stmts[:-1]
         else:
             acquire = self.pure_expr()
+        # item 130 §4.5: the PROVIDER-side replay declaration. It sits between
+        # the acquisition and its `undo` — `effect Stream.source() replay(8) undo
+        # src.close()` — which is the one position where a qualifier can be read
+        # with no lookahead and no new keyword, exactly as `subscribe`'s own
+        # qualifier run sits between the stream and its `undo`. Whether this
+        # acquisition may CARRY a replay declaration is lower.py's call (only a
+        # stream source holds a backlog); the parser only reads the surface.
+        replay = None
+        if self.at("ident", "replay"):
+            replay = self._parse_replay_qual(where="effect")
         if not self.at("kw", "undo"):
             # witnessed-inverse externs (item 243, docs/design/243-witnessed-externs.md):
             # a witnessed call's inverse is the extern's own DECLARED `undo`,
@@ -5683,12 +5742,12 @@ class Parser:
             if isinstance(acquire, ExprVar) or (
                     isinstance(acquire, ExprCall)
                     and isinstance(acquire.callee, ExprVar)):
-                return acquire, None, line, setup, is_async, mode
+                return acquire, None, line, setup, is_async, mode, replay
             message, hint = missing_undo_refusal(_describe_expr(acquire))
             raise self.err(line, message, hint=hint)
         self.next()
         undo = self.pure_expr()
-        return acquire, undo, line, setup, is_async, mode
+        return acquire, undo, line, setup, is_async, mode, replay
 
     def _stream_chain(self):
         """`.map(<arrow>)` / `.filter(<arrow>)` / `.take(<int>)` after the stream
@@ -5742,21 +5801,24 @@ class Parser:
         — exactly the `effect lease … ttl … uses …` shape (`_lease_acquire`).
         Returns `(policy, buffer, drain_ms)`.
 
-        `replay(n)` / `replay(from: <durable>)` (§4.5) is recognized here so its
-        surface is a first-class part of the `subscribe` head, but it is REFUSED
-        in v1: replay is a provider-side durability claim (the provider must hold
-        the backlog and, after a crash, reconstruct it — §4.9), and no provider
-        can yet declare replay. So every `replay(…)` at a `subscribe` is an
-        undeclared argument, which §4.5's last sentence makes a compile error.
-        `_parse_replay_qual` raises; it never returns a threaded value, so the IR
-        and the byte-identity of a replay-free program are untouched."""
+        `replay(n)` / `replay(from: <durable>)` (§4.5) is the fourth qualifier.
+        It is parsed here and returned; whether it is ADMITTED is not a question
+        the parser can answer, because replay is a provider-side durability claim
+        and the parser cannot see the provider's declaration. So the surface is
+        threaded out and `_admit_replay` (lower.py) compares it against the
+        source's own `replay(…)`, refusing an undeclared one with §4.5's
+        compile error. Returns `(policy, buffer, drain_ms, replay)`."""
         policy = None
         buffer = None
         drain_ms = None
+        replay = None
         while (self.at("ident", "policy") or self.at("ident", "buffer")
                or self.at("ident", "drain") or self.at("ident", "replay")):
             if self.at("ident", "replay"):
-                self._parse_replay_qual()      # always raises (§4.5)
+                if replay is not None:
+                    raise self.err(line, "duplicate `replay` on a `subscribe`")
+                replay = self._parse_replay_qual()
+                continue
             qual = self.next().value
             if qual == "policy":
                 if policy is not None:
@@ -5798,50 +5860,43 @@ class Parser:
                      "has a drain window to re-check on the clock's `advance`; "
                      "the `drop_*`/`error` policies resolve an overflow "
                      "immediately (item 130 §4.4, §8)")
-        return policy or "error", buffer, drain_ms
+        return policy or "error", buffer, drain_ms, replay
 
-    def _parse_replay_qual(self) -> None:
-        """Parse a `replay(n)` / `replay(from: <durable>)` qualifier in the
-        `subscribe` head and REFUSE it (item 130 §4.5).
+    def _parse_replay_qual(self, where: str = "subscribe") -> "ReplaySpec":
+        """Parse one `replay(n)` / `replay(from: <durable>)` (item 130 §4.5).
 
-        The surface is recognized in full so the two diagnostics are honest and
-        distinct: a MALFORMED argument (`replay()`, `replay(0)`, `replay(x)`) is
-        a syntax error naming the two accepted shapes, and a WELL-FORMED one
-        (`replay(5)`, `replay(from: cursor)`) is refused as UNDECLARED — replay
-        is a durability claim only the provider can make, and no provider can
-        declare it yet (its declaration surface and the reconstructible
-        crash-recovery it gates are a later slice, §4.9). Never returns; it
-        raises before the caller consumes the `replay` token, so nothing is
-        threaded and a replay-free program is byte-identical."""
+        The SAME routine parses both ends of the claim — the provider's
+        declaration on `effect Stream.source() …` and the consumer's request on
+        a `subscribe` head — so the two surfaces cannot drift in spelling and the
+        admission pass can compare them field for field.
+
+        A MALFORMED argument (`replay()`, `replay(0)`, `replay(x)`) is a syntax
+        error here, naming the two accepted shapes. Whether a WELL-FORMED one is
+        ADMITTED is decided in lower.py: a consumer's request needs a provider
+        that declared replay (§4.5), and a declaration needs to sit on a stream
+        source. Neither is knowable from the token stream."""
         rline = self.peek().line
         self.next()                            # `replay`
         malformed = self.err(
             rline,
-            "malformed `replay` argument on a `subscribe`",
+            f"malformed `replay` argument on a `{where}`",
             hint="`replay` takes last-n `replay(<positive int>)` or a durable "
                  "cursor `replay(from: <durable>)` (item 130 §4.5)")
         if not self.at("("):
             raise malformed
         self.next()                            # `(`
+        count = None
+        cursor = None
         if self.at("int") and self.peek().value >= 1:
-            self.next()
+            count = self.next().value
         elif self.at("ident", "from"):
             self.next()                        # `from`
             self.expect(":")
-            self.pure_expr()                   # the durable cursor
+            cursor = self.pure_expr()          # the durable cursor
         else:
             raise malformed
         self.expect(")", what="`)` closing the `replay(…)` argument")
-        raise self.err(
-            rline,
-            "`replay` at a `subscribe` requires a provider that declares it "
-            "(item 130 §4.5)",
-            hint="replay is a provider-side durability claim — the provider must "
-                 "hold the backlog and, after a crash, reconstruct it (§4.9). No "
-                 "provider can declare replay yet, so every `replay(…)` at a "
-                 "`subscribe` is undeclared and refused. Drop the `replay` "
-                 "argument; provider-declared replay and its crash-recovery "
-                 "reconstruction are a later slice.")
+        return ReplaySpec(count, cursor, rline)
 
     def _at_stream_merge(self) -> bool:
         """True at the head of a `merge(` fan-in (item 130 Slice 3)."""
@@ -5900,7 +5955,7 @@ class Parser:
         `undo` is required (rule 3.2 — a held subscription with no inverse has no
         place on the accumulator, the same G4 reason plain `let` is refused in an
         activation body). Returns `(stream, stages, policy, buffer, drain_ms,
-        undo, line)`."""
+        replay, undo, line)`."""
         self.expect("kw", "subscribe")
         # A bare identifier head lets the combinator chain be parsed as stages
         # rather than as method calls (see `StreamStage`); any other operand
@@ -5918,7 +5973,7 @@ class Parser:
             stages = self._stream_chain()
         else:
             stream = self.pure_expr()
-        policy, buffer, drain_ms = self._subscribe_quals(line)
+        policy, buffer, drain_ms, replay = self._subscribe_quals(line)
         if not self.at("kw", "undo"):
             raise self.err(
                 line,
@@ -5930,7 +5985,7 @@ class Parser:
             )
         self.next()
         undo = self.pure_expr()
-        return stream, stages, policy, buffer, drain_ms, undo, line
+        return stream, stages, policy, buffer, drain_ms, replay, undo, line
 
     def _lease_acquire(self, line: int) -> "LeaseAcquire":
         """`<cap> [ttl <n><unit>] [uses <n>]` after `effect lease` (item 294).
