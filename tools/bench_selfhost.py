@@ -386,7 +386,7 @@ def _reference_admit(src: str) -> str:
 
 
 # =========================================================================
-# stage 5 — EMIT_PY  selfhost/emit_py.rvl::emit_src(ir) vs backends/python/emit.py::emit(ir)
+# stage 5 — EMIT_PY  selfhost/emit_py.rvl::emit_py_src(ir) vs backends/python/emit.py::emit(ir)
 #   THE key number: item 195's state-threading (render-context) tax lives here.
 # =========================================================================
 

@@ -2006,7 +2006,7 @@
           "const_numeral": 3
         },
         "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.": {
-          "emit_src": 1
+          "emit_wasm_src": 1
         },
         "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
           "render_bin": 1

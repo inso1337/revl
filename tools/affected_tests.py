@@ -87,6 +87,10 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     "tests/test_rescore_no_self_score.py",
+    # The self-host capstone oracle pins four `bench/results/…` candidate
+    # documents as members of the emit_java corpus (roadmap item 146 gap 2's
+    # located-gap ratchet), so a bench change must re-run it.
+    "tests/test_selfhost_compile.py",
     # Drives the codegen-perf harness (bench/codegen/python/run.py) to gate the
     # roadmap-436 / issue-71 python-emitter findings, so a bench change re-runs it.
     "tests/test_71_codegen_perf_findings.py",

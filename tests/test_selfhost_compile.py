@@ -89,14 +89,24 @@ def _exec_selfhost(rvl_relpath: str) -> dict:
     return namespace
 
 
+TIER_SUBDIR = {"py": "python", "rust": "rust", "ts": "typescript",
+               "go": "go", "java": "java", "wasm": "wasm"}
+
+
 def _load_reference_emit(tier: str):
     """The reference emitter for a tier, loaded by path — the exact file the
-    self-host emitter mirrors, and the ground truth for ``compile to <tier>``."""
-    subdir = {"py": "python", "rust": "rust", "ts": "typescript"}[tier]
+    self-host emitter mirrors, and the ground truth for ``compile to <tier>``.
+
+    The wasm reference returns a ``{module_name: wat}`` dict rather than one
+    source string; the covered surface is its ``functions`` module, which is what
+    ``emit_wasm_src`` produces and therefore what ``compile_to(..., "wasm")``
+    returns. Project it here so every tier is compared the same way."""
     spec = importlib.util.spec_from_file_location(
-        "ref_emit_" + tier, ROOT / "backends" / subdir / "emit.py")
+        "ref_emit_" + tier, ROOT / "backends" / TIER_SUBDIR[tier] / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if tier == "wasm":
+        return lambda ir, _emit=module.emit: _emit(ir)["functions"]
     return module.emit
 
 
@@ -124,9 +134,7 @@ def admit(compile_rvl):
 
 @pytest.fixture(scope="module")
 def reference_emit() -> dict:
-    return {"py": _load_reference_emit("py"),
-            "rust": _load_reference_emit("rust"),
-            "ts": _load_reference_emit("ts")}
+    return {tier: _load_reference_emit(tier) for tier in TIER_SUBDIR}
 
 
 # ---------------------------------------------------------------- corpus
@@ -311,13 +319,178 @@ def test_native_compile_of_component_program_is_byte_identical(
         f"--- lengths ref={len(want)} got={len(got)} ---")
 
 
-def test_three_way_composition_co_compiles(compile_rvl):
-    """SEAM 2 is closed: lower.rvl + emit_py.rvl + emit_rust.rvl ``use``d together
-    in compile.rvl compile into ONE artifact whose namespace exposes the driver.
+# ------------------------------------- item 146 gap 2: the last three tiers
+#
+# go, java and wasm each exported a bare ``pub fn emit_src``. The merge that
+# builds ``selfhost/compile.rvl`` flattens public declarations by bare name, so
+# admitting a second one was a duplicate-symbol error and the three tiers could
+# not co-compile with the rest of the pipeline at all. Renaming them to
+# ``emit_go_src`` / ``emit_java_src`` / ``emit_wasm_src`` (plus two collisions the
+# wider composition exposed: ``emit_wasm.rvl``'s ``type E`` against
+# ``stdlib/render.rvl``'s ``render_seq[E]`` type PARAMETER, and a test name shared
+# with ``emit_rust.rvl``) was the whole cost of admitting them, exactly as the
+# ts wiring predicted. All six tiers now run the SAME fully-native chain.
+#
+# MEASURED on the tier's own emitter corpus — the enumerated document list
+# ``tests/test_selfhost_emit_<tier>.py::CORPUS`` holds to byte agreement — driven
+# by ``compile_to`` (native frontend + native IR producer + native emitter, no
+# reference in the chain):
+#
+#     tier   corpus   emitter vs the REFERENCE IR   the FULLY-NATIVE chain
+#     py         54                   54 (100%)               38 (70.4%)
+#     ts         60                   60 (100%)               36 (60.0%)
+#     go         21                   21 (100%)              21 (100.0%)
+#     java       49                   49 (100%)               28 (57.1%)
+#     rust       34                   34 (100%)               32 (94.1%)
+#     wasm       19                   19 (100%)              19 (100.0%)
+#     TOTAL     237                  237 (100%)              174 (73.4%)
+#
+# The two columns are the whole finding. Every one of the 237 documents is
+# reproduced byte-for-byte by its self-host emitter when the emitter is fed the
+# REFERENCE IR; only 174 survive the fully-native chain. So all 63 residual
+# documents are ``selfhost/lower.rvl`` gaps — the native IR producer — and NOT
+# emitter gaps. The emitter half of roadmap item 146 is complete over the
+# enumerated corpus; what is left of the maximal story is item 391's arc.
+GO_DOCS = [
+    "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
+    "lists.rvl", "records.rvl", "variants.rvl", "transforms.rvl", "secrets.rvl",
+    "inference.rvl", "identifiers.rvl", "match_edges.rvl", "accumulators.rvl",
+    "accumulator_hygiene.rvl", "arrow_containers.rvl", "builder_literal.rvl",
+    "../emit_java_corpus/records.rvl", "../emit_rust_corpus/perf_shapes.rvl",
+    "../emit_wasm_corpus/loopctrl.rvl", "../emit_wasm_corpus/strlit.rvl",
+]
+JAVA_DOCS = [
+    "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
+    "lists.rvl", "maps.rvl", "records.rvl", "adts.rvl", "optmatch.rvl",
+    "match_ignored.rvl", "float_numeric.rvl",
+    # the component/service surface the java native emitter covers
+    "service.rvl", "services_multi.rvl", "comp_config_req.rvl",
+    "comp_config_provide.rvl", "comp_multi_effect.rvl", "comp_fail.rvl",
+    "v1_components.rvl", "legacy_void.rvl",
+    # cross-tier documents the java corpus borrows
+    "../emit_go_corpus/records.rvl", "../emit_go_corpus/variants.rvl",
+    "../emit_py_corpus/services_config.rvl",
+    "../emit_py_corpus/services_method_effects.rvl",
+    "../emit_ts_corpus/components_mixed.rvl",
+    "../emit_wasm_corpus/constfold.rvl", "../emit_wasm_corpus/listmem.rvl",
+    "../../../examples/ecosystem-consumer-js/candidates/double_tool.rvl",
+]
+WASM_DOCS = [
+    "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "builtins.rvl",
+    "constfold.rvl", "folding.rvl", "forloop.rvl", "inference.rvl",
+    "listmem.rvl", "loopctrl.rvl", "reads.rvl", "recmem.rvl", "residuals.rvl",
+    "scratch_names.rvl", "string_ops.rvl", "strlit.rvl", "variants.rvl",
+    "widening.rvl",
+]
+
+WIRED_TIER_CORPUS = (
+    [("go", "emit_go_corpus", n) for n in GO_DOCS]
+    + [("java", "emit_java_corpus", n) for n in JAVA_DOCS]
+    + [("wasm", "emit_wasm_corpus", n) for n in WASM_DOCS]
+)
+
+
+@pytest.mark.parametrize(
+    "tier,subdir,name", WIRED_TIER_CORPUS,
+    ids=[f"{t}:{n}" for t, _, n in WIRED_TIER_CORPUS])
+def test_native_compile_on_the_tiers_wired_by_item_146(
+        compile_to, reference_emit, tier, subdir, name):
+    """The three tiers item 146 gap 2 admitted, held to the same standard as the
+    first three: ``compile_to(source, tier)`` — native frontend, native IR
+    producer, native emitter, ONE co-compiled revl artifact — produces the target
+    source BYTE-FOR-BYTE equal to the reference compile. ``got`` comes from the
+    raw source string alone; the reference computes only ``want``."""
+    path = _fixture_path(subdir, name)
+    source = path.read_text(encoding="utf-8")
+
+    got = compile_to(source, tier)
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), (
+        f"native driver did not emit for {tier}:{name}: {got[:80]!r}")
+
+    want = reference_emit[tier](compile_files([str(path)]))
+
+    assert got == want, (
+        f"native compile diverged from the reference on {tier}:{name}\n"
+        f"--- lengths ref={len(want)} got={len(got)} ---")
+
+
+# The residual, NAMED rather than skipped. These are the java corpus documents the
+# fully-native chain does NOT reproduce — and for every one of them the native java
+# EMITTER is byte-exact when fed the reference IR, so the divergence is located in
+# ``selfhost/lower.rvl``, not in ``selfhost/emit_java.rvl``. Recording that split is
+# what makes this a ratchet: the day lower.rvl grows the realm/async/host-map/
+# branch surface, the native chain agrees, this test fails on the stale entry, and
+# the document moves up into JAVA_DOCS instead of quietly staying out.
+JAVA_LOWER_GAP_DOCS = [
+    # realm placement metadata (isolate / intercept / routes)
+    "comp_realm_isolate.rvl", "comp_realm_intercept.rvl", "legacy_realms.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl", "../erase_realms.rvl",
+    "../realm_conformance/provider_a.rvl", "../../../examples/tenants.rvl",
+    # async coloring
+    "comp_await.rvl", "../emit_ts_corpus/services_async.rvl",
+    # host roots acquired in a component (Map/Pool/Job)
+    "comp_host_map.rvl", "comp_host_map_generic.rvl",
+    # component metadata / branch shapes / map inference
+    "metadata_null.rvl", "component_format.rvl", "component_branches.rvl",
+    "branch_shapes.rvl", "map_inference.rvl",
+    # whole-program documents that combine several of the above
+    "../../../backends/go/scenarios/tagger.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
+]
+
+
+@pytest.mark.parametrize("name", JAVA_LOWER_GAP_DOCS)
+def test_the_residual_java_gap_is_located_in_lower_not_in_the_emitter(
+        compile_rvl, compile_to, reference_emit, name):
+    """The measurement that prices what is left of roadmap item 146.
+
+    For each document the fully-native chain does not reproduce, assert BOTH
+    halves: the native chain diverges, AND the native emitter driven by the
+    REFERENCE IR is byte-exact. Together those say the defect is in the native IR
+    producer. A one-sided claim would not: an emitter that diverges everywhere
+    also "does not reproduce the document"."""
+    path = _fixture_path("emit_java_corpus", name)
+    reference_ir = compile_files([str(path)])
+    want = reference_emit["java"](reference_ir)
+
+    # (a) the native EMITTER reproduces the reference bytes from the reference IR
+    assert compile_rvl["emit_java_src"](reference_ir) == want, (
+        f"{name} is no longer a lower.rvl gap on the emitter side: "
+        f"selfhost/emit_java.rvl diverged on the REFERENCE IR")
+
+    # (b) the fully-native chain still does not — the IR producer is the gap
+    assert compile_to(path.read_text(encoding="utf-8"), "java") != want, (
+        f"{name} now compiles byte-exact through the fully-native chain: "
+        f"move it from JAVA_LOWER_GAP_DOCS into JAVA_DOCS")
+
+
+# NON-VACUITY for the split above: the two probes it runs are real ones. A
+# document in JAVA_DOCS must pass BOTH — native emitter byte-exact on the
+# reference IR AND the native chain byte-exact — so neither assertion in the gap
+# test is trivially true of every input.
+@pytest.mark.parametrize("name", ["arith.rvl", "service.rvl", "comp_fail.rvl"])
+def test_the_gap_probe_is_not_vacuous(compile_rvl, compile_to, reference_emit, name):
+    path = _fixture_path("emit_java_corpus", name)
+    reference_ir = compile_files([str(path)])
+    want = reference_emit["java"](reference_ir)
+    assert compile_rvl["emit_java_src"](reference_ir) == want
+    assert compile_to(path.read_text(encoding="utf-8"), "java") == want
+
+
+def test_six_way_composition_co_compiles(compile_rvl):
+    """SEAM 2 is closed for ALL SIX TIERS (roadmap item 146, gap 2): lower.rvl plus
+    emit_{py,ts,go,java,rust,wasm}.rvl ``use``d together in compile.rvl compile into
+    ONE artifact whose namespace exposes the driver AND every tier entrypoint.
     (If the composition failed — a duplicate public ``emit_src``, a leaked private
-    ``Ctx``, a colliding test name — the ``compile_rvl`` fixture would have raised.)"""
+    ``Ctx``, a colliding test name, a type name colliding with a stdlib type
+    PARAMETER — the ``compile_rvl`` fixture would have raised.)"""
     assert callable(compile_rvl["compile_to"])
     assert callable(compile_rvl["admit"])
+    for tier in TIER_SUBDIR:
+        assert callable(compile_rvl[f"emit_{tier}_src"]), tier
 
 
 @pytest.mark.parametrize("source", [
@@ -492,10 +665,11 @@ def test_refused_program_never_reaches_an_emitter(compile_to, tier, case):
 
 def test_unknown_tier_is_reported(compile_to):
     """A tier outside the proven set is reported, never silently emitted as if
-    the pipeline covered it."""
-    assert compile_to("fn id(x: Int) -> Int { return x }", "go") == "UNKNOWN_TIER|go"
-    assert compile_to("fn id(x: Int) -> Int { return x }", "java") == "UNKNOWN_TIER|java"
-    assert compile_to("fn id(x: Int) -> Int { return x }", "wasm") == "UNKNOWN_TIER|wasm"
+    the pipeline covered it. go/java/wasm used to be the witnesses here; item 146
+    gap 2 wired them, so the witness is a tier revl has no backend for at all."""
+    for tier in ("dotnet", "swift", "", "PY"):
+        assert compile_to("fn id(x: Int) -> Int { return x }", tier) == \
+            "UNKNOWN_TIER|" + tier
 
 
 # -------------------------------------- the declared `Secret[T]` marking, native
