@@ -1,6 +1,6 @@
 # 439: the A2A Task lifecycle binding, and the first slice
 
-**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1; the four ops bound over HTTP+JSON/REST 2026-09-14)
+**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1; the four ops bound over HTTP+JSON/REST 2026-09-14; the reply's shape gates and the T2 / durable-task-id re-verification 2026-09-14)
 
 ## What this note decides
 
@@ -140,6 +140,26 @@ Precondition, stated so it is not discovered: 130 must admit `Stream[T]` as a
 service operation's return and as a required capability. Until it does, T1 is
 the surface and T2 is sugar over the same four crossings.
 
+**Status of that precondition, re-verified against `main` on 2026-09-14 (item
+130 closed).** One half landed and the other is now a decision against it, so
+T2 is still not writable and the block has moved rather than lifted:
+
+* The **required capability** half IS shipped (#1076): `requires <k>: Stream[T]`
+  is a coeffect the wiring resolves, and it may carry a replay declaration
+  (`requires feed: Stream[T] replay(from: "cursor")`).
+* The **stream-valued service operation** half is NOT, and 130 §6b/§6c now
+  refuse the shapes it would need. `provides <k>: Stream[T]` is refused by
+  name ("a component cannot provide a stream"), and a required stream is read
+  in a `subscribe` head and nowhere else, so `subscribe researcher.research(…)`
+  is refused too. A remote A2A row synthesizes an ordinary provider holding
+  ordinary externs, which is exactly the provider side 130 declined to admit,
+  so there is no source a `Stream[TaskEvent]` on this boundary could come from.
+  The type `Stream[T]` still FORMS in a service signature (130's type-formation
+  rule), which is why the T2 sketch above parses; nothing can consume it.
+
+Re-opening T2 therefore needs a 130 decision about the provider side, not a
+439 slice. Until that decision exists, T1 is the whole surface.
+
 ## Decision 2: no gRPC, and not as a sub-transport
 
 Refused under any label, on both entry points, as today. Reasons: A2A 1.0.0's
@@ -166,7 +186,8 @@ second wire.
 | trust | the card and every reply are claims; no re-admission (337), no badge (D-424c.8); every A2A provider is item 329's untrusted-author case. On JSON-RPC a reply is not read until it correlates: every crossing carries one identity as the envelope `id` and the `revl.correlation` metadata member, and a reply that is not a JSON object, does not claim JSON-RPC 2.0, or does not carry that identity back is a fault (slice B1, `src/revl/a2a_boundary.py`). On HTTP+JSON/REST there is no envelope to echo it, so the identity rides one way and the shape gate is what the wire can check. On these four ops a reply that describes ANOTHER task is refused too: `_poll`/`_reply`/`_cancel` name a task they already hold |
 | failure text | the peer-authored text the boundary renders into our own fault (a JSON-RPC `error.code`, a task `state`, a reply `kind`) is funnelled through item 421 F5's call-argument scrub before the consumer sees it (slice B1); `docs/design/439-a2a-transport-binding.md` question (2) is the reasoning |
 | version | "A2A 1.0.0 over JSON-RPC 2.0" or "over HTTP+JSON", exact, never bare "A2A". The four ops speak whichever of the two the row or the card declares, never the other one under the same claim |
-| peer text as structure | the task id `_poll`/`_cancel` address is the peer's own, and on HTTP+JSON/REST it lands in the URL path, so it is shape-checked and percent-encoded whole (`a2a_boundary.py_rest_task_url`); on JSON-RPC it is a JSON member and needs no such rule |
+| peer text as structure | the task id `_poll`/`_cancel` address is the peer's own, and on HTTP+JSON/REST it lands in the URL path, so it is shape-checked and percent-encoded whole (`a2a_boundary.py_rest_task_url`); on JSON-RPC it is a JSON member and needs no such rule. The `contextId` a `_start` reply carries is the second peer-authored identifier the binding KEEPS, and `stdlib/a2a.rvl` declares it `Opt[Str]`, so it is shape-checked at the same boundary (`py_context_id_gate`): present and not a string is a fault, never a coercion, because dropping it to `None` discards a grouping identity the peer asserted and `str()` fabricates one |
+| peer shape as control flow | a reply's CONTAINERS are peer-authored too: A2A 1.0.0 says a Task's `status` is an object, its `artifacts` a list of objects and a `Message`'s `parts` a list of objects, and a peer is a claim about none of it. Read member by member, a `status` that is a string raises `AttributeError` out of the generated body, and an exception no settlement classifies is NOT the settlement the row declared: withdrawal keys on the `_revl_transport_fault` marker, so an unmarked host error leaves wired the provider `on_failure(withdraw)` says to withdraw and is not the `Err` `on_failure(result)` says to return. A peer could therefore choose whether the declared settlement ran, by answering valid JSON of the wrong shape. Each container is checked, at every level, and a wrong one is this crossing's own declared fault (`py_task_status_gate`, `py_task_parts_gate`, `py_message_parts_gate`). Checked and not filtered: a filter would drop the peer's own content silently and read as an artifact that carried nothing |
 | operator halt | see Decision 6 |
 
 ## Decision 4: the runtime half of `on_failure(withdraw)`
@@ -220,6 +241,25 @@ are still working somewhere else.
 - **`tasks/resubscribe` after our own crash**: the listener is
   `unreconstructible` residue (130 §4.9) unless the task id is durable; T2 may
   declare `replay(from: task_id)` once 130 lands provider-declared replay.
+  **Re-verified 2026-09-14 against #1066, which landed §4.5 provider-declared
+  replay and §4.9 reconstructible recovery.** Still blocked, on two things, and
+  the second one is new:
+  1. It is scoped inside T2, which is blocked above. T1 has no listener at all:
+     the consumer drives `_poll`, so nothing bracket-shaped is registered and
+     there is no descriptor for §4.9's self-describing disposer to describe.
+     `message/stream` and `tasks/resubscribe` are not on this wire in any form.
+  2. §4.5 requires a durable cursor to be a string LITERAL, because the cursor
+     is written into the WAL as it stands and a computed one would be a
+     durability claim with nothing durable in it. An A2A task id is minted by
+     the PEER at `_start` and is only known at run time, so `replay(from:
+     task_id)` as this note sketched it is refused by that rule even once T2
+     exists. Whatever closes this has to say how a run-time, peer-authored
+     referent becomes a WAL-writable cursor without weakening the literal rule,
+     and that is a 130 question as much as a 439 one.
+
+  The `_start` compensation is not a substitute: a compensation's inverse is a
+  closure over in-process memory (`inverse_descriptor`), so the task id it
+  captured does not survive our crash in a re-issuable form either.
 
 ## Slices and exit tests
 

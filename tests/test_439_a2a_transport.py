@@ -1451,3 +1451,216 @@ def test_all_four_task_crossings_are_on_the_g8_audit_surface(tmp_path):
     assert {e["class"] for e in provider["externs"]} == {"emission"}
     assert {tuple(e["capabilities"]) for e in provider["externs"]} == {
         ("net.agent_example",)}
+
+
+# ====================== the reply's SHAPE, on every peer-authored member (T1b)
+# Item 439 (issue #118). `#1030`'s rule one layer in: a peer-authored VALUE was
+# already shape-checked where it becomes URL path structure, and this block
+# holds the same line for the peer-authored CONTAINERS a reply is read through.
+#
+# A2A 1.0.0 says a Task's `status` is a `TaskStatus` object, its `artifacts` a
+# list of `Artifact` objects, a `Message`'s `parts` a list of `Part` objects and
+# a Task's `contextId` an optional string. A peer is a CLAIM (item 329), so
+# none of that is a fact about the bytes that arrive. Read member by member, a
+# `status` that is a string or an `artifacts` that is a list of strings raises
+# `AttributeError` / `TypeError` straight out of the generated body.
+#
+# THE FAILURE DIRECTION, which is why this is a gate and not tidiness: an
+# exception no settlement classifies is not the settlement the row DECLARED.
+# Provider withdrawal keys on the `_revl_transport_fault` marker (slice T0), so
+# an unmarked host error leaves wired the provider `on_failure(withdraw)` says
+# to withdraw, and is not the `Err` `on_failure(result)` says to return. A peer
+# could therefore choose whether the declared settlement ran at all, by
+# answering valid JSON of the wrong shape. After the gates every one of these
+# is this crossing's own declared fault, so the settlement the row declares is
+# the settlement that runs.
+
+def _task(**members):
+    """A JSON-RPC reply whose `result` is a Task for `t-42` (so the identity
+    gate, which runs first, passes and the SHAPE is what is under test)."""
+    return {"jsonrpc": "2.0", "id": "1",
+            "result": {"kind": "task", "id": "t-42", **members}}
+
+
+MALFORMED = [
+    # `status` is not an object
+    (_task(status="working"), "task status was not an object"),
+    (_task(status=["working"]), "task status was not an object"),
+    (_task(status=7), "task status was not an object"),
+    # `status.state` is not a string
+    (_task(status={"state": {"evil": 1}}), "task status state was not a string"),
+    (_task(status={"state": ["working"]}), "task status state was not a string"),
+    # `artifacts` is not a list of objects
+    (_task(status={"state": "completed"}, artifacts={"a": 1}),
+     "task artifacts were not a list"),
+    (_task(status={"state": "completed"}, artifacts="boom"),
+     "task artifacts were not a list"),
+    (_task(status={"state": "completed"}, artifacts=["boom"]),
+     "task artifact was not an object"),
+    # an artifact's `parts` is not a list of objects
+    (_task(status={"state": "completed"}, artifacts=[{"parts": "boom"}]),
+     "task artifact parts were not a list"),
+    (_task(status={"state": "completed"}, artifacts=[{"parts": ["boom"]}]),
+     "reply part was not an object"),
+]
+
+MALFORMED_MESSAGE = [
+    ({"jsonrpc": "2.0", "id": "1", "result": {"kind": "message", "parts": "boom"}},
+     "reply parts were not a list"),
+    ({"jsonrpc": "2.0", "id": "1", "result": {"kind": "message", "parts": {"a": 1}}},
+     "reply parts were not a list"),
+    ({"jsonrpc": "2.0", "id": "1", "result": {"kind": "message", "parts": ["boom"]}},
+     "reply part was not an object"),
+]
+
+
+@pytest.mark.parametrize("reply,needle", MALFORMED + MALFORMED_MESSAGE)
+def test_a_wrongly_shaped_task_reply_is_the_crossings_own_fault(reply, needle):
+    """`_poll` over JSON-RPC: every peer-authored container is checked, and a
+    wrong one settles as the MARKED `TransportFault` the activation runtime maps
+    to withdrawal, never as a host exception that escapes the settlement."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_task_body("poll", reply, {"id": "t-42", "context": None})
+    fault = excinfo.value
+    assert needle in str(fault)
+    assert getattr(fault, "_revl_transport_fault", False) is True
+    assert fault._revl_row == "researcher"
+    assert fault._revl_crossing == "research_poll"
+
+
+@pytest.mark.parametrize("reply,needle", MALFORMED + MALFORMED_MESSAGE)
+def test_a_wrongly_shaped_reply_faults_on_the_reply_crossing_too(reply, needle):
+    """`_reply` reads a Task the same way `_poll` does, so the same gates guard
+    it: a gate on one of the two event-returning ops and not the other would be
+    a peer read differently depending on which one asked."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_task_body("reply", reply, {"id": "t-42", "context": None}, "answer")
+    assert needle in str(excinfo.value)
+    assert getattr(excinfo.value, "_revl_transport_fault", False) is True
+
+
+@pytest.mark.parametrize("context", [{"evil": 1}, ["c-1"], 7, True])
+def test_a_non_string_context_id_is_refused_at_start(context):
+    """The second peer-authored identifier this binding KEEPS. `stdlib/a2a.rvl`
+    declares `TaskRef.context: Opt[Str]`, so an unchecked one puts arbitrary
+    peer-authored JSON structure behind a type that says string, everywhere a
+    `TaskRef` goes — the task id's own failure direction (#1030), one field
+    over. It is a fault and not a coercion: dropping it to `None` would discard
+    a grouping identity the peer asserted and `str()` would fabricate one."""
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "id": "t-42", "contextId": context,
+        "status": {"state": "working"}}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_task_body("start", reply, "survey the field")
+    fault = excinfo.value
+    assert "contextId was not a string" in str(fault)
+    assert getattr(fault, "_revl_transport_fault", False) is True
+    assert fault._revl_crossing == "research_start"
+
+
+@pytest.mark.parametrize("reply,needle", [
+    ({"kind": "task", "id": "t-42", "status": "working"},
+     "task status was not an object"),
+    ({"kind": "task", "id": "t-42", "status": {"state": "completed"},
+      "artifacts": ["boom"]}, "task artifact was not an object"),
+    ({"kind": "message", "parts": ["boom"]}, "reply part was not an object"),
+])
+def test_the_rest_wire_shape_gates_its_reply_the_same_way(reply, needle):
+    """The REST sub-transport has no envelope to gate, which is exactly why the
+    shape gates matter more there and not less: they are the checks this wire
+    CAN make."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_rest_task_body("poll", reply, {"id": "t-42", "context": None})
+    assert needle in str(excinfo.value)
+    assert getattr(excinfo.value, "_revl_transport_fault", False) is True
+
+
+def test_a_rest_start_refuses_a_non_string_context_id():
+    reply = {"kind": "task", "id": "t-42", "contextId": {"evil": 1},
+             "status": {"state": "working"}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_rest_task_body("start", reply, "survey the field")
+    assert "contextId was not a string" in str(excinfo.value)
+
+
+# -- the same gates on the TERMINAL single-crossing wire ----------------------
+# One boundary, three emitters: the terminal `through a2a` row reads a peer's
+# reply through the same containers, so it gets the same gates. Both
+# settlements are pinned, because they are the two the failure direction is
+# about: `withdraw` must raise the marked fault and `result` must return the
+# declared `Err`, and before the gates neither happened.
+
+@pytest.mark.parametrize("result,needle", [
+    ({"kind": "task", "status": "completed"}, "task status was not an object"),
+    ({"kind": "task", "status": {"state": {"x": 1}}},
+     "task status state was not a string"),
+    ({"kind": "task", "status": {"state": "completed"}, "artifacts": "boom"},
+     "task artifacts were not a list"),
+    ({"kind": "task", "status": {"state": "completed"}, "artifacts": ["boom"]},
+     "task artifact was not an object"),
+    ({"kind": "task", "status": {"state": "completed"},
+      "artifacts": [{"parts": ["boom"]}]}, "reply part was not an object"),
+    ({"kind": "message", "parts": "boom"}, "reply parts were not a list"),
+    ({"kind": "message", "parts": ["boom"]}, "reply part was not an object"),
+])
+def test_the_terminal_wire_faults_on_a_wrongly_shaped_reply(result, needle):
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body({"jsonrpc": "2.0", "id": "1", "result": result})
+    fault = excinfo.value
+    assert needle in str(fault)
+    assert getattr(fault, "_revl_transport_fault", False) is True
+
+
+@pytest.mark.parametrize("result,needle", [
+    ({"kind": "task", "status": "completed"}, "task status was not an object"),
+    ({"kind": "message", "parts": ["boom"]}, "reply part was not an object"),
+])
+def test_on_failure_result_brings_a_wrongly_shaped_reply_back_in_band(result,
+                                                                     needle):
+    """The other half of the failure direction: under `on_failure(result)` the
+    same malformed reply is the declared `Err`, not an exception that unwinds
+    past the settlement the author opted into."""
+    out, _calls = _run_row_body({"jsonrpc": "2.0", "id": "1", "result": result},
+                                in_band=True)
+    assert isinstance(out, _Err)
+    assert needle in out.e
+
+
+# -- the non-vacuity control, which passes with and without the gates ---------
+
+def test_a_well_formed_reply_is_unchanged_by_the_shape_gates():
+    """The control for the whole block. A COMPLIANT peer's Task walks
+    `working` to `Done` with its payload intact, its `contextId` rides back on
+    the handle, a direct `Message` still reads, and the terminal wire still
+    answers — so the gates above refuse malformed replies and nothing else."""
+    start = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "id": "t-42", "contextId": "c-1",
+        "status": {"state": "working"}}}
+    out, _c, _Ev = _run_task_body("start", start, "survey the field")
+    assert out == {"id": "t-42", "context": "c-1"}
+
+    # a Task with NO contextId at all: the optional is genuinely optional
+    bare = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "id": "t-7", "status": {"state": "submitted"}}}
+    out, _c, _Ev = _run_task_body("start", bare, "survey")
+    assert out == {"id": "t-7", "context": None}
+
+    working = _task(status={"state": "working"})
+    out, _c, _Ev = _run_task_body("poll", working, {"id": "t-42", "context": None})
+    assert out == _Ev("Status", "working")
+
+    done = _task(status={"state": "completed"},
+                 artifacts=[{"parts": [{"kind": "text", "text": "the "}]},
+                            {"parts": [{"kind": "text", "text": "answer"}]}])
+    out, _c, _Ev = _run_task_body("poll", done, {"id": "t-42", "context": None})
+    assert out == _Ev("Done", "the answer")
+
+    msg = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "hello"}]}}
+    out, _c, _Ev = _run_task_body("poll", msg, {"id": "t-42", "context": None})
+    assert out == _Ev("Message", "hello")
+
+    terminal = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "pong"}]}}
+    out, _calls = _run_row_body(terminal)
+    assert out == "pong"

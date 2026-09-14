@@ -297,6 +297,119 @@ def py_result_gate(fault, indent: int = 4) -> str:
             + fault(indent + 4, '"a2a: response carried no result object"'))
 
 
+#: What the shape gates below call the members they refuse, in the ONE place
+#: all three py entry points read them from. A peer reading an operator's fault
+#: text must see the same name for the same member whichever client generated
+#: the crossing.
+_SHAPE_FAULTS = {
+    "status": "a2a: task status was not an object",
+    "state": "a2a: task status state was not a string",
+    "artifacts": "a2a: task artifacts were not a list",
+    "artifact": "a2a: task artifact was not an object",
+    "artifact_parts": "a2a: task artifact parts were not a list",
+    "message_parts": "a2a: reply parts were not a list",
+    "part": "a2a: reply part was not an object",
+    "context": "a2a: reply contextId was not a string",
+}
+
+
+def _shape_note(pad: str, member: str, says: str) -> str:
+    """The comment every shape gate carries. One text, because every one of
+    them exists for the same reason and an operator should not have to read
+    four arguments for one rule."""
+    return (f"{pad}# item 439: `{member}` is PEER-AUTHORED. A2A 1.0.0 says it is\n"
+            f"{pad}# {says}, but a peer is a CLAIM. Read member by member off\n"
+            f"{pad}# something else it raises `AttributeError` / `TypeError` out\n"
+            f"{pad}# of this body, and an exception no settlement classifies is\n"
+            f"{pad}# NOT the settlement the row declared: withdrawal keys on the\n"
+            f"{pad}# `_revl_transport_fault` marker, so an unmarked host error\n"
+            f"{pad}# leaves the provider wired and returns no in-band `Err`. So\n"
+            f"{pad}# the shape is checked and a wrong one is THIS crossing's own\n"
+            f"{pad}# declared fault.\n")
+
+
+def py_task_status_gate(fault, indent: int = 4) -> str:
+    """Bind `_state` off a `Task`'s `status`, shape-gated.
+
+    `_result["status"]` is peer-authored. Absence is left alone (it is the
+    reply carrying no lifecycle, which each caller already settles its own
+    way); a member that is PRESENT and the wrong shape is this crossing's
+    fault, because the alternative is an unclassified host exception escaping
+    a body whose whole contract is that a failure is the declared settlement.
+    """
+    pad = " " * indent
+    return (_shape_note(pad, "status", "a `TaskStatus` object")
+            + f'{pad}_status = _result.get("status")\n'
+            + f"{pad}if _status is not None and not isinstance(_status, dict):\n"
+            + fault(indent + 4, json.dumps(_SHAPE_FAULTS["status"]))
+            + f'{pad}_state = (_status or {{}}).get("state")\n'
+            + f"{pad}if _state is not None and not isinstance(_state, str):\n"
+            + fault(indent + 4, json.dumps(_SHAPE_FAULTS["state"])))
+
+
+def py_task_parts_gate(fault, indent: int = 4) -> str:
+    """Bind `_parts` off a `Task`'s `artifacts`, shape-gated at every level.
+
+    Three peer-authored containers are walked to reach a `Part`: `artifacts`,
+    each artifact, and its `parts`. Each is checked rather than filtered: a
+    filter would drop the peer's own content silently and read as an artifact
+    that carried nothing, which is the "quietly-empty answer" this wire refuses
+    everywhere else.
+    """
+    pad = " " * indent
+    inner = pad + "    "
+    deep = inner + "    "
+    return (_shape_note(pad, "artifacts", "a list of `Artifact` objects")
+            + f'{pad}_artifacts = _result.get("artifacts") or []\n'
+            + f"{pad}if not isinstance(_artifacts, list):\n"
+            + fault(indent + 4, json.dumps(_SHAPE_FAULTS["artifacts"]))
+            + f"{pad}_parts = []\n"
+            + f"{pad}for _a in _artifacts:\n"
+            + f"{inner}if not isinstance(_a, dict):\n"
+            + fault(indent + 8, json.dumps(_SHAPE_FAULTS["artifact"]))
+            + f'{inner}_ap = _a.get("parts") or []\n'
+            + f"{inner}if not isinstance(_ap, list):\n"
+            + fault(indent + 8, json.dumps(_SHAPE_FAULTS["artifact_parts"]))
+            + f"{inner}for _p in _ap:\n"
+            + f"{deep}if not isinstance(_p, dict):\n"
+            + fault(indent + 12, json.dumps(_SHAPE_FAULTS["part"]))
+            + f"{deep}_parts.append(_p)\n")
+
+
+def py_message_parts_gate(fault, indent: int = 4) -> str:
+    """Bind `_parts` off a direct `Message` reply, shape-gated. The `Message`
+    twin of :func:`py_task_parts_gate`, one container shallower."""
+    pad = " " * indent
+    inner = pad + "    "
+    return (_shape_note(pad, "parts", "a list of `Part` objects")
+            + f'{pad}_parts = _result.get("parts") or []\n'
+            + f"{pad}if not isinstance(_parts, list):\n"
+            + fault(indent + 4, json.dumps(_SHAPE_FAULTS["message_parts"]))
+            + f"{pad}for _p in _parts:\n"
+            + f"{inner}if not isinstance(_p, dict):\n"
+            + fault(indent + 8, json.dumps(_SHAPE_FAULTS["part"])))
+
+
+def py_context_id_gate(fault, indent: int = 4) -> str:
+    """Bind `_ctx` off a `_start` reply's `contextId`, shape-gated.
+
+    The second peer-authored identifier this binding keeps. The task id is
+    already shape-checked and percent-encoded whole where it becomes URL path
+    structure (:func:`py_rest_task_url`); the `contextId` rides beside it in
+    the same `TaskRef` and is declared `Opt[Str]` in `stdlib/a2a.rvl`, so an
+    unchecked one puts arbitrary peer-authored JSON structure behind a type
+    that says string, everywhere a `TaskRef` goes. Absent is `None` (the
+    optional is genuinely optional); present and not a string is a fault, not
+    a coercion: dropping it to `None` would discard a grouping identity the
+    peer asserted, and `str()`-ing it would fabricate one.
+    """
+    pad = " " * indent
+    return (_shape_note(pad, "contextId", "an optional string")
+            + f'{pad}_ctx = _result.get("contextId")\n'
+            + f"{pad}if _ctx is not None and not isinstance(_ctx, str):\n"
+            + fault(indent + 4, json.dumps(_SHAPE_FAULTS["context"])))
+
+
 def py_task_identity_gate(fault, indent: int = 4) -> str:
     """The Task-level correlation gate for an op that names a task it already
     holds (`_poll`, `_reply`, `_cancel`).

@@ -17,6 +17,7 @@ module rather than re-spelled per call site.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -122,6 +123,90 @@ def test_the_ts_crossing_correlates_its_reply():
     assert f'"{a2a_boundary.CORRELATION_KEY}": a2aCorr' in body
     assert 'if (rpc.id !== a2aCorr)' in body
     assert 'if (rpc.jsonrpc !== "2.0")' in body
+
+
+# ------------------------------------- the reply's SHAPE, one rule, three wires
+
+def test_every_generated_py_crossing_shape_gates_the_peers_containers():
+    """A2A 1.0.0 says a Task's `status` is an object, its `artifacts` a list of
+    objects and a `Message`'s `parts` a list of objects. A peer is a CLAIM, so
+    every generated body checks that before reading a member off it, and the
+    check is the shared module's rather than re-spelled per call site: a gate on
+    one emitter and not another is a peer read differently per entry point."""
+    bodies = {
+        "row/withdraw": _py_body_a2a("agent.example:8443", "ask", False,
+                                     label="@agent"),
+        "row/result": _py_body_a2a("agent.example:8443", "ask", True,
+                                   label="@agent"),
+        "row/rest": _py_body_a2a("agent.example:8443", "ask", False, rest=True,
+                                 label="@agent"),
+        "import": _py_a2a_body("https://agent.example", "ask",
+                               follow_redirects=False, rest=False,
+                               in_modality="text", out_modality="text"),
+        "import/rest": _py_a2a_body("https://agent.example", "ask",
+                                    follow_redirects=False, rest=True,
+                                    in_modality="text", out_modality="text"),
+        "import/file": _py_a2a_body("https://agent.example", "render",
+                                    follow_redirects=False, rest=False,
+                                    in_modality="file", out_modality="file"),
+        "task/poll": task_body("poll", "https://agent.example", "research",
+                               label="agent"),
+        "task/reply": task_body("reply", "https://agent.example", "research",
+                                label="agent"),
+        "task/poll/rest": task_body("poll", "https://agent.example", "research",
+                                    label="agent", rest=True),
+    }
+    for name, body in bodies.items():
+        assert "if _status is not None and not isinstance(_status, dict):" \
+            in body, name
+        assert "if _state is not None and not isinstance(_state, str):" \
+            in body, name
+        assert "if not isinstance(_artifacts, list):" in body, name
+        assert "if not isinstance(_a, dict):" in body, name
+        assert "if not isinstance(_ap, list):" in body, name
+        assert "if not isinstance(_p, dict):" in body, name
+        # and nothing is read off a peer container that was never checked
+        assert '(_result.get("status") or {}).get("state")' not in body, name
+        assert '(a.get("parts") or [])' not in body, name
+
+
+def test_the_shape_faults_have_one_spelling_across_the_emitters():
+    """The fault texts live in `a2a_boundary` so an operator reading one beside
+    another sees the same name for the same member, whichever client generated
+    the crossing."""
+    for text in a2a_boundary._SHAPE_FAULTS.values():
+        assert text.startswith("a2a: ")
+    gates = (a2a_boundary.py_task_status_gate(_fault)
+             + a2a_boundary.py_task_parts_gate(_fault)
+             + a2a_boundary.py_message_parts_gate(_fault)
+             + a2a_boundary.py_context_id_gate(_fault))
+    for text in a2a_boundary._SHAPE_FAULTS.values():
+        assert json.dumps(text) in gates, text
+
+
+def test_the_context_id_gate_is_emitted_only_where_the_handle_is_minted():
+    """`_start` is the one crossing that KEEPS a `contextId`: the other three
+    are handed a `TaskRef` they already hold and never re-read it off the
+    wire."""
+    marker = 'if _ctx is not None and not isinstance(_ctx, str):'
+    for rest in (False, True):
+        assert marker in task_body("start", "https://x", "r", label="a",
+                                   rest=rest)
+        for kind in ("poll", "reply", "cancel"):
+            assert marker not in task_body(kind, "https://x", "r", label="a",
+                                           rest=rest), kind
+
+
+def test_a_wrongly_shaped_container_is_refused_not_filtered():
+    """Filtering would drop the peer's own content silently and read as an
+    artifact that carried nothing, which is the quietly-empty answer this wire
+    refuses everywhere else. So each level faults."""
+    gate = a2a_boundary.py_task_parts_gate(_fault)
+    assert "raise RuntimeError" in gate
+    assert "isinstance" in gate
+    # the walk appends, it does not comprehend-and-drop
+    assert "_parts.append(_p)" in gate
+    assert "if isinstance(_p, dict)]" not in gate
 
 
 # ------------------------------------------- the funnel, on BOTH tiers

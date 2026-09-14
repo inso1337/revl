@@ -747,16 +747,12 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
     except Exception as _exc:
 {transport_fail}{fault(8, '"a2a: transport failure"', cause="_exc")}{error_branch}{a2a_boundary.py_result_gate(fault)}    _kind = _result.get("kind")
     if _kind == "task":
-        _state = (_result.get("status") or {{}}).get("state")
-        if _state not in {terminal}:
+{a2a_boundary.py_task_status_gate(fault, indent=8)}        if _state not in {terminal}:
             # Item 439's open question: a task still in flight is a LIFECYCLE
             # this slice does not express. Fault; never poll, never resume.
 {fault(12, '_scrub("a2a: task returned non-terminal state %r - this binding crosses once and does not poll" % (_state,))')}        if _state != "completed":
-{fault(12, '_scrub("a2a: task ended %r" % (_state,))')}        _parts = [p for a in (_result.get("artifacts") or [])
-                  for p in (a.get("parts") or [])]
-    elif _kind == "message":
-        _parts = _result.get("parts") or []
-    else:
+{fault(12, '_scrub("a2a: task ended %r" % (_state,))')}{a2a_boundary.py_task_parts_gate(fault, indent=8)}    elif _kind == "message":
+{a2a_boundary.py_message_parts_gate(fault, indent=8)}    else:
 {fault(8, '_scrub("a2a: unexpected result kind %r" % (_kind,))')}{extract}{empty_guard}{ok}    """
 
 
