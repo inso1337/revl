@@ -1025,6 +1025,32 @@ SLO_RESPONSES: dict[str, bool] = {
     "halt": False,
 }
 
+# The DENOMINATOR an entry may name with `of` (item 473, slice 3). A rate is a
+# numerator over a population, and the population is the half the surface used
+# to leave out: `success_rate: 99.5` alone is a number divided by whichever
+# counter a reader happened to reach for. So the denominator is DECLARED, and
+# the registry is closed for the same reason the datum registry is — a
+# denominator nothing counts is a contract with no measurement behind it.
+#
+# The value is whether THIS tree can count a success against that population.
+# `activations` can: the trace pairs a load with its withdraw and the withdraw
+# carries the transition that settled it, which is the same population and the
+# same classification `metrics._failure_metrics` already reports. `crossings`
+# cannot: the runtime records that an emit happened and never records whether
+# it succeeded, so a rate over crossings has a denominator and no numerator,
+# and `measure` answers `unmeasurable` naming exactly that rather than
+# substituting the population it does have.
+SLO_DENOMINATORS: dict[str, bool] = {
+    "activations": True,
+    "crossings": False,
+}
+
+# The datums that may name a denominator. Only a RATE has one: a percentile's
+# population is fixed by the measurement that produces it (the completion
+# bracket), and letting a document name a different one would be a second
+# meaning nothing reads. The same argument as the absent comparator.
+SLO_TAKES_DENOMINATOR = ("success_rate",)
+
 # What a live breach triggers when the datum declares no `on breach` clause.
 #
 # `pause`, not "record a receipt and carry on": a breach that changes nothing is
@@ -1090,6 +1116,15 @@ class CompositionDecl:
     # empty map is the honest reading of "the document chose no response".
     slo_responses: dict[str, tuple[str, str | None]] = field(
         default_factory=dict)
+    # item 473 slice 3: the WINDOW, the SAMPLE FLOOR and the DENOMINATOR of the
+    # datums that declared one, as `<datum> -> {overMs?, minSamples?, of?}`.
+    #
+    # A THIRD map rather than more tuple members, for the reason the second one
+    # exists: a `slo` block that writes none of the three has to parse, resolve
+    # and emit exactly the document it emitted before this slice. An absent
+    # entry is "this datum declared no window", which `slo.measure` reads as the
+    # whole of the generation's population — the pre-slice reading, preserved.
+    slo_windows: dict[str, dict] = field(default_factory=dict)
 
 
 # --- item 426 S2: layers and the fold ---------------------------------------
@@ -3737,6 +3772,7 @@ class Parser:
         site: tuple[str, int] | None = None
         slo: list[tuple[str, int | float, int]] = []
         slo_responses: dict[str, tuple[str, str | None]] = {}
+        slo_windows: dict[str, dict] = {}
         seen: dict[str, int] = {}
         while True:
             self._skip_semis()
@@ -3810,7 +3846,7 @@ class Parser:
                         hint="a composition carries exactly ONE SLO contract: "
                              "the datums are distinct keys, so two blocks could "
                              "only disagree")
-                slo, slo_responses = self._slo_block(name, sline)
+                slo, slo_responses, slo_windows = self._slo_block(name, sline)
                 continue
             if not self.at("ident", "row"):
                 tok = self.peek()
@@ -3835,11 +3871,13 @@ class Parser:
         return CompositionDecl(name, rows, line, uses, stack=stack,
                                site=site, remotes=remotes, hosts=hosts,
                                seams=seams, places=places, slo=slo,
-                               slo_responses=slo_responses)
+                               slo_responses=slo_responses,
+                               slo_windows=slo_windows)
 
     def _slo_block(self, composition: str, line: int) -> tuple[
             list[tuple[str, int | float, int]],
-            dict[str, tuple[str, str | None]]]:
+            dict[str, tuple[str, str | None]],
+            dict[str, dict]]:
         """`slo { <datum>: <value> [on breach <response>] (, ...)* }`, the
         composition's SLO contract (roadmap item 473, issue #825). The leading
         `slo` is already consumed.
@@ -3859,15 +3897,23 @@ class Parser:
         response registry is closed for the same reason the datum registry is:
         an action nothing implements is a promise the runtime cannot keep.
 
-        Returns `(targets, responses)`: the `(datum, value, line)` triples the
-        compile-time gate already read, and a SEPARATE `datum -> (response,
-        fallback)` map for the datums that wrote a clause. Two returns rather
-        than one widened list, so a document that declares no response
+        `over <duration>`, `min <count>` and `of <denominator>` are the slice-3
+        qualifiers: the window a verdict is taken over, the smallest sample that
+        may produce one, and the population a rate is a rate OF. They are
+        optional, order-free and each refused when repeated, and they are what
+        makes a verdict falsifiable — `p95_latency: 250ms` with no window is
+        breached by one slow call in a year and held by none.
+
+        Returns `(targets, responses, windows)`: the `(datum, value, line)`
+        triples the compile-time gate already read, and two SEPARATE maps for
+        the datums that wrote a clause. Three returns rather than one widened
+        list, so a document that declares neither a response nor a qualifier
         produces the same `CompositionDecl.slo` it produced before this slice.
         """
         self.expect("{")
         out: list[tuple[str, int | float, int]] = []
         responses: dict[str, tuple[str, str | None]] = {}
+        windows: dict[str, dict] = {}
         seen: set[str] = set()
         while not self.at("}"):
             dline = self.peek().line
@@ -3891,10 +3937,13 @@ class Parser:
             seen.add(datum)
             self.expect(":")
             value = self._slo_value(datum, dline)
+            window = self._slo_qualifiers(datum, dline)
             response = self._slo_response(datum, dline)
             out.append((datum, value, dline))
             if response is not None:
                 responses[datum] = response
+            if window:
+                windows[datum] = window
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -3905,7 +3954,89 @@ class Parser:
                 hint="a composition that promises nothing should declare no "
                      "`slo` block at all; an empty one reads as a contract and "
                      "holds none (item 473)")
-        return out, responses
+        return out, responses, windows
+
+    def _slo_qualifiers(self, datum: str, line: int) -> dict:
+        """`over <duration>`, `min <count>` and `of <denominator>` after one
+        SLO datum's value (item 473, slice 3). Order-free, each at most once,
+        all optional; `{}` when the entry writes none.
+
+        `over` is the window a verdict is taken over and `min` the smallest
+        sample that may produce one. Both exist because an objective with
+        neither is not falsifiable in either direction, and both belong beside
+        the target in the SOURCE rather than in a runtime flag: a target and the
+        window it is measured over are one promise, and splitting them lets an
+        operator quietly change what the author promised.
+
+        `of` is the population a rate is a rate OF, and it is accepted only on
+        a rate. A percentile's population is fixed by the measurement that
+        produces it, so a denominator on `p95_latency` would be a second meaning
+        nothing reads — the same argument that keeps the comparator out of the
+        surface.
+        """
+        out: dict = {}
+        # `of` is a lexer KEYWORD (the `for ... of` surface) and `over`/`min`
+        # are ordinary idents, so the head test reads the token KIND for each
+        # rather than assuming the three are spelled alike. Matching `of` as an
+        # ident would silently never fire, which is the failure mode that leaves
+        # a declared denominator unread.
+        while ((self.at("ident") and self.peek().value in ("over", "min"))
+               or self.at("kw", "of")):
+            qtok = self.next()
+            name = qtok.value
+            if name in out:
+                raise self.err(
+                    qtok.line,
+                    f"duplicate `{name}` on SLO datum `{datum}`",
+                    hint="each qualifier appears once: a second one either "
+                         "repeats the first or contradicts it, and neither is "
+                         "a contract (item 473)")
+            if name == "over":
+                ms = self._duration_literal(
+                    what=f"the window `{datum}` is measured over")
+                if ms <= 0:
+                    raise self.err(
+                        qtok.line,
+                        f"`{datum} over` must be a positive window",
+                        hint="a window of zero contains no observation, so the "
+                             "verdict it produces is about nothing (item 473)")
+                out["over"] = ms
+            elif name == "min":
+                ntok = self.expect(
+                    "int", what=f"the smallest sample `{datum}` may be judged on")
+                if ntok.value <= 0:
+                    raise self.err(
+                        ntok.line,
+                        f"`{datum} min` must be a positive sample count, found "
+                        f"{ntok.value!r}",
+                        hint="the floor is the number of observations below "
+                             "which the verdict is `insufficient`; a floor of "
+                             "zero admits a verdict over an empty sample, which "
+                             "is the number this qualifier exists to stop")
+                out["min"] = ntok.value
+            else:
+                if datum not in SLO_TAKES_DENOMINATOR:
+                    takes = ", ".join(f"`{n}`" for n in SLO_TAKES_DENOMINATOR)
+                    raise self.err(
+                        qtok.line,
+                        f"`{datum}` takes no `of` denominator",
+                        hint=f"only a rate is a rate OF something ({takes}). "
+                             "A percentile's population is fixed by the "
+                             "measurement that produces it, so naming a second "
+                             "one would be a meaning nothing reads (item 473)")
+                ntok = self.peek()
+                pop = ntok.value if ntok.kind == "ident" else None
+                if pop not in SLO_DENOMINATORS:
+                    known = ", ".join(f"`{n}`" for n in SLO_DENOMINATORS)
+                    raise self.err(
+                        ntok.line,
+                        f"unknown SLO denominator {ntok.value!r} for `{datum}`",
+                        hint=f"the denominator is a CLOSED registry (item 473): "
+                             f"{known}. A population nothing counts is a rate "
+                             "with no measurement behind it")
+                self.next()
+                out["of"] = pop
+        return out
 
     def _slo_response(self, datum: str, line: int) -> tuple[str, str | None] | None:
         """The optional `on breach <response>` clause of one SLO datum (item

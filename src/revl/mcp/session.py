@@ -1858,7 +1858,8 @@ class Session:
         to build a table this has no use for, and the `slo` block is a property
         of the declaration alone.
         """
-        from ..composition import _slo_responses, sole_composition  # noqa: PLC0415
+        from ..composition import (_slo_responses,  # noqa: PLC0415
+                                    _slo_windows, sole_composition)
         from ..parser import SLO_IR_KEYS, parse_file  # noqa: PLC0415
 
         decl = sole_composition(parse_file(document), document)
@@ -1871,6 +1872,12 @@ class Session:
                 {key: {"action": action, "divertTo": target}
                  for key, (action, target) in _slo_responses(decl).items()}}
                if decl.slo_responses else {}),
+            # item 473 slice 3: the window, the sample floor and the
+            # denominator, through the SAME `_slo_windows` helper `to_ir` uses,
+            # so the contract a session measures carries the qualifiers the
+            # compile-time document declared rather than a second reading of
+            # them. Conditional for the reason the other two keys are.
+            **({"slo_window": _slo_windows(decl)} if decl.slo_windows else {}),
         }
         return True
 
