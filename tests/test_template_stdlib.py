@@ -108,10 +108,22 @@ def test_module_file_is_the_documented_surface():
     assert "pub fn scan(tpl: Str) -> Result[List[Hole], TemplateError]" in text
     assert "pub fn render(tpl: Str, values: List[Binding]) -> Result[Str, TemplateError]" in text
     assert "pub fn render_one(tpl: Str, name: Str, value: Str) -> Result[Str, TemplateError]" in text
+    # the F2 source-map half (tests/test_template_source_map_459.py pins its
+    # behaviour; this list is the surface guard).
+    assert "pub type Pos = { line: Int, column: Int }" in text
+    assert ("pub type Segment = { kind: Str, name: Str, context: Str, "
+            "generated: Pos, original: Pos }") in text
+    assert ("pub type Rendered = { template: Str, text: Str, "
+            "segments: List[Segment] }") in text
+    assert "pub fn position_at(tpl: Str, offset: Int) -> Result[Pos, TemplateError]" in text
+    assert ("pub fn render_mapped(tpl: Str, values: List[Binding]) "
+            "-> Result[Rendered, TemplateError]") in text
+    assert ("pub fn source_map(rendered: Rendered, source: Str, "
+            "generated_file: Str) -> Str") in text
     # every public fn is one of the documented doors, so a raw-insertion door
     # cannot be added without this list changing.
     public = [line for line in text.splitlines() if line.startswith("pub fn ")]
-    assert len(public) == 6, public
+    assert len(public) == 9, public
 
 
 # ---------------------------------------------------------------- py tier

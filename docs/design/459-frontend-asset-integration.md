@@ -4,7 +4,7 @@
 **Builds on:** docs/design/526-webui-asset-alignment.md,
 docs/design/530-webui-entry-surface.md,
 docs/design/525-webapp-slice4-frontend.md ·
-**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · REMAINDER NAMED BELOW
+**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · INSERTION-SITE SOURCE MAP LANDED (F2, less the bundler chain) · REMAINDER NAMED BELOW
 
 ## Purpose
 
@@ -182,10 +182,34 @@ author writes `attr="{{html:x}}"`).
   admitted turn cannot use it to probe the compile tree. Guard:
   `tests/test_asset_handle_459.py`, with the dev-host half in
   `tests/test_app_notes_725.py`.
-- **F2 - real source maps.** `Hole.start`/`Hole.end` are the groundwork. Mapping
-  an insertion site back to a line/column in the original asset file, and
-  feeding that into a bundler's source map so the browser devtools point at the
-  original, is not done here.
+- **F2 - real source maps. THE INSERTION-SITE HALF LANDED.**
+  `stdlib/template.rvl` now consumes the `Hole.start`/`Hole.end` groundwork:
+  `render_mapped` returns the rendered text plus a `Segment` per span of output
+  saying which template position it came from, as a 0-based `Pos`, and
+  `source_map` writes that as a Source Map v3 document with the template inlined
+  as `sourcesContent`. `position_at` is the offset-to-line/column half on its
+  own and refuses an out-of-range offset rather than clamping. `render` is
+  `render_mapped` with the map dropped, so the mapped and unmapped doors cannot
+  answer different text for one template.
+
+  Three decisions worth naming. A span that crosses a generated line break is
+  recorded once PER GENERATED LINE, because a source map addresses a line and a
+  column and cannot describe a span that spills past the end of one; every
+  generated line with any character therefore carries a segment at column 0. An
+  inserted VALUE maps in full to the hole that produced it, because a line break
+  inside data has no position in the template. And the JSON strings reuse
+  `escape_js`, whose output is already a valid JSON string body and whose three
+  extra escapes (`<`, `>`, `&`) are what stop an inlined template breaking out
+  of a `<script>` element carrying the map: a second escaper here would be a
+  second thing to get wrong, the same argument F1 makes about a second jail.
+
+  What it does NOT claim: composing this map with the bundler's. A template
+  rendered into a `.ts` that Vite then bundles has two maps and nothing chains
+  them, so devtools follow Vite's back to the generated file and stop. That
+  chain is what is left of F2. The module is pure revl, so F6 does not reach it.
+  Guard: `tests/test_template_source_map_459.py`, whose map checks are decoded
+  by an independent VLQ reader and whose thirteen-mutation neutering proof makes
+  the gate's ability to fail a measured fact rather than a claim.
 - **F3 - template control flow.** `{{if}}`, `{{for}}`, includes, layout
   inheritance, blocks and a per-directory default context. Every hole is
   explicit and flat in stage 1.
@@ -252,7 +276,8 @@ The design decisions worth naming:
 
 Not done by F1: `prod_manifest` (a build output, above), a canonical stdlib name
 for the handle's record shape, and any consumption of the handle beyond the
-WebUI coeffect. F2, F3 and F6 are unchanged.
+WebUI coeffect. F3 and F6 are unchanged; F2's insertion-site half landed
+separately, above.
 
 ## Verification
 
