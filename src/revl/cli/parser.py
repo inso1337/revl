@@ -490,6 +490,63 @@ def build_parser() -> argparse.ArgumentParser:
                        help="the identity to record as the receipt's issuer, "
                             "so a verifier can tell who requested the erasure")
 
+    # item 472: the erasure REQUEST, under a declared `retention` policy, and
+    # the check on a receipt somebody presents. Separate from `erase-report`
+    # because it is a different protocol over a different scope (a policy's
+    # replicas and derivatives, not a realm's boundary crossings) and because
+    # it must work on a composition the checker REFUSES: past a policy's
+    # deadline, `G-RETAIN` is exactly why the erasure is being requested.
+    retention_cmd = sub.add_parser(
+        "retention-receipt",
+        help="issue a signed erasure receipt under a declared `retention` "
+             "policy, naming each in-scope replica and derivative, or "
+             "--verify one somebody presents (roadmap item 472)")
+    retention_cmd.add_argument(
+        "files", nargs="*",
+        help="the sources declaring the `retention` policy (parsed, not "
+             "compiled: past its deadline the composition no longer admits, "
+             "which is when the erasure request is made)")
+    retention_cmd.add_argument(
+        "--policy", default=None, metavar="NAME",
+        help="the `retention <NAME> { ... }` the request is made under")
+    retention_cmd.add_argument(
+        "--requester", default=None, metavar="WHO",
+        help="who is requesting the deletion; must be one of the policy's own "
+             "`deleters` or the request is refused rather than signed")
+    retention_cmd.add_argument(
+        "--replica", action="append", default=[], metavar="TOKEN[@RESIDENCE]",
+        help="one copy of the retained data the system knows about; repeatable")
+    retention_cmd.add_argument(
+        "--derivative", action="append", default=[],
+        metavar="NAME=CLASS[@RESIDENCE]",
+        help="one value made from the retained data (summary, index, "
+             "embedding, backup, export, cache); repeatable. A class the "
+             "policy does not cover is reported `not-covered` and explicitly "
+             "not claimed erased")
+    retention_cmd.add_argument(
+        "--inventory", default=None, metavar="PATH",
+        help='an operator enumeration as JSON: {"replicas": [...], '
+             '"derivatives": [...]}, for the rows a command line cannot carry')
+    retention_cmd.add_argument(
+        "--receipt-key", default=None, metavar="PATH", dest="receipt_key",
+        help="the signing key file. Falls back to REVL_ERASURE_KEY_FILE (a "
+             "path) or REVL_ERASURE_KEY (the secret); never hardcoded, so a "
+             "receipt is never signed with a secret the tree assumed")
+    retention_cmd.add_argument(
+        "--signer", default=None, metavar="NAME",
+        help="the identity recorded INSIDE the signed body as the issuer")
+    retention_cmd.add_argument(
+        "--issued-at", default=None, metavar="INSTANT", dest="issued_at",
+        help="the RFC-3339 instant to stamp the receipt with, so an issue is "
+             "reproducible; defaults to now")
+    retention_cmd.add_argument(
+        "--verify", default=None, metavar="PATH",
+        help="check a receipt somebody presented instead of issuing one. Fail "
+             "closed: a receipt this process cannot check is REFUSED (exit 1), "
+             "never reported valid")
+    retention_cmd.add_argument("--json", action="store_true",
+                               help="machine-readable receipt or verdict")
+
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
     plan_cmd.add_argument("files", nargs="+")

@@ -872,3 +872,165 @@ def uncovered_derivatives(receipt: Mapping) -> list:
         for row in (receipt.get("derivatives") or ())
         if isinstance(row, Mapping) and row.get("covered") is False
     ]
+
+
+# ------------------------------------------------- the operator-facing surface
+#
+# WHY THIS READS THE SOURCE RATHER THAN A COMPILED DOCUMENT. The retention
+# refusal is a property of ADMISSION: past a policy's deadline a composition
+# that persists a value under it no longer compiles (`G-RETAIN`). That is
+# precisely the moment an operator needs to issue an erasure receipt, so a
+# receipt surface that required a successful compile would be unusable in the
+# one case it exists for. `declared_policies` therefore PARSES the declaration
+# closure and validates the policies with the same `policy_from_decl` the
+# checker uses — the same reading of the same text, without the admission
+# verdict that the deadline has already decided.
+
+
+def declared_policies(paths, *, sources=None) -> dict:
+    """Every `retention <name> { ... }` the given roots declare, including the
+    ones they import, keyed by name.
+
+    The import closure is walked with the compiler's own module loader, so a
+    policy declared in a `use`d module is found here exactly as `compile_files`
+    finds it (the item-256 defect this mirrors: a surface that reads only the
+    roots refuses a policy the composition genuinely declares).
+
+    A name declared twice across two modules is refused NAMING BOTH FILES: one
+    policy per name, because `Retained[T, <name>]` would otherwise be ambiguous
+    — the same rule `policies` holds inside one file."""
+    from .compiler import _load_root, _ModuleLoader  # noqa: PLC0415 — cycle
+
+    loader = _ModuleLoader(sources=sources)
+    out: dict = {}
+    where: dict = {}
+    queue = [_load_root(loader, str(path)) for path in paths]
+    seen: set = set()
+    while queue:
+        module = queue.pop(0)
+        if module.path in seen:
+            continue
+        seen.add(module.path)
+        for name, policy in policies(module.program, module.path).items():
+            if name in out and where[name] != module.path:
+                raise RevlError(
+                    module.path, policy.line,
+                    f"duplicate `retention {name}` (also declared in "
+                    f"{where[name]})",
+                    hint="one policy per name; a second declaration would make "
+                         f"`Retained[T, {name}]` ambiguous")
+            out[name] = policy
+            where[name] = module.path
+        for use in module.program.uses:
+            queue.append(loader.load(
+                loader.resolve_use(module.dir, module.path, use)))
+    return out
+
+
+def resolve_key(key_path, *, env=None) -> bytes:
+    """The signing key, by `erasure_receipt`'s rule, DELEGATED rather than
+    restated: an explicit path, then `REVL_ERASURE_KEY_FILE` (a path), then
+    `REVL_ERASURE_KEY` (the secret itself), and never a hardcoded default.
+
+    The two protocols read the same key file and fingerprint it under their own
+    domains (`key_id`), which is the split that matters; reading the FILE twice
+    two ways is how the same `cat`-created key became two different keys."""
+    from . import erasure_receipt  # noqa: PLC0415 — one reading of one rule
+
+    return erasure_receipt.resolve_key(key_path, env=env)
+
+
+def key_from_env(env=None) -> bool:
+    """Whether an operator has exported this protocol's signing key."""
+    from . import erasure_receipt  # noqa: PLC0415
+
+    return erasure_receipt.key_from_env(env)
+
+
+def render_receipt(receipt: Mapping) -> str:
+    """Human rendering. The structured receipt is the product; this is the
+    auditor's readable view.
+
+    It prints the scope first, then every row with its disposition, then the
+    uncovered derivatives AGAIN under their own heading — a derivative the
+    policy never covered is the copy most likely to be assumed gone, so it is
+    said twice rather than once in a list a reader may skim."""
+    if not isinstance(receipt, Mapping) or receipt.get("kind") != RECEIPT_KIND:
+        return f"error: not a {RECEIPT_KIND} document"
+    policy = receipt.get("policy") or {}
+    request = receipt.get("request") or {}
+    scope = receipt.get("scope") or {}
+    out = [
+        f"RETENTION ERASURE RECEIPT: policy `{policy.get('name')}`",
+        f"  {receipt.get('kind')} v{receipt.get('version')}",
+        f"  issued {receipt.get('issuedAt')}"
+        + (f" by {receipt['signer']}" if receipt.get("signer") else ""),
+        f"  key {receipt.get('key_id')}",
+        f"  requested by {request.get('requester')!r} "
+        f"(authorised by {request.get('authorisedBy')})",
+        f"  until {policy.get('until')} · residence {policy.get('residence')}"
+        + (f" · HOLD {policy.get('hold')}" if policy.get("hold") else ""),
+        "",
+        f"  {scope.get('title', '')}",
+        "  PROVES:",
+    ]
+    out += [f"    + {line}" for line in scope.get("proves") or []]
+    out.append("  DOES NOT PROVE:")
+    out += [f"    - {line}" for line in scope.get("doesNotProve") or []]
+    replicas = receipt.get("replicas") or []
+    out.append("")
+    if not replicas:
+        out.append("  [replicas] none enumerated")
+    else:
+        out.append(f"  [replicas] {len(replicas)}")
+        for row in replicas:
+            out.append(f"    {str(row.get('disposition')):<21} "
+                       f"{row.get('token')} "
+                       f"({row.get('kind')}, residence "
+                       f"{row.get('residence')})")
+    derivatives = receipt.get("derivatives") or []
+    out.append("")
+    if not derivatives:
+        out.append("  [derivatives] none enumerated")
+    else:
+        out.append(f"  [derivatives] {len(derivatives)}")
+        for row in derivatives:
+            out.append(f"    {str(row.get('disposition')):<21} "
+                       f"{row.get('name')} ({row.get('derivativeKind')})")
+    uncovered = uncovered_derivatives(receipt)
+    if uncovered:
+        out.append("")
+        out.append("  NOT CLAIMED ERASED (the policy does not cover these):")
+        for row in uncovered:
+            out.append(f"    {row.get('name')} ({row.get('derivativeKind')})")
+    summary = receipt.get("summary") or {}
+    out.append("")
+    out.append(f"  summary: {summary.get('replicas')} replica(s), "
+               f"{summary.get('derivatives')} derivative(s), "
+               f"{summary.get('coveredDerivatives')} covered")
+    out.append(f"  signature: {receipt.get(SIGNATURE_FIELD)}")
+    return "\n".join(out)
+
+
+def render_verify(ok: bool, reason: str, receipt: Mapping) -> str:
+    """The verdict on a PRESENTED receipt, in the shape `attest.render_verify`
+    uses: what was checked, and — when it does not hold — the one reason it
+    does not, never a shrug."""
+    policy = (receipt or {}).get("policy") or {}
+    head = "VALID" if ok else "REFUSED"
+    out = [f"retention erasure receipt: {head}",
+           f"  policy {policy.get('name')!r} "
+           f"(until {policy.get('until')}, residence "
+           f"{policy.get('residence')})",
+           f"  key {(receipt or {}).get('key_id')}"]
+    if ok:
+        summary = (receipt or {}).get("summary") or {}
+        out.append(f"  {summary.get('replicas')} replica(s), "
+                   f"{summary.get('derivatives')} derivative(s), "
+                   f"{summary.get('coveredDerivatives')} covered")
+        for row in uncovered_derivatives(receipt):
+            out.append(f"  not claimed erased: {row.get('name')} "
+                       f"({row.get('derivativeKind')})")
+    else:
+        out.append(f"  {reason}")
+    return "\n".join(out)

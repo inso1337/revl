@@ -12,10 +12,10 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  goal  policy  simulate  diff  changelog  version  contract
-erase-report  plan  apply  undo  canary  query  fmt  quarantine  analyze
-test  mcp  import  export  serve  run  dev  recover  estop  slo  branch
-compare  replay  why  metrics  trace  profile  attest  dash  repair
-bundle  emit  verify  deploy  deploy-admit  truc
+erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
+quarantine  analyze  test  mcp  import  export  serve  run  dev  recover
+estop  slo  branch  compare  replay  why  metrics  trace  profile
+attest  dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -1048,6 +1048,49 @@ untouched ([erase-report.md](erase-report.md)).
 - `--json` - machine-readable, versioned report document.
 - `--no-residue-proof` - skip the runtime teardown proof (static sections
   only; use where the cordis runtime is unavailable).
+
+### `revl retention-receipt`
+
+The erasure REQUEST under a declared `retention` policy, and the check on a
+receipt somebody presents (roadmap item 472). The receipt is a signed
+ENUMERATION of the replicas and derivatives the system knows about, not a proof
+of destruction: what the signature establishes is which copies were named, under
+which policy, by whom, and that the document has not been altered since.
+
+The sources are PARSED, not compiled. Past a policy's deadline a composition
+that persists a value under it is refused (`G-RETAIN`), and that refusal is why
+the erasure is being requested, so this verb has to work on a composition the
+checker will not admit.
+
+- `FILES` - the sources declaring the policy (required when issuing).
+- `--policy NAME` - the `retention <NAME> { ... }` the request is made under.
+- `--requester WHO` - who is requesting the deletion. Must be one of the
+  policy's own `deleters`, or the request is refused rather than signed.
+- `--replica TOKEN[@RESIDENCE]` - one known copy; repeatable. A replica whose
+  residence differs from the policy's is reported `residence-mismatch`.
+- `--derivative NAME=CLASS[@RESIDENCE]` - one value made from the retained data;
+  repeatable. `CLASS` is one of `summary`, `index`, `embedding`, `backup`,
+  `export`, `cache`. A class the policy does not cover is reported
+  `not-covered` and explicitly not claimed erased.
+- `--inventory PATH` - an operator enumeration as JSON,
+  `{"replicas": [...], "derivatives": [...]}`, for the rows a command line
+  cannot carry. An unknown member is refused by name.
+- `--receipt-key PATH` - the signing key file; falls back to
+  `REVL_ERASURE_KEY_FILE` (a path) then `REVL_ERASURE_KEY` (the secret), and is
+  never hardcoded.
+- `--signer NAME` - the issuer identity recorded inside the signed body.
+- `--issued-at INSTANT` - the RFC-3339 instant to stamp, so an issue is
+  reproducible; defaults to now.
+- `--verify PATH` - check a presented receipt instead of issuing one.
+- `--json` - machine-readable receipt or verdict.
+
+Exit codes, and the two directions they fail in. Issuing: a receipt that cannot
+be signed is never printed, so an unresolvable key, an unauthorised requester,
+an unknown derivative class, an undeclared policy name and sources declaring no
+policy at all are each exit `1` with nothing on stdout. Verifying: a receipt
+that IS presented and does not verify is exit `1` naming the one reason -
+including when no key can be resolved, because "could not check it" is never
+"valid". An ABSENT receipt is not a refusal here at all; that is the issue path.
 
 ### `revl dash`
 

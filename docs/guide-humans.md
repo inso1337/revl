@@ -276,6 +276,7 @@ below; the exhaustive per-command flag reference is
 | `revl changelog --from OLD --to NEW` | the release note derived from the interface, structural and authority delta, with the semver headline | [derived-versioning.md](derived-versioning.md) |
 | `revl contract FILES` | federated contracts between sovereign compositions: export a consumer surface, or check a provider against a pinned one | [federation.md](federation.md) |
 | `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (`--json`, `--no-residue-proof`) | [erase-report.md](erase-report.md) |
+| `revl retention-receipt FILES --policy P --requester W` | sign an erasure receipt over a `retention` policy's replicas and derivatives, or `--verify` one | [commands-reference.md](commands-reference.md) |
 | `revl plan FILES` | dry run for admission (`--manifest RUNNING.json`, `--replacing`); `-o change.plan` serializes an executable plan | [plan.md](plan.md) |
 | `revl apply change.plan` | execute a plan: drift-refuse, verify each step, roll back on failure (`--against RUNNING.json`) | [apply.md](apply.md) |
 | `revl undo --history H` | operator undo: replay a generation history and return to an earlier generation through the gate | [generation-history.md](generation-history.md) |
