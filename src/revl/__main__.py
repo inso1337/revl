@@ -960,6 +960,7 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
         # response a live breach takes, marking the one the document did not
         # choose so a reader can tell a decision from a default.
         from .parser import SLO_DEFAULT_RESPONSE  # noqa: PLC0415
+        _slo_windows_ir = table.slo_windows
         print()
         print("SLO")
         for key, (value, line) in table.slo.items():
@@ -970,7 +971,22 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
                 breach += f" -> {target}"
             if key not in table.slo_responses:
                 breach += " (default)"
-            print(f"  {key:<24} {value}   {breach}   "
+            # `_slo_windows` is the one renamer (`over` -> `overMs`), so this
+            # reads the IR spelling rather than the surface one; reading the
+            # surface spelling here would silently print nothing.
+            window = _slo_windows_ir.get(key) or {}
+            # The window is part of the promise, so it prints beside the
+            # target rather than under it. A datum that declared none prints
+            # exactly the line it printed before slice 3.
+            spelled = " ".join(
+                part for part in (
+                    f"over {window['overMs']}ms" if "overMs" in window else "",
+                    f"min {window['minSamples']}" if "minSamples" in window
+                    else "",
+                    f"of {window['of']}" if "of" in window else "")
+                if part)
+            shown = f"{value} {spelled}" if spelled else f"{value}"
+            print(f"  {key:<24} {shown}   {breach}   "
                   f"(declared at line {line})")
     print()
     print("ROWS")
