@@ -117,13 +117,13 @@ ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "tests" / "fixtures" / "selfhost_uncovered_lines.json"
 
 
-# The self-host module's entry function, per tier. Two spellings are in use:
-# `emit_<tier>_src` where the port has been wired into selfhost/compile.rvl
-# (py, rust, and ts since item 146 gap 2 landed in #209), plain `emit_src`
-# where it has not. Tiers move from the second spelling to the first as that
-# wiring lands, so resolve in that order rather than pinning a table that the
-# next wired tier reds on the rename alone. It still fails LOUDLY — never
-# silently measuring nothing — when neither name is present.
+# The self-host module's entry function, per tier. ALL SIX tiers now spell it
+# `emit_<tier>_src`: that rename is what admits a tier into selfhost/compile.rvl's
+# composition, which flattens public decls by bare name, and item 146 gap 2
+# finished it for go/java/wasm after py/rust (item 230) and ts (#209). The legacy
+# `emit_src` fallback is kept so a newly ported tier measures before it is wired.
+# It still fails LOUDLY — never silently measuring nothing — when neither name is
+# present.
 def _entry(module, tier: str):
     for name in (f"emit_{tier}_src", "emit_src"):
         found = getattr(module, name, None)

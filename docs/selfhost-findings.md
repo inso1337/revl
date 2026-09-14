@@ -1698,3 +1698,87 @@ the part that keeps this closed: the verbatim `@rs` splice, a Rust-keyword exter
 name through `_mangle`, a multi-line body, an empty body, `Unit`, generic and
 user-record param/return positions, and two free functions whose `let`s are typed
 only by the extern returns. It reds on the pre-fix emitter and passes after.
+
+---
+
+# Item 146, gap 2: the last three tiers, and where the self-host gap actually is
+
+`selfhost/compile.rvl` dispatched `py`, `rust` and `ts`. `go`, `java` and `wasm`
+were out for one reason, stated in the file's own header: each exported a bare
+`pub fn emit_src`, and the merge that builds the composition flattens public
+declarations by bare name, so admitting a second one was a duplicate-symbol
+error. The header predicted "the rename is the whole cost of admitting a tier".
+
+That held, with two collisions only the wider composition exposed:
+
+1. `selfhost/emit_wasm.rvl` declared `type E = { wat: Str, ty: Str }`. Admitting
+   it alongside `emit_ts.rvl` pulled in `stdlib/render.rvl`, whose
+   `render_seq[E](...)` uses `E` as a type **parameter**, and the frontend refuses
+   a type parameter that shadows a declared type. Renamed to `WExpr`, which is
+   invisible to the oracle: the emitter's own internal record type never reaches
+   its output bytes.
+2. `emit_go.rvl` and `emit_rust.rvl` both declared an in-file
+   `test "bin-op table maps the longest revl ops"`. Same class of collision item
+   230 hit with two emitters; it recurs once per added tier.
+
+Neither is a self-host limitation. Both are name hygiene that a composition
+surfaces and a standalone file cannot.
+
+## The measurement: emitter gap vs. IR gap
+
+The valuable number is not "how many documents does the native chain reproduce".
+It is that number placed **next to** the same corpus driven by the reference IR,
+because only the pair says which half is at fault.
+
+For each tier: the corpus is the enumerated list
+`tests/test_selfhost_emit_<tier>.py::CORPUS` that the byte-agreement oracle holds
+to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
+**reference** IR (isolating the emitter). The right column runs
+`compile_to(source, tier)`, the whole native chain, with no reference in it.
+
+| tier | corpus | emitter vs the reference IR | the fully-native chain |
+|------|-------:|----------------------------:|-----------------------:|
+| py   |     54 |                   54 (100%) |             38 (70.4%) |
+| ts   |     60 |                   60 (100%) |             36 (60.0%) |
+| go   |     21 |                   21 (100%) |            21 (100.0%) |
+| java |     49 |                   49 (100%) |             28 (57.1%) |
+| rust |     34 |                   34 (100%) |             32 (94.1%) |
+| wasm |     19 |                   19 (100%) |            19 (100.0%) |
+| **total** | **237** |              **237 (100%)** |        **174 (73.4%)** |
+
+**All 63 residual documents are `selfhost/lower.rvl` gaps.** Not one is an
+emitter gap. Every emitter reproduces its reference counterpart's bytes on every
+document of its own corpus; the documents that fall out of the native chain fall
+out because the native IR producer does not reproduce the reference IR for them.
+Reproduce with `tools/selfhost_line_coverage.py`'s harness shape, or read the
+pinned lists in `tests/test_selfhost_compile.py`.
+
+This reframes what is left of item 146. The item reads "self-host `lower.rvl` +
+the six emitters". The six emitters are done to the standard the item sets, over
+the corpus the project actually gates on. The maximal story now advances by
+widening `lower.rvl`, which is item 391's arc, not by more emitter porting.
+
+## What remains, measured, by family
+
+The 21 java documents the native chain does not reproduce, each verified as a
+`lower.rvl` gap by the paired probe (`JAVA_LOWER_GAP_DOCS` in
+`tests/test_selfhost_compile.py` asserts both halves per document):
+
+| family | count | documents |
+|--------|------:|-----------|
+| realm placement metadata (`isolate` / `intercept` / `routes`) | 7 | `comp_realm_isolate`, `comp_realm_intercept`, `legacy_realms`, `emit_ts_corpus/realm_intercept`, `erase_realms`, `realm_conformance/provider_a`, `examples/tenants` |
+| async coloring | 2 | `comp_await`, `emit_ts_corpus/services_async` |
+| host roots acquired in a component (`Map` / `Pool` / `Job`) | 2 | `comp_host_map`, `comp_host_map_generic` |
+| component metadata, branch shapes, map inference | 5 | `metadata_null`, `component_format`, `component_branches`, `branch_shapes`, `map_inference` |
+| whole-program documents combining several of the above | 5 | the four `bench/results/baseline-deepseek-v4-pro/*` candidates and `backends/go/scenarios/tagger` |
+
+The first three families are exactly the ones `selfhost/compile.rvl`'s header
+already named as the ts holdouts, which is the corroboration that matters: they
+are not java-specific, they are the shared frontier of the native IR producer.
+`branch_shapes.rvl` is the one whose divergence sits in the IR's `functions`
+section rather than `components`, so it is the cheapest of the five in the fourth
+family to attack first.
+
+The `manifest` IR key differs on every document, agreeing ones included, because
+`lower_to_ir` does not produce it at all. It is inert: no backend emitter reads
+it, which is why 174 documents are byte-exact in spite of it.

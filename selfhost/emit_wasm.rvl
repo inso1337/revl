@@ -212,7 +212,7 @@ fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
 // ---------------------------------------------------------- expr result / scope
 // An emitted expression: its WAT text and its revl surface type (the type picks
 // the width of a later instruction, so it is threaded like the reference's `_E`).
-type E = { wat: Str, ty: Str }
+type WExpr = { wat: Str, ty: Str }
 // The names visible to the body emitter: a slot expression and a surface type
 // per binding (`_Scope`), plus the document-global string pool — each pooled
 // literal's value mapped to its `(i32.const <offset>)` pointer (`_str_ptr`).
@@ -556,7 +556,7 @@ fn infer_val_ty(node: Any, s: Scope) -> Str {
 // `_list_expr`: `[u32 count][pad][slot0]…`. Acquire this list's base scratch at
 // `depth`, lower each element one nesting level deeper (so a nested allocation
 // cannot clobber this base pointer), store the count then one 8-byte slot each.
-fn render_list(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+fn render_list(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let ty = list_type_of(node, s, expected)
   let elem = list_elem(ty)
   let items = value_list(value_field(node, "items"))
@@ -581,7 +581,7 @@ fn render_list(node: Any, s: Scope, expected: Str, depth: Int) -> E {
 // `_record_expr`: one 8-byte slot per field, in DECLARED order (not literal
 // order). Acquire the base scratch first — a field that is itself an allocation
 // must land on a deeper scratch — then store each field's value at `8*position`.
-fn render_record(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+fn render_record(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let ty = record_type_of(node, s, expected)
   let fieldsMap = value_field(value_field(s.rectypes, ty), "fields")
   let order = value_keys(fieldsMap)
@@ -795,7 +795,7 @@ fn fold_const(op: Str, opnd: Str, left: Str, right: Str) -> Str {
   return `(${width}.const ${v})`
 }
 
-fn render_bin(node: Any, s: Scope, depth: Int) -> E {
+fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
   let op = node_op(node)
   if (op == "??") { return { wat: "<<DEFER-coalesce>>", ty: "" } }
   let ln = value_field(node, "left")
@@ -834,7 +834,7 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   return { wat: wat, ty: result_ty }
 }
 
-fn render_un(node: Any, s: Scope, depth: Int) -> E {
+fn render_un(node: Any, s: Scope, depth: Int) -> WExpr {
   let op = node_op(node)
   let operand = render_expr(value_field(node, "operand"), s, "", depth)
   if (op == "!") {
@@ -867,7 +867,7 @@ fn render_un(node: Any, s: Scope, depth: Int) -> E {
 // `_field_expr`: a record field READ. The base pointer plus `8 * position` (the
 // field's DECLARED index) is the slot address; `slot_load` narrows a non-Int
 // field back to its i32 view.
-fn render_field(node: Any, s: Scope, depth: Int) -> E {
+fn render_field(node: Any, s: Scope, depth: Int) -> WExpr {
   let tty = infer_val_ty(value_field(node, "target"), s)
   let fields = value_field(value_field(s.rectypes, tty), "fields")
   let fname = value_str(value_field(node, "name"))
@@ -887,7 +887,7 @@ fn render_field(node: Any, s: Scope, depth: Int) -> E {
 // `_index_expr`: `xs[i]` over a List (`[u32 count][pad][slot…]`) or `s[i]` over a
 // Str. A constant index folds to a compile-time slot offset (`8 + 8*i`); a
 // variable index computes `8 + i*8` at runtime, the index narrowed i64->i32 once.
-fn render_index(node: Any, s: Scope, depth: Int) -> E {
+fn render_index(node: Any, s: Scope, depth: Int) -> WExpr {
   let tty = infer_val_ty(value_field(node, "target"), s)
   let idxNode = value_field(node, "index")
   let index = render_expr(idxNode, s, "Int", depth)
@@ -913,7 +913,7 @@ fn render_index(node: Any, s: Scope, depth: Int) -> E {
 // `_len_expr`: `x.length` (the property form, a `len` node). A `Str` counts code
 // points (decoding UTF-8 via `$str_cp_length`); `Bytes`/`List` count elements
 // from the u32 prefix.
-fn render_len(node: Any, s: Scope, depth: Int) -> E {
+fn render_len(node: Any, s: Scope, depth: Int) -> WExpr {
   let tty = infer_val_ty(value_field(node, "target"), s)
   let target = render_expr(value_field(node, "target"), s, tty, depth)
   if (tty == "Str") { return { wat: `(i64.extend_i32_u (call $str_cp_length ${target.wat}))`, ty: "Int" } }
@@ -926,7 +926,7 @@ fn render_len(node: Any, s: Scope, depth: Int) -> E {
 // `push`/`concat`/`slice`/`charAt`/`charCodeAt`/`startsWith`/`endsWith` probes
 // each lower to a single preamble call. `indexOf`/`split`/`join` (demand-pulled
 // helpers not in the preamble) and the Map methods stay out.
-fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let method = value_str(value_field(node, "method"))
   let tnode = value_field(node, "target")
   let tty = infer_val_ty(tnode, s)
@@ -1029,7 +1029,7 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> E {
 // `_make_tagged`: a two-slot `[u32 tag][pad][slot payload]` cell. Acquire the
 // base scratch first (an allocated payload must land one nesting level deeper),
 // store the tag discriminant, then the payload slot (0 for a nullary case).
-fn make_tagged(ty: Str, case: Str, payload: Any, s: Scope, depth: Int) -> E {
+fn make_tagged(ty: Str, case: Str, payload: Any, s: Scope, depth: Int) -> WExpr {
   let layout = tagged_layout(s.rectypes, ty)
   let tag = tag_of(layout, case)
   let pty = payload_ty_of(layout, case)
@@ -1052,7 +1052,7 @@ fn make_tagged(ty: Str, case: Str, payload: Any, s: Scope, depth: Int) -> E {
 
 // `_adt_expr`: a user-variant / Ok / Err constructor. Its cell type comes from
 // `expected` when that pins a matching case, else the node's own `type`.
-fn render_adt(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+fn render_adt(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let ty = adt_cell_ty(node, s, expected)
   let args = value_list(value_field(node, "args"))
   var payload = value_field(node, "")
@@ -1067,7 +1067,7 @@ fn function_sig(name: Str, s: Scope) -> Any {
   return value_field(s.rectypes, "")
 }
 
-fn render_direct_call(node: Any, s: Scope, depth: Int) -> E {
+fn render_direct_call(node: Any, s: Scope, depth: Int) -> WExpr {
   let callee = value_field(node, "callee")
   let name = value_str(value_field(callee, "name"))
   let sig = function_sig(name, s)
@@ -1087,7 +1087,7 @@ fn render_direct_call(node: Any, s: Scope, depth: Int) -> E {
   return { wat: parts.join(`${newline()}      `), ty: value_str(value_field(sig, "returns")) }
 }
 
-fn render_if(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+fn render_if(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let cond = render_expr(value_field(node, "cond"), s, "Bool", depth)
   let then = render_expr(value_field(node, "then"), s, expected, depth)
   let otherwise = render_expr(value_field(node, "else"), s, expected, depth)
@@ -1100,7 +1100,7 @@ fn render_if(node: Any, s: Scope, expected: Str, depth: Int) -> E {
         (else ${otherwise.wat}))`, ty: then.ty }
 }
 
-fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let k = node_kind(node)
   if (k == "lit") {
     let v = value_field(node, "value")
@@ -1159,7 +1159,7 @@ fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
 // so the lossless widening is a sign-extend, wrapped around the un-widened node
 // (`render_inner` ignores the widen field, so re-dispatching on the same node is
 // exactly the reference's strip-then-recurse).
-fn render_expr(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+fn render_expr(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   if (value_str(value_field(node, "widen")) == "Int") {
     let inner = render_inner(node, s, expected, depth)
     return { wat: `(i64.extend_i32_s ${inner.wat})`, ty: "Int" }
@@ -2192,7 +2192,7 @@ fn prune_preamble(pre: Str, rendered: Str) -> Str {
 // preamble, the record/variant layout comments, then each function block blank-
 // line separated, then `)`; joined with newlines and closed with one trailing
 // newline. No extern/test blocks in-subset, so those reference sections are empty.
-pub fn emit_src(ir: Any) -> Str {
+pub fn emit_wasm_src(ir: Any) -> Str {
   let functions = value_list(value_field(ir, "functions"))
   // Pool the string literals first (`_collect_string_literals`): the walk order
   // is function bodies in document order, then test bodies — the corpus is
@@ -2321,7 +2321,7 @@ test "the built-in Opt/Result tag layouts (slice 4)" {
 }
 
 // --------------------------------------------------------------- component wrap
-// A trivial provider so the emitted module is a valid plugin (the pure `emit_src`
+// A trivial provider so the emitted module is a valid plugin (the pure `emit_wasm_src`
 // is what the cross-check exercises); mirrors the wrapper the other self-host
 // stages carry. `render` avoids the `emit` keyword.
 service EmitStream {
@@ -2330,6 +2330,6 @@ service EmitStream {
 
 component EmitWasm provides emitter: EmitStream {
   provide emitter {
-    fn render(ir) = emit_src(ir)
+    fn render(ir) = emit_wasm_src(ir)
   }
 }
