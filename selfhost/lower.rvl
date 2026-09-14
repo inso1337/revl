@@ -4551,6 +4551,31 @@ type Prov3 = { key: Str, rlm: Str, comp: Str }
 // per-realm provider check rather than reporting one loss twice.
 type MReq = { comp: Str, key: Str, rlm: Str, routed: Bool }
 
+// item 186 / issue #1036: a manifest ROUTE row — the running component `comp`
+// binds `key` across the realms `rlms`, in the declaration order the route was
+// written in (`C>k/r1,r2`, item 162's `isolate <key> in realms(...)`).
+//
+// The requirement row's `*` marker (`C<*k`) says a running consumer's key is
+// ROUTED; this row says WHERE it is routed, which is the half the wire was
+// missing. Without it the gate could see that a routed consumer existed and
+// nothing more: the reference's per-realm provider check runs over EVERY entry,
+// the ambient ones included, so a running consumer whose realm lost its
+// provider was refused there and ADMITTED here. The strategy name is NOT on the
+// wire: no refusal on this surface names it (it appears only in the reference's
+// `why` trace, which the verdict string does not carry), and a row carrying a
+// field nothing reads is a field that can drift.
+type MRoute = { comp: Str, key: Str, rlms: List[Str] }
+
+// The route `comp` declares for `key`, or an empty route (no legs) when the
+// wire carries none — which is what a pre-#1036 wire carries for every routed
+// key, so a manifest rendered by an older projection keeps its old behaviour
+// (no legs, so no edge and no per-realm refusal) instead of misreading one.
+fn find_route(rs: List[MRoute], comp: Str, key: Str, i: Int) -> MRoute {
+  if (i >= rs.length()) { return { comp: comp, key: key, rlms: [] } }
+  if (rs[i].comp == comp && rs[i].key == key) { return rs[i] }
+  return find_route(rs, comp, key, i + 1)
+}
+
 fn find_provider(ps: List[Prov3], key: Str, rlm: Str, i: Int) -> Str {
   if (i >= ps.length()) { return "" }
   if (ps[i].key == key && ps[i].rlm == rlm) { return ps[i].comp }
@@ -4787,6 +4812,39 @@ fn collect_routes(comps: List[CompD], ci: Int, provs: List[Prov3],
   return collect_routes(comps, ci + 1, provs, refs2)
 }
 
+// item 186 / issue #1036: the SAME per-realm provider check over the ALREADY
+// RUNNING composition's routes. The reference runs its route loop over every
+// `entries` element — the ambient ones FIRST, then the incoming text's — so a
+// RUNNING consumer whose routed realm lost its provider is refused there. The
+// gate could not ask the question at all until the wire carried route rows, and
+// admitted: the one live false-admit left open by the replacement wave's part 1.
+//
+// This is item 162's question ("this realm has no provider"), so it reports
+// under item 162's own tag and message. The withdrawal check (`G2`, "this
+// admission withdraws the running provider of ...") deliberately skips a routed
+// key and leaves it here, so one loss is never reported twice and neither
+// refusal carries a name that does not describe it.
+//
+// FAILURE DIRECTION: fail-CLOSED. The refusal is the admission not happening;
+// the running composition keeps running with the routed consumer still bound to
+// the providers it has. The scope is exactly the reference's: a realm named by a
+// route row with no provider in the resulting per-(key, realm) table. A routed
+// realm that still has a provider adds nothing, and a wire with no route rows
+// (an older projection) produces no refusal at all.
+//
+// Anchor: `_link`'s `_line(entry["name"])`. An ambient entry has no declaration
+// in the incoming text, so the reference's `lines.get(name, 1)` default applies
+// — which is what `comp_line` returns for a name the text does not declare.
+fn collect_manifest_routes(rts: List[MRoute], i: Int, provs: List[Prov3],
+                           comps: List[CompD], refs: List[Verd]) -> List[Verd] {
+  if (i >= rts.length()) { return refs }
+  let r = route_realm_scan(rts[i].rlms, 0, rts[i].key, rts[i].comp, provs)
+  let refs2 = r != "" ? refs.push(mk_verd(tagged("ROUTE", r),
+                                          comp_line(comps, rts[i].comp, 0)))
+                      : refs
+  return collect_manifest_routes(rts, i + 1, provs, comps, refs2)
+}
+
 // item 419c: `_link` as a collecting sink — every G2, then every ROUTE, then
 // the G3 refusals — in the reference's order (BOOT is decided ahead of these,
 // by `admit_src`). A cycle is capped at one per composition (the reference caps
@@ -4811,7 +4869,7 @@ fn collect_routes(comps: List[CompD], ci: Int, provs: List[Prov3],
 // union graph — `M`'s provider-to-consumer edges plus `X`'s — is exactly what
 // `admit_src(M ++ X)` walks, cycle trace and anchor included.
 fn link_refusals(pg: Prog, seed: List[Prov3], seedReqs: List[MReq],
-                 seedNames: List[Str]) -> List[Verd] {
+                 seedRoutes: List[MRoute], seedNames: List[Str]) -> List[Verd] {
   // spawn templates are runtime instances, not static composition members — they
   // take no place in the G2/G3 table or loadOrder (decision 5/6).
   let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
@@ -4820,11 +4878,15 @@ fn link_refusals(pg: Prog, seed: List[Prov3], seedReqs: List[MReq],
   // the multi-realm bind verification (item 162) runs between G2 and the edges,
   // exactly where the reference runs it: the dual EXISTENCE check on the
   // consumption side, over the same per-(key, realm) provider table.
+  // the reference walks `entries` = ambient ++ incoming, so the RUNNING
+  // composition's routes are checked first and an equal-line tie between the
+  // two falls the same way here as it does under the reference's stable sort.
+  refs = collect_manifest_routes(seedRoutes, 0, g2.provs, pg.comps, refs)
   refs = collect_routes(live, 0, g2.provs, refs)
   // the manifest's own requirement edges go in FIRST (its components are the
   // already-running, earlier-loaded ones), then the incoming components extend
   // the graph — the edge-insertion order `admit_src(M ++ X)` produces.
-  let seedEdges = manifest_edges(seedReqs, 0, g2.provs, Map.empty())
+  let seedEdges = manifest_edges(seedReqs, seedRoutes, 0, g2.provs, Map.empty())
   let edges = build_edges(live, 0, g2.provs, seedEdges)
   if (edges.msg != "") {
     refs = refs.push(mk_verd(tagged("G3", edges.msg), edges.line))
@@ -4846,17 +4908,27 @@ fn link_refusals(pg: Prog, seed: List[Prov3], seedReqs: List[MReq],
 // already-running manifest is impossible). A ROUTED requirement (`C<*k`) is
 // skipped for the same reason `scan_reqs` skips one: its legs resolve
 // per-realm, and a stray shared-realm provider must not shadow the route's own
-// targets. The wire carries no route legs, so a routed running consumer
-// contributes no edge at all rather than a wrong one.
-fn manifest_edges(reqs: List[MReq], i: Int, provs: List[Prov3],
+// targets. Since issue #1036 the wire DOES carry those legs (`C>k/r1,r2`), so a
+// routed running consumer contributes ONE EDGE PER ROUTED REALM — exactly what
+// `scan_reqs` builds for an in-text routed consumer and what the reference's
+// edge loop builds for an ambient entry. A wire with no route row for the key
+// (an older projection) yields an empty leg list and therefore no edge, as
+// before.
+fn manifest_edges(reqs: List[MReq], rts: List[MRoute], i: Int,
+                  provs: List[Prov3],
                   succ: Map[Str, List[Str]]) -> Map[Str, List[Str]] {
   if (i >= reqs.length()) { return succ }
-  if (reqs[i].routed) { return manifest_edges(reqs, i + 1, provs, succ) }
+  if (reqs[i].routed) {
+    return manifest_edges(reqs, rts, i + 1, provs,
+      route_edges(find_route(rts, reqs[i].comp, reqs[i].key, 0).rlms, 0,
+                  reqs[i].key, reqs[i].comp, provs, succ))
+  }
   let provider = find_provider(provs, reqs[i].key, reqs[i].rlm, 0)
   if (provider == "" || provider == reqs[i].comp) {
-    return manifest_edges(reqs, i + 1, provs, succ)
+    return manifest_edges(reqs, rts, i + 1, provs, succ)
   }
-  return manifest_edges(reqs, i + 1, provs, add_edge(succ, provider, reqs[i].comp))
+  return manifest_edges(reqs, rts, i + 1, provs,
+                        add_edge(succ, provider, reqs[i].comp))
 }
 
 fn live_names(comps: List[CompD], i: Int, acc: List[Str]) -> List[Str] {
@@ -6765,7 +6837,7 @@ fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
   // the G2/ROUTE/G3 link collects the rest, in that order (empty seed: a single
   // source composes only against its own text — no ambient provisions,
   // requirements, or nodes).
-  return append_verds(nl.refs, link_refusals(pg, [], [], []))
+  return append_verds(nl.refs, link_refusals(pg, [], [], [], []))
 }
 
 pub fn admit_src(src: Str) -> Str {
@@ -6886,6 +6958,20 @@ pub fn admit_tag(src: Str) -> Str {
 //     of `admit_ambient(X, wire)` and `compile_files([X], manifest=IR(M),
 //     replacing=R)` agree byte for byte.
 //
+//   * ROUTE ROWS (issue #1036). Wave part 1 left one live divergence in the
+//     FALSE-ADMIT direction and named it rather than reporting it under a tag
+//     that does not describe it: the wire carried a routed marker (`C<*k`) but
+//     no legs, so a ROUTED RUNNING consumer whose realm lost its provider was
+//     refused by the reference (item 162's link-time per-realm check, which
+//     walks the ambient entries too) and ADMITTED here — the consumer stranded,
+//     with nothing said anywhere. The wire now carries `C>k/r1,r2`, and
+//     `collect_manifest_routes` runs the SAME per-realm check over the running
+//     composition's routes, reporting under ITEM 162's OWN tag and message. The
+//     withdrawal check still skips a routed key: it answers "this key became
+//     unmet", this answers "this realm has no provider", and one loss is never
+//     reported twice. The legs are EDGES too (`manifest_edges`), so a cycle
+//     closing through a routed running consumer is seen rather than missed.
+//
 // The surface still behind the WAVE (item 186): `handoff` STATE compatibility
 // (`C=k:T` rows), blocked on the self-host type layer — such a row therefore
 // REFUSES here (fail-closed) rather than being silently mis-admitted — and the
@@ -6895,11 +6981,14 @@ pub fn admit_tag(src: Str) -> Str {
 // The manifest is the linker's already-live composition, serialised as rows
 // joined by ";" — provisions "<component>/<key>/<realm>" (realm "" = shared),
 // requirements "<component><<key>" (with "<key>/<realm>" for a realm-resolved
-// one and "*<key>" for a multi-realm bind), withdrawals "-<component>", the
-// "!halted" header, and the item-346 SERVICE BLOCK ("!services" followed by one
-// ":<service>" row per service the composition declares) — e.g.
-// "Store/db/;KvA/kv/tenant_a;Store<net;!services;:D;-KvA". An empty manifest is
-// the empty table, so `admit_ambient(src, "")` == `admit_src(src)` exactly.
+// one and "*<key>" for a multi-realm bind), routes
+// "<component>><key>/<realm>,<realm>" (the legs of that multi-realm bind),
+// withdrawals "-<component>", the "!halted" header, and the item-346 SERVICE
+// BLOCK ("!services" followed by one ":<service>" row per service the
+// composition declares) — e.g.
+// "Store/db/;KvA/kv/tenant_a;Store<net;Store>net/a,b;!services;:D;-KvA". An
+// empty manifest is the empty table, so `admit_ambient(src, "")` ==
+// `admit_src(src)` exactly.
 
 // The head of `s` up to the first `sep` (one char), and the remainder past it.
 // `rest` "" when `sep` is absent — the whole of `s` is the head.
@@ -6913,7 +7002,10 @@ fn cut(s: Str, sep: Str) -> Cut {
 
 // item 186: the parsed running manifest. `provs` seed G2/ROUTE (slices 1-2);
 // `reqs` seed the G3 union graph (slice 3) and the unmet-consumer check (the
-// replacement wave); `mnames` are the manifest's component names in wire order
+// replacement wave); `routes` carry the REALM LEGS of a routed running consumer
+// (`C>k/r1,r2`, issue #1036), which is what lets the item-162 per-realm provider
+// check see a running composition at all; `mnames` are the component names in
+// wire order
 // (the G3 DFS seed order). `repl` is the explicitly WITHDRAWN set (`-C` rows,
 // the replacement wave) — the wire's carrier for `compile_files`' `replacing=`,
 // so `R` is a property of the admission CALL and never something the incoming
@@ -6926,9 +7018,12 @@ fn cut(s: Str, sep: Str) -> Cut {
 // The item-346 SERVICE BLOCK (`!services` + `:S` rows) is parsed and validated
 // but adds no field here: a service declaration is not a composition edge, so
 // there is nothing for G2/G3, the withdrawal check or the realm table to fold it
-// into. The certifier that DOES use it reads the wire directly.
-type Manifest = { provs: List[Prov3], reqs: List[MReq], mnames: List[Str],
-                  repl: List[Str], halted: Bool, bad: Str }
+// into. The certifier that DOES use it reads the wire directly. A ROUTE row
+// (`C>k/r1,r2`, issue #1036) is the contrast that shows where the line is: its
+// legs ARE composition edges and a per-realm existence obligation, so it gets a
+// field (`routes`) and is folded in full.
+type Manifest = { provs: List[Prov3], reqs: List[MReq], routes: List[MRoute],
+                  mnames: List[Str], repl: List[Str], halted: Bool, bad: Str }
 
 fn add_mname(names: List[Str], name: Str) -> List[Str] {
   if (contains(names, name)) { return names }
@@ -6953,6 +7048,17 @@ fn bare_ident(s: Str, i: Int) -> Bool {
   return bare_ident(s, i + 1)
 }
 
+// The `,`-separated realm labels of a route row's realm field, in wire order —
+// the declaration order of `realms("r1", "r2")`, which is the order the
+// reference's per-realm check walks and therefore which realm a refusal names
+// first. An empty field is ONE empty label (the shared realm), the reading
+// `realms("")` renders to.
+fn split_labels(s: Str, acc: List[Str]) -> List[Str] {
+  let ix = s.indexOf(",")
+  if (ix == 0 - 1) { return acc.push(s) }
+  return split_labels(s.slice(ix + 1, s.length()), acc.push(s.slice(0, ix)))
+}
+
 // Parse a requirement row's key part (everything after the `<`): `k` is the
 // shared realm, `k/r` names a realm, `*k` is a multi-realm bind (item 162).
 fn parse_mreq(comp: Str, spec: Str) -> MReq {
@@ -6970,6 +7076,7 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 //   C<k       requirement (slice 3)  -> an MReq row + a graph node
 //     C<k/r     the same, resolved in realm `r` (the wave)
 //     C<*k      the same, MULTI-REALM bound (the wave)
+//   C>k/r,r   route      (#1036)     -> an MRoute row + a graph node
 //   !halted   header     (slice 3)   -> the halt flag
 //   !services header     (item 346)  -> the service block is EXHAUSTIVE
 //   :S        service     (item 346) -> the running composition declares S
@@ -6998,17 +7105,17 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
   if (man.bad != "") { return man }
   if (row.slice(0, 1) == "!") {
     if (row == "!halted") {
-      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-               repl: man.repl, halted: true, bad: "" }
+      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               mnames: man.mnames, repl: man.repl, halted: true, bad: "" }
     }
     // the completeness claim over the `:S` rows. It carries no data of its own —
     // the claim is read by the admission certifier, which parses the same wire.
     if (row == "!services") {
-      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-               repl: man.repl, halted: man.halted, bad: "" }
+      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
     }
-    return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-             repl: man.repl, halted: man.halted,
+    return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             mnames: man.mnames, repl: man.repl, halted: man.halted,
              bad: tagged("MANIFEST", "unrecognized manifest header row `".concat(row).concat("`")) }
   }
   if (row.slice(0, 1) == ":") {
@@ -7018,13 +7125,13 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     // above for why this fold has nothing to compute from it.
     let sname = row.slice(1, row.length())
     if (!bare_ident(sname, 0)) {
-      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-               repl: man.repl, halted: man.halted,
+      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               mnames: man.mnames, repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest service row `".concat(row)
                  .concat("` does not name a service")) }
     }
-    return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-             repl: man.repl, halted: man.halted, bad: "" }
+    return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
   }
   if (row.slice(0, 1) == "-") {
     // a withdrawal names a component, nothing more: `-C`. A name carrying a
@@ -7032,38 +7139,63 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     // read fails closed rather than withdrawing nothing in silence.
     let name = row.slice(1, row.length())
     if (!bare_ident(name, 0)) {
-      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-               repl: man.repl, halted: man.halted,
+      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               mnames: man.mnames, repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest replacement row `".concat(row)
                  .concat("` does not name a component")) }
     }
-    return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+    return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             mnames: man.mnames,
              repl: contains(man.repl, name) ? man.repl : man.repl.push(name),
              halted: man.halted, bad: "" }
   }
   if (ident_led(row)) {
     if (row.indexOf("=") != 0 - 1) {
-      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-               repl: man.repl, halted: man.halted,
+      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               mnames: man.mnames, repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
                  .concat("` needs the deferred handoff/type-layer wave (item 186)")) }
+    }
+    // the ROUTE row (issue #1036) is read BEFORE the requirement and provision
+    // rows: it carries a `/` of its own (the realm field) and would otherwise
+    // parse as a provision whose component name is `C>k`.
+    if (row.indexOf(">") != 0 - 1) {
+      let a = cut(row, ">")
+      let b = cut(a.rest, "/")
+      // `C>k/r1,r2` — a component, a key, and a non-omitted realm field. A row
+      // missing any of the three is a garbled wire, not a route, and a wire the
+      // gate cannot read fails CLOSED rather than dropping a route's legs in
+      // silence (which is exactly the blindness this row kind removes).
+      if (!bare_ident(a.s, 0) || !bare_ident(b.s, 0)
+          || a.rest.indexOf("/") == 0 - 1) {
+        return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+                 mnames: man.mnames, repl: man.repl, halted: man.halted,
+                 bad: tagged("MANIFEST", "manifest route row `".concat(row)
+                   .concat("` does not name a component, a key and its realms")) }
+      }
+      return { provs: man.provs, reqs: man.reqs,
+               routes: man.routes.push({ comp: a.s, key: b.s,
+                                         rlms: split_labels(b.rest, []) }),
+               mnames: add_mname(man.mnames, a.s), repl: man.repl,
+               halted: man.halted, bad: "" }
     }
     if (row.indexOf("<") != 0 - 1) {
       let a = cut(row, "<")
       return { provs: man.provs, reqs: man.reqs.push(parse_mreq(a.s, a.rest)),
-               mnames: add_mname(man.mnames, a.s), repl: man.repl,
-               halted: man.halted, bad: "" }
+               routes: man.routes, mnames: add_mname(man.mnames, a.s),
+               repl: man.repl, halted: man.halted, bad: "" }
     }
     if (row.indexOf("/") != 0 - 1) {
       let a = cut(row, "/")
       let b = cut(a.rest, "/")
       return { provs: man.provs.push({ key: b.s, rlm: b.rest, comp: a.s }),
-               reqs: man.reqs, mnames: add_mname(man.mnames, a.s),
+               reqs: man.reqs, routes: man.routes,
+               mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted, bad: "" }
     }
   }
-  return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
-           repl: man.repl, halted: man.halted,
+  return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+           mnames: man.mnames, repl: man.repl, halted: man.halted,
            bad: tagged("MANIFEST", "unrecognized manifest row `".concat(row).concat("`")) }
 }
 
@@ -7077,8 +7209,8 @@ fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: Str) -> Manifest {
-  return parse_manifest_rows(m, { provs: [], reqs: [], mnames: [], repl: [],
-                                  halted: false, bad: "" })
+  return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], mnames: [],
+                                  repl: [], halted: false, bad: "" })
 }
 
 // ------------------------------------- item 186, the replacement wave (part 1)
@@ -7138,6 +7270,15 @@ fn keep_reqs(rs: List[MReq], drop: List[Str], i: Int,
   if (i >= rs.length()) { return acc }
   return keep_reqs(rs, drop, i + 1,
                    contains(drop, rs[i].comp) ? acc : acc.push(rs[i]))
+}
+
+// A withdrawn component's routes go with it: a consumer this admission drops
+// cannot be stranded by what it no longer requires.
+fn keep_routes(rs: List[MRoute], drop: List[Str], i: Int,
+               acc: List[MRoute]) -> List[MRoute] {
+  if (i >= rs.length()) { return acc }
+  return keep_routes(rs, drop, i + 1,
+                     contains(drop, rs[i].comp) ? acc : acc.push(rs[i]))
 }
 
 fn keep_names(ns: List[Str], drop: List[Str], i: Int,
@@ -7263,6 +7404,7 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   let drop = dropped_names(pg.comps, 0, man.repl)
   let keptProvs = split_provs(man.provs, drop, false, 0, [])
   let keptReqs = keep_reqs(man.reqs, drop, 0, [])
+  let keptRoutes = keep_routes(man.routes, drop, 0, [])
   let keptNames = keep_names(man.mnames, drop, 0, [])
   let lost = lost_provs(split_provs(man.provs, drop, true, 0, []),
                         live_provs(live, 0, keptProvs), 0, [])
@@ -7281,10 +7423,14 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   //   * slice 3 — the manifest's requirement rows (`C<k`) seed the G3 union
   //     graph, so a dependency cycle that closes THROUGH the running manifest
   //     is seen, byte-identical to `admit_src(manifest_text ++ src)`.
+  //   * issue #1036 — the manifest's route rows (`C>k/r1,r2`) carry the realms
+  //     a RUNNING consumer binds a key across, so the item-162 per-realm
+  //     provider check runs over the running composition as the reference runs
+  //     it over its ambient entries, and its legs seed the union graph.
   // Ordered against the internal refusals by `(line, seq)`, so an ambient link
   // refusal competes with an internal one exactly as in the composed text.
   return pick_min(append_verds(wrefs,
-    link_refusals(pg, keptProvs, keptReqs, keptNames)))
+    link_refusals(pg, keptProvs, keptReqs, keptRoutes, keptNames)))
 }
 
 // ============================================================ interchange IR
@@ -11277,6 +11423,80 @@ test "a routed running requirement is not reported by the withdrawal check" {
   let svc = "service C { fn g(k: Str) -> Str } "
   let x = "component Fresh provides other: C { provide other { fn g(k) { return k } } }"
   assert admit_ambient(svc.concat(x), "Old/db/r1;Store/cache/;Store<*db;-Old") == ""
+}
+
+// ---- route rows: the running composition's own multi-realm binds (#1036) ----
+//
+// `Router` runs, routing `kv` across `r1` and `r2`; the admission withdraws the
+// provider of `r2`. The reference refuses under item 162's link-time per-realm
+// check, which walks the ambient entries too. Before the route row the gate saw
+// `Router<*kv` and nothing else, so it could not ask which realms were routed —
+// and ADMITTED. FAIL-CLOSED: the refusal is the admission not happening.
+test "a routed running consumer that loses a realm's provider is refused" {
+  let svc = "service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } "
+  let x = "component StoreB provides other: Api { provide other { fn go(k) { return k } } }"
+  assert admit_ambient(svc.concat(x),
+      "StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")
+    == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"
+}
+
+// The route row is LOAD-BEARING: the SAME admission against the pre-#1036 wire
+// (routed marker, no legs) is invisible to the gate and admits. This pins which
+// row closed the hole, the way the requirement-row test pins slice 3's.
+test "without the route row the routed realm loss is invisible" {
+  let svc = "service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } "
+  let x = "component StoreB provides other: Api { provide other { fn go(k) { return k } } }"
+  assert admit_ambient(svc.concat(x),
+      "StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv") == ""
+}
+
+// NON-VACUITY. The realm the admission withdraws is RE-PROVIDED by the incoming
+// text, in the same realm: a legitimate routed hot-swap, admitted on both wires.
+test "a routed realm re-provided by the incoming text still admits" {
+  let svc = "service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } "
+  let x = """component StoreB provides kv: Kv { isolate kv in realm("r2") provide kv { fn get(k) { return k } } }"""
+  assert admit_ambient(svc.concat(x),
+      "StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2") == ""
+}
+
+// NON-VACUITY. Nothing the route depends on is withdrawn — the admission adds an
+// unrelated component — so the routed running consumer is untouched.
+test "a routed running consumer whose realms all stay provided is untouched" {
+  let svc = "service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } "
+  let x = "component Fresh provides other: Api { provide other { fn go(k) { return k } } }"
+  assert admit_ambient(svc.concat(x),
+      "StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2") == ""
+}
+
+// The two row kinds that landed together, on ONE wire: the item-346 service
+// block (inert for this fold) and the route rows (not inert). Neither disturbs
+// the other — the block moves no verdict, and a `:S` row after the route rows
+// does not swallow them.
+test "a wire carrying both a service block and route rows refuses the lost realm" {
+  let svc = "service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } "
+  let x = "component StoreB provides other: Api { provide other { fn go(k) { return k } } }"
+  assert admit_ambient(svc.concat(x),
+      "StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2;!services;:Kv;:Api")
+    == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"
+}
+
+// A route row the gate cannot read is a garbled wire and refuses, exactly as a
+// garbled withdrawal row does — never a route whose legs are silently dropped.
+test "a malformed route row refuses rather than dropping the legs" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "Router/api/;Router>kv")
+    == "MANIFEST|manifest route row `Router>kv` does not name a component, a key and its realms"
+}
+
+// The routed consumer's legs are edges too (the reference builds one per routed
+// realm for an ambient entry). A cycle that closes through a ROUTED running
+// consumer is now seen rather than missed for want of an edge.
+test "a cycle closing through a routed running consumer is refused (ambient G3)" {
+  let svc = "service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } "
+  let x = """component StoreB requires api: Api provides kv: Kv { isolate kv in realm("r2") provide kv { fn get(k) { return api.go(k) } } }"""
+  assert admit_ambient(svc.concat(x),
+      "StoreA/kv/r1;Router/api/;Router<*kv;Router>kv/r1,r2")
+    == "G3|dependency cycle: Router -> StoreB -> Router (G3)"
 }
 
 test "a handoff row refuses until the deferred type layer lands" {
