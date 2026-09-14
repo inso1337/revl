@@ -6821,7 +6821,17 @@ fn closure_assign_scan(ts: List[Token]) -> Verd {
 
 type NoLink = { done: Bool, refs: List[Verd] }
 
-fn collect_nonlink(ts: List[Token], pg: Prog) -> NoLink {
+// `wrefs` (item 186 / issue #86, wave part 3) are the AMBIENT refusals this
+// admission produces outside the link — today the unmet-consumer withdrawal —
+// spliced into the sink at the PHASE POSITION the reference gives them:
+// `check_and_lower` runs `_admit_provision_withdrawal` after the component loop
+// and BEFORE `_check_spawn_emission_bounds` / `_check_spawn_attenuation` and
+// before `_link` (which decides the BOOT count). Appending them after the whole
+// non-link sink, as the gate did, put them behind the spawn and boot refusals
+// instead, so a LINE TIE between a withdrawal and one of those two fell the
+// opposite way on the two sides. `admit_src` passes `[]`, so the single-source
+// path is byte-identical.
+fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd]) -> NoLink {
   // the ADT constructors the program declares join the callable universe a bare
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
@@ -6892,6 +6902,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog) -> NoLink {
     }
     ci += 1
   }
+  // the AMBIENT post-pass sits HERE, between the component loop and the spawn
+  // bounds: `_admit_provision_withdrawal` is collected at exactly this point in
+  // `check_and_lower`. Empty for `admit_src` and for any admission that
+  // withdraws nothing, so both are byte-identical.
+  refs = append_verds(refs, wrefs)
   // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
   // once every component is lowered, before the G2/G3 link — the reference's
   // order (`_check_spawn_emission_bounds`, `_check_spawn_attenuation`, `_link`).
@@ -6912,7 +6927,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog) -> NoLink {
 }
 
 fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
-  let nl = collect_nonlink(ts, pg)
+  let nl = collect_nonlink(ts, pg, [])
   if (nl.done) { return nl.refs }
   // the G2/ROUTE/G3 link collects the rest, in that order (empty seed: a single
   // source composes only against its own text — no ambient provisions,
@@ -7463,14 +7478,6 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
-  // the INTERNAL refusals (per-component G1/G4/A1/PRELUDE, module fn, spawn,
-  // boot) are properties of the incoming text ALONE — an ambient composition
-  // never launders an internally refused component — so collect them exactly as
-  // the single-source path does. A FAIL-FAST internal refusal rides alone, no
-  // link (the seam a later handoff / state-migration wave relaxes, where a
-  // replacement legitimately overrides what the manifest already holds).
-  let nl = collect_nonlink(ts, pg)
-  if (nl.done) { return pick_min(nl.refs) }
   // REPLACEMENT (the item-186 wave, part 1). `drop` is what this admission
   // withdraws from the running composition: the explicit `-C` rows plus every
   // running component the incoming text redeclares by name, exactly
@@ -7488,9 +7495,24 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   let keptNames = keep_names(man.mnames, drop, 0, [])
   let lost = lost_provs(split_provs(man.provs, drop, true, 0, []),
                         live_provs(live, 0, keptProvs), 0, [])
-  // the reference runs `_admit_provision_withdrawal` BEFORE `_link`, so the
-  // withdrawal verdicts go into the sink first and win a tie on the line.
-  let wrefs = append_verds(nl.refs, withdrawal_refusals(keptReqs, lost, pg.comps, 0))
+  // the INTERNAL refusals (per-component G1/G4/A1/PRELUDE, module fn, spawn,
+  // boot) are properties of the incoming text ALONE — an ambient composition
+  // never launders an internally refused component — so collect them exactly as
+  // the single-source path does. A FAIL-FAST internal refusal rides alone, no
+  // link (the seam a later handoff / state-migration wave relaxes, where a
+  // replacement legitimately overrides what the manifest already holds).
+  //
+  // item 186, wave part 3 (419c ordering): the WITHDRAWAL verdicts are handed to
+  // the sink so they land at the reference's own phase position — after the
+  // component loop, ahead of the spawn bounds and the BOOT count. They used to
+  // be appended after the whole non-link sink, which is a different SEQ, and
+  // seq is the tie-break when two refusals share a line: a withdrawal tying with
+  // a spawn-bound or BOOT refusal then fell to the gate one way and to the
+  // reference the other.
+  let nl = collect_nonlink(ts, pg,
+    withdrawal_refusals(keptReqs, lost, pg.comps, 0))
+  if (nl.done) { return pick_min(nl.refs) }
+  let wrefs = nl.refs
   // the LINK is the half the running manifest reshapes. Seed the per-(key,
   // realm) provider table with the manifest's live provisions and run the SAME
   // G2/ROUTE/G3 scan the single-source path runs, so:
@@ -12441,6 +12463,81 @@ test "a malformed service row refuses naming the row" {
   assert admit_ambient(clean, ":9bad") == "MANIFEST|manifest service row `:9bad` does not name a service"
   assert admit_ambient(clean, ":A/b") == "MANIFEST|manifest service row `:A/b` does not name a service"
   assert admit_ambient(clean, "!service") == "MANIFEST|unrecognized manifest header row `!service`"
+}
+
+// ---- the replacement wave, part 3 (item 419c): REFUSAL ORDERING ----
+//
+// When an ambient admission carries SEVERAL true refusals, the one reported is
+// the minimum by `(line, seq)` — the reference's `diagnostics[0]`. `seq` is the
+// append order, and it is what decides a LINE TIE (two components written on one
+// source line). `check_and_lower` collects `_admit_provision_withdrawal` right
+// after the component loop and AHEAD of `_check_spawn_emission_bounds`,
+// `_check_spawn_attenuation` and `_link` (whose head decides the BOOT count), so
+// the withdrawal verdicts are spliced into `collect_nonlink` at that position
+// rather than appended after the whole non-link sink. On distinct lines this is
+// unobservable; on a tie it is the winner.
+//
+// FAILURE DIRECTION: unchanged, fail-CLOSED. Every program below is refused by
+// both sides before and after; what changes is WHICH true refusal is named, and
+// the rule kept is the one this wave has held throughout — a refusal must carry
+// the tag that describes the finding, so an admission's effect on the RUNNING
+// composition is not reported under a spawn bound's or a boot count's name.
+
+// A withdrawal and a G4 spawn-emission bound on ONE source line. The withdrawal
+// is collected first, so it is the verdict.
+test "a withdrawal tying with a spawn bound names the withdrawal" {
+  let src = """service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }
+service Kv2 { emission[kv2] fn write(row: Str) -> Int }
+service Task { emission[kv2] fn go() -> Int }
+service Sup { fn run() -> Int }
+component Old provides other: C { provide other { fn g(k) { return k } } } component Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write("x")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }"""
+  assert admit_ambient(src, "Old/db/;Store/cache/;Store<db")
+    == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+// The same shape against the BOOT count, which the reference decides at the head
+// of `_link` — later than the withdrawal, where the gate decided it earlier.
+test "a withdrawal tying with the boot count names the withdrawal" {
+  let src = """service C { fn g(k: Str) -> Str }
+service Env { fn a() -> Str }
+service Env2 { fn b() -> Str }
+component Old provides other: C { provide other { fn g(k) { return k } } } boot component B1 provides e1: Env { config { x: Str } provide e1 { fn a() = config.x } } boot component B2 provides e2: Env2 { config { y: Str } provide e2 { fn b() = config.y } }"""
+  assert admit_ambient(src, "Old/db/;Store/cache/;Store<db")
+    == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+// NON-VACUITY: the withdrawal did not move to the HEAD of the sink, only to its
+// own place in it. LINE still decides — a spawn bound declared on an EARLIER
+// line than the withdrawal is still the verdict.
+test "an earlier-line spawn bound still outranks a later-line withdrawal" {
+  let src = """service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }
+service Kv2 { emission[kv2] fn write(row: Str) -> Int }
+service Task { emission[kv2] fn go() -> Int }
+service Sup { fn run() -> Int }
+component Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write("x")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }
+component Old provides other: C { provide other { fn g(k) { return k } } }"""
+  assert admit_ambient(src, "Old/db/;Store/cache/;Store<db")
+    == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv2`"
+}
+
+// NON-VACUITY, the other direction: the COMPONENT LOOP runs ahead of the
+// withdrawal on both sides, so a component's own G4 wins a tie with it.
+test "a component-loop refusal still outranks a tying withdrawal" {
+  let src = """service C { fn g(k: Str) -> Str }
+service Bus { emission fn publish(topic: Str) }
+component Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }"""
+  assert admit_ambient(src, "Old/db/;Store/cache/;Store<db")
+    == "G4|call to emission `bus.publish` must be marked `emit` (G4)"
+}
+
+// The splice is inert for the single-source path: `admit_src` hands the sink an
+// EMPTY ambient list, so the same program with no manifest is unchanged.
+test "the ambient splice leaves the single-source sink unchanged" {
+  let src = """service C { fn g(k: Str) -> Str }
+service Bus { emission fn publish(topic: Str) }
+component Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }"""
+  assert admit_ambient(src, "") == admit_src(src)
+  assert admit_src(src) == "G4|call to emission `bus.publish` must be marked `emit` (G4)"
 }
 
 // A requirement row whose provider is in the incoming text (not a cycle) simply
