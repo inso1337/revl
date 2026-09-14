@@ -2,12 +2,12 @@
 
 Filed against GitHub issue [#822](https://github.com/inso1337/revl/issues/822)
 ("Intent-vs-action refinement verification"), roadmap item 470. Design plus
-three slices: the semantic kernel `src/revl/intent.py` (the `Intent` record, the
+five slices: the semantic kernel `src/revl/intent.py` (the `Intent` record, the
 `Action` record, and `refine`, with unit coverage in
 `tests/test_470_intent_refinement.py`), and the source surface that finally
 holds a declaration and compares a crossing against it (the `within` and
 `acting` clauses, with coverage in `tests/test_470_intent_surface.py`). Section
-3 names the four landed lines and section 4 names the stages that stay open.
+3 names the five landed lines and section 4 names the stages that stay open.
 
 Companion docs: [441-goal-contracts.md](441-goal-contracts.md),
 [442-typed-delegation.md](442-typed-delegation.md),
@@ -319,24 +319,67 @@ builds anything when no intent is declared, so no existing program reaches it
 and the byte-identical-IR property slice 3 pinned is unchanged.
 
 One consequence is worth stating rather than discovering: a VALUE-RETURNING
-crossing has no stating spelling today. `let r = emit svc.op(...)` is how an
-emission that returns data is written, and it can carry no clause, so under a
-declaration it is refused with no rewrite available other than dropping the
-returned value. The slot for it is a trailing `acting` on the binding statement
-rather than on the expression, and it is named in section 4 as open work.
+crossing had no stating spelling. `let r = emit svc.op(...)` is how an emission
+that returns data is written, and it could carry no clause, so under a
+declaration it was refused with no rewrite available other than dropping the
+returned value. Slice 5 is the slot for it.
+
+### 3.5 Slice 5: the stating slot for a value-returning crossing
+
+**Landed: `acting { … }` on a binding statement.** An `emit` STEP discards the
+value it produces. An emission that RETURNS data (an LLM completion, an HTTP
+GET, a row count) is therefore written in value position, where the marker sits
+inside an expression and no trailing clause can reach it, and slice 4 refused
+exactly that spelling with no rewrite other than throwing the value away. The
+honest surface is the one the previous section named: the clause trails the
+BINDING STATEMENT, so `let r = emit svc.op(...) acting { verb: ingest }` states
+what that one crossing does and keeps `r`.
+
+It is a `let` grammar change rather than an expression one, and only in the one
+place a declaration can be in scope: `LetStmt.acting` is read by the provide-
+method statement parser and by nothing else, so the module `fn` grammar and the
+activation body never see it. `acting` stays contextual in the new slot too, and
+the slot is the reason the marker now needs a lookahead: `acting` is an ordinary
+name, and a body that binds one and then assigns it must not read as a malformed
+clause on the statement above, so the marker is the name followed by `{`. That
+lookahead is applied to the `emit` step slot as well, which only widens what
+parses there.
+
+Once the clause is on the statement the check is the per-crossing one slice 3
+already runs, with `_check_let_intent_refinement` as the second caller of the
+same helpers: the verb, the tenant and the scopes come off `acting`, while the
+object and the amount are read off the crossing's own capability spelling
+through `Action.from_cap`. So the two sides still cannot drift by being written
+twice, and every dimension the step slot refuses the binding slot refuses, with
+the same message and the spelling named in it.
+
+Three things stay refused, and each keeps the slot from being a way around the
+rule rather than a way to obey it:
+
+- a clause with no declaration to check it against, which is slice 3's refusal
+  reached through a shared helper;
+- a clause on a binding whose value carries no `emit` marker. The marker is
+  G4's point, and a clause on an unmarked value would state something about a
+  crossing that is not there while leaving the real one (a bare call to an
+  `emission` extern) unstated;
+- a clause on a helper hop, which is the same refusal: one clause cannot state
+  a crossing the binding does not itself perform, so the transitive reach stays
+  the completeness check's business.
+
+The completeness half has to learn about the new spelling or it would refuse
+the binding it just admitted, and that is where the no-IR property costs
+something. An `emit` step is recognised in the residue structurally (`step ==
+"emit"` already means "compared against the declaration"); a stated binding
+cannot be, because a marker on the lowered node would be an IR key. So the
+admitted crossing nodes are registered out of band on the lowering environment
+(`Env.stated_crossings`, reset per method exactly as `declared_intent` is) and
+the residue drops them by object identity. The IR is byte-identical to the
+clause-free program's, which this slice pins for the third time.
 
 ## 4. Explicit non-goals for this note
 
-Four stages are named and deliberately not started; each is a separate,
+Three stages are named and deliberately not started; each is a separate,
 independently reviewable change:
-
-0. **The stating slot for a value-returning crossing.** Slice 4 refuses
-   `let r = emit svc.op(...)` under a declaration because the marker sits inside
-   an expression and no clause can trail it. The honest surface is an `acting`
-   clause on the BINDING STATEMENT (`let r = emit svc.op(...) acting { verb: … }`),
-   which is a `let` grammar change rather than an expression one, plus the
-   per-crossing check slice 3 already runs. Until it lands, an operation that
-   declares an intent must discard what its crossings return.
 
 1. **The class-(c) approval gate.** Today the gate compares the grant against the
    request with `_grant_covers` / `_grant_within`. Routing that comparison
