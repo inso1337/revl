@@ -11950,6 +11950,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # borrow) is typed and detectable. An acquire bound in the method is
         # method-owned (its own `undo` is exempt).
         _ownership_walk_method(mbody, env, comp.source or filename, method.line)
+        # item 470: the declaration bounds the OPERATION, not the `emit` steps
+        # written in it. Run after the body is fully lowered, while the
+        # declaration is still the one in scope.
+        _check_intent_completeness(decl, mbody, env, svc.name, method.name,
+                                   comp.source or filename, method.line)
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
         env.declared_intent = saved_intent
@@ -12372,6 +12377,93 @@ def _refine_one_crossing(token: str, clause, acting, where: str,
              f"{clause.line} (roadmap item 470)",
         code="G4", category="intent-refinement",
         expected=refusal.declared, actual=refusal.requested)
+
+
+def _without_stated_crossings(node):
+    """`node` with every `emit` STEP's crossing removed, and nothing else.
+
+    An `emit` step under a declaration has already been compared against it
+    (`_check_intent_refinement` runs at the step, and refuses the step that
+    carries no `acting` clause), so it is the one crossing spelling that STATES
+    what it does. Everything else in the body is left exactly as lowered,
+    including an emit step's `compensate` and approval slots: a compensation
+    that itself crosses a boundary states nothing about that crossing and is
+    not covered by the step's own `acting` clause.
+
+    Only the `step`/`expr` pair is dropped rather than the whole step, so the
+    residue keeps those sibling slots. The result feeds `_method_emissions` and
+    is never lowered, so pruning a copy costs no IR.
+    """
+    if isinstance(node, dict):
+        if node.get("step") == "emit":
+            return {key: _without_stated_crossings(value)
+                    for key, value in node.items()
+                    if key not in ("step", "expr")}
+        return {key: _without_stated_crossings(value)
+                for key, value in node.items()}
+    if isinstance(node, list):
+        return [_without_stated_crossings(value) for value in node]
+    return node
+
+
+def _check_intent_completeness(decl, mbody, env, svc_name: str,
+                               method_name: str, filename: str,
+                               line: int) -> None:
+    """A declared intent bounds the OPERATION, not the `emit` steps in it.
+
+    `_check_intent_refinement` closes one hole per crossing: an `emit` step
+    under a declaration must state what it does. That leaves the declaration
+    vacuous through every OTHER spelling of a crossing, and the tree has two
+    that reach a boundary with no `emit` step to hang an `acting` clause on:
+
+      * a direct call to an `emission` extern (`let n = wr(row)`), which the G4
+        scope check already counts as a crossing but item 470 never saw;
+      * a value-position emission (`let r = emit svc.op(...)`, `EmitExpr`),
+        whose marker sits inside an expression where no clause can trail it;
+
+    and one that hides a crossing behind an extra hop:
+
+      * a helper `fn` the body calls that itself reaches an emission, which the
+        same G4 check follows transitively.
+
+    Each of them would let a body declare `within { object: fs.write(path=
+    "/tmp"), ... }` and then reach `/etc` with no refusal at all, which is the
+    exact direction the `acting`-less `emit` refusal was written to close.
+
+    So the rule is stated over the whole body rather than per step: under a
+    declaration, the only crossing spelling admitted is an `emit` step that
+    states itself. Whatever the body still reaches once those are removed is a
+    crossing that states nothing, and a crossing that states nothing cannot be
+    shown to refine the declaration (fail closed). The analysis is
+    `_method_emissions`, the same one the G4 provider upper bound reads, run
+    over the residue, so this check inherits its transitive reach and its
+    vocabulary rather than inventing a second one.
+
+    Inert for every operation that declares no intent, which is every operation
+    in the tree: `decl.within` is `None`, and the function returns before the
+    residue is even built.
+    """
+    clause = getattr(decl, "within", None)
+    if clause is None:
+        return
+    caused, _caps = _method_emissions(_without_stated_crossings(mbody), env)
+    if not caused:
+        return
+    evidence = ", ".join(f"`{item}`" for item in caused)
+    declared = _declared_objects(clause)
+    raise RevlError(
+        filename, line,
+        f"`{svc_name}.{method_name}` declares an intent (`within` at line "
+        f"{clause.line}), and this implementation reaches {evidence} through a "
+        f"crossing that states nothing about itself",
+        hint="the declaration bounds the operation, not the `emit` steps "
+             "written in it, so a crossing reached any other way would leave it "
+             f"vacuous. The intent authorizes `{declared}`: route the crossing "
+             "through an `emit <call> acting { verb: <operation> }` step, which "
+             "is the one spelling a declaration can be checked against, or drop "
+             "the `within` clause (roadmap item 470)",
+        code="G4", category="intent-refinement",
+        expected=declared, actual=evidence)
 
 
 def _approval_scope_of(expr_type: str | None) -> str | None:

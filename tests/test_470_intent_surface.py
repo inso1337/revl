@@ -283,3 +283,93 @@ def test_within_and_acting_are_not_reserved_words():
         'test "t" { assert within(3) == 3 }\n'
     )
     assert compile_source(src, "<test>")
+
+
+# --------------- the declaration bounds the OPERATION, not its `emit` steps
+#
+# `_check_intent_refinement` closes one hole per crossing: an `emit` step under
+# a declaration must state what it does. That left the declaration vacuous
+# through every OTHER spelling of a crossing, and the tree has three:
+#
+#   * a direct call to an `emission` extern, which needs no `emit` marker;
+#   * a value-position emission (`let r = emit ...`), whose marker sits inside
+#     an expression where no clause can trail it;
+#   * a helper `fn` that reaches an emission one hop down.
+#
+# Each of them let a body declare `within { object: fs.write(path="/tmp") }`
+# and then reach `/etc` with no refusal at all. The rule is therefore stated
+# over the whole body: under a declaration, the only crossing spelling admitted
+# is an `emit` step that states itself, and whatever the body still reaches once
+# those are removed is a crossing that states nothing.
+
+# A second shape, because these spellings need a host `emission` extern rather
+# than a required service (a req-service emission must carry the `emit` marker
+# in every program, declaration or not).
+EXTERN_PROGRAM = """
+extern emission[fs.write(path="/tmp/out")] fn wr(msg: Str) -> Int = @py {{
+    return 1
+}}
+fn helper(msg: Str) -> Int {{ return wr(msg) }}
+service Worker {{ emission fn run() -> Str{within} }}
+component W provides worker: Worker {{
+  provide worker {{ fn run() {{ {body} return "k" }} }}
+}}
+"""
+
+STATED = 'emit wr("row") acting { verb: ingest }'
+UNSTATED = {
+    "a direct call to an emission extern": 'let n = wr("row")',
+    "a value-position emission": 'let n = emit wr("row")',
+    "a helper that reaches an emission": 'let n = helper("row")',
+}
+
+
+def extern_source(body, within=DECLARE_TMP):
+    return EXTERN_PROGRAM.format(within=within, body=body)
+
+
+@pytest.mark.parametrize("body", list(UNSTATED.values()), ids=list(UNSTATED))
+def test_an_unstated_crossing_under_a_declaration_is_refused(body):
+    with pytest.raises(RevlError) as exc:
+        compile_source(extern_source(body), "<test>")
+    message = str(exc.value)
+    assert "`Worker.run` declares an intent (`within` at line 6)" in message
+    assert "through a crossing that states nothing about itself" in message
+    # the refusal names the intent it violated, which is the roadmap's exit
+    # criterion and the whole reason the kernel holds a declaration.
+    assert 'authorizes `fs.write(path="/tmp")`' in message
+
+
+def test_an_unstated_crossing_is_refused_even_inside_the_declared_cone():
+    """The failure direction, stated exactly: the refusal is not "the object is
+    outside the cone", it is "this crossing cannot be SHOWN to refine the
+    declaration". `fs.write(path="/tmp/out")` is inside the declared `/tmp`
+    cone and the same crossing spelled as an annotated `emit` compiles, so the
+    only difference is that this spelling states nothing."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(extern_source('let n = wr("row")'), "<test>")
+    assert "states nothing about itself" in str(exc.value)
+    assert compile_source(extern_source(STATED), "<test>")
+
+
+@pytest.mark.parametrize("body", list(UNSTATED.values()), ids=list(UNSTATED))
+def test_every_crossing_spelling_still_compiles_with_no_declaration(body):
+    """The non-vacuity control, and the one that keeps the rule honest: none of
+    these spellings is refused on its own. Each is refused only because an
+    operation declared an intent it cannot be checked against."""
+    assert compile_source(extern_source(body, within=""), "<test>")
+
+
+def test_the_annotated_emit_is_the_admitted_spelling():
+    """The other half of the control: the declaration admits the crossing that
+    states itself, so the rule bounds the spelling and not the boundary."""
+    assert compile_source(extern_source(STATED), "<test>")
+
+
+def test_the_completeness_check_contributes_no_ir():
+    """The property #1007 pinned, re-proved for this shape: the declaration and
+    the clause it arms lower to nothing, so a program that writes neither is
+    byte-identical to the annotated one."""
+    plain = compile_source(extern_source('emit wr("row")', within=""), "<test>")
+    annotated = compile_source(extern_source(STATED), "<test>")
+    assert json.dumps(plain, sort_keys=True) == json.dumps(annotated, sort_keys=True)
