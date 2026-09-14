@@ -1,0 +1,85 @@
+// item 458 / 1041 — `&&` and `||` SHORT-CIRCUIT, and `i32.and`/`i32.or` do not.
+//
+// Every other tier gets short-circuiting from its host operator, so a guard whose
+// right operand only makes sense once the left one holds answers the same on all
+// six. wasm has no such instruction: the strict `i32.and`/`i32.or` evaluate both
+// sides, so a right operand that traps trapped anyway and this tier alone gave a
+// different answer. The lowering is the folded `(if (result i32) …)` branch the
+// tier already uses for the ternary and `??`; the strict single instruction is
+// kept only where the right operand provably cannot trap, allocate or read
+// memory (a constant, a local read, and `!`/comparison/logical combinations of
+// those), which is why every pre-existing golden byte in this corpus holds.
+//
+// The corpus had no document spelling a trapping right operand, which is exactly
+// how the divergence survived the byte-agreement oracle. This is that document:
+// the functions below are named for which side of the decision they pin.
+
+// ---------------------------------------------------------------- the branch
+// `%` is `i64.rem_s`, which traps on a zero divisor. The guard that makes the
+// division safe is the whole point of `&&` short-circuiting.
+fn divides(n: Int, d: Int) -> Bool { return d != 0 && n % d == 0 }
+
+// The `||` mirror: the right operand runs only when the left one said false.
+fn notDivides(n: Int, d: Int) -> Bool { return d == 0 || n % d != 0 }
+
+// The total integer division `div_trunc` traps the same way (a `builtin` node,
+// which is never trap-free), and the operand sits one comparison deep.
+fn quotientIsOne(n: Int, d: Int) -> Bool { return d != 0 && n.div_trunc(d) == 1 }
+
+// The checked `$int_mul` traps at the Int edge, so a product is not trap-free.
+fn productPositive(ok: Bool, n: Int) -> Bool { return ok && n * n > 0 }
+
+// A checked `+` is equally a trap, even wrapped in `!`: the `!` arm forwards the
+// decision to its operand rather than answering true for the negation itself.
+fn notOverflowing(ok: Bool, n: Int) -> Bool { return ok && !(n + n > 0) }
+
+// An out-of-range slot load reads memory the list does not own. `xs.length` is a
+// `len` node and `xs[i]` an index read; neither is on the trap-free list.
+fn inRangePositive(xs: List[Int], i: Int) -> Bool { return i < xs.length && xs[i] > 0 }
+
+// A call can do anything, so a call on the right always takes the branch.
+fn half(n: Int) -> Int { return n.div_trunc(2) }
+fn halfPositive(ok: Bool, n: Int) -> Bool { return ok && half(n) > 0 }
+
+// A `Str` leaf is a memory read (the pooled pointer), so a `Str` comparison on
+// the right is not trap-free even though `==` itself is.
+fn taggedOk(ok: Bool, s: Str) -> Bool { return ok && s == "ok" }
+
+// A unary operator other than `!` is not the negation arm: `-` is a checked
+// subtract-from-zero (`0 - Int.MIN` traps) and `~` is Int32-only, so both fall
+// out of the trap-free list rather than forwarding to their operand.
+fn negatedPositive(ok: Bool, n: Int) -> Bool { return ok && -n > 0 }
+fn complementNegative(ok: Bool, a: Int32, b: Int32) -> Bool { return ok && ~a < b }
+
+// Chained: `a && b && <trapping>` is `(a && b) && <trapping>`, so the branch
+// wraps the strict left pair rather than replacing it.
+fn chained(ok: Bool, n: Int, d: Int) -> Bool { return ok && d != 0 && n % d == 0 }
+
+// The branch nests: a trapping right operand under a trapping right operand.
+fn nestedGuards(n: Int, d: Int, e: Int) -> Bool {
+  return d != 0 && n % d == 0 && e != 0 && n % e == 0
+}
+
+// The branch composes with `!` and with a surrounding `if`, and its Bool result
+// is an ordinary i32 that a local can hold.
+fn guardedStatement(n: Int, d: Int) -> Int {
+  let safe = d != 0 && n % d == 0
+  if (!(d != 0 && n % d == 1)) { return 0 }
+  if (safe) { return 1 }
+  return 2
+}
+
+// ------------------------------------------------- the strict instruction
+// The NON-VACUITY control: a right operand that provably cannot trap keeps the
+// single `i32.and`/`i32.or`, with no branch at all. If the predicate ever
+// widened to "always branch", these lines would move and the byte comparison
+// would say so.
+fn bothFlags(a: Bool, b: Bool) -> Bool { return a && b }
+fn eitherFlag(a: Bool, b: Bool) -> Bool { return a || b }
+fn negatedFlag(a: Bool, b: Bool) -> Bool { return a && !b }
+fn comparedLocals(a: Int, b: Int) -> Bool { return a < b && a != b }
+fn int32Locals(a: Int32, b: Int32) -> Bool { return a < b && a >= b }
+fn literalRight(a: Bool) -> Bool { return a && true }
+fn constantCompare(a: Bool, n: Int) -> Bool { return a && n == 0 }
+fn nestedLogical(a: Bool, b: Bool, c: Bool) -> Bool { return a && (b || c) }
+fn doubleNegated(a: Bool, b: Bool) -> Bool { return a || !(!b) }
