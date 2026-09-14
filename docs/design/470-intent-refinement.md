@@ -325,10 +325,101 @@ declaration it is refused with no rewrite available other than dropping the
 returned value. The slot for it is a trailing `acting` on the binding statement
 rather than on the expression, and it is named in section 4 as open work.
 
+### 3.6 Slice 6: the class-(c) approval gate compares a declaration
+
+**Landed: the runtime half, and the first grant that is a declaration.** Slices
+3 and 4 hold a declaration across a COMPILE. This is the same rule at the other
+end of the tree, where a declaration is held across TIME: an operator mints a
+standing grant now and a class-(c) crossing is compared against it minutes
+later, which is the one pairing in the running system that already has the shape
+`refine` wants. `session._grant_covers` / `_grant_within` are that comparison
+and they now go through the kernel.
+
+The hole is one shape on both predicates, and it is the erasure. `_mint_grant`
+strips every ceiling parameter out of the spelling it stores: `calls=N` becomes
+the shipped `remainingUses` counter, and `size=` / `time=` are dropped with
+nothing left behind, because revl meters neither. What the operator STATED
+therefore did not outlive the mint, so both predicates keyed to the grant read a
+declaration that no longer held the thing it declared:
+
+- the FIND path admitted a crossing declaring any budget at all, including one
+  the grant never bounded. `cap_order.covers` reads a parameter bound only on
+  the narrow side as free on the wider side, hence narrowing, which is true of a
+  resource valuation and backwards for a ceiling, where a bigger number is
+  wider. A grant minted `fs.write(path="/tmp", size="1MB")` auto-approved a
+  crossing declaring `size="10MB"`, and so did a grant that bounded no amount at
+  all.
+- the REVOKE path could not match the very spelling the grant was minted with.
+  `revoke_standing_grant(capability="model.complete(calls=3)")` compared the
+  operator's unerased text against the erased grant, `covers` demanded a
+  parameter the stored cone could no longer bind, and the call returned a typed
+  `{"revoked": true, "count": 0}`. An operator reads that as consent withdrawn
+  while the grant goes on auto-approving.
+
+So the mint keeps what it erases (`declaredCeilings` on the entry, beside the
+resource-only `capability` item 294 stores), and the two predicates are read as
+refinements of it. The grant is the `Intent`, the crossing is the `Action`, and
+both are built off ONE spelling through `cap_order.split_ceilings`, the same
+split `Intent.from_cap` and `Action.from_cap` route through, so the declaration
+and the crossing cannot drift apart by being read twice.
+
+Two dimensions are stated deliberately rather than guessed, because guessing one
+would be inferring an intent the caller never stated:
+
+- the VERB is the same sentinel on both records, so its dimension is the
+  identity here. This gate has no verb vocabulary: section 1 records that the
+  tree's only `verb` notion (`operator.TOOL_VERB`) names operator MANAGEMENT
+  actions, not operations performed at a boundary. Section 4's operator-profile
+  stage is what gives this gate a verb worth stating.
+- `calls` (and its `requests` alias) is ERASED from both sides. It is metered
+  here already: the mint translates it into `remainingUses` and `_consume_grant`
+  spends it, so one crossing is one use and the counter IS its comparison.
+  Handing it to the ceiling dimension as well would compare one bound by two
+  rules and let the weaker one win, which is the hazard `Intent.__post_init__`
+  refuses a ceiling parameter on an object for. `size` and `time` are metered by
+  nothing, which is exactly why they have to survive as a declaration.
+
+The DIRECTIONS are opposite on the two predicates, and that is the reason
+`_grant_within` makes one projection `_grant_covers` does not. On the find path
+a crossing that cannot be shown to refine the grant is refused, and refused
+means it prompts for a single-use approval: the gate never admits a spend it
+could not compare. On the revoke path a grant that is NOT retired keeps
+auto-approving, so retiring too few is the fail-open direction. Reading a
+ceiling the revoke spelling does not mention as a bound, which is what the
+kernel correctly does on the find path, would have made a bare-token revoke
+retire nothing the moment a grant stated an amount. So the revoke projects away
+every ceiling its spelling does not state, and the change is monotone: a revoke
+spelling carrying no ceiling compares exactly as before, and one that does can
+only ever retire more.
+
+Additive at the bottom: a grant that states no ceiling and a crossing that
+states no amount reduce to the object dimension, which is `cap_order.covers`
+itself, so every parameter-free and resource-only grant is bit-for-bit what it
+was. Nothing here is reachable from the frontend, so the byte-identical-IR
+property slices 3 and 4 pinned is untouched by construction.
+
+What it makes expressible is the amount-scoped approval `246-auto-approve.md`
+leaves undesigned: `fs.write(path="/tmp", size="10MB")` is now a grant that
+auto-approves a crossing declaring `size="10MB"` and refuses one declaring more,
+instead of a spelling whose amount was accepted and then discarded.
+
+The refusal is a `Refusal`, not a bare boolean. `_grant_refusal` builds the
+finding and `_grant_covers` is that finding read as a bool, because item 470's
+exit criterion is a refusal that NAMES THE INTENT IT VIOLATED and a predicate
+carries none. It renders in `errors.RevlError`'s message-plus-hint shape, so the
+stage that surfaces it on the operator's prompt introduces no second convention.
+
+`attest.RULESET_MODULES` is untouched, on the precedent `quorum.py` set: that
+digest identifies the frontend ruleset producing a COMPILE verdict, and an MCP
+session admitting a runtime crossing is a different thing. The module list is
+also spelled as bare `src/revl/<name>.py` names, which an `mcp/` submodule
+cannot be.
+
 ## 4. Explicit non-goals for this note
 
-Four stages are named and deliberately not started; each is a separate,
-independently reviewable change:
+Three stages stay open; each is a separate, independently reviewable change.
+Stage 1 is struck through below rather than deleted, because section 3.6 is the
+slice that closed it and the stage text is what that slice was measured against.
 
 0. **The stating slot for a value-returning crossing.** Slice 4 refuses
    `let r = emit svc.op(...)` under a declaration because the marker sits inside
@@ -338,12 +429,14 @@ independently reviewable change:
    per-crossing check slice 3 already runs. Until it lands, an operation that
    declares an intent must discard what its crossings return.
 
-1. **The class-(c) approval gate.** Today the gate compares the grant against the
-   request with `_grant_covers` / `_grant_within`. Routing that comparison
-   through `refine` would make the amount-scoped and `uses: n` approval cases
-   that `246-auto-approve.md` leaves undesigned expressible against a stated
-   intent. Touching the gate changes shipped, tested semantics and belongs in its
-   own slice.
+1. **The class-(c) approval gate. CLOSED by slice 3.6.** `_grant_covers` and
+   `_grant_within` are refinements of the grant's own declaration, and the mint
+   keeps the ceilings it erases so there is a declaration to refine. The
+   amount-scoped case is expressible; the `uses: n` case is unchanged and stays
+   metered by `remainingUses`, which slice 3.6 records as the reason `calls` is
+   erased from both sides of the comparison rather than compared twice. What it
+   does NOT do is give the gate a verb: both records state the same sentinel, so
+   the verb dimension waits on stage 3.
 2. **The lease path.** A runtime crossing carrying its intent so the lease check
    is an intent refinement rather than an authority-versus-request comparison.
    `cap_order`'s ceiling erasure into `remainingUses` interacts with this and
@@ -359,7 +452,13 @@ independently reviewable change:
    activation body can carry or the runtime path in `mcp/session.py`, and the
    runtime path is the one this stage names.
 3. **The operator profile.** A surface that declares an operator's intent so the
-   `TOOL_VERB` management actions can be checked against it.
+   `TOOL_VERB` management actions can be checked against it. Slice 3.6 sharpens
+   what this stage owes: the class-(c) gate now refines every dimension it can
+   state, and the one it cannot is the verb, because `operator.Grant` is verb
+   GLOBS over subject globs (an authority) and not a declared intent. It is also
+   where a bound on what an operator may GRANT would live: nothing today bounds
+   the capability, the ceiling or the `uses` an operator holding `approve` can
+   mint.
 
 Also explicitly out of scope for this item, not merely deferred:
 
