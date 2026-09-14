@@ -556,28 +556,30 @@ def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
     """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
 
     A byte-for-byte mirror of `backends/go/emit.py` and `backends/rust/emit.py`:
-    the derived combinator chain (`map`/`filter`/`take`) IS lowered here now (see
-    `_stream_chain`), and what is left are the three non-default backpressure
-    policies and the `block`-policy drain window. The drain window is the one
-    that must stay refused on principle: its resume fires on the deterministic
-    test clock, which this tier does not carry, so lowering it would resume
-    EARLY and quietly disagree with the reference. Emitting a subscription that
-    SILENTLY dropped a lossy policy or a drain window is the worst outcome
+    Slice 2 arrived on the blocking tiers in two landings and only one thing
+    outlived them. The derived combinator chain (`map`/`filter`/`take`) IS
+    lowered here now (see `_stream_chain`), and so are all four §4.4
+    backpressure policies: `drop_newest`, `drop_oldest` and `block` mirror the
+    py reference's `Subscription._deliver` arm for arm, with `block` resuming
+    EAGERLY at the `next` that makes room, which is what the reference does when
+    no window is declared.
+
+    What is left is the `drain` WINDOW, and it is the one that must stay refused
+    on principle: its resume fires on the deterministic test clock, which this
+    tier does not carry AT ALL (an `advance` step is refused here), so lowering
+    it would resume EARLY and quietly disagree with the reference. Emitting a
+    subscription that SILENTLY dropped the window is the worst outcome
     available — the program would run and answer differently from the py
     reference — so refuse by name instead."""
-    policy = node.get("policy") or "error"
-    if policy != "error":
-        raise EmitError(
-            "backpressure policy `%s` is not lowered on the %s tier; this tier "
-            "lowers the default `error` policy (a full bounded buffer faults "
-            "with `Faulted(overflow)` and closes, no silent loss). "
-            "`drop_newest`/`drop_oldest`/`block` run on the py reference tier "
-            "(item 130 §4.4) — try `--backend py`" % (policy, tier))
     if node.get("drain") is not None:
         raise EmitError(
-            "a `drain` window is the `block`-policy drain interval and is not "
-            "lowered on the %s tier; it fires on the deterministic test clock, "
-            "which lives on the py reference tier (item 130 §8) — try "
+            "a `drain` window is not lowered on the %s tier; the `block` policy "
+            "itself IS lowered here with the EAGER resume (the provider "
+            "un-pauses at the `next` that makes room, exactly what the py "
+            "reference does with no window declared), but a declared window "
+            "resumes only on the deterministic test clock, which lives on the "
+            "py reference tier (item 130 §8). Lowering the window without that "
+            "clock would resume EARLY and quietly disagree — try "
             "`--backend py`" % tier)
 
 
@@ -3995,15 +3997,22 @@ public static final class Stream {
 
     // Deliver one item to the single consumer (and into any merged stream fed by
     // this provider). A no-op once terminal.
+    //
+    // The return is downstream ACCEPTANCE, not merely "the provider was open": a
+    // `block` pause or an `error` overflow below reaches the provider through
+    // this value rather than being swallowed, which is what makes `block`
+    // backpressure (§4.4) observable at all. The trace says which it was, so a
+    // refusal is never silent, and the line matches the py reference and ts
+    // tiers byte for byte.
     public boolean emit(String item) {
         synchronized (this) {
             if (!state.equals("open")) {
                 return false;
             }
         }
-        record("stream.emit " + item);
-        forward(item);
-        return true;
+        boolean accepted = forward(item);
+        record(accepted ? "stream.emit " + item : "stream.emit " + item + " refused");
+        return accepted;
     }
 
     // Carry one item to this stream's consumer and into any derived stream fed by
@@ -4311,6 +4320,12 @@ public static final class Subscription {
     private boolean cancelled = false;
     private boolean termed = false;
     private boolean closed = false;
+    // `block`-policy backpressure (§4.4): this IS the design's `Paused` state
+    // index. The resume is EAGER — it happens at the `next` that makes room —
+    // which is what the py reference does with no `drain` window declared. A
+    // declared window is refused by this tier's emitter rather than resumed
+    // early.
+    private boolean paused = false;
 
     Subscription(Stream src, String policy, int capacity) {
         this.src = src;
@@ -4318,27 +4333,60 @@ public static final class Subscription {
         this.capacity = capacity;
     }
 
-    // Buffer one item under the declared overflow policy (§4.4). Answers whether
-    // the delivery was ACCEPTED — a false is backpressure the provider sees
-    // through the chain, never a silent drop.
+    // Buffer one item under the declared overflow policy (§4.4). The return is
+    // whether the delivery was ACCEPTED — a `false` is backpressure the provider
+    // sees, never a silent drop. The four arms mirror the py reference
+    // (backends/python/runtime.py `Subscription._deliver`) arm for arm:
+    //
+    //   error (default)  a full bounded buffer is a terminal Faulted(overflow)
+    //   drop_newest      discard the incoming item, RECORDED (never silent)
+    //   drop_oldest      evict the buffer head, keep the newest, RECORDED
+    //   block            REFUSE the delivery and pause the provider until the
+    //                    consumer drains
     boolean deliver(String item) {
         boolean overflow = false;
-        boolean accepted = false;
+        String mark = "";
+        boolean accepted;
         lock.lock();
         try {
             if (closed || termed) {
                 return false;
             }
+            if (paused) {
+                // `block`: the provider is SUSPENDED and stays suspended until
+                // this subscription resumes. Refusing here rather than at the
+                // capacity check is what makes the pause a state, not a per-item
+                // accident.
+                return false;
+            }
             if (items.size() < capacity) {
                 items.addLast(item);
                 ready.signalAll();
+                return true;
+            }
+            if (policy.equals("drop_newest")) {
+                // lossy-tolerant telemetry: discard the INCOMING item. Opted
+                // into at `subscribe`, and recorded — loss is never silent.
+                mark = "stream.drop_newest " + item;
                 accepted = true;
-            } else if (policy.isEmpty() || policy.equals("error")) {
-                overflow = true;
+            } else if (policy.equals("drop_oldest")) {
+                // latest-wins gauges: evict the buffer head, keep the newest.
+                String evicted = items.removeFirst();
+                items.addLast(item);
+                ready.signalAll();
+                mark = "stream.drop_oldest " + evicted;
+                accepted = true;
+            } else if (policy.equals("block")) {
+                // the provider suspends until the consumer drains: the delivery
+                // is REFUSED (so `emit` returns false and the provider knows) and
+                // the subscription enters the reserved `Paused` state. No
+                // implicit retry — the provider re-emits once it is Active again.
+                paused = true;
+                mark = "stream.paused";
+                accepted = false;
             } else {
-                throw new IllegalStateException(
-                    "revl: backpressure policy " + policy
-                    + " is not lowered on the cordis4j tier");
+                overflow = true;
+                accepted = false;
             }
         } finally {
             lock.unlock();
@@ -4346,8 +4394,37 @@ public static final class Subscription {
         if (overflow) {
             Stream.record("stream.overflow");
             terminate("faulted", "overflow");
+            return false;
         }
+        Stream.record(mark);
         return accepted;
+    }
+
+    // Release a `block`-paused provider once the consumer has drained an item.
+    // EAGER, matching the py reference with no `drain` window declared (§4.4); a
+    // declared window is refused by this tier's emitter rather than resumed
+    // early (§8). Called with the lock already held by `next`.
+    private boolean maybeResume() {
+        if (!paused || closed || items.size() >= capacity) {
+            return false;
+        }
+        paused = false;
+        return true;
+    }
+
+    // The design's state index (§1) as this runtime sees it: `closed` once the
+    // cancel flag is tripped, `paused` while a `block`-policy buffer is full,
+    // `active` otherwise.
+    public String state() {
+        lock.lock();
+        try {
+            if (closed) {
+                return "closed";
+            }
+            return paused ? "paused" : "active";
+        } finally {
+            lock.unlock();
+        }
     }
 
     void terminate(String kind, String reason) {
@@ -4374,6 +4451,7 @@ public static final class Subscription {
     // condition wait, and `close` signals it from ANOTHER thread — the reason a
     // parked `next` can never make the bracket inverse unreachable.
     public Object next() {
+        boolean resumed = false;
         lock.lock();
         try {
             while (true) {
@@ -4381,7 +4459,10 @@ public static final class Subscription {
                     return Stream.CLOSED;
                 }
                 if (!items.isEmpty()) {
-                    return items.removeFirst();
+                    Object item = items.removeFirst();
+                    // draining may release a `block`-paused provider (§4.4)
+                    resumed = maybeResume();
+                    return item;
                 }
                 if (termed) {
                     return terminal();
@@ -4399,6 +4480,9 @@ public static final class Subscription {
             }
         } finally {
             lock.unlock();
+            if (resumed) {
+                Stream.record("stream.resume");
+            }
         }
     }
 

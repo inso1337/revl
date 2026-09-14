@@ -2805,13 +2805,24 @@ impl Stream {
 
     /// Deliver one item to the single consumer (and into any merged stream fed
     /// by this provider). A no-op once terminal.
+    ///
+    /// The return is downstream ACCEPTANCE, not merely "the provider was open":
+    /// a `block` pause or an `error` overflow below reaches the provider through
+    /// this value rather than being swallowed, which is what makes `block`
+    /// backpressure (§4.4) observable at all. The trace says which it was, so a
+    /// refusal is never silent, and the line matches the py reference and ts
+    /// tiers byte for byte.
     pub fn emit(&self, item: String) -> bool {
         if self.inner.st.lock().unwrap().state != 0u8 {
             return false;
         }
-        revl_stream_record(format!("stream.emit {}", item));
-        let _ = self.inner.forward(&item);
-        true
+        let accepted = self.inner.forward(&item);
+        if accepted {
+            revl_stream_record(format!("stream.emit {}", item));
+        } else {
+            revl_stream_record(format!("stream.emit {} refused", item));
+        }
+        accepted
     }
 
     /// The provider's terminal-delivering inverse (§9 Part B) and, for a merged
@@ -3052,6 +3063,12 @@ struct SubscriptionState {
     /// 0 none, 1 closed, 2 faulted
     terminal: u8,
     reason: String,
+    /// `block`-policy backpressure (§4.4): this IS the design's `Paused` state
+    /// index. The resume is EAGER — it happens at the `next` that makes room —
+    /// which is what the py reference does with no `drain` window declared. A
+    /// declared window is refused by this tier's emitter rather than resumed
+    /// early.
+    paused: bool,
 }
 
 struct SubscriptionInner {
@@ -3109,6 +3126,20 @@ impl Subscription {
         self.inner.next()
     }
 
+    /// The design's state index (§1) as this runtime sees it: `closed` once the
+    /// cancel signal is tripped, `paused` while a `block`-policy buffer is full,
+    /// `active` otherwise.
+    pub fn state(&self) -> &'static str {
+        let st = self.inner.st.lock().unwrap();
+        if st.cancelled {
+            "closed"
+        } else if st.paused {
+            "paused"
+        } else {
+            "active"
+        }
+    }
+
     /// The bracket inverse: trip the cancel signal, wake the park, detach the
     /// listener, release the slot. Infallible, idempotent, and it NEVER waits
     /// for a parked `next` to drain.
@@ -3127,30 +3158,73 @@ impl Subscription {
 }
 
 impl SubscriptionInner {
-    /// Buffer one item under the declared overflow policy (§4.4). Answers
+    /// Buffer one item under the declared overflow policy (§4.4). The return is
     /// whether the delivery was ACCEPTED — a `false` is backpressure the
-    /// provider sees through the chain, never a silent drop.
+    /// provider sees, never a silent drop. The four arms mirror the py
+    /// reference (backends/python/runtime.py `Subscription._deliver`) arm for
+    /// arm: `error` faults on a full bounded buffer, `drop_newest` discards the
+    /// incoming item, `drop_oldest` evicts the head, `block` refuses and pauses.
     fn deliver(&self, item: &str) -> bool {
         let mut st = self.st.lock().unwrap();
         if st.cancelled || st.terminal != 0u8 {
             return false;
         }
-        if st.items.len() >= self.capacity {
-            // backpressure `error` (the default, §4.4): a full bounded buffer is
-            // a terminal Faulted(overflow) — deterministic, no silent loss.
-            if self.policy.is_empty() || self.policy == "error" {
-                st.terminal = 2u8;
-                st.reason = String::from("overflow");
-                self.wake.notify_all();
-                return false;
-            }
-            panic!(
-                "revl: backpressure policy {} is not lowered on the cordis-rs tier",
-                self.policy
-            );
+        if st.paused {
+            // `block`: the provider is SUSPENDED and stays suspended until this
+            // subscription resumes. Refusing here rather than at the capacity
+            // check is what makes the pause a state, not a per-item accident.
+            return false;
         }
-        st.items.push_back(item.to_string());
+        if st.items.len() < self.capacity {
+            st.items.push_back(item.to_string());
+            self.wake.notify_all();
+            return true;
+        }
+        if self.policy == "drop_newest" {
+            // lossy-tolerant telemetry: discard the INCOMING item. Opted into at
+            // `subscribe`, and recorded — loss is never silent.
+            drop(st);
+            revl_stream_record(format!("stream.drop_newest {}", item));
+            return true;
+        }
+        if self.policy == "drop_oldest" {
+            // latest-wins gauges: evict the buffer head, keep the newest item.
+            let evicted = st.items.pop_front().unwrap_or_default();
+            st.items.push_back(item.to_string());
+            self.wake.notify_all();
+            drop(st);
+            revl_stream_record(format!("stream.drop_oldest {}", evicted));
+            return true;
+        }
+        if self.policy == "block" {
+            // the provider suspends until the consumer drains: the delivery is
+            // REFUSED (so `emit` returns false and the provider knows) and the
+            // subscription enters the reserved `Paused` state. No implicit
+            // retry — the provider re-emits once the subscription is Active.
+            st.paused = true;
+            drop(st);
+            revl_stream_record(String::from("stream.paused"));
+            return false;
+        }
+        // backpressure `error` (the default, §4.4): a full bounded buffer is
+        // a terminal Faulted(overflow) — deterministic, no silent loss.
+        st.terminal = 2u8;
+        st.reason = String::from("overflow");
         self.wake.notify_all();
+        drop(st);
+        revl_stream_record(String::from("stream.overflow"));
+        false
+    }
+
+    /// Release a `block`-paused provider once the consumer has drained an item.
+    /// EAGER, matching the py reference with no `drain` window declared (§4.4);
+    /// a declared window is refused by this tier's emitter rather than resumed
+    /// early (§8). Called with the state lock already held by `next`.
+    fn maybe_resume(&self, st: &mut SubscriptionState) -> bool {
+        if !st.paused || st.cancelled || st.items.len() >= self.capacity {
+            return false;
+        }
+        st.paused = false;
         true
     }
 
@@ -3174,6 +3248,12 @@ impl SubscriptionInner {
                 return Ok(StreamNext::Closed);
             }
             if let Some(item) = st.items.pop_front() {
+                // draining may release a `block`-paused provider (§4.4)
+                let resumed = self.maybe_resume(&mut st);
+                drop(st);
+                if resumed {
+                    revl_stream_record(String::from("stream.resume"));
+                }
                 return Ok(StreamNext::Item(item));
             }
             if st.terminal == 2u8 {
@@ -3535,28 +3615,30 @@ def _binds(component: dict) -> list[str]:
 def _refuse_unlowered_stream_surface(node, tier: str) -> None:
     """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
 
-    The derived combinator chain (`map`/`filter`/`take`) IS lowered here now —
-    see `_stream_chain`. What is left are the three non-default backpressure
-    policies and the `block`-policy drain window, and the drain window is the
-    one that must stay refused on principle: its resume fires on the
-    deterministic test clock, which this tier does not carry, so lowering it
-    would resume EARLY and quietly disagree with the reference. Emitting a
-    subscription that SILENTLY dropped a lossy policy or a drain window is the
-    worst outcome available — the program would run and answer differently from
-    the py reference — so refuse by name instead."""
-    policy = node.get("policy") or "error"
-    if policy != "error":
-        raise EmitError(
-            f"backpressure policy `{policy}` is not lowered on the {tier} tier; "
-            "this tier lowers the default `error` policy (a full bounded buffer "
-            "faults with `Faulted(overflow)` and closes, no silent loss). "
-            "`drop_newest`/`drop_oldest`/`block` run on the py reference tier "
-            "(item 130 §4.4) — try `--backend py`")
+    Slice 2 arrived on this tier in two landings and only one thing outlived
+    them. The derived combinator chain (`map`/`filter`/`take`) IS lowered now,
+    as derived stream links inside the subscription's acquisition (see
+    `_stream_chain`), and so are all four §4.4 backpressure policies:
+    `drop_newest`, `drop_oldest` and `block` mirror the py reference's
+    `Subscription._deliver` arm for arm, with `block` resuming EAGERLY at the
+    `next` that makes room, which is what the reference does when no window is
+    declared.
+
+    What is left is the `drain` WINDOW, and it is the one that must stay refused
+    on principle: its resume fires on the deterministic test clock, which this
+    tier does not carry, so lowering it would resume EARLY and quietly disagree
+    with the reference. Emitting a subscription that SILENTLY dropped the window
+    is the worst outcome available — the program would run and answer
+    differently from the py reference — so refuse by name instead."""
     if node.get("drain") is not None:
         raise EmitError(
-            "a `drain` window is the `block`-policy drain interval and is not "
-            f"lowered on the {tier} tier; it fires on the deterministic test "
-            "clock, which lives on the py reference tier (item 130 §8) — try "
+            f"a `drain` window is not lowered on the {tier} tier; the `block` "
+            "policy itself IS lowered here with the EAGER resume (the provider "
+            "un-pauses at the `next` that makes room, exactly what the py "
+            "reference does with no window declared), but a declared window "
+            "resumes only on the deterministic test clock, which lives on the "
+            "py reference tier (item 130 §8). Lowering the window without that "
+            "clock would resume EARLY and quietly disagree — try "
             "`--backend py`")
 
 
