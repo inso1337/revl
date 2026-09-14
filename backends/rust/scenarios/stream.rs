@@ -431,6 +431,211 @@ fn backpressure_error_faults_on_overflow() {
     assert_eq!(revl_stream_pending(), 0);
 }
 
+// -------------------------------------------------------------------------
+// Backpressure: the three NON-DEFAULT policies (item 130 Slice 2, §4.4).
+//
+// Each case below mirrors the py reference's own case in
+// backends/python/tests/test_stream_runtime.py statement for statement — same
+// capacity, same emit sequence, same drained values, same trace marks. That is
+// deliberate: a policy that COMPILES on this tier and behaves differently from
+// the reference is strictly worse than one that is refused by name, so the
+// reference's case IS this tier's specification.
+// -------------------------------------------------------------------------
+
+fn marks_with_prefix(prefix: &str) -> Vec<String> {
+    revl_stream_marks()
+        .into_iter()
+        .filter(|m| m.starts_with(prefix))
+        .collect()
+}
+
+fn next_item(sub: &revl_stream_scn::Subscription, want: &str) {
+    match sub.next() {
+        Ok(StreamNext::Item(item)) => assert_eq!(item, want),
+        other => panic!("next = {:?}, want the item {:?}", other, want),
+    }
+}
+
+/// `drop_newest` discards the INCOMING item and records the loss. A drop policy
+/// never blocks the provider and never pauses the subscription.
+#[test]
+fn drop_newest_discards_the_incoming_item_and_records_it() {
+    reset();
+    let src = Stream::source();
+    let sub = Stream::subscribe(&src, "drop_newest", 2);
+    for item in ["i0", "i1", "i2", "i3"] {
+        assert!(
+            src.emit(String::from(item)),
+            "a drop policy never blocks the provider ({})",
+            item
+        );
+    }
+    next_item(&sub, "i0");
+    next_item(&sub, "i1");
+    // the buffered prefix survives; the overflow is DISCARDED and recorded, so
+    // the loss is explicit rather than silent.
+    assert_eq!(
+        marks_with_prefix("stream.drop_newest"),
+        vec![
+            String::from("stream.drop_newest i2"),
+            String::from("stream.drop_newest i3")
+        ]
+    );
+    assert_eq!(sub.state(), "active", "a drop policy never pauses");
+    sub.close();
+    src.close();
+    assert_eq!(revl_stream_pending(), 0);
+}
+
+/// `drop_oldest` evicts the buffer HEAD and keeps the newest item (latest-wins
+/// gauges), recording the eviction.
+#[test]
+fn drop_oldest_evicts_the_buffer_head_and_records_it() {
+    reset();
+    let src = Stream::source();
+    let sub = Stream::subscribe(&src, "drop_oldest", 2);
+    for item in ["i0", "i1", "i2"] {
+        assert!(src.emit(String::from(item)));
+    }
+    // latest-wins: the head was evicted, the newest item is buffered
+    next_item(&sub, "i1");
+    next_item(&sub, "i2");
+    assert_eq!(
+        marks_with_prefix("stream.drop_oldest"),
+        vec![String::from("stream.drop_oldest i0")]
+    );
+    sub.close();
+    src.close();
+    assert_eq!(revl_stream_pending(), 0);
+}
+
+/// `block` REFUSES the delivery and puts the subscription in the reserved
+/// `Paused` state. No implicit retry — `emit` returns false, so the provider
+/// knows it is suspended, and the refusal is TRACED. Draining resumes it
+/// eagerly, which is what the reference does with no `drain` window declared; a
+/// declared window is refused by this tier's emitter rather than resumed early.
+#[test]
+fn block_pauses_the_provider_until_the_consumer_drains() {
+    reset();
+    let src = Stream::source();
+    let sub = Stream::subscribe(&src, "block", 2);
+    assert!(src.emit(String::from("i0")));
+    assert!(src.emit(String::from("i1")));
+    assert_eq!(sub.state(), "active");
+    assert!(
+        !src.emit(String::from("i2")),
+        "the provider must be TOLD it is blocked — a `true` here is a silent loss"
+    );
+    assert_eq!(sub.state(), "paused", "the reserved `Paused` state index");
+    let marks = revl_stream_marks();
+    assert!(mark_index(&marks, "stream.paused").is_some(), "{:?}", marks);
+    // the refused delivery is traced as such, exactly as the py reference and
+    // the ts tier trace it — a refusal is never silent.
+    assert!(
+        mark_index(&marks, "stream.emit i2 refused").is_some(),
+        "{:?}",
+        marks
+    );
+
+    next_item(&sub, "i0"); // drains -> resumes eagerly
+    assert_eq!(sub.state(), "active", "draining did not resume the provider");
+    assert!(mark_index(&revl_stream_marks(), "stream.resume").is_some());
+    assert!(
+        src.emit(String::from("i2")),
+        "the provider may emit again once the subscription is Active"
+    );
+    next_item(&sub, "i1");
+    next_item(&sub, "i2"); // no silent loss: nothing was dropped
+    sub.close();
+    src.close();
+    assert_eq!(revl_stream_pending(), 0);
+}
+
+/// A `block`-paused subscription is still torn down by its own bracket inverse:
+/// the pause is a provider-side refusal, never a hold on the consumer, so the
+/// core guarantee (§9 Part A) is untouched by the policy.
+#[test]
+fn block_a_paused_subscription_still_closes_cleanly() {
+    reset();
+    let src = Stream::source();
+    let sub = Stream::subscribe(&src, "block", 1);
+    src.emit(String::from("i0"));
+    src.emit(String::from("i1")); // refused: paused
+    assert_eq!(sub.state(), "paused");
+    sub.close();
+    assert_eq!(sub.state(), "closed");
+    match sub.next() {
+        Ok(StreamNext::Closed) => {}
+        other => panic!("next after close = {:?}, want the Closed terminal", other),
+    }
+    src.close();
+    assert_eq!(revl_stream_pending(), 0);
+}
+
+/// A lossy/blocking POLICY and a `take(n)` link on the SAME subscription — the
+/// interaction between the two Slice 2 landings, which neither one tests alone.
+///
+/// Both mechanisms ride the SAME boolean: the acceptance `deliver` answers.
+/// `take(n)` reserves its slot under the lock and REFUNDS it when the forward is
+/// refused, and a `block` pause is exactly such a refusal. So the pause must not
+/// spend the budget: a consumer that asked for two items has to receive two. If
+/// the two used different signalling, `take(2)` would exhaust after ONE
+/// delivered item, push its `Closed` terminal early, and the second item would
+/// be gone with no overflow, no drop mark and no fault — the silent loss §4.4
+/// rules out.
+///
+/// The sequence is the py reference's, asserted there by
+/// `test_a_block_pause_does_not_spend_the_take_budget`.
+#[test]
+fn a_block_pause_does_not_spend_the_take_budget() {
+    reset();
+    let src = Stream::source();
+    let chain = Stream::take(&src, 2);
+    let sub = Stream::subscribe(&chain, "block", 1);
+
+    assert!(src.emit(String::from("i0")), "the first item fits the buffer");
+    // the buffer is full; `block` refuses and pauses, and the refusal travels UP
+    // through the take link, which must hand its slot back.
+    assert!(
+        !src.emit(String::from("i1")),
+        "the consumer's pause did not reach the provider through the chain"
+    );
+    assert_eq!(sub.state(), "paused");
+    let marks = revl_stream_marks();
+    assert!(
+        mark_index(&marks, "stream.emit i1 refused").is_some(),
+        "the refusal was not traced: {:?}",
+        marks
+    );
+    assert!(
+        mark_index(&marks, "stream.take exhausted").is_none(),
+        "the refused item SPENT the take budget — take(2) exhausted after one \
+         delivered item: {:?}",
+        marks
+    );
+
+    next_item(&sub, "i0"); // drains -> resumes eagerly
+    assert_eq!(sub.state(), "active");
+    // the budget survived the pause, so the second item is still admissible
+    assert!(
+        src.emit(String::from("i1")),
+        "the take budget was not refunded: the second item was refused"
+    );
+    next_item(&sub, "i1");
+    match sub.next() {
+        Ok(StreamNext::Closed) => {}
+        other => panic!("next = {:?}, want take(2)'s Closed terminal", other),
+    }
+    assert_eq!(
+        count_mark(&revl_stream_marks(), "stream.take exhausted"),
+        1,
+        "take's terminal fired more than once"
+    );
+    sub.close();
+    src.close();
+    assert_eq!(revl_stream_pending(), 0);
+}
+
 /// Subscribing to an already-terminal provider terminates at once, so the first
 /// `next` cannot park on a provider that is already gone.
 #[test]
