@@ -2089,6 +2089,38 @@ fn uses_equality(ir: Any) -> Bool {
   return node_uses_equality(value_field(ir, "externs"))
 }
 
+// `_uses_stdlib` / `_emit_stdlib_helpers`, for the ONE group this port covers:
+// `revlStrCmp` (item 458). The reference reserves a slot after `revlEq` and,
+// once the whole unit is emitted, splices in exactly the helper groups the
+// emitted text calls (`_stdlib_helpers_reached`). Every other group in that
+// block is deferred here, so the mirror is gated on the one construct that
+// pulls this one: a relational `bin` the frontend marked `operands: "Str"`,
+// which is precisely what makes `render_bin` emit a `revlStrCmp(` call.
+fn node_uses_str_cmp(v: Any) -> Bool {
+  let k = value_kind(v)
+  if (k == "record") {
+    if (node_kind(v) == "bin" && is_relational(node_op(v)) && node_operands(v) == "Str") { return true }
+    for (key of value_keys(v)) {
+      if (node_uses_str_cmp(value_field(v, key))) { return true }
+    }
+    return false
+  }
+  if (k == "list") {
+    for (child of value_list(v)) {
+      if (node_uses_str_cmp(child)) { return true }
+    }
+    return false
+  }
+  return false
+}
+
+fn uses_str_cmp(ir: Any) -> Bool {
+  if (node_uses_str_cmp(value_field(ir, "components"))) { return true }
+  if (node_uses_str_cmp(value_field(ir, "functions"))) { return true }
+  if (node_uses_str_cmp(value_field(ir, "tests"))) { return true }
+  return node_uses_str_cmp(value_field(ir, "externs"))
+}
+
 fn revl_eq_helper() -> List[Str] {
   return [
     "// revl equality (docs/syntax-2.0.md §3.4): structural, EXCEPT that",
@@ -3164,6 +3196,38 @@ pub fn emit_java_src(ir: Any) -> Str {
   }
   if (needs_value_helpers) {
     for (l of revl_hash_helper()) {
+      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
+  }
+  // The reference reserves the stdlib slot HERE (`stdlib_at`) and splices in
+  // the reached helper groups after the whole unit is emitted. This port
+  // covers one group, `revlStrCmp` (item 458); the rest of the block stays
+  // deferred, so a document reaching another helper is off the byte oracle.
+  // The block header (`_STDLIB_BLOCK_HEADER_LINES`) rides with the block rather
+  // than with any one helper, so it leads and the group follows it verbatim.
+  if (uses_str_cmp(ir)) {
+    for (l of [
+      "// revl stdlib surface (docs/stdlib-2.0.md) — typed static overloads.",
+      "// A Str counts and indexes in Unicode code points (docs/strings.md);",
+      "// Java's String APIs are UTF-16, so the String overloads go through",
+      "// codePointCount/offsetByCodePoints. The List overloads are unchanged.",
+      "// Str ordering, in the unit revl counts strings in: CODE POINTS",
+      "// (docs/strings.md). String.compareTo compares UTF-16 code units,",
+      "// which agrees only below U+FFFF - an astral scalar starts with a",
+      "// high surrogate in D800..DBFF, so it would sort BELOW U+E000..U+FFFF.",
+      "// Java also has no relational operator on String at all, so `<` on two",
+      "// Str values routes here rather than reaching javac as `(a < b)`.",
+      "private static int revlStrCmp(String a, String b) {",
+      "    int i = 0, j = 0;",
+      "    while (i < a.length() && j < b.length()) {",
+      "        int ca = a.codePointAt(i), cb = b.codePointAt(j);",
+      "        if (ca != cb) { return Integer.compare(ca, cb); }",
+      "        i += Character.charCount(ca); j += Character.charCount(cb);",
+      "    }",
+      "    return Boolean.compare(i < a.length(), j < b.length());",
+      "}",
+      "",
+    ]) {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
     }
   }

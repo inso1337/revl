@@ -150,9 +150,6 @@
       "Unreachable canonical spelling: parser.py _CANONICAL_OPS rewrites === to == and !== to != before lowering; successful corpus reaches the canonical equality arms instead.": [
         "op=!==",
         "op===="
-      ],
-      "item 458 Str ordering: `operands: \"Str\"` routes `<`/`<=`/`>`/`>=` on two Str values through the `revlStrCmp` helper, which lives in the stdlib helper block (`_emit_stdlib_helpers`) this port defers. A corpus document spelling the comparison would flip the byte-agreement oracle RED over the absent helper block rather than over the comparison, so the construct is mirrored and unreached. The behaviour is executed on a real JVM in tests/test_458_str_ordering.py.": [
-        "operands=Str"
       ]
     },
     "unported": {
