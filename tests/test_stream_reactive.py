@@ -538,6 +538,251 @@ def test_a_replay_free_program_is_byte_identical():
 
 
 # ---------------------------------------------------------------------------
+# Replay, DECLARED: the provider surface §4.5 gates the consumer request on
+# ---------------------------------------------------------------------------
+
+def _declared(decl: str, head: str) -> str:
+    """A provider carrying the `decl` declaration and a consumer asking `head`."""
+    return (
+        "component C {\n"
+        f"  let src = effect Stream.source() {decl} undo src.close()\n"
+        f"  let sub = subscribe src {head} undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n"
+    )
+
+
+def _declared_ir(decl: str, head: str) -> tuple:
+    body = compile_source(_declared(decl, head), "s.rvl")["components"][0]["body"]
+    source = next(s for s in body if not s.get("subscribe")
+                  and s.get("step") == "let-effect")
+    sub = next(s for s in body if s.get("subscribe"))
+    return source, sub
+
+
+def test_a_declared_provider_admits_the_consumer_request_and_threads_both_ends():
+    """§4.5: replay has ONE owner. The provider declares the backlog it holds,
+    the consumer asks for a slice of it, and both ends land in the IR — the
+    provider so the source can hold the items, the consumer so the subscription
+    reads them before any live item."""
+    source, sub = _declared_ir("replay(8)", "replay(3)")
+    assert source["replay"] == {"count": 8}
+    assert source["acquire"]["replay"] == {"count": 8}
+    assert sub["replay"] == {"count": 3} == sub["acquire"]["replay"]
+
+
+def test_a_durable_cursor_threads_its_name_on_both_ends():
+    source, sub = _declared_ir('replay(from: "orders")', 'replay(from: "orders")')
+    assert source["replay"] == {"cursor": "orders"}
+    assert sub["replay"] == {"cursor": "orders"} == sub["acquire"]["replay"]
+
+
+def test_a_consumer_cannot_ask_past_the_declared_backlog():
+    """The provider holds the buffer, so the consumer cannot ask beyond it.
+    Admitting `replay(3)` against a `replay(2)` provider would ship a claim
+    the provider does not back — the vacuity §4.5 refuses."""
+    msg = _refusal(_declared("replay(2)", "replay(3)"))
+    assert "asks for more than stream source `src` declares" in msg
+    assert "backlog holds 2" in msg
+
+
+def test_a_last_n_provider_does_not_back_a_durable_cursor():
+    msg = _refusal(_declared("replay(4)", 'replay(from: "orders")'))
+    assert "declares a last-n backlog, not a durable cursor" in msg
+
+
+def test_a_durable_cursor_provider_is_resumed_not_asked_for_a_count():
+    msg = _refusal(_declared('replay(from: "orders")', "replay(2)"))
+    assert "declares a durable cursor" in msg
+    assert 'replay(from: "orders")' in msg
+
+
+def test_a_consumer_may_only_resume_the_cursor_the_provider_declared():
+    msg = _refusal(_declared('replay(from: "orders")', 'replay(from: "other")'))
+    assert "declares the durable cursor `orders`, not `other`" in msg
+
+
+def test_a_durable_cursor_must_be_a_literal_name():
+    """The cursor IS the descriptor recovery re-issues the subscription from
+    (§4.9), so it has to be writable into the WAL as it stands. A computed one
+    would be a durability claim with nothing durable in it."""
+    msg = _refusal(_declared("replay(from: 7)", "replay(2)"))
+    assert "durable replay cursor must be a literal name" in msg
+
+
+def test_replay_on_a_fan_in_is_refused_for_having_no_declared_order():
+    msg = _refusal("""
+    component C {
+      let a = effect Stream.source() replay(4) undo a.close()
+      let b = effect Stream.source() replay(4) undo b.close()
+      let sub = subscribe merge(a, b) replay(2) undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "has no declared order" in msg
+
+
+def test_a_durable_cursor_refuses_a_combinator_chain():
+    """A cursor is a position in the PROVIDER's log. A derived stream drops and
+    rewrites items, so it has no position in that log to resume from."""
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() replay(from: "orders") undo src.close()
+      let sub = subscribe src.filter(x => x > 1) replay(from: "orders")
+                  undo sub.close()
+      await sub.next()
+    }
+    """)
+    assert "durable replay cursor and a combinator chain do not compose" in msg
+
+
+@pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest"])
+def test_a_durable_cursor_refuses_the_lossy_policies(policy):
+    """A discarded item would advance the cursor past an item no consumer saw —
+    a resumable position that silently lies."""
+    msg = _refusal(_declared('replay(from: "orders")',
+                             f"policy {policy} replay(from: \"orders\")"))
+    assert "do not compose" in msg and policy in msg
+
+
+def test_replay_on_a_non_stream_acquisition_is_refused():
+    msg = _refusal("""
+    component C {
+      let p = effect Pool.open("u", 4) replay(3) undo p.close()
+    }
+    """)
+    assert "not a stream source" in msg
+
+
+def test_an_unbound_replay_declaration_is_refused():
+    """Replay is consumed BY NAME (`subscribe <source> replay(n)`), so an
+    unbound provider could never have its declaration honoured."""
+    msg = _refusal("""
+    component C {
+      effect Stream.source() replay(3) undo Stream.source()
+    }
+    """)
+    assert "needs a bound stream source" in msg
+
+
+def test_replay_may_not_be_declared_twice_on_a_subscribe():
+    msg = _refusal(_declared("replay(8)", "replay(2) replay(3)"))
+    assert "duplicate `replay`" in msg
+
+
+# ---------------------------------------------------------------------------
+# Replay emission: py lowers it; every other tier REFUSES BY NAME (§4.5, §4.9)
+# ---------------------------------------------------------------------------
+
+def test_python_emits_the_declaration_the_request_and_the_durable_disposer():
+    code = _tier_emit("python").emit(compile_source(
+        _declared('replay(from: "orders")', 'replay(from: "orders")'), "s.rvl"))
+    assert "Stream.source(replay={'cursor': 'orders'})" in code
+    assert ("Stream.subscribe(src, 'error', _revl_ctx, "
+            "replay={'cursor': 'orders'})") in code
+    # §4.9: the bracket registers a disposer that DESCRIBES itself, so the WAL
+    # records a re-issuable inverse instead of a closure it cannot run again.
+    assert "yield sub.durable_undo()" in code
+    # ... and the provider bracket is untouched: only the subscription is the
+    # thing a durable cursor makes reconstructible.
+    assert "yield lambda: src.close()" in code
+
+
+def test_a_last_n_request_keeps_the_ordinary_closure_bracket():
+    """Only the DURABLE cursor buys reconstructibility (§4.9). A last-n backlog
+    dies with the provider, so its subscription is the closure-only bracket it
+    always was — no tier ships a reconstructibility claim a count does not make."""
+    code = _tier_emit("python").emit(compile_source(
+        _declared("replay(8)", "replay(3)"), "s.rvl"))
+    assert "Stream.source(replay={'count': 8})" in code
+    assert "yield lambda: sub.close()" in code
+    assert "durable_undo" not in code
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
+@pytest.mark.parametrize("head", ["", "replay(2)"])
+def test_every_other_tier_refuses_replay_by_name(tier, head):
+    """Both ends refuse: the provider's declaration (a backlog this tier does
+    not hold) and the consumer's request. A tier that emitted either while
+    silently dropping it would deliver only live items and call it replay —
+    exactly the run-and-quietly-disagree outcome item 130 refuses."""
+    emit = _tier_emit(tier)
+    ir = compile_source(_declared("replay(4)", head), "s.rvl")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(ir)
+    msg = str(excinfo.value)
+    assert "`replay(…)` is not lowered" in msg
+    assert "§4.5" in msg and "§4.9" in msg and "backend py" in msg
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
+@pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
+def test_replay_is_refused_beside_a_policy_the_tier_now_lowers(tier, policy):
+    """The combination neither landing had. Since #1042 these tiers LOWER the
+    three non-default §4.4 policies, so a `subscribe` carrying both a lossy
+    policy and a `replay(…)` is the first shape where one half of a head is
+    emittable and the other is not.
+
+    The refusal must win. A tier that lowered the policy and let the backlog
+    fall off the end would emit a program that runs, drops items by a rule the
+    author declared, and never replays anything the author also declared — the
+    run-and-quietly-disagree outcome, with a durability claim as the casualty.
+    Asserted on the message, so a future landing that lowers replay has to
+    delete this test rather than let it pass vacuously."""
+    emit = _tier_emit(tier)
+    head = f"policy {policy} buffer 2 replay(2)"
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_declared("replay(4)", head), "s.rvl"))
+    assert "`replay(…)` is not lowered" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
+@pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
+def test_the_same_head_without_replay_still_lowers_its_policy(tier, policy):
+    """The control for the refusal above, and the thing that keeps it honest:
+    drop the `replay` and the identical head EMITS, carrying the declared policy
+    as the subscription's own argument. So the refusal is about replay, not a
+    blanket refusal of the head it appears in, and this tier's #1042 policy
+    lowering is untouched by this branch."""
+    code = _tier_emit(tier).emit(compile_source(
+        "component C {\n"
+        "  let src = effect Stream.source() undo src.close()\n"
+        f"  let sub = subscribe src policy {policy} buffer 2 undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n", "s.rvl"))
+    # the emitted `subscribe` CALL carrying the policy, per tier's spelling —
+    # not the bare policy word, which also appears in each runtime's own arms.
+    assert (f'"{policy}", 2' in code                       # go / java / rust
+            or f'"{policy}", ctx, {{ capacity: 2 }}' in code)  # ts
+
+
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+def test_replay_outranks_the_drain_refusal_on_a_blocking_tier(tier):
+    """Both unlowered halves on one head: a durable cursor (§4.5) and a `drain`
+    window (§8, still refused here because the deterministic clock lives on py).
+
+    Either message would be honest, so the point is that WHICH one is stable.
+    Pinned because the two refusals are about different things — the window is
+    refused for the clock, replay for the recovery surface — and a silent flip
+    would send an author to fix the wrong half of their `subscribe`."""
+    emit = _tier_emit(tier)
+    head = 'policy block buffer 2 drain 10ms replay(from: "orders")'
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(
+            _declared('replay(from: "orders")', head), "s.rvl"))
+    message = str(excinfo.value)
+    assert "`replay(…)` is not lowered" in message
+    assert "`drain` window is not lowered" not in message
+
+
+def test_wasm_still_refuses_a_replay_program_as_a_stream_program():
+    emit = _tier_emit("wasm")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_declared("replay(4)", "replay(2)"), "s.rvl"))
+    assert "suspends a fiber" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
 # Emission: py renders the chain/policy/window; wasm still REFUSES (§4.6)
 # ---------------------------------------------------------------------------
 

@@ -1250,3 +1250,208 @@ async def test_the_contract_is_built_once_not_per_item(trace):
     c.dispose()
     await _flush()
     assert runtime_mod.Stream.pending() == 0
+
+
+# ===========================================================================
+# §4.5 — provider-declared replay, and §4.9's durable cursor
+# ===========================================================================
+#
+# Replay is the one stream property a consumer cannot have on its own: the
+# PROVIDER holds the backlog, so the claim is the provider's to make and the
+# frontend refuses a consumer that asks for one nobody declared. What follows is
+# the runtime half of that — what the declaration actually buys, executed
+# end to end where the surface allows it and against the reference protocol
+# where it does not.
+#
+# The end-to-end shape needs a window: a consumer that subscribes at the same
+# instant its source opens has nothing to replay. `await Job.run(..)` between
+# the two is that window — the body parks for a few scheduler turns, the harness
+# emits into the open provider, and the subscription that follows sees the
+# backlog. That is exactly the case replay exists for, and the CONTROL below
+# (the same program and the same timing with no `replay`) sees nothing at all.
+
+_REPLAY_LATE = """
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() replay(3) undo src.close()
+  await Job.run("warm")
+  let sub = subscribe src replay(3) undo sub.close()
+  every o in sub { emit sink.write(o) }
+}
+"""
+
+_LIVE_ONLY = _REPLAY_LATE.replace(" replay(3)", "")
+
+
+async def _park_until_source() -> object:
+    """Turn the loop until the activation has opened its provider and parked in
+    `Job.run` — the window in which a late subscriber's backlog accumulates."""
+    for _ in range(8):
+        await asyncio.sleep(0)
+        if runtime_mod.Stream.last_source() is not None:
+            return runtime_mod.Stream.last_source()
+    raise AssertionError("the provider never opened")
+
+
+@pytest.mark.asyncio
+async def test_a_declared_backlog_reaches_a_consumer_that_subscribed_late():
+    """§4.5 end to end: four items are emitted while the consumer is still
+    parked before its `subscribe`. A `replay(3)` provider holds the last three,
+    and the iteration body runs on exactly those before any live item."""
+    module = _module(_REPLAY_LATE, "stream_replay_late")
+    root, sink = _sink_root()
+    c = root.plugin(module.C)
+    src = await _park_until_source()
+
+    for item in ("a", "b", "c", "d"):
+        src.emit(item)
+    await _flush()
+
+    assert sink.written == ["b", "c", "d"], \
+        "the last three held items replayed, in order, oldest first"
+
+    src.emit("e")
+    await _flush()
+    assert sink.written == ["b", "c", "d", "e"], "live items follow the backlog"
+
+    c.dispose()
+    await _flush()
+    assert c.state is FiberState.DISPOSED
+    assert runtime_mod.Stream.pending() == 0, "no residue: the bracket still closed"
+
+
+@pytest.mark.asyncio
+async def test_without_the_declaration_the_same_program_sees_no_backlog():
+    """The non-vacuity control. Identical program and identical timing with the
+    `replay` dropped: every item emitted before the `subscribe` is gone, which
+    is §4.5's default (a consumer sees only what was emitted after it
+    subscribed) and the thing the declaration changes."""
+    module = _module(_LIVE_ONLY, "stream_live_only")
+    root, sink = _sink_root()
+    c = root.plugin(module.C)
+    src = await _park_until_source()
+
+    for item in ("a", "b", "c", "d"):
+        src.emit(item)
+    await _flush()
+
+    assert sink.written == [], "no declaration, no backlog"
+
+    c.dispose()
+    await _flush()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_item_takes_the_declared_buffer_and_policy():
+    """A replayed item is delivered through the provider's own forward path, so
+    it takes the declared bounded buffer and overflow policy exactly as a live
+    item does. There is no second delivery path for a backlog to diverge on:
+    a backlog larger than the buffer is ordinary `error`-policy overflow."""
+    runtime_mod.Stream.reset()
+    src = runtime_mod.Stream.source(replay={"count": 6})
+    for i in range(6):
+        src.emit(i)
+
+    sub = runtime_mod.Stream.subscribe(src, "error", None, capacity=2,
+                                       replay={"count": 6})
+    assert await sub.next() == 0
+    assert await sub.next() == 1
+    with pytest.raises(runtime_mod.StreamFaulted) as excinfo:
+        await sub.next()
+    assert "overflow" in str(excinfo.value)
+
+    sub.close()
+    src.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_durable_cursor_resumes_where_the_last_consumer_stopped():
+    """§4.9's mechanism, observed: the cursor is a POSITION, advanced when the
+    consumer takes an item and not when one is merely delivered. A second
+    subscription on the same declared cursor picks up at the next item, never
+    re-delivering what was already consumed."""
+    runtime_mod.Stream.reset()
+    src = runtime_mod.Stream.source(replay={"cursor": "orders"})
+    for i in range(4):
+        src.emit(f"e{i}")
+
+    first = runtime_mod.Stream.subscribe(src, "error", None,
+                                         replay={"cursor": "orders"})
+    assert [await first.next(), await first.next()] == ["e0", "e1"]
+    first.close()
+    assert runtime_mod.Stream.cursor_at("orders") == 1
+
+    second = runtime_mod.Stream.subscribe(src, "error", None,
+                                          replay={"cursor": "orders"})
+    assert [await second.next(), await second.next()] == ["e2", "e3"]
+    assert runtime_mod.Stream.cursor_at("orders") == 3
+    second.close()
+    src.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_behind_the_held_backlog_is_a_faulted_terminal():
+    """The bound is honest. A provider holds a BOUNDED backlog (§4.4: there are
+    no unbounded buffers), so a cursor the provider has already trimmed past
+    cannot be resumed. Resuming anyway would silently skip items, so it is a
+    `Faulted` terminal like any other — the consumer is told."""
+    runtime_mod.Stream.reset()
+    src = runtime_mod.Stream.source(replay={"cursor": "c"})
+    src.emit("a")
+    src.emit("b")
+    first = runtime_mod.Stream.subscribe(src, "error", None,
+                                         replay={"cursor": "c"})
+    assert await first.next() == "a"
+    first.close()
+
+    cap = runtime_mod.StreamSource.DEFAULT_REPLAY_CAPACITY
+    for i in range(cap + 4):
+        src.emit(i)
+
+    second = runtime_mod.Stream.subscribe(src, "error", None,
+                                          replay={"cursor": "c"})
+    with pytest.raises(runtime_mod.StreamFaulted) as excinfo:
+        await second.next()
+    assert "replay gap" in str(excinfo.value)
+
+    second.close()
+    src.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_cursor_starts_at_the_oldest_held_item_not_a_gap():
+    """A cursor with no recorded position is not a gap: it resumes at the oldest
+    item the provider still holds. `from the beginning of time` is a claim a
+    bounded buffer cannot back, and faulting a first subscribe would make the
+    declaration useless."""
+    runtime_mod.Stream.reset()
+    src = runtime_mod.Stream.source(replay={"cursor": "fresh"})
+    for i in range(3):
+        src.emit(i)
+    sub = runtime_mod.Stream.subscribe(src, "error", None,
+                                       replay={"cursor": "fresh"})
+    assert [await sub.next() for _ in range(3)] == [0, 1, 2]
+    sub.close()
+    src.close()
+    assert runtime_mod.Stream.pending() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_declared_provider_with_no_consumer_request_replays_nothing():
+    """The declaration alone changes nothing a consumer sees: the provider holds
+    the backlog, and only a `subscribe … replay(…)` reads it. So a source that
+    declares replay and a subscription that does not ask is byte-for-byte the
+    default behaviour."""
+    runtime_mod.Stream.reset()
+    src = runtime_mod.Stream.source(replay={"count": 4})
+    src.emit("old")
+    sub = runtime_mod.Stream.subscribe(src, "error", None)
+    src.emit("new")
+    assert await sub.next() == "new", "only what was emitted after subscribe"
+    sub.close()
+    src.close()
+    assert runtime_mod.Stream.pending() == 0

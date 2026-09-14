@@ -12,10 +12,12 @@ blocking lowerings, `every … in` async iteration, and typed events; §4.5
 (`replay`) and §6b (events) record inline what each slice shipped. Java
 graduated the whole v1 surface (S1-S5), so every tier but wasm — which refuses
 streams by design, having no async host seam — now lowers the type, the
-subscribe/next/close bracket, `merge`, `every … in` and `on … as`. Still open:
-the `replay(n)`/`replay(from: <durable>)` declaration, the reconstructible
-crash-recovery case, and the required-`Stream[T]` coeffect wiring that would let
-`on E as e { … }` drop its `in <sub>` clause.
+subscribe/next/close bracket, `merge`, `every … in` and `on … as`. §4.5's
+provider-declared `replay(n)`/`replay(from: <durable>)` and the §4.9
+reconstructible crash-recovery case it gates have since landed on py, the tier
+that owns the WAL; every other tier refuses `replay` by name. Still open: the
+required-`Stream[T]` coeffect wiring that would let `on E as e { … }` drop its
+`in <sub>` clause.
 
 Base: `origin/main` @ `e513772`. Every `file:line` anchor below was read at
 that sha. Every "admitted"/"refused" claim about *today's* checker is a claim
@@ -301,22 +303,66 @@ buffer, and after a crash must reconstruct it), so it is opt-in and it is what
 gates crash-recovery reconstructibility (§4.9). An undeclared `replay` argument
 at `subscribe` is a compile error.
 
-**Shipped (frontend-only).** The `subscribe` head recognizes the two shapes,
-`replay(n)` (last-n) and `replay(from: <durable>)` (a durable cursor), as an
-order-free qualifier alongside `policy`/`buffer`/`drain`
-(`parser._parse_replay_qual`). Both are REFUSED in v1, with two distinct
-diagnostics: a malformed argument (`replay()`, `replay(0)`, `replay(x)`) is a
-syntax error that names the two accepted shapes, and a well-formed one
-(`replay(5)`, `replay(from: cursor)`) is refused as UNDECLARED — replay is a
-durability claim only the provider can make, and the provider-side declaration
-surface does not exist yet (it lands with the reconstructible crash-recovery it
-gates, §4.9). So every `replay(…)` at a `subscribe` is currently the "undeclared
-`replay` argument" compile error this section names. The refusal threads no IR
-key: the `"replay"` slot §5 reserves stays absent until the provider declaration
-and a tier that honors the backlog land together, so nothing ships a silently
-inert (vacuous) durability claim in the meantime. The surface grammar is the one
-seam this slice adds; flipping the refusal to an admission-plus-thread is the
-later slice's whole job.
+**Shipped (py).** Both ends of the claim are now surface. The provider
+declares what it holds, between the acquisition and its `undo`:
+
+```revl fragment
+let src = effect Stream.source() replay(8) undo src.close()
+let cur = effect Stream.source() replay(from: "orders") undo cur.close()
+```
+
+and only then may a consumer ask for a backlog, with the same spelling as an
+order-free qualifier alongside `policy`/`buffer`/`drain`:
+
+```revl fragment
+let sub = subscribe src replay(3) undo sub.close()
+```
+
+One routine (`parser._parse_replay_qual`) reads both, so the two surfaces cannot
+drift in spelling, and a malformed argument (`replay()`, `replay(0)`,
+`replay(x)`) is still the syntax error naming the two accepted shapes. The
+admission pass compares them field for field (`lower._admit_replay`) and refuses
+five ways, each a claim the provider does not back: an undeclared `replay` at a
+`subscribe` (this section's last sentence, unchanged), a count larger than the
+declared backlog, a durable cursor against a last-n provider (and the reverse),
+a cursor name the provider did not declare, and a `replay` on a `merge(a, b)`
+fan-in, where neither source declared how its backlog orders against the
+other's. A durable cursor additionally refuses a combinator chain and the
+`drop_*` policies: a cursor is a position in the PROVIDER's log, and a derived
+or lossy stream has no position in that log to resume from.
+
+The cursor is a string LITERAL by rule. It is the descriptor recovery re-issues
+the subscription from (§4.9), so it has to be writable into the WAL as it
+stands; a computed cursor would be a durability claim with nothing durable in
+it.
+
+Lowering is the py reference tier's, and so is the backlog. A declared provider
+holds a bounded log (`StreamSource._hold`), and a replayed item is delivered
+through the provider's own forward path before any live item, so it takes the
+declared buffer and overflow policy exactly as a live item does. A backlog
+larger than the buffer is ordinary `error`-policy overflow, not a special case,
+and there is no second delivery path for a replayed item to diverge on. A cursor
+advances on CONSUMPTION rather than delivery, so the position a restart resumes
+from never claims an item the consumer did not take, and a cursor the provider
+has already trimmed past is a `Faulted("replay gap")` terminal rather than a
+silent skip.
+
+ts, go, rust and java REFUSE `replay` by name, at the declaration as well as at
+the request: the half of the claim that makes it worth anything is §4.9's, which
+is the WAL's, and a tier that delivered a backlog while calling it durable would
+run and quietly disagree with the reference. This is now the only unlowered half
+a `subscribe` head can carry alongside lowered ones — those tiers lower the
+combinator chain and all four §4.4 policies — so the refusal has to WIN over a
+head it shares. A tier that lowered the policy and let the backlog fall off the
+end would emit a program that runs, drops items by the rule the author declared,
+and never replays what the author also declared. Where a head carries both an
+unlowered `replay` and an unlowered `drain` window, the replay refusal is the
+one reported: the two are refused for different reasons, the window for the
+deterministic clock and replay for the recovery surface, and a stable answer is
+what keeps an author from fixing the wrong half.
+
+The `"replay"` slot §5 reserves is threaded only when declared, so a replay-free
+program's IR is byte-identical.
 
 ### 4.6 The minimal six-tier protocol — subscribe / next / close, wasm REFUSES
 
@@ -411,6 +457,31 @@ recover can re-issue `subscribe` from the cursor and resume. This is the only
 reconstructible case, and it is gated on the same declaration that gates replay,
 so the two durability claims cannot diverge. Default stays non-reconstructible;
 the honest report is the deliverable, not automatic resurrection.
+
+**Shipped (py).** The mechanism is one disposer, not a second teardown path. A
+cursor subscription registers `sub.durable_undo()` in place of the usual
+`lambda: sub.close()`. Calling it is exactly `close()` — the author's own
+`undo`, so the in-process teardown a cursor subscription takes is the one every
+other bracket takes and §0 is not re-argued for it — but it can also state the
+cursor, and the recorder asks it to (`replay.record_yield`, beside the point
+where it already reads the declared capability scope). So the WAL records
+`{"receiver": "Stream", "method": "close", "args": ["orders"]}` with a referent
+that outlives the process, and `revl recover` re-issues it. A plain subscription
+records what it always did, the honest "closure over in-process memory". No new
+WAL version and no new record shape: this is the existing explicit-descriptor
+path (`inverse_descriptor`'s `reconstructible: true` branch) reached by a
+disposer that describes itself.
+
+The question crosses the runtime/recorder boundary as ONE declared seam,
+`revl_durable_inverse(disposer)`, registered in `tools/check_runtime_seams.py`
+and asserted there to be defined exactly once with the arity its caller uses.
+The alternative — a pair of attributes the recorder reads off the disposer by
+string name — is the issue-#292 shape: nothing checks the two halves still
+agree, and a rename on either side does not raise, it just stops a durable
+subscription from claiming the reconstructibility this section grants it. A
+durability claim that can go missing without an error is the one thing §4.5 and
+§4.9 are jointly written to prevent, so it does not get to go missing here
+either.
 
 ## 5. IR and lowering
 
@@ -546,6 +617,7 @@ core guarantee and the refusal fence, on the reference tier.
 | **3** | Blocking tiers + `merge` | **go/java/rust** emit + one runtime helper each; the multi-source teardown ordering | `merge`; go/java/rust lowering of Slices 1-2 | 1 (2 for combinators) |
 | **4** | `every … in` async iteration | parser (`every IDENT in`), the effect-context body §4.7, handler-abort-closes | `every x in sub { … }` | 1; **item 131** (the body composes effects across the `next` suspension, so it needs awaited `effect`/`emit`) |
 | **5** | Typed EVENTS | `event`/`on … as`, schema contract, idempotency key (item 309), dedup | `event E(key: f)`, `on E as e in sub { }` (§6b) | 4 |
+| **6** | Provider-declared replay + reconstructible recovery | parser (the declaration and the request, one routine); lower (`_admit_replay`); **py** backlog + durable cursor + the self-describing disposer; every other tier REFUSES by name | `replay(n)`, `replay(from: "<name>")` (§4.5); the one reconstructible crash-recovery case (§4.9) | 1; the WAL (the durable half of the claim is `revl recover`'s) |
 
 **Slice 1 is the landable unit.** It ships the type, the three core operations,
 the bracket lifecycle, and the core-guarantee exit tests (§10.1-10.3) on py,

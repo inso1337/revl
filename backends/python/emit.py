@@ -1127,6 +1127,15 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
 _MAP_CAS_VERBS = frozenset({"insert_if_absent"})
 
 
+def _replay_kwarg(decl: dict) -> str:
+    """The `replay=` keyword for a §4.5 declaration/request — `{"count": n}` or
+    `{"cursor": name}` — rendered as a literal dict so the runtime reads the same
+    two shapes the IR carries, with nothing in between to drift."""
+    if "cursor" in decl:
+        return "{'cursor': %r}" % (str(decl["cursor"]),)
+    return "{'count': %d}" % (int(decl["count"]),)
+
+
 def _is_map_cas(acquire: Any) -> bool:
     """Whether an acquisition node is a result-guarded map CAS (item 397)."""
     return (isinstance(acquire, dict) and acquire.get("kind") == "call"
@@ -1525,6 +1534,11 @@ class _ComponentEmitter:
                 raise EmitError(f"{where}: unknown host builtin {fn!r}")
             self.uses.add(root)
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+            if fn == "Stream.source" and expr.get("replay"):
+                # item 130 §4.5: the provider's replay declaration — the backlog
+                # it holds. Rendered only when DECLARED, so a replay-free source
+                # still emits the exact `Stream.source()` (byte-identity, §10.9).
+                args = f"replay={_replay_kwarg(expr['replay'])}"
             return f"{fn}({args})"
         if kind == "subscribe":
             # item 130: `subscribe <stream>` opens a single-consumer subscription
@@ -1561,6 +1575,12 @@ class _ComponentEmitter:
                 extra += f", capacity={int(expr.get('buffer'))}"
             if expr.get("drain") is not None:
                 extra += f", drain_ms={int(expr.get('drain'))}"
+            if expr.get("replay"):
+                # item 130 §4.5: the backlog this consumer asked for and the
+                # provider declared. Delivered through the provider's own
+                # forward path before any live item, so the declared buffer and
+                # policy apply to a replayed item exactly as to a live one.
+                extra += f", replay={_replay_kwarg(expr['replay'])}"
             return f"Stream.subscribe({stream}, {policy!r}, _revl_ctx{extra})"
         if kind == "fn":
             name = _ident(expr.get("name"), f"{where}: function")
@@ -1844,6 +1864,15 @@ class _ComponentEmitter:
                     # result-guarded undo (item 397): identity inverse on a
                     # `false` CAS, so teardown never removes the winner's entry.
                     out.add(indent, f"yield lambda: ({undo} if {bind} else None)")
+                elif step.get("subscribe") \
+                        and (step.get("replay") or {}).get("cursor"):
+                    # item 130 §4.9: a DURABLE-CURSOR subscription registers a
+                    # disposer that describes itself. It still calls exactly
+                    # `close()` — the author's `undo` — but it carries the cursor
+                    # name, so the WAL records a re-issuable inverse instead of
+                    # "closure over in-process memory" and a crashed subscription
+                    # is reconstructible residue rather than unreconstructible.
+                    out.add(indent, f"yield {bind}.durable_undo()")
                 else:
                     out.add(indent, f"yield lambda: {undo}")
         elif kind == "effect":

@@ -3629,7 +3629,24 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
     tier does not carry, so lowering it would resume EARLY and quietly disagree
     with the reference. Emitting a subscription that SILENTLY dropped the window
     is the worst outcome available — the program would run and answer
-    differently from the py reference — so refuse by name instead."""
+    differently from the py reference — so refuse by name instead.
+
+    §4.5's `replay(…)` is the other one, and it is refused for a reason of its
+    own rather than for the clock. Replay is a DURABILITY claim, and the half
+    that makes it worth anything is §4.9's: a durable cursor is what turns a
+    crashed subscription from residue into a re-issuable descriptor, and that
+    recovery surface is the WAL's, which lives on the py reference tier. A tier
+    that emitted a subscription while silently dropping the backlog would
+    deliver only live items and call it replay. Refused at the provider's
+    declaration as well as at the consumer's request, because a declared backlog
+    nothing holds is the same vacuous claim one end earlier."""
+    if node.get("replay"):
+        raise EmitError(
+            f"a stream `replay(…)` is not lowered on the {tier} tier; replay is "
+            "a durability claim — the provider holds the backlog, and a durable "
+            "cursor is what makes a crashed subscription reconstructible rather "
+            "than residue — and that recovery surface is the py reference "
+            "tier's (item 130 §4.5, §4.9) — try `--backend py`")
     if node.get("drain") is not None:
         raise EmitError(
             f"a `drain` window is not lowered on the {tier} tier; the `block` "
@@ -6315,6 +6332,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
     if kind == "host":
         # component dialect: `Pool.open(..)` -> `Pool::open(..)`.
         fn = node.get("fn")  # e.g. "Pool.open"
+        if node.get("replay"):
+            # item 130 §4.5: a provider-side `replay(…)` declaration this tier
+            # cannot honour. Refused rather than dropped — a declared backlog
+            # nothing holds is the same vacuous durability claim the consumer's
+            # request would be, one end earlier.
+            _refuse_unlowered_stream_surface(node, "cordis-rs")
         host, _, method = fn.partition(".")
         rendered = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
         return f"{host}::{_mname(method)}({', '.join(rendered)})"
