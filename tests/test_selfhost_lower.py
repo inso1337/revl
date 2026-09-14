@@ -162,6 +162,12 @@ def _classify(e: RevlError) -> str:
     m = e.message
     if "provision conflict" in m and "(G2)" in m:
         return "G2"
+    # item 186, the replacement wave: the unmet-consumer refusal of
+    # `admission._admit_provision_withdrawal`. It DOES set `code="G2"`, but the
+    # code arm above is deliberately limited to G4/A1, so the marker classifies
+    # it like every other G2 in this file.
+    if "withdraws the running provider of" in m:
+        return "G2"
     # G3 (dependency-cycle / self-provision) and G1 (undeclared access) set no
     # code, so their message markers classify them. G3's two shapes both end
     # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
@@ -2972,15 +2978,275 @@ def test_ambient_halted_header_refuses_every_incoming(admit_ambient):
 
 
 def test_ambient_unknown_and_deferred_row_kinds_refuse(admit_ambient):
-    """An unknown row kind refuses naming the row; the deferred wave's kinds
-    (`-C` replacement, `C=k:T` handoff) fail closed rather than mis-admitting."""
+    """An unknown row kind refuses naming the row; a `-C` row that does not name
+    a bare component refuses as a garbled wire; the one kind still deferred (the
+    `C=k:T` handoff row, blocked on the self-host type layer) fails closed
+    rather than mis-admitting."""
     clean = ("service D { fn q(s: Str) -> Int } component NewStore provides "
              "db: D { provide db { fn q(s) { let x = s   return 0 } } }")
     assert admit_ambient(clean, "?A/a/") == (
         "MANIFEST|unrecognized manifest row `?A/a/`")
-    assert admit_ambient(clean, "OldStore/db/;-OldStore") == (
-        "MANIFEST|manifest replacement row `-OldStore` needs the deferred "
-        "replacement wave (item 186)")
+    for row in ("-", "-OldStore/db/", "-Old<db"):
+        assert admit_ambient(clean, "OldStore/db/;" + row) == (
+            "MANIFEST|manifest replacement row `" + row
+            + "` does not name a component"), row
     assert admit_ambient(clean, "OldStore=db:D") == (
         "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred "
         "handoff/type-layer wave (item 186)")
+
+
+# ---------------------------------------- item 186, the REPLACEMENT wave, part 1
+#
+# `-C` withdrawal rows, G2/ROUTE/G3 against `M \\ R`, the unmet-consumer refusal,
+# and ORACLE B — the differential that builds the running manifest on BOTH
+# sides, which is what the roadmap asked item 186 for and what slices 1-3 could
+# not have: once a replacement is in play the `admit_ambient(X, wire(M)) ==
+# admit_src(M ++ X)` equivalence of oracle A breaks by construction (a hot-swap
+# OVERRIDES what the manifest holds, where the composed text CONFLICTS with it).
+#
+# Oracle B therefore derives both sides from ONE artifact: the reference
+# compiles `M` to `IR(M)`; `revl.manifest_wire(ir, replacing=R)` renders `IR(M)`
+# onto the gate's wire; and the first `TAG|message` of
+# `compile_source(X, manifest=IR(M), replacing=R)` is compared byte-for-byte
+# against `admit_ambient(X, wire)`.
+#
+# FAILURE DIRECTION of the one refusal this adds (`withdraws the running
+# provider of ...`): fail-CLOSED. The running composition keeps running and the
+# admission is what does not happen. Its scope is exactly the transition met ->
+# unmet: a requirement already unmet before the admission stays admissible, a
+# routed key is left to the item-162 per-realm check, and the match is
+# per-(key, realm) so re-providing a withdrawn key in another realm does not
+# satisfy a shared-realm consumer. The controls below pin all three, so the
+# refusal cannot pass by refusing everything.
+
+_W_SVCS = ("service D { fn q(s: Str) -> Int }\n"
+           "service C { fn g(k: Str) -> Str }\n")
+_W_DB = ('component Db provides db: D {\n'
+         '  provide db { fn q(s) { let x = s   return 0 } }\n'
+         '}\n')
+_W_STORE = ('component Store requires db: D provides cache: C {\n'
+            '  provide cache { fn g(k) { return k } }\n'
+            '}\n')
+#: The running composition M: one provider, one retained consumer of it. The
+#: smallest shape in which a withdrawal can strand something.
+_W_M = _W_SVCS + _W_DB + _W_STORE
+
+#: `Db` redeclared WITHOUT its `db` provision — the implicit same-name
+#: replacement `compile_files` performs, and the common hot-swap shape.
+_W_X_DROPS = (_W_SVCS + 'component Db provides other: C {\n'
+              '  provide other { fn g(k) { return k } }\n'
+              '}')
+#: The legitimate replacement: same name, key re-provided in the same realm.
+_W_X_KEEPS = (_W_SVCS + 'component Db provides db: D {\n'
+              '  provide db { fn q(s) { let x = s   return 1 } }\n'
+              '}')
+
+_W_LOST_DB = (
+    "G2|this admission withdraws the running provider of `db` (`Db`) and "
+    "nothing provides it again, but the running component `Store` still "
+    "requires it (G2)")
+
+
+def _ref_ambient(src: str, running_src: str,
+                 replacing: tuple[str, ...] = ()) -> str:
+    """ORACLE B, reference leg: the FIRST verdict of
+    `compile_source(X, manifest=IR(M), replacing=R)`, on the gate's
+    "<TAG>|<message>" wire ("" when the reference admits)."""
+    ir = compile_source(running_src, "running.rvl")
+    try:
+        compile_source(src, "diff.rvl", manifest=ir, replacing=replacing)
+        return ""
+    except RevlErrors as error:
+        first = error.errors[0]
+        return _classify(first) + "|" + first.message
+    except RevlError as error:
+        return _classify(error) + "|" + error.message
+
+
+def _gate_ambient(admit_ambient, src: str, running_src: str,
+                  replacing: tuple[str, ...] = ()) -> str:
+    """ORACLE B, gate leg: `admit_ambient(X, manifest_wire(IR(M), R))`.
+
+    An empty `R` renders the plain slice-1-3 wire (no withdrawal row), which is
+    what keeps the two controls below runnable against a gate that has no
+    replacement support at all."""
+    from revl import manifest_wire
+    ir = compile_source(running_src, "running.rvl")
+    wire = manifest_wire(ir, replacing=replacing) if replacing else manifest_wire(ir)
+    return admit_ambient(src, wire)
+
+
+def test_manifest_wire_renders_the_withdrawal_rows():
+    """`replacing=R` renders one `-C` row per withdrawn component, after the
+    composition rows it acts on — the wire's carrier for `compile_files`'
+    `replacing=`, so `R` is a property of the admission CALL and never
+    something the incoming text can assert about itself."""
+    from revl import manifest_wire
+    ir = compile_source(_W_M, "running.rvl")
+    rows = manifest_wire(ir, replacing=("Db",)).split(";")
+    assert rows[-1] == "-Db"
+    assert "Db/db/" in rows and "Store<db" in rows
+    # no `replacing` renders no withdrawal row: slices 1-3 are byte-identical
+    assert manifest_wire(ir) == ";".join(rows[:-1])
+
+
+def test_manifest_wire_realm_qualifies_a_requirement_row():
+    """A running consumer that resolves its required key in a named realm
+    renders `C<k/r`, so the gate's per-(key, realm) reasoning matches `_link`'s
+    instead of assuming the shared realm."""
+    from revl import manifest_wire
+    src = (_W_SVCS
+           + 'component Db provides db: D {\n'
+             '  isolate db in realm("t1")\n'
+             '  provide db { fn q(s) { let x = s   return 0 } }\n'
+             '}\n'
+             'component Store requires db: D provides cache: C {\n'
+             '  isolate db in realm("t1")\n'
+             '  provide cache { fn g(k) { return k } }\n'
+             '}\n')
+    rows = set(manifest_wire(compile_source(src, "running.rvl")).split(";"))
+    assert "Db/db/t1" in rows, rows
+    assert "Store<db/t1" in rows, rows
+
+
+def test_oracle_b_implicit_replacement_that_strands_a_consumer(admit,
+                                                               admit_ambient):
+    """ORACLE B, the refusal. `Db` is redeclared without `db`; `Store` is
+    RETAINED and still requires it. Both sides refuse with the same string.
+
+    Fails on main in the ADMISSION direction: the gate saw a key leave the
+    provider table and a retained consumer with no edge, so it had nothing to
+    report and wrongly ADMITTED."""
+    got = _gate_ambient(admit_ambient, _W_X_DROPS, _W_M)
+    assert got == _W_LOST_DB, got
+    assert got == _ref_ambient(_W_X_DROPS, _W_M)
+
+
+def test_oracle_b_explicit_withdrawal_row_strands_a_consumer(admit_ambient):
+    """The same loss reached through an explicit `-Db` row rather than a
+    redeclaration: the incoming text mentions `Db` nowhere. Both sides refuse
+    identically, and the gate anchors the refusal at line 0 because the
+    withdrawn provider has no declaration in this text."""
+    fresh = (_W_SVCS + 'component Fresh provides other: C {\n'
+             '  provide other { fn g(k) { return k } }\n'
+             '}')
+    got = _gate_ambient(admit_ambient, fresh, _W_M, replacing=("Db",))
+    assert got == _W_LOST_DB, got
+    assert got == _ref_ambient(fresh, _W_M, replacing=("Db",))
+
+
+def test_oracle_b_re_providing_in_another_realm_does_not_satisfy_the_consumer(
+        admit_ambient):
+    """The case a realm-blind check would have wrongly admitted: the
+    replacement re-provides `db`, but isolated into realm `t1`, while `Store`
+    resolves `db` in the SHARED realm. The key is still lost to that consumer,
+    so both sides refuse."""
+    realmed = (_W_SVCS + 'component Db provides db: D {\n'
+               '  isolate db in realm("t1")\n'
+               '  provide db { fn q(s) { let x = s   return 0 } }\n'
+               '}')
+    got = _gate_ambient(admit_ambient, realmed, _W_M)
+    assert got == _W_LOST_DB, got
+    assert got == _ref_ambient(realmed, _W_M)
+
+
+def test_oracle_b_a_legitimate_replacement_still_admits(admit_ambient):
+    """NON-VACUITY. The ordinary hot-swap — same name, same key, same realm —
+    ADMITS on both sides. On main the gate refused it with a spurious G2
+    provision conflict, because the link ran against `M` rather than `M \\ R`
+    and the withdrawn provider was still in the seeded table."""
+    got = _gate_ambient(admit_ambient, _W_X_KEEPS, _W_M)
+    assert got == "", got
+    assert got == _ref_ambient(_W_X_KEEPS, _W_M) == ""
+
+
+def test_oracle_b_an_already_unmet_requirement_stays_admissible(admit_ambient):
+    """NON-VACUITY, scope. `Store` requires `db` and NOTHING ever provided it;
+    the admission withdraws `Aux`, which no one consumes. Only the transition
+    met -> unmet is a refusal — an incremental composition legitimately admits
+    a consumer before its provider — so both sides admit."""
+    running = (_W_SVCS + _W_STORE
+               + 'component Aux provides aux: C {\n'
+                 '  provide aux { fn g(k) { return k } }\n'
+                 '}\n')
+    drops_aux = (_W_SVCS + 'component Aux provides other: C {\n'
+                 '  provide other { fn g(k) { return k } }\n'
+                 '}')
+    got = _gate_ambient(admit_ambient, drops_aux, running)
+    assert got == "", got
+    assert got == _ref_ambient(drops_aux, running) == ""
+
+
+def test_ambient_admission_without_a_withdrawal_is_unchanged(admit_ambient):
+    """NON-VACUITY, the other side of the gate: with nothing withdrawn, a
+    retained running consumer is no reason to refuse anything. Passes on main
+    too — the withdrawal check is inert unless this admission drops something."""
+    fresh = (_W_SVCS + 'component Fresh provides other: C {\n'
+             '  provide other { fn g(k) { return k } }\n'
+             '}')
+    got = _gate_ambient(admit_ambient, fresh, _W_M)
+    assert got == "", got
+    assert got == _ref_ambient(fresh, _W_M) == ""
+
+
+def test_withdrawing_the_consumer_itself_releases_the_key(admit_ambient):
+    """The composition's own escape hatch, as the design note words it: "a
+    composition that wants a key gone unloads the consumer first". With both
+    `Db` and `Store` withdrawn there is no retained consumer left, so the same
+    drop admits."""
+    fresh = (_W_SVCS + 'component Fresh provides other: C {\n'
+             '  provide other { fn g(k) { return k } }\n'
+             '}')
+    got = _gate_ambient(admit_ambient, fresh, _W_M, replacing=("Db", "Store"))
+    assert got == "", got
+    assert got == _ref_ambient(fresh, _W_M, replacing=("Db", "Store")) == ""
+
+
+def test_withdrawal_row_for_a_component_that_is_not_running_withdraws_nothing(
+        admit_ambient):
+    """A `-C` naming a component the manifest does not hold is a no-op, exactly
+    as `replacing=` is on the reference side: it matches no row, so nothing is
+    lost and the admission is decided on its own merits."""
+    fresh = (_W_SVCS + 'component Fresh provides other: C {\n'
+             '  provide other { fn g(k) { return k } }\n'
+             '}')
+    got = _gate_ambient(admit_ambient, fresh, _W_M, replacing=("Nowhere",))
+    assert got == "", got
+    assert got == _ref_ambient(fresh, _W_M, replacing=("Nowhere",)) == ""
+
+
+def test_a_replacement_no_longer_conflicts_with_what_it_withdraws(admit_ambient):
+    """G2 runs against `M \\ R`. A key the admission WITHDRAWS is out of the
+    seeded table, so taking it over under a new component name is not a
+    conflict — which is what makes a replacement expressible at all. A key a
+    RETAINED component provides is untouched, and re-providing it still
+    conflicts, on both sides."""
+    running = (_W_M + 'component Aux provides aux: C {\n'
+               '  provide aux { fn g(k) { return k } }\n'
+               '}\n')
+    takeover = (_W_SVCS + 'component NewAux provides aux: C {\n'
+                '  provide aux { fn g(k) { return k } }\n'
+                '}')
+    got = _gate_ambient(admit_ambient, takeover, running, replacing=("Aux",))
+    assert got == "", got
+    assert got == _ref_ambient(takeover, running, replacing=("Aux",)) == ""
+
+    clash = (_W_SVCS + 'component NewCache provides cache: C {\n'
+             '  provide cache { fn g(k) { return k } }\n'
+             '}')
+    got = _gate_ambient(admit_ambient, clash, running, replacing=("Aux",))
+    assert got == ("G2|provision conflict: key `cache` is provided by both "
+                   "Store and NewCache (G2)"), got
+    assert got == _ref_ambient(clash, running, replacing=("Aux",))
+
+
+def test_ambient_g3_cycle_survives_a_withdrawal_of_an_unrelated_component(
+        admit_ambient):
+    """The G3 union graph is rebuilt over `M \\ R`: a cycle that closes through
+    a RETAINED manifest component is still seen when the admission withdraws a
+    different one."""
+    running = (_G3_SVC + _G3_M
+               + 'component Spare provides s: B { provide s { fn pb() { return 0 } } }')
+    got = _gate_ambient(admit_ambient, _G3_SVC + _G3_X, running,
+                        replacing=("Spare",))
+    assert got == "G3|dependency cycle: A -> B -> A (G3)", got

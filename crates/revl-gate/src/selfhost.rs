@@ -215,6 +215,8 @@ pub struct Prov3 {
 pub struct MReq {
     comp: String,
     key: String,
+    rlm: String,
+    routed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -327,6 +329,7 @@ pub struct Manifest {
     provs: Vec<Prov3>,
     reqs: Vec<MReq>,
     mnames: Vec<String>,
+    repl: Vec<String>,
     halted: bool,
     bad: String,
 }
@@ -4251,7 +4254,10 @@ fn manifest_edges(reqs: &[MReq], i: i64, provs: &[Prov3], succ: std::collections
     if (i >= reqs.revl_length()) {
         return succ;
     }
-    let provider = find_provider(provs, &(reqs)[(i) as usize].key, "", 0i64);
+    if (reqs)[(i) as usize].routed.clone() {
+        return manifest_edges(reqs, (i).checked_add(1i64).expect("revl: Int overflow"), provs, succ.clone());
+    }
+    let provider = find_provider(provs, &(reqs)[(i) as usize].key, &(reqs)[(i) as usize].rlm, 0i64);
     if ((provider == "") || (provider == (reqs)[(i) as usize].comp)) {
         return manifest_edges(reqs, (i).checked_add(1i64).expect("revl: Int overflow"), provs, succ.clone());
     }
@@ -6077,34 +6083,62 @@ fn ident_led(row: &str) -> bool {
     return ({ let _rc: &str = &c; ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") } || (c == "_"));
 }
 
+fn bare_ident(s: &str, i: i64) -> bool {
+    if (s.revl_length() == 0i64) {
+        return false;
+    }
+    if (i >= s.revl_length()) {
+        return true;
+    }
+    if ((i == 0i64) && (!ident_led(s))) {
+        return false;
+    }
+    if ((i > 0i64) && (!ty_word_char(&(s.revl_slice(i, (i).checked_add(1i64).expect("revl: Int overflow")))))) {
+        return false;
+    }
+    return bare_ident(s, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn parse_mreq(comp: String, spec: String) -> MReq {
+    if (spec.revl_slice(0i64, 1i64) == "*") {
+        return MReq { comp: comp.clone(), key: spec.revl_slice(1i64, spec.revl_length()), rlm: String::from(""), routed: true };
+    }
+    let b = cut(spec.clone(), "/");
+    return MReq { comp: comp.clone(), key: b.s.clone(), rlm: b.rest.clone(), routed: false };
+}
+
 fn parse_row(row: String, man: Manifest) -> Manifest {
     if (man.bad != "") {
         return man;
     }
     if (row.revl_slice(0i64, 1i64) == "!") {
         if (row == "!halted") {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), halted: true, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, bad: String::from("") };
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest header row `").revl_concat(&row)).revl_concat("`"))) };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest header row `").revl_concat(&row)).revl_concat("`"))) };
     }
     if (row.revl_slice(0i64, 1i64) == "-") {
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest replacement row `").revl_concat(&row)).revl_concat("` needs the deferred replacement wave (item 186)"))) };
+        let name = row.revl_slice(1i64, row.revl_length());
+        if (!bare_ident(&name, 0i64)) {
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest replacement row `").revl_concat(&row)).revl_concat("` does not name a component"))) };
+        }
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: if contains(&man.repl, &name) { man.repl } else { man.repl.revl_push(name.clone()) }, halted: man.halted, bad: String::from("") };
     }
     if ident_led(&row) {
         if (row.revl_index_of("=") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest handoff row `").revl_concat(&row)).revl_concat("` needs the deferred handoff/type-layer wave (item 186)"))) };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("manifest handoff row `").revl_concat(&row)).revl_concat("` needs the deferred handoff/type-layer wave (item 186)"))) };
         }
         if (row.revl_index_of("<") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "<");
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(MReq { comp: a.s.clone(), key: a.rest.clone() }), mnames: add_mname(man.mnames.clone(), a.s.clone()), halted: man.halted, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(parse_mreq(a.s.clone(), a.rest.clone())), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
         }
         if (row.revl_index_of("/") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "/");
             let b = cut(a.rest.clone(), "/");
-            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), halted: man.halted, bad: String::from("") };
+            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, bad: String::from("") };
         }
     }
-    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest row `").revl_concat(&row)).revl_concat("`"))) };
+    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, bad: tagged("MANIFEST", &((String::from("unrecognized manifest row `").revl_concat(&row)).revl_concat("`"))) };
 }
 
 fn parse_manifest_rows(m: String, man: Manifest) -> Manifest {
@@ -6117,7 +6151,90 @@ fn parse_manifest_rows(m: String, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: String) -> Manifest {
-    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], mnames: vec![], halted: false, bad: String::from("") });
+    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], mnames: vec![], repl: vec![], halted: false, bad: String::from("") });
+}
+
+fn dropped_names(comps: Vec<CompD>, i: i64, acc: Vec<String>) -> Vec<String> {
+    if (i >= comps.revl_length()) {
+        return acc;
+    }
+    let n = (comps)[(i) as usize].name.clone();
+    return dropped_names(comps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), if contains(&acc, &n) { acc.clone() } else { acc.revl_push(n.clone()) });
+}
+
+fn split_provs(ps: Vec<Prov3>, drop: Vec<String>, wantDropped: bool, i: i64, acc: Vec<Prov3>) -> Vec<Prov3> {
+    if (i >= ps.revl_length()) {
+        return acc;
+    }
+    let dropped = contains(&drop, &(ps)[(i) as usize].comp);
+    return split_provs(ps.clone(), drop.clone(), wantDropped, (i).checked_add(1i64).expect("revl: Int overflow"), if (dropped == wantDropped) { acc.revl_push((ps)[(i) as usize].clone()) } else { acc.clone() });
+}
+
+fn keep_reqs(rs: Vec<MReq>, drop: Vec<String>, i: i64, acc: Vec<MReq>) -> Vec<MReq> {
+    if (i >= rs.revl_length()) {
+        return acc;
+    }
+    return keep_reqs(rs.clone(), drop.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), if contains(&drop, &(rs)[(i) as usize].comp) { acc.clone() } else { acc.revl_push((rs)[(i) as usize].clone()) });
+}
+
+fn keep_names(ns: Vec<String>, drop: Vec<String>, i: i64, acc: Vec<String>) -> Vec<String> {
+    if (i >= ns.revl_length()) {
+        return acc;
+    }
+    return keep_names(ns.clone(), drop.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), if contains(&drop, &(ns)[(i) as usize]) { acc.clone() } else { acc.revl_push((ns)[(i) as usize].clone()) });
+}
+
+fn comp_provs(c: CompD, pks: Vec<ProvKey>, ki: i64, acc: Vec<Prov3>) -> Vec<Prov3> {
+    if (ki >= pks.revl_length()) {
+        return acc;
+    }
+    return comp_provs(c.clone(), pks.clone(), (ki).checked_add(1i64).expect("revl: Int overflow"), acc.revl_push(Prov3 { key: (pks)[(ki) as usize].key.clone(), rlm: (pks)[(ki) as usize].rlm.clone(), comp: c.name.clone() }));
+}
+
+fn live_provs(comps: Vec<CompD>, i: i64, acc: Vec<Prov3>) -> Vec<Prov3> {
+    if (i >= comps.revl_length()) {
+        return acc;
+    }
+    return live_provs(comps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp_provs((comps)[(i) as usize].clone(), (comps)[(i) as usize].provKeys.clone(), 0i64, acc.clone()));
+}
+
+fn lost_provs(wp: Vec<Prov3>, resulting: Vec<Prov3>, i: i64, acc: Vec<Prov3>) -> Vec<Prov3> {
+    if (i >= wp.revl_length()) {
+        return acc;
+    }
+    if ((find_provider(&resulting, &(wp)[(i) as usize].key, &(wp)[(i) as usize].rlm, 0i64) != "") || (find_provider(&acc, &(wp)[(i) as usize].key, &(wp)[(i) as usize].rlm, 0i64) != "")) {
+        return lost_provs(wp.clone(), resulting.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone());
+    }
+    return lost_provs(wp.clone(), resulting.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.revl_push((wp)[(i) as usize].clone()));
+}
+
+fn withdrawal_msg(key: &str, rlm: &str, provider: &str, consumer: &str) -> String {
+    return (((((((String::from("this admission withdraws the running provider of `").revl_concat(&key)).revl_concat("`")).revl_concat(&realm_where(rlm))).revl_concat(" (`")).revl_concat(&provider)).revl_concat("`) and nothing provides it again, but the running component `")).revl_concat(&consumer)).revl_concat("` still requires it (G2)");
+}
+
+fn text_line_or_zero(comps: &[CompD], name: &str, i: i64) -> i64 {
+    if (i >= comps.revl_length()) {
+        return 0i64;
+    }
+    if ((comps)[(i) as usize].name == name) {
+        return (comps)[(i) as usize].line.clone();
+    }
+    return text_line_or_zero(comps, name, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn withdrawal_refusals(reqs: &[MReq], lost: &[Prov3], comps: &[CompD], i: i64) -> Vec<Verd> {
+    if (i >= reqs.revl_length()) {
+        return vec![];
+    }
+    let r = (reqs)[(i) as usize].clone();
+    if r.routed {
+        return withdrawal_refusals(reqs, lost, comps, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    let provider = find_provider(lost, &r.key, &r.rlm, 0i64);
+    if (provider == "") {
+        return withdrawal_refusals(reqs, lost, comps, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    return vec![mk_verd(tagged("G2", &withdrawal_msg(&r.key, &r.rlm, &provider, &r.comp)), text_line_or_zero(comps, &provider, 0i64))];
 }
 
 pub fn admit_ambient(src: String, manifest: String) -> String {
@@ -6148,7 +6265,14 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     if nl.done {
         return pick_min(&nl.refs);
     }
-    return pick_min(&append_verds(nl.refs.clone(), link_refusals(pg.clone(), man.provs.clone(), man.reqs.clone(), man.mnames.clone())));
+    let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
+    let drop = dropped_names(pg.comps.clone(), 0i64, man.repl.clone());
+    let keptProvs = split_provs(man.provs.clone(), drop.clone(), false, 0i64, vec![]);
+    let keptReqs = keep_reqs(man.reqs.clone(), drop.clone(), 0i64, vec![]);
+    let keptNames = keep_names(man.mnames.clone(), drop.clone(), 0i64, vec![]);
+    let lost = lost_provs(split_provs(man.provs.clone(), drop.clone(), true, 0i64, vec![]), live_provs(live.clone(), 0i64, keptProvs.clone()), 0i64, vec![]);
+    let wrefs = append_verds(nl.refs.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64));
+    return pick_min(&append_verds(wrefs.clone(), link_refusals(pg.clone(), keptProvs.clone(), keptReqs.clone(), keptNames.clone())));
 }
 
 fn mk_irres(ok: bool, js: String) -> IrRes {
@@ -11769,9 +11893,58 @@ fn an_unknown_manifest_row_kind_refuses_naming_the_row() {
 }
 
 #[test]
-fn a_replacement_row_refuses_until_the_deferred_wave_lands() {
+fn a_malformed_replacement_row_refuses_rather_than_withdrawing_nothing() {
     let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;-OldStore")) == "MANIFEST|manifest replacement row `-OldStore` needs the deferred replacement wave (item 186)"));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;-OldStore/db/")) == "MANIFEST|manifest replacement row `-OldStore/db/` does not name a component"));
+}
+
+#[test]
+fn a_withdrawn_provision_a_retained_running_consumer_requires_is_refused() {
+    let svc = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Old provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn an_explicit_withdrawal_row_strands_the_same_consumer() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db;-Old")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn a_legitimate_replacement_that_re_provides_the_key_admits() {
+    let svc = String::from("service D { fn q(s: Str) -> Int } ");
+    let x = String::from("component Old provides db: D { provide db { fn q(s) { let x = s   return 1 } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == ""));
+}
+
+#[test]
+fn a_requirement_already_unmet_before_the_admission_stays_admissible() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Old provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/aux/;Store/cache/;Store<db")) == ""));
+}
+
+#[test]
+fn re_providing_a_withdrawn_key_in_another_realm_does_not_satisfy_the_consumer() {
+    let svc = String::from("service D { fn q(s: Str) -> Int } ");
+    let x = String::from("component Old provides db: D { isolate db in realm(\"t1\") provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn withdrawing_the_consumer_too_releases_the_withdrawn_key() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db;-Old;-Store")) == ""));
+}
+
+#[test]
+fn a_routed_running_requirement_is_not_reported_by_the_withdrawal_check() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/r1;Store/cache/;Store<*db;-Old")) == ""));
 }
 
 #[test]
