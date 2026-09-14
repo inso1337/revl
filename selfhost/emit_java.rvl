@@ -3093,7 +3093,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
 // into the class — joined with newlines, right-stripped, closed with a single
 // trailing newline. Components/services follow the admitted slices above;
 // externs/tests/Result/stdlib blocks remain deferred.
-pub fn emit_src(ir: Any) -> Str {
+pub fn emit_java_src(ir: Any) -> Str {
   let ctx = build_ctx(ir)
   let types = value_field(ir, "types")
   let functions = value_list(value_field(ir, "functions"))
@@ -3234,7 +3234,7 @@ test "camel maps a provision key to its PascalCase struct suffix" {
 }
 
 // --------------------------------------------------------------- component wrap
-// A trivial provider so the emitted module is a valid plugin (the pure `emit_src`
+// A trivial provider so the emitted module is a valid plugin (the pure `emit_java_src`
 // above is what the cross-check exercises); mirrors the wrapper the other
 // self-host stages carry. `render` avoids the `emit` keyword.
 service EmitStream {
@@ -3243,6 +3243,6 @@ service EmitStream {
 
 component EmitJava provides emitter: EmitStream {
   provide emitter {
-    fn render(ir) = emit_src(ir)
+    fn render(ir) = emit_java_src(ir)
   }
 }

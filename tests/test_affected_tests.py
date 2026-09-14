@@ -339,21 +339,26 @@ def test_selfhost_lexer_change_selects_its_dependents_oracles():
 
 
 def test_selfhost_emitter_change_selects_compile_dependent():
-    """compile.rvl `use`s emit_py/emit_rust/emit_ts + lower, so a change to one
-    of those emitters must also run the compile oracle. It must NOT drag in a
-    sibling emitter that compile reaches independently."""
-    r = sel("selfhost/emit_py.rvl")
-    assert "tests/test_selfhost_emit_py.py" in r["pytest"]
-    assert "tests/test_selfhost_compile.py" in r["pytest"]
-    # emit_go is not on emit_py's reverse-reachable set.
-    assert "tests/test_selfhost_emit_go.py" not in r["pytest"]
+    """compile.rvl `use`s ALL SIX emitters + lower since roadmap item 146 gap 2,
+    so a change to any one of them must also run the compile oracle. It must NOT
+    drag in a sibling emitter that compile reaches independently."""
+    for tier in ("py", "ts", "go", "java", "rust", "wasm"):
+        r = sel(f"selfhost/emit_{tier}.rvl")
+        assert f"tests/test_selfhost_emit_{tier}.py" in r["pytest"], tier
+        assert "tests/test_selfhost_compile.py" in r["pytest"], tier
+        # a sibling emitter is not on this emitter's reverse-reachable set
+        sibling = "rust" if tier != "rust" else "py"
+        assert f"tests/test_selfhost_emit_{sibling}.py" not in r["pytest"], tier
 
 
-def test_selfhost_leaf_emitter_has_no_extra_dependents():
-    """emit_go/emit_java/emit_wasm are `use`d by nothing, so their change stays
-    exactly their own oracle (+ line coverage) — the narrow #431 behaviour."""
+def test_selfhost_emitter_dependents_stay_narrow():
+    """An emitter is `use`d only by compile.rvl, so its change stays its own
+    oracle, the compile oracle and line coverage — the narrow #431 behaviour.
+    Before item 146 gap 2, emit_go/emit_java/emit_wasm were `use`d by NOTHING and
+    this list was two entries; the composition is what added the third."""
     r = sel("selfhost/emit_go.rvl")
     assert sorted(x for x in r["pytest"] if "selfhost" in x) == [
+        "tests/test_selfhost_compile.py",
         "tests/test_selfhost_emit_go.py",
         "tests/test_selfhost_line_coverage.py",
     ]

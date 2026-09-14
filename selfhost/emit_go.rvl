@@ -1333,7 +1333,7 @@ fn emit_v3_types(types: Any) -> List[Str] {
 // portability boundary), an extern carrying a `config` schema (the reference
 // prepends the config scaffold and binds `_revl_config` as the first body line),
 // and a body carrying a `//revl:import` directive (hoisted to the module import
-// block, which is assembled in `emit_src` above these lines). The body splice
+// block, which is assembled in `emit_go_src` above these lines). The body splice
 // itself is LF-only: the reference splits with Python `splitlines()`, which also
 // breaks on CR and on the Unicode separators, so a body carrying one of those
 // takes the marker too rather than splitting differently.
@@ -1452,7 +1452,7 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
 // the IR sees exactly the same set. `_go_string`-escaping and type spellings set
 // no flag; only these do, in-slice. The `fmt`/`strconv` IMPORT flags are NOT
 // here: since item 434 (f) an interpolation picks between them from the operand
-// types it infers as it renders, so `emit_src` reads them off the rendered
+// types it infers as it renders, so `emit_go_src` reads them off the rendered
 // lines instead of re-deriving that inference structurally.
 type Flags = { fdiv: Bool, ovf: Bool, ovf32: Bool }
 
@@ -1544,7 +1544,7 @@ fn overflow32_preamble() -> List[Str] {
 // the banner + package, the conditional import block, the feature preambles in
 // the reference's fixed order (revlDiv, then the overflow trio, then the Int32
 // block), then the free functions — joined, right-stripped, one trailing `\n`.
-pub fn emit_src(ir: Any) -> Str {
+pub fn emit_go_src(ir: Any) -> Str {
   let types = value_field(ir, "types")
   let tables = build_type_tables(types)
   let functions = value_list(value_field(ir, "functions"))
@@ -1629,7 +1629,7 @@ test "go_type covers the scalar and generic surface" {
   assert go_type("Opt[Str]") == "RevlOpt[string]"
 }
 
-test "bin-op table maps the longest revl ops" {
+test "the go bin-op table maps the longest revl ops" {
   assert go_bin_op("===") == "=="
   assert go_bin_op("!==") == "!="
   assert go_bin_op("&&") == "&&"
@@ -1722,7 +1722,7 @@ test "go_type passes user record/variant names through" {
 
 // --------------------------------------------------------------- component wrap
 // A trivial provider so the emitted module is a valid plugin (the pure
-// `emit_src` above is what the cross-check exercises); mirrors the wrapper the
+// `emit_go_src` above is what the cross-check exercises); mirrors the wrapper the
 // other self-host stages carry. `render` avoids the `emit` keyword.
 service EmitStream {
   fn render(ir: Any) -> Str
@@ -1730,6 +1730,6 @@ service EmitStream {
 
 component EmitGo provides emitter: EmitStream {
   provide emitter {
-    fn render(ir) = emit_src(ir)
+    fn render(ir) = emit_go_src(ir)
   }
 }
