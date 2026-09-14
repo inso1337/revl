@@ -2,3 +2,10 @@ fn cat(a: Str, b: Str) -> Str { return a + b }
 fn greet(name: Str, n: Int) -> Str { return `hi ${name} x${n}!` }
 fn lit() -> Str { return "plain ascii string" }
 fn label(a: Str) -> Str { return a + " suffix" }
+// item 458: `Str` ordering is code-point order. This tier has no relational
+// operator on `String` at all, so the comparison routes through `revlStrCmp`
+// and pulls that one group of the stdlib helper block in with it.
+fn is_before(a: Str, b: Str) -> Bool { return a < b }
+fn is_not_after(a: Str, b: Str) -> Bool { return a <= b }
+fn is_after(a: Str, b: Str) -> Bool { return a > b }
+fn is_not_before(a: Str, b: Str) -> Bool { return a >= b }

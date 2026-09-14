@@ -134,6 +134,43 @@ supplies:
 Byte-oriented work keeps its own type: `Bytes` is a sequence of `u8` and its
 `length`/index are byte-based, unchanged. The unit decision is about `Str`.
 
+### The unit decides the ORDER too (item 458)
+
+`<`, `<=`, `>` and `>=` on two `Str` values are lexicographic **by code
+point** — the same unit everything above counts in — and so is the
+`Map.keys()` order. The two are one rule: a program that sorts keys with `<`
+and a program that reads `keys()` must not disagree.
+
+Three tiers get it free. python compares code points; go and rust compare
+UTF-8 bytes, which is the *same* order, because UTF-8 preserves code-point
+order. Two did not, and the failure was invisible below U+FFFF:
+
+- **typescript.** JS `<` on a string compares UTF-16 **code units**. An astral
+  scalar's first unit is a high surrogate in `D800..DBFF`, which sorts *below*
+  `U+E000..U+FFFF`, so a comparison of the literal U+FFFF against the
+  literal U+10000 answered `false` where every other tier answered `true`.
+  `Map.keys()` had the same fault by a second route: its comparator split
+  both keys into code points and then compared the resulting one-scalar
+  **strings** with `<`, which is the same code-unit comparison one level down.
+- **java.** There is no relational operator on `String` at all, so `a < b`
+  reached `javac` as *"bad operand types for binary operator `<`"*. The
+  document compiled on the frontend and on five tiers and would not build on
+  the sixth — for plain ASCII, not only above the BMP. Separately, its
+  `Map.keys()` tie-break answered `1` for `("a", "ab")` and sorted a key after
+  its own extension.
+
+The close mirrors the arithmetic wave: a relational `bin` node whose operands
+are both `Str` carries `operands: "Str"` (additive, the same key `/` and `+`
+already use because a backend cannot tell `Int / Int` from `Float / Float`
+from the node alone), and ts and java route it through a `revlStrCmp` that
+walks scalars and compares them **as numbers**. Both `keys()` sorts call the
+same comparator. `String.compareTo` is *not* that comparator — it is UTF-16
+code-unit order and would reintroduce the boundary fault.
+
+wasm refuses `<` on a `Str` by name (*"relational operator '<' is only
+lowerable for Int/Int32"*) and keeps refusing it. A tier that cannot match the
+reference should say so; a silent wrong answer is the worse outcome.
+
 ### Literal syntax — no escapes, plus a triple-quoted verbatim form (item 85)
 
 A plain double-quoted string `"..."` has **no escape sequences**: `"a\nb"` is
