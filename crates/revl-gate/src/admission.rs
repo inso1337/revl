@@ -38,15 +38,42 @@
 //!
 //! # The manifest half
 //!
-//! [`certify_into`] is deliberately far narrower still, and the reason is a
-//! property of the item-186 row wire rather than a gap in this module: the wire
-//! carries component names, provision keys and realms, and NO SERVICE SHAPES.
-//! So a candidate declaring `service Store { ... }` cannot be certified against
-//! a running composition, because the running composition may already hold a
-//! DIFFERENT `Store` and the wire cannot say. Measured, not assumed: the
-//! reference refuses that exact pair with "service `Store` differs from the
-//! running manifest". A candidate that declares nothing can be certified, and
-//! nothing else can, until the wire carries the running shapes.
+//! [`certify_into`] asks the same question against a RUNNING composition, and
+//! the one thing the composition can say about a candidate's declarations is
+//! whether they REDECLARE something it already holds. Measured on the reference
+//! (`revl.admission._admit_service_replacement`, which `lower.py` reaches only
+//! when the declared name is already in the ambient service table):
+//!
+//! * a candidate declaring a service whose name the running composition does NOT
+//!   declare is admitted into it, whatever the composition holds — there is no
+//!   toucher to break, so no §5 relation to satisfy;
+//! * a candidate declaring a service whose name the running composition DOES
+//!   declare is gated on that relation, which is the reference type layer's
+//!   business and not this gate's. Withheld.
+//!
+//! So the certifier needs the running composition's service NAMES, and the
+//! item-186 row wire carries them: a `!services` header followed by one `:S`
+//! row per declared service (`revl.manifest.manifest_wire`). The HEADER is the
+//! load-bearing half. A wire without it does not claim to enumerate anything, so
+//! the running service set is UNKNOWN rather than empty and a candidate that
+//! declares a service is withheld exactly as it was before the block existed.
+//! Reading an absent block as "declares nothing" would be the wave-through this
+//! module exists to prevent, so the claim is spelled on the wire instead of
+//! inferred from the absence of rows.
+//!
+//! Scalar `type` aliases are certified into a running composition unconditionally
+//! (a running composition's manifest carries no aliases for one to collide with,
+//! and the reference admits an alias-only candidate into any composition), with
+//! one conservative exception: an alias whose NAME is a running service name is
+//! withheld, because the candidate's own signatures would then be written over a
+//! name the ambient also binds and this gate does not resolve that.
+//!
+//! A wire carrying a WITHDRAWAL row (`-C`, the item-186 replacement wave) is not
+//! certified into at all, even though the fold has a full answer for it. A
+//! withdrawal changes which provisions survive and can strand a running consumer,
+//! and the certifier does not re-derive that reasoning: it declines the wire and
+//! leaves the question to the fold, which is the direction this module is allowed
+//! to err in.
 
 /// The type names a certified signature may mention. Derived from the
 /// reference's own scalar data set (`revl.typecheck._CONFIG_DATA_SCALARS`):
@@ -147,7 +174,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
 /// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
 /// bounds the admissions, and a consumer caching an admission compares THIS
 /// before trusting it against a gate built from another tree.
-pub(crate) const SURFACE_ID: &str = "admission-interface:ff812ef1fa7f9b20";
+pub(crate) const SURFACE_ID: &str = "admission-interface:685b438c69ad1f3e";
 
 /// The tail every certificate carries, so the two halves of the basis line
 /// cannot drift apart.
@@ -157,9 +184,11 @@ const BASIS_TAIL: &str =
 /// What a certified source turned out to contain. Counts only: the certificate
 /// is evidence that the walk ACCOUNTED for the whole source, and the counts are
 /// what make that evidence readable.
-struct Shape {
-    services: usize,
-    aliases: usize,
+struct Shape<'a> {
+    /// The service names the source DECLARES, in declaration order.
+    services: Vec<&'a str>,
+    /// The scalar alias names the source declares.
+    aliases: Vec<&'a str>,
     methods: usize,
 }
 
@@ -236,6 +265,23 @@ fn is_name(token: &str) -> bool {
     }
 }
 
+/// A name as a MANIFEST WIRE field: every byte an identifier byte, and not a
+/// reference keyword.
+///
+/// [`is_name`] is written for tokens that already came out of [`tokens`], where
+/// an identifier run is guaranteed and only the first byte has to be checked. A
+/// wire field has no such guarantee: `A/b` and `a<b` reach here whole, and
+/// reading either as a name would have the certifier compare a running service
+/// list against strings it never verified. So this checks every byte, and a row
+/// it cannot read is a wire the surface declines rather than one it guesses at.
+fn is_wire_name(field: &str) -> bool {
+    if field.is_empty() || REFERENCE_KEYWORDS.contains(&field) {
+        return false;
+    }
+    let bytes = field.as_bytes();
+    is_ident_start(bytes[0]) && bytes[1..].iter().all(|&b| is_ident_byte(b))
+}
+
 /// A name this source may DECLARE: a name that does not shadow a reference
 /// builtin type or the reserved opaque `Principal`.
 fn is_declarable(token: &str) -> bool {
@@ -256,7 +302,7 @@ fn has_duplicate(names: &[&str]) -> bool {
 /// The walk is total by construction: every iteration either consumes a token
 /// and advances, or returns `None`. There is no "skip what I do not recognise"
 /// branch, which is the property that makes the certificate mean something.
-fn shape_of(source: &str) -> Option<Shape> {
+fn shape_of(source: &str) -> Option<Shape<'_>> {
     let toks = tokens(source)?;
     let n = toks.len();
 
@@ -358,8 +404,8 @@ fn shape_of(source: &str) -> Option<Shape> {
         }
     }
     Some(Shape {
-        services: services.len(),
-        aliases: aliases.len(),
+        services,
+        aliases,
         methods: methods_total,
     })
 }
@@ -371,61 +417,150 @@ pub(crate) fn certify(source: &str) -> Option<String> {
     let shape = shape_of(source)?;
     Some(format!(
         "admission surface {}: services={} aliases={} methods={}; {}",
-        SURFACE_ID, shape.services, shape.aliases, shape.methods, BASIS_TAIL
+        SURFACE_ID, shape.services.len(), shape.aliases.len(), shape.methods,
+        BASIS_TAIL
     ))
 }
 
 /// `Some(basis)` when `source` may be admitted INTO the running composition
 /// `manifest`, `None` otherwise.
 ///
-/// Narrow, and the reason is the wire rather than this module. An item-186 row
-/// carries a component name, a provision key and a realm; it does NOT carry the
-/// running composition's service shapes. A candidate declaring
-/// `service Store { ... }` may therefore collide with a `Store` the running
-/// composition already holds in a different shape, and the reference refuses
-/// exactly that ("service `Store` differs from the running manifest") where this
-/// gate cannot even see it. So against a NON-EMPTY manifest only a candidate
-/// that declares nothing at all is certified.
+/// The candidate has to clear `shape_of` exactly as it does standalone, and then
+/// one more obligation the running composition imposes: nothing it declares may
+/// REDECLARE a service the composition already declares. That is the only
+/// interaction the reference has between an interface-only candidate and a
+/// running manifest, and it is the one the item-186 service block
+/// (`!services` + `:S` rows) exists to make answerable.
+///
+/// A wire with no service block does not say what the composition declares, so
+/// the set is UNKNOWN: any declared service is withheld, which is exactly the
+/// answer this function gave before the block existed. Fail closed on silence.
 ///
 /// The empty manifest is the empty composition, and `crate::issue_admission_into`
 /// routes it to `crate::issue_admission` before this is reached.
 pub(crate) fn certify_into(source: &str, manifest: &str) -> Option<String> {
     let shape = shape_of(source)?;
-    if shape.services > 0 || shape.aliases > 0 {
-        return None;
+    let running = manifest_shape(manifest)?;
+    let declared = match running.services.as_ref() {
+        // The wire is silent about the running services. A declared service could
+        // be a redeclaration and this gate cannot tell, so it does not guess.
+        None => {
+            if !shape.services.is_empty() {
+                return None;
+            }
+            &[][..]
+        }
+        Some(names) => names.as_slice(),
+    };
+    // Aliases are held to the same disjointness even though only services can
+    // redeclare: an alias sharing a running service's name would have the
+    // candidate's own signatures written over a name the ambient also binds, and
+    // this gate does not resolve that.
+    for name in shape.services.iter().chain(shape.aliases.iter()) {
+        if declared.contains(name) {
+            return None;
+        }
     }
-    let (provisions, requirements) = manifest_shape(manifest)?;
     Some(format!(
-        "admission surface {}: the candidate declares nothing, and the running composition's {} provision rows resolve its {} requirement rows; {}",
-        SURFACE_ID, provisions, requirements, BASIS_TAIL
+        "admission surface {}: services={} aliases={} methods={}, none of them redeclaring one of the running composition's {}; its {} provision rows resolve its {} requirement rows; {}",
+        SURFACE_ID,
+        shape.services.len(),
+        shape.aliases.len(),
+        shape.methods,
+        match running.services.as_ref() {
+            Some(names) => format!("{} declared services", names.len()),
+            None => "unenumerated services (the candidate declares none)".to_string(),
+        },
+        running.provisions,
+        running.requirements,
+        BASIS_TAIL
     ))
 }
 
-/// `(provisions, requirements)` for a manifest wire every one of whose rows the
+/// What the admission surface reads off a manifest wire.
+struct Running<'a> {
+    provisions: usize,
+    requirements: usize,
+    /// The running composition's declared service names, `None` when the wire
+    /// carries no `!services` header and therefore makes no claim about them.
+    /// `None` is NOT the empty set: see [`certify_into`].
+    services: Option<Vec<&'a str>>,
+}
+
+/// The [`Running`] reading of a manifest wire every one of whose rows the
 /// admission surface can account for, `None` otherwise.
 ///
-/// Two obligations, both of them the wire's own: every row is a provision
-/// (`C/k/r`) or a requirement (`C<k`) — a `!halted` header, a replacement or a
-/// handoff row is not certifiable here even though the fold has its own answer
-/// for it — and every requirement key is provided by a provision row in the same
-/// wire. The second is what stops a bogus wire from being admitted into: the
-/// running composition is supposed to be one the reference already admitted, and
-/// a dangling requirement says it is not.
-fn manifest_shape(manifest: &str) -> Option<(usize, usize)> {
+/// The accountable kinds are the provision (`C/k/r`), the requirement in its
+/// three spellings (`C<k`, `C<k/r`, `C<*k`) and the service block (`!services`,
+/// `:S`). Everything else declines the wire, which is a withheld admission and
+/// not a refusal: a `!halted` header, a handoff row, and — deliberately, even
+/// though the fold has a full answer for it — a WITHDRAWAL row (`-C`). A
+/// withdrawal changes which provisions survive and can strand a running
+/// consumer; re-deriving that here would be a second implementation of the fold's
+/// reasoning, and a second implementation is exactly where the two would drift.
+///
+/// Two obligations beyond the kinds. Every requirement must find its KEY on some
+/// provision row — the running composition is supposed to be one the reference
+/// already admitted, and a requirement naming a key nothing provides says the
+/// wire is not describing one. By KEY and not by (key, realm), deliberately: the
+/// realm a requirement row carries is the consumer's own `isolate` of that key,
+/// which is not always the realm `_link` resolves it in, so a per-realm
+/// obligation here would decline compositions the reference did admit. This
+/// check exists to catch a bogus wire, not to re-derive the link. And a `:S` row
+/// only counts inside a block a `!services` header CLAIMED: a service list nobody
+/// vouched for is not a list an admission may rest on.
+fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
     let mut provided: Vec<&str> = Vec::new();
     let mut required: Vec<&str> = Vec::new();
+    let mut services: Option<Vec<&str>> = None;
     for row in manifest.split(';') {
         if row.is_empty() {
             return None;
         }
-        if let Some((component, key)) = row.split_once('<') {
-            if component.is_empty() || key.is_empty() {
+        if row == "!services" {
+            // One header per wire: two blocks leave it undecidable which of them
+            // is the complete one, and "undecidable" is not a ground to admit on.
+            if services.is_some() {
                 return None;
             }
-            if component.contains('/') || key.contains('/') || key.contains('=') {
+            services = Some(Vec::new());
+            continue;
+        }
+        if let Some(name) = row.strip_prefix(':') {
+            let claimed = services.as_mut()?;
+            if !is_wire_name(name) || claimed.contains(&name) {
                 return None;
             }
-            if !is_name(component) || !is_name(key) {
+            claimed.push(name);
+            continue;
+        }
+        if row.starts_with('-') {
+            // A withdrawal. The fold decides it; this surface does not.
+            return None;
+        }
+        if let Some((component, spec)) = row.split_once('<') {
+            if component.is_empty() || spec.is_empty() || component.contains('/') {
+                return None;
+            }
+            if !is_wire_name(component) {
+                return None;
+            }
+            // `*k` is the item-162 multi-realm bind. Its per-realm legs are not
+            // on the wire at all, so a spelling that also names a realm is a
+            // garbled row rather than a requirement.
+            let (spec, routed) = match spec.strip_prefix('*') {
+                Some(rest) => (rest, true),
+                None => (spec, false),
+            };
+            // the realm is CHECKED and not kept: resolution below is by key
+            // (see this function's contract), but a realm field that is not a
+            // name still means a row this surface cannot read.
+            let (key, realm) = match spec.split_once('/') {
+                Some(_) if routed => return None,
+                Some((key, realm)) => (key, realm),
+                None => (spec, ""),
+            };
+            if !is_wire_name(key) || (!realm.is_empty() && !is_wire_name(realm)) {
                 return None;
             }
             required.push(key);
@@ -438,10 +573,10 @@ fn manifest_shape(manifest: &str) -> Option<(usize, usize)> {
         if component.is_empty() || key.is_empty() {
             return None;
         }
-        if !is_name(component) || !is_name(key) {
+        if !is_wire_name(component) || !is_wire_name(key) {
             return None;
         }
-        if !realm.is_empty() && !is_name(realm) {
+        if !realm.is_empty() && !is_wire_name(realm) {
             return None;
         }
         provided.push(key);
@@ -451,7 +586,11 @@ fn manifest_shape(manifest: &str) -> Option<(usize, usize)> {
             return None;
         }
     }
-    Some((provided.len(), required.len()))
+    Some(Running {
+        provisions: provided.len(),
+        requirements: required.len(),
+        services,
+    })
 }
 
 #[cfg(test)]
@@ -573,5 +712,122 @@ mod tests {
     fn a_dangling_requirement_row_is_not_certified_into() {
         assert!(certify_into("", "App/app/;App<store").is_none());
         assert!(certify_into("", "Kv/store/;App<store").is_some());
+    }
+
+    // The item-186 replacement wave's own row shapes, which this surface has to
+    // read rather than trip over.
+
+    #[test]
+    fn the_waves_requirement_spellings_are_read_rather_than_tripped_over() {
+        // `C<k/r` (realm-bearing) and `C<*k` (the item-162 multi-realm bind) are
+        // the replacement wave's own row shapes. Both are READ: the key is what
+        // has to resolve, in any realm, because the realm a requirement row
+        // carries is the consumer's own isolate and not necessarily where the
+        // link resolves it.
+        assert!(certify_into("", "Kv/store/t1;App/app/;App<store/t1").is_some());
+        assert!(certify_into("", "Kv/store/;App/app/;App<store/t1").is_some());
+        assert!(certify_into("", "Kv/store/t1;App/app/;App<*store").is_some());
+        // a key nothing provides is still a wire this surface declines
+        assert!(certify_into("", "Kv/other/;App/app/;App<*store").is_none());
+        assert!(certify_into("", "Kv/other/;App/app/;App<store/t1").is_none());
+        // and a spelling that tries to be both routed and realm-qualified is a
+        // garbled row, not a requirement
+        assert!(certify_into("", "Kv/store/t1;App/app/;App<*store/t1").is_none());
+    }
+
+    #[test]
+    fn a_withdrawal_row_declines_the_wire_rather_than_being_re_derived() {
+        // The fold decides a withdrawal in full (item 186, the replacement
+        // wave). This surface does not re-derive it: a wire carrying one is
+        // withheld, whatever the candidate is.
+        for wire in ["Kv/store/;-Kv", "Kv/store/;!services;:Store;-Kv", "-Kv"] {
+            assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
+        }
+    }
+
+    // The item-186 service block (issue #346).
+
+    const ENUMERATED: &str = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc";
+
+    #[test]
+    fn a_fresh_interface_is_certified_into_an_enumerated_composition() {
+        // `Cache` is not a name the running composition declares, so there is no
+        // running toucher for the §5 relation to protect and the reference admits
+        // it into the composition. This is the admission the wire's service block
+        // buys; without the block the same bytes are withheld (below).
+        let basis = certify_into("service Cache {\n  fn lookup(key: Str) -> Str\n}\n", ENUMERATED)
+            .expect("a fresh interface cannot redeclare a running service");
+        assert!(basis.contains("services=1"), "{}", basis);
+        assert!(basis.contains("2 declared services"), "{}", basis);
+    }
+
+    #[test]
+    fn a_redeclared_interface_is_withheld_from_an_enumerated_composition() {
+        // `Store` IS declared by the running composition, so whether this is an
+        // admissible replacement is the §5 compatibility relation - the reference
+        // type layer, which this gate does not run. Withheld.
+        assert!(certify_into(INTERFACE, ENUMERATED).is_none());
+        // ... including when the candidate's shape is byte-identical to the
+        // running one. The wire carries the NAME, not the shape, so "identical"
+        // is not a question this gate can ask.
+        assert!(certify_into("service AppSvc {\n  fn snapshot() -> Str\n}\n", ENUMERATED).is_none());
+    }
+
+    #[test]
+    fn a_wire_without_the_header_makes_no_claim_about_the_running_services() {
+        // Silence is not "declares nothing": the same fresh interface certified
+        // above is withheld here, because nothing on this wire says the running
+        // composition does not already hold a `Cache`.
+        let fresh = "service Cache {\n  fn lookup(key: Str) -> Str\n}\n";
+        assert!(certify_into(fresh, ENUMERATED).is_some());
+        assert!(certify_into(fresh, "Kv/store/;App/app/;App<store").is_none());
+    }
+
+    #[test]
+    fn an_empty_service_block_is_a_composition_that_declares_no_service() {
+        assert!(certify_into(INTERFACE, "Kv/store/;!services").is_some());
+    }
+
+    #[test]
+    fn a_scalar_alias_is_certified_into_a_running_composition() {
+        // A running composition's manifest carries no aliases, so there is
+        // nothing for one to collide with and the reference admits an alias-only
+        // candidate into any composition.
+        assert!(certify_into("type Key = Str\n", "Kv/store/;App/app/;App<store").is_some());
+        assert!(certify_into("type Key = Str\n", ENUMERATED).is_some());
+        // ... but an alias that takes a running service's NAME is withheld: the
+        // candidate's signatures would then be written over a name the ambient
+        // also binds.
+        assert!(certify_into("type Store = Str\n", ENUMERATED).is_none());
+    }
+
+    #[test]
+    fn the_block_reads_the_same_beside_the_waves_own_rows() {
+        // The interaction the two additions create: a wire carrying realm-bearing
+        // and routed requirement rows AND a service block still reads, and the
+        // block still decides the same way it does on a plain wire.
+        let combined = "Kv/store/t1;App/app/;App<store/t1;Log/log/;Sink<*log;\
+!services;:Store;:AppSvc;:Logger";
+        assert!(certify_into("service Cache {\n  fn lookup(key: Str) -> Str\n}\n", combined).is_some());
+        assert!(certify_into(INTERFACE, combined).is_none());
+        assert!(certify_into("type Logger = Str\n", combined).is_none());
+    }
+
+    #[test]
+    fn a_malformed_service_block_is_not_certified_into() {
+        for wire in [
+            // a `:S` row outside a claimed block - a list nobody vouched for
+            "Kv/store/;:Store",
+            // the header twice: which block is the complete one?
+            "Kv/store/;!services;:Store;!services;:AppSvc",
+            // a duplicate, and a name that is not one
+            "Kv/store/;!services;:Store;:Store",
+            "Kv/store/;!services;:9bad",
+            "Kv/store/;!services;:",
+            "Kv/store/;!services;:service",
+            "Kv/store/;!services;:A/b",
+        ] {
+            assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
+        }
     }
 }

@@ -1,5 +1,5 @@
 {
-  "admission_arm": "revl_gate::issue_admission(source) / issue_admission_into(source, manifest) -> Admission. `Admitted` requires BOTH that `admit` returned NoObjection and that the source is inside admission_surface; everything else is `Withheld` carrying the verdict verbatim. Against a non-empty manifest only a candidate that declares nothing is admitted: the item-186 row wire carries no service shapes, so a declared service may collide with a running one and the wire cannot say.",
+  "admission_arm": "revl_gate::issue_admission(source) / issue_admission_into(source, manifest) -> Admission. `Admitted` requires BOTH that `admit` returned NoObjection and that the source is inside admission_surface; everything else is `Withheld` carrying the verdict verbatim. Against a non-empty manifest a candidate is admitted when nothing it declares redeclares a service the running composition declares, read off the item-186 wire's service block (`!services` + `:S` rows); a wire with no block makes no claim, so any declared service is withheld, and a wire carrying a withdrawal row is declined outright.",
   "admission_arms": [
     "admitted",
     "withheld"
@@ -30,7 +30,7 @@
     "Str",
     "Unit"
   ],
-  "admission_surface": "admission-interface:ff812ef1fa7f9b20",
+  "admission_surface": "admission-interface:685b438c69ad1f3e",
   "admitted_layer": "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides",
   "covered_layer": "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer",
   "crate": "revl-gate",
@@ -44,7 +44,7 @@
     "src/revl/typecheck.py",
     "tools/build_gate_crate.py"
   ],
-  "frontier": "selfhost-admit:ff812ef1fa7f9b20",
+  "frontier": "selfhost-admit:685b438c69ad1f3e",
   "frontier_excluded_builtins": [],
   "frontier_excluded_keywords": [],
   "gate_api_version": "1.0.0",
@@ -84,7 +84,7 @@
     "selfhost/lower.rvl"
   ],
   "selfhost_root": "selfhost/lower.rvl",
-  "source_digest": "ff812ef1fa7f9b20fa46231f0f7b80b86ea4da347d090e736e17223496c00f45",
+  "source_digest": "685b438c69ad1f3e41999a9e3d00c2cf787f9574dc559de34140fea21ecd503c",
   "symbols_api_version": "0.1.0",
   "verdict_arms": [
     "refused",

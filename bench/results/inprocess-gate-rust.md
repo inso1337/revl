@@ -34,7 +34,8 @@ arm, not an admission arm - it still reports `"admitted": false`, and it refuses
 what the py gate refuses, with the same code and the same why-trace.
 
 What that closes and what it does not, against `held_manifest` =
-`Kv/store/;App/app/;App<store` (the py harness's `base_manifest()` wire):
+`Kv/store/;App/app/;App<store;!services;:Store;:AppSvc` (the py harness's
+`base_manifest()` wire, service block included):
 
 * **closed** - the ambient half of G2/G3: a candidate whose provides collide
   with a RUNNING key is refused. `ambient_provision_conflict` below is the exit

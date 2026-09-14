@@ -125,12 +125,14 @@ use std::time::Instant;
 ///
 /// The same composition the py harness holds: `bench/admission_latency.py::
 /// RUNNING`, compiled and then flattened by `revl.manifest_wire` - `Kv`
-/// provides `store`, `App` provides `app` and requires `store`, joined by `;`.
+/// provides `store`, `App` provides `app` and requires `store`, and the item-346
+/// service block names the two services the composition declares (`Store`,
+/// `AppSvc`) behind the `!services` header that says the list is the whole one.
 /// `tests/test_inprocess_gate_rust.py` recomputes that wire from the py
 /// harness's own `base_manifest()`, so a py-side change to the running
 /// composition reds here instead of leaving the two tiers admitting into
 /// different worlds.
-const HELD_MANIFEST: &str = "Kv/store/;App/app/;App<store";
+const HELD_MANIFEST: &str = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc";
 
 /// `bench/admission_latency.py::CANDIDATE_STANDALONE`, the py harness's
 /// `standalone_twin`: standalone-valid, `Store` inlined. py ADMITS it.
