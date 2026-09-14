@@ -866,8 +866,7 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
         raise RuntimeError("a2a: transport failure") from _exc
 {error_branch}{a2a_boundary.py_result_gate(fault)}    _kind = _result.get("kind")
     if _kind == "task":
-        _state = (_result.get("status") or {{}}).get("state")
-        if _state not in {terminal}:
+{a2a_boundary.py_task_status_gate(fault, indent=8)}        if _state not in {terminal}:
             # Item 439's open question: a task still in flight is a LIFECYCLE
             # this slice does not express. Refuse; never poll, never resume.
             raise RuntimeError(_scrub(
@@ -875,11 +874,8 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
                 "crosses once and does not poll" % (_state,)))
         if _state != "completed":
             raise RuntimeError(_scrub("a2a: task ended %r" % (_state,)))
-        _parts = [p for a in (_result.get("artifacts") or [])
-                  for p in (a.get("parts") or [])]
-    elif _kind == "message":
-        _parts = _result.get("parts") or []
-    else:
+{a2a_boundary.py_task_parts_gate(fault, indent=8)}    elif _kind == "message":
+{a2a_boundary.py_message_parts_gate(fault, indent=8)}    else:
         raise RuntimeError(_scrub("a2a: unexpected result kind %r" % (_kind,)))
 {extract}    """
 
