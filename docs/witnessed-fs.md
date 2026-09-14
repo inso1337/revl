@@ -544,6 +544,44 @@ re-linked and non-regular sidecars, the post-install re-check, the end-to-end
 abort that must surface the residue record, and the controls that must stay
 silent.
 
+## Where the host-bound inverse is registered (#1071)
+
+`write_witnessed` performs the mutation from host Python, so there is no emitted
+effect step and no activation-body generator to yield a disposer into. That makes
+the registration path load-bearing, and it was the wrong one.
+
+`Frame.transactional` is the activation-body path: its contract is that the
+emitted body yields the returned disposer into the runtime's LIFO disposer
+stack, and the frame's `_transactional` list it also appends to is
+introspection, read for the WAL discharge record and the residue and E-Stop
+inventories but never walked to run anything. The ambient bind called it and
+returned the receipt to its caller, so the disposer went nowhere. Driving the
+runtime's own abort (`SessionOwner.begin_abort`, then `Frame.drain`) replayed
+nothing: the target stayed at its forward mutation, `finalize_abort` named no
+replayed seq, and no residue was reported. Not a refusal and not a reported
+residue, just a mutation that stays while the abort reports clean. It also hid
+the `restore-residue` reporting of the three sections above, which is only
+reached if the inverse runs at all.
+
+The runtime already had the right path. `Frame.transactional_method` (item 318,
+`docs/design/243-witnessed-externs.md` rule 5) exists for exactly the case of an
+inverse with no body generator to yield into: it parks the entry in
+`_deferred_transactional`, which `drain` disposes once the commit vs abort bit is
+settled, and which the mid-session withdrawal branch escrows against a still
+pending session verdict. The entry still joins `_transactional`, so the WAL
+record and every introspection surface see it as before. The ambient bind now
+registers there, and carries its item 309 idempotent declaration through so the
+durable descriptor still says so and the replay writes no fence.
+
+Nothing else moved: no WAL version, no verdict vocabulary, no settlement surface.
+The existing suites hand-called the entry rather than driving the runtime, which
+is why this did not surface there.
+`tests/test_fs_witnessed_ambient_abort_1071.py` drives `begin_abort` plus `drain`
+plus `finalize_abort` for the replaced target, the created target, the LIFO order
+of overlapping writes, the drifted sidecar reaching the report, the escrowed
+withdrawal, and the commit direction, with controls that hold on both sides of
+the change.
+
 ## Honest caveats
 
 These are load-bearing limits, documented so the reversibility claim is not

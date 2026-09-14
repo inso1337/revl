@@ -2849,27 +2849,52 @@ class Frame:
         return entry
 
     def transactional_method(self, undo: Callable[[Any], Any], witness: Any, *,
+                             undo_idempotent: bool = False,
                              scope: Optional[dict] = None) -> "_Transactional":
-        """Register a PROVIDE-METHOD witnessed effect's declared inverse as a
-        transactional entry on THIS component's activation frame (item 318,
-        docs/design/243-witnessed-externs.md). This is the per-tool-call H1
-        seam: an agent's fs mutation fires from a provide-method (per request),
-        and its inverse must outlive the method call — the method returns, but
-        the mutation's rollback must survive until the component/session
-        commits or aborts. The enclosing component's activation frame is that
-        accumulator: it is component-long, and its commit/abort already drives
+        """Register the declared inverse of a witnessed effect that has NO body
+        generator to yield its disposer into, as a transactional entry on THIS
+        component's activation frame (item 318,
+        docs/design/243-witnessed-externs.md). Two registrants reach it:
+
+        * a PROVIDE-METHOD witnessed effect — the per-tool-call H1 seam: an
+          agent's fs mutation fires from a provide-method (per request), and its
+          inverse must outlive the method call. The method returns, but the
+          mutation's rollback must survive until the component/session commits
+          or aborts.
+        * a HOST-BOUND witnessed effect — `revl.fs.write_witnessed`'s ambient
+          bind (issue #623), where the mutation is performed by host Python
+          against the live `SessionOwner`'s newest frame. The host call site is
+          not an emitted step either, so nothing yields the returned disposer
+          anywhere (issue #1071).
+
+        The enclosing component's activation frame is the accumulator for both:
+        it is component-long, and its commit/abort already drives
         `_Transactional` discharge/replay (Slice 2a).
 
         Unlike `transactional` (yielded by the activation body's generator into
-        cordis's LIFO disposer stack), a method body has no generator to yield
-        into. Adopting the entry as a sibling `ctx.effect` is unsound — cordis
-        disposes an adopted effect BEFORE the body's `drain`, so on a clean
-        unload the disposer would see `_committed` still False and wrongly
+        cordis's LIFO disposer stack), neither registrant has a generator to
+        yield into. Adopting the entry as a sibling `ctx.effect` is unsound —
+        cordis disposes an adopted effect BEFORE the body's `drain`, so on a
+        clean unload the disposer would see `_committed` still False and wrongly
         revert the deliverable. So the entry is parked in
         `_deferred_transactional` and disposed by `drain` (commit) or the
         aborting `drain` pass (abort), where `_committed` is already settled.
         The entry still joins `_transactional` so the WAL discharge record and
         residue introspection cover it exactly like an activation-body one.
+
+        `_deferred_transactional` is what makes the entry REACHABLE at teardown.
+        `_transactional` alone is introspection: `drain` never walks it to run
+        anything, and cordis cannot unwind a disposer nobody handed it. An entry
+        registered through `transactional` but never yielded is therefore an
+        effect with no inverse at abort time, and silently so — the forward
+        mutation stays and no residue is reported (issue #1071).
+
+        item 309: `undo_idempotent` carries the author's declaration through to
+        the entry and the durable descriptor exactly as `transactional` carries
+        it, so a declared-idempotent inverse registered here replays free of a
+        WAL fence and `revl recover` reads the same bit off the record. The
+        emitted provide-method call site does not pass it, so the default keeps
+        that path byte-identical.
 
         Registration is unconditional here; the emitted call site calls this
         only on the `Ok` branch (Ok-conditional), so a failed mutation that
@@ -2881,7 +2906,8 @@ class Frame:
         item 872: `scope` is the extern's DECLARED `witnessed[caps]` capability
         set, carried on the entry exactly as `transactional` carries it."""
         _estop_check(f"{self.name}.{_named_call_method(undo)}")   # item 443
-        entry = _Transactional(self, undo, witness, scope=scope)
+        entry = _Transactional(self, undo, witness,
+                               undo_idempotent=undo_idempotent, scope=scope)
         self._transactional.append(entry)
         self._deferred_transactional.append(entry)
         wal = self._wal()
@@ -2893,6 +2919,7 @@ class Frame:
                 args=[witness],
                 origin={"phase": "call", "key": self.name},
                 witness=witness,
+                undo_idempotent=undo_idempotent,
             )
             entry.seq = record["seq"]
         return entry
