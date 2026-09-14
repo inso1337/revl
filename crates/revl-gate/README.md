@@ -280,11 +280,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-<<<<<<< HEAD
-    // frontier "selfhost-admit:ad11d048af652512"
-=======
-    // frontier "selfhost-admit:d3e5bf97b82eb575"
->>>>>>> origin/main
+    // frontier "selfhost-admit:7230ae27a52015de"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
