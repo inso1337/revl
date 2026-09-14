@@ -1,0 +1,86 @@
+// The `?T` type-parameter MARK on a generic match arm's `payload_type`
+// (item 391). Inside its own body a fn's type parameters are universally
+// quantified wildcards, so the checker rewrites them `T` -> `?T`
+// (typecheck.py's `_TPARAM` / `mark_tparams`). The marker is described as
+// checker-internal — `render_type` strips it before any diagnostic — but it is
+// NOT stripped off an arm's `payload_type`, so `match opt { Some(v) => … }` over
+// an `Opt[?T]` carries `"payload_type": "?T"` in the reference IR. The self-host
+// lowering answered the author's bare `T`.
+//
+// NEGATIVE CONTROLS:
+//   * the CONCRETE twin of every generic fn (`Opt[Int]`, `Result[Int, Str]`),
+//     whose arms must carry the unmarked spelling;
+//   * an EXPLICIT `[Elem]` list whose name the single-uppercase heuristic would
+//     miss, and — beside it — a one-letter name in a signature that DECLARES its
+//     list, which roadmap 75(c) says is then an ordinary nominal type and must
+//     NOT be marked;
+//   * `type S = A | B`, a DECLARED one-letter type, matched over in a fn that
+//     takes it: the heuristic must not quantify it.
+
+type S = A | B
+
+type Box[T] = Held(T) | Empty
+
+// implicit single-uppercase type parameters
+fn unwrap_or[T](opt: Opt[T], fallback: T) -> T {
+  return match opt {
+    Some(v) => v,
+    None    => fallback,
+  }
+}
+
+fn unwrap_implicit(opt: Opt[T], fallback: T) -> T {
+  return match opt {
+    Some(v) => v,
+    None    => fallback,
+  }
+}
+
+// the concrete twin: no marking anywhere
+fn unwrap_or_int(opt: Opt[Int], fallback: Int) -> Int {
+  return match opt {
+    Some(v) => v,
+    None    => fallback,
+  }
+}
+
+// both arms of a generic Result
+fn settle[T, E](r: Result[T, E], fallback: T, note: E) -> T {
+  return match r {
+    Ok(v)  => v,
+    Err(e) => fallback,
+  }
+}
+
+fn settle_concrete(r: Result[Int, Str], fallback: Int) -> Int {
+  return match r {
+    Ok(v)  => v,
+    Err(e) => fallback,
+  }
+}
+
+// an EXPLICIT name the single-uppercase heuristic would miss
+fn first_or[Elem](xs: Opt[Elem], fallback: Elem) -> Elem {
+  return match xs {
+    Some(v) => v,
+    None    => fallback,
+  }
+}
+
+// an explicit list turns the heuristic OFF for this signature: `S` is declared,
+// and `E` is an ordinary undeclared nominal type here, not a type parameter
+fn declared_one_letter(s: S) -> Int {
+  return match s {
+    A => 1,
+    B => 2,
+  }
+}
+
+// a user ADT's own payload, read through the case table rather than the type
+// arguments — the other half of `_arm_payload_type`
+fn held_or(b: Box[Int], fallback: Int) -> Int {
+  return match b {
+    Held(v) => v,
+    Empty   => fallback,
+  }
+}
