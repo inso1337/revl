@@ -56,8 +56,16 @@ uv pip install --python .venv/bin/python pip
 # two in step. Without coverage here those gates ERROR rather than skip, which
 # is deliberate — a ratchet that goes quiet when its instrument is missing is
 # the exact failure it exists to catch.
+#
+# `cryptography` is here for the same reason: tests/test_ecdsa_differential.py
+# checks src/revl/tee_quote.py's hand-written P-256/P-384 ECDSA against
+# OpenSSL's, and it imports the library HARD rather than through an
+# `importorskip`, so that the one independent check on the quote verifier's
+# crypto cannot report SKIPPED. Without it here, that file ERRORS in this job
+# instead of running. `revl` itself imports nothing from it; the differential
+# asserts that too.
 uv pip install --python .venv/bin/python pytest pytest-asyncio pyyaml watchdog coverage \
-    --editable "$CORDIS_PY"
+    cryptography --editable "$CORDIS_PY"
 # Re-install revl through stock pip so `[project.scripts]` (the `revl` and
 # `truc` console-script entries) are written to .venv/bin/. `uv pip install -e`
 # resolves the editable to a `.pth` and skips the entry-point step; issue #336.
