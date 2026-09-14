@@ -1433,9 +1433,19 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   var k = ret_at(ts, ps.i)
-  // skip any `= @host { ... }` bodies without letting a brace end the decl early
+  // skip any `= @host { ... }` bodies without letting a brace end the decl early.
+  //
+  // The stop set has to name every declaration head, not just the ones the
+  // ADMISSION gate reads, because `.i` is also where `fns_walk` and `types_walk`
+  // resume: running past a `pub` lowered the `pub fn` that followed as PRIVATE,
+  // and running past a `type` dropped that declaration from the `types` section
+  // — both silent, both invisible to a corpus whose externs are last in the
+  // file. Nothing between an extern's return type and the end of its host bodies
+  // can spell one of these keywords, so widening the set only ends the extern
+  // where it already ended.
   while (k < ts.length() && !atw(ts, k, "service") && !atw(ts, k, "component")
-         && !atw(ts, k, "extern") && !atw(ts, k, "fn") && !atk(ts, k, "eof")) {
+         && !atw(ts, k, "extern") && !atw(ts, k, "fn") && !atw(ts, k, "pub")
+         && !atw(ts, k, "type") && !atk(ts, k, "eof")) {
     if (atk(ts, k, "{")) {
       let e = close_brace(ts, k)
       if (e == 0 - 1) { k = ts.length() } else { k = e }
@@ -8325,6 +8335,19 @@ fn builtin_ret(method: Str, recvTy: Str) -> Str {
   if (method == "to_str") { return "Str" }
   if (method == "size") { return "Int" }
   if (method == "keys") { return "List[Str]" }
+  // `lookup` is the one Map row whose result is built FROM the receiver's type
+  // arguments (`Opt[@elem]`, where `@elem` is the VALUE parameter). It was the
+  // only entry of `_BUILTIN_SIG` this table did not answer, so `let hit =
+  // m.lookup(k)` typed as unknown and the `match hit { Some(v) => .. }` that
+  // always follows it lost the arm's `payload_type` — the annotation a tier
+  // needs to give `v` a type.
+  if (method == "lookup") {
+    let margs = type_args(recvTy)
+    if (parse_head(recvTy) == "Map" && margs.length() == 2) {
+      return "Opt[".concat(margs[1]).concat("]")
+    }
+    return ""
+  }
   // The Value dot-accessors (item 189): the return type of the `value_*` free
   // function each one redirects to. `keys` is shared with the Map row above and
   // answers `List[Str]` for either receiver.
@@ -8424,6 +8447,51 @@ fn infer_callee(callee: Expr, env: List[Bind]) -> Str {
   }
 }
 
+// The ADT arm of `infer_ast`: the type a CONSTRUCTOR APPLICATION has.
+//
+// This is what a `match` reads back as `payload_type`, so a scrutinee written
+// inline (`match Node(x) { .. }`, `match Ok(1) { .. }`) must type the same way a
+// scrutinee reached through a local does. A user variant case constructs its own
+// ADT; the built-in `Ok`/`Err`/`Some` carry the ARGUMENT's type into the type
+// argument the arm reads and leave the other side `Any`, which is exactly the
+// pair the reference stamps (`Ok(1)` matched `Ok`/`Err` gives `Int`/`Any`).
+// A user ADT may shadow `Ok`/`Err`, so the built-in arms are gated on the case
+// table still resolving them to `Result`.
+fn infer_ctor(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
+  let nm = match callee { Var(n) => n, _ => "", }
+  if (nm == "") { return "" }
+  let arg0 = args.length() > 0 ? infer(args[0], env) : ""
+  let payload = arg0 == "" ? "Any" : arg0
+  if (nm == "Some" && tenv_get(env, "case Some").startsWith("Opt")) {
+    return "Opt[".concat(payload).concat("]")
+  }
+  let adt = tagged_case_adt(env, nm)
+  if (adt == "") { return "" }
+  if (adt.startsWith("Result")) {
+    if (nm == "Ok") { return "Result[".concat(payload).concat(", Any]") }
+    if (nm == "Err") { return "Result[Any, ".concat(payload).concat("]") }
+    return ""
+  }
+  if (adt.startsWith("Opt")) { return "" }
+  return adt
+}
+
+// A NULLARY user case used as a bare value (`let s = C0_0`) types as its ADT.
+// The guard is the one `lir_expr`'s `Var` arm uses to decide the node is an
+// `adt` rather than a `var`, so the type and the node agree by construction.
+fn infer_bare_case(n: Str, env: List[Bind]) -> Str {
+  let adt = tagged_case_adt(env, n)
+  if (adt == "" || tenv_get(env, "payload ".concat(n)) != "") { return "" }
+  if (adt.startsWith("Result") || adt.startsWith("Opt")) { return "" }
+  return adt
+}
+
+fn infer_call_ty(c: CallN, env: List[Bind]) -> Str {
+  let ctor = infer_ctor(c.target, c.args, env)
+  if (ctor != "") { return ctor }
+  return infer_callee(c.target, env)
+}
+
 fn infer_record_ty(fields: List[InitN], env: List[Bind]) -> Str {
   var names: List[Str] = []
   var i = 0
@@ -8464,11 +8532,11 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     StrLit(v)   => "Str",
     BoolLit(v)  => "Bool",
     NullLit     => "",
-    Var(n)      => tenv_get(env, n),
+    Var(n)      => tenv_get(env, n) != "" ? tenv_get(env, n) : infer_bare_case(n, env),
     Bin(b)      => binop_ty(b.op, infer(b.l, env), infer(b.r, env)),
     Un(u)       => u.op == "!" ? "Bool" : infer(u.e, env),
     Emit(u)     => "",
-    Call(c)     => infer_callee(c.target, env),
+    Call(c)     => infer_call_ty(c, env),
     Field(f)    => infer_field(infer(f.target, env), f.name, env),
     OptField(f) => "",
     OptCall(c)  => "",
@@ -9032,6 +9100,18 @@ fn apply_arg_markers(node: Str, expected: Str, actual: Str) -> Str {
     return node.slice(0, node.length() - 1).concat(",\"widen\":").concat(jstr(expected)).concat("}")
   }
   return node
+}
+
+// `_pin_empty_literal` (roadmap 76b/107): an annotated `let`/`var` pins an
+// EMPTY collection literal with the author's declared type, because the checker
+// types the literal at bottom (`Map[Str, Never]` / `List[Never]`) and a
+// positional emitter — go's composite literals, the wasm tier — has no element
+// to infer from. The reference pins every `maplit` (it only ever builds the
+// empty one) and a `list` that is empty AND declared at a `List[..]`; a
+// non-empty list, and a `List` annotation on anything else, carry nothing.
+fn pins_empty_literal(node: Str, declared: Str) -> Bool {
+  if (node.startsWith("{\"kind\":\"maplit\"")) { return true }
+  return node == "{\"kind\":\"list\",\"items\":[]}" && declared.startsWith("List[")
 }
 
 fn is_compound_op(ts: List[Token], k: Str) -> Bool {
@@ -9723,11 +9803,23 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (!atk(ts, j, "=")) { return mk_one("", env, muts, hi) }
     let r = lir_rhs(ts, j + 1, env)
     if (!r.ok) { return mk_one("", env, muts, hi) }
-    let bindty = declared != "" ? declared : r.ty
+    // read the rhs out of the step ONCE: both the type and the JSON are used
+    // more than once below, and a repeated FIELD read is what the rust tier
+    // cannot borrow (a plain local it clones, a moved field it does not).
+    let rty = r.ty
+    let rjs = r.js
+    let bindty = declared != "" ? declared : rty
     let env2 = bindty == "" ? env : tenv_put(env, name, bindty)
-    let value = declared != "" && r.js == "{\"kind\":\"maplit\",\"entries\":[]}"
-      ? r.js.slice(0, r.js.length() - 1).concat(",\"expected\":").concat(jstr(declared)).concat("}")
-      : r.js
+    // An annotated `let`/`var` is a checking position, so the reference stamps
+    // the same two markers here that it stamps on a call argument and a return:
+    // `_mark_widen` (Int/Int32 -> Float, Int32 -> Int) and then
+    // `_pin_empty_literal`. They are disjoint — a widen needs a numeric declared
+    // type, a pin needs a collection one — so the pin tests the ORIGINAL rhs.
+    var value = declared == "" ? rjs : apply_arg_markers(rjs, declared, rty)
+    if (declared != "" && pins_empty_literal(rjs, declared)) {
+      value = value.slice(0, value.length() - 1)
+        .concat(",\"expected\":").concat(jstr(declared)).concat("}")
+    }
     let js = "{\"step\":\"let\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false")
       .concat(own_birth_marker(births, i)).concat("}")
@@ -9868,7 +9960,8 @@ fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
 }
 
 // One module `fn` -> its `functions` entry. Advances past the whole fn.
-fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool) -> LirFn {
+fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
+                colored: List[Str]) -> LirFn {
   let nm = tkc(ts, i + 1).text
   let ps = params_at(ts, i + 3)
   var reti = ps.i
@@ -9895,39 +9988,41 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool) -> 
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
     .concat(bodyjs).concat("]")
-    .concat(cache_pure ? ",\"cache\":{\"class\":\"pure_fn\"}" : "").concat("}")
+    .concat(cache_pure ? ",\"cache\":{\"class\":\"pure_fn\"}" : "")
+    .concat(contains(colored, nm) ? ",\"async\":true" : "").concat("}")
   return { js: js, i: bend }
 }
 
 // Collect every top-level `fn` into the `functions` list; skip other decls
 // wholesale (a nested `fn` inside a component is not a module function).
-fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind]) -> Str {
+fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
+            colored: List[Str]) -> Str {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases) }
-  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
-  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
+  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored) }
+  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
+  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases) }
-    return fns_walk(ts, skip_line(ts, i), acc, cases)
+    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored)
   }
-  if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
-  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases) }
+  if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored) }
+  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored) }
   let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
   if (t.text == "fn" || public_fn) {
-    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn)
+    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn, colored)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
-    return fns_walk(ts, f.i, acc2, cases)
+    return fns_walk(ts, f.i, acc2, cases, colored)
   }
   // the remaining `pub` forms (`pub type` / `pub service` / `pub extern`) carry
   // nothing this walker reads, so the prefix is stepped over and the declaration
   // it heads dispatches above. `pub fn` cannot reach here: it is the one form
   // whose prefix IS data (the `"public"` stamp), handled with the `fn` branch.
-  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases) }
-  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases) }
-  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases) }
-  return fns_walk(ts, skip_line(ts, i), acc, cases)
+  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored) }
+  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored) }
+  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored) }
+  return fns_walk(ts, skip_line(ts, i), acc, cases, colored)
 }
 
 // ================================================================ externs IR
@@ -10307,7 +10402,15 @@ pub fn lower_to_ir(src: Str) -> Str {
   let ts = lex_src(src)
   let a = ir_walk(ts, 0, mk_iracc("", "", false, false))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
-  let fnsjs = fns_walk(ts, 0, "", case_binds(ts))
+  // The async COLOUR is a whole-program property, so the streaming function
+  // producer cannot decide it one declaration at a time: the reference runs the
+  // fixed point over the call graph and only then stamps `"async": true` on each
+  // coloured entry (`check_and_lower`). The gate half of this file already
+  // computes that same closure for its A1/composition verdicts, so the producer
+  // reads it rather than deriving a second one.
+  let pg = parse_prog_ts(ts)
+  let colored = async_colored(pg.fns, async_slots_map(pg.fns))
+  let fnsjs = fns_walk(ts, 0, "", case_binds(ts), colored)
   let typesjs = types_walk(ts, 0, "")
   let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts))
   var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
@@ -11489,6 +11592,75 @@ test "a Map subscript carries the declared key and value type (issue #957)" {
   // this order; this pins the bytes so the two lowerings cannot drift again.
   assert lower_to_ir("""fn keyed(m: Map[Str, Int], k: Str) -> Int { return m[k] } fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }""")
     == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"keyed","params":[{"name": "m", "type": "Map[Str, Int]"}, {"name": "k", "type": "Str"}],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"index","target":{"kind":"var","name":"m"},"index":{"kind":"var","name":"k"},"key_type":"Str","value_type":"Int"}}]},{"name":"positional","params":[{"name": "xs", "type": "List[Int]"}, {"name": "i", "type": "Int"}],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"index","target":{"kind":"var","name":"xs"},"index":{"kind":"var","name":"i"}}}]}]}"""
+}
+
+test "a pub fn and a type written AFTER an extern keep their declaration" {
+  // `p_extern` decides where every top-level walker RESUMES. Its stop set ran
+  // past a `pub` (so the `pub fn` after an extern lowered PRIVATE) and past a
+  // `type` (so it dropped out of the `types` section) — both silent.
+  assert lower_to_ir(`extern pure fn h(s: Str) -> Str = @py { return s }
+type T = { a: Int }
+pub fn render(l: Str) -> Str { return h(l) }
+`)
+    == """{"ir_version": 3, "services": {}, "components": [], "types": {"T": {"params": [], "kind": "record", "fields": {"a":"Int"}}}, "functions": [{"name":"render","params":[{"name": "l", "type": "Str"}],"returns":"Str","public":true,"body":[{"step":"return","expr":{"kind":"call","callee":{"kind":"var","name":"h"},"args":[{"kind":"var","name":"l"}]}}]}], "externs": [{"name": "h", "class": "pure", "params": [{"name": "s", "type": "Str"}], "returns": "Str", "bodies": {"py": " return s "}}]}"""
+}
+
+test "an annotated let pins an empty list and marks a width coercion" {
+  // `_pin_empty_literal` and `_mark_widen`: the two markers a declared type
+  // puts on its value. A non-empty literal carries neither.
+  assert lower_to_ir(`fn empty() -> List[Int] { let xs: List[Int] = [] return xs }
+fn full() -> List[Int] { let ys: List[Int] = [1] return ys }
+fn widened(n: Int32) -> Int { let w: Int = n return w }
+`)
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"empty","params":[],"returns":"List[Int]","public":false,"body":[{"step":"let","name":"xs","value":{"kind":"list","items":[],"expected":"List[Int]"},"mutable":false},{"step":"return","expr":{"kind":"var","name":"xs"}}]},{"name":"full","params":[],"returns":"List[Int]","public":false,"body":[{"step":"let","name":"ys","value":{"kind":"list","items":[{"kind":"lit","value":1}]},"mutable":false},{"step":"return","expr":{"kind":"var","name":"ys"}}]},{"name":"widened","params":[{"name": "n", "type": "Int32"}],"returns":"Int","public":false,"body":[{"step":"let","name":"w","value":{"kind":"var","name":"n","widen":"Int"},"mutable":false},{"step":"return","expr":{"kind":"var","name":"w"}}]}]}"""
+}
+
+test "a constructor in scrutinee position types its match arms" {
+  // the arm's `payload_type` is read off the scrutinee's INFERRED type, so a
+  // constructor applied inline has to type as its own ADT
+  assert lower_to_ir(`type Tree = Leaf | Node(Int)
+fn f(x: Int) -> Int { return match Node(x) { Node(v) => v, Leaf => 0 } }
+`)
+    == """{"ir_version": 3, "services": {}, "components": [], "types": {"Tree": {"params": [], "kind": "variant", "cases": [{"name":"Leaf","payload":null},{"name":"Node","payload":"Int"}]}}, "functions": [{"name":"f","params":[{"name": "x", "type": "Int"}],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"match","scrutinee":{"kind":"adt","type":"Tree","case":"Node","args":[{"kind":"var","name":"x"}]},"arms":[{"pattern":"Node","bind":"v","body":{"kind":"var","name":"v"},"payload_type":"Int"},{"pattern":"Leaf","bind":null,"body":{"kind":"lit","value":0}}]}}]}]}"""
+}
+
+test "a nullary case bound bare carries its ADT to the match" {
+  // `let c = Red` types `Tag`, which is what gives the arms below their
+  // pattern table; an unknown scrutinee type gives every arm nothing
+  assert lower_to_ir(`type Tag = Red | Green(Int)
+fn f() -> Int { let c = Red
+  return match c { Red => 1, Green(n) => n } }
+`)
+    == """{"ir_version": 3, "services": {}, "components": [], "types": {"Tag": {"params": [], "kind": "variant", "cases": [{"name":"Red","payload":null},{"name":"Green","payload":"Int"}]}}, "functions": [{"name":"f","params":[],"returns":"Int","public":false,"body":[{"step":"let","name":"c","value":{"kind":"adt","type":"Tag","case":"Red","args":[]},"mutable":false},{"step":"return","expr":{"kind":"match","scrutinee":{"kind":"var","name":"c"},"arms":[{"pattern":"Red","bind":null,"body":{"kind":"lit","value":1}},{"pattern":"Green","bind":"n","body":{"kind":"var","name":"n"},"payload_type":"Int"}]}}]}]}"""
+}
+
+test "a built-in constructor carries its argument type into the arm" {
+  // `Ok(1)` types `Result[Int, Any]`: the argument reaches the arm that binds
+  // it and the other side stays `Any`, exactly as the reference stamps it
+  assert lower_to_ir(`fn f() -> Int { return match Ok(1) { Ok(o) => o, Err(e) => 0 } }
+`)
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"f","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"match","scrutinee":{"kind":"adt","type":"Result[Any, Any]","case":"Ok","args":[{"kind":"lit","value":1}]},"arms":[{"pattern":"Ok","bind":"o","body":{"kind":"var","name":"o"},"payload_type":"Int"},{"pattern":"Err","bind":"e","body":{"kind":"lit","value":0},"payload_type":"Any"}]}}]}]}"""
+}
+
+test "Map.lookup types the Opt its match unwraps" {
+  // the one `_BUILTIN_SIG` row the method table did not answer; without it the
+  // `Opt[V]` typed as unknown and the arm lost its `payload_type`
+  assert lower_to_ir(`fn f(m: Map[Str, Int], k: Str) -> Int { let hit = m.lookup(k)
+  return match hit { Some(v) => v, None => 0 } }
+`)
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"f","params":[{"name": "m", "type": "Map[Str, Int]"}, {"name": "k", "type": "Str"}],"returns":"Int","public":false,"body":[{"step":"let","name":"hit","value":{"kind":"builtin","method":"lookup","target":{"kind":"var","name":"m"},"args":[{"kind":"var","name":"k"}]},"mutable":false},{"step":"return","expr":{"kind":"match","scrutinee":{"kind":"var","name":"hit"},"arms":[{"pattern":"Some","bind":"v","body":{"kind":"var","name":"v"},"payload_type":"Int"},{"pattern":"None","bind":null,"body":{"kind":"lit","value":0}}]}}]}]}"""
+}
+
+test "the async colour reaches the fn entries transitively" {
+  // colour is a whole-program fixed point, not a property of one declaration:
+  // `one` is seeded by the async extern and `two` is coloured by calling it,
+  // while the fn that reaches no suspension carries no stamp at all
+  assert lower_to_ir(`extern emission async fn hf(p: Str) -> Str = @py { return p }
+fn one(p: Str) -> Str { return hf(p) }
+fn two(p: Str) -> Str { return one(p) }
+fn plain(n: Int) -> Int { return n + 1 }
+`)
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[{"name": "p", "type": "Str"}],"returns":"Str","public":false,"body":[{"step":"return","expr":{"kind":"call","callee":{"kind":"var","name":"hf"},"args":[{"kind":"var","name":"p"}]}}],"async":true},{"name":"two","params":[{"name": "p", "type": "Str"}],"returns":"Str","public":false,"body":[{"step":"return","expr":{"kind":"call","callee":{"kind":"var","name":"one"},"args":[{"kind":"var","name":"p"}]}}],"async":true},{"name":"plain","params":[{"name": "n", "type": "Int"}],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"bin","op":"+","left":{"kind":"var","name":"n"},"right":{"kind":"lit","value":1},"operands":"Int"}}]}], "externs": [{"name": "hf", "class": "emission", "params": [{"name": "p", "type": "Str"}], "returns": "Str", "bodies": {"py": " return p "}, "async": true}]}"""
 }
 
 test "a destructuring let is read, not refused" {

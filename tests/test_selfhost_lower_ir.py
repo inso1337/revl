@@ -79,6 +79,30 @@ this oracle did not notice, because the corpus it globs indexed no `Map` at all.
 `maps.rvl` is that document — keyed reads (variable key, literal key, a read
 used as the next read's key, nested maps, a map reached through a record field)
 next to the `List` reads that must carry neither annotation.
+
+Roadmap item 391 (issue #106) closes the rest of that class. #957 was one
+instance of a general shape: the reference frontend annotates the IR from
+knowledge no backend has, the self-host lowering does not follow, and the oracle
+stays green because the globbed corpus never exercises the path. Running both
+frontends over every single-file `.rvl` in the tree (410 documents, not the 36
+here) measured 53 such divergences; five families are closed with a corpus
+document each, which is the half that stops them regressing:
+
+  * `extern_neighbours.rvl` — the declaration written AFTER an extern. A `pub fn`
+    lowered PRIVATE and a `type` dropped out of the `types` section, because
+    `p_extern`'s body skip decides where every top-level walker resumes and its
+    stop set named only the heads the admission gate reads. Every extern in this
+    corpus sat last in its file.
+  * `annotated_lets.rvl` — the two markers a declared type puts on its value:
+    `_pin_empty_literal` (the annotation threaded onto an EMPTY `List`, which the
+    checker types at bottom) and `_mark_widen` at the `let` position. Plus
+    `Map.lookup`, the one `_BUILTIN_SIG` row the self-host method table did not
+    answer.
+  * `adt_inference.rvl` — a `match` whose scrutinee is a constructor APPLICATION
+    or a bare nullary case, which the self-host's `infer` typed as unknown, so
+    every arm over it lost its `payload_type`.
+  * `async_colour.rvl` — the whole-program async colour on a fn entry, the stamp
+    an emitter reads to render `async`/`await`.
 """
 
 import importlib.util
@@ -113,7 +137,8 @@ VERSION_BODY_DEPENDENT: set[str] = set()
 FUNCTION_EMIT_READY_DOCS = [
     "arith.rvl", "control.rvl", "strings.rvl", "records.rvl", "result.rvl",
     "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
-    "maps.rvl",
+    "maps.rvl", "annotated_lets.rvl", "adt_inference.rvl",
+    "extern_neighbours.rvl", "async_colour.rvl",
 ]
 
 # The component documents whose whole activation/method body is now lowered
@@ -274,6 +299,126 @@ def test_native_ir_annotates_a_map_subscript(lower_to_ir):
     keyed = reference[0]["body"][-1]["expr"]
     assert keyed["key_type"] == "Str" and keyed["value_type"] == "Int"
     assert "key_type" not in reference[1]["body"][-1]["expr"]
+    assert native == reference
+
+
+def test_native_ir_keeps_the_declaration_after_an_extern(lower_to_ir):
+    """Item 391 — `p_extern`'s body skip decides where every top-level walker
+    RESUMES, and its stop set named only the heads the admission gate reads.
+
+    So a `pub fn` written after an extern resumed at the `fn` with the `pub`
+    already consumed and lowered PRIVATE, and a `type` written after one was
+    skipped straight out of the `types` section. Both are silent — the IR stays
+    well formed, it just is not the reference's — and every extern in the corpus
+    sat last in its file, so no document held the ordering.
+    `tests/fixtures/emit_py_corpus/extern_neighbours.rvl` is that document."""
+    source = (
+        "extern pure fn h(s: Str) -> Str = @py { return s }\n"
+        "type T = { a: Int }\n"
+        "pub fn render(l: Str) -> Str { return h(l) }\n"
+    )
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert reference["functions"][0]["public"] is True
+    assert reference["types"] == {"T": {"params": [], "kind": "record",
+                                        "fields": {"a": "Int"}}}
+    assert native["functions"] == reference["functions"]
+    assert native["types"] == reference["types"]
+
+
+def test_native_ir_pins_an_empty_collection_literal(lower_to_ir):
+    """Item 391 — an annotated `let`/`var` is a checking position, so the
+    reference threads the author's annotation onto an EMPTY collection literal
+    (`_pin_empty_literal`): the checker types the literal at bottom and a
+    positional emitter has no element to infer from. The self-host pinned the
+    empty `Map` and not the empty `List`; a non-empty literal takes neither."""
+    source = (
+        "fn empty() -> List[Int] { let xs: List[Int] = [] return xs }\n"
+        "fn full() -> List[Int] { let ys: List[Int] = [1] return ys }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["value"]["expected"] == "List[Int]"
+    assert "expected" not in reference[1]["body"][0]["value"]
+    assert native == reference
+
+
+def test_native_ir_marks_a_width_coercion_on_an_annotated_let(lower_to_ir):
+    """Item 391 — `_mark_widen` runs at the same annotated-`let` position it runs
+    at for a call argument and a return. The self-host carried the argument and
+    return halves and not this one, so `let w: Int = <Int32>` reached the tiers
+    that keep the widths apart as a bare node."""
+    source = (
+        "fn widened(n: Int32) -> Int { let w: Int = n return w }\n"
+        "fn floated(n: Int) -> Float { let f: Float = n return f }\n"
+        "fn plain(n: Int) -> Int { let k: Int = n return k }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["value"]["widen"] == "Int"
+    assert reference[1]["body"][0]["value"]["widen"] == "Float"
+    assert "widen" not in reference[2]["body"][0]["value"]
+    assert native == reference
+
+
+def test_native_ir_types_a_constructor_in_scrutinee_position(lower_to_ir):
+    """Item 391 — a match arm's `payload_type` is read off the scrutinee's
+    INFERRED type, so a constructor APPLICATION used directly as the scrutinee
+    has to type the same way a local holding one does.
+
+    The self-host's `infer` had no ADT arm at all: a constructor call and a bare
+    nullary case both typed as unknown, so every arm over them lost the
+    annotation that gives its binder a type. Every match in the corpus went
+    through a declared parameter, which is why the oracle never disagreed.
+    `tests/fixtures/emit_py_corpus/adt_inference.rvl` is that document."""
+    source = (
+        "type Tree = Leaf | Node(Int)\n"
+        "fn applied(x: Int) -> Int { return match Node(x) { Node(v) => v, Leaf => 0 } }\n"
+        "fn builtin() -> Int { return match Ok(1) { Ok(o) => o, Err(e) => 0 } }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["expr"]["arms"][0]["payload_type"] == "Int"
+    # `Ok(1)` types `Result[Int, Any]`: the argument reaches the arm that binds
+    # it, and the other side of the Result stays `Any`.
+    ok_arms = reference[1]["body"][0]["expr"]["arms"]
+    assert [a["payload_type"] for a in ok_arms] == ["Int", "Any"]
+    assert native == reference
+
+
+def test_native_ir_types_a_map_lookup(lower_to_ir):
+    """Item 391 — `lookup` was the one `_BUILTIN_SIG` row the self-host method
+    table did not answer, so the `Opt[V]` it returns typed as unknown and the
+    `match` that always follows it lost the arm's `payload_type`."""
+    source = (
+        "fn find(m: Map[Str, Int], k: Str) -> Int {\n"
+        "  let hit = m.lookup(k)\n"
+        "  return match hit { Some(v) => v, None => 0 }\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][1]["expr"]["arms"][0]["payload_type"] == "Int"
+    assert native == reference
+
+
+def test_native_ir_colours_an_async_function(lower_to_ir):
+    """Item 391 — the async colour is a whole-program fixed point over the call
+    graph, and `"async": true` on a fn entry is the only thing that tells an
+    emitter to render `async`/`await`. The self-host's streaming function
+    producer decided each declaration on its own and so stamped nothing, even
+    though the gate half of the same file already computes that closure for its
+    A1 verdicts; it now reads that one rather than deriving a second.
+    `tests/fixtures/emit_py_corpus/async_colour.rvl` is the corpus document."""
+    source = (
+        "extern emission async fn hf(p: Str) -> Str = @py { return p }\n"
+        "fn one(p: Str) -> Str { return hf(p) }\n"
+        "fn two(p: Str) -> Str { return one(p) }\n"
+        "fn plain(n: Int) -> Int { return n + 1 }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert [fn.get("async") for fn in reference] == [True, True, None]
     assert native == reference
 
 

@@ -1,0 +1,36 @@
+// The declaration that FOLLOWS an extern (roadmap item 391).
+//
+// `p_extern`'s body skip in `selfhost/lower.rvl` decides where every top-level
+// walker RESUMES, and its stop set named only the heads the admission gate
+// reads. So a `pub fn` written after an extern resumed at the `fn` with the
+// `pub` already consumed and lowered PRIVATE, and a `type` written after one was
+// skipped straight out of the `types` section. Both are silent: the IR stays
+// well formed, it just is not the reference's. Every extern in this corpus used
+// to sit last in its file, which is why no document held the ordering.
+extern pure fn host_scale(n: Int) -> Int
+= @py {
+      return n * 3
+    }
+
+// a `type` whose only neighbour above is an extern
+type Scaled = { raw: Int, scaled: Int }
+
+extern pure fn host_label(s: Str) -> Str
+= @py {
+      return s.upper()
+    }
+
+// a `pub fn` whose only neighbour above is an extern
+pub fn scale(n: Int) -> Scaled { return { raw: n, scaled: host_scale(n) } }
+
+pub fn labelled(s: Str) -> Str { return host_label(s) }
+
+fn internal(n: Int) -> Int { return n + 1 }
+
+extern pure fn host_trim(s: Str) -> Str
+= @py {
+      return s.strip()
+    }
+
+// and the private neighbour, so the stamp is read both ways
+fn trimmed(s: Str) -> Str { return host_trim(s) }

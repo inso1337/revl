@@ -1,0 +1,87 @@
+// A `match` whose SCRUTINEE is written inline (roadmap item 391).
+//
+// `payload_type` on an arm is read off the scrutinee's inferred type, so a
+// constructor APPLICATION used directly as the scrutinee has to type the same
+// way a local holding one does. The self-host's `infer` had no ADT arm at all: a
+// constructor call and a bare nullary case both typed as unknown, so every arm
+// over them lost its `payload_type` — the annotation that gives the binder a
+// type on the tiers that need one. Every match in this corpus went through a
+// declared parameter, which is why the oracle never disagreed.
+type Tree = Leaf | Node(Int)
+type Tag = Red | Green | Blue
+
+// a user constructor applied in scrutinee position
+fn constructed(x: Int) -> Int {
+  return match Node(x) {
+    Node(v) => v,
+    Leaf => 0,
+  }
+}
+
+// the same case reached through a local, which is what it used to take
+fn through_a_local(x: Int) -> Int {
+  let t = Node(x)
+  return match t {
+    Node(v) => v,
+    Leaf => 0,
+  }
+}
+
+// a NULLARY case bound bare: the `let` has to carry the ADT forward
+fn bare_nullary() -> Str {
+  let c = Red
+  return match c {
+    Red => "red",
+    Green => "green",
+    Blue => "blue",
+  }
+}
+
+fn nullary_in_scrutinee() -> Int {
+  return match Leaf {
+    Node(v) => v,
+    Leaf => 0,
+  }
+}
+
+// the built-in constructors: the argument's type reaches the arm that binds it,
+// and the other side of the `Result` stays `Any`
+fn ok_literal() -> Int {
+  return match Ok(1) {
+    Ok(o) => o,
+    Err(e) => 0,
+  }
+}
+
+fn err_literal(s: Str) -> Str {
+  return match Err(s) {
+    Ok(o) => "ok",
+    Err(e) => e,
+  }
+}
+
+fn some_literal(s: Str) -> Str {
+  return match Some(s) {
+    Some(v) => v,
+    None => "",
+  }
+}
+
+fn ok_through_a_local(n: Int) -> Int {
+  let r = Ok(n + 1)
+  return match r {
+    Ok(o) => o,
+    Err(e) => 0,
+  }
+}
+
+// a nested payload: the outer arm's binder types the inner match
+fn nested(x: Int) -> Int {
+  return match Ok(Node(x)) {
+    Ok(t) => match t {
+      Node(v) => v,
+      Leaf => 0,
+    },
+    Err(e) => 0,
+  }
+}
