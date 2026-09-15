@@ -1199,6 +1199,9 @@
           "_finite_float": 3,
           "_refuse_float_operands": 1
         },
+        "Item 459 F6. `_refuse_bodyless_extern` states, by name, that a DECLARED extern carrying no `@wasm` body is not portable to this tier, naming the tiers that do carry one - the sentence the other five emitters have always given, where wasm answered `callee 'x' is not a lowerable function`, which is also what it says for a MISSPELLED callee. EVERY statement of it is on a refusal path: it raises on every input that reaches it, and its one quiet arm returns straight into the caller's own raise, so NO successfully emitted document executes a line of it. A corpus document therefore cannot reach it, and that is structural rather than inconvenient - the corpus is the list of documents the reference EMITS and holds byte-identical against the port, and tools/selfhost_line_coverage.py::measure() calls emit() with no `except`, so a refusing document would abort the measurement itself. WHAT WOULD HAVE TO CHANGE for a document to be possible, stated so this is a decision and not a shrug: (1) the oracle would need a REFUSAL workload beside `CORPUS` holding both sides to the same diagnostic rather than to the same bytes, the diagnostic-agreement shape tests/test_selfhost_lower.py already has and this tier's emit oracle does not; (2) measure() would need to run that workload and count the lines executed before the raise, which measure_full_tree() in the same module already does deliberately (a refusal path is reference logic too), so this half is small; and (3) selfhost/emit_wasm.rvl would have to be able to REFUSE at all. It cannot: a pure self-host emitter fn cannot `fail`, which is why every deferred family on this tier answers with an `<<UNSUPPORTED-...>>` marker instead (test_fn_type_param_refused, test_deferred_families_remain_explicit). (3) is the real blocker and it is a PORT property, not a corpus one. Until it lifts the refusal is pinned by tests/test_selfhost_emit_wasm.py::test_reference_refuses_a_bodyless_extern_by_name, which drives BOTH entry points (_call_expr for a call in expression position, _call_type for a `let` initializer; they refuse independently), by tests/test_json_stdlib.py::test_wasm_tier_refuses_extern_without_body, and by tests/test_asset_runtime_load_459.py's per-tier refusal sweep.": {
+          "_V3Emitter._refuse_bodyless_extern": 3
+        },
         "Only the negative lookup for a nonvariant, non-Opt/Result type remains. The no-expected-type lookup is covered by bare Some; typed tagged constructors supply a valid tagged layout.": {
           "_V3Emitter._tagged_layout": 1
         },
@@ -1228,8 +1231,8 @@
           "_dedup_colour_erased_poly_externs": 14,
           "_dedup_colour_erased_poly_externs._rewrite": 6
         },
-        "Remaining branches resolve deferred inline arrows or reject unknown/non-callable callees and argument-count/type mismatches; direct declared calls are covered.": {
-          "_V3Emitter._call_type": 6
+        "Remaining branches resolve deferred inline arrows or reject unknown/non-callable callees and argument-count/type mismatches; direct declared calls are covered. Item 459 F6 adds one statement here: before raising the generic unknown-callee error, the arm asks `_refuse_bodyless_extern` whether the name is a DECLARED extern with no `@wasm` body, so a portability limit is no longer spelled as a typo. It is on the same refusal path as the rest of this entry and is uncovered for the same reason.": {
+          "_V3Emitter._call_type": 7
         },
         "Remaining branches retain a module with indirect/table/start edges or seed callees of unnamed exported component functions. The pure module ABI emits named exports and direct calls only.": {
           "prune_unreachable_funcs": 2
@@ -1391,8 +1394,8 @@
         "The item-458 short-circuit decision for a logical operator's right operand. Every accepting and refusing arm is now exercised: shortcircuit.rvl spells a trapping `%`, `/` and checked `*`, an index read, a `len`, a call, a `Str` comparison and a non-`!` unary, and arith.rvl/folding.rvl the constants, local reads and comparisons that keep the strict instruction. What stays unrun is the non-dict guard's refusal and the EmitError catch (with its refusal) for a leaf name the caller cannot resolve \u2014 a malformed node and an unbound name, neither of which a document that compiles can produce.": {
           "_trap_free_operand": 3
         },
-        "The remaining call paths inline a deferred arrow or raise for an indirect callee, wrong Some arity, unknown named function, wrong declared-function arity, or void argument. Expected-free Some payload inference is covered by the bare expression statement.": {
-          "_V3Emitter._call_expr": 6
+        "The remaining call paths inline a deferred arrow or raise for an indirect callee, wrong Some arity, unknown named function, wrong declared-function arity, or void argument. Expected-free Some payload inference is covered by the bare expression statement. Item 459 F6 adds one statement here: before raising the generic unknown-callee error, the arm asks `_refuse_bodyless_extern` whether the name is a DECLARED extern with no `@wasm` body, so a portability limit is no longer spelled as a typo. It is on the same refusal path as the rest of this entry and is uncovered for the same reason.": {
+          "_V3Emitter._call_expr": 7
         },
         "These helper text generators are demanded only by indexOf/join/split; the selfhost scaffold lacks those helpers and the oracle explicitly excludes those methods.": {
           "_V3Emitter._helper_str_index_of": 1,

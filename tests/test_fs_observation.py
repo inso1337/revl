@@ -209,7 +209,14 @@ def test_the_observations_route_through_the_family_1_guard():
     tests/test_fs_confinement_families.py; this is the observation-specific
     half, stated where the surface is."""
     assert ws.PATH_FAMILIES["named-endpoint"] == ("resolve_within",)
-    assert set(ws.READ_HELPERS) == {"lexists_confined", "is_dir_confined"}
+    # The read helpers are a deliberate, pinned enumeration: each one is a new
+    # way to LOOK at the filesystem through the jail, so widening this set has
+    # to be an edit in two places. `read_pinned_confined` (item 459 F6) is the
+    # one that yields file CONTENT rather than a fact about a name, and it is
+    # narrower than the others rather than wider: it returns the bytes only when
+    # they hash to a digest the caller already holds.
+    assert set(ws.READ_HELPERS) == {"lexists_confined", "is_dir_confined",
+                                    "read_pinned_confined"}
     text = _FS_RVL.read_text(encoding="utf-8")
     for name, reads in (("resolve_within", ()),
                         ("lexists", ("_ws.lexists_confined(",)),
