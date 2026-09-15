@@ -4893,6 +4893,25 @@ fn find_route(rs: List[MRoute], comp: Str, key: Str, i: Int) -> MRoute {
   return find_route(rs, comp, key, i + 1)
 }
 
+// item 186 / issue #86, the replacement wave part 2: a manifest HANDOFF row —
+// the running component `comp` EXPORTS live state of shape `ty` at the key it
+// provides (item 53). This is the wire's carrier for
+// `compiler._running_handoffs`, the ambient table
+// `admission._admit_handoff_replacement` compares a replacement's ACCEPTED
+// shape against.
+type MHand = { comp: Str, key: Str, ty: Str }
+
+// The running export at `key`, or an empty record when nothing exports one.
+// Keyed by KEY ALONE and LAST-WINS, because that is exactly what the
+// reference's `_running_handoffs` builds: a dict keyed by `h["key"]`, filled
+// walking the IR components in order, so a second running exporter of one key
+// overwrites the first. A wire carrying no handoff row (every projection before
+// part 2) yields the empty record and the whole check is a no-op.
+fn find_mhand(hs: List[MHand], key: Str, i: Int, found: MHand) -> MHand {
+  if (i >= hs.length()) { return found }
+  return find_mhand(hs, key, i + 1, hs[i].key == key ? hs[i] : found)
+}
+
 fn find_provider(ps: List[Prov3], key: Str, rlm: Str, i: Int) -> Str {
   if (i >= ps.length()) { return "" }
   if (ps[i].key == key && ps[i].rlm == rlm) { return ps[i].comp }
@@ -7311,18 +7330,27 @@ pub fn admit_tag(src: Str) -> Str {
 //     reported twice. The legs are EDGES too (`manifest_edges`), so a cycle
 //     closing through a routed running consumer is seen rather than missed.
 //
-// The surface still behind the WAVE (item 186): `handoff` STATE compatibility
-// (`C=k:T` rows), blocked on the self-host type layer — such a row therefore
-// REFUSES here (fail-closed) rather than being silently mis-admitted — and the
-// item-419c multi-refusal ORDERING of an ambient refusal against an internal
-// one. See docs/design/186-ambient-admission-guarantees.md.
+//   * WAVE PART 2 — `handoff` STATE compatibility (item 53). The wire grows
+//     `C=k:T` rows (the shape each running provider EXPORTS), a component in
+//     the incoming text carries the shape it ACCEPTS, and `handoff_refusals`
+//     compares the two with the §5 relation pointed at state
+//     (`ho_compatible`, the `types=None` reading of `typecheck.compatible`),
+//     byte-identical to the reference's `_admit_handoff_replacement`. It needs
+//     no expression type layer: both shapes are declared SPELLINGS carried to
+//     the gate, so the only algebra it ports is the type-string one `ty_parse`
+//     already gives. A structural record cannot be one — the reference's
+//     `type_()` refuses `{` at a `handoff` annotation — which is why the
+//     structural branch of `compatible` is out of this port rather than
+//     approximated.
+//
+// See docs/design/186-ambient-admission-guarantees.md.
 //
 // The manifest is the linker's already-live composition, serialised as rows
 // joined by ";" — provisions "<component>/<key>/<realm>" (realm "" = shared),
 // requirements "<component><<key>" (with "<key>/<realm>" for a realm-resolved
 // one and "*<key>" for a multi-realm bind), routes
 // "<component>><key>/<realm>,<realm>" (the legs of that multi-realm bind),
-// withdrawals "-<component>", the "!halted" header, and the item-346 SERVICE
+// withdrawals "-<component>", handoffs "<component>=<key>:<type>", the "!halted" header, and the item-346 SERVICE
 // BLOCK ("!services" followed by one ":<service>" row per service the
 // composition declares) — e.g.
 // "Store/db/;KvA/kv/tenant_a;Store<net;Store>net/a,b;!services;:D;-KvA". An
@@ -7350,19 +7378,25 @@ fn cut(s: Str, sep: Str) -> Cut {
 // so `R` is a property of the admission CALL and never something the incoming
 // text can assert about itself. `halted` (the `!halted` header, item 443) makes
 // every admission refuse; `bad` (non-"") is a wire that does not parse — an
-// unknown row kind, or a `C=k:T` handoff row whose type layer is still the
-// deferred wave — and REFUSES admission by name rather than being silently
-// skipped (a row that parses and does nothing is worse than one that refuses).
+// unknown row kind, or a garbled row of a kind it does know — and REFUSES
+// admission by name rather than being silently skipped (a row that parses and
+// does nothing is worse than one that refuses). `hands` is the running EXPORT
+// table of the replacement wave's part 2 (`C=k:T`), keyed by KEY and not
+// filtered by `repl`: a provider being replaced is exactly the one whose
+// exported state the replacement must accept.
 //
 // The item-346 SERVICE BLOCK (`!services` + `:S` rows) is parsed and validated
 // but adds no field here: a service declaration is not a composition edge, so
 // there is nothing for G2/G3, the withdrawal check or the realm table to fold it
-// into. The certifier that DOES use it reads the wire directly. A ROUTE row
-// (`C>k/r1,r2`, issue #1036) is the contrast that shows where the line is: its
-// legs ARE composition edges and a per-realm existence obligation, so it gets a
-// field (`routes`) and is folded in full.
+// into. The certifier that DOES use it reads the wire directly. The ROUTE row
+// (`C>k/r1,r2`, issue #1036) and the HANDOFF row (`C=k:T`, wave part 2) are the
+// contrast that shows where the line is: a route's legs ARE composition edges
+// and a per-realm existence obligation, and a handoff row IS the predecessor
+// half of item 53's compatibility relation, so each gets a field (`routes`,
+// `hands`) and is folded in full.
 type Manifest = { provs: List[Prov3], reqs: List[MReq], routes: List[MRoute],
-                  mnames: List[Str], repl: List[Str], halted: Bool, bad: Str }
+                  hands: List[MHand], mnames: List[Str], repl: List[Str],
+                  halted: Bool, bad: Str }
 
 fn add_mname(names: List[Str], name: Str) -> List[Str] {
   if (contains(names, name)) { return names }
@@ -7420,7 +7454,7 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 //   !services header     (item 346)  -> the service block is EXHAUSTIVE
 //   :S        service     (item 346) -> the running composition declares S
 //   -C        replacing  (wave)      -> a withdrawn component name
-//   C=k:T     handoff    (deferred)  -> REFUSE (needs the self-host type layer)
+//   C=k:T     handoff    (wave 2)    -> an MHand row (the running EXPORT)
 //   anything else                    -> REFUSE (unknown row kind)
 // A `bad` already set rides through unchanged (first offending row wins).
 //
@@ -7431,8 +7465,10 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 // a service DECLARATION contributes no provision, no requirement, no graph node
 // and no withdrawable component, so there is nothing for G2/ROUTE/G3 or the
 // unmet-consumer check to compute from it, at any wire. `-C` and `C=k:T` are the
-// contrast: each of them CHANGES what the fold must compute, which is why one is
-// folded in full and the other still refuses. The consumer the service block
+// contrast: each of them CHANGES what the fold must compute — the first which
+// provisions survive, the second which state shapes a replacement must accept —
+// which is why both are folded in full and a `:S` row is read and dropped. The
+// consumer the service block
 // exists for is the ADMISSION certifier (`crates/revl-gate/src/admission.rs`),
 // which parses the wire itself and uses the names to tell a fresh interface from
 // a redeclaration of a running one. What this fold still does NOT do with them is
@@ -7445,15 +7481,18 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
   if (row.slice(0, 1) == "!") {
     if (row == "!halted") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: true, bad: "" }
     }
     // the completeness claim over the `:S` rows. It carries no data of its own —
     // the claim is read by the admission certifier, which parses the same wire.
     if (row == "!services") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             hands: man.hands,
              mnames: man.mnames, repl: man.repl, halted: man.halted,
              bad: tagged("MANIFEST", "unrecognized manifest header row `".concat(row).concat("`")) }
   }
@@ -7465,11 +7504,13 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     let sname = row.slice(1, row.length())
     if (!bare_ident(sname, 0)) {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest service row `".concat(row)
                  .concat("` does not name a service")) }
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             hands: man.hands,
              mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
   }
   if (row.slice(0, 1) == "-") {
@@ -7479,21 +7520,46 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     let name = row.slice(1, row.length())
     if (!bare_ident(name, 0)) {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest replacement row `".concat(row)
                  .concat("` does not name a component")) }
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             hands: man.hands,
              mnames: man.mnames,
              repl: contains(man.repl, name) ? man.repl : man.repl.push(name),
              halted: man.halted, bad: "" }
   }
   if (ident_led(row)) {
+    // the HANDOFF row (`C=k:T`, the replacement wave part 2) is read FIRST of
+    // the ident-led kinds. Its TYPE field is the one place on the wire carrying
+    // an arbitrary type SPELLING, and a function type spells `->`: read after
+    // the route row, `Store=st:(Int) -> Str` would split at its `>` and parse
+    // as a route whose component name is `Store=st:(Int) -`.
     if (row.indexOf("=") != 0 - 1) {
+      let a = cut(row, "=")
+      let b = cut(a.rest, ":")
+      // `C=k:T` — a component, the provided key its live state hangs off, and a
+      // non-empty type spelling. A row missing any of the three is a garbled
+      // wire, not a handoff, and a wire the gate cannot read fails CLOSED
+      // rather than dropping a running export in silence — which would put the
+      // gate back where part 2 found it, admitting a swap that drops the state.
+      // The TYPE itself is NOT validated here: it is a type spelling, judged by
+      // the §5 relation `handoff_refusals` runs and by nothing else, so a shape
+      // this row cannot judge is left to the judgment that can.
+      if (!bare_ident(a.s, 0) || !bare_ident(b.s, 0)
+          || a.rest.indexOf(":") == 0 - 1 || b.rest == "") {
+        return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+                 hands: man.hands,
+                 mnames: man.mnames, repl: man.repl, halted: man.halted,
+                 bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
+                   .concat("` does not name a component, a key and its state type")) }
+      }
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               mnames: man.mnames, repl: man.repl, halted: man.halted,
-               bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
-                 .concat("` needs the deferred handoff/type-layer wave (item 186)")) }
+               hands: man.hands.push({ comp: a.s, key: b.s, ty: b.rest }),
+               mnames: add_mname(man.mnames, a.s), repl: man.repl,
+               halted: man.halted, bad: "" }
     }
     // the ROUTE row (issue #1036) is read BEFORE the requirement and provision
     // rows: it carries a `/` of its own (the realm field) and would otherwise
@@ -7508,6 +7574,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       if (!bare_ident(a.s, 0) || !bare_ident(b.s, 0)
           || a.rest.indexOf("/") == 0 - 1) {
         return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+                 hands: man.hands,
                  mnames: man.mnames, repl: man.repl, halted: man.halted,
                  bad: tagged("MANIFEST", "manifest route row `".concat(row)
                    .concat("` does not name a component, a key and its realms")) }
@@ -7515,12 +7582,14 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       return { provs: man.provs, reqs: man.reqs,
                routes: man.routes.push({ comp: a.s, key: b.s,
                                          rlms: split_labels(b.rest, []) }),
+               hands: man.hands,
                mnames: add_mname(man.mnames, a.s), repl: man.repl,
                halted: man.halted, bad: "" }
     }
     if (row.indexOf("<") != 0 - 1) {
       let a = cut(row, "<")
       return { provs: man.provs, reqs: man.reqs.push(parse_mreq(a.s, a.rest)),
+               hands: man.hands,
                routes: man.routes, mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted, bad: "" }
     }
@@ -7529,11 +7598,13 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       let b = cut(a.rest, "/")
       return { provs: man.provs.push({ key: b.s, rlm: b.rest, comp: a.s }),
                reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted, bad: "" }
     }
   }
   return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+           hands: man.hands,
            mnames: man.mnames, repl: man.repl, halted: man.halted,
            bad: tagged("MANIFEST", "unrecognized manifest row `".concat(row).concat("`")) }
 }
@@ -7548,8 +7619,9 @@ fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: Str) -> Manifest {
-  return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], mnames: [],
-                                  repl: [], halted: false, bad: "" })
+  return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], hands: [],
+                                  mnames: [], repl: [], halted: false,
+                                  bad: "" })
 }
 
 // ------------------------------------- item 186, the replacement wave (part 1)
