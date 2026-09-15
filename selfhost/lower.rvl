@@ -3503,6 +3503,27 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            localArrows: cx.localArrows, acqWhere: cx.acqWhere }
 }
 
+// The RUNNING composition's operation table, off the item-346 service block's
+// `:S,op,op` rows. Only a service whose row made the operation claim gets an
+// entry, so the map's KEYS are exactly the running services this gate holds a
+// surface for (`svc_decl_known`) and there is no entry that means "unknown".
+fn amb_ops_map(xs: List[SvcOps], i: Int,
+               acc: Map[Str, List[Str]]) -> Map[Str, List[Str]] {
+  if (i >= xs.length()) { return acc }
+  return amb_ops_map(xs, i + 1, acc.set(xs[i].name, xs[i].ops))
+}
+
+fn ctx_amb_ops(cx: Ctx, ops: Map[Str, List[Str]]) -> Ctx {
+  return { svcs: cx.svcs, ambOps: ops, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
+           underArrow: cx.underArrow, handles: cx.handles,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+}
+
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
   var i = 0
@@ -7272,12 +7293,14 @@ type NoLink = { done: Bool, refs: List[Verd] }
 // opposite way on the two sides. `admit_src` passes `[]`, so the single-source
 // path is byte-identical.
 fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
-                   ambSvcs: List[Str], ambSvcsKnown: Bool) -> NoLink {
+                   ambSvcs: List[Str], ambSvcsKnown: Bool,
+                   ambOps: List[SvcOps]) -> NoLink {
   // the ADT constructors the program declares join the callable universe a bare
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
-  let base = ctx_with_callables(build_maps(pg), type_ctors(ts))
+  let base = ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
+                         amb_ops_map(ambOps, 0, Map.empty()))
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
@@ -7382,7 +7405,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
 fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
   // the single-source path: no ambient services, and the text IS the whole
   // world, so its own service declarations are the complete set.
-  let nl = collect_nonlink(ts, pg, [], [], true)
+  let nl = collect_nonlink(ts, pg, [], [], true, [])
   if (nl.done) { return nl.refs }
   // the G2/ROUTE/G3 link collects the rest, in that order (empty seed: a single
   // source composes only against its own text — no ambient provisions,
@@ -7576,9 +7599,16 @@ fn cut(s: Str, sep: Str) -> Cut {
 // is the contrast that shows where the composition line is: its legs ARE edges
 // and a per-realm existence obligation, so it gets a field (`routes`) and is
 // folded in full.
+// One running service's OPERATION claim: the names its `:S,op,op` row spells.
+// Only a row that carries the separator makes the claim, so a bare `:S` (every
+// wire rendered before the operation names were on it) contributes no entry and
+// the A6 member rule decides nothing about that service — the same
+// silence-is-not-emptiness discipline the `!services` header itself carries.
+type SvcOps = { name: Str, ops: List[Str] }
+
 type Manifest = { provs: List[Prov3], reqs: List[MReq], routes: List[MRoute],
                   mnames: List[Str], repl: List[Str], halted: Bool, bad: Str,
-                  svcs: List[Str], svcsKnown: Bool }
+                  svcs: List[Str], svcsKnown: Bool, svcOps: List[SvcOps] }
 
 fn add_mname(names: List[Str], name: Str) -> List[Str] {
   if (contains(names, name)) { return names }
@@ -7661,8 +7691,43 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 fn man_bad(man: Manifest, msg: Str) -> Manifest {
   return { provs: man.provs, reqs: man.reqs, routes: man.routes,
            mnames: man.mnames, repl: man.repl, halted: man.halted,
-           svcs: man.svcs, svcsKnown: man.svcsKnown,
+           svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
            bad: tagged("MANIFEST", msg) }
+}
+
+// The operation half of a `:S,…` row, read once so the row branch reads as one
+// decision. `claimed` is false only for a row that carries no separator at all.
+type OpsR = { xs: List[Str], claimed: Bool, ok: Bool }
+
+fn mk_ops_none() -> OpsR {
+  return { xs: [], claimed: false, ok: true }
+}
+
+// `rest` is everything after the first comma: "" is the EMPTY claim (a running
+// service that declares no operation), and every other spelling is a
+// comma-separated run of bare identifiers. A malformed one refuses the wire by
+// name rather than silently claiming a smaller surface than the composition
+// has — a short list here would refuse calls the reference admits, which is the
+// direction this gate may not err in.
+fn mk_ops(rest: Str) -> OpsR {
+  if (rest == "") { return { xs: [], claimed: true, ok: true } }
+  var xs: List[Str] = []
+  var s = rest
+  var ok = true
+  var done = false
+  while (!done) {
+    let comma = s.indexOf(",")
+    let one = comma == 0 - 1 ? s : s.slice(0, comma)
+    if (!bare_ident(one, 0)) {
+      ok = false
+      done = true
+    } else {
+      xs = contains(xs, one) ? xs : xs.push(one)
+      if (comma == 0 - 1) { done = true }
+      else { s = s.slice(comma + 1, s.length()) }
+    }
+  }
+  return { xs: ok ? xs : [], claimed: true, ok: ok }
 }
 
 fn parse_row(row: Str, man: Manifest) -> Manifest {
@@ -7671,7 +7736,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     if (row == "!halted") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
                mnames: man.mnames, repl: man.repl, halted: true,
-               svcs: man.svcs, svcsKnown: man.svcsKnown, bad: "" }
+               svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps, bad: "" }
     }
     // the completeness claim over the `:S` rows: with it, the service block
     // ENUMERATES the running composition's services and a name absent from it
@@ -7680,24 +7745,47 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     if (row == "!services") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
                mnames: man.mnames, repl: man.repl, halted: man.halted,
-               svcs: man.svcs, svcsKnown: true, bad: "" }
+               svcs: man.svcs, svcsKnown: true, svcOps: man.svcOps,
+               bad: "" }
     }
     return man_bad(man, "unrecognized manifest header row `".concat(row)
       .concat("`"))
   }
   if (row.slice(0, 1) == ":") {
-    // a service the running composition declares. Its name is held to the same
-    // BARE identifier rule a withdrawal name is — anything carrying a separator
-    // is a garbled row, not a declaration.
-    let sname = row.slice(1, row.length())
+    // a service the running composition declares, optionally followed by the
+    // OPERATIONS it declares: `:S` or `:S,get,put`. The name is held to the
+    // same BARE identifier rule a withdrawal name is, and so is every operation
+    // — anything else is a garbled row, not a declaration.
+    //
+    // The comma is the CLAIM. `:S` says the composition declares `S` and says
+    // nothing about its surface, so the A6 member rule decides nothing about
+    // it; `:S,` says `S` declares no operation at all, and `:S,get` says its
+    // surface is exactly `get`. Keeping the two apart is what lets a wire
+    // rendered by a producer that had no service table (or by one from before
+    // the operations were on the wire) go on resolving NAMES without ever
+    // being read as an empty method list — the same
+    // silence-is-not-emptiness rule the `!services` header carries for the
+    // names themselves.
+    let comma = row.indexOf(",")
+    let sname = comma == 0 - 1 ? row.slice(1, row.length())
+                               : row.slice(1, comma)
     if (!bare_ident(sname, 0)) {
       return man_bad(man, "manifest service row `".concat(row)
         .concat("` does not name a service"))
     }
+    let ops = comma == 0 - 1 ? mk_ops_none()
+                             : mk_ops(row.slice(comma + 1, row.length()))
+    if (!ops.ok) {
+      return man_bad(man, "manifest service row `".concat(row)
+        .concat("` does not name an operation"))
+    }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
              mnames: man.mnames, repl: man.repl, halted: man.halted,
              svcs: contains(man.svcs, sname) ? man.svcs : man.svcs.push(sname),
-             svcsKnown: man.svcsKnown, bad: "" }
+             svcsKnown: man.svcsKnown,
+             svcOps: ops.claimed ? man.svcOps.push({ name: sname, ops: ops.xs })
+                                 : man.svcOps,
+             bad: "" }
   }
   if (row.slice(0, 1) == "-") {
     // a withdrawal names a component, nothing more: `-C`. A name carrying a
@@ -7711,7 +7799,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
              mnames: man.mnames,
              repl: contains(man.repl, name) ? man.repl : man.repl.push(name),
-             halted: man.halted, svcs: man.svcs, svcsKnown: man.svcsKnown,
+             halted: man.halted, svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
              bad: "" }
   }
   if (ident_led(row)) {
@@ -7738,7 +7826,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
                routes: man.routes.push({ comp: a.s, key: b.s,
                                          rlms: split_labels(b.rest, []) }),
                mnames: add_mname(man.mnames, a.s), repl: man.repl,
-               halted: man.halted, svcs: man.svcs, svcsKnown: man.svcsKnown,
+               halted: man.halted, svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
                bad: "" }
     }
     if (row.indexOf("<") != 0 - 1) {
@@ -7746,7 +7834,8 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       return { provs: man.provs, reqs: man.reqs.push(parse_mreq(a.s, a.rest)),
                routes: man.routes, mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted, svcs: man.svcs,
-               svcsKnown: man.svcsKnown, bad: "" }
+               svcsKnown: man.svcsKnown, svcOps: man.svcOps,
+               bad: "" }
     }
     if (row.indexOf("/") != 0 - 1) {
       let a = cut(row, "/")
@@ -7755,7 +7844,8 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
                reqs: man.reqs, routes: man.routes,
                mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted, svcs: man.svcs,
-               svcsKnown: man.svcsKnown, bad: "" }
+               svcsKnown: man.svcsKnown, svcOps: man.svcOps,
+               bad: "" }
     }
   }
   return man_bad(man, "unrecognized manifest row `".concat(row).concat("`"))
@@ -7773,7 +7863,8 @@ fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
 fn parse_manifest(m: Str) -> Manifest {
   return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], mnames: [],
                                   repl: [], halted: false, svcs: [],
-                                  svcsKnown: false, bad: "" })
+                                  svcsKnown: false, svcOps: [],
+                                  bad: "" })
 }
 
 // Does this wire ENUMERATE the running composition's services? The `!services`
@@ -7992,7 +8083,7 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   // reference the other.
   let nl = collect_nonlink(ts, pg,
     withdrawal_refusals(keptReqs, lost, pg.comps, 0),
-    man.svcs, manifest_svcs_known(man))
+    man.svcs, manifest_svcs_known(man), man.svcOps)
   if (nl.done) { return pick_min(nl.refs) }
   let wrefs = nl.refs
   // the LINK is the half the running manifest reshapes. Seed the per-(key,
@@ -12613,6 +12704,38 @@ test "async-declared op admits the same async body" {
 test "sync method implementing an async op is refused (signature parity)" {
   let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
   assert v == "A1|method `post` of provision `http` is not async but service Http declares it async"
+}
+
+// ------------------------------------- A6: the required-service member rule
+// (docs/design/457 T4b). `_component_req_call` resolves the operation against
+// the service the requirement names and refuses an absent one BEFORE it counts
+// arguments or judges the emit marking, so an operation nothing declares draws
+// A6 and not G4 even under `emit`. It fires only where the declaration is held
+// (see `svc_decl_known`).
+
+test "a required-service call to an undeclared operation is refused (A6)" {
+  let v = admit_src("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.execute(\"x\") undo db.query(\"y\") }")
+  assert v == "A6|`db.execute` is not a method of service Database"
+}
+
+test "the same call to a DECLARED operation is admitted" {
+  let v = admit_src("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.query(\"x\") undo db.query(\"y\") }")
+  assert v == ""
+}
+
+test "an absent operation in a provide method is refused (A6)" {
+  let v = admit_src("service Store { fn get(key: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component C requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nonexistent(key) } }")
+  assert v == "A6|`store.nonexistent` is not a method of service Store"
+}
+
+test "an absent operation under `emit` is A6, not the G4 marker rule" {
+  let v = admit_src("service Bus { emission fn publish(topic: Str) } service Cache { fn put(key: Str) } component C requires bus: Bus provides cache: Cache { provide cache { fn put(key) { emit bus.broadcast(key) } } }")
+  assert v == "A6|`bus.broadcast` is not a method of service Bus"
+}
+
+test "a Stream requirement draws no member verdict" {
+  let v = admit_src("service Cache { fn put(key: Str) } component C requires ticks: Stream[Int] provides cache: Cache { provide cache { fn put(key) { let x = key } } }")
+  assert v == ""
 }
 
 test "undeclared access is refused (G1), exact wording" {
