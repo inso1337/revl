@@ -850,6 +850,78 @@ so the turn's fibers were torn down and re-activated and the handle no longer
 addresses the instance it was minted onto. `Gate.call` keeps serving gen N
 throughout, which is EDGE 1's guarantee and is untouched. Seven tests.
 
+**Slice 5 (LANDED): what a proposal INHERITS by NAME — the reviewed blast set.**
+Slice 2 looked at the `(component glob, realm)` pair the item-246/251 approval
+policy scopes a standing approval and an auto-approve rule by, closed the realm
+half (`no_realm_placement`, G9), and dismissed the other half in one clause: "an
+untrusted author writes its own component NAMES, so the glob half discriminates
+nothing against it; the realm was the only half left". The first part of that is
+true. The conclusion drawn from it was not: a scope half that discriminates
+nothing is not a half that can be left alone, it is the half that is open.
+
+Item 251's H1 bind is what stands in the glob's place. A distilled
+`AutoApproveRule` is not bound to its open glob, it is bound to the ENUMERATED
+set of components the glob selected when the operator reviewed it
+(`_auto_reviewed`, snapshot at first sighting and persisted across every
+generation), and a component ENTERING that set suspends the rule and re-offers
+it. That closes growth. It does not close SUBSTITUTION, because the set it
+compares is a set of NAMES, and under `propose` the successor is agent-authored
+code that writes its own component names. A candidate that calls itself by a
+reviewed component's name leaves the membership byte-identical: no growth, no
+suspend, and its class-(c) crossings fire under the operator's distilled rule
+with NO prompt and NO ticket. The operator reviewed some code; the candidate
+replaced the code and kept the receipt. Measured end to end before the fix: gen
+N's reviewed `BillerInvoice` auto-approves silently (correct), the proposal
+swaps in a `BillerInvoice` whose body rewrites the payload, and its crossing
+fires with zero tickets raised.
+
+The two neighbouring authorities were already immune and are worth stating,
+because they are why this was the one that was open. A single-use standing
+approval (`_find_standing_approval`) and a standing grant (`_live_grant_for`)
+both pin the reach-closure `candidateHash` of the generation they were minted
+in, so a swap of any kind recomputes a different hash and they simply stop
+covering. A 251 rule cannot do that: it is POLICY, it must survive the swaps a
+grant is meant to die on, and the H1 name set is the whole of what it carries
+instead.
+
+The bind is `_component_signature`: the rule is reviewed against what each
+member IS, not only what it is called. `_auto_reviewed_sig` snapshots
+`{name: digest}` over the same glob at the same first sighting and persists on
+the same key and for the same reason (re-snapshotting it per generation would
+let a later generation re-review the rule on the operator's behalf, exactly as
+re-deriving the budget would renew it), and `_auto_rule_suspended` checks growth
+first and then signature drift. The digest covers the component's `body`,
+`provides`, `requires` and `config` and excludes `source`, which is the spelling
+of a path rather than of the component and moves for reasons that are not
+changes of code — a composition compiled from another directory, `propose`'s own
+`candidate.rvl` staging name.
+
+Deliberately AUTHOR-BLIND, and that is the design decision, not an accident of
+implementation. The alternative was to mark the components each untrusted door
+admits and suspend on agent authorship, which is narrower in blast radius and
+wrong in shape: it would have had to be threaded through `propose`, the MCP
+inline `revl_swap`/`revl_load`, `rollback`, `undo`, `fork` and `restore`, it
+would fail OPEN at the next door that forgot to declare itself, and it states the
+rule as a fact about `propose` when the fact is about the review. A rule reviewed
+over one body does not carry onto another body under that name, whoever wrote it.
+An operator who genuinely rewrote that component re-reviews the rule, which is
+the same answer H1 already gives for a new member.
+
+Strictly narrowing, and the controls say so rather than the prose: a REFUSED
+proposal swaps nothing, so the reviewed component is still live and still covered
+(the non-vacuity control); a proposal carrying the reviewed component's OWN code
+digests identically and stays covered, through `propose`, which is what
+distinguishes a bind on the code from a bind on the verb; and a generation that
+re-materializes the identical composition — the common case, and every `uses` /
+`ttl` budget test in `tests/test_distill_enforcement.py` — is unchanged. Five
+tests in `tests/test_334_reviewed_name_substitution.py`; three of them fail on
+the predecessor and both controls pass on it.
+
+**Still deferred after slice 5:** the rust host (below); the re-entrant
+`propose` (enforced-deferred by the forbidden-grant rule); the
+genuinely-new-host-code path (operator gate or item 411); and cross-trust-domain
+re-admission.
+
 **The rust host, re-verified 2026-09-14. The 2026-09-02 statement below is
 SUPERSEDED and the blocker has moved.** It read: `crates/revl-gate` is layer 1
 only and admit-only, `crates/revl-gate/src/session.rs` is a 25-line documented

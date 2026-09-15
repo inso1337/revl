@@ -580,6 +580,14 @@ class Session:
         # swap's re-materialize. Reset per session.
         self._auto_rules: list = []
         self._auto_reviewed: dict = {}
+        # item 334: the same review bind, taken over what each reviewed member IS
+        # (`_component_signature`) and not only what it is called. The name-set
+        # above cannot see a generation that puts different code behind a reviewed
+        # name, which is exactly what an agent-authored successor does under
+        # `Gate.propose` — it writes its own component names. Keyed, persisted and
+        # reset on the same terms as `_auto_reviewed`, because it is the other
+        # half of the same snapshot.
+        self._auto_reviewed_sig: dict = {}
         # the rule's SPENT budget (`remainingUses`/`expiresAt`/`consumed`),
         # persisted on the same key and for the same reason as `_auto_reviewed`:
         # a rule is re-materialized each generation, and re-deriving the budget
@@ -3836,6 +3844,12 @@ class Session:
         # refuses one.
         branch._auto_spend = dict(self._auto_spend)
         branch._auto_reviewed = dict(self._auto_reviewed)
+        # item 334: the review bind's signature half carries for the same reason
+        # its name half does — a branch that re-snapshot it would re-review the
+        # rule against whatever code the parent generation was running, which on
+        # the propose path is the agent's.
+        branch._auto_reviewed_sig = {k: dict(v)
+                                     for k, v in self._auto_reviewed_sig.items()}
         branch.restore(snap)               # fresh session_id + owner; no approval carry
         if self._wal_path:
             # keep the branch's distinct WAL beside the parent's, rather than in
@@ -6974,6 +6988,20 @@ class Session:
         names = [c.get("name") for c in ir.get("components") or []]
         return frozenset(n for n in names if n and fnmatchcase(n, glob))
 
+    def _glob_signatures(self, glob: str) -> dict:
+        """The `{name: signature}` map of the components a rule's glob currently
+        selects — the same membership `_glob_members` reads, carrying each
+        member's CODE IDENTITY beside its name (item 334).
+
+        The H1 bind snapshots the glob's membership as a set of NAMES. A name is
+        not an identity: a generation whose author writes its own component names
+        can put different code behind a reviewed one, and the name-set is then
+        unchanged. `_component_signature` is what tells those two apart."""
+        ir = self._class_map.ir if self._class_map is not None else (self.ir or {})
+        return {c["name"]: _component_signature(c)
+                for c in ir.get("components") or []
+                if c.get("name") and fnmatchcase(c["name"], glob)}
+
     def _install_auto_approve_rules(self) -> None:
         """Materialize the bound policy's `AutoApproveRule`s into the live standing
         analog for this generation (item 251 Slice 2). Each entry carries the
@@ -7000,6 +7028,15 @@ class Session:
             if reviewed is None:
                 reviewed = members
                 self._auto_reviewed[key] = reviewed
+            # item 334: the same snapshot, taken at the same first sighting, of
+            # what the reviewed members ARE and not only what they are called.
+            # Persisted on the same key and for the same reason as the name set
+            # (re-snapshotting it each generation would let a later generation
+            # re-review the rule for the operator).
+            signatures = self._auto_reviewed_sig.get(key)
+            if signatures is None:
+                signatures = self._glob_signatures(rule.component)
+                self._auto_reviewed_sig[key] = signatures
             try:
                 caps = [cap_order.parse_cap(c) for c in rule.caps]
             except cap_order.CapError:
@@ -7027,6 +7064,7 @@ class Session:
                 "caps": caps,
                 "admitting": rule.admitting,
                 "reviewedComponents": reviewed,
+                "reviewedSignatures": signatures,
                 "remainingUses": spend["remainingUses"],
                 "expiresAt": spend["expiresAt"],
                 "consumed": spend["consumed"],
@@ -7048,13 +7086,45 @@ class Session:
         return self._class_map.static_taint(component)
 
     def _auto_rule_suspended(self, entry: dict) -> bool:
-        """Whether a distilled rule is suspended by glob-membership GROWTH (§6 A1,
-        the H1 fix). Any component currently selected by the glob that was not in
-        the reviewed blast set is a signature change: the rule is bound to the
+        """Whether a distilled rule is suspended by a change in the blast set it
+        was reviewed against — by GROWTH (§6 A1, the H1 fix) or by SUBSTITUTION
+        (roadmap item 334).
+
+        GROWTH: any component currently selected by the glob that was not in the
+        reviewed blast set is a signature change: the rule is bound to the
         enumerated set it was distilled from, not to the open glob, so a new member
-        suspends it and it must be re-offered - never silently auto-approved."""
+        suspends it and it must be re-offered - never silently auto-approved.
+
+        SUBSTITUTION: any member whose CODE no longer digests to what it digested
+        when the rule was reviewed. The growth check above compares NAMES, and a
+        name is not an identity. Item 334's `Gate.propose` replaces the whole live
+        composition with an agent-authored successor, and that author writes its
+        own component names — so a candidate that calls itself by a reviewed
+        component's name changes nothing the name-set can see, and inherits the
+        standing authority an operator distilled over the code that used to hold
+        that name. Item 334 slice 2 bounded the other half of the same scope, the
+        `(component glob, realm)` pair the item-246/251 policy matches on: it
+        refused a candidate its own REALM (G9), and said of the glob half that it
+        "discriminates nothing against" an author who names its own components.
+        This is that half, closed the only way it can be — by binding the review
+        to what the component IS rather than to what it is called.
+
+        Deliberately author-blind: it is not a rule about `propose`, it is a rule
+        about the review, so it holds at every door that can move code behind a
+        reviewed name (propose, the MCP inline `revl_swap`/`revl_load`, an
+        operator's own edit) and it cannot fail open because a NEW door forgot to
+        declare its authorship. An operator who genuinely changed that component
+        re-reviews the rule, which is the same answer H1 already gives for a new
+        member. A generation that re-materializes the identical composition — the
+        common case, and every `uses`/`ttl` budget test — digests identically and
+        stays live."""
         current = self._glob_members(entry["glob"])
-        return bool(current - entry["reviewedComponents"])
+        if current - entry["reviewedComponents"]:
+            return True
+        reviewed_sig = entry.get("reviewedSignatures") or {}
+        return any(reviewed_sig.get(name) != signature
+                   for name, signature in self._glob_signatures(
+                       entry["glob"]).items())
 
     def _auto_rule_covers(self, entry: dict, ticket: dict, now: int) -> bool:
         """Whether one distilled rule auto-approves this class-(c) ticket, using the
@@ -8198,6 +8268,30 @@ def _base_manifest_hash_of(ir: dict | None) -> str | None:
         return None
     import json  # noqa: PLC0415 — stdlib
     payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _component_signature(comp: dict) -> str:
+    """The content digest of ONE component's IR entry — its CODE IDENTITY, as
+    opposed to its name (roadmap item 334).
+
+    An item-251 distilled rule is reviewed against an enumerated blast set of
+    component NAMES (`_auto_reviewed`, the §6 A1 H1 bind). That bind holds only
+    while a name keeps meaning the code it meant when the operator reviewed it,
+    and under every door that admits source whose AUTHOR is untrusted — item
+    334's `Gate.propose` above all, where the successor REPLACES the running
+    composition — the author writes its own component names. Taking a reviewed
+    name is therefore free, and the name-set bind cannot see it.
+
+    `source` (the file the component was declared in) is excluded: it is the
+    spelling of a path, not of the component, and it moves for reasons that are
+    not changes of code (a composition re-compiled from a different directory,
+    `propose`'s `candidate.rvl` staging name). Everything that IS the component
+    — its `body`, the keys it `provides`, what it `requires`, its `config`
+    declaration — is in, canonicalized the way every other digest here is."""
+    import json  # noqa: PLC0415 — stdlib
+    payload = json.dumps({k: v for k, v in comp.items() if k != "source"},
+                         sort_keys=True, separators=(",", ":"), default=_plain)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
