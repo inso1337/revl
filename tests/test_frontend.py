@@ -259,14 +259,6 @@ REJECTIONS = {
         "with a wider resource budget than it holds: `net(calls=1000)` widens "
         "`calls` to 1000 over the parent's 100",
     "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
-    # The same widening as the line above, reached through a key SPELLED THE
-    # SAME on both sides. `g4_spawn_widens_capability` names its keys `kv_a` and
-    # `kv_b`, so a fold keyed by the wiring key catches it by accident; here both
-    # components spell theirs `kv` and only the declared TOKEN separates them,
-    # which is what `_cap_keyed` exists for (renaming a child's `requires` key
-    # was enough to launder the boundary past the invariant). The pair is what
-    # makes the difference between the two namespaces measurable.
-    "g4_spawn_key_rename_launders.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
     # item 82: an emission reached through a spawn handle (`w.task.run(...)`,
     # an `instance-get` provision access) must still be marked `emit` — an
     # unmarked crossing is refused, not silently lowered (and no longer a
