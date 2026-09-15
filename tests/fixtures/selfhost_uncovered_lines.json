@@ -849,8 +849,8 @@
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
-        "Concrete->Any boxing coercion (`_coerce_any_arg`): a concrete scalar flowing into an `Any`/`Value` parameter is boxed as `Value::new(serde_json::Value::from(..))` (native `compile_to`, #106/#98). The firing path is not reached by the byte-agreement corpus yet: a concrete->Any document would need the self-host `emit_rust.rvl` call renderer to mirror the same boxing (a tracked follow-up), or the two tiers diverge on it. Recorded until that mirror + corpus case land. The count rose 3 -> 5 when the non-finite-`Float` arm was added: `serde_json::Value::from(f64)` maps a non-finite float to `Null` silently, so a `Float` argument boxes through a checked `serde_json::Number::from_f64` and refuses the `None` rather than substituting a different value. The `Some` arm is corpus-reachable in principle once the mirror lands. The `None` arm is structurally unreachable from ANY static corpus document: a non-finite `Float` has no literal spelling (the frontend refuses it, item 312) and arises only at runtime, through IEEE true division. Recorded rather than chased, because the corpus case cannot exist before the mirror does.": {
-          "_coerce_any_arg": 5
+        "Concrete->Any boxing coercion (`_coerce_any_arg`): a concrete scalar flowing into an `Any`/`Value` parameter is boxed as `Value::new(serde_json::Value::from(..))` (native `compile_to`, #106/#98). The firing path is not reached by the byte-agreement corpus yet: a concrete->Any document would need the self-host `emit_rust.rvl` call renderer to mirror the same boxing (a tracked follow-up), or the two tiers diverge on it. Recorded until that mirror + corpus case land. The count rose 3 -> 5 when the non-finite-`Float` arm was added: `serde_json::Value::from(f64)` maps a non-finite float to `Null` silently, so a `Float` argument boxes through a checked `serde_json::Number::from_f64` and refuses the `None` rather than substituting a different value. The `Some` arm is corpus-reachable in principle once the mirror lands. The `None` arm is structurally unreachable from ANY static corpus document: a non-finite `Float` has no literal spelling (the frontend refuses it, item 312) and arises only at runtime, through IEEE true division. Recorded rather than chased, because the corpus case cannot exist before the mirror does. The count rose 5 -> 7 with the RETURN and `??`-DEFAULT positions: a declared `-> Any` erases to the same opaque `Value`, so returning a concrete scalar from such a function is the identical E0308 the argument position had, and an `Opt[Any] ?? <scalar>` default fills the same slot through `unwrap_or_else`. Both route through this function, and both are blocked from the corpus by the same missing mirror. The `List[Any]` arm arrives with them: a `Vec<Value>` boxes as the JSON array `stdlib/value.rvl`'s `value_list` reads back, the one container with a canonical image, and it is the coercion that let `selfhost/emit_rust.rvl` itself build as rust (the Stage-4 precondition).": {
+          "_coerce_any_arg": 7
         },
         "Demand-selected formatting helpers: canonical Float interpolation and record/timer/teardown preambles are emitted only when those deferred runtime features are present. Ordinary string interpolation and checked arithmetic are covered without selecting these helper bodies.": {
           "_format": 20,
@@ -904,16 +904,17 @@
           "_undo_reclone_locals": 1,
           "_v3_self_append_inplace": 19
         },
-        "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
+        "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. The stdlib-method result table (`_v3_builtin_return_type`) joins this bucket: it names the surface type of a `kind == \"builtin\"` node, so a `let` bound to a method call carries a type instead of none. Driving `_v3_infer_type` over the receivers it now asks about is what pulls `_v3_infer_type` 11 -> 4, `_v3_is_float` 4 -> 1 and `_v3_is_str` 2 -> 1. Its own residual statement is the `@self` fallback for a receiver the corpus never leaves untyped; the same missing mirror keeps a corpus document from reaching it, because `selfhost/emit_rust.rvl` carries no inference layer of its own.": {
           "_emit_v3_functions": 8,
           "_v3_builtin": 30,
+          "_v3_builtin_return_type": 1,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_infer_type": 11,
+          "_v3_infer_type": 4,
           "_v3_inplace_persistent": 12,
           "_v3_interp": 3,
-          "_v3_is_float": 4,
-          "_v3_is_str": 2,
+          "_v3_is_float": 1,
+          "_v3_is_str": 1,
           "_v3_let_pattern": 19,
           "_v3_match_expr": 2,
           "_v3_stmt": 5

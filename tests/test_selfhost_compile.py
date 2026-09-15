@@ -339,15 +339,15 @@ def test_native_compile_of_component_program_is_byte_identical(
 #     tier   corpus   emitter vs the REFERENCE IR   the FULLY-NATIVE chain
 #     py         54                   54 (100%)               38 (70.4%)
 #     ts         60                   60 (100%)               36 (60.0%)
-#     go         21                   21 (100%)              21 (100.0%)
+#     go         22                   22 (100%)              22 (100.0%)
 #     java       49                   49 (100%)               28 (57.1%)
 #     rust       34                   34 (100%)               32 (94.1%)
-#     wasm       19                   19 (100%)              19 (100.0%)
-#     TOTAL     237                  237 (100%)              174 (73.4%)
+#     wasm       20                   20 (100%)              20 (100.0%)
+#     TOTAL     239                  239 (100%)              176 (73.6%)
 #
-# The two columns are the whole finding. Every one of the 237 documents is
+# The two columns are the whole finding. Every one of the 239 documents is
 # reproduced byte-for-byte by its self-host emitter when the emitter is fed the
-# REFERENCE IR; only 174 survive the fully-native chain. So all 63 residual
+# REFERENCE IR; only 176 survive the fully-native chain. So all 63 residual
 # documents are ``selfhost/lower.rvl`` gaps — the native IR producer — and NOT
 # emitter gaps. The emitter half of roadmap item 146 is complete over the
 # enumerated corpus; what is left of the maximal story is item 391's arc.
@@ -359,6 +359,9 @@ GO_DOCS = [
     # issue #721: `%` on Float (math.Mod), a Float literal that must not be a
     # Go CONSTANT, and the `widen` marker over an Int literal.
     "float_rem.rvl",
+    # joined the go emitter corpus after the table above was first taken, and
+    # measured through the native chain here so the 100% row stays pinned
+    "arrow_captures.rvl",
     "../emit_java_corpus/records.rvl", "../emit_rust_corpus/perf_shapes.rvl",
     "../emit_wasm_corpus/loopctrl.rvl", "../emit_wasm_corpus/strlit.rvl",
 ]
@@ -390,6 +393,9 @@ WASM_DOCS = [
     "listmem.rvl", "loopctrl.rvl", "reads.rvl", "recmem.rvl", "residuals.rvl",
     "scratch_names.rvl", "string_ops.rvl", "strlit.rvl", "variants.rvl",
     "widening.rvl",
+    # joined the wasm emitter corpus after the table above was first taken, and
+    # measured through the native chain here so the 100% row stays pinned
+    "shortcircuit.rvl",
 ]
 
 WIRED_TIER_CORPUS = (

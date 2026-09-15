@@ -199,8 +199,10 @@
 //! # `compile_to` is Stage 4
 //!
 //! Exported so the shape is fixed; it refuses unconditionally today, because
-//! the self-host emitters still carry `@py`-only helper externs and do not emit
-//! to rust at all.
+//! this crate carries the FRONTEND only. `selfhost/lower.rvl` and its `use`
+//! closure are what `tools/build_gate_crate.py` emits into `selfhost.rs`; no
+//! emitter is in the crate, so there is no native emitter to call. See
+//! [`compile_to`] for what each tier still needs.
 //!
 //! # The navigation surface
 //!
@@ -699,20 +701,39 @@ fn verdict_from_wire(wire: &str) -> Verdict {
 
 /// Verdict plus emitted target source — **Stage 4, not available**.
 ///
-/// Always `Err(Verdict::OutsideFrontier)` today: the self-host emitters
-/// (`selfhost/emit_py.rvl`, `selfhost/emit_rust.rvl`) still carry `@py`-only
-/// helper externs (`string_lit`, `num_str`, `py_repr`, `mangle`) and do not emit
-/// to rust at all, so no native emitter exists to call. The signature is fixed
-/// here so its arrival is additive.
+/// Always `Err(Verdict::OutsideFrontier)` today: the crate carries the FRONTEND
+/// only (`selfhost/lower.rvl` and its `use` closure, emitted into `selfhost`),
+/// so there is no emitter in it to call. What each tier still needs differs, and
+/// the refusal names it rather than stating one reason for both:
+///
+/// * `py` — `selfhost/emit_py.rvl`'s six helper externs (`py_repr`, `mangle`,
+///   `snake`, `pascal`, `upper`, `newline`) carry `@py` bodies only, so that
+///   emitter has no rust form at all;
+/// * `rust` — `selfhost/emit_rust.rvl` now BUILDS as rust (every extern carries
+///   an `@rs` body, and roadmap item 146 closed the `Any`-erasure boxing that
+///   left it failing `cargo build`; pinned by
+///   `tests/test_selfhost_emit_rust.py::test_the_rust_emitter_builds_as_rust`).
+///   What is missing is the rest of the chain in this crate: the emitter is not
+///   generated into it, and its entry point takes the interchange IR as an
+///   `Any`, which erases to `cordis::Value` with no rust-side constructor to
+///   build one from source.
+///
+/// The signature is fixed here so its arrival is additive.
 pub fn compile_to(_source: &str, tier: Tier) -> Result<String, Verdict> {
     let tier_name = match tier {
         Tier::Py => "py",
         Tier::Rust => "rust",
     };
+    // The two tiers are blocked by different things, and a consumer reading this
+    // reason should be told which, not one summary that fits neither.
+    let tier_detail = match tier {
+        Tier::Py => "selfhost/emit_py.rvl carries @py-only helper externs and has no rust form",
+        Tier::Rust => "selfhost/emit_rust.rvl builds as rust but is not generated into this crate, and its entry takes the interchange IR as an erased cordis::Value with no rust-side constructor",
+    };
     Err(Verdict::OutsideFrontier {
         reason: format!(
-            "compile_to({}) is not available in this crate: the self-host emitters still depend on @py-only helper externs, so there is no native emitter to run (roadmap item 332 Stage 4). Emit with the reference `revl compile --backend {}`.",
-            tier_name, tier_name
+            "compile_to({}) is not available in this crate: it carries the frontend only, so there is no native emitter in it to run ({}) (roadmap item 332 Stage 4). Emit with the reference `revl compile --backend {}`.",
+            tier_name, tier_detail, tier_name
         ),
     })
 }
