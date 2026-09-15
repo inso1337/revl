@@ -1159,6 +1159,81 @@ extern acquire fn f() undo g(1) = @py { return 1 }
     # the gate before this slice.
     *[(f"{label} is read", _sop(clause, _SOP_EMISSION_PUT, impl))
       for label, clause, impl in _SOP_CLAUSES],
+
+    # ---- item 391 / issue #106: the shadowed module callable ---------------
+    # The ACCEPTING twins of the callable-shadowing refusals below, and the
+    # whole reason that scan is scoped to the CALL position. Every one of these
+    # would be refused by a reader that fired on the mere coincidence of a name,
+    # which is the false-rejection direction the gate may not err in.
+    ("a binding sharing a callable's name that never calls it", """
+fn make_row(id: Int, name: Str) -> Str { return name }
+fn f(row: Str) -> Str {
+  let name = row
+  return make_row(1, name)
+}
+"""),
+    ("a parameter sharing a callable's name that never calls it", """
+fn name(row: Str) -> Str { return row }
+fn f(name: Str) -> Str { return name }
+"""),
+    ("a bound name called only as a METHOD of a receiver", """
+fn get(k: Str) -> Str { return k }
+fn f(k: Str) -> Str {
+  let m = Map.new()
+  let get = k
+  return m.get(get)
+}
+"""),
+    ("a callable called in a fn that binds nothing of that name", """
+fn helper(xs: List[Int]) -> Int { return xs.length() }
+fn f() -> Int { return helper([1, 2, 3]) }
+"""),
+    # the `=>` fence: a match ARM head is an identifier followed by `(` and must
+    # not read as a call, or a bound name colliding with a constructor-shaped
+    # module fn would be refused here and admitted by the reference.
+    ("a match arm head that shares a module callable's name", """
+fn Wrap(n: Int) -> Int { return n }
+fn f(o: Opt[Int]) -> Int {
+  let Wrap = 1
+  return match o { Some(v) => v, None => Wrap }
+}
+"""),
+    # ---- item 391 / issue #106: the provide-method rebind ------------------
+    # The accepting twins of the method-local collision: a fresh method-local
+    # name, a method PARAMETER that only coincides with another method's local,
+    # and a component local read (never rebound) by the method that closes over
+    # it. Refusing any of these would break the ordinary component shape.
+    ("a provide method binding a name the component does not hold", """
+service Cache { fn set(key: Str) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let slot = key
+      effect store.insert(slot, "v")
+      undo   store.remove(slot)
+    }
+  }
+}
+"""),
+    ("two provide methods binding the same fresh local", """
+service Cache { fn set(key: Str)  fn put(key: Str) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let slot = key
+      effect store.insert(slot, "v")
+      undo   store.remove(slot)
+    }
+    fn put(key) {
+      let slot = key
+      effect store.insert(slot, "w")
+      undo   store.remove(slot)
+    }
+  }
+}
+"""),
 ]
 
 
@@ -2100,6 +2175,77 @@ fn f() -> Int {
   return 1
 }
 """, "G1"),
+    # ---- item 391 / issue #106: the shadowed module callable (G6) ----------
+    # `_refuse_callable_shadowing`. A body that BINDS a name and CALLS it while
+    # a module `fn` or `extern` of that name is in scope has two readings, and
+    # the tiers do not pick the same one. Code-less in the reference, so before
+    # this slice the gate raised no objection and the census filed
+    # `shadowed_module_fn_call` as a false-admit; it was pinned in
+    # TYPE_LAYER_GAP below and has been struck from it.
+    ("a binding that shadows a module fn it calls",
+     _fixture("shadowed_module_fn_call"), "G6"),
+    # the extern half: the diagnostic spells the kind, so a shadowed `extern`
+    # must draw "module extern" and not "module function".
+    ("a binding that shadows a module extern it calls", """
+extern pure fn helper(n: Int) -> Int = @py { return n }
+fn f(g: (Int) -> Int) -> Int {
+  let helper = g
+  return helper(1)
+}
+""", "G6"),
+    # a PARAMETER is a binder too, and it is reported ahead of any later `let`.
+    ("a parameter that shadows a module fn the body calls", """
+fn helper(n: Int) -> Int { return n }
+fn f(helper: (Int) -> Int) -> Int {
+  return helper(1)
+}
+""", "G6"),
+    # whole-body granularity, not per-block: the bind in one arm and the call
+    # outside it is the same ambiguity.
+    ("a bind in an if arm with the call outside it", """
+fn helper(n: Int) -> Int { return n }
+fn f(c: Bool, g: (Int) -> Int) -> Int {
+  if (c) { let helper = g }
+  return helper(1)
+}
+""", "G6"),
+    # ---- item 391 / issue #106: the provide-method rebind (G6) -------------
+    # `_check_rebind`'s component-scope arm: a method-local `let` reusing an
+    # activation-body name is emitted with the SAME host-safe name as the
+    # component local, so the local's declared inverse runs against the shadow
+    # and the acquisition it was meant to release leaks. Also code-less, also
+    # struck from TYPE_LAYER_GAP below.
+    ("a method local shadowing a component local",
+     _fixture("g6_method_local_shadows_component"), "G6"),
+    # the earlier-METHOD-LOCAL arm: the scope grows as the body walk goes.
+    ("a method local bound twice in one method body", """
+service Cache { fn set(key: Str) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let slot = key
+      let slot = key.concat("!")
+      effect store.insert(slot, "v")
+      undo   store.remove(slot)
+    }
+  }
+}
+""", "G6"),
+    # the method PARAMETER arm of the same rule.
+    ("a method local shadowing the method's own parameter", """
+service Cache { fn set(key: Str) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      effect store.insert(key, "v")
+      undo   store.remove(key)
+      let key = "k"
+    }
+  }
+}
+""", "G6"),
     # ---- item 391 / issue #106: the service-operation head -----------------
     # The refusing half: the same clause, same position, in front of a `Cache`
     # whose `put` is declared PLAIN. The reference's G4 names `put`, not the
@@ -2853,7 +2999,7 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 44. The self-declared async-colour
+# `examples/rejections/`; it now stands at 42. The self-declared async-colour
 # arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
 # binding-discipline slice) moved OUT of the gap into gate/reference agreement,
 # and two slices have moved fixtures IN by making the gate READ a body it used
@@ -2881,14 +3027,13 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # and the arrow-body write form moved `v2_let_reassignment`,
     # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
     # `g6_closure_mutates_capture` into REJECTED_PROGRAMS above, where tag AND
-    # message are compared. What stays pinned here needs what that slice
-    # deliberately does not build: resolving a name READ against the whole
-    # callable universe (the two G1 rows), and the whole-body callable-shadowing
-    # scan over every fn, component and test block.
+    # message are compared, and the callable-shadowing slice has since moved
+    # `shadowed_module_fn_call` there too. What stays pinned here needs what
+    # neither slice builds: resolving a name READ against the whole callable
+    # universe, which is what both G1 rows want.
     "fn-body binding (G1/G6)": [
         ("g1_template_undeclared", "G1"),
         ("v2_undeclared_fn_var", "G1"),
-        ("shadowed_module_fn_call", "G6"),
     ],
     # expression typing (T1/T2): the operator/field/index/record algebra and the
     # literal-range and `null` refusals.
@@ -2967,7 +3112,6 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t31_index_non_int_provide_method", "T1"),
         ("t3_config_default_type", "T1"),
         ("a6_method_not_in_service", "A6"),
-        ("g6_method_local_shadows_component", "G6"),
         # the t29 field-read-on-`Any` shape inside a provide method, pinned for
         # the same reason: the `pub extern` parse refusal used to hide it.
         ("t30_field_read_on_any_provide_method", "T1"),
@@ -2984,9 +3128,9 @@ _TYPE_LAYER_CASES = [
 def test_the_type_layer_gap_is_exactly_44_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 44, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 42, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 44, "a fixture is listed twice"
+    assert len(set(names)) == 42, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
