@@ -409,6 +409,8 @@ def _audit_composition(args):
     through to the shared module compile), an `int` exit code when the command
     refuses, or the compiled composition document.
     """
+    import os  # noqa: PLC0415 — one call site
+
     from .composition import compile_composition  # noqa: PLC0415 — lazy
 
     docs, layers = _wiring_documents(args.files)
@@ -424,7 +426,7 @@ def _audit_composition(args):
         # has no boundary surface to render. Compiled as a module it has none
         # either, which is the same empty answer for a different reason, and an
         # empty surface reads as an absence of authority.
-        named = ", ".join(_basename(layer) for layer in layers)
+        named = ", ".join(os.path.basename(layer) for layer in layers)
         return _refuse(
             f"`revl audit` was given the layer document{'s' if len(layers) > 1 else ''} "
             f"{named}; a layer is a DELTA over a composition, so it has no "
@@ -434,7 +436,7 @@ def _audit_composition(args):
     if not docs:
         return None
 
-    names = ", ".join(_basename(doc) for doc in docs)
+    names = ", ".join(os.path.basename(doc) for doc in docs)
     if len(docs) > 1:
         return _refuse(
             f"`revl audit` was given {len(docs)} composition documents "
@@ -442,7 +444,7 @@ def _audit_composition(args):
             f"is no one boundary surface to render",
             "audit one composition document per invocation")
     if len(args.files) > 1:
-        others = ", ".join(_basename(f) for f in args.files if f not in docs)
+        others = ", ".join(os.path.basename(f) for f in args.files if f not in docs)
         return _refuse(
             f"`revl audit` was given the composition document `{names}` "
             f"alongside modules ({others}); a composition names the rows it "
@@ -468,12 +470,6 @@ def _audit_composition(args):
         else:
             print(f"error: {error}", file=sys.stderr)
         return 1
-
-
-def _basename(path: str) -> str:
-    import os  # noqa: PLC0415 — one call site
-
-    return os.path.basename(path)
 
 
 def _run_audit(args, ir: dict) -> int:

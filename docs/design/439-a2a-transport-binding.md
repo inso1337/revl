@@ -1,7 +1,8 @@
 # 439: the A2A 1.0.0 transport binding for remote providers
 
-Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-14
-(the four-op Task lifecycle bound over HTTP+JSON/REST as well as JSON-RPC 2.0).
+Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-15
+(`revl audit` resolves a composition document, so the CLI reaches the same G8
+surface the property is pinned over; slice G8c).
 The semantics are item 424 gap (c)'s and are not reopened here; the Task
 lifecycle is `docs/design/439-a2a-task-lifecycle.md`'s and is not re-decided
 here. This note records what the binding IS, where every guarantee still applies
@@ -449,7 +450,7 @@ row says so instead of inventing a site.
 | tickets, class (c) | the extern is a bare `emission`, so the crossing is class (c) and receives the per-call ticket; an unanswered ticket refuses fail-closed rather than running the crossing | `src/revl/deploy.py:3280` (the class), `src/revl/gate.py:838` (the ticket on the activation body), `src/revl/recovery.py:549` (recovery re-asks, never auto-answers) |
 | F5, the call-argument funnel | JOINED at this boundary (slice B1), on BOTH tiers, emitted as source rather than imported because a synthesized body is not a seam client: the peer-authored text the boundary renders is scrubbed of this call's own argument values by exact match, and the marked-value exclusion above still keeps the subset small | `src/revl/a2a_boundary.py` (`py_funnel` for the three py bodies, `ts_funnel` for the importer's two coloured ts bodies), mirroring `backends/python/confidential.py:415` (the runtime funnel), `backends/python/bridge.py:460` (its seam call site) and `backends/typescript/bridge.ts`'s `seamFailure` |
 | the correlation identity | every crossing carries one uuid4 as the JSON-RPC envelope `id` and the `revl.correlation` metadata member, and a reply that is not a JSON object, does not claim JSON-RPC 2.0, or does not carry that identity back is the crossing's ordinary fault, never a value. `through a2a_rest` carries it one-way, because a REST reply echoes no envelope | `src/revl/a2a_boundary.py` (`py_correlation`, `py_envelope_gates`, `py_task_identity_gate`) |
-| G8, the enumerable boundary | a remote row synthesizes an ordinary provider holding ordinary externs, so the one (or four) synthesized crossings are on the boundary surface with their folded `net.<host>` reach, which is what makes `docs/design/439-a2a-task-lifecycle.md` decision 3's G8 row true. Verified over the COMPOSITION's compiled document (`audit_report`, the same walk `revl audit` renders); see the scope limit below for what the CLI does not do yet | `src/revl/boundary.py` (the walk), pinned for both forms by `tests/test_439_a2a_transport.py::test_the_a2a_crossing_is_on_the_g8_audit_surface` and `::test_all_four_task_crossings_are_on_the_g8_audit_surface` |
+| G8, the enumerable boundary | a remote row synthesizes an ordinary provider holding ordinary externs, so the one (or four) synthesized crossings are on the boundary surface with their folded `net.<host>` reach, which is what makes `docs/design/439-a2a-task-lifecycle.md` decision 3's G8 row true. Verified over the COMPOSITION's compiled document (`audit_report`, the same walk `revl audit` renders), and the CLI now reaches that document too: a composition argument is resolved rather than compiled as a module (slice G8c, the scope limit below) | `src/revl/boundary.py` (the walk), pinned for both forms by `tests/test_439_a2a_transport.py::test_the_a2a_crossing_is_on_the_g8_audit_surface` and `::test_all_four_task_crossings_are_on_the_g8_audit_surface` |
 | F6, the trace funnel | every host-trace event, a crossing fault's included, passes the one choke point that removes registered secret values | `backends/python/runtime.py:1198` |
 | F7, temporal residue | unchanged in kind: the crossing is an ordinary emission with no inverse, so it adds no residue class, and the withdrawal cascade is what settles it (slice T0) | `src/revl/run.py:1870` |
 | G4, no inverse | every synthesized op is an `emission`; the provider emits no `undo`, and the four-op projection's `_cancel` is a `compensate` of `_start`, not an inverse | `src/revl/synthesize.py:839`, `src/revl/a2a_task.py:62` |
@@ -469,14 +470,47 @@ them, and neither note contradicts the other.
   HTTPS root. An agent served under a path is the importer's case, where the full
   `url` is read from the Agent Card. The header records that the peer authority
   is the endpoint root.
-- **`revl audit <file>` does not resolve a composition.** The synthesized
-  provider exists only inside the COMPOSITION document, and the CLI's audit path
-  compiles its arguments as MODULES (`src/revl/__main__.py`, `compile_files`), so
-  pointing it at a composition document prints an empty surface rather than the
-  remote row's crossings. The G8 property itself holds and is pinned over the
-  composition document, as the guarantee table says. Closing the CLI gap is a
-  `__main__` change and is named here so the table's claim is not read as more
-  than it is.
+- **`revl audit <file>` resolves a composition (CLOSED, slice G8c).** It did
+  not. The synthesized provider exists only inside the COMPOSITION document, and
+  the CLI's audit path compiled its arguments as MODULES
+  (`src/revl/__main__.py`, `compile_files`), so pointing it at a composition
+  document printed an empty surface and exited 0 rather than the remote row's
+  crossings. The G8 property itself held and was pinned over the composition
+  document, as the guarantee table says; the gap was between the property and
+  the command an operator actually runs.
+  **The failure direction is why this was a defect and not a missing feature.**
+  An audit surface is read to ENUMERATE authority, so an empty one is read as an
+  ABSENCE of it. The silence failed OPEN: an operator counting what leaves the
+  process saw zero crossings for a composition holding a `net.<host>` emission,
+  with nothing on stderr and a zero exit to say the command had not looked.
+  `_audit_composition` (`src/revl/__main__.py`) now resolves and compiles the
+  document through `compile_composition`, the same door the two
+  `_on_the_g8_audit_surface` tests pin the property over, so the CLI and the
+  property read the same surface. Admission is WHOLE-composition, never a layer
+  delta, so no row is skipped out of the surface being counted, and a
+  non-first-party stack-layer row compiles under its own untrusted-author
+  profile (`confine=True`). Both are the over-refusing direction, and there is
+  deliberately no `--trust-host-code` on this command: an audit that had to be
+  told to trust the code it is enumerating would be answering a different
+  question.
+  Three shapes the command cannot resolve now REFUSE BY NAME with a nonzero
+  exit instead of rendering an empty surface: a composition listed beside
+  modules (a composition names the rows it compiles, so the two describe
+  different surfaces), two composition documents in one invocation (a
+  composition document IS the audited unit), and a LAYER document (a layer is a
+  delta over the composition that stacks it, 426 §2.4, so it has no boundary
+  surface of its own, and compiled as a module it renders the same empty one).
+  Exit tests:
+  `tests/test_439_a2a_transport.py::test_revl_audit_over_a_composition_renders_the_a2a_crossing`,
+  `::test_revl_audit_over_a_composition_carries_the_crossing_into_json` and
+  `::test_revl_audit_over_the_four_op_composition_renders_all_four` (the CLI
+  renders the synthesized crossings with their folded reach, on both forms).
+  Negative exit tests: `::test_revl_audit_refuses_a_composition_beside_modules`,
+  `::test_revl_audit_refuses_two_composition_documents` and
+  `::test_revl_audit_refuses_a_layer_document` (each refuses by name, nonzero,
+  and renders no surface). The control, which passes on both trees:
+  `::test_revl_audit_over_a_module_is_unchanged`, because the composition door
+  is an added branch and not a change to the path every other invocation takes.
 - **`@py` tier only.** As with the canonical wire, an `emission` method emits a
   synchronous ts function and a network round trip is not synchronous, so a ts
   body would be `await` inside a non-`async` function. The remote row must not
@@ -624,10 +658,15 @@ replay has to decide first.
   crossing, the funnel present on every generated ts crossing, the REST wire's
   one-way identity, the correlation refusal rendering nothing of the peer's,
   and the ts body's identity.
+- `src/revl/__main__.py`: slice G8c. `_wiring_documents` (which of the
+  arguments declare a composition, and which a layer, read by parsing alone) and
+  `_audit_composition` (resolve and compile the one composition, or refuse by
+  name), routed from `main` ahead of the shared module compile.
 - `tests/test_439_a2a_transport.py`: the seam/remote-provider exit test for the
   binding, the C3 taint section, the modality refusals, the four-op projection,
-  and `test_no_marked_value_can_cross_the_a2a_wire`, which pins question (2)'s
-  precondition.
+  `test_no_marked_value_can_cross_the_a2a_wire`, which pins question (2)'s
+  precondition, and the `revl_audit` block, which is slice G8c's exit test, its
+  three refusals and its control.
 - `tests/test_439_a2a_task.py`: slice T0's exit test (the runtime maps a
   marker-bearing transport fault to provider withdrawal) and the T1 vocabulary.
 - `tests/test_424_remote_row.py`: `test_a_named_through_transport_is_refused`
