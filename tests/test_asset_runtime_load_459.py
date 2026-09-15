@@ -177,7 +177,7 @@ def test_the_module_declares_the_handle_type_and_one_public_door():
     only presentable digests the ones `resolve_assets` computed."""
     ir = compile_files([str(_ASSET_RVL)])
     fns = {fn["name"]: fn for fn in ir["functions"]}
-    assert fns["load"]["pub"] and fns["locate"]["pub"]
+    assert fns["load"]["public"] and fns["locate"]["public"]
     assert _ASSET_RVL.read_text(encoding="utf-8").count(
         "extern pure fn load_pinned") == 1
     assert "pub extern pure fn load_pinned" not in _ASSET_RVL.read_text(
@@ -329,15 +329,20 @@ def test_a_symlinked_leaf_out_of_the_root_is_refused_even_when_it_matches(
     A jail that ran after the pin would be a read primitive for any file whose
     content an attacker can predict."""
     main = _app(tmp_path)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "elsewhere.tpl").write_text(_TEMPLATE, encoding="utf-8")
-    target = main.parent / "frontend" / "page.tpl"
-    target.unlink()
-    target.symlink_to(outside / "elsewhere.tpl")
     monkeypatch.setenv(ws.WORKSPACE_ENV, str(main.parent))
     mod = _py_module(main, "revl_asset_f6_symlink")
     try:
+        assert _load(mod) == ("Ok", _TEMPLATE)
+        # the swap happens AFTER the build, which is the only way this shape can
+        # arise: the COMPILE-time jail realpaths too, and refuses the same link
+        # outright (`test_a_handle_path_is_never_absolute_and_never_leaves_the_root`).
+        # The runtime jail is what stands between a post-build swap and a read.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "elsewhere.tpl").write_text(_TEMPLATE, encoding="utf-8")
+        target = main.parent / "frontend" / "page.tpl"
+        target.unlink()
+        target.symlink_to(outside / "elsewhere.tpl")
         assert _load(mod) == ("Err", "EOUTSIDE")
     finally:
         sys.modules.pop("revl_asset_f6_symlink", None)
@@ -347,14 +352,15 @@ def test_a_symlinked_directory_component_is_refused(tmp_path, monkeypatch):
     """realpath resolves EVERY component, not only the leaf, so a directory
     swapped for a link out of the tree is caught by the same check."""
     main = _app(tmp_path)
-    outside = tmp_path / "outside"
-    (outside / "frontend").mkdir(parents=True)
-    (outside / "frontend" / "page.tpl").write_text(_TEMPLATE, encoding="utf-8")
-    shutil.rmtree(main.parent / "frontend")
-    (main.parent / "frontend").symlink_to(outside / "frontend")
     monkeypatch.setenv(ws.WORKSPACE_ENV, str(main.parent))
     mod = _py_module(main, "revl_asset_f6_dirlink")
     try:
+        assert _load(mod) == ("Ok", _TEMPLATE)
+        outside = tmp_path / "outside"
+        (outside / "frontend").mkdir(parents=True)
+        (outside / "frontend" / "page.tpl").write_text(_TEMPLATE, encoding="utf-8")
+        shutil.rmtree(main.parent / "frontend")
+        (main.parent / "frontend").symlink_to(outside / "frontend")
         assert _load(mod) == ("Err", "EOUTSIDE")
     finally:
         sys.modules.pop("revl_asset_f6_dirlink", None)
@@ -381,8 +387,23 @@ def test_a_handle_path_is_never_absolute_and_never_leaves_the_root(
     hold, and neither is load-bearing alone."""
     with pytest.raises(RevlError, match="absolute"):
         compile_files([str(_app(tmp_path / "abs", written="/etc/passwd"))])
-    with pytest.raises(RevlError, match="OUTSIDE|outside"):
-        compile_files([str(_app(tmp_path / "esc", written="../../etc/passwd"))])
+
+    esc = tmp_path / "esc"
+    esc.mkdir()
+    (esc / "secret.tpl").write_text(_TEMPLATE, encoding="utf-8")
+    with pytest.raises(RevlError, match="OUTSIDE"):
+        compile_files([str(_app(esc, written="../secret.tpl"))])
+
+    # and the same file reached through a symlink INSIDE the tree: the realpath
+    # is what is jailed, so the written text being innocent changes nothing.
+    link = tmp_path / "lnk"
+    link.mkdir()
+    (link / "secret.tpl").write_text(_TEMPLATE, encoding="utf-8")
+    main = _app(link, at="frontend/page.tpl")
+    (main.parent / "frontend" / "page.tpl").unlink()
+    (main.parent / "frontend" / "page.tpl").symlink_to(link / "secret.tpl")
+    with pytest.raises(RevlError, match="OUTSIDE"):
+        compile_files([str(main)])
 
 
 def test_the_runtime_guard_refuses_the_escapes_a_forged_handle_could_carry(
@@ -603,6 +624,7 @@ def _guard_module(source: str):
     mod = types.ModuleType("revl_fs_workspace_mutant")
     mod.__file__ = str(_GUARD_SRC)
     exec(compile(source, "<guard mutant>", "exec"), mod.__dict__)
+    mod.__source__ = source
     return mod
 
 
@@ -648,7 +670,7 @@ def _check_symlink_leaf_refused(guard, root: Path) -> None:
     try:
         guard.read_pinned_confined(real, _TEMPLATE_SHA)
     except guard.FsOpError as exc:
-        assert exc.code in ("EOUTSIDE", "ENOENT")
+        assert exc.code == "EOUTSIDE"
     else:
         raise AssertionError("a symlink out of the root was read")
 
@@ -662,7 +684,9 @@ def _check_dotdot_escape_refused(guard, root: Path) -> None:
     try:
         guard.read_pinned_confined(real, _TEMPLATE_SHA)
     except guard.FsOpError as exc:
-        assert exc.code in ("EOUTSIDE", "ENOENT")
+        assert exc.code == "EOUTSIDE", (
+            "a `..` escape must refuse as a BOUNDARY refusal; an ENOENT here "
+            "means the path was sanitized textually rather than resolved")
     else:
         raise AssertionError("a `..` escape was read")
 
@@ -681,7 +705,7 @@ def _check_sibling_root_refused(guard, root: Path) -> None:
     try:
         guard.read_pinned_confined(real, _TEMPLATE_SHA)
     except guard.FsOpError as exc:
-        assert exc.code in ("EOUTSIDE", "ENOENT")
+        assert exc.code == "EOUTSIDE"
     else:
         raise AssertionError("a sibling of the root was read")
 
@@ -713,9 +737,55 @@ def _check_directory_refused(guard, root: Path) -> None:
     try:
         guard.read_pinned_confined(real, _TEMPLATE_SHA)
     except guard.FsOpError as exc:
-        assert exc.code in ("ENOTFILE", "EISDIR")
+        assert exc.code == "ENOTFILE"
     else:
         raise AssertionError("a directory was read as a template")
+
+
+def _check_a_near_miss_digest_is_refused(guard, root: Path) -> None:
+    """A digest that agrees with the real one on a PREFIX and differs later must
+    still refuse. A comparison that looks at part of the value is a comparison
+    that can be met by guessing part of the value."""
+    real = guard.resolve_within("frontend/page.tpl")
+    near = _TEMPLATE_SHA[:32] + ("0" * 32 if _TEMPLATE_SHA[32] != "0"
+                                 else "1" * 32)
+    try:
+        guard.read_pinned_confined(real, near)
+    except guard.FsOpError as exc:
+        assert exc.code == "EDIGEST"
+    else:
+        raise AssertionError("a digest matching only a prefix was accepted")
+
+
+def _check_the_read_goes_through_the_walk(guard, root: Path) -> None:
+    """The read must reach the file through the root-anchored directory-fd walk
+    and nothing else: no builtin `open`, and every `os.open` carried by the
+    helper takes a `dir_fd=` and refuses a symlink leaf with `O_NOFOLLOW`.
+
+    Stated over the SOURCE because the property is about which syscall is made,
+    not about what it answers on a tree with no attacker in it: a second read by
+    name returns the same bytes on a quiet filesystem and a different file on a
+    busy one."""
+    import ast
+    tree = ast.parse(guard.__source__)
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "read_pinned_confined"), None)
+    assert fn is not None, "the guard has no `read_pinned_confined`"
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            assert node.func.id not in ("open", "exec", "eval", "__import__"), \
+                f"the pinned read calls the builtin `{node.func.id}`"
+        if (isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os" and node.func.attr == "open"):
+            assert any(kw.arg == "dir_fd" for kw in node.keywords), \
+                "the pinned read opens by NAME rather than through the walk"
+            flags = ast.dump(node.args[1]) if len(node.args) > 1 else ""
+            assert "_O_NOFOLLOW" in flags, \
+                "the pinned read opens its leaf without O_NOFOLLOW"
 
 
 def _check_read_helper_is_listed_and_total(guard, root: Path) -> None:
@@ -736,6 +806,8 @@ _CONFINEMENT_CHECKS = {
     "absolute-outside-refused": _check_absolute_outside_refused,
     "no-root-is-a-refusal": _check_no_root_is_a_refusal,
     "directory-refused": _check_directory_refused,
+    "near-miss-digest-refused": _check_a_near_miss_digest_is_refused,
+    "read-goes-through-the-walk": _check_the_read_goes_through_the_walk,
     "listed-and-total": _check_read_helper_is_listed_and_total,
 }
 
@@ -762,8 +834,14 @@ _MUTATIONS = {
         '            "asset was resolved at compile time",',
         '            "file content does not match the pinned sha256: " + data.decode("utf-8", "replace"),'),
     "regular-file-check-dropped": (
-        '        if not stat.S_ISREG(st.st_mode):',
-        '        if False:'),
+        '        if not stat.S_ISREG(st.st_mode):\n'
+        '            raise FsOpError(\n'
+        '                "ENOTFILE",\n'
+        '                "pinned read target is not a regular file",',
+        '        if False:\n'
+        '            raise FsOpError(\n'
+        '                "ENOTFILE",\n'
+        '                "pinned read target is not a regular file",'),
     "symlink-followed-at-the-leaf": (
         '        fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,\n'
         '                     dir_fd=dirfd)',
@@ -785,6 +863,9 @@ _MUTATIONS = {
         '        )',
         '    if False:\n'
         '        raise ConfinementError("EOUTSIDE", "x", real)'),
+    "dotdot-stripped-textually": (
+        '    target = path if os.path.isabs(path) else os.path.join(root, path)',
+        '    target = os.path.join(root, path.replace("../", ""))'),
     "realpath-skipped": (
         '    real = os.path.realpath(target)',
         '    real = os.path.normpath(target)'),
@@ -808,10 +889,10 @@ _MUTATIONS = {
         '    globals()[_entry] = _make_total(_entry, globals()[_entry])',
         'for _entry in READ_HELPERS:\n'
         '    pass'),
-    "nul-path-admitted": (
-        '    refuse_unusable_path(path)\n'
-        '    root = workspace_root()',
-        '    root = workspace_root()'),
+    "leaf-opened-without-nofollow": (
+        '        fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,\n'
+        '                     dir_fd=dirfd)',
+        '        fd = os.open(leaf, os.O_RDONLY, dir_fd=dirfd)'),
     "digest-over-a-second-read": (
         '    if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), expected_sha256):',
         '    if not hmac.compare_digest(\n'
