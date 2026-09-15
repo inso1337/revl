@@ -1413,6 +1413,7 @@ jobs:
           backends/python/.venv/bin/python -m pytest
           tests/test_cross_tier_execution.py
           tests/test_458_str_ordering.py
+          tests/test_int_min_edges_cross_tier.py
           tests/test_realm_conformance.py
           tests/test_time_coeffect.py
           -q

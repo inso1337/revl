@@ -1334,6 +1334,13 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
   if (is_addsubmul(op) && opnd == "Int32") {
     return `(${left}).${checked_method(op)}(${right}).expect("revl: Int32 overflow")`
   }
+  if (op == "%" && (opnd == "Int" || opnd == "Int32")) {
+    // The truncated remainder is defined wherever rust's `%` is, plus one:
+    // `Int.MIN % -1` is 0. Rust's `%` panics there because it computes the
+    // quotient on the way; `wrapping_rem` is the same operation everywhere
+    // else and still panics on a zero divisor.
+    return `(${left}).wrapping_rem(${right})`
+  }
   if (op == "/" && (opnd == "Int" || opnd == "Int32")) {
     return `((${left}) as f64 / (${right}) as f64)`
   }
@@ -1356,7 +1363,19 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
     // integer as `!` (the same token as logical not on bool). Never traps.
     return `(!${operand})`
   }
-  if (op == "-") { return `(-${operand})` }
+  if (op == "-") {
+    // `-Int.MIN` is 2^63 and must trap. Rust's own unary minus only checks in
+    // DEBUG builds, so the bare operator kept the guarantee under `cargo test`
+    // and wrapped silently in a release profile.
+    let opnd = node_operands(node)
+    if (opnd == "Int") {
+      return `(${operand}).checked_neg().expect("revl: Int overflow")`
+    }
+    if (opnd == "Int32") {
+      return `(${operand}).checked_neg().expect("revl: Int32 overflow")`
+    }
+    return `(-${operand})`
+  }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
 
@@ -1625,12 +1644,21 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   return `<<UNSUPPORTED-EXPR:${kind}>>`
 }
 
+// The total division forms. Two inputs have no quotient, not one: a zero
+// divisor, and `Int.MIN / -1` (whose quotient 2^63 is one past Int.MAX).
+// rust's `/`, `div_euclid` and the `a % b` inside the floor arm all PANIC on
+// the second, so it is named as a VALUE here — a `checked_*` that can still
+// fault is not checked. `mod` is exempt: its answer at that divisor is 0, and
+// `rem_euclid` reaches it only through an `a % b` that would overflow, so the
+// -1 divisor answers 0 directly.
 fn checked_div_expr(method: Str, target: Str, arg: Str) -> Str {
   var ok = "a / b"
   if (method == "checked_div_floor") { ok = "{ let q = a / b; if a % b != 0 && ((a < 0) != (b < 0)) { q - 1 } else { q } }" }
   if (method == "checked_div_euclid") { ok = "a.div_euclid(b)" }
-  if (method == "checked_mod") { ok = "a.rem_euclid(b).abs()" }
-  return `{ let a = (${target}); let b = (${arg}); if b == 0 { Err::<i64, String>("revl: division by zero".to_string()) } else { Ok::<i64, String>(${ok}) } }`
+  if (method == "checked_mod") { ok = "if b == -1 { 0 } else { a.rem_euclid(b).abs() }" }
+  var overflow = `else if a == i64::MIN && b == -1 { Err::<i64, String>("revl: Int overflow".to_string()) } `
+  if (method == "checked_mod") { overflow = "" }
+  return `{ let a = (${target}); let b = (${arg}); if b == 0 { Err::<i64, String>("revl: division by zero".to_string()) } ${overflow}else { Ok::<i64, String>(${ok}) } }`
 }
 
 fn render_builtin(node: Any, ctx: Ctx) -> Str {
