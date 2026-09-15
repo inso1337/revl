@@ -3755,11 +3755,17 @@ def _revl_helpers(ir: dict) -> list[str]:
     comes first because the named integer operations call it.
     """
     out: list[str] = []
-    # `revlIndexOf` calls `revlEq` for a List receiver (see the helper), so a
-    # document that only searches a list and never writes `==` still needs the
-    # equality helper in scope — without this clause it emitted a call to an
-    # undefined function.
-    if _uses_equality(ir) or _uses_index_of(ir):
+    # `revlIndexOf` compares List elements with `revlEq` (see the helper), so
+    # the equality helper has to be in scope wherever that one is emitted, even
+    # in a document that never writes `==`. The condition is deliberately
+    # `_uses_str_methods` and not "does this document call `indexOf`":
+    # `revlIndexOf` is part of `_REVL_STR_HELPER`, which is emitted as a UNIT
+    # for any of `len`/`length`/`slice`/`charAt`/`charCodeAt`/`indexOf`, so a
+    # document that only reads a `.length()` still gets the `revlIndexOf` body
+    # and the `revlEq` reference inside it. Gating on the call rather than on
+    # the emission left `revlEq` undefined in exactly those modules, which
+    # `tsc` rejects.
+    if _uses_equality(ir) or _uses_str_methods(ir):
         out.extend([_REVL_EQ_HELPER, ""])
     if _uses_assert(ir):
         out.extend([_REVL_SHOW_HELPER, ""])
@@ -4099,24 +4105,6 @@ def _uses_str_methods(node) -> bool:
         return any(_uses_str_methods(v) for v in node.values())
     if isinstance(node, (list, tuple)):
         return any(_uses_str_methods(v) for v in node)
-    return False
-
-
-def _uses_index_of(node) -> bool:
-    """Does this IR call `indexOf`? The List receiver's branch of
-    `revlIndexOf` compares elements with `revlEq`, so the equality helper has
-    to be emitted alongside it even when the document contains no `==`. The
-    scan does not try to separate a Str receiver from a List one — the
-    receiver kind is a typing question the emitter answers while rendering,
-    not a property of the node — so a Str-only document may carry the helper
-    it would not otherwise have needed. That is a dead function, not a wrong
-    answer, which is the right way round for this trade."""
-    if isinstance(node, dict):
-        if node.get("kind") == "builtin" and node.get("method") == "indexOf":
-            return True
-        return any(_uses_index_of(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_index_of(v) for v in node)
     return False
 
 

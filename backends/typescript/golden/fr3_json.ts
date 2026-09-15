@@ -3,6 +3,32 @@
 import type { Context } from 'cordis'
 import { host } from '../runtime.ts'
 
+function revlEq(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
+    return false
+  }
+  const arrA = Array.isArray(a), arrB = Array.isArray(b)
+  if (arrA !== arrB) return false
+  if (arrA && arrB) {
+    const xs = a as unknown[], ys = b as unknown[]
+    return xs.length === ys.length && xs.every((x, i) => revlEq(x, ys[i]))
+  }
+  if (a instanceof Map && b instanceof Map) {
+    // revl equality is structural and order-independent (syntax-2.0 §3.4);
+    // for maps that means same key set, equal value under every key.
+    if (a.size !== b.size) return false
+    for (const [k, v] of a.entries()) {
+      if (!b.has(k) || !revlEq(v, b.get(k))) return false
+    }
+    return true
+  }
+  const ka = Object.keys(a as object), kb = Object.keys(b as object)
+  if (ka.length !== kb.length) return false
+  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k)
+    && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+}
+
 let revlCpsK0: string | undefined
 let revlCpsV0: string[] = []
 let revlCpsK1: string | undefined
@@ -46,7 +72,8 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
     const at = x.indexOf(v as string)
     return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)
   }
-  return BigInt(x.indexOf(v))
+  for (let i = 0; i < x.length; i++) { if (revlEq(x[i], v)) return BigInt(i) }
+  return -1n
 }
 
 export interface ToolCall {
