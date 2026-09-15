@@ -53,8 +53,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Worker exit codes. 1 is drift, 2 is a broken producer, 3 is a loud skip: the
-# machine lacks a tool the producer needs, which is not a stale golden.
+# Worker exit codes, and they are three different answers rather than degrees of
+# the same one:
+#
+#   1 DRIFT      the golden and a fresh generation disagree. Regenerate.
+#   2 BROKEN     the producer could not be RUN here, so nothing was compared.
+#                This is not a stale golden and must never be reported as one.
+#   3 SKIPPED    a tool the producer declares is absent. Also nothing compared,
+#                but expected on this machine rather than a fault.
+#
+# Conflating 2 with 1 is how this tool first reported `DRIFT rust/java/wasm` in
+# a job where the real fact was "the three crashproof producers never executed":
+# `sh` is dash on ubuntu, the scripts are bash (`set -o pipefail`,
+# `${BASH_SOURCE[0]}`), and a driver that ran them under the wrong interpreter
+# reported the failure as staleness. "I could not check this" and "this is
+# stale" resolve differently and must not print the same word.
+DRIFT = 1
+BROKEN = 2
 SKIPPED = 3
 
 
@@ -126,9 +141,20 @@ def produce_rust() -> dict[str, str]:
     emit = _load("emit", backend / "emit.py")
     revl = _frontend()
     jsonwire = revl.compile_files([str(backend / "scenarios" / "jsonwire.rvl")])
+    user_cache = emit.emit(_reference_ir())
     return {
-        "backends/rust/golden/user_cache.rs": emit.emit(_reference_ir()),
+        "backends/rust/golden/user_cache.rs": user_cache,
         "backends/rust/golden/jsonwire.rs": emit.emit(jsonwire),
+        # The placement runner's components module (issue #1089). `revl run
+        # --placement --backend rust` REGENERATES this file from the running
+        # IR and restores it afterwards (src/revl/placement.py::_build_rust,
+        # tests/test_run_rust.py), so the committed copy is the reference
+        # composition's emission and nothing else — the same bytes as the
+        # golden above, from the same producer and the same IR. It was a
+        # committed emitted artifact that no target declared and no test
+        # compared, and it had drifted 41 lines behind the emitter (its own
+        # header still said cordis-rs 0.3.x).
+        "backends/rust/placement_runner/src/components.rs": user_cache,
     }
 
 
@@ -223,12 +249,14 @@ TARGETS: tuple[Target, ...] = (
     ),
     Target(
         name="rust",
-        what="reference-IR and jsonwire goldens plus the crashproof scenario",
+        what="reference-IR, jsonwire and placement-runner goldens plus the crashproof scenario",
         files=("backends/rust/golden/user_cache.rs",
                "backends/rust/golden/jsonwire.rs",
+               "backends/rust/placement_runner/src/components.rs",
                "backends/rust/scenarios/crashproof/src/lib.rs"),
         produce=produce_rust,
-        commands=(("sh", "backends/rust/scenarios/crashproof/regen.sh"),),
+        commands=(("bash", "backends/rust/scenarios/crashproof/regen.sh"),),
+        requires=("bash",),
         gate="pytest tests/test_goldens.py backends/rust/test_emit_rust.py",
     ),
     Target(
@@ -237,7 +265,8 @@ TARGETS: tuple[Target, ...] = (
         files=("backends/java/golden/user_cache.java",
                "backends/java/scenarios/crashproof/revl/Components.java"),
         produce=produce_java,
-        commands=(("sh", "backends/java/scenarios/crashproof/regen.sh"),),
+        commands=(("bash", "backends/java/scenarios/crashproof/regen.sh"),),
+        requires=("bash",),
         gate="pytest tests/test_goldens.py backends/java/test_emit_java.py",
         notes=("Components.java used to be regenerated but NOT drift-checked: the java "
                "emitter named a witnessed step's temporary from the AST node's `id()`, "
@@ -261,7 +290,8 @@ TARGETS: tuple[Target, ...] = (
                "backends/wasm/golden/canonical_service.wit",
                "backends/wasm/scenarios/crashproof/crashproof.ir.json"),
         produce=produce_wasm,
-        commands=(("sh", "backends/wasm/scenarios/crashproof/regen.sh"),),
+        commands=(("bash", "backends/wasm/scenarios/crashproof/regen.sh"),),
+        requires=("bash",),
         gate=("pytest tests/test_goldens.py tests/test_wasm_backend.py "
               "backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py"),
     ),
@@ -271,10 +301,10 @@ TARGETS: tuple[Target, ...] = (
         files=_glob("backends/go/scenarios/emitted/*/gen*.go",
                     "backends/go/v3/*/gen*.go",
                     "backends/go/scenarios/crashproof/gen_crash_recovery_test.go"),
-        commands=(("sh", "backends/go/regen.sh"),
-                  ("sh", "backends/go/scenarios/crashproof/regen.sh")),
+        commands=(("bash", "backends/go/regen.sh"),
+                  ("bash", "backends/go/scenarios/crashproof/regen.sh")),
         gate="pytest backends/go/test_emit_go.py",
-        requires=("gofmt",),
+        requires=("bash", "gofmt"),
         notes=("Without gofmt the emitted go is written unformatted, so this target "
                "loud-skips rather than reporting a drift that is really a missing "
                "tool. CI's backend-go job is the real gate.",),
@@ -335,6 +365,31 @@ def _restore(snap: dict[str, bytes | None]) -> None:
             path.write_bytes(blob)
 
 
+def script_interpreter(path: Path) -> str | None:
+    """The interpreter a script's own shebang names, or None if it has none.
+
+    The registry has to invoke a script the way the script says it must be
+    invoked. Every `regen.sh` in this repo is `#!/usr/bin/env bash` and uses
+    bash-only syntax — `set -o pipefail`, `${BASH_SOURCE[0]}` — and the driver
+    used to run all of them as `sh <script>`. On macOS `/bin/sh` IS bash in
+    POSIX mode, so that worked; on ubuntu `/bin/sh` is dash, `set -o pipefail`
+    is an error, and all three of the crashproof targets died on line one.
+    `tests/test_emitted_artifacts_are_drift_gated.py` pins the pairing so a new
+    script cannot be added under the wrong interpreter."""
+    try:
+        first = path.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    if not first.startswith("#!"):
+        return None
+    words = first[2:].split()
+    if not words:
+        return None
+    # `#!/usr/bin/env bash` -> bash; `#!/bin/sh` -> sh
+    name = Path(words[0]).name
+    return Path(words[1]).name if name == "env" and len(words) > 1 else name
+
+
 def _run_commands(target: Target) -> None:
     """Run the target's shell producers. Their output is kept quiet unless one
     fails: the driver's own per-file report is the authoritative one, and a
@@ -357,7 +412,8 @@ def worker(target: Target, check: bool) -> int:
         # Loud, never silent, and never a drift report: a missing tool would
         # make the producer write different bytes, which is a broken machine
         # rather than a stale golden.
-        print(f"SKIP   {target.name}: needs {', '.join(missing)} on PATH")
+        print(f"SKIP   {target.name}: needs {', '.join(missing)} on PATH — "
+              f"NOTHING was compared for this target")
         return SKIPPED
 
     if target.produce is not None:
@@ -366,7 +422,7 @@ def worker(target: Target, check: bool) -> int:
         if undeclared:
             print(f"regen-goldens: {target.name} produces undeclared files: "
                   f"{', '.join(undeclared)}", file=sys.stderr)
-            return 2
+            return BROKEN
         for rel, text in sorted(produced.items()):
             path = ROOT / rel
             current = path.read_text(encoding="utf-8") if path.exists() else None
@@ -390,8 +446,11 @@ def worker(target: Target, check: bool) -> int:
         except subprocess.CalledProcessError as exc:
             if check:
                 _restore(snap)
-            print(f"regen-goldens: {target.name} regeneration failed: {exc}", file=sys.stderr)
-            return 2
+            print(f"BROKEN {target.name}: its producer could not be RUN here, so "
+                  f"NOTHING was compared for this target. This is not a drift "
+                  f"report and regenerating will not fix it.\n"
+                  f"       {exc}", file=sys.stderr)
+            return BROKEN
         after = _snapshot(target)
         for rel in sorted(set(snap) | set(after)):
             if snap.get(rel) == after.get(rel):
@@ -454,6 +513,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true", help="every target")
     parser.add_argument("--check", action="store_true",
                         help="report drift instead of writing; exit 1 if any target drifted")
+    parser.add_argument("--strict", action="store_true",
+                        help="a target that SKIPS for a missing tool is an ERROR. Use this "
+                             "wherever the run is a gate: a skip and a pass are the same "
+                             "colour on a dashboard, and a gate that skipped compared "
+                             "nothing")
     parser.add_argument("--list", action="store_true", help="list targets and exit")
     parser.add_argument("--worker", metavar="TARGET",
                         help=argparse.SUPPRESS)  # internal: run one target in-process
@@ -473,28 +537,55 @@ def main(argv: list[str] | None = None) -> int:
 
     verb = "checking" if args.check else "regenerating"
     print(f"regen-goldens: {verb} {len(chosen)} target(s)", flush=True)
-    worst = 0
-    skipped = 0
+    drifted: list[str] = []
+    broken: list[str] = []
+    skipped: list[str] = []
     for target in chosen:
         cmd = [sys.executable, str(Path(__file__).resolve()), "--worker", target.name]
         if args.check:
             cmd.append("--check")
         rc = subprocess.run(cmd, cwd=ROOT).returncode
         if rc == SKIPPED:
-            skipped += 1
-            continue
-        worst = max(worst, rc)
+            skipped.append(target.name)
+        elif rc == BROKEN:
+            broken.append(target.name)
+        elif rc == DRIFT:
+            drifted.append(target.name)
 
-    tail = f" ({skipped} skipped for a missing tool)" if skipped else ""
-    if args.check:
-        if worst == 0:
-            print(f"regen-goldens: every golden that could be checked matches a fresh "
-                  f"generation{tail}.")
-        else:
-            print("regen-goldens: DRIFT. Run the regen command each target printed, review")
-            print("               the diff, and commit it. Do NOT bend the emitter back to")
-            print("               the old bytes — see docs/conformance.md, golden policy.")
-    return worst
+    # Three answers, three sentences. A target that could not be checked has to
+    # read differently from one that is stale: the first is resolved by fixing
+    # the machine or the producer, the second by regenerating, and printing
+    # "DRIFT" for both sends the next reader to regenerate something that was
+    # never compared.
+    if broken:
+        which = "Its producer" if len(broken) == 1 else "Their producers"
+        print(f"regen-goldens: COULD NOT CHECK {', '.join(broken)}. {which} failed to RUN")
+        print("               here, so nothing was compared. This is NOT a drift report and")
+        print("               regenerating will not fix it: read the BROKEN line(s) above")
+        print("               for the command that failed.")
+    if skipped:
+        note = "ERROR" if args.strict else "not checked"
+        print(f"regen-goldens: {', '.join(skipped)} SKIPPED for a missing tool ({note}).")
+        if args.strict:
+            print("               --strict: this run is a gate, and a gate that skipped a")
+            print("               target compared nothing for it. Run it in a job that has")
+            print("               the tool, or stop claiming this job checks it.")
+    if args.check and drifted:
+        print("regen-goldens: DRIFT. Run the regen command each target printed, review")
+        print("               the diff, and commit it. Do NOT bend the emitter back to")
+        print("               the old bytes — see docs/conformance.md, golden policy.")
+    if args.check and not (drifted or broken or skipped):
+        print("regen-goldens: every golden checked matches a fresh generation.")
+    if broken:
+        return BROKEN
+    if drifted:
+        return DRIFT
+    if skipped and args.strict:
+        return SKIPPED
+    if args.check and skipped:
+        print(f"regen-goldens: every golden that could be checked matches a fresh "
+              f"generation ({len(skipped)} skipped for a missing tool).")
+    return 0
 
 
 if __name__ == "__main__":

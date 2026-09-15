@@ -237,6 +237,7 @@ command, in order, reporting each step:
 | backend-wasm | `pytest backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py` |
 | backend-java | `pytest backends/java/test_emit_java.py` (emit/golden tests) |
 | backend-ts | `tools/regen_goldens.py --check typescript` (golden drift) |
+| golden drift (all targets) | `tools/regen_goldens.py --check` (CI adds `--strict`: `lint` for the toolchain-free targets, `backend-go` for `go`) |
 | conformance matrix + emit sweep | `tools/conformance.py --check-readme` |
 | site wheel | `tools/check_site_wheel.py` (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
 | docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |

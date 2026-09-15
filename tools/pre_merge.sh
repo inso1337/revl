@@ -229,12 +229,18 @@ gemit java "backend-java (emit goldens)" backends/java/test_emit_java.py
 # this fast gate — it needs backends/typescript/node_modules and is heavy. Run it
 # yourself when you touch that tier: cd backends/typescript && npm ci && npx vitest run
 #
-# Its GOLDENS, though, are pure Python and sub-second, and no other local step
-# touches five of them (fr3_json, the three async fixtures, temporal_booktrip).
-# Check them here so a stale ts golden cannot wait for CI to be noticed. Every
-# other target's goldens are already covered: the tier suites above, and
-# `pytest tests/` for tests/test_goldens.py and the gate-crate drift gate.
-step "backend-ts   (golden drift)" python3 tools/regen_goldens.py --check typescript
+# The GOLDENS, though, are pure Python and sub-second. This used to check the
+# typescript target alone on the grounds that the tier suites and `pytest
+# tests/` covered the rest; they do not cover all of it, which is how a stale
+# emitted go module reached main (issue #1089). Check every target: the driver
+# loud-SKIPS one whose tool is missing (`gofmt` for go) rather than reporting a
+# drift it cannot trust, so this is honest on a machine without Go and is the
+# full comparison on one with it. CI runs the same check in `lint` and
+# `backend-go`, and adds `--strict` there so a skip is an error: in CI the tool
+# is supposed to be present, and a gate that skipped compared nothing. Locally
+# a missing gofmt is an ordinary fact about the machine, so this line does not
+# pass it.
+step "goldens      (drift, all targets)" python3 tools/regen_goldens.py --check
 
 # 4. Generated-artifact gates (pure Python, always run): the README conformance
 #    matrix and the site/playground wheel must match a fresh generation, the same

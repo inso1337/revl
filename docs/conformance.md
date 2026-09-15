@@ -307,7 +307,7 @@ contract. The invariant they enforce is **"emitter output never changes
   `tools/regen_goldens.py` is the registry of every checked-in golden: which
   files a target owns, how their bytes are produced, and which test reds when
   they drift. The targets are `python`, `typescript`, `rust`, `java`, `wasm`,
-  `go` and `gate-crate`. Regenerate in the **same commit** as the emitter
+  `go`, `gate-crate` and `gate-wasm`. Regenerate in the **same commit** as the emitter
   change that moved the bytes. A stale golden *noticed by a red test* is the
   same decision, made at the test. That is why every golden assertion names
   the command that resolves it.
@@ -337,11 +337,84 @@ crate that embeds emitted rust, so *any* change to `backends/rust/emit.py` or
 PR goes red on drift alone. The fix is `python3 tools/regen_goldens.py
 gate-crate` in the same commit, never a revert of the emitter change.
 
-One exception is declared rather than hidden, because an undeclared
+Three exceptions are declared rather than hidden, because an undeclared
 generated file is an unchecked one:
 
 - `backends/python/golden/fork_report_compensate_false.json` is compared as
   **parsed JSON**, not bytes, and its formatting is authored. Edit it by hand.
+- `backends/typescript/tests/generated/*.ts` is **regenerated before every
+  run, not compared**. `backends/typescript/vitest.config.ts` calls
+  `emitFixtures()` while the config is evaluated, before vitest resolves its
+  `include` glob, so the bytes the suite typechecks and runs are always a fresh
+  emission and no committed copy sits in the loop to go stale. The copy is
+  committed only so a cold checkout collects the same test files as a warm one
+  (one of them, `v3_tests.test.ts`, is itself a test module);
+  `backends/typescript/tests/generated_coverage.test.ts` pins that and the count
+  of lowered `test` blocks. A byte gate here would compare a file the next run
+  overwrites.
+- `backends/typescript/tests/fixtures/a2a_agent.rvl` is byte-gated **somewhere
+  else**: it is `revl import a2a`'s output rather than a backend emitter's, and
+  `tests/test_import_a2a.py::test_the_ts_backend_fixture_is_current` re-runs the
+  importer on the committed Agent Card and compares.
+
+`tests/test_emitted_artifacts_are_drift_gated.py` enforces the rule those
+exceptions are exceptions to. It sweeps every committed file under `backends/`
+whose own header says an emitter wrote it, and requires each one to be declared
+by a golden target or to appear in that file's exemption table with a written
+reason. Both instances above are in the table; anything else is a red.
+
+### Where the drift check runs
+
+A byte comparison that happens on a developer's machine is not a gate.
+`tools/regen_goldens.py --check --strict` runs in CI twice, split by what the
+producers need:
+
+- `lint` checks `python`, `typescript`, `rust`, `java`, `wasm`, `gate-crate`
+  and `gate-wasm`. Every one of those producers runs with no language toolchain
+  present, which is verified rather than asserted:
+  `test_the_toolchain_free_targets_really_need_no_toolchain` runs that exact
+  list with a PATH holding a shell, python3 and coreutils and nothing else.
+- `backend-go` checks `go`. Its producer needs `gofmt` to make the emitted
+  bytes reproducible, so the check lives in the job that provisions Go.
+
+`--strict` is what makes the split a decision rather than a hope. Without it a
+target whose tool is absent loud-skips and the run still exits 0, so a target
+listed in the wrong job reports green having compared nothing. With it, that
+skip fails the job.
+
+The split is itself gated:
+`test_every_golden_target_is_drift_checked_by_a_job_that_can_see_it` pairs each
+target against a job that checks it **with `--strict`** and provides its
+`requires` tools. A target with no such home is a red, and so is a `--check`
+that omits `--strict`.
+
+### Three answers, not two
+
+A run of `--check` can end three ways, and they are not degrees of the same
+thing:
+
+| exit | meaning | resolution |
+|---|---|---|
+| 1 `DRIFT` | the golden and a fresh generation disagree | regenerate, review the diff, commit it |
+| 2 `BROKEN` | the producer could not be RUN here; nothing was compared | fix the producer or the machine; regenerating changes nothing |
+| 3 `SKIPPED` | a declared tool is absent; nothing was compared | run it where the tool is, or drop the claim that this job checks it |
+
+Conflating 2 with 1 is not hypothetical. The registry used to invoke every
+`regen.sh` as `sh <script>`, and those scripts are bash (`set -euo pipefail`,
+`${BASH_SOURCE[0]}`). On macOS `/bin/sh` is bash in POSIX mode and they ran; on
+ubuntu `/bin/sh` is dash and all three crashproof producers died on their
+seventh line. The run reported `DRIFT rust java wasm`, which points the reader
+at a regeneration for goldens that were never compared. Each producer is now
+invoked as the interpreter its own shebang names, and
+`test_every_shell_producer_runs_under_the_interpreter_its_shebang_names` pins
+the pairing so a new script cannot be added under the wrong one.
+
+Compiling and running an emitted module is a different property from comparing
+it. `backend-go` does both, and the reason both are there is that
+`backends/go/scenarios/emitted/secret_trace/gen_secret_trace_test.go` once sat
+239 lines behind the emitter while compiling, running and passing (issue #1089).
+"This generated artifact still works" and "this generated artifact is what the
+emitter produces today" are separate claims.
 
 `backends/java/scenarios/crashproof/revl/Components.java` used to be a second
 exception: the java emitter named a witnessed step's temporary from the AST

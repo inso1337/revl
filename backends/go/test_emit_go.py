@@ -10,6 +10,7 @@ Run: pytest backends/go/test_emit_go.py -q
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -358,11 +359,93 @@ def _gofmt(src: str) -> str | None:
     return proc.stdout
 
 
-@pytest.mark.parametrize("ir_path,pkg,rel", [
-    (V3_TESTS, "tests", "v3/tests/gen_test.go"),
-    (V3_TYPES_FUNCTIONS, "types_functions", "v3/types_functions/gen.go"),
-    (V3_STDLIB, "stdlib", "v3/stdlib/gen.go"),
-])
+# --- what regen.sh actually produces ----------------------------------------
+# The drift tables below are DERIVED from backends/go/regen.sh rather than
+# retyped beside it (issue #1089). They used to be hand-maintained lists whose
+# comment claimed they mirrored regen.sh "one-to-one", and the claim was false:
+# `secret_trace` was added to regen.sh and never to the table, so item 421
+# F6(e)'s container walk staled its emitted module by 239 lines with no test
+# reddening. The module still compiled and still ran, which is the whole point
+# — "this generated artifact still works" and "this generated artifact is what
+# the emitter produces today" are different properties, and only a table that
+# cannot fall behind its producer checks the second one.
+
+_REGEN_SH = HERE / "regen.sh"
+
+_SHELL_VARS = {"here": HERE, "root": ROOT}
+
+_EMIT_STANZA = re.compile(
+    r'emit\.py"\s+"(?P<ir>[^"]+)"\s+(?P<pkg>[A-Za-z_][A-Za-z0-9_]*)'
+    r'(?P<flags>(?:\s+--[a-z-]+)*)\s*>\s*"(?P<out>[^"]+)"'
+)
+
+
+def _regen_text() -> str:
+    """regen.sh with comments dropped and line continuations joined, so one
+    stanza is one line."""
+    lines = []
+    for line in _REGEN_SH.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).replace("\\\n", " ")
+
+
+def _shell_vars() -> dict[str, Path]:
+    """`here` and `root` (the script's own cd idiom) plus every simple
+    `name="$root/..."` assignment the script makes — `fx`, today."""
+    known = dict(_SHELL_VARS)
+    for match in re.finditer(r'^(\w+)="\$(\w+)/([^"]+)"$', _regen_text(), re.M):
+        name, base, rest = match.groups()
+        if base in known:
+            known[name] = known[base] / rest
+    return known
+
+
+def _expand(word: str, known: dict[str, Path]) -> Path:
+    match = re.fullmatch(r"\$(\w+)/(.+)", word)
+    assert match, f"regen.sh path {word!r} is not $var/... — teach _expand about it"
+    base, rest = match.groups()
+    assert base in known, f"regen.sh uses ${base}, which _shell_vars() does not know"
+    return known[base] / rest
+
+
+def _regen_stanzas() -> list[tuple[Path, str, Path]]:
+    """Every `emit.py <ir> <pkg> > <out>` stanza in backends/go/regen.sh, as
+    (ir_path, package, output_path). This is the single source of truth for
+    what the go tier commits as emitted output."""
+    known = _shell_vars()
+    return [(_expand(m["ir"], known), m["pkg"], _expand(m["out"], known))
+            for m in _EMIT_STANZA.finditer(_regen_text())]
+
+
+def test_the_regen_sh_parser_sees_every_emit_stanza():
+    """Non-vacuity for the two derived tables below. A parser that silently
+    matched nothing would turn both of them into empty parametrizations, which
+    pytest reports as green — the exact shape of the gap this replaced. Count
+    the `emit.py` invocations in the script and require one stanza each."""
+    invocations = len(re.findall(r"emit\.py\"", _regen_text()))
+    stanzas = _regen_stanzas()
+    assert invocations > 0, "regen.sh invokes emit.py nowhere — read the wrong file?"
+    assert len(stanzas) == invocations, (
+        f"parsed {len(stanzas)} stanza(s) out of {invocations} emit.py invocation(s) "
+        f"in backends/go/regen.sh — the drift tables would silently cover less than "
+        f"the script produces. Teach _EMIT_STANZA the new spelling.")
+    for ir_path, _pkg, out in stanzas:
+        assert ir_path.exists(), f"regen.sh reads a missing IR fixture: {ir_path}"
+        assert out.exists(), f"regen.sh writes a file that is not committed: {out}"
+
+
+V3_GOLDENS = [(ir, pkg, out) for ir, pkg, out in _regen_stanzas()
+              if out.is_relative_to(HERE / "v3")]
+
+
+@pytest.mark.parametrize(
+    "ir_path,pkg,rel",
+    [(ir, pkg, str(out.relative_to(HERE))) for ir, pkg, out in V3_GOLDENS],
+    ids=[str(out.relative_to(HERE / "v3")) for _ir, _pkg, out in V3_GOLDENS],
+)
 def test_v3_checked_in_generated_is_current(ir_path, pkg, rel):
     """The committed v3 Go is byte-identical to gofmt(emit(ir)) — this is the
     reproducibility gate regen.sh guarantees."""
@@ -417,39 +500,44 @@ def test_checked_in_generated_is_current(ir_path, pkg):
 # item 247's RevlFrame prelude change left the provide_method_witnessed golden
 # stale with no failing test. test_v3_checked_in_generated_is_current covers
 # only the v3/ fixtures, so this parametrized twin closes the gap for the
-# scenarios/emitted goldens. The table mirrors regen.sh's scenarios/emitted
-# stanzas one-to-one; each row pins (id, ir_path, package, output_rel_path).
+# scenarios/emitted goldens.
+#
+# The table was hand-written and fell behind regen.sh exactly once, which was
+# enough: `secret_trace` never reached it, so item 421 F6(e) staled its module
+# by 239 lines under a green suite (issue #1089). It is DERIVED from regen.sh
+# now — every stanza, no editing step between adding a scenario and gating it.
 _EMITTED = HERE / "scenarios" / "emitted"
-SCENARIO_GOLDENS = [
-    ("usercache", USER_CACHE, "usercache", "usercache/gen.go"),
-    ("tenants", TENANTS, "tenants", "tenants/gen.go"),
-    ("memkv", _EMITTED / "memkv" / "memkv.ir.json", "memkv", "memkv/gen.go"),
-    ("counter", _EMITTED / "counter" / "counter.ir.json", "counter", "counter/gen.go"),
-    ("tagger", _EMITTED / "tagger" / "tagger.ir.json", "tagger", "tagger/gen.go"),
-    ("spawn", _EMITTED / "spawn" / "spawn.ir.json", "spawn", "spawn/gen.go"),
-    ("accessor", _EMITTED / "accessor" / "accessor.ir.json", "accessor", "accessor/gen.go"),
-    ("timer", _EMITTED / "timer" / "timer.ir.json", "timer", "timer/gen.go"),
-    ("advance", _EMITTED / "advance" / "advance.ir.json", "advance",
-     "advance/gen_advance_test.go"),
-    ("records", _EMITTED / "records" / "records.ir.json", "records",
-     "records/gen_records_test.go"),
-    ("jsonwire", _EMITTED / "jsonwire" / "jsonwire.ir.json", "jsonwire",
-     "jsonwire/gen_jsonwire_test.go"),
-    ("witnessed_teardown", _EMITTED / "witnessed_teardown" / "witnessed_teardown.ir.json",
-     "witnessedteardown", "witnessed_teardown/gen_witnessed_teardown_test.go"),
-    ("provide_method_witnessed",
-     _EMITTED / "provide_method_witnessed" / "provide_method_witnessed.ir.json",
-     "providemethodwitnessed",
-     "provide_method_witnessed/gen_provide_method_witnessed_test.go"),
-    ("method_compensate", _EMITTED / "method_compensate" / "method_compensate.ir.json",
-     "methodcompensate", "method_compensate/gen_method_compensate_test.go"),
-]
+SCENARIO_GOLDENS = [(ir, pkg, out) for ir, pkg, out in _regen_stanzas()
+                    if out.is_relative_to(_EMITTED)]
+
+
+def test_every_emitted_scenario_module_is_drift_gated():
+    """The other half of deriving the table: regen.sh is the source of truth
+    for what the parametrization covers, so a committed emitted module that
+    regen.sh does not produce would be covered by nothing at all and nothing
+    would say so. Every `gen*.go` under scenarios/emitted/ must be the output
+    of a stanza.
+
+    `gen_exec_test.go` and the other hand-written `*_test.go` harnesses beside
+    them are NOT emitted — they carry no `Code generated` header — so the sweep
+    reads the header rather than guessing from the filename."""
+    on_disk = sorted(
+        path for directory in sorted(_EMITTED.iterdir()) if directory.is_dir()
+        for path in sorted(directory.glob("*.go"))
+        if path.read_text(encoding="utf-8").startswith("// Code generated by"))
+    assert on_disk, "found no emitted module under scenarios/emitted — wrong path?"
+    produced = {out for _ir, _pkg, out in SCENARIO_GOLDENS}
+    missing = [str(path.relative_to(ROOT)) for path in on_disk if path not in produced]
+    assert not missing, (
+        "emitted Go under scenarios/emitted that backends/go/regen.sh does not "
+        "produce, so nothing regenerates it and nothing drift-checks it: "
+        + ", ".join(missing))
 
 
 @pytest.mark.parametrize(
     "ir_path,pkg,rel",
-    [(ir, pkg, rel) for _id, ir, pkg, rel in SCENARIO_GOLDENS],
-    ids=[g[0] for g in SCENARIO_GOLDENS],
+    [(ir, pkg, str(out.relative_to(_EMITTED))) for ir, pkg, out in SCENARIO_GOLDENS],
+    ids=[out.parent.name for _ir, _pkg, out in SCENARIO_GOLDENS],
 )
 def test_scenario_checked_in_generated_is_current(ir_path, pkg, rel):
     """Each scenarios/emitted golden must be byte-identical to a fresh
