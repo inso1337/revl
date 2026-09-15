@@ -57,6 +57,17 @@ revl refuses.)
   `xs[f()]` — still faults at runtime, and that fault is what
   `tests/test_cross_tier_execution.py` records as the residual divergence (ts
   reads `undefined`, wasm reads `0`).
+- **`charAt`/`charCodeAt`/`codepoint_at` FAULT outside `0 <= i < length()`**,
+  the same rule the List subscript takes above. There is no empty-string
+  reading, no wrap to the end and no byte read past the value. python routes
+  the read through `_revl_str_at` (its `s[i]` is end-relative, so `charAt(-1)`
+  would otherwise answer the LAST code point); TypeScript and java throw
+  `revl: Str index out of range` where both used to hand back `""`; wasm traps
+  through `$str_cp_offset_strict` (the clamping `$str_cp_offset` stays, for
+  `slice`); go and rust fault natively and are untouched. For a position that
+  may be past the end, `slice`-then-guard is the total form — `slice` clamps
+  and never faults. Pinned by
+  `tests/test_str_index_bounds_cross_tier.py` on all six tiers.
 - `slice(a, b)` bounds are **end-relative**: a negative bound counts from the
   end of the receiver (`len + bound`), then both bounds clamp into `[0, len]`
   and the slice is empty if `b < a` — the python/JS reading, on every tier
@@ -390,11 +401,16 @@ lexer's hot path**, which previously spelled the code point at `j` as
 `code0(source.charAt(j))` — a `charAt` that allocates a 1-char `Str`, then a
 revl-fn call that indexes it a second time to reach `charCodeAt(0)`. Reading
 `source.codepoint_at(j)` drops the fn call and the second index. Like
-`charAt`/`charCodeAt`, the index is assumed **in bounds** (`0 <= i < length()`);
-the lexer only reads a position it has already guarded with `j < n`. For a
-position that may be past the end, `slice`-then-guard is still the total form
-(the lexer keeps its `code0` helper, which returns `-1` on an empty clamped
-slice, for exactly those probes).
+`charAt`/`charCodeAt`, the index must be **in bounds** (`0 <= i < length()`) and
+an index outside it **FAULTS on every tier**; the lexer only reads a position it
+has already guarded with `j < n`. For a position that may be past the end,
+`slice`-then-guard is still the total form (the lexer keeps its `code0` helper,
+which returns `-1` on an empty clamped slice, for exactly those probes). The
+bound used to be an assumption rather than a rule, and it read four different
+ways: ts and java answered `""` for a `charAt` past the end, python read from
+the END at a negative index, and wasm read a byte past the string's own bytes
+(`charCodeAt`) or the first code point (a negative index). See the errata entry
+and `tests/test_str_index_bounds_cross_tier.py`.
 
 **Lowering per tier.** py `ord(x[i])`; ts/go/java via the same astral-aware
 `charCodeAt` helper (a lone JS surrogate would otherwise leak through

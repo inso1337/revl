@@ -656,6 +656,26 @@ rejection (below).
   the empty-separator case through `Array.from` and Java through
   `String.codePoints()`, matching the python `list(s)`, go
   `utf8.DecodeRuneInString` and wasm helpers that already agreed.
+- **`charAt`/`charCodeAt`/`codepoint_at` outside `0 <= i < length()` read
+  four different ways** (closed, uniform fault). The stdlib surface stated the
+  bound as an ASSUMPTION — "the index is assumed in bounds" — and nothing
+  enforced it, so with `s = "a😀b"` (3 code points): ts and java answered
+  `""` for `s.charAt(3)`, `s.charAt(9)` and `"".charAt(0)`, because both
+  `revlCharAt` bodies said so in as many words; python answered `"b"` / `98`
+  for a NEGATIVE index, because its `s[i]` is end-relative; and wasm read a
+  byte PAST the string's own bytes for `charCodeAt` at or after the end (its
+  `$str_cp_offset` answers the byte length there, which is what `slice` wants
+  and what a character read must not get), and the FIRST code point for a
+  negative index. go and rust faulted on all of it. This is the `xs[-1]` entry
+  below, one type over, and it takes the same close: an index outside the range
+  FAULTS on every tier. python guards the read through `_revl_str_at` the way
+  `_revl_index` already guards a List subscript, ts and java throw
+  `revl: Str index out of range`, wasm traps through a strict
+  `$str_cp_offset_strict` (the clamping form stays, because `slice` must still
+  clamp and never fault), and go and rust are unchanged. `slice`-then-guard
+  remains the total form for a position that may be past the end. Asserted in
+  `tests/test_str_index_bounds_cross_tier.py` on all six tiers, with the wasm
+  past-the-end read reproduced against a known neighbouring allocation.
 - **`"+7".to_int()` was `Some(7)` on rust** (closed). The parse takes an
   optional leading `-` and no `+` (docs/stdlib-2.0.md §Str.to_int), so `"+7"`
   is `None`. Rust's `str::parse::<i64>` accepts a leading `+`; the emitter now
