@@ -273,6 +273,12 @@ def _line_of(source: str, index: int) -> int:
     return source.count("\n", 0, index) + 1
 
 
+def _elided(path: str) -> bool:
+    """`go/.../bridge.go` drops a middle segment. No lookup can honestly expand
+    it, so it is not judged and not counted in the denominator either."""
+    return "..." in path
+
+
 def _is_historical(source: str, index: int) -> bool:
     lo = max(0, index - HISTORY_WINDOW)
     hi = min(len(source), index + HISTORY_WINDOW)
@@ -288,6 +294,8 @@ def collect_test_claims(source: str) -> List[Claim]:
         # `lower.py::_link` is prose shorthand for a function in a module, not
         # a pytest node. Only a test file naming a test function is judged.
         if not (base.startswith("test_") and name.startswith("test_")):
+            continue
+        if _elided(path):
             continue
         if _is_historical(source, m.start()):
             continue
@@ -313,6 +321,8 @@ def collect_symbol_claims(source: str) -> List[Claim]:
     for pattern, sym_group, path_group in SYMBOL_SITE_RES:
         for m in pattern.finditer(source):
             sym, path = m.group(sym_group), m.group(path_group)
+            if _elided(path):
+                continue
             if _is_historical(source, m.start()):
                 continue
             key = sym + "@" + path
@@ -328,6 +338,8 @@ def collect_path_claims(source: str) -> List[Claim]:
     seen: Set[str] = set()
     for m in PATH_LINE_RE.finditer(source):
         path = m.group("path")
+        if _elided(path):
+            continue
         if _is_historical(source, m.start()):
             continue
         if path in seen:
@@ -343,6 +355,8 @@ def collect_absent_claims(source: str) -> List[Claim]:
     for pattern in ABSENT_RES:
         for m in pattern.finditer(source):
             sym, where = m.group("sym"), m.group("where")
+            if _elided(where):
+                continue
             if _is_historical(source, m.start()):
                 continue
             key = sym + "@" + where
