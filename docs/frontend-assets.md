@@ -91,7 +91,7 @@ The four arguments are:
 | Argument | What it is |
 |---|---|
 | `dev_source` | the frontend's **entry module** as Vite serves it in dev, a real `.ts` file rather than a bundle, named by an `asset` handle so the compiler resolves, jails and content-pins it |
-| `prod_manifest` | the Vite **build manifest** (`build.manifest: true`), which maps entry names to hashed, emitted assets for production. Still a plain `Str`: a manifest is a build output, so there is nothing on disk to resolve or pin when the composition is compiled |
+| `prod_manifest` | the Vite **build manifest** (`build.manifest: true`), which maps entry names to hashed, emitted assets for production. A plain `Str` at compile time, because a manifest is a build output with nothing on disk to resolve or pin then; the host confines it to the app root and, once the frontend is built, requires it to name an entry for the pinned `dev_source` |
 | `routes` | the client-side route patterns this entry owns, so the host can mount it |
 | `data` | the **typed reactive state** the entry publishes — the object Cordis WebUI broadcasts to the browser, declared as a record instead of an untyped `T` |
 
@@ -606,11 +606,23 @@ produced it. That leg runs in the `frontend-assets` job, where
 This page documents stage 1. The item's design note names the remainder, and
 none of it should be assumed:
 
-- **`prod_manifest` is still a bare `Str`.** A Vite manifest is a build output:
-  it does not exist when the composition is compiled, so there is nothing to
-  resolve, jail or pin. `dev_source` is a typed handle (design note 459's
-  **F1**, the section [The asset handle](#the-asset-handle-asset-path) above);
-  pinning a built artifact needs a build-time step the toolchain does not have.
+- **`prod_manifest` is still a bare `Str` at COMPILE time, and is now checked at
+  run time.** A Vite manifest is a build output: it does not exist when the
+  composition is compiled, so there is nothing to resolve, jail or pin there, and
+  `dev_source` is the only typed handle (design note 459's **F1**, the section
+  [The asset handle](#the-asset-handle-asset-path) above). What the host can
+  check is that the two halves describe one frontend, and it does: the WebUI
+  adapter `revl dev` installs confines the manifest path to the app root whether
+  or not the file exists, and, once the frontend has been built, opens it and
+  requires it to name an entry for the pinned asset. The join is by file
+  identity rather than by string, because the two halves are keyed differently:
+  the handle is relative to the compile-tree root, a Vite manifest to the Vite
+  root, so a host that joined them by name would look up a key that is not
+  there. An absent manifest is the ordinary unbuilt state and is recorded, not
+  refused; every other answer (unreadable, not an object, naming no entry for
+  this asset, naming a chunk that is not on disk) is refused by name. Pinning the
+  built artifact's BYTES still needs a build-time step the toolchain does not
+  have.
 - **A hand-written handle still type-checks.** The shape now has a canonical
   name, `AssetRef` in `stdlib/asset.rvl`, so a composition no longer declares
   the record itself. The compiler builds the value, so writing the record by

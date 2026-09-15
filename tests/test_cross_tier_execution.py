@@ -717,7 +717,11 @@ def test_widening_is_marked_in_the_ir():
     ("python", "ident(float(3))"),
     ("typescript", "ident(Number(3n))"),
     ("rust", "ident((3i64 as f64))"),
-    ("go", "ident(float64(3))"),
+    # go spells it `revlF(3)` rather than `float64(3)`: the conversion is
+    # there either way, and the CALL is what keeps the result out of Go's
+    # constant world, where a fold has no signed zero and no infinity
+    # (issue #721, tests/test_458_float_division_and_remainder.py).
+    ("go", "ident(revlF(3))"),
     ("java", "ident(((double) (3L)))"),
 ])
 def test_every_tier_emits_the_conversion(backend, conversion):
@@ -1502,12 +1506,22 @@ def test_go_equality_is_not_native_comparison():
     assert "reflect.DeepEqual" in emitted
 
 
-def test_go_float_literals_are_typed():
-    """Go folds *untyped constant* arithmetic at arbitrary precision, so a bare
-    `0.1 + 0.2` equals exactly `0.3` at compile time — not IEEE 754 binary64.
-    Typing each literal forces ordinary float64 arithmetic."""
+def test_go_float_literals_are_not_constants():
+    """Go folds constant arithmetic EXACTLY, so a bare `0.1 + 0.2` equals
+    exactly `0.3` at compile time — not IEEE 754 binary64.
+
+    This used to read `float64(0.1)`, on the theory that the problem was the
+    UNTYPED fold and typing the literal ended it. It does end that one, and a
+    typed constant expression is still a constant expression: a Go constant has
+    neither a signed zero nor an infinity, so `(float64(0.0) - float64(1.0)) *
+    float64(0.0)` folded to `+0` and `float64(1e308) * float64(10.0)` was a
+    compile error (issue #721, tests/test_458_float_division_and_remainder.py).
+    A call is not a constant expression at all, which is the property actually
+    wanted here and the one `revlDiv` below already relies on."""
     emitted = _emit("go", IEEE_FLOAT)
-    assert "float64(0.1)" in emitted, emitted
+    assert "revlF(0.1)" in emitted, emitted
+    assert "func revlF(v float64) float64 { return v }" in emitted
+    assert "float64(0.1)" not in emitted
 
 
 def test_go_true_division_goes_through_a_function():

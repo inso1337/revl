@@ -356,6 +356,9 @@ GO_DOCS = [
     "lists.rvl", "records.rvl", "variants.rvl", "transforms.rvl", "secrets.rvl",
     "inference.rvl", "identifiers.rvl", "match_edges.rvl", "accumulators.rvl",
     "accumulator_hygiene.rvl", "arrow_containers.rvl", "builder_literal.rvl",
+    # issue #721: `%` on Float (math.Mod), a Float literal that must not be a
+    # Go CONSTANT, and the `widen` marker over an Int literal.
+    "float_rem.rvl",
     # joined the go emitter corpus after the table above was first taken, and
     # measured through the native chain here so the 100% row stays pinned
     "arrow_captures.rvl",

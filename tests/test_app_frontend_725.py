@@ -471,3 +471,54 @@ def test_the_pinned_vite_major_is_one_the_vue_plugin_peers():
     lock = json.loads(LOCK.read_text(encoding="utf-8"))
     peers = lock["packages"]["node_modules/@vitejs/plugin-vue"]["peerDependencies"]
     assert "^7.0.0" in peers["vite"], peers
+
+
+@needs_frontend_toolchain
+def test_the_built_manifest_resolves_the_asset_the_component_pinned(tmp_path):
+    """The two halves of `webui.add_entry` describe ONE frontend, proven by
+    building it (item 459, issue #722).
+
+    The component names a dev source and a production Vite manifest in one call,
+    and until now only the first was ever opened: `DevWebUI` confined, existence-
+    checked and re-hashed the handle, then stored the manifest path verbatim.
+    That mattered because the two are keyed differently — the handle carries the
+    compile-root-relative `frontend/entry.client.ts`, a Vite manifest is keyed by
+    the Vite-root-relative `entry.client.ts` — so nothing in the repo could say
+    whether the declared asset was reachable in the mode that ships. The build
+    above asserts the manifest exists; this asserts it names THIS asset.
+
+    Everything here is the real article: the handle comes from compiling
+    `notes.rvl`, the manifest from a real `vite build`, and the resolution from
+    the `DevWebUI` `revl dev` installs. The tree is copied to `tmp_path` first so
+    the build writes no `dist/` into the checkout, with `node_modules` linked
+    rather than reinstalled.
+    """
+    from revl.dev import DevWebUI
+
+    app = tmp_path / "app"
+    shutil.copytree(FRONTEND.parent, app,
+                    ignore=shutil.ignore_patterns("node_modules", "dist"))
+    (app / "frontend" / "node_modules").symlink_to(FRONTEND / "node_modules")
+
+    built = subprocess.run([_npm, "run", "build"], cwd=app / "frontend",
+                           capture_output=True, text=True, timeout=600)
+    assert built.returncode == 0, built.stdout + built.stderr
+
+    ir = compile_files([str(app / "notes.rvl")])
+    console = next(c for c in ir["components"] if c["name"] == "NotesConsole")
+    emit = next(s for s in console["body"] if s.get("step") == "emit")
+    handle = {name: node["value"]
+              for name, node in emit["expr"]["args"][0]["fields"]}
+    manifest = emit["expr"]["args"][1]["value"]
+
+    host = DevWebUI(app)
+    host.add_entry(handle, manifest, ["/notes"])
+
+    # the chunk a production Cordis WebUI host would serve for this entry, read
+    # out of the manifest the component itself names.
+    resolved = host.prod_entries[0]
+    assert resolved is not None, (
+        f"{manifest} names no entry for {handle['path']}")
+    assert (app / resolved).is_file()
+    records = json.loads((app / Path(manifest)).read_text(encoding="utf-8"))
+    assert Path(resolved).name == records["entry.client.ts"]["file"]
