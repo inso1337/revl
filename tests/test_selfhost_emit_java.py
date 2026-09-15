@@ -253,6 +253,19 @@ CORPUS = [
                                  # host Map per answer so a missing arm shows up
                                  # as a `Map<String>` fallback in the emitted
                                  # field/ctor/local declarations
+    # Other tiers' fixtures that the stdlib port brought into agreement. A
+    # differential sweep of every `.rvl` in the tree moved 60 documents from
+    # diverging to byte-identical; these carry the stdlib shapes the two
+    # documents above do not spell, in bodies written for other tiers.
+    "../emit_ts_corpus/property_edges.rvl",   # `config.label.length` in a provide
+                                              # method: the `sized_length` field
+    "../emit_py_corpus/strings.rvl",          # Str builtins through fn bodies
+    "../emit_ts_corpus/strings.rvl",
+    "../emit_rust_corpus/lengths.rvl",        # `len` vs `length()` side by side
+    "../emit_wasm_corpus/string_ops.rvl",
+    "../emit_py_corpus/annotated_lets.rvl",
+    "../emit_rust_corpus/perf_index.rvl",
+    "../emit_wasm_corpus/forloop.rvl",
 ]
 
 
