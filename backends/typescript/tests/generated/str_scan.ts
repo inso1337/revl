@@ -120,11 +120,13 @@ function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unkn
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = revlCps(s)[Number(i)]
-  return c === undefined ? "" : c
+  if (c === undefined) { throw new RangeError("revl: Str index out of range") }
+  return c
 }
 function revlCharCodeAt(s: string, i: bigint): bigint {
   const c = revlCps(s)[Number(i)]
-  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
+  if (c === undefined) { throw new RangeError("revl: Str index out of range") }
+  return BigInt(c.codePointAt(0) as number)
 }
 function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   if (typeof x === "string") {

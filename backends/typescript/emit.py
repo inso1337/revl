@@ -2842,7 +2842,15 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     if method == "join":
         return f"{target}.join({args[0]})"
     if method == "repeat":
-        return f"{target}.repeat({_int_as_number(arg_nodes[0], ctx)})"
+        # A NEGATIVE count is `""` — the reference tier's `x * n` answer, which
+        # go, rust and java give too. JS `String.repeat` THROWS on it
+        # (`RangeError: Invalid count value: -1`), so this tier was the only
+        # one of the five that lower `repeat` to disagree, and it disagreed by
+        # faulting where the others answered. Clamping matches the "out of
+        # domain clamps into range, never faults" reading `slice` already has
+        # for its bounds (docs/stdlib-2.0.md §slice).
+        return (f"{target}.repeat("
+                f"Math.max(0, {_int_as_number(arg_nodes[0], ctx)}))")
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
     # A code-point prefix of a string is a UTF-16 prefix (code-point
     # boundaries never split), so the native startsWith/endsWith are exact.
@@ -3970,6 +3978,12 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
 # most two strings for the module's lifetime, which is the price of linearity.
 # `revlIndexOf` deliberately stays on its own `Array.from`: its argument is a
 # fresh substring per call, so caching it would evict the scan's entry.
+#
+# `revlCharAt`/`revlCharCodeAt` THROW for an index outside `0 <= i < length()`
+# (docs/stdlib-2.0.md §Str.codepoint_at). `revlCharAt` used to hand back `""`,
+# which is a perfectly good `Str`, so a walk one index too far read a character
+# that is not there and finished with a wrong answer while py, go and rust
+# faulted on the same input. `slice`-then-guard is still the total form.
 _REVL_STR_HELPER = """let revlCpsK0: string | undefined
 let revlCpsV0: string[] = []
 let revlCpsK1: string | undefined
@@ -4002,11 +4016,13 @@ function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unkn
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = revlCps(s)[Number(i)]
-  return c === undefined ? "" : c
+  if (c === undefined) { throw new RangeError("revl: Str index out of range") }
+  return c
 }
 function revlCharCodeAt(s: string, i: bigint): bigint {
   const c = revlCps(s)[Number(i)]
-  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
+  if (c === undefined) { throw new RangeError("revl: Str index out of range") }
+  return BigInt(c.codePointAt(0) as number)
 }
 function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   if (typeof x === "string") {

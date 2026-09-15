@@ -4378,6 +4378,40 @@ fn check_cache_fns(fns: List[FnD]) -> Verd {
   return no_verd()
 }
 
+// A provide-method binding may not collide with a name already in scope: the
+// method's own parameters, or a COMPONENT-scope name (`_check_rebind`).
+//
+// The component arm is the load-bearing one. `Env.bind_local` already refuses a
+// duplicate ACTIVATION-body binding ("name `x` is already bound in C"), but the
+// method stratum consulted only its own params and locals, so a method-local
+// `let` could reuse an activation-body name. That is not a scoping nicety: a
+// method body lowers into a closure over the activation frame and the safe-name
+// allocator draws from the METHOD's names alone, so the shadowing binding is
+// emitted with the SAME host-safe name as the component local. The component
+// local's declared inverse then runs against the shadow — `store.drop()` on a
+// `Str` — and the host object it was meant to release leaks; with the shadowing
+// `let` written after the use, the local is not bound at all and teardown raises.
+//
+// The scope grows as the walk goes, so the reference's third arm — an earlier
+// METHOD-local — is covered by the same comparison. The reference saves and
+// restores its local map around every nested block so two DISJOINT `if` arms may
+// reuse a name; there is nothing here to get wrong about that, because this
+// gate's method-body reader does not DESCEND into a block at all (`p_stmts`
+// records one "skip" statement for it), so an arm's binding is invisible to this
+// walk and cannot collide with a straight-line one. If that reader ever learns
+// to descend, this walk needs the block snapshot `fb_walk` already does for a
+// module `fn` body.
+fn mth_rebind(pm: ProvM, scope: List[Str], i: Int) -> Verd {
+  if (i >= pm.body.length()) { return no_verd() }
+  let s = pm.body[i]
+  if (s.bind == "") { return mth_rebind(pm, scope, i + 1) }
+  if (contains(scope, s.bind)) {
+    return mk_verd(tagged("G6", "`".concat(s.bind)
+      .concat("` is already bound in `").concat(pm.name).concat("`")), s.line)
+  }
+  return mth_rebind(pm, scope.push(s.bind), i + 1)
+}
+
 // G4 + A1 over one component. `no_verd()` = admitted, else a tagged refusal
 // carrying its LINE (item 419c): an inline body refusal reports the offending
 // statement's line (`body_line`), every whole-component verdict — signature
@@ -4413,6 +4447,9 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
   let sA1 = stmt_a1_verdict(comp, comp.setup, 0, scx)
   if (sA1 != "") { return mk_verd(tagged("A1", sA1), comp.line) }
   let pcx = cx
+  // the component-scope names a provide-method binding may not reuse
+  // (`_check_rebind`'s `env.locals`): the activation body's own `let`s.
+  let compLocals = stmt_binds(comp.setup, 0, [])
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
@@ -4431,8 +4468,16 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
       let mcx = ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
         arrows_in(pm.body, 0, setupArrows))
+      // `_check_rebind`, run by the reference DURING the body lowering: it
+      // interleaves with the walk below statement by statement, so the earlier
+      // SOURCE LINE wins (both are read in statement order). A walk verdict with
+      // no statement line is a post-body aggregate, which the reference reaches
+      // only after the whole body is lowered, so the rebind precedes it.
+      let rb = mth_rebind(pm, union_into(pm.params, compLocals), 0)
       let a = walk_stmts(pm.body, 0, mcx, empty_ac())
       if (a.msg != "") {
+        let rl = refusal_line(pm.body, 0, mcx, empty_ac())
+        if (rb.v != "" && (rl == 0 || rb.line < rl)) { return rb }
         return mk_verd(tagged(a.tag, a.msg), body_line(pm.body, mcx, comp.line))
       }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
@@ -4455,6 +4500,10 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
         return mk_verd(tagged("A1", "`await` is only allowed in a component body"),
                        comp.line)
       }
+      // the rebind again, now against the POST-BODY verdicts below: the
+      // reference raises it while lowering, ahead of every aggregate the walk
+      // can only decide once the body is finished.
+      if (rb.v != "") { return rb }
       if (decl.name != "") {
         let g4 = g4_verdict(pv.svcName, pm.name, decl, a)
         if (g4 != "") { return mk_verd(tagged("G4", g4), comp.line) }
@@ -7048,6 +7097,253 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   return fb_refusal(ts, skip_line(ts, i))
 }
 
+// --------------------------------------- the shadowed module callable (G6/391)
+//
+// `_refuse_callable_shadowing`. A body that BINDS a name and also CALLS it,
+// while a module `fn` or `extern` of that name is in scope, has two readings and
+// the tiers do not pick the same one: a python, TypeScript, Rust or Go local
+// shadows the callable, while a Java local does not shadow a static method of
+// that name. The reference RAISES on it between the type section and
+// `_lower_fns`, so the phase sits between `config_data_refusal` and
+// `fb_refusal` here — ahead of every body-scope verdict and of the extern
+// section.
+//
+// Precision is the whole rule. A binding that merely SHARES a callable's name is
+// unambiguous and common (`fn make_row(id: Int, name: Str)` beside `fn
+// name(row: Row)` in backends/wasm/golden/functions.revl), so only the CALL
+// position is ambiguous and the refusal needs the name bound AND called in the
+// same declaration. Whole-body granularity, not per-block: a `let` in one arm
+// with the call in another reads no better than the same-block form.
+//
+// WHAT THIS SLICE READS, and why the rest is silence rather than a guess. The
+// reference walks the AST, so it sees every call and every binder. A token
+// reader sees fewer of both, and the two directions are not symmetric:
+//   * a CALL it misses is a name that never becomes ambiguous — an
+//     under-refusal, which is the no-objection direction the gate is allowed;
+//   * a BINDER it misses is not, because the diagnostic is anchored at the FIRST
+//     ambiguous binder and an unseen earlier one moves the line. So a module
+//     `fn` is judged only when every binder in it is enumerable: `fb_scan` marks
+//     a statement it cannot model "bail", and an `=>` anywhere in the
+//     declaration means an arrow parameter or a match-arm payload binds a name
+//     off this reader's map. Either one leaves the whole `fn` undecided.
+// The `=>` fence earns its keep twice. A match ARM head (`Some(v) => …`) is an
+// identifier followed by `(` and would otherwise read as a call — the one way
+// this scan could OVER-approximate `called` and refuse a program the reference
+// admits, which is the direction the gate may not err in.
+//
+// Components, `test` blocks and prop tests are out of this slice and are not
+// walked. The reference checks them only after every module `fn`, so leaving
+// them undecided cannot move the anchor of a `fn` refusal, and a program whose
+// only ambiguity is in a component is admitted here rather than reported
+// against the wrong declaration.
+
+type CshBind = { name: Str, line: Int }
+// The binders of one declaration in source order, and whether they are ALL of
+// them: `ok` false means something unmodelled may bind ahead of the ones seen.
+type CshBs = { bs: List[CshBind], ok: Bool }
+// The module callable universe: every name, the `extern` half (the diagnostic
+// spells the two differently), and the token index of every judgeable module
+// `fn` head, collected in one top-level walk.
+type CshU = { all: List[Str], exts: List[Str], heads: List[Int] }
+
+fn csh_word(isExt: Bool) -> Str { return isExt ? "extern" : "function" }
+
+fn csh_msg(name: Str, isExt: Bool) -> Str {
+  return "`".concat(name)
+    .concat("` is bound here and called in this body, and a module ")
+    .concat(csh_word(isExt)).concat(" of that name is in scope")
+}
+
+// The name an `extern` declaration head names, or "". The head is
+// `extern <word>* fn <name>(`, the words being the classification and colour
+// markers `extern_decl_refusal` decides on its own.
+fn csh_extern_name(ts: List[Token], i: Int, end: Int) -> Str {
+  var j = i
+  while (j < end) {
+    if (atw(ts, j, "fn") && tkc(ts, j + 1).kind == "ident") {
+      return tkc(ts, j + 1).text
+    }
+    j += 1
+  }
+  return ""
+}
+
+// The top level, stepped over exactly as `fb_refusal` steps it, so the two
+// cannot disagree about where a declaration ends.
+fn csh_universe(ts: List[Token]) -> CshU {
+  var all: List[Str] = []
+  var exts: List[Str] = []
+  var heads: List[Int] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    let t = tkc(ts, i)
+    var nx = skip_line(ts, i)
+    if (at_boot(ts, i)) {
+      nx = i + 1
+    } else if (at_event(ts, i)) {
+      nx = event_decl_end(ts, i)
+    } else if (t.kind != "kw") {
+      nx = skip_line(ts, i)
+    } else if (at_pub_prefix(ts, i)) {
+      nx = i + 1
+    } else if (t.text == "type") {
+      nx = type_decl_end(ts, i + 1)
+    } else if (t.text == "use") {
+      nx = skip_line(ts, i)
+    } else if (t.text == "test") {
+      let e = test_block_end(ts, i)
+      nx = e != 0 - 1 ? e : skip_line(ts, i)
+    } else if (t.text == "extern") {
+      let e = p_extern(ts, i, empty_prog()).i
+      let n = csh_extern_name(ts, i, e)
+      if (n != "") {
+        all = union_into(all, [n])
+        exts = union_into(exts, [n])
+      }
+      nx = e
+    } else if (t.text == "service") {
+      nx = p_service(ts, i, empty_prog()).i
+    } else if (t.text == "component") {
+      nx = p_component(ts, i, empty_prog()).i
+    } else if (t.text == "fn") {
+      if (tkc(ts, i + 1).kind == "ident") {
+        all = union_into(all, [tkc(ts, i + 1).text])
+      }
+      let sp = fb_span(ts, i)
+      if (sp.ok) {
+        heads = heads.push(i)
+        nx = sp.next
+      } else {
+        nx = skip_line(ts, i)
+      }
+    }
+    if (nx <= i) { i = i + 1 } else { i = nx }
+  }
+  return { all: all, exts: exts, heads: heads }
+}
+
+// Every name in CALL position inside `[lo, hi)`: an identifier immediately
+// followed by `(` that is not the tail of a field access. A method call
+// (`x.m()`), a module-alias call (`m.f()`) and an immediately applied arrow all
+// name something other than a bare identifier, so none of them can be ambiguous.
+fn csh_called(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
+  var out: List[Str] = []
+  var j = lo
+  while (j < hi) {
+    if (tkc(ts, j).kind == "ident" && atk(ts, j + 1, "(")
+        && !atk(ts, j - 1, ".")) {
+      out = union_into(out, [tkc(ts, j).text])
+    }
+    j += 1
+  }
+  return out
+}
+
+// `a` is the CALLED set and `b` the universe, never the other way round: a body
+// calls a handful of names and a file declares hundreds, and the membership test
+// is a list scan, so the cheap list has to be the one walked.
+fn csh_inter(a: List[Str], b: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < a.length()) {
+    if (contains(b, a[i])) { out = out.push(a[i]) }
+    i += 1
+  }
+  return out
+}
+
+fn csh_arrow_free(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var j = lo
+  while (j < hi) {
+    if (atk(ts, j, "=>")) { return false }
+    j += 1
+  }
+  return true
+}
+
+fn csh_add(b: CshBs, name: Str, line: Int) -> CshBs {
+  return { bs: b.bs.push({ name: name, line: line }), ok: b.ok }
+}
+
+// `fb_scan`'s steps flattened into the reference's binder order: the binder a
+// statement introduces, then whatever the block it heads introduces, then the
+// next statement. A "bail" clears `ok` rather than being skipped.
+fn csh_binders(steps: List[FbStep], i: Int, acc: CshBs) -> CshBs {
+  if (i >= steps.length()) { return acc }
+  let s = steps[i]
+  var out = acc
+  if (s.kind == "bail") { out = { bs: acc.bs, ok: false } }
+  if (s.kind == "let") { out = csh_add(acc, s.name, s.line) }
+  if (s.kind == "for") {
+    out = csh_binders(s.body, 0, csh_add(acc, s.name, s.line))
+  }
+  if (s.kind == "if") { out = csh_binders(s.els, 0, csh_binders(s.then_, 0, acc)) }
+  if (s.kind == "while") { out = csh_binders(s.body, 0, acc) }
+  return csh_binders(steps, i + 1, out)
+}
+
+// A parameter's own line: the reference stamps `FnParam.line` off the name
+// token, and a parameter list may span lines.
+fn csh_param_line(ts: List[Token], lo: Int, hi: Int, name: Str, dflt: Int) -> Int {
+  var j = lo
+  while (j < hi) {
+    let t = tkc(ts, j)
+    if (t.kind == "ident" && t.text == name) { return t.line }
+    j += 1
+  }
+  return dflt
+}
+
+fn csh_params(ts: List[Token], lo: Int, hi: Int, ps: List[ParamN], i: Int,
+              dflt: Int, acc: CshBs) -> CshBs {
+  if (i >= ps.length()) { return acc }
+  return csh_params(ts, lo, hi, ps, i + 1, dflt,
+                    csh_add(acc, ps[i].name,
+                            csh_param_line(ts, lo, hi, ps[i].name, dflt)))
+}
+
+fn csh_first(bs: List[CshBind], i: Int, amb: List[Str], u: CshU) -> Verd {
+  if (i >= bs.length()) { return no_verd() }
+  let b = bs[i]
+  if (contains(amb, b.name)) {
+    return mk_verd(tagged("G6", csh_msg(b.name, contains(u.exts, b.name))), b.line)
+  }
+  return csh_first(bs, i + 1, amb, u)
+}
+
+// One module `fn` located from its `fn` keyword, its span already read.
+fn csh_function(ts: List[Token], i: Int, sp: FbSpan, u: CshU) -> Verd {
+  // the ambiguity test first: it is one pass over the body's tokens and it
+  // answers "nothing to decide here" for almost every fn, so the two scans that
+  // cost more (the `=>` fence and the binder walk) never run for those.
+  let amb = csh_inter(csh_called(ts, sp.lo, sp.hi), u.all)
+  if (amb.length() == 0) { return no_verd() }
+  if (!csh_arrow_free(ts, i, sp.hi)) { return no_verd() }
+  let pend = params_at(ts, i + 3).i
+  let seed = csh_params(ts, i + 3, pend, sp.ps, 0, tkc(ts, i).line,
+                        { bs: [], ok: true })
+  let bs = csh_binders(fb_scan(ts, sp.lo, sp.hi), 0, seed)
+  if (!bs.ok) { return no_verd() }
+  return csh_first(bs.bs, 0, amb, u)
+}
+
+// The first refusing module `fn` in declaration order.
+fn csh_walk(ts: List[Token], u: CshU, i: Int) -> Verd {
+  if (i >= u.heads.length()) { return no_verd() }
+  let h = u.heads[i]
+  let sp = fb_span(ts, h)
+  if (!sp.ok) { return csh_walk(ts, u, i + 1) }
+  let v = csh_function(ts, h, sp, u)
+  if (v.v != "") { return v }
+  return csh_walk(ts, u, i + 1)
+}
+
+fn csh_refusal(ts: List[Token]) -> Verd {
+  let u = csh_universe(ts)
+  if (u.all.length() == 0) { return no_verd() }
+  return csh_walk(ts, u, 0)
+}
+
 // ------------------------------------------------ the arrow-body write form (G6)
 //
 // `(…) => { name = … }` — a closure assigning to a name bound outside it. revl
@@ -7140,6 +7436,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd]) -> NoLink {
   // the component loop.
   let cfgv = config_data_refusal(ts, pg)
   if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
+  // the SHADOWED MODULE CALLABLE (item 391): `_refuse_callable_shadowing` runs
+  // after the type section and BEFORE `_lower_fns`, so it precedes the binding
+  // discipline below and every phase that follows it.
+  let cshv = csh_refusal(ts)
+  if (cshv.v != "") { return { done: true, refs: [cshv] } }
   // the module-`fn` BINDING DISCIPLINE (item 391): `_lower_fns` walks every `fn`
   // body before `_lower_externs` and raises on the first scope violation, so the
   // phase sits here — after the declared-type validation and ahead of the extern
