@@ -4238,3 +4238,99 @@ def test_the_handoff_row_is_what_closed_it(admit_ambient):
     # ... while the reference refuses it either way: the divergence was real.
     assert _ref_ambient(incoming, _H_M, replacing=("Store",)) == \
         _h_drift("Int", "Str")
+
+
+# -- where the hand-off sits in the sink (part 2 against part 3's ordering) ----
+#
+# `_admit_handoff_replacement` is collected immediately BEFORE
+# `_admit_provision_withdrawal`, and both sit after the component loop and ahead
+# of the spawn bounds, the attenuation walk and `_link`'s BOOT count. So the
+# hand-off drift takes exactly one position in the `(line, seq)` sink, and the
+# corpus below measures it from every side: against the withdrawal it is spliced
+# beside, against the two families part 3 had to move, and against a component
+# refusal that still outranks it on a tie.
+
+#: the running composition of the ordering corpus: the part-1 withdrawal shape
+#: (a provider and a retained consumer) plus a STATEFUL provider exporting `Str`.
+_H_MO_CACHE = ('component Cache provides c: C {\n'
+               '  handoff c: Str\n'
+               '  provide c { fn g(k) { return k } }\n'
+               '}\n')
+_H_MO_M = _W_SVCS + _W_DB + _W_STORE + _H_MO_CACHE
+
+#: `Cache` redeclared accepting a shape the running export does not fit.
+_MO_HANDOFF = ('component Cache provides c: C '
+               '{ handoff c: Int   provide c { fn g(k) { return k } } }')
+
+_MO_HANDOFF_DRIFT = (
+    "G2|state hand-off on `c` differs from the running manifest: `Cache` "
+    "accepts `Int`, but `Cache` exports `Str` — the successor cannot hold the "
+    "predecessor's state, and dropping it on the swap would be residue")
+
+_H_MO_PAIRS = [
+    ("hand-off then withdrawal", [_MO_HANDOFF, _MO_WITHDRAW]),
+    ("withdrawal then hand-off", [_MO_WITHDRAW, _MO_HANDOFF]),
+    ("hand-off then spawn bound", [_MO_HANDOFF, _MO_SPAWN]),
+    ("spawn bound then hand-off", [_MO_SPAWN, _MO_HANDOFF]),
+    ("hand-off then two boots", [_MO_HANDOFF, _MO_BOOT]),
+    ("two boots then hand-off", [_MO_BOOT, _MO_HANDOFF]),
+    ("hand-off then a component G4", [_MO_HANDOFF, _MO_G4]),
+    ("a component G4 then hand-off", [_MO_G4, _MO_HANDOFF]),
+    ("hand-off, withdrawal and two boots",
+     [_MO_HANDOFF, _MO_WITHDRAW, _MO_BOOT]),
+    ("a component G4, a spawn bound and a hand-off",
+     [_MO_G4, _MO_SPAWN, _MO_HANDOFF]),
+]
+
+
+@pytest.mark.parametrize("layout", ["separate", "glued", "oneline"])
+@pytest.mark.parametrize("name,fragments", _H_MO_PAIRS,
+                         ids=[n for n, _ in _H_MO_PAIRS])
+def test_oracle_b_handoff_refusal_ordering_agrees(admit_ambient, name,
+                                                  fragments, layout):
+    """ORACLE B over multi-refusal admissions that include a hand-off drift, in
+    all three line layouts. Every one of these programs is refused by BOTH sides;
+    what is compared is which of its true refusals gets named."""
+    src = _mo_src(fragments, layout)
+    got = _gate_ambient(admit_ambient, src, _H_MO_M)
+    reference = _ref_ambient(src, _H_MO_M)
+    assert reference != "", (name, layout)
+    assert got == reference, (name, layout)
+
+
+def test_the_handoff_is_collected_just_ahead_of_the_withdrawal(admit_ambient):
+    """NON-VACUITY for the splice position, and the tie that fixes it. On ONE
+    line the hand-off wins, because the reference collects it immediately ahead
+    of the withdrawal; on separate lines the LINE still decides, whichever way
+    round they are written. Both refusals are genuinely present in all three."""
+    pair = [_MO_HANDOFF, _MO_WITHDRAW]
+    glued = _mo_src(pair, "glued")
+    assert _gate_ambient(admit_ambient, glued, _H_MO_M) == _MO_HANDOFF_DRIFT
+    assert _ref_ambient(glued, _H_MO_M) == _MO_HANDOFF_DRIFT
+
+    # line order decides when there is no tie, in both directions
+    handoff_first = _mo_src([_MO_HANDOFF, _MO_WITHDRAW], "separate")
+    assert _gate_ambient(admit_ambient, handoff_first,
+                         _H_MO_M) == _MO_HANDOFF_DRIFT
+    assert _ref_ambient(handoff_first, _H_MO_M) == _MO_HANDOFF_DRIFT
+
+    withdraw_first = _mo_src([_MO_WITHDRAW, _MO_HANDOFF], "separate")
+    assert _gate_ambient(admit_ambient, withdraw_first, _H_MO_M) == _W_LOST_DB
+    assert _ref_ambient(withdraw_first, _H_MO_M) == _W_LOST_DB
+
+    # ... and each fragment on its own is what both sides report, so neither
+    # expectation above is the vacuous "only one refusal was ever there".
+    alone = _mo_src([_MO_HANDOFF], "glued")
+    assert _gate_ambient(admit_ambient, alone, _H_MO_M) == _MO_HANDOFF_DRIFT
+    assert _ref_ambient(alone, _H_MO_M) == _MO_HANDOFF_DRIFT
+
+
+def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
+    """NON-VACUITY, the other direction. The COMPONENT LOOP runs ahead of the
+    hand-off on both sides, so a component's own G4 wins a tie with one: the
+    hand-off did not move to the head of the sink, it took its own place in
+    it."""
+    src = _mo_src([_MO_HANDOFF, _MO_G4], "glued")
+    expected = "G4|call to emission `bus.publish` must be marked `emit` (G4)"
+    assert _gate_ambient(admit_ambient, src, _H_MO_M) == expected
+    assert _ref_ambient(src, _H_MO_M) == expected
