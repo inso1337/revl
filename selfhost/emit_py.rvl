@@ -371,12 +371,13 @@ fn uses_i32_shl(n: Any) -> Bool {
 
 // -------------------------------------------------------------- expressions
 // `_is_float_expr` (backends/python/emit.py): syntactically-certain Float.
-// Is this `${...}` operand a `Float`? The recorded type first (the only way to
-// see a Float that arrives through a parameter, a local, a field or a call),
-// then the node-local proof for IR that predates the annotation.
+// Is this `${...}` operand a `Float`? The node-local proof first (it answers for
+// hand-written IR in the backend-ir dialect, which carries no annotation), then
+// the type the frontend recorded — the only way to see a Float that arrives
+// through a parameter, a local, a field or a call.
 fn interp_is_float(node: Any) -> Bool {
-  if (node_interp_type(node) == "Float") { return true }
-  return is_float_expr(node)
+  if (is_float_expr(node)) { return true }
+  return node_interp_type(node) == "Float"
 }
 
 fn is_float_expr(node: Any) -> Bool {

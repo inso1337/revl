@@ -3292,9 +3292,14 @@ def _interp_type(node: object) -> str | None:
 
 
 def _interp_is_float(node: object) -> bool:
-    """Is this `${...}` operand a `Float`? The recorded type first, then the
-    syntactic proof for IR that predates the annotation."""
-    return _interp_type(node) == "Float" or _is_float_expr(node)
+    """Is this `${...}` operand a `Float`?
+
+    The node-local proof first (it answers for hand-written IR in the
+    backend-ir dialect, which carries no annotation), then the type the
+    frontend recorded — the only way to see a `Float` that arrives through a
+    parameter, a local, a field or a call.
+    """
+    return _is_float_expr(node) or _interp_type(node) == "Float"
 
 
 def _interp_fstring(parts) -> str:

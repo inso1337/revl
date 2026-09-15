@@ -13,3 +13,9 @@ fn boxed(a: Float) -> Opt[Float] { return Some(a) }
 fn measures(a: Float, b: Int32) -> Measures { return { ratio: a, small: b } }
 fn small(a: Int32) -> Int { return a }
 fn real(a: Float) -> Scalar { return Real(a) }
+
+// A `${...}` over a Float the emitter cannot prove syntactically (it arrives
+// through a parameter). String.valueOf renders `1e21` as "1.0E21" and `3.0` as
+// "3.0", neither of which is the canonical ECMAScript form, so the frontend's
+// `interp_type` annotation is what routes this through `revlFtoa`.
+fn render(a: Float) -> Str { return `ratio ${a}` }

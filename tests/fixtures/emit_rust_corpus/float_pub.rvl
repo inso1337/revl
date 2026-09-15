@@ -21,3 +21,9 @@ fn explicit_int_widen(x: Int32) -> Int { return accept_int(x) }
 
 // Int-literal -> Float widen on a fresh temporary (no clone).
 fn call_float() -> Float { return accept_float(3) }
+
+// A `${...}` over a Float the emitter cannot prove syntactically (it arrives
+// through a parameter). Rust's `{}` on an f64 renders `1e-7` as "0.0000001",
+// so the frontend's `interp_type` annotation is what routes this through
+// `revl_ftoa`.
+fn render_float(a: Float) -> Str { return `ratio ${a}` }

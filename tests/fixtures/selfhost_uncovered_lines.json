@@ -377,9 +377,6 @@
         "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering.": {
           "_emit_component_stmts": 17
         },
-        "backends/java/emit.py::_emit_ftoa_helper: Only the Float-to-Str formatter text is missing, an explicit port boundary reproduced by strict floats.rvl divergence; Float literals, arithmetic and widening are covered.": {
-          "_emit_ftoa_helper": 1
-        },
         "backends/java/emit.py::_emit_host_stubs.walk: The missing walk addition recognizes a host used as call target (rather than kind=host dotted fn). lower.py's host-effect lowering materializes dotted host fn nodes; Map/Job acquisition and uses are covered in that canonical form.": {
           "_emit_host_stubs.walk": 1
         },
@@ -423,7 +420,7 @@
           "_emit_v2": 4
         },
         "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458 adds one more: the `_uses_int_arith` call that pulls in the revlDivFloor/revlDivEuclid/revlMod block, on the same helper-demand boundary as the checked-division one beside it.": {
-          "_emit_v3": 17
+          "_emit_v3": 16
         },
         "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
           "_emit_v3_externs": 32
@@ -447,7 +444,7 @@
           "_empty_map_decl_type": 2
         },
         "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, builtin/len and sized-length helpers, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 \u00a74.5 adds one statement: the `replay(\u2026)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_expr": 36
+          "_expr": 35
         },
         "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value.": {
           "_finite_float": 1
@@ -573,7 +570,7 @@
           "_uses_checked_div.walk": 1
         },
         "backends/java/emit.py::_uses_float_interp.walk: Residual found short-circuit and true assignment require Float-to-Str interpolation, explicitly deferred and reproduced by floats.rvl. Float arithmetic nodes alone do not satisfy this condition.": {
-          "_uses_float_interp.walk": 5
+          "_uses_float_interp.walk": 2
         },
         "backends/java/emit.py::_uses_instance_get.walk: Traversal and true detection only run on spawn/instance-get components after their feature gate; spawn/instances are explicitly deferred.": {
           "_uses_instance_get.walk": 8
@@ -627,7 +624,7 @@
           "emit": 2
         }
       },
-      "uncovered_statements": 942
+      "uncovered_statements": 936
     },
     "py": {
       "statements": 2437,
@@ -850,7 +847,7 @@
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
           "_emit_component": 5,
           "_emit_component_new": 27,
-          "_emit_components": 8,
+          "_emit_components": 7,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
@@ -860,11 +857,10 @@
         "Demand-selected formatting helpers: canonical Float interpolation and record/timer/teardown preambles are emitted only when those deferred runtime features are present. Ordinary string interpolation and checked arithmetic are covered without selecting these helper bodies.": {
           "_format": 20,
           "_format.literal": 2,
-          "_revl_ftoa_helper": 1,
           "_revl_record_preamble": 2,
           "_revl_teardown_preamble": 1,
           "_revl_timer_preamble": 1,
-          "_uses_float_interp.walk": 5
+          "_uses_float_interp.walk": 2
         },
         "Explicit invalid/deferred-input guards: accepted frontend IR contains no unresolved holes or ownerless deferred approvals; these walkers and refusal branches make such direct or stale IR fail loudly instead of generating Rust.": {
           "_refuse_deferred_emissions": 10,
@@ -916,7 +912,7 @@
           "_v3_empty_vec_elem_types.collect": 1,
           "_v3_infer_type": 11,
           "_v3_inplace_persistent": 12,
-          "_v3_interp": 3,
+          "_v3_interp": 1,
           "_v3_is_float": 4,
           "_v3_is_str": 2,
           "_v3_let_pattern": 19,
@@ -1035,7 +1031,7 @@
           "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1384
+      "uncovered_statements": 1377
     },
     "ts": {
       "statements": 2151,

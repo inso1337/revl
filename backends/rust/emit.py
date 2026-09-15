@@ -5978,18 +5978,16 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
 def _v3_is_float(node: object) -> bool:
     """Is this expression certain to be a `Float`?
 
-    The frontend's `interp_type` annotation first: a `${...}` operand carries
-    the type the checker gave it, which is the only way to see a `Float` that
-    arrives through a parameter, a local, a field or a call. Rust's `{}` on an
-    f64 is not the canonical form (`1e-7` prints as `0.0000001` and `1e21` as
-    the full 22-digit expansion), so an unseen Float was a wrong string.
-    Then the syntactic proof — a Float literal, a `/` (true division), a
-    Float-annotated arithmetic node, or a unary minus of one — which still
-    answers for IR that predates the annotation (docs/strings.md)."""
+    The node-local proof first: a Float literal, a `/` (true division), a
+    Float-annotated arithmetic node, or a unary minus of one. That proof
+    answers for hand-written IR in the backend-ir dialect, which carries no
+    annotation; it CANNOT see a `Float` that arrives through a parameter, a
+    local, a field or a call, so a `${...}` operand also carries the type the
+    frontend recorded. Rust's `{}` on an f64 is not the canonical form
+    (`1e-7` prints as `0.0000001` and `1e21` as the full 22-digit expansion),
+    so an unseen Float was a wrong string (docs/strings.md)."""
     if not isinstance(node, dict):
         return False
-    if node.get("interp_type") == "Float":
-        return True
     kind = node.get("kind")
     if kind == "lit":
         value = node.get("value")
@@ -5998,7 +5996,7 @@ def _v3_is_float(node: object) -> bool:
         return node.get("op") == "/" or node.get("operands") == "Float"
     if kind == "un":
         return node.get("op") == "-" and _v3_is_float(node.get("operand"))
-    return False
+    return node.get("interp_type") == "Float"
 
 
 class _V3Analyses:

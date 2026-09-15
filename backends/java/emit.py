@@ -1670,19 +1670,17 @@ def _uses_stdlib(ir: dict) -> bool:
 def _is_float_expr(node: object) -> bool:
     """Is this expression certain to be a `Float`?
 
-    The frontend's `interp_type` annotation first: a `${...}` operand carries
-    the type the checker gave it, which is the only way to see a `Float` that
-    arrives through a parameter, a local, a field or a call. Java string
-    concatenation applies `String.valueOf` to such an operand, and that is not
-    the canonical form (`1e21` becomes `1.0E21`, `3.0` stays `3.0`), so an
-    unseen Float was a wrong string. Then the node-local proof — a Float
-    literal, a `/` (true division), a Float-annotated arithmetic node, or a
-    unary minus of one — which still answers for IR that predates the
-    annotation (docs/strings.md)."""
+    The node-local proof first: a Float literal, a `/` (true division), a
+    Float-annotated arithmetic node, or a unary minus of one. That proof
+    answers for hand-written IR in the backend-ir dialect, which carries no
+    annotation; it CANNOT see a `Float` that arrives through a parameter, a
+    local, a field or a call, so a `${...}` operand also carries the type the
+    frontend recorded. Java string concatenation applies `String.valueOf` to
+    such an operand, and that is not the canonical form (`1e21` becomes
+    "1.0E21", `3.0` stays "3.0"), so an unseen Float was a wrong string
+    (docs/strings.md)."""
     if not isinstance(node, dict):
         return False
-    if node.get("interp_type") == "Float":
-        return True
     kind = node.get("kind")
     if kind == "lit":
         value = node.get("value")
@@ -1691,7 +1689,7 @@ def _is_float_expr(node: object) -> bool:
         return node.get("op") == "/" or node.get("operands") == "Float"
     if kind == "un":
         return node.get("op") == "-" and _is_float_expr(node.get("operand"))
-    return False
+    return node.get("interp_type") == "Float"
 
 
 def _uses_float_interp(ir: dict) -> bool:
