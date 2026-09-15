@@ -113,6 +113,22 @@ TOP_LEVEL_REFUSALS = (
     "(bad) unexpected declaration",
 )
 
+# The four refusals the checker issues when it ENTERED a declaration and could
+# not read its signature. Like the two above, each fails a WHOLE document at
+# the parse stage, so each reads as agreement on a program the reference
+# refuses. 53 documents the reference ADMITS were refused this way before the
+# extern classification slot, the type-parameter list, the `cache` trailing
+# clause, the keyword-named record field and the service-operation modifier
+# slot were ported: 29, 16, 6 and 2 across the four messages in that order.
+#
+# Prefixes, not whole messages: two of the four name the declaration.
+SIGNATURE_REFUSALS = (
+    "(bad) expected fn after extern",
+    "(bad) bad method signature in service ",
+    "(bad) expected { after fn signature",
+    "(bad) bad record field in type ",
+)
+
 
 def build_check_service_src():
     """`selfhost/checker.rvl`'s `check_service_src`, emitted to python and run.
