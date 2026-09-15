@@ -20,8 +20,28 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "src" / "revl"
 OUT_DIR = Path(__file__).resolve().parent / "vendor"
+
+# The trees this wheel vendors, as (repo-relative tree, glob, arcname prefix).
+# This table is the SINGLE SOURCE OF TRUTH for "what makes the committed wheel
+# stale", in both directions: `main()` builds the wheel from exactly this, and
+# `tools/affected_tests.py` is held to `wheel_inputs()` by
+# tests/test_affected_tests.py, so a tree added here without a matching gate
+# rule reds that test instead of quietly rotting the committed wheel.
+#
+# The backends glob is TOP-LEVEL `*.py` on purpose, not a recursive walk:
+# `revl/backends/python/<name>.py` is the flat layout `_paths.backends_root()`
+# expects in an installed wheel, so subdirectories (golden/, tests/) are not
+# vendored and are not inputs.
+SOURCE_TREES = (
+    ("src/revl", "**/*.py", "revl/"),
+    ("backends/python", "*.py", "revl/backends/python/"),
+)
+
+# Files the wheel does not vendor but whose content still changes its bytes:
+# pyproject supplies the version that names every `.dist-info` member, and this
+# builder decides the member set and the metadata text.
+META_INPUTS = ("pyproject.toml", "playground/build_wheel.py")
 
 
 def _tracked(tree: Path) -> set[str] | None:
@@ -51,6 +71,36 @@ def _tracked(tree: Path) -> set[str] | None:
         return None
     paths = {p for p in proc.stdout.split("\0") if p}
     return paths or None
+
+
+def _members() -> list[tuple[Path, str]]:
+    """(source path, arcname) for every tracked file the wheel vendors.
+
+    In wheel order, and filtered through `_tracked` exactly as before: an
+    untracked module under one of the trees is on the filesystem but not in the
+    commit, so it is not an input and does not ride into the wheel.
+    """
+    out: list[tuple[Path, str]] = []
+    for rel_tree, pattern, prefix in SOURCE_TREES:
+        tree = ROOT / rel_tree
+        tracked = _tracked(tree)
+        for path in sorted(tree.glob(pattern)):
+            rel = path.relative_to(ROOT).as_posix()
+            if tracked is not None and rel not in tracked:
+                continue
+            out.append((path, prefix + path.relative_to(tree).as_posix()))
+    return out
+
+
+def wheel_inputs() -> list[str]:
+    """Repo-relative paths whose content this builder reads.
+
+    A change to any of them makes the committed `playground/vendor` and
+    `site/vendor` wheels stale, so `tools/affected_tests.py` has to select the
+    `site-wheel` gate for each one. Derived from the same table `main()` builds
+    from, so the two cannot drift: this is not a second copy of the list.
+    """
+    return [p.relative_to(ROOT).as_posix() for p, _ in _members()] + list(META_INPUTS)
 
 
 def _version() -> str:
@@ -84,31 +134,15 @@ def main() -> None:
         "Tag: py3-none-any\n"
     )
 
-    src_tracked = _tracked(SRC)
     records: list[str] = []
     with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as whl:
-        for path in sorted(SRC.rglob("*.py")):
-            rel = path.relative_to(ROOT).as_posix()
-            if src_tracked is not None and rel not in src_tracked:
-                continue
-            arcname = "revl/" + path.relative_to(SRC).as_posix()
-            data = path.read_bytes()
-            whl.writestr(arcname, data)
-            records.append(_record_line(arcname, data))
-
-        # The py-tier runtime glue (emit/runtime/replay/...), packaged where
-        # `_paths.backends_root()` finds it in an installed wheel
-        # (revl/backends) — the same layout pyproject's wheel target ships,
-        # scoped to the one tier the in-browser session can boot. With the
-        # cordis wheel installed beside it, `revl.mcp.session.Session` runs
-        # load/call/swap/unload entirely client-side.
-        py_backend = ROOT / "backends" / "python"
-        backend_tracked = _tracked(py_backend)
-        for path in sorted(py_backend.glob("*.py")):
-            rel = path.relative_to(ROOT).as_posix()
-            if backend_tracked is not None and rel not in backend_tracked:
-                continue
-            arcname = "revl/backends/python/" + path.name
+        # `src/revl/**` plus the py-tier runtime glue (emit/runtime/replay/...),
+        # the latter packaged where `_paths.backends_root()` finds it in an
+        # installed wheel (revl/backends) — the same layout pyproject's wheel
+        # target ships, scoped to the one tier the in-browser session can boot.
+        # With the cordis wheel installed beside it, `revl.mcp.session.Session`
+        # runs load/call/swap/unload entirely client-side.
+        for path, arcname in _members():
             data = path.read_bytes()
             whl.writestr(arcname, data)
             records.append(_record_line(arcname, data))

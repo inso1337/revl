@@ -380,11 +380,30 @@ def _selfhost_oracles(root: Path, stems) -> set[str]:
 # --------------------------------------------------------------------------- #
 # Compile-reachability of src/revl (fail-safe core detection).                 #
 # --------------------------------------------------------------------------- #
+# One AST walk of `src/revl/**` per tree, not per `select()` call. The selector
+# is a pure function of (changed, tree) and every process that uses it is
+# short-lived, so re-parsing ~175 modules for each call bought nothing; callers
+# that ask the same question many times (tests/test_affected_tests.py,
+# tests/test_root_suite_coverage_is_unconditional.py) paid it every time. Same
+# shape as `_READ_CACHE` above.
+_REACH_CACHE: dict[Path, object] = {}
+
+
 def compile_reachable(root: Path):
     """Top-level module names reachable from the package entry (`revl/__init__`)
     through ALL imports, lazy/nested included. A change to any of these can run
     during compilation, so it fails safe to the FULL gate. Returns None if the
     tree cannot be analyzed (also -> FULL at the call site)."""
+    key = Path(root).resolve()
+    if key in _REACH_CACHE:
+        cached = _REACH_CACHE[key]
+        return None if cached is None else set(cached)
+    result = _compile_reachable_uncached(root)
+    _REACH_CACHE[key] = None if result is None else frozenset(result)
+    return result
+
+
+def _compile_reachable_uncached(root: Path):
     pkg = root / "src" / "revl"
     if not pkg.is_dir():
         return None
@@ -478,6 +497,21 @@ def select(changed, root) -> dict:
             tier = parts[1] if len(parts) > 1 else ""
             if tier not in BACKEND_TIERS:
                 return _full(f"unknown backend path {f} -> full")
+            # The committed playground/site wheel vendors the py tier's
+            # TOP-LEVEL modules as `revl/backends/python/<name>.py`
+            # (playground/build_wheel.py's SOURCE_TREES), so a change to one of
+            # them stales the committed wheel exactly as a src/revl change does.
+            # Nothing here selected the gate for it: PR #1092 changed
+            # backends/python/revl_fs_workspace.py, passed every check, and left
+            # `site wheel drift` red on main across four merges. Deliberately
+            # matched to the builder's real glob — top level only, not a
+            # recursive walk — so subdirectories the wheel never ships
+            # (golden/, tests/) do not drag the gate in. Held to the builder by
+            # tests/test_affected_tests.py, which reads build_wheel's own
+            # input list rather than restating it.
+            vendored = tier == "python" and f.endswith(".py") and len(parts) == 3
+            if vendored:
+                gates.add("site-wheel")
             pytest_nodes |= _tier_tests(root, tier)
             # `_tier_tests` matches the tier NAME, by filename or by content, in
             # the tests it scans. The oracles that hold a tier's REFERENCE
@@ -496,7 +530,9 @@ def select(changed, root) -> dict:
             gates.add("conformance")
             if tier in BACKEND_STEP_TIERS:
                 backends.add(tier)
-            reasons.append(f"backends/{tier}/**")
+            reasons.append(
+                f"backends/{tier}/**" + (" (+ site wheel)" if vendored else "")
+            )
             continue
 
         # --- stdlib/<mod>.rvl ---------------------------------------------- #
