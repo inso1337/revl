@@ -4799,8 +4799,11 @@ fn svc_caps_modelled(svcs: &[SvcD], i: i64) -> bool {
     return svc_caps_modelled(svcs, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn cvio_key(v: CVio) -> String {
-    return (v.capStr.revl_concat("\u{1}")).revl_concat(&v.param);
+fn cvio_gt(a: CVio, b: CVio) -> bool {
+    if (a.capStr != b.capStr) {
+        return (a.capStr > b.capStr);
+    }
+    return (a.param > b.param);
 }
 
 fn sort_cvios(xs: &[CVio]) -> Vec<CVio> {
@@ -4812,7 +4815,7 @@ fn sort_cvios(xs: &[CVio]) -> Vec<CVio> {
         let mut placed = false;
         let mut res: Vec<CVio> = vec![];
         while (k < out.revl_length()) {
-            if ((!placed) && (cvio_key((out)[(k) as usize].clone()) > cvio_key(v.clone()))) {
+            if ((!placed) && cvio_gt((out)[(k) as usize].clone(), v.clone())) {
                 res.push(v.clone());
                 placed = true;
             }
