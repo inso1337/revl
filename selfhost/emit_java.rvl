@@ -519,6 +519,12 @@ fn render_field(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let tr = render_expr(tn, ctx, counter)
   var target = tr.text
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  // item 104: property-form `.length` on a sized value is the code-point (Str) /
+  // element (List) count, NOT a record member access (which would not resolve on
+  // a `String`).
+  if (value_bool(value_field(node, "sized_length"))) {
+    return { text: v3_len(target), counter: tr.counter }
+  }
   return { text: `${target}.${mangle(value_str(value_field(node, "name")))}`, counter: tr.counter }
 }
 
@@ -529,6 +535,76 @@ fn render_index(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
   let ir = render_expr(value_field(node, "index"), ctx, tr.counter)
   return { text: `${target}.get((int)(${ir.text}))`, counter: ir.counter }
+}
+
+// `_v3_len`: the code-point (Str) / element (List) count, through the one
+// `revlLength` overload set. Reached by a `len` node, and by the property-form
+// `.length` on a sized value (`sized_length`, item 104).
+fn v3_len(target: Str) -> Str { return `revlLength(${target})` }
+
+// `_v3_builtin`: the stdlib surface (docs/stdlib-2.0.md), dispatched through the
+// `revl*` static overloads emitted once per file — javac resolves the receiver's
+// static type, so every (method, Str|List) pair from the spec table compiles.
+// `recv` carries the receiver's STATIC type only where the lowering must dispatch
+// on it (`to_int`: the Int32 widen vs the Str parse; `to_str`: the Float
+// renderer).
+//
+// DEFERRED here, each behind a loud marker rather than a wrong-shaped emission:
+//   * the total `checked_*` division forms, whose helpers live in the Result-
+//     valued `_emit_checked_div_helpers` block this port does not carry;
+//   * `div_floor`/`div_euclid`/`mod`, whose `revlDivFloor`/`revlDivEuclid`/
+//     `revlMod` helpers live in the separate int-arith block;
+//   * a Float `to_str`, which routes through the canonical `revlFtoa`.
+fn v3_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
+  if (method == "checked_div_trunc" || method == "checked_div_floor"
+      || method == "checked_div_euclid" || method == "checked_mod") {
+    return `<<DEFER-checked-div:${method}>>`
+  }
+  if (method == "length") { return `revlLength(${target})` }
+  if (method == "push") { return `revlPush(${target}, ${args[0]})` }
+  if (method == "slice") { return `revlSlice(${target}, ${args[0]}, ${args[1]})` }
+  if (method == "charAt") { return `revlCharAt(String.valueOf(${target}), ${args[0]})` }
+  if (method == "charCodeAt") { return `revlCharCodeAt(String.valueOf(${target}), ${args[0]})` }
+  // Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
+  // the Unicode scalar at code-point index i, via the same code-point-indexed
+  // helper as charCodeAt.
+  if (method == "codepoint_at") { return `revlCharCodeAt(String.valueOf(${target}), ${args[0]})` }
+  if (method == "concat") { return `revlConcat(${target}, ${args[0]})` }
+  if (method == "to_int") {
+    // Str.to_int parses (the throw maps to the tier's Opt None); an Int32
+    // receiver widens with an explicit `(long)` cast.
+    if (recv == "Str") { return `revlParseInt(${target})` }
+    return `((long) (${target}))`
+  }
+  if (method == "to_int32") { return `Math.toIntExact(${target})` }
+  // `div_trunc` truncates toward zero; `Math.divideExact` truncates identically
+  // and throws on the one overflow (`Int.MIN / -1`) plain `/` would wrap.
+  if (method == "div_trunc") { return `Math.divideExact(${target}, ${args[0]})` }
+  if (method == "div_floor" || method == "div_euclid" || method == "mod") {
+    return `<<DEFER-int-arith:${method}>>`
+  }
+  if (method == "indexOf") { return `revlIndexOf(${target}, ${args[0]})` }
+  if (method == "split") { return `revlSplit(${target}, ${args[0]})` }
+  if (method == "join") { return `revlJoin(${target}, ${args[0]})` }
+  if (method == "repeat") { return `revlRepeat(${target}, ${args[0]})` }
+  // A code-point prefix of a string is a UTF-16 prefix, so the native probes
+  // are exact.
+  if (method == "startsWith") { return `${target}.startsWith(${args[0]})` }
+  if (method == "endsWith") { return `${target}.endsWith(${args[0]})` }
+  // The Map value type (docs/stdlib-2.0.md §Map): persistent HashMaps.
+  if (method == "set") { return `revlMapSet(${target}, ${args[0]}, ${args[1]})` }
+  if (method == "lookup") { return `revlMapGet(${target}, ${args[0]})` }
+  if (method == "has") { return `revlMapHas(${target}, ${args[0]})` }
+  if (method == "size") { return `(long) ${target}.size()` }
+  if (method == "keys") { return `revlMapKeys(${target})` }
+  if (method == "remove") { return `revlMapRemove(${target}, ${args[0]})` }
+  if (method == "to_str") {
+    if (recv == "Float") { return `<<DEFER-ftoa:to_str>>` }
+    return `String.valueOf(${target})`
+  }
+  // The reference raises `unknown builtin method`; a pure self-host emitter fn
+  // cannot fail, so the refusal travels as a loud marker (item 207).
+  return `<<UNSUPPORTED-BUILTIN:${method}>>`
 }
 
 fn render_list(node: Any, ctx: Ctx, counter: Int) -> Rendered {
@@ -861,6 +937,25 @@ fn render_inner(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   if (kind == "un") { return render_un(node, ctx, counter) }
   if (kind == "field") { return render_field(node, ctx, counter) }
   if (kind == "index") { return render_index(node, ctx, counter) }
+  if (kind == "builtin") {
+    let tn = value_field(node, "target")
+    let tr = render_expr(tn, ctx, counter)
+    var target = tr.text
+    if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+    var bargs = []
+    var bc = tr.counter
+    for (a of value_list(value_field(node, "args"))) {
+      let r = render_expr(a, ctx, bc)
+      bargs = bargs.push(r.text)
+      bc = r.counter
+    }
+    let m = value_str(value_field(node, "method"))
+    return { text: v3_builtin(m, target, bargs, value_str(value_field(node, "recv"))), counter: bc }
+  }
+  if (kind == "len") {
+    let lr = render_expr(value_field(node, "target"), ctx, counter)
+    return { text: v3_len(lr.text), counter: lr.counter }
+  }
   if (kind == "record") { return render_record(node, ctx, counter) }
   if (kind == "match") { return match_expr(node, ctx, counter) }
   if (kind == "if") {
@@ -2089,36 +2184,284 @@ fn uses_equality(ir: Any) -> Bool {
   return node_uses_equality(value_field(ir, "externs"))
 }
 
-// `_uses_stdlib` / `_emit_stdlib_helpers`, for the ONE group this port covers:
-// `revlStrCmp` (item 458). The reference reserves a slot after `revlEq` and,
-// once the whole unit is emitted, splices in exactly the helper groups the
-// emitted text calls (`_stdlib_helpers_reached`). Every other group in that
-// block is deferred here, so the mirror is gated on the one construct that
-// pulls this one: a relational `bin` the frontend marked `operands: "Str"`,
-// which is precisely what makes `render_bin` emit a `revlStrCmp(` call.
-fn node_uses_str_cmp(v: Any) -> Bool {
-  let k = value_kind(v)
-  if (k == "record") {
-    if (node_kind(v) == "bin" && is_relational(node_op(v)) && node_operands(v) == "Str") { return true }
-    for (key of value_keys(v)) {
-      if (node_uses_str_cmp(value_field(v, key))) { return true }
-    }
-    return false
-  }
-  if (k == "list") {
-    for (child of value_list(v)) {
-      if (node_uses_str_cmp(child)) { return true }
-    }
-    return false
-  }
-  return false
+// `_STDLIB_BLOCK_HEADER_LINES`: the four lines describing the whole surface.
+fn stdlib_block_header() -> List[Str] {
+  return [
+    "// revl stdlib surface (docs/stdlib-2.0.md) — typed static overloads.",
+    "// A Str counts and indexes in Unicode code points (docs/strings.md);",
+    "// Java's String APIs are UTF-16, so the String overloads go through",
+    "// codePointCount/offsetByCodePoints. The List overloads are unchanged.",
+  ]
 }
 
-fn uses_str_cmp(ir: Any) -> Bool {
-  if (node_uses_str_cmp(value_field(ir, "components"))) { return true }
-  if (node_uses_str_cmp(value_field(ir, "functions"))) { return true }
-  if (node_uses_str_cmp(value_field(ir, "tests"))) { return true }
-  return node_uses_str_cmp(value_field(ir, "externs"))
+// The helper group ORDER of `_stdlib_helper_source` (first-declaration order),
+// which is the order `_emit_stdlib_helpers` emits the selected groups in.
+fn stdlib_group_names() -> List[Str] {
+  return ["revlLength", "revlSlice", "revlIndexOf", "revlCharAt", "revlCharCodeAt", "revlConcat", "revlPush", "revlSplit", "revlJoin", "revlRepeat", "revlParseInt", "revlMapSet", "revlMapGet", "revlMapHas", "revlStrCmp", "revlMapRemove", "revlMapKeys"]
+}
+
+// Each group VERBATIM (its own leading comment lines ride with it, so a group
+// that is not emitted takes its documentation with it).
+fn stdlib_group_lines(name: Str) -> List[Str] {
+  if (name == "revlLength") {
+    return [
+      "private static long revlLength(String s) { return s.codePointCount(0, s.length()); }",
+      "private static long revlLength(java.util.List<?> xs) { return xs.size(); }",
+      "private static long revlLength(Object x) {",
+      "    if (x instanceof java.util.List<?>) { return ((java.util.List<?>) x).size(); }",
+      "    String s = String.valueOf(x);",
+      "    return s.codePointCount(0, s.length());",
+      "}",
+    ]
+  }
+  if (name == "revlSlice") {
+    return [
+      "// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative",
+      "// bound counts from the end, then both bounds clamp into range; never",
+      "// throws. Bounds are code-point offsets for a Str.",
+      "private static String revlSlice(String s, long a, long b) {",
+      "    int len = s.codePointCount(0, s.length());",
+      "    long aa = a < 0 ? a + len : a;",
+      "    long bb = b < 0 ? b + len : b;",
+      "    int a2 = (int) Math.min(Math.max(aa, 0L), len);",
+      "    int b2 = (int) Math.max(Math.min(Math.max(bb, 0L), len), a2);",
+      "    return s.substring(s.offsetByCodePoints(0, a2), s.offsetByCodePoints(0, b2));",
+      "}",
+      "private static <T> java.util.List<T> revlSlice(java.util.List<T> xs, long a, long b) {",
+      "    int len = xs.size();",
+      "    long aa = a < 0 ? a + len : a;",
+      "    long bb = b < 0 ? b + len : b;",
+      "    int a2 = (int) Math.min(Math.max(aa, 0L), len);",
+      "    int b2 = (int) Math.max(Math.min(Math.max(bb, 0L), len), a2);",
+      "    return java.util.List.copyOf(xs.subList(a2, b2));",
+      "}",
+    ]
+  }
+  if (name == "revlIndexOf") {
+    return [
+      "private static long revlIndexOf(String s, String needle) {",
+      "    int i = s.indexOf(needle);",
+      "    return i < 0 ? -1 : s.codePointCount(0, i);",
+      "}",
+      "private static <T> long revlIndexOf(java.util.List<T> xs, T v) { return xs.indexOf(v); }",
+    ]
+  }
+  if (name == "revlCharAt") {
+    return [
+      "// charAt/charCodeAt are Str-only; the index and the returned scalar",
+      "// are code points, not UTF-16 units (docs/strings.md). An index",
+      "// outside `0 <= i < length()` FAULTS, as it does on every tier",
+      "// (docs/stdlib-2.0.md §Str.codepoint_at): revlCharAt used to hand",
+      "// back \"\", a Str that is not in the string, and a walk one index too",
+      "// far then finished with a wrong answer and no diagnostic.",
+      "private static String revlCharAt(String s, long i) {",
+      "    int len = s.codePointCount(0, s.length());",
+      "    if (i < 0 || i >= len) { throw new IndexOutOfBoundsException(\"revl: Str index out of range\"); }",
+      "    return new String(Character.toChars(s.codePointAt(s.offsetByCodePoints(0, (int) i))));",
+      "}",
+    ]
+  }
+  if (name == "revlCharCodeAt") {
+    return [
+      "private static long revlCharCodeAt(String s, long i) {",
+      "    int len = s.codePointCount(0, s.length());",
+      "    if (i < 0 || i >= len) { throw new IndexOutOfBoundsException(\"revl: Str index out of range\"); }",
+      "    return (long) s.codePointAt(s.offsetByCodePoints(0, (int) i));",
+      "}",
+    ]
+  }
+  if (name == "revlConcat") {
+    return [
+      "private static String revlConcat(String a, String b) { return a.concat(b); }",
+      "private static <T> java.util.List<T> revlConcat(java.util.List<T> a, java.util.List<T> b) {",
+      "    return java.util.stream.Stream.concat(a.stream(), b.stream()).toList();",
+      "}",
+    ]
+  }
+  if (name == "revlPush") {
+    return [
+      "private static <T> java.util.List<T> revlPush(java.util.List<T> xs, T v) {",
+      "    return java.util.stream.Stream.concat(xs.stream(), java.util.stream.Stream.of(v)).toList();",
+      "}",
+    ]
+  }
+  if (name == "revlSplit") {
+    return [
+      "// split is pinned to the JS shape: Pattern.quote (literal sep, not",
+      "// regex), limit -1 (trailing empties kept), \"\" -> 1-char strings.",
+      "private static java.util.List<String> revlSplit(String s, String sep) {",
+      "    if (sep.isEmpty()) {",
+      "        // docs/stdlib-2.0.md §split: an empty separator splits by CODE",
+      "        // POINT, so an astral scalar is ONE piece. `s.chars()` walks",
+      "        // UTF-16 code UNITS (two for a surrogate pair) — the #549",
+      "        // divergence; `s.codePoints()` walks Unicode scalars.",
+      "        return s.codePoints().mapToObj(Character::toString).toList();",
+      "    }",
+      "    return java.util.List.of(s.split(java.util.regex.Pattern.quote(sep), -1));",
+      "}",
+    ]
+  }
+  if (name == "revlJoin") {
+    return [
+      "private static String revlJoin(java.util.List<String> xs, String sep) {",
+      "    return String.join(sep, xs);",
+      "}",
+    ]
+  }
+  if (name == "revlRepeat") {
+    return [
+      "private static String revlRepeat(String s, long n) {",
+      "    return s.repeat((int) Math.max(0L, n));",
+      "}",
+    ]
+  }
+  if (name == "revlParseInt") {
+    return [
+      "// Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): Long.parseLong is",
+      "// total on the ASCII digits (leading `-` allowed) and throws on empty,",
+      "// partial, `+`-prefixed AND out-of-long-range spellings; the throw is",
+      "// mapped to the tier's Opt None (Optional.empty()). parseLong would",
+      "// also accept non-ASCII decimal digits (Character.digit), so the",
+      "// ASCII gate runs first — revl's spec is ASCII-only.",
+      "private static java.util.Optional<Long> revlParseInt(String s) {",
+      "    if (s.isEmpty()) { return java.util.Optional.empty(); }",
+      "    int i = 0;",
+      "    if (s.charAt(0) == '-') {",
+      "        i = 1;",
+      "        if (s.length() == 1) { return java.util.Optional.empty(); }",
+      "    }",
+      "    for (; i < s.length(); i++) {",
+      "        char c = s.charAt(i);",
+      "        if (c < '0' || c > '9') { return java.util.Optional.empty(); }",
+      "    }",
+      "    try { return java.util.Optional.of(Long.parseLong(s)); }",
+      "    catch (NumberFormatException e) { return java.util.Optional.empty(); }",
+      "}",
+    ]
+  }
+  if (name == "revlMapSet") {
+    return [
+      "// The Map value type (docs/stdlib-2.0.md §Map): persistent maps —",
+      "// set copies before it puts; lookup answers the tier's Optional.",
+      "private static <V> java.util.Map<String, V> revlMapSet(java.util.Map<String, V> m, String k, V v) {",
+      "    java.util.Map<String, V> out = new java.util.HashMap<>(m);",
+      "    out.put(k, v);",
+      "    return out;",
+      "}",
+    ]
+  }
+  if (name == "revlMapGet") {
+    return [
+      "private static <V> java.util.Optional<V> revlMapGet(java.util.Map<String, V> m, String k) {",
+      "    return java.util.Optional.ofNullable(m.get(k));",
+      "}",
+    ]
+  }
+  if (name == "revlMapHas") {
+    return [
+      "private static <V> boolean revlMapHas(java.util.Map<String, V> m, String k) {",
+      "    return m.containsKey(k);",
+      "}",
+    ]
+  }
+  if (name == "revlStrCmp") {
+    return [
+      "// Str ordering, in the unit revl counts strings in: CODE POINTS",
+      "// (docs/strings.md). String.compareTo compares UTF-16 code units,",
+      "// which agrees only below U+FFFF - an astral scalar starts with a",
+      "// high surrogate in D800..DBFF, so it would sort BELOW U+E000..U+FFFF.",
+      "// Java also has no relational operator on String at all, so `<` on two",
+      "// Str values routes here rather than reaching javac as `(a < b)`.",
+      "private static int revlStrCmp(String a, String b) {",
+      "    int i = 0, j = 0;",
+      "    while (i < a.length() && j < b.length()) {",
+      "        int ca = a.codePointAt(i), cb = b.codePointAt(j);",
+      "        if (ca != cb) { return Integer.compare(ca, cb); }",
+      "        i += Character.charCount(ca); j += Character.charCount(cb);",
+      "    }",
+      "    return Boolean.compare(i < a.length(), j < b.length());",
+      "}",
+    ]
+  }
+  if (name == "revlMapRemove") {
+    return [
+      "// remove copies before deleting (persistent); keys sorts a copied",
+      "// list with the code-point comparator — canonical Str order even for",
+      "// supplementary-plane keys, where compareTo would misorder.",
+      "private static <V> java.util.Map<String, V> revlMapRemove(java.util.Map<String, V> m, String k) {",
+      "    java.util.Map<String, V> out = new java.util.HashMap<>(m);",
+      "    out.remove(k);",
+      "    return out;",
+      "}",
+    ]
+  }
+  if (name == "revlMapKeys") {
+    return [
+      "private static <V> java.util.List<String> revlMapKeys(java.util.Map<String, V> m) {",
+      "    java.util.List<String> ks = new java.util.ArrayList<>(m.keySet());",
+      "    ks.sort((a, b) -> revlStrCmp(a, b));",
+      "    return java.util.List.copyOf(ks);",
+      "}",
+    ]
+  }
+  return []
+}
+
+// `_stdlib_helpers_reached` / `_emit_stdlib_helpers` (item 433 F6). The helper
+// block is NOT all-or-nothing: the reference reserves a slot after `revlEq`,
+// emits the whole rest of the unit, then splices in exactly the helper groups
+// the emitted text CALLS, closed over helper-to-helper calls so a selected
+// group never loses one it needs itself (`revlMapKeys` sorts with `revlStrCmp`).
+// This port reserves the same slot and runs the same selection over the same
+// tail, so a document reaching one helper carries that helper and no other.
+//
+// The reference finds a call with `\b<name>\s*\(`; every emitted call site is
+// the direct `name(` spelling and no helper name is a prefix of another, so a
+// plain substring probe for `name(` selects the same set.
+fn text_calls(text: Str, name: Str) -> Bool {
+  return text.indexOf(name.concat("(")) >= 0
+}
+
+fn stdlib_helpers_reached(lines: List[Str]) -> List[Str] {
+  let text = lines.join(newline())
+  var reached = []
+  for (n of stdlib_group_names()) {
+    if (text_calls(text, n)) { reached = reached.push(n) }
+  }
+  // Close over helper-to-helper calls: a selected group's own body may call
+  // another group, which must then be emitted too.
+  var growing = true
+  while (growing) {
+    growing = false
+    var extra = []
+    for (n of reached) {
+      let body = stdlib_group_lines(n).join(newline())
+      for (m of stdlib_group_names()) {
+        if (text_calls(body, m) && !list_contains(reached, m) && !list_contains(extra, m)) {
+          extra = extra.push(m)
+        }
+      }
+    }
+    if (extra.length() > 0) {
+      reached = reached.concat(extra)
+      growing = true
+    }
+  }
+  return reached
+}
+
+// The block, restricted to the reached groups and emitted in the block's own
+// declaration order (`_emit_stdlib_helpers`). Empty when nothing is reached, so
+// a document that calls no helper carries neither the header nor a blank line.
+fn emit_stdlib_helpers(names: List[Str]) -> List[Str] {
+  var wanted = []
+  for (n of stdlib_group_names()) {
+    if (list_contains(names, n)) { wanted = wanted.push(n) }
+  }
+  if (wanted.length() == 0) { return [] }
+  var out = stdlib_block_header()
+  for (n of wanted) { out = out.concat(stdlib_group_lines(n)) }
+  return out.push("")
 }
 
 fn revl_eq_helper() -> List[Str] {
@@ -3199,38 +3542,12 @@ pub fn emit_java_src(ir: Any) -> Str {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
     }
   }
-  // The reference reserves the stdlib slot HERE (`stdlib_at`) and splices in
-  // the reached helper groups after the whole unit is emitted. This port
-  // covers one group, `revlStrCmp` (item 458); the rest of the block stays
-  // deferred, so a document reaching another helper is off the byte oracle.
+  // item 433 F6: reserve the stdlib slot HERE (`stdlib_at`), emit the whole rest
+  // of the unit, then splice in only the helper groups that rest actually calls.
   // The block header (`_STDLIB_BLOCK_HEADER_LINES`) rides with the block rather
-  // than with any one helper, so it leads and the group follows it verbatim.
-  if (uses_str_cmp(ir)) {
-    for (l of [
-      "// revl stdlib surface (docs/stdlib-2.0.md) — typed static overloads.",
-      "// A Str counts and indexes in Unicode code points (docs/strings.md);",
-      "// Java's String APIs are UTF-16, so the String overloads go through",
-      "// codePointCount/offsetByCodePoints. The List overloads are unchanged.",
-      "// Str ordering, in the unit revl counts strings in: CODE POINTS",
-      "// (docs/strings.md). String.compareTo compares UTF-16 code units,",
-      "// which agrees only below U+FFFF - an astral scalar starts with a",
-      "// high surrogate in D800..DBFF, so it would sort BELOW U+E000..U+FFFF.",
-      "// Java also has no relational operator on String at all, so `<` on two",
-      "// Str values routes here rather than reaching javac as `(a < b)`.",
-      "private static int revlStrCmp(String a, String b) {",
-      "    int i = 0, j = 0;",
-      "    while (i < a.length() && j < b.length()) {",
-      "        int ca = a.codePointAt(i), cb = b.codePointAt(j);",
-      "        if (ca != cb) { return Integer.compare(ca, cb); }",
-      "        i += Character.charCount(ca); j += Character.charCount(cb);",
-      "    }",
-      "    return Boolean.compare(i < a.length(), j < b.length());",
-      "}",
-      "",
-    ]) {
-      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
-    }
-  }
+  // than with any one helper, so it leads and the selected groups follow it
+  // verbatim, in the block's own declaration order.
+  let stdlib_at = out.length()
   if (functions.length() > 0) {
     for (l of emit_v3_functions(functions, ctx)) {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
@@ -3254,6 +3571,15 @@ pub fn emit_java_src(ir: Any) -> Str {
       }
     }
   }
+  // The splice: `out[stdlib_at:stdlib_at] = ...` over the tail emitted since the
+  // slot was reserved.
+  let head = out.slice(0, stdlib_at)
+  let tail = out.slice(stdlib_at, out.length())
+  var helpers = []
+  for (l of emit_stdlib_helpers(stdlib_helpers_reached(tail))) {
+    if (l == "") { helpers = helpers.push("") } else { helpers = helpers.push("    ".concat(l)) }
+  }
+  out = head.concat(helpers).concat(tail)
   out = out.push("}")
   return rstrip(out.join(newline())).concat(newline())
 }
