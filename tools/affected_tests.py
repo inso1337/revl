@@ -87,6 +87,13 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     "tests/test_rescore_no_self_score.py",
+    # Does not READ bench. Its synthetic tree mirrors the real suffix
+    # collision between `backends/typescript/runtime.ts` and
+    # `bench/codegen/typescript/runtime.ts`, which is the ambiguity the
+    # roadmap's abbreviated `typescript/runtime.ts` citations depend on
+    # resolving. Declared because the guard below is mention-based, and
+    # over-selecting is the safe direction for this gate.
+    "tests/test_roadmap_claims_gate.py",
     # The self-host capstone oracle pins four `bench/results/…` candidate
     # documents as members of the emit_java corpus (roadmap item 146 gap 2's
     # located-gap ratchet), so a bench change must re-run it.
