@@ -112,6 +112,21 @@ An emitted ts module runs as an **ES module on plain node**, from inside
    `NODE_ENV`, `VITEST` or `process.argv`.
 6. **Node >= 22.18 (or >= 23.6 on the 23 line).** Below that, node does not
    strip types without a flag, so an emitted `.ts` module will not load.
+7. **No ambient async context carried between emitted tests.** A module that
+   carries `lifecycle test` blocks imports `AsyncLocalStorage` from
+   `node:async_hooks`, snapshots the module's entry context once
+   (`_revl_test_context`), and re-enters it around every driver. So a `@ts`
+   extern that binds ambient context with `AsyncLocalStorage.enterWith` binds
+   it for its own test and no other. This is the py reference tier's isolation
+   (every py driver runs under its own `asyncio.run`, hence in a fresh copy of
+   the module's context) on the ts tier, and it is version-independent by
+   construction: node >= 24 confines an `enterWith` binding to the callback it
+   ran in, node <= 23 does not, and without the snapshot the same emitted file
+   is green on a node 26 dev machine and red on the node 22 CI pins. Issue
+   #1112; the gate is `backends/typescript/test_lifecycle_async_isolation.py`,
+   which reproduces the node <= 23 behaviour on a modern node with
+   `--no-async-context-frame`. A document with no lifecycle test imports
+   nothing new.
 
 Rules 1 to 5 apply to everything the emitter writes **and to every verbatim
 `@ts` extern body**, because an extern body is copied into the module

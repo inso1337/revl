@@ -1083,8 +1083,8 @@
           "_method_body_needs_frame": 1,
           "_needs_frame.walk": 2
         },
-        "In-file test harness boundary: `_emit_ts_tests` emits vitest cases and test-mode statements; `_emit_ts_lifecycle_tests` builds Context/fibers and lowers load, unload, call, assert, advance and no-residue steps. The self-host emitter produces application/library modules only; lifecycle constructs and steps are recorded unported": {
-          "_emit_ts_lifecycle_tests": 60,
+        "In-file test harness boundary: `_emit_ts_tests` emits vitest cases and test-mode statements; `_emit_ts_lifecycle_tests` builds Context/fibers and lowers load, unload, call, assert, advance and no-residue steps. The self-host emitter produces application/library modules only; lifecycle constructs and steps are recorded unported Issue #1112 adds the per-test async-context isolation here (the module-entry `AsyncLocalStorage.snapshot()` re-entered around every driver) and the region got SMALLER, 60 to 59: the driver's line emission was folded into one `extend` per region, so a construct no corpus document can reach costs the ledger one statement instead of one per emitted line. It cannot be reached: a corpus document carrying a `lifecycle test` would flip the byte-agreement oracle RED rather than close the gap, and that was MEASURED on such a document rather than assumed -- selfhost/emit_ts.rvl emits no driver section at all for it (reference 3934 bytes, port 2298, 57 diff lines), because in-file `test` / `fault_test` / `lifecycle test` emission is deferred out of every self-host slice by that file's own header. Porting it is the corpus work that retires this entry; the reference half is pinned by backends/typescript/test_lifecycle_async_isolation.py, which executes both drivers on real node under both of node's async-context implementations.": {
+          "_emit_ts_lifecycle_tests": 59,
           "_emit_ts_tests": 14
         },
         "Item 130 \u00a74.5 replay refusal: backends/typescript/emit.py::_refuse_unlowered_replay refuses a `replay(\u2026)` declaration or request this tier does not lower. It is a refusal, so no successful corpus document can reach it \u2014 a document that did would fail to emit rather than compare bytes. Pinned by tests/test_stream_reactive.py.": {
@@ -1101,8 +1101,8 @@
           "_ident": 2,
           "_raw_field": 2
         },
-        "Module-v3 residuals: `_emit_v3` rejects empty/duplicate documents and conditionally imports/emits vitest tests, ref-runtime support, lifecycle settle/runtime helpers, and ref/config extern support. The byte corpus exercises ordinary module/component output; those conditional branches are classified by the test/ref/config boundaries": {
-          "_emit_v3": 15,
+        "Module-v3 residuals: `_emit_v3` rejects empty/duplicate documents and conditionally imports/emits vitest tests, ref-runtime support, lifecycle settle/runtime helpers, and ref/config extern support. The byte corpus exercises ordinary module/component output; those conditional branches are classified by the test/ref/config boundaries Issue #1112 adds 2 statements to the same lifecycle-only branch: the `node:async_hooks` import line and the module-entry `AsyncLocalStorage.snapshot()` line, both emitted only when `_uses_lifecycle_tests(ir)` holds. They are unreachable for the same measured reason as `_emit_ts_lifecycle_tests` above.": {
+          "_emit_v3": 17,
           "_runtime_imports": 2
         },
         "Owned-write malformed-shape returns: `_ts_inplace_write` declines assignment nodes without a supported owned list/map operation or valid target/value dictionaries. The corpus covers admitted unique list/map set/remove/push updates; these None returns preserve fallback to ordinary assignment": {
