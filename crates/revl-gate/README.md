@@ -196,22 +196,22 @@ generalises `admit` rather than re-implementing it.
 
 Two honest limits, both fail-closed:
 
-* **It closes the `G2`/`G3` legs, and one member rule.** The reference TYPE
-  layer is its own lane (docs/design/457), so a type-incorrect candidate is
-  still a no-objection here, exactly as in `admit`. What this arm DOES resolve is
-  a requirement against the running service's declaration: a candidate calling an
-  operation the running service does not declare is refused `A6` in the
-  reference's own words, and the same call to an operation it does declare is
-  not. That resolution runs only where the wire made the claim — a `:S` row with
-  no operation list says nothing about the running surface, and silence decides
-  nothing. Argument typing, arity and the compatibility relation on a
-  redeclaration are still the type layer's. The reference remains the only tier
-  that admits.
-* **A row it cannot honour is REFUSED, never skipped.** The wire reserves row
-  kinds for waves that have not landed — replacement (`-C`) and handoff
-  (`C=k:T`), both of which need the type layer. Those rows come back as a
-  `MANIFEST` refusal. Ignoring a row would be the wave-through this crate exists
-  to prevent.
+* **It closes the `G2`/`G3` legs, item 53's state compatibility, and one member
+  rule.** The reference TYPE layer is its own lane (docs/design/457), so a
+  type-incorrect candidate is still a no-objection here, exactly as in `admit`.
+  What this arm DOES resolve is a requirement against the running service's
+  declaration: a candidate calling an operation the running service does not
+  declare is refused `A6` in the reference's own words, and the same call to an
+  operation it does declare is not. That resolution runs only where the wire made
+  the claim — a `:S` row with no operation list says nothing about the running
+  surface, and silence decides nothing. Argument typing, arity and the §5
+  compatibility relation on a redeclared SERVICE are still the type layer's. The
+  reference remains the only tier that admits.
+* **A row it cannot honour is REFUSED, never skipped.** Every row kind the wire
+  defines is folded, including the replacement (`-C`) and handoff (`C=k:T`)
+  rows. A row of no kind, or a garbled row of a kind the fold does know, comes
+  back as a `MANIFEST` refusal. Ignoring a row would be the wave-through this
+  crate exists to prevent.
 
 ## What is deliberately absent
 
@@ -221,8 +221,11 @@ Two honest limits, both fail-closed:
 * **The reference type layer.** Still absent, in `admit` and in `admit_into`
   alike: neither arm issues an admission. That lane is the type layer's, not the
   manifest parameter's.
-* **The deferred manifest rows.** Replacement and handoff rows are refused, for
-  the reason in the section above: they need the type layer.
+* **The §5 SERVICE compatibility relation.** A candidate that REDECLARES a
+  running service is a no-objection here; the reference is the only tier that
+  runs `admission._admit_service_replacement`. The service block on the wire is
+  what lets the admission surface above tell that case from a fresh interface
+  and withhold it.
 * **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
   rust host, slices 1-2: the generation state machine, the untrusted-author
   admission entry (`propose`/`admit`/`admit_into`), and the item-245 call path
@@ -287,7 +290,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:2a233c0a0891be05"
+    // frontier "selfhost-admit:8b7e306c552d3cfa"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the

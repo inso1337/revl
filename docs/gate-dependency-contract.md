@@ -212,9 +212,10 @@ not run the reference type layer any more than `admit` does, so a
 type-incorrect candidate is a `NoObjection` here too. It does not RESOLVE a
 candidate's `requires`; it checks them for disjointness and acyclicity, and a
 `requires` the union does not provide is a no-objection. And it REFUSES, with
-the fold's own `MANIFEST` code, a row kind the landed wave does not cover (a
-replacement `-C`, a handoff `C=k:T`) rather than skipping it, because a row
-this gate cannot honour is exactly where a wave-through would hide.
+the fold's own `MANIFEST` code, a row of no kind at all, or a garbled row of a
+kind it does know (a replacement `-C` naming no component, a handoff `C=k:T`
+missing its state type), rather than skipping it, because a row this gate cannot
+honour is exactly where a wave-through would hide.
 
 Two bounds fail closed ahead of the fold, because an overflow in the native
 front end aborts rather than refusing and the crate's `catch_unwind` path

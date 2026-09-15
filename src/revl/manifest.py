@@ -10,6 +10,7 @@ rows joined by ``;``, the kind of each row set by its leading marker
     C<k/r     requirement: the same, resolved in realm r
     C<*k      requirement: the same, multi-realm bound (item 162)
     C>k/r,r   route:       the realms C binds k across (the legs of that bind)
+    C=k:T     handoff:     C exports state of type T at key k (item 53)
     -C        replacing:   component C is withdrawn by this admission
     !halted   header:      the composition is halted; every admission refuses
     !services header:      the `:S` rows below ENUMERATE the running
@@ -23,8 +24,9 @@ the SAME running manifest on both sides: the reference compiles `M` to `IR(M)`,
 projects it here, and feeds the wire to the native gate. `replacing=` renders
 the withdrawn set of a REPLACEMENT admission, so the wire says exactly what
 ``compile_files(paths, manifest=IR(M), replacing=R)`` says on the reference
-side. The handoff row (``C=k:T``) is the one kind still deferred, behind the
-self-host type layer.
+side. The handoff row (``C=k:T``) carries the state shape each running provider
+EXPORTS (item 53), which is what the gate compares a replacement's ACCEPTED
+shape against — the port of `admission._admit_handoff_replacement`.
 
 The SERVICE BLOCK (issue #346) says which services the running composition
 DECLARES, and its header is the load-bearing half. The service names are what
@@ -121,6 +123,43 @@ def _route_rows(name: str, entry: dict) -> list[str]:
     return rows
 
 
+def _handoffs(ir: dict) -> dict[str, dict]:
+    """`component name -> {"key", "type"}` for every running provider that
+    declares a `handoff` (item 53).
+
+    Read off the WHOLE IR document's ``components``, whose ``handoff`` field
+    survives lowering — the manifest projection ``_components`` reads drops it,
+    which is why this is a second lookup rather than a field of the entry. The
+    same place `compiler._running_handoffs` reads, so the wire carries exactly
+    what the reference's own ambient view carries; a bare manifest dict has no
+    such field anywhere and renders no handoff row, exactly as it gives the
+    reference an empty hand-off table."""
+    if not isinstance(ir, dict) or "manifest" not in ir:
+        return {}
+    out: dict[str, dict] = {}
+    for comp in ir.get("components") or []:
+        handoff = comp.get("handoff")
+        if isinstance(handoff, dict) and handoff.get("key"):
+            out[comp.get("name", "")] = handoff
+    return out
+
+
+def _handoff_row(name: str, handoff: dict | None) -> list[str]:
+    """The handoff row of one running component, or no row at all.
+
+    ``C=k:T`` says component C exports state of shape T at the key k it
+    provides. It is a per-component COMPOSITION row like the route row beside
+    it, and it is the one the gate needs to run item 53's compatibility
+    relation: a replacement that accepts a shape the predecessor's exported
+    state does not fit is refused rather than admitted into a swap that drops
+    the state. The type is rendered as the reference spells it in the IR (the
+    declared annotation, alias unresolved), because that is the string
+    `admission._handoff_compatible` compares."""
+    if not handoff:
+        return []
+    return [f"{name}={handoff['key']}:{handoff.get('type') or ''}"]
+
+
 def _requirement_row(name: str, key: str, entry: dict) -> str:
     """One requirement row for `key`, carrying the realm the running consumer
     resolves it in — which is what makes the gate's per-(key, realm) reasoning
@@ -154,7 +193,12 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
 
     A route row is a COMPOSITION row — it says what one running component binds
     across which realms — so it sits with its component, after that component's
-    requirement rows and ahead of the service block. That keeps the per-component
+    requirement rows and ahead of the service block. The handoff row (``C=k:T``,
+    item 53) is a per-component composition row too and sits last within its
+    component, for the same reason and with the same consequence: it moves no
+    provision or requirement position, so the `mnames` DFS seed order is
+    unchanged and a composition declaring no `handoff` renders byte-identically
+    to before. That keeps the per-component
     grouping the wire already has, keeps the running composition's routes in the
     order `_link` walks its entries (which fixes which realm a refusal names
     first), and leaves both the provision/requirement positions and the `mnames`
@@ -168,6 +212,7 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
     does not touch) provably unchanged.
     """
     rows: list[str] = []
+    handoffs = _handoffs(ir)
     for entry in _components(ir):
         name = entry.get("name", "")
         isolate = entry.get("isolate") or {}
@@ -177,6 +222,7 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
         for key in entry.get("inject") or []:
             rows.append(_requirement_row(name, key, entry))
         rows.extend(_route_rows(name, entry))
+        rows.extend(_handoff_row(name, handoffs.get(name)))
     services = _declared_services(ir)
     if services is not None:
         rows.append(SERVICES_HEADER)

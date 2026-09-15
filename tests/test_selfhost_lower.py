@@ -168,6 +168,17 @@ def _classify(e: RevlError) -> str:
     # it like every other G2 in this file.
     if "withdraws the running provider of" in m:
         return "G2"
+    # item 186, the replacement wave part 2: the state hand-off drift of
+    # `admission._admit_handoff_replacement` (item 53). Code-less, and the
+    # phrase "differs from the running manifest" is what routes it through
+    # `diagnostics.classify` to the same (G2, "admission") bucket every other
+    # admission rejection carries, so it classifies G2 here too. The marker is
+    # the hand-off HALF of that phrase and not the phrase itself: the §5 SERVICE
+    # drift of `_admit_service_replacement` spells it as well and the gate has
+    # no phase for that one, so naming it here would claim an agreement that
+    # does not exist.
+    if "state hand-off on `" in m:
+        return "G2"
     # G3 (dependency-cycle / self-provision) and G1 (undeclared access) set no
     # code, so their message markers classify them. G3's two shapes both end
     # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
@@ -3630,11 +3641,11 @@ def test_ambient_halted_header_refuses_every_incoming(admit_ambient):
     assert admit_ambient(clean, "") == ""
 
 
-def test_ambient_unknown_and_deferred_row_kinds_refuse(admit_ambient):
-    """An unknown row kind refuses naming the row; a `-C` row that does not name
-    a bare component refuses as a garbled wire; the one kind still deferred (the
-    `C=k:T` handoff row, blocked on the self-host type layer) fails closed
-    rather than mis-admitting."""
+def test_ambient_unknown_and_garbled_row_kinds_refuse(admit_ambient):
+    """An unknown row kind refuses naming the row, and a row of a kind the gate
+    DOES know that does not carry that kind's fields refuses as a garbled wire —
+    a withdrawal row naming no bare component, a handoff row naming no component,
+    key and state type. A wire the gate cannot read fails closed."""
     clean = ("service D { fn q(s: Str) -> Int } component NewStore provides "
              "db: D { provide db { fn q(s) { let x = s   return 0 } } }")
     assert admit_ambient(clean, "?A/a/") == (
@@ -3643,9 +3654,15 @@ def test_ambient_unknown_and_deferred_row_kinds_refuse(admit_ambient):
         assert admit_ambient(clean, "OldStore/db/;" + row) == (
             "MANIFEST|manifest replacement row `" + row
             + "` does not name a component"), row
-    assert admit_ambient(clean, "OldStore=db:D") == (
-        "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred "
-        "handoff/type-layer wave (item 186)")
+    for row in ("OldStore=db", "OldStore=db:", "OldStore=:D",
+                "OldStore=d/b:D"):
+        assert admit_ambient(clean, row) == (
+            "MANIFEST|manifest handoff row `" + row
+            + "` does not name a component, a key and its state type"), row
+    # a row that does not even START with an identifier is not a handoff row
+    # missing its component; it is a row of no kind at all, and says so.
+    assert admit_ambient(clean, "=db:D") == (
+        "MANIFEST|unrecognized manifest row `=db:D`")
 
 
 # ---------------------------------------- item 186, the REPLACEMENT wave, part 1
@@ -4434,6 +4451,90 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
     assert got == ref, (name, layout, got, ref)
 
 
+# ---- an OPEN ordering divergence: the handoff verdict vs a body refusal -----
+#
+# `_admit_handoff_replacement` runs over `live_components`, which
+# `src/revl/lower.py` builds by DROPPING every component whose body lowering
+# raised (it appends a `poisoned` header stub instead). So on the reference a
+# component whose body refuses contributes NO handoff verdict at all — the body
+# refusal is the whole answer, whatever line either sits on.
+#
+# `selfhost/lower.rvl`'s `handoff_refusals` walks every component in the text,
+# poisoned or not, and its verdict is anchored at the COMPONENT declaration
+# line. `pick_min` orders by `(line, seq)`, so it beats any INLINE body refusal,
+# which `body_line` anchors at the offending STATEMENT — a strictly later line.
+#
+# This predates the A6 member rule and is not caused by it: the reproducer below
+# uses the G1 undeclared-access refusal, which has been inline-anchored since
+# long before docs/design/457. A whole-component AGGREGATE verdict (the G4
+# emission-reach one) is anchored at the component line, ties, and is saved by
+# `seq` — which is why no corpus program has caught this.
+#
+# Both refusals are TRUE of the program, so this is a 419c naming divergence and
+# never a false admission. Pinned rather than fixed here: the fix belongs to the
+# handoff slice that owns `handoff_refusals`, needs the poisoned-component set
+# threaded into `collect_nonlink`, and carries its own oracle rows.
+
+_HO_RUNNING = """service D { fn q(s: Str) -> Int }
+service Extra { fn e(s: Str) -> Str }
+component OldStore provides db: D {
+  handoff db: Str
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+"""
+
+#: (label, source) — each carries a handoff drift AND one body refusal.
+_HO_PAIRS = [
+    # the PRE-A6 member: an undeclared access, inline-anchored for many slices.
+    ("a G1 undeclared access", """service D { fn q(s: Str) -> Int }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { emit nope.execute(s)   return 0 } }
+}
+"""),
+    # the A6 member of the same family (docs/design/457 T4b), which is how this
+    # divergence was found.
+    ("an A6 member refusal", """service D { fn q(s: Str) -> Int }
+service Extra { fn e(s: Str) -> Str }
+component NewStore provides db: D requires ex: Extra {
+  handoff db: Int
+  provide db { fn q(s) { let y = ex.nope(s)   return 0 } }
+}
+"""),
+]
+
+
+@pytest.mark.parametrize("label,src", _HO_PAIRS, ids=[n for n, _ in _HO_PAIRS])
+def test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate(
+        admit_ambient, label, src):
+    """The divergence, measured in both directions so it cannot drift silently.
+
+    The reference names the BODY refusal (the component never reaches the
+    handoff pass); the gate names the handoff drift. Both are true, so this is a
+    naming divergence and not a false alarm — and the gate still REFUSES, which
+    is the property that matters for soundness.
+
+    When the handoff slice threads the poisoned set through, this test flips to
+    an agreement: delete the `!=` arm and assert equality."""
+    ref = _ref_ambient(src, _HO_RUNNING, replacing=("OldStore",))
+    got = _gate_ambient(admit_ambient, src, _HO_RUNNING, replacing=("OldStore",))
+    assert ref.startswith(("G1|", "A6|")), (
+        f"the reference must name the body refusal for {label}: {ref!r}")
+    assert got.startswith("G2|state hand-off on `db` differs"), (
+        f"the gate is expected to name the handoff drift for {label}: {got!r}")
+    assert got != ref, (
+        "this pin exists because the two disagree; if they now agree, the "
+        "handoff slice has been fixed - replace this test with an equality "
+        "assertion rather than deleting it")
+    # NON-VACUITY: with the handoff made compatible, the two agree on the body
+    # refusal, so the divergence is the handoff verdict's ranking and nothing
+    # else about these programs.
+    compatible = src.replace("handoff db: Int", "handoff db: Str")
+    assert _gate_ambient(admit_ambient, compatible, _HO_RUNNING,
+                         replacing=("OldStore",)) == _ref_ambient(
+        compatible, _HO_RUNNING, replacing=("OldStore",))
+
+
 def test_oracle_b_a_withdrawal_tying_with_a_spawn_bound_names_the_withdrawal(
         admit_ambient):
     """The first closed family, with its bytes written out. The withdrawal and
@@ -4508,3 +4609,250 @@ def test_the_single_source_sink_is_unchanged_by_the_ambient_splice(admit):
         for text in (src, _oneline(src)):
             ref_tag, ref_msg = _ref(text)
             assert admit(text) == ref_tag + "|" + ref_msg
+
+
+# ---------------------------------------- item 186, the REPLACEMENT wave, part 2
+#
+# `handoff` STATE compatibility (item 53), the last surface the wave held back.
+# A stateful provider declares the shape of the live state it EXPORTS when it is
+# replaced (`handoff <key>: <Type>`); its replacement declares the shape it
+# ACCEPTS. The value flows predecessor -> successor, so the accepted shape must
+# admit everything the exported one produces — the same covariant §5 relation an
+# interface return position uses, pointed at state. A swap whose successor
+# cannot hold the predecessor's state is REFUSED rather than admitted into a
+# runtime that silently drops it.
+#
+# The wire grows one kind, `C=k:T`, rendered by `manifest_wire` off the whole IR
+# document's `components` (whose `handoff` survives lowering) — the same place
+# `compiler._running_handoffs` reads, so the gate sees exactly the ambient table
+# the reference's own check sees.
+#
+# Why it needed no expression type layer, which is what deferred it: both shapes
+# reach the two gates as declared SPELLINGS, and `_handoff_compatible` calls
+# `compatible(accepted, exported)` with NO declared-type table. So the port is
+# the type-STRING algebra alone, and the structural-record branch that would
+# need a table is unreachable — `handoff st: {a: Int}` is a parse error on the
+# reference (`Parser.type_` refuses `{` at an annotation), never a comparison.
+#
+# FAILURE DIRECTION: fail-CLOSED. Every refusal here is an admission that does
+# not happen; the running composition keeps running with its state where it is.
+# The controls below pin that it does not refuse everything: an identical shape,
+# a WIDENED accepted shape, a cold key and a successor that declares no hand-off
+# at all all still admit.
+
+_H_SVC = "service D { fn q(s: Str) -> Int }\n"
+
+
+def _h_comp(name: str, accepts: str | None, key: str = "db",
+            extra: str = "") -> str:
+    """A component providing `key`, optionally declaring a `handoff` on it."""
+    line = f"  handoff {key}: {accepts}\n" if accepts else ""
+    return (_H_SVC + extra + f"component {name} provides {key}: D {{\n"
+            + line
+            + f"  provide {key} {{ fn q(s) {{ let x = s   return 0 }} }}\n}}\n")
+
+
+#: The running composition: one stateful provider exporting `Str` at `db`.
+_H_M = _h_comp("Store", "Str")
+
+
+def _h_drift(accepts: str, exports: str, new: str = "Store",
+             old: str = "Store", key: str = "db") -> str:
+    return ("G2|state hand-off on `" + key + "` differs from the running "
+            "manifest: `" + new + "` accepts `" + accepts + "`, but `" + old
+            + "` exports `" + exports + "` — the successor cannot hold the "
+            "predecessor's state, and dropping it on the swap would be residue")
+
+
+#: (name, running M, incoming X, replacing R, expected verdict). Every row is
+#: checked on BOTH legs of oracle B, so the expectation is a third witness and
+#: not the definition.
+_HANDOFF_CORPUS = (
+    ("a narrower accepted shape is refused",
+     _H_M, _h_comp("Store", "Int"), ("Store",), _h_drift("Int", "Str")),
+    ("an identical shape admits",
+     _H_M, _h_comp("Store", "Str"), ("Store",), ""),
+    ("a WIDENED accepted shape admits (T injects into Opt[T])",
+     _H_M, _h_comp("Store", "Opt[Str]"), ("Store",), ""),
+    ("the reverse narrowing is refused",
+     _h_comp("Store", "Opt[Str]"), _h_comp("Store", "Str"), ("Store",),
+     _h_drift("Str", "Opt[Str]")),
+    ("numeric widening: Float accepts an exported Int",
+     _h_comp("Store", "Int"), _h_comp("Store", "Float"), ("Store",), ""),
+    ("and the reverse does not",
+     _h_comp("Store", "Float"), _h_comp("Store", "Int"), ("Store",),
+     _h_drift("Int", "Float")),
+    ("containers meet elementwise",
+     _h_comp("Store", "List[Int]"), _h_comp("Store", "List[Float]"),
+     ("Store",), ""),
+    ("and elementwise the other way is refused",
+     _h_comp("Store", "List[Float]"), _h_comp("Store", "List[Int]"),
+     ("Store",), _h_drift("List[Int]", "List[Float]")),
+    ("a COLD key — nothing running exported it — is no conflict",
+     _h_comp("Store", None), _h_comp("Store", "Int"), ("Store",), ""),
+    ("a successor that declares no hand-off opts out, lossily but legally",
+     _H_M, _h_comp("Store", None), ("Store",), ""),
+    ("the table is keyed by KEY, so another component inherits the state too",
+     _H_M, _h_comp("Fresh", "Int"), ("Store",), _h_drift("Int", "Str", "Fresh")),
+    ("an ALIAS is not erased on either side, so the spellings differ",
+     _h_comp("Store", "S", extra="type S = Str\n"), _h_comp("Store", "Str"),
+     ("Store",), _h_drift("Str", "S")),
+    ("the implicit same-name replacement reaches it with no `replacing=`",
+     _H_M, _h_comp("Store", "Int"), (), _h_drift("Int", "Str")),
+)
+
+
+@pytest.mark.parametrize("name,running,incoming,replacing,expected",
+                         _HANDOFF_CORPUS,
+                         ids=[c[0] for c in _HANDOFF_CORPUS])
+def test_oracle_b_handoff_state_compatibility(admit_ambient, name, running,
+                                              incoming, replacing, expected):
+    """ORACLE B over the hand-off row: both legs derived from one artifact, and
+    the verdict string compared byte for byte."""
+    got = _gate_ambient(admit_ambient, incoming, running, replacing=replacing)
+    assert got == expected, name
+    assert got == _ref_ambient(incoming, running, replacing=replacing), name
+
+
+def test_manifest_wire_renders_the_handoff_row():
+    """`C=k:T` rides with its component, after that component's requirement and
+    route rows and ahead of the service block: it is a per-component COMPOSITION
+    row. The provision and requirement positions are untouched, so the `mnames`
+    DFS seed order cannot have moved, and a composition declaring no `handoff`
+    renders byte-identically to before."""
+    from revl import manifest_wire
+
+    rows = manifest_wire(compile_source(_H_M, "running.rvl")).split(";")
+    assert rows[0] == "Store/db/"
+    assert rows[1] == "Store=db:Str"
+    assert rows.index("!services") == 2
+    # a composition with no hand-off renders no such row at all
+    bare = manifest_wire(compile_source(_h_comp("Store", None), "running.rvl"))
+    assert "=" not in bare, bare
+
+
+def test_manifest_wire_renders_no_handoff_row_for_a_manifest_dict():
+    """The manifest PROJECTION drops `handoff`, so a bare manifest dict cannot
+    say what any provider exports — and the wire must not invent it. It renders
+    no row, which is exactly the empty hand-off table `_running_handoffs` builds
+    from the same input, so the two sides stay in step."""
+    from revl import manifest_wire
+
+    ir = compile_source(_H_M, "running.rvl")
+    assert "=" not in manifest_wire(ir["manifest"])
+
+
+def test_the_handoff_row_is_what_closed_it(admit_ambient):
+    """NON-VACUITY, the load-bearing half. Strip the `C=k:T` row from the wire
+    and the same admission goes back to the answer the gate gave before part 2:
+    ADMITTED, with the running state dropped on the swap and nothing said
+    anywhere. This is what pins that the row — not something already on the wire
+    — is what closed the divergence."""
+    from revl import manifest_wire
+
+    ir = compile_source(_H_M, "running.rvl")
+    wire = manifest_wire(ir, replacing=("Store",))
+    incoming = _h_comp("Store", "Int")
+    assert admit_ambient(incoming, wire) == _h_drift("Int", "Str")
+    stripped = ";".join(r for r in wire.split(";") if "=" not in r)
+    assert stripped != wire
+    assert admit_ambient(incoming, stripped) == ""
+    # ... while the reference refuses it either way: the divergence was real.
+    assert _ref_ambient(incoming, _H_M, replacing=("Store",)) == \
+        _h_drift("Int", "Str")
+
+
+# -- where the hand-off sits in the sink (part 2 against part 3's ordering) ----
+#
+# `_admit_handoff_replacement` is collected immediately BEFORE
+# `_admit_provision_withdrawal`, and both sit after the component loop and ahead
+# of the spawn bounds, the attenuation walk and `_link`'s BOOT count. So the
+# hand-off drift takes exactly one position in the `(line, seq)` sink, and the
+# corpus below measures it from every side: against the withdrawal it is spliced
+# beside, against the two families part 3 had to move, and against a component
+# refusal that still outranks it on a tie.
+
+#: the running composition of the ordering corpus: the part-1 withdrawal shape
+#: (a provider and a retained consumer) plus a STATEFUL provider exporting `Str`.
+_H_MO_CACHE = ('component Cache provides c: C {\n'
+               '  handoff c: Str\n'
+               '  provide c { fn g(k) { return k } }\n'
+               '}\n')
+_H_MO_M = _W_SVCS + _W_DB + _W_STORE + _H_MO_CACHE
+
+#: `Cache` redeclared accepting a shape the running export does not fit.
+_MO_HANDOFF = ('component Cache provides c: C '
+               '{ handoff c: Int   provide c { fn g(k) { return k } } }')
+
+_MO_HANDOFF_DRIFT = (
+    "G2|state hand-off on `c` differs from the running manifest: `Cache` "
+    "accepts `Int`, but `Cache` exports `Str` — the successor cannot hold the "
+    "predecessor's state, and dropping it on the swap would be residue")
+
+_H_MO_PAIRS = [
+    ("hand-off then withdrawal", [_MO_HANDOFF, _MO_WITHDRAW]),
+    ("withdrawal then hand-off", [_MO_WITHDRAW, _MO_HANDOFF]),
+    ("hand-off then spawn bound", [_MO_HANDOFF, _MO_SPAWN]),
+    ("spawn bound then hand-off", [_MO_SPAWN, _MO_HANDOFF]),
+    ("hand-off then two boots", [_MO_HANDOFF, _MO_BOOT]),
+    ("two boots then hand-off", [_MO_BOOT, _MO_HANDOFF]),
+    ("hand-off then a component G4", [_MO_HANDOFF, _MO_G4]),
+    ("a component G4 then hand-off", [_MO_G4, _MO_HANDOFF]),
+    ("hand-off, withdrawal and two boots",
+     [_MO_HANDOFF, _MO_WITHDRAW, _MO_BOOT]),
+    ("a component G4, a spawn bound and a hand-off",
+     [_MO_G4, _MO_SPAWN, _MO_HANDOFF]),
+]
+
+
+@pytest.mark.parametrize("layout", ["separate", "glued", "oneline"])
+@pytest.mark.parametrize("name,fragments", _H_MO_PAIRS,
+                         ids=[n for n, _ in _H_MO_PAIRS])
+def test_oracle_b_handoff_refusal_ordering_agrees(admit_ambient, name,
+                                                  fragments, layout):
+    """ORACLE B over multi-refusal admissions that include a hand-off drift, in
+    all three line layouts. Every one of these programs is refused by BOTH sides;
+    what is compared is which of its true refusals gets named."""
+    src = _mo_src(fragments, layout)
+    got = _gate_ambient(admit_ambient, src, _H_MO_M)
+    reference = _ref_ambient(src, _H_MO_M)
+    assert reference != "", (name, layout)
+    assert got == reference, (name, layout)
+
+
+def test_the_handoff_is_collected_just_ahead_of_the_withdrawal(admit_ambient):
+    """NON-VACUITY for the splice position, and the tie that fixes it. On ONE
+    line the hand-off wins, because the reference collects it immediately ahead
+    of the withdrawal; on separate lines the LINE still decides, whichever way
+    round they are written. Both refusals are genuinely present in all three."""
+    pair = [_MO_HANDOFF, _MO_WITHDRAW]
+    glued = _mo_src(pair, "glued")
+    assert _gate_ambient(admit_ambient, glued, _H_MO_M) == _MO_HANDOFF_DRIFT
+    assert _ref_ambient(glued, _H_MO_M) == _MO_HANDOFF_DRIFT
+
+    # line order decides when there is no tie, in both directions
+    handoff_first = _mo_src([_MO_HANDOFF, _MO_WITHDRAW], "separate")
+    assert _gate_ambient(admit_ambient, handoff_first,
+                         _H_MO_M) == _MO_HANDOFF_DRIFT
+    assert _ref_ambient(handoff_first, _H_MO_M) == _MO_HANDOFF_DRIFT
+
+    withdraw_first = _mo_src([_MO_WITHDRAW, _MO_HANDOFF], "separate")
+    assert _gate_ambient(admit_ambient, withdraw_first, _H_MO_M) == _W_LOST_DB
+    assert _ref_ambient(withdraw_first, _H_MO_M) == _W_LOST_DB
+
+    # ... and each fragment on its own is what both sides report, so neither
+    # expectation above is the vacuous "only one refusal was ever there".
+    alone = _mo_src([_MO_HANDOFF], "glued")
+    assert _gate_ambient(admit_ambient, alone, _H_MO_M) == _MO_HANDOFF_DRIFT
+    assert _ref_ambient(alone, _H_MO_M) == _MO_HANDOFF_DRIFT
+
+
+def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
+    """NON-VACUITY, the other direction. The COMPONENT LOOP runs ahead of the
+    hand-off on both sides, so a component's own G4 wins a tie with one: the
+    hand-off did not move to the head of the sink, it took its own place in
+    it."""
+    src = _mo_src([_MO_HANDOFF, _MO_G4], "glued")
+    expected = "G4|call to emission `bus.publish` must be marked `emit` (G4)"
+    assert _gate_ambient(admit_ambient, src, _H_MO_M) == expected
+    assert _ref_ambient(src, _H_MO_M) == expected

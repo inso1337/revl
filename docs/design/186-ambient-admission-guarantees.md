@@ -40,7 +40,7 @@ being replaced (empty today).
 | G7 | unchanged for `X`; for `R`, the withdrawal runs the replaced component's own LIFO teardown, which is what makes replacement expensive and is why it is a wave |
 | G9 taint | checked over `X`'s bodies with the running providers' declared return qualifiers taken from the ambient `services`; a running component's own sinks are not re-walked, because its text was admitted with its own flow and is unchanged |
 | multi-realm routes (162) | a route may target a realm provided only by `M`. Landed (slice 2) |
-| handoff (53) | the replacement's accepted state type must be compatible with the replaced component's exported type under the §5 relation. NOT landed in the self-host: needs the type layer |
+| handoff (53) | the replacement's accepted state type must be compatible with the replaced component's exported type under the §5 relation. Landed on both sides (wave part 2) |
 | the halted state (443) | admission against a halted composition is refused; the reference's session already refuses `load`/`swap` after a halt, and the self-host gate refuses a manifest whose header row says `halted` (below) |
 
 The base invariant that every slice keeps: `admit_ambient(src, "") ==
@@ -153,12 +153,13 @@ Two oracles, one per regime:
 |---|---|---|
 | **3 (now)** | requirement rows on the wire; G3 over the union graph in `link_refusals(pg, seed)`; the `!halted` header; `manifest_wire(ir)` projection; oracle A extended to G3 and pinned in `tests/test_selfhost_lower.py`; gate crate and wasm gate regenerated | none beyond the regen |
 | **wave, part 1** (landed) | `-C` rows, G2 against `M \ R`, the unmet-consumer refusal on both the reference and the native gate, oracle B | the reference wrapper returning the first verdict string |
-| **wave, part 2** | `C=k:T` rows and the handoff compatibility check | the self-host type layer (docs/design/457-selfhost-type-layer.md): `compatible` cannot be ported to `lower.rvl` before the types it compares exist there |
-| **wave, part 3** (landed) | 419c closure: line-ordered collecting of ambient refusals against internal ones for the multi-refusal corpus (slice 2 ordered the single-conflict case) | part 1; the handoff row of part 2 contributes no verdict yet, so it carries no ordering |
+| **wave, part 2** (landed) | `C=k:T` rows and the handoff compatibility check | none, as it turned out: both shapes reach the gate as declared SPELLINGS and the reference compares them with NO declared-type table, so the port is the type-STRING algebra alone |
+| **wave, part 3** (landed) | 419c closure: line-ordered collecting of ambient refusals against internal ones for the multi-refusal corpus (slice 2 ordered the single-conflict case) | part 1. Part 2's hand-off verdict later took its own place in the same sink, immediately ahead of the withdrawal |
 
 Slice 3 is small, needs no type layer, and closes the one guarantee hole that
-is a soundness gap today (a cycle hidden by the manifest). The wave is deferred
-until the type layer lands, and this note is the spec it lands against.
+is a soundness gap today (a cycle hidden by the manifest). The wave was deferred
+until the type layer lands, and this note is the spec it landed against — the
+part-2 note below records where that precondition turned out to be wrong.
 
 ### Landed since this note was written
 
@@ -224,8 +225,86 @@ requirement, and a withdrawal of the consumer itself. It lives in
 `tests/test_selfhost_lower.py`; the gate's own in-language cases live in
 `selfhost/lower.rvl` and ride into `crates/revl-gate` with the generated crate.
 
-Still open for the wave: the `C=k:T` handoff row and its compatibility check
-(part 2, still blocked on the self-host type layer).
+Wave part 2 closed the remaining row; see below.
+
+**Wave part 2, the `C=k:T` handoff row and state compatibility (2026-09-15).**
+The last surface the wave held back. The wire grows one kind:
+
+```
+C=k:T        handoff: the state shape the running component C exports at key k
+```
+
+`manifest_wire` renders it off the WHOLE IR document's `components`, whose
+`handoff` field survives lowering — the same place `compiler._running_handoffs`
+reads, so the gate sees exactly the ambient table the reference's own check
+sees. It is a per-component COMPOSITION row: it rides with its component, after
+that component's requirement and route rows and ahead of the service block, so
+the provision and requirement positions are untouched and the G3 DFS seed order
+(`mnames`) is unchanged. A composition that declares no `handoff` renders
+byte-identically to before.
+
+`admit_ambient` now runs the reference's own check. For each incoming component
+declaring `handoff k: A`, if some running provider exports state at `k` with
+shape `E`, then `A` must accept everything an `E` produces — the covariant
+`compatible(expected=A, actual=E)` of §5, pointed at state — and a successor
+that cannot hold the predecessor's state is refused in the reference's exact
+words, classified `(G2, admission)`. A key nothing running exported starts COLD
+and a successor that declares no `handoff` opts out: neither is a conflict, on
+either side. The running table is NOT filtered by the withdrawn set, because the
+provider being replaced is precisely the one whose exported state the
+replacement must accept.
+
+**The precondition this note named did not hold.** Part 2 was deferred behind
+"the self-host type layer (457): `compatible` cannot be ported to `lower.rvl`
+before the types it compares exist there". That was the wrong reading of the
+dependency. Both shapes reach the gate as declared SPELLINGS — the running one
+on the wire, the incoming one off the component's own annotation — and
+`admission._handoff_compatible` calls `compatible(accepted, exported)` with NO
+declared-type table. So the only algebra to port is the type-STRING one, which
+`ty_parse`/`ty_render` already were; `ho_compatible` is the `types=None` reading
+of `typecheck.compatible`, head for head. The nominal-record resolution that
+would need a table is off this path entirely, and the STRUCTURAL-record branch
+is unreachable: `Parser.type_` refuses a `{` at an annotation position, so
+`handoff st: {a: Int}` is a parse error on the reference and never a comparison.
+What genuinely needs 457 is the §5 relation on a redeclared SERVICE
+(`_admit_service_replacement`), which compares declared method signatures; that
+one stays open, and the gate is a no-objection on it.
+
+Where it sits in the sink (part 3's question, asked again for the new producer):
+`check_and_lower` collects `_admit_handoff_replacement` immediately BEFORE
+`_admit_provision_withdrawal`, both after the component loop and ahead of the
+spawn bounds, the attenuation walk and `_link`'s BOOT count. `collect_nonlink`
+takes the two spliced in that order, so a hand-off drift and a stranded consumer
+that land on ONE line are broken the same way by `seq` on both sides. Measured
+over the ordering corpus in three line layouts (hand-off against the withdrawal,
+a G4 spawn-emission bound, the BOOT count, and a component's own G4, in both
+orders plus two triples): 30 admissions, all agreeing, and the splice is
+load-bearing — reversing the two producers reds seven of them.
+
+Failure direction: fail-CLOSED. Every refusal here is an admission that does not
+happen; the running composition keeps running with its state where it is. The
+non-vacuity controls pin that it does not refuse everything: an identical shape,
+a WIDENED accepted shape (`Opt[Str]` accepting an exported `Str`), a numeric
+widening, an elementwise container widening, a cold key and a successor
+declaring no hand-off all still admit — and stripping the `C=k:T` rows from a
+rendered wire reproduces the admission the gate used to give, which is what pins
+which row closed it.
+
+On the ADMISSION surface (`crates/revl-gate/src/admission.rs`) the row is READ
+and counted as nothing, exactly as a route row is: its key is already on the
+wire as its component's own provision row, and the fold is what compares the
+shapes. Reading it is the point — a row that surface cannot parse declines the
+WHOLE wire, so leaving handoff rows out would have silently withheld the
+admission arm from every STATEFUL running composition. It is read AHEAD of the
+route row on both surfaces, because the type field is the one place on the wire
+carrying an arbitrary type spelling and a function type spells `->`. The type
+itself is not validated against the wire-name rule: it is a spelling, and the
+only thing that may judge it is the relation that compares it.
+
+`tests/test_selfhost_lower.py` carries oracle B over the row (a 13-case corpus
+of `(M, X, R)` triples, the ordering corpus, and the controls);
+`selfhost/lower.rvl` carries the in-language twins, which ride into
+`crates/revl-gate` with the generated crate.
 
 **Route rows, and the routed realm loss (2026-09-14, issue #1036).** The wire
 grows one more kind:
@@ -372,4 +451,6 @@ three layouts, the two closed families with their bytes, and the controls);
 6. **Oracle B (the wave's exit).** For a corpus of `(M, X, R)` triples covering
    plain replacement, an unmet consumer, a realm-separated non-conflict and a
    handoff mismatch, the first verdict string agrees byte-for-byte between the
-   reference wrapper and `admit_ambient` over `manifest_wire(IR(M))`.
+   reference wrapper and `admit_ambient` over `manifest_wire(IR(M))`. MET: the
+   replacement and unmet-consumer cases landed with wave part 1, the realm
+   cases with the route rows, and the handoff cases with wave part 2.

@@ -4647,17 +4647,18 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         if not test.get("lifecycle"):
             continue
         where = f"lifecycle test {test['name']!r}"
-        lines.append(f"it({_string(test.get('name'))}, async () => {{")
-        lines.append("  // drives the composition on a real cordis context and")
-        lines.append("  // proves no residue after LIFO teardown (FR-5 / §7.1).")
-        lines.append("  const root = new Context()")
+        # issue #1112: the driver's statements are collected here and then
+        # emitted one level deeper, inside the per-test async context the
+        # `_revl_test_context` wrapper below enters.
+        body: list[str] = []
+        body.append("  const root = new Context()")
         if any(s.get("step") == "advance" for s in test.get("body") or []):
             # item 102: the clock coeffect is a module-global; reset it so this
             # test's `advance` steps start from t=0 and see only its own timers,
             # independent of any earlier lifecycle test in the file.
-            lines.append("  host.clockReset()")
-        lines.append("  const _revl_baseline = snapshotRuntime(root)")
-        lines.append("  const _revl_fibers = new Map<string, any>()")
+            body.append("  host.clockReset()")
+        body.append("  const _revl_baseline = snapshotRuntime(root)")
+        body.append("  const _revl_fibers = new Map<string, any>()")
         for step in test.get("body") or []:
             kind = step.get("step")
             if kind == "load":
@@ -4666,17 +4667,17 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 cfg_items = ", ".join(
                     f"{_ident(field, 'config field')}: {_expr(value, ctx)}"
                     for field, value in cfg.items())
-                lines.append("  {")
-                lines.append(f"    const _f = plug(root, {component}, {{{cfg_items}}})")
-                lines.append("    await _f")
-                lines.append(f"    _revl_fibers.set({_string(component)}, await _f)")
-                lines.append("    await _revl_settle()")
-                lines.append("  }")
+                body.append("  {")
+                body.append(f"    const _f = plug(root, {component}, {{{cfg_items}}})")
+                body.append("    await _f")
+                body.append(f"    _revl_fibers.set({_string(component)}, await _f)")
+                body.append("    await _revl_settle()")
+                body.append("  }")
             elif kind == "unload":
                 component = step["component"]
-                lines.append(f"  await (await _revl_fibers.get({_string(component)})).dispose()")
-                lines.append("  _revl_fibers.delete(" + _string(component) + ")")
-                lines.append("  await _revl_settle()")
+                body.append(f"  await (await _revl_fibers.get({_string(component)})).dispose()")
+                body.append("  _revl_fibers.delete(" + _string(component) + ")")
+                body.append("  await _revl_settle()")
             elif kind == "call":
                 key = step["key"]
                 service = provided.get(key)
@@ -4690,30 +4691,44 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 call = f"root.{_ident(key, 'provision key')}.{_ident(step['method'], 'method')}({args})"
                 bind = step.get("bind")
                 if bind is not None:
-                    lines.append(f"  const {_ident(bind, 'lifecycle binding')} = {await_}{call}")
+                    body.append(f"  const {_ident(bind, 'lifecycle binding')} = {await_}{call}")
                 else:
-                    lines.append(f"  {await_}{call}")
-                lines.append("  await _revl_settle()")
+                    body.append(f"  {await_}{call}")
+                body.append("  await _revl_settle()")
             elif kind == "assert":
                 # reuse the pure-test assert rendering (equality goes through
                 # revlEq + vitest's matcher, with both sides in the message)
-                _v3_stmt({"step": "assert", "expr": step["expr"]}, ctx, lines,
+                _v3_stmt({"step": "assert", "expr": step["expr"]}, ctx, body,
                          2, test_mode=True)
             elif kind == "advance":
                 # item 102: drive the clock coeffect forward. A firing is a
                 # deterministic timeline step, so `_revl_settle` after it lets
                 # the fired body's async work (if any) settle before the next
                 # statement observes it (docs/time-coeffect.md §advance).
-                lines.append(f"  host.clockAdvance({int(step['ms'])})")
-                lines.append("  await _revl_settle()")
+                body.append(f"  host.clockAdvance({int(step['ms'])})")
+                body.append("  await _revl_settle()")
             elif kind == "assert_no_residue":
-                lines.append("  // R4 + R1: same introspection the py reference")
-                lines.append("  // tier's `assert no_residue` performs.")
-                lines.append("  assertNoResidue(root, _revl_baseline)")
+                body.append("  // R4 + R1: same introspection the py reference")
+                body.append("  // tier's `assert no_residue` performs.")
+                body.append("  assertNoResidue(root, _revl_baseline)")
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
-        lines.append("})")
-        lines.append("")
+        # One `extend` per region rather than a statement per emitted line:
+        # every statement here is unreachable by the self-host byte-agreement
+        # corpus (selfhost/emit_ts.rvl defers in-file test emission entirely),
+        # so each one is a line the mirrored-emitter ledger has to carry.
+        lines.extend([
+            f"it({_string(test.get('name'))}, async () => {{",
+            "  // drives the composition on a real cordis context and",
+            "  // proves no residue after LIFO teardown (FR-5 / §7.1). It runs with",
+            "  // the module's entry async context restored, so ambient context an",
+            "  // earlier test in this file bound with `AsyncLocalStorage.enterWith`",
+            "  // is not in scope here — the py tier's per-`asyncio.run` per-test",
+            "  // isolation, on this tier (issue #1112).",
+            "  await _revl_test_context(async () => {",
+        ])
+        lines.extend(("  " + line if line else line) for line in body)
+        lines.extend(["  })", "})", ""])
     return lines
 
 
@@ -4933,6 +4948,13 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     ]
     if tests:
         out.append("import { expect, it } from 'vitest'")
+    if _uses_lifecycle_tests(ir):
+        # issue #1112: per-test async-context isolation for the lifecycle
+        # drivers (see `_emit_ts_lifecycle_tests`). A module-top ESM import of
+        # a node builtin, which both vitest and plain node resolve; emitted
+        # only when a lifecycle driver is, so every other document stays
+        # byte-identical to before.
+        out.append("import { AsyncLocalStorage } from 'node:async_hooks'")
     # item 396 option B: a `@ts ref` extern emits a lazy thunk that resolves the
     # ref'd module at CALL time through a root the runner provides (so the
     # artifact text stays machine-independent) and imports the symbol then —
@@ -4952,6 +4974,25 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     out.extend(_revl_helpers(ir))
     if _uses_lifecycle_tests(ir):
         out.append("const _revl_settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))")
+        # issue #1112: per-test async-context isolation. The py reference tier
+        # runs every lifecycle driver under its own `asyncio.run`, so a
+        # contextvar a test binds dies with that test; the ts tier ran every
+        # driver in one shared async context, so an `@ts` extern that binds
+        # ambient context with `AsyncLocalStorage.enterWith` polluted every
+        # later test in the file. On node >= 24 the binding is confined by
+        # AsyncContextFrame and the escape does not happen at all, which is
+        # what makes this expensive: it reads as "fails on ubuntu, passes on
+        # macOS" when the real variable is the node version (22 on CI, 26 on a
+        # dev machine). Captured ONCE at module evaluation — the file's entry
+        # context, the ts analogue of the context each `asyncio.run` copies —
+        # and re-entered per test, so what an earlier test bound is not in
+        # scope for the next one.
+        #
+        # `AsyncResource.runInAsyncScope` is NOT enough on its own here, and
+        # was measured not to be: a driver awaits its `load` step before any
+        # extern runs, so the `enterWith` lands on a promise continuation that
+        # has already left the resource's synchronous scope.
+        out.append("const _revl_test_context = AsyncLocalStorage.snapshot()")
         out.append("")
 
     if types:

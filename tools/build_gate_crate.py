@@ -85,11 +85,13 @@ question the py loop (`bench/inprocess_gate_harness.py`) already asks.
 `admit_into(source, manifest)` is therefore a real arm, not a stub: both inputs
 go to the native fold and what that fold decides is what the crate reports. It
 closes the G2/G3 legs of ambient admission — provision disjointness, route
-realms, cross-manifest acyclicity — and NOTHING ELSE. The manifest wire carries
-the two row kinds the landed wave covers (provision `C/k/r`, requirement `C<k`)
-plus the `!halted` header; every OTHER row kind the wire reserves, the
-replacement (`-C`) and handoff (`C=k:T`) rows, is REFUSED as `MANIFEST` rather
-than ignored, because those waves land with the type layer. It issues no
+realms, cross-manifest acyclicity — plus the replacement wave's withdrawn
+provisions and state hand-offs, and NOTHING ELSE. Every row kind the wire
+defines is folded (provision `C/k/r`, requirement `C<k` in its three spellings,
+route `C>k/r,r`, withdrawal `-C`, handoff `C=k:T`, the `!halted` header and the
+service block); a row of no kind, or a garbled row of a kind it does know, is
+REFUSED as `MANIFEST` rather than ignored, because ignoring a row is exactly the
+wave-through this crate exists to prevent. It issues no
 admission either: a fold verdict is mapped through the same admission-free arms,
 so `to_json` still emits `"admitted": false` everywhere.
 
@@ -876,9 +878,10 @@ struct Running<'a> {
 /// admission surface can account for, `None` otherwise.
 ///
 /// The accountable kinds are the provision (`C/k/r`), the requirement in its
-/// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`) and the
-/// service block (`!services`, `:S` or `:S,op,op`). Everything else declines the wire, which is a withheld admission and
-/// not a refusal: a `!halted` header, a handoff row, and — deliberately, even
+/// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`), the
+/// handoff (`C=k:T`) and the service block (`!services`, `:S` or `:S,op,op`).
+/// Everything else declines the wire, which is a withheld admission and
+/// not a refusal: a `!halted` header, and — deliberately, even
 /// though the fold has a full answer for it — a WITHDRAWAL row (`-C`). A
 /// withdrawal changes which provisions survive and can strand a running
 /// consumer; re-deriving that here would be a second implementation of the fold's
@@ -903,6 +906,17 @@ struct Running<'a> {
 /// the WHOLE wire, so leaving route rows out would have silently withheld the
 /// admission surface from every routed composition — the shape of the bug the
 /// `C<*k` and `C<k/r` spellings had here until they were read.
+///
+/// A HANDOFF row (`C=k:T`, item 186 wave part 2) is read the same way, for the
+/// same reason: it is the running provider's EXPORTED state shape, the fold
+/// compares it against the candidate's accepted shape with the §5 relation, and
+/// nothing here counts it. Its key is already on the wire as that component's
+/// own provision row. It is read BEFORE the route row because the TYPE field is
+/// the one place on the wire carrying an arbitrary type SPELLING and a function
+/// type spells `->`: read after, `Store=st:(Int) -> Str` would split at its `>`
+/// and look like a route. The TYPE itself is NOT validated against
+/// [`is_wire_name`] — it is a type spelling, not a name, and the only thing that
+/// may judge it is the relation that compares it.
 fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
     let mut provided: Vec<&str> = Vec::new();
     let mut required: Vec<&str> = Vec::new();
@@ -949,6 +963,14 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
         if row.starts_with('-') {
             // A withdrawal. The fold decides it; this surface does not.
             return None;
+        }
+        if let Some((component, spec)) = row.split_once('=') {
+            // `C=k:T` — the state shape `component` exports at `k` (item 53).
+            let (key, state) = spec.split_once(':')?;
+            if !is_wire_name(component) || !is_wire_name(key) || state.is_empty() {
+                return None;
+            }
+            continue;
         }
         if let Some((component, spec)) = row.split_once('>') {
             // `C>k/r1,r2` — the realms a running component binds `k` across. It
@@ -1168,6 +1190,30 @@ mod tests {
         // wave). This surface does not re-derive it: a wire carrying one is
         // withheld, whatever the candidate is.
         for wire in ["Kv/store/;-Kv", "Kv/store/;!services;:Store;-Kv", "-Kv"] {
+            assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
+        }
+    }
+
+    #[test]
+    fn a_handoff_row_is_read_rather_than_tripped_over() {
+        // `C=k:T` (item 186, wave part 2) is the running provider's EXPORTED
+        // state shape. The fold compares it against the candidate's accepted
+        // shape; this surface counts it as nothing, exactly as it counts a
+        // route row as nothing, and must not decline a wire for carrying one —
+        // declining would have silently withheld the admission arm from every
+        // STATEFUL running composition.
+        assert!(certify_into("", "Kv/store/;Kv=store:Str").is_some());
+        assert!(certify_into("", "Kv/store/;Kv=store:Str;App/app/;App<store").is_some());
+        // a function-typed shape carries a `>`, which is why the handoff row is
+        // read AHEAD of the route row: read after, this would split at its own
+        // arrow and look like a garbled route.
+        assert!(certify_into("", "Kv/store/;Kv=store:(Int) -> Str").is_some());
+        // the type is opaque here: it is a type SPELLING, not a wire name, and
+        // the only thing that may judge it is the relation that compares it
+        assert!(certify_into("", "Kv/store/;Kv=store:Map[Str, Int]").is_some());
+        // a garbled handoff row is still a row this surface cannot read
+        for wire in ["Kv/store/;Kv=store", "Kv/store/;Kv=store:", "Kv/store/;Kv=:Str",
+                     "Kv/store/;=store:Str"] {
             assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
         }
     }
@@ -1692,10 +1738,12 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! `selfhost/lower.rvl::admit_ambient`, compiled to rust like [`admit`].
 //!
 //! What this arm decides is the G2/G3 legs of ambient admission, the
-//! replacement wave's withdrawals, and nothing else. The handoff row (`C=k:T`)
-//! is the one kind still deferred behind the type layer, and it is REFUSED as
-//! `MANIFEST` rather than skipped, because a row this gate cannot honour is
-//! exactly where a stub that ignored its inputs would wave a program through.
+//! replacement wave's withdrawals and its state hand-offs (`C=k:T`, item 53 —
+//! a successor that cannot hold the running provider's exported state is
+//! refused), and nothing else. A row of no kind, or a garbled row of a kind the
+//! fold does know, is REFUSED as `MANIFEST` rather than skipped, because a row
+//! this gate cannot honour is exactly where a stub that ignored its inputs
+//! would wave a program through.
 //! The service block (`!services`, `:S`) is the one kind this fold accepts and
 //! computes nothing from, and it is the one kind whose meaning adds no provision,
 //! no requirement, no graph node and no withdrawable component: the consumer it
@@ -2082,10 +2130,9 @@ fn manifest_rows(manifest: &str) -> usize {
 ///
 /// * the reference TYPE layer — a type-incorrect candidate is
 ///   [`Verdict::NoObjection`] here, exactly as it is in [`admit`];
-/// * the row kinds the wire reserves for the deferred waves — a replacement row
-///   (`-C`) or a handoff row (`C=k:T`) is REFUSED with the fold's own `MANIFEST`
-///   code, never skipped. Skipping a row this gate cannot honour is the
-///   wave-through this crate exists to prevent;
+/// * a row of no kind, or a garbled row of a kind the fold does know, is
+///   REFUSED with the fold's own `MANIFEST` code, never skipped. Skipping a row
+///   this gate cannot honour is the wave-through this crate exists to prevent;
 /// * it does not RESOLVE the requirements a candidate declares; it checks them
 ///   for disjointness and acyclicity. A `requires` the union does not provide is
 ///   a no-objection, and the reference is the only tier that decides it.
@@ -6070,22 +6117,22 @@ generalises `admit` rather than re-implementing it.
 
 Two honest limits, both fail-closed:
 
-* **It closes the `G2`/`G3` legs, and one member rule.** The reference TYPE
-  layer is its own lane (docs/design/457), so a type-incorrect candidate is
-  still a no-objection here, exactly as in `admit`. What this arm DOES resolve is
-  a requirement against the running service's declaration: a candidate calling an
-  operation the running service does not declare is refused `A6` in the
-  reference's own words, and the same call to an operation it does declare is
-  not. That resolution runs only where the wire made the claim — a `:S` row with
-  no operation list says nothing about the running surface, and silence decides
-  nothing. Argument typing, arity and the compatibility relation on a
-  redeclaration are still the type layer's. The reference remains the only tier
-  that admits.
-* **A row it cannot honour is REFUSED, never skipped.** The wire reserves row
-  kinds for waves that have not landed — replacement (`-C`) and handoff
-  (`C=k:T`), both of which need the type layer. Those rows come back as a
-  `MANIFEST` refusal. Ignoring a row would be the wave-through this crate exists
-  to prevent.
+* **It closes the `G2`/`G3` legs, item 53's state compatibility, and one member
+  rule.** The reference TYPE layer is its own lane (docs/design/457), so a
+  type-incorrect candidate is still a no-objection here, exactly as in `admit`.
+  What this arm DOES resolve is a requirement against the running service's
+  declaration: a candidate calling an operation the running service does not
+  declare is refused `A6` in the reference's own words, and the same call to an
+  operation it does declare is not. That resolution runs only where the wire made
+  the claim — a `:S` row with no operation list says nothing about the running
+  surface, and silence decides nothing. Argument typing, arity and the §5
+  compatibility relation on a redeclared SERVICE are still the type layer's. The
+  reference remains the only tier that admits.
+* **A row it cannot honour is REFUSED, never skipped.** Every row kind the wire
+  defines is folded, including the replacement (`-C`) and handoff (`C=k:T`)
+  rows. A row of no kind, or a garbled row of a kind the fold does know, comes
+  back as a `MANIFEST` refusal. Ignoring a row would be the wave-through this
+  crate exists to prevent.
 
 ## What is deliberately absent
 
@@ -6095,8 +6142,11 @@ Two honest limits, both fail-closed:
 * **The reference type layer.** Still absent, in `admit` and in `admit_into`
   alike: neither arm issues an admission. That lane is the type layer's, not the
   manifest parameter's.
-* **The deferred manifest rows.** Replacement and handoff rows are refused, for
-  the reason in the section above: they need the type layer.
+* **The §5 SERVICE compatibility relation.** A candidate that REDECLARES a
+  running service is a no-objection here; the reference is the only tier that
+  runs `admission._admit_service_replacement`. The service block on the wire is
+  what lets the admission surface above tell that case from a fresh interface
+  and withhold it.
 * **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
   rust host, slices 1-2: the generation state machine, the untrusted-author
   admission entry (`propose`/`admit`/`admit_into`), and the item-245 call path
@@ -6581,9 +6631,9 @@ def render_generated_json(digest: str, fid: str, language: str,
         ),
         "manifest_arm": (
             "revl_gate::admit_into(source, manifest) — the item-186 ambient gate "
-            "as a binding: the union fold's G2/G3 legs. Refuses the deferred "
-            "manifest rows (replacement `-C`, handoff `C=k:T`) rather than "
-            "skipping them, and issues no admission."
+            "as a binding: the union fold's G2/G3 legs, the replacement "
+            "wave's withdrawals and its `C=k:T` state hand-offs. Refuses a row "
+            "it cannot read rather than skipping it, and issues no admission."
         ),
         "note": ("Regenerate with `python3 tools/build_gate_crate.py`. The "
                  "source_digest is a pure function of digest_inputs, not a git "

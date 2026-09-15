@@ -88,6 +88,7 @@ pub struct CompD {
     setup: Vec<Stmt>,
     iso: Vec<ProvKey>,
     routes: Vec<Route>,
+    hoff: Bind,
     refuse: String,
     line: i64,
     svcRefs: Vec<SvcRef>,
@@ -146,6 +147,7 @@ pub struct ProvR {
     setup: Vec<Stmt>,
     iso: Vec<ProvKey>,
     routes: Vec<Route>,
+    hoff: Bind,
     refuse: String,
     i: i64,
     ok: bool,
@@ -235,6 +237,13 @@ pub struct MRoute {
     comp: String,
     key: String,
     rlms: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MHand {
+    comp: String,
+    key: String,
+    ty: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -372,6 +381,7 @@ pub struct Manifest {
     provs: Vec<Prov3>,
     reqs: Vec<MReq>,
     routes: Vec<MRoute>,
+    hands: Vec<MHand>,
     mnames: Vec<String>,
     repl: Vec<String>,
     halted: bool,
@@ -1394,8 +1404,8 @@ fn mk_msig(nm: String, em: bool, cs: Vec<String>, asy: bool) -> MSig {
     return MSig { name: nm.clone(), isEm: em, caps: cs.clone(), isAsync: asy };
 }
 
-fn mk_compd(nm: String, pks: Vec<ProvKey>, pvs: Vec<Provide>, rq: Vec<Bind>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, refuse: String, ln: i64, srefs: Vec<SvcRef>) -> CompD {
-    return CompD { name: nm.clone(), provKeys: pks.clone(), provs: pvs.clone(), reqMap: rq.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), refuse: refuse.clone(), line: ln, svcRefs: srefs.clone() };
+fn mk_compd(nm: String, pks: Vec<ProvKey>, pvs: Vec<Provide>, rq: Vec<Bind>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, ho: Bind, refuse: String, ln: i64, srefs: Vec<SvcRef>) -> CompD {
+    return CompD { name: nm.clone(), provKeys: pks.clone(), provs: pvs.clone(), reqMap: rq.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), hoff: ho.clone(), refuse: refuse.clone(), line: ln, svcRefs: srefs.clone() };
 }
 
 fn mk_provkey(k: String, r: String) -> ProvKey {
@@ -2112,8 +2122,16 @@ fn bind_has(env: &[Bind], n: &str) -> bool {
     return (bind_lookup(env, n, 0i64) != "");
 }
 
+fn no_hoff() -> Bind {
+    return Bind { name: String::from(""), ty: String::from("") };
+}
+
 fn mk_provr(pv: Vec<Provide>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, refuse: String, i: i64, ok: bool) -> ProvR {
-    return ProvR { provs: pv.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), refuse: refuse.clone(), i: i, ok: ok };
+    return ProvR { provs: pv.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), hoff: no_hoff(), refuse: refuse.clone(), i: i, ok: ok };
+}
+
+fn mk_provr_h(pv: Vec<Provide>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, ho: Bind, i: i64) -> ProvR {
+    return ProvR { provs: pv.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), hoff: ho.clone(), refuse: String::from(""), i: i, ok: true };
 }
 
 fn prelude_msg(kw: &str) -> String {
@@ -2245,9 +2263,9 @@ fn handoff_twice_msg(cname: &str) -> String {
     return (cname.revl_concat(" declares more than one `handoff` — a component has one ")).revl_concat("activation frame, so it hands off one state shape");
 }
 
-fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: bool, action: bool) -> ProvR {
+fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: Bind, action: bool) -> ProvR {
     if ((i >= end) || atk(&ts, i, "}")) {
-        return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), i, true);
+        return mk_provr_h(provs.clone(), setup.clone(), iso.clone(), rts.clone(), hoff.clone(), i);
     }
     if atw(&ts, i, "provide") {
         let key = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
@@ -2262,11 +2280,11 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         if (!ms.ok) {
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), pend, false);
         }
-        return p_comp_body(ts.clone(), pend, end, provh.clone(), reqh.clone(), cname, provs.revl_push(Provide { key: key.clone(), svcName: bind_lookup(&provh, &key, 0i64), methods: ms.xs.clone() }), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, true);
+        return p_comp_body(ts.clone(), pend, end, provh.clone(), reqh.clone(), cname, provs.revl_push(Provide { key: key.clone(), svcName: bind_lookup(&provh, &key, 0i64), methods: ms.xs.clone() }), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), true);
     }
     if atw(&ts, i, "isolate") {
         if (atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in") && ati(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realms")) {
-            return p_route_stmt(ts.clone(), i, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
+            return p_route_stmt(ts.clone(), i, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
         }
         if action {
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("PRELUDE", &prelude_msg("isolate")), skip_line(&ts, i), true);
@@ -2281,9 +2299,9 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
             }
             let rlm = tkc(&ts, (i).checked_add(5i64).expect("revl: Int overflow")).text;
             let nx = if atk(&ts, (i).checked_add(6i64).expect("revl: Int overflow"), ")") { (i).checked_add(7i64).expect("revl: Int overflow") } else { skip_line(&ts, i) };
-            return p_comp_body(ts.clone(), nx.clone(), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.revl_push(mk_provkey(key.clone(), rlm.clone())), rts.clone(), icept.clone(), hoff, action);
+            return p_comp_body(ts.clone(), nx.clone(), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.revl_push(mk_provkey(key.clone(), rlm.clone())), rts.clone(), icept.clone(), hoff.clone(), action);
         }
-        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
+        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
     }
     if atw(&ts, i, "handoff") {
         if action {
@@ -2293,10 +2311,11 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         if (!bind_has(&provh, &key)) {
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("HANDOFF", &handoff_target_msg(&key, cname)), skip_line(&ts, i), true);
         }
-        if hoff {
+        if (hoff.name != "") {
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("HANDOFF", &handoff_twice_msg(cname)), skip_line(&ts, i), true);
         }
-        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), true, action);
+        let hty = if atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), ":") { type_at(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow")).ty } else { String::from("") };
+        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), Bind { name: key.clone(), ty: hty }, action);
     }
     if atw(&ts, i, "intercept") {
         if action {
@@ -2316,24 +2335,24 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         if atk(&ts, k.clone(), "{") {
             let ce = close_brace(&ts, k.clone());
             if (ce != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.revl_push(key.clone()), hoff, action);
+                return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.revl_push(key.clone()), hoff.clone(), action);
             }
         }
-        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.revl_push(key.clone()), hoff, action);
+        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.revl_push(key.clone()), hoff.clone(), action);
     }
     if (atw(&ts, i, "config") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{")) {
         let ce = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
         if (ce != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
+            return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
         }
     }
     let le = line_end(&ts, i, end);
     let r = p_stmt_run(ts.clone(), i, le);
     let nx = if (r.i > i) { r.i } else { le };
-    return p_comp_body(ts.clone(), nx.clone(), end, provh.clone(), reqh.clone(), cname, provs.clone(), append_stmts(setup.clone(), r.ss.clone()), iso.clone(), rts.clone(), icept.clone(), hoff, true);
+    return p_comp_body(ts.clone(), nx.clone(), end, provh.clone(), reqh.clone(), cname, provs.clone(), append_stmts(setup.clone(), r.ss.clone()), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), true);
 }
 
-fn p_route_stmt(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: bool, action: bool) -> ProvR {
+fn p_route_stmt(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: Bind, action: bool) -> ProvR {
     if action {
         return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("PRELUDE", &route_prelude_msg()), skip_line(&ts, i), true);
     }
@@ -2352,12 +2371,12 @@ fn p_route_stmt(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bi
     }
     let rc = p_route_clause(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"));
     if (!rc.ok) {
-        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff, action);
+        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
     }
     if ((rc.strat != "") && (!contains(&known_strategies(), &rc.strat))) {
         return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("ROUTE", &route_strategy_msg(&rc.strat, &key, cname)), skip_line(&ts, i), true);
     }
-    return p_comp_body(ts.clone(), rc.i, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: rc.strat.clone() }), icept.clone(), hoff, action);
+    return p_comp_body(ts.clone(), rc.i, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: rc.strat.clone() }), icept.clone(), hoff.clone(), action);
 }
 
 fn realm_of(iso: &[ProvKey], key: &str, i: i64) -> String {
@@ -2410,7 +2429,7 @@ fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return PStep { pg: bad_prog(pg.clone(), String::from("unbalanced braces in component")), i: ts.revl_length() };
     }
-    let body = p_comp_body(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), provh.clone(), reqs.clone(), &nm, vec![], vec![], vec![], vec![], vec![], false, false);
+    let body = p_comp_body(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), provh.clone(), reqs.clone(), &nm, vec![], vec![], vec![], vec![], vec![], no_hoff(), false);
     if (!body.ok) {
         return PStep { pg: bad_prog(pg.clone(), String::from("bad provide block in component ").revl_concat(&nm)), i: end };
     }
@@ -2421,7 +2440,7 @@ fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
         pks.push(mk_provkey((pkeys)[(pi) as usize].clone(), realm_of(&body.iso, &(pkeys)[(pi) as usize], 0i64)));
         pi = (pi).checked_add(1i64).expect("revl: Int overflow");
     }
-    return mk_step(push_comp(pg.clone(), mk_compd(nm.clone(), pks.clone(), body.provs.clone(), reqs.clone(), body.setup.clone(), body.iso.clone(), body.routes.clone(), body.refuse.clone(), tkc(&ts, i).line, concat_refs(reqRefs.clone(), provRefs.clone(), 0i64))), end);
+    return mk_step(push_comp(pg.clone(), mk_compd(nm.clone(), pks.clone(), body.provs.clone(), reqs.clone(), body.setup.clone(), body.iso.clone(), body.routes.clone(), body.hoff.clone(), body.refuse.clone(), tkc(&ts, i).line, concat_refs(reqRefs.clone(), provRefs.clone(), 0i64))), end);
 }
 
 fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
@@ -4457,6 +4476,13 @@ fn find_route(rs: &[MRoute], comp: String, key: String, i: i64) -> MRoute {
         return (rs)[(i) as usize].clone();
     }
     return find_route(rs, comp.clone(), key.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn find_mhand(hs: &[MHand], key: &str, i: i64, found: MHand) -> MHand {
+    if (i >= hs.revl_length()) {
+        return found;
+    }
+    return find_mhand(hs, key, (i).checked_add(1i64).expect("revl: Int overflow"), if ((hs)[(i) as usize].key == key) { (hs)[(i) as usize].clone() } else { found.clone() });
 }
 
 fn find_provider(ps: &[Prov3], key: &str, rlm: &str, i: i64) -> String {
@@ -6808,7 +6834,7 @@ fn parse_mreq(comp: String, spec: String) -> MReq {
 }
 
 fn man_bad(man: Manifest, msg: &str) -> Manifest {
-    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: tagged("MANIFEST", msg) };
+    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: tagged("MANIFEST", msg) };
 }
 
 fn mk_ops_none() -> OpsR {
@@ -6847,10 +6873,10 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
     }
     if (row.revl_slice(0i64, 1i64) == "!") {
         if (row == "!halted") {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         if (row == "!services") {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: true, svcOps: man.svcOps.clone(), bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: true, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         return man_bad(man.clone(), &((String::from("unrecognized manifest header row `").revl_concat(&row)).revl_concat("`")));
     }
@@ -6864,18 +6890,23 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
         if (!ops.ok) {
             return man_bad(man.clone(), &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name an operation")));
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: if contains(&man.svcs, &sname) { man.svcs } else { man.svcs.revl_push(sname.clone()) }, svcsKnown: man.svcsKnown, svcOps: if ops.claimed { man.svcOps.revl_push(SvcOps { name: sname.clone(), ops: ops.xs.clone() }) } else { man.svcOps }, bad: String::from("") };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: if contains(&man.svcs, &sname) { man.svcs } else { man.svcs.revl_push(sname.clone()) }, svcsKnown: man.svcsKnown, svcOps: if ops.claimed { man.svcOps.revl_push(SvcOps { name: sname.clone(), ops: ops.xs.clone() }) } else { man.svcOps }, bad: String::from("") };
     }
     if (row.revl_slice(0i64, 1i64) == "-") {
         let name = row.revl_slice(1i64, row.revl_length());
         if (!bare_ident(&name, 0i64)) {
             return man_bad(man.clone(), &((String::from("manifest replacement row `").revl_concat(&row)).revl_concat("` does not name a component")));
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: if contains(&man.repl, &name) { man.repl } else { man.repl.revl_push(name.clone()) }, halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: man.mnames.clone(), repl: if contains(&man.repl, &name) { man.repl } else { man.repl.revl_push(name.clone()) }, halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
     }
     if ident_led(&row) {
         if (row.revl_index_of("=") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return man_bad(man.clone(), &((String::from("manifest handoff row `").revl_concat(&row)).revl_concat("` needs the deferred handoff/type-layer wave (item 186)")));
+            let a = cut(row.clone(), "=");
+            let b = cut(a.rest.clone(), ":");
+            if ((((!bare_ident(&a.s, 0i64)) || (!bare_ident(&b.s, 0i64))) || (a.rest.revl_index_of(":") == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) || (b.rest == "")) {
+                return man_bad(man.clone(), &((String::from("manifest handoff row `").revl_concat(&row)).revl_concat("` does not name a component, a key and its state type")));
+            }
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.revl_push(MHand { comp: a.s.clone(), key: b.s.clone(), ty: b.rest.clone() }), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         if (row.revl_index_of(">") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), ">");
@@ -6883,16 +6914,16 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
             if (((!bare_ident(&a.s, 0i64)) || (!bare_ident(&b.s, 0i64))) || (a.rest.revl_index_of("/") == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
                 return man_bad(man.clone(), &((String::from("manifest route row `").revl_concat(&row)).revl_concat("` does not name a component, a key and its realms")));
             }
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.revl_push(MRoute { comp: a.s.clone(), key: b.s.clone(), rlms: split_labels(b.rest.clone(), &(vec![])) }), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.revl_push(MRoute { comp: a.s.clone(), key: b.s.clone(), rlms: split_labels(b.rest.clone(), &(vec![])) }), hands: man.hands.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         if (row.revl_index_of("<") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "<");
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(parse_mreq(a.s.clone(), a.rest.clone())), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(parse_mreq(a.s.clone(), a.rest.clone())), hands: man.hands.clone(), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         if (row.revl_index_of("/") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "/");
             let b = cut(a.rest.clone(), "/");
-            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
+            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
     }
     return man_bad(man.clone(), &((String::from("unrecognized manifest row `").revl_concat(&row)).revl_concat("`")));
@@ -6908,7 +6939,7 @@ fn parse_manifest_rows(m: String, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: String) -> Manifest {
-    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], routes: vec![], mnames: vec![], repl: vec![], halted: false, svcs: vec![], svcsKnown: false, svcOps: vec![], bad: String::from("") });
+    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], routes: vec![], hands: vec![], mnames: vec![], repl: vec![], halted: false, bad: String::from(""), svcs: vec![], svcsKnown: false, svcOps: vec![] });
 }
 
 fn manifest_svcs_known(man: Manifest) -> bool {
@@ -7008,6 +7039,98 @@ fn withdrawal_refusals(reqs: &[MReq], lost: &[Prov3], comps: &[CompD], i: i64) -
     return vec![mk_verd(tagged("G2", &withdrawal_msg(&r.key, &r.rlm, &provider, &r.comp)), text_line_or_zero(comps, &provider, 0i64))];
 }
 
+fn ho_wildcard(t: &str) -> bool {
+    return (((((t == "") || (t == "Any")) || (t == "Never")) || (t == "!poison")) || (t.revl_slice(0i64, 1i64) == "?"));
+}
+
+fn ho_arg(ps: TyParts, n: i64) -> String {
+    return if (ps.args.revl_length() > n) { (ps.args)[(n) as usize].clone() } else { String::from("") };
+}
+
+fn ho_params_ok(ea: &[String], aa: &[String], i: i64) -> bool {
+    if ((i).checked_add(1i64).expect("revl: Int overflow") >= ea.revl_length()) {
+        return true;
+    }
+    if (!ho_compatible((aa)[(i) as usize].clone(), (ea)[(i) as usize].clone())) {
+        return false;
+    }
+    return ho_params_ok(ea, aa, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn ho_args_ok(ea: &[String], aa: &[String], i: i64) -> bool {
+    if (i >= ea.revl_length()) {
+        return true;
+    }
+    if (!ho_compatible((ea)[(i) as usize].clone(), (aa)[(i) as usize].clone())) {
+        return false;
+    }
+    return ho_args_ok(ea, aa, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn ho_compatible(expected: String, actual: String) -> bool {
+    let ep = ty_parse(expected.clone());
+    let ap = ty_parse(actual.clone());
+    if ((ep.head == "Never") && (!ho_wildcard(&actual))) {
+        return false;
+    }
+    if (ho_wildcard(&expected) || ho_wildcard(&actual)) {
+        return true;
+    }
+    if ((ep.head == "Value") || (ap.head == "Value")) {
+        return true;
+    }
+    if (expected == actual) {
+        return true;
+    }
+    if ((ep.head == "Float") && (ap.head == "Int")) {
+        return true;
+    }
+    if (((ep.head == "Int") || (ep.head == "Float")) && (ap.head == "Int32")) {
+        return true;
+    }
+    if ((ep.head == "Async") && (ap.head != "Async")) {
+        return ho_compatible(ho_arg(ep.clone(), 0i64), actual.clone());
+    }
+    if (ep.head == "->") {
+        if ((ap.head != "->") || (ep.args.revl_length() != ap.args.revl_length())) {
+            return false;
+        }
+        return (ho_params_ok(&ep.args, &ap.args, 0i64) && ho_compatible((ep.args)[((ep.args.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone(), (ap.args)[((ap.args.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone()));
+    }
+    if (ep.head == "Opt") {
+        if (ap.head == "Opt") {
+            return ho_compatible(ho_arg(ep.clone(), 0i64), ho_arg(ap.clone(), 0i64));
+        }
+        return ho_compatible(ho_arg(ep.clone(), 0i64), actual.clone());
+    }
+    if ((ep.head == ap.head) && (ep.args.revl_length() == ap.args.revl_length())) {
+        return ho_args_ok(&ep.args, &ap.args, 0i64);
+    }
+    return false;
+}
+
+fn handoff_drift_msg(key: &str, newName: &str, accepted: &str, oldName: &str, exported: &str) -> String {
+    return ((((((((((String::from("state hand-off on `").revl_concat(&key)).revl_concat("` differs from the running manifest: `")).revl_concat(&newName)).revl_concat("` accepts `")).revl_concat(&accepted)).revl_concat("`, but `")).revl_concat(&oldName)).revl_concat("` exports `")).revl_concat(&exported)).revl_concat("` — the successor cannot hold the predecessor's state, and ")).revl_concat("dropping it on the swap would be residue");
+}
+
+fn handoff_refusals(comps: &[CompD], hands: &[MHand], i: i64) -> Vec<Verd> {
+    if (i >= comps.revl_length()) {
+        return vec![];
+    }
+    let c = (comps)[(i) as usize].clone();
+    if (c.hoff.name == "") {
+        return handoff_refusals(comps, hands, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    let old = find_mhand(hands, &c.hoff.name, 0i64, MHand { comp: String::from(""), key: String::from(""), ty: String::from("") });
+    if (old.comp == "") {
+        return handoff_refusals(comps, hands, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    if ho_compatible(c.hoff.ty.clone(), old.ty.clone()) {
+        return handoff_refusals(comps, hands, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    return vec![mk_verd(tagged("G2", &handoff_drift_msg(&c.hoff.name, &c.name, &c.hoff.ty, &old.comp, &old.ty)), c.line)];
+}
+
 pub fn admit_ambient(src: String, manifest: String) -> String {
     let man = parse_manifest(manifest.clone());
     if (man.bad != "") {
@@ -7039,7 +7162,7 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let keptRoutes = keep_routes(man.routes.clone(), drop.clone(), 0i64, vec![]);
     let keptNames = keep_names(man.mnames.clone(), drop.clone(), 0i64, vec![]);
     let lost = lost_provs(split_provs(man.provs.clone(), drop.clone(), true, 0i64, vec![]), live_provs(live.clone(), 0i64, keptProvs.clone()), 0i64, vec![]);
-    let nl = collect_nonlink(ts.clone(), pg.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64), man.svcs.clone(), manifest_svcs_known(man.clone()), man.svcOps.clone());
+    let nl = collect_nonlink(ts.clone(), pg.clone(), append_verds(handoff_refusals(&pg.comps, &man.hands, 0i64), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64)), man.svcs.clone(), manifest_svcs_known(man.clone()), man.svcOps.clone());
     if nl.done {
         return pick_min(&nl.refs);
     }
@@ -13778,9 +13901,47 @@ fn the_empty_wire_keeps_the_standalone_verdict() {
 }
 
 #[test]
-fn a_handoff_row_refuses_until_the_deferred_type_layer_lands() {
+fn a_handoff_row_alone_moves_no_verdict() {
     let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred handoff/type-layer wave (item 186)"));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == ""));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == admit_src(clean.clone())));
+}
+
+#[test]
+fn a_successor_that_cannot_hold_the_running_state_is_refused__handoff_() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Str;-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Int`, but `OldStore` exports `Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
+}
+
+#[test]
+fn a_widened_accepted_hand_off_shape_still_admits() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Opt[Str]   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Str;-OldStore")) == ""));
+}
+
+#[test]
+fn a_narrowed_accepted_hand_off_shape_is_refused() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Str   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Opt[Str];-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Str`, but `OldStore` exports `Opt[Str]` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
+}
+
+#[test]
+fn a_cold_hand_off_key_is_no_conflict() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;-OldStore")) == ""));
+}
+
+#[test]
+fn a_function_typed_hand_off_row_is_read__and_meets_contravariantly() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: (Float) -> Str   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:(Int) -> Str;-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `(Float) -> Str`, but `OldStore` exports `(Int) -> Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
+}
+
+#[test]
+fn a_garbled_handoff_row_refuses_by_name() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db")) == "MANIFEST|manifest handoff row `OldStore=db` does not name a component, a key and its state type"));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:")) == "MANIFEST|manifest handoff row `OldStore=db:` does not name a component, a key and its state type"));
 }
 
 #[test]

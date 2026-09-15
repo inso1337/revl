@@ -82,7 +82,7 @@ was corrected by hand and had drifted back within a day.
 | README.md | needs-work | 50 |  |
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 69 |  |
+| arithmetic.md | needs-work | 75 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 1 |  |
 | audit-diff.md | needs-work | 14 |  |

@@ -638,6 +638,26 @@ redeclaration (the block carries operation names, not signatures), and the
 `Admitted` arm — which is now the ONLY thing standing between the rust gate and
 clause 2, and is T6 in full.
 
+**An ordering divergence T4b uncovered, and did not cause.** The A6 refusal is
+INLINE: `body_line` anchors it at the offending statement. The handoff
+compatibility verdict of item 186's wave part 2 is anchored at the COMPONENT
+declaration line, and `pick_min` orders by `(line, seq)`, so the handoff verdict
+outranks any inline body refusal on the same component. The reference does the
+opposite and for a structural reason, not a line one: `_admit_handoff_replacement`
+runs over `live_components`, which `src/revl/lower.py` builds by dropping every
+component whose body lowering raised, so a component with a refusing body
+contributes no handoff verdict at all.
+
+It predates this slice — the same disagreement reproduces with the G1
+undeclared-access refusal, inline-anchored since long before this design — and no
+corpus program had caught it because the whole-component AGGREGATE verdicts (the
+G4 emission reach) tie at the component line and are saved by `seq`. Both
+refusals are true, so it is a 419c naming divergence and never a false admission.
+`test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate` pins it in
+both directions; the fix belongs to the slice that owns `handoff_refusals`, needs
+the poisoned-component set threaded into `collect_nonlink`, and carries its own
+oracle rows.
+
 **T4. Provide-method and component bodies.** `cir_*` typed against the
 service signature (2.4); `unknown service` in `requires`/`provides`; config
 defaults; method-local shadowing; `check_service_src` becomes the wrapper of

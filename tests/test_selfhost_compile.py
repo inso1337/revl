@@ -356,6 +356,9 @@ GO_DOCS = [
     "lists.rvl", "records.rvl", "variants.rvl", "transforms.rvl", "secrets.rvl",
     "inference.rvl", "identifiers.rvl", "match_edges.rvl", "accumulators.rvl",
     "accumulator_hygiene.rvl", "arrow_containers.rvl", "builder_literal.rvl",
+    # issue #721: `%` on Float (math.Mod), a Float literal that must not be a
+    # Go CONSTANT, and the `widen` marker over an Int literal.
+    "float_rem.rvl",
     "../emit_java_corpus/records.rvl", "../emit_rust_corpus/perf_shapes.rvl",
     "../emit_wasm_corpus/loopctrl.rvl", "../emit_wasm_corpus/strlit.rvl",
 ]
