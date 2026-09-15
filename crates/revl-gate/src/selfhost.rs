@@ -6851,7 +6851,7 @@ fn mk_ops(rest: String) -> OpsR {
     let mut done = false;
     while (!done) {
         let comma = s.revl_index_of(",");
-        let one = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { s.clone() } else { s.revl_slice(0i64, comma.clone()) };
+        let one = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { s.clone() } else { s.revl_slice(0i64, comma) };
         if (!bare_ident(&one, 0i64)) {
             ok = false;
             done = true;
@@ -6882,7 +6882,7 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
     }
     if (row.revl_slice(0i64, 1i64) == ":") {
         let comma = row.revl_index_of(",");
-        let sname = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { row.revl_slice(1i64, row.revl_length()) } else { row.revl_slice(1i64, comma.clone()) };
+        let sname = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { row.revl_slice(1i64, row.revl_length()) } else { row.revl_slice(1i64, comma) };
         if (!bare_ident(&sname, 0i64)) {
             return man_bad(man.clone(), &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name a service")));
         }
