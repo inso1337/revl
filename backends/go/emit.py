@@ -4454,6 +4454,8 @@ class _V3GoCtx:
         self.used_stdlib = False
         self.needs_reflect = False      # structural `==` on a non-scalar
         self.needs_float_div = False    # `/` (true division, IEEE at zero)
+        self.needs_float_rem = False    # `%` on Float (math.Mod)
+        self.needs_float_lit = False    # a Float literal, through revlF
         self.needs_ftoa = False         # canonical Float -> Str in interpolation
         self.needs_int_arith = False    # div_floor / div_euclid / mod
         self.needs_overflow = False     # trapping + - * on Int
@@ -4734,7 +4736,7 @@ def _go_v3_is_interface(surface, types) -> bool:
     return bool(spec) and spec.get("kind") == "variant"
 
 
-def _go_v3_lit(node: dict) -> str:
+def _go_v3_lit(node: dict, ctx: "_V3GoCtx | None" = None) -> str:
     value = node.get("value")
     if value is True:
         return "true"
@@ -4749,12 +4751,21 @@ def _go_v3_lit(node: dict) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        # `float64(...)`, not a bare literal. Go evaluates *untyped constant*
-        # arithmetic at arbitrary precision, so `0.1 + 0.2` folds to exactly
-        # 0.3 at compile time and compares equal to it — which is not IEEE 754
-        # binary64, the semantics revl specifies (docs/arithmetic.md). Typing
-        # the literal forces ordinary float64 arithmetic.
-        return f"float64({_finite_float(value)!r})"
+        # Through `revlF`, so the literal is not a Go expression Go will fold.
+        # Typing it `float64(..)` stopped the arbitrary-precision UNTYPED fold
+        # that made `0.1 + 0.2` exactly 0.3 (docs/arithmetic.md) — but a TYPED
+        # constant expression is still folded exactly, and a Go constant has
+        # neither a signed zero nor an infinity. So
+        # `(float64(0.0) - float64(1.0)) * float64(0.0)` folded to `+0` where
+        # every other tier computes `-0.0`, and `float64(1e308) *
+        # float64(10.0)` was `constant 1e+309 overflows float64`, a compile
+        # error in the emitted package where IEEE (and the other five tiers)
+        # give `+Inf` (issue #721). A call is not a constant expression, so the
+        # arithmetic around it is ordinary runtime float64 — the move `revlDiv`
+        # already makes for `/`.
+        if ctx is not None:
+            ctx.needs_float_lit = True
+        return f"revlF({_finite_float(value)!r})"
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 
@@ -4827,6 +4838,13 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     # conversion explicit in the emitted source.
     if node.get("widen") == "Float":
         inner = {k: v for k, v in node.items() if k != "widen"}
+        if inner.get("kind") == "lit" and isinstance(inner.get("value"), int) \
+                and not isinstance(inner.get("value"), bool):
+            # An Int LITERAL widened to Float: `float64(3)` is still a Go
+            # constant, so arithmetic around it keeps the constant semantics
+            # the `revlF` note below is about. Go through the same helper.
+            ctx.needs_float_lit = True
+            return f"revlF({inner['value']})"
         return f"float64({_go_v3_expr(inner, ctx, expected)})"
     # An Int32 -> Int widening site (docs/arithmetic.md): int32 does not
     # implicitly convert to int64 in Go, so the lossless widening is spelled
@@ -4837,7 +4855,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     kind = node["kind"]
 
     if kind == "lit":
-        return _go_v3_lit(node)
+        return _go_v3_lit(node, ctx)
 
     if kind in ("var", "name"):
         name = node.get("name") or node.get("id")
@@ -4933,6 +4951,13 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             if node.get("operands") in ("Int", "Int32"):
                 return f"revlDiv(float64({left}), float64({right}))"
             return f"revlDiv({left}, {right})"
+        if op == "%" and node.get("operands") == "Float":
+            # Go's `%` is not DEFINED on float64 — `a % b` there is a compile
+            # error in the emitted package, which is how this tier used to
+            # answer a Float remainder (issue #721). `math.Mod` is the IEEE
+            # `fmod` the other tiers compute, zero divisor (NaN) included.
+            ctx.needs_float_rem = True
+            return f"math.Mod({left}, {right})"
         if op in ("<<", ">>"):
             # Int32 shift: mask the count to 0..31 as an unsigned value, because
             # Go neither masks the count nor accepts a negative signed one. `<<`
@@ -8824,6 +8849,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         imports.append('\t"math"')
         imports.append('\t"strconv"')
         imports.append(strings_import)
+    if ctx.needs_float_rem:
+        imports.append('\t"math"')
     if ctx.needs_strconv:
         imports.append('\t"strconv"')
     if ctx.needs_strings:
@@ -8858,6 +8885,12 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         # at compile time, where IEEE defines +Inf. Through a call it is an
         # ordinary runtime float division, which is what revl specifies.
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_float_lit:
+        # The same move, one step earlier: a Float LITERAL is handed back
+        # through a call so it is not a Go constant, and the arithmetic around
+        # it is ordinary runtime float64 (issue #721).
+        out.append("func revlF(v float64) float64 { return v }")
         out.append("")
     if ctx.needs_ftoa:
         out.append(_V3_FTOA_HELPER.replace(
@@ -9988,6 +10021,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         imports.append('\t"math"')
         imports.append('\t"strconv"')
         imports.append('\t"strings"')
+    if ctx.needs_float_rem:
+        imports.append('\t"math"')
     if ctx.needs_strconv or _COMP_NEEDS_STRCONV:
         imports.append('\t"strconv"')
     if ctx.needs_strings:
@@ -10026,6 +10061,9 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append("")
     if ctx.needs_float_div:
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_float_lit:
+        out.append("func revlF(v float64) float64 { return v }")
         out.append("")
     if ctx.needs_ftoa:
         out.append(_V3_FTOA_HELPER)

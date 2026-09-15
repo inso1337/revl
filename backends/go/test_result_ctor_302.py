@@ -71,7 +71,11 @@ def test_bare_err_recovers_the_unseen_ok_type_param():
 
 def test_float_result_equality_keeps_float64():
     src = _emit_go()
-    assert "RevlResult[float64, string]{OkV: float64(1.5), Ok: true}" in src
+    # `revlF(1.5)`, not `float64(1.5)`: a Float literal is handed back through
+    # an identity call so it is not a Go CONSTANT (issue #721, and
+    # tests/test_458_float_constants_go.py). What this test pins is the type
+    # parameter recovery around it, which is unchanged.
+    assert "RevlResult[float64, string]{OkV: revlF(1.5), Ok: true}" in src
     assert 'RevlResult[float64, string]{ErrV: "bad"}' in src
 
 

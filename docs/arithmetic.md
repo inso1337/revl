@@ -40,7 +40,9 @@ revl makes you say which one you mean:
 
 ## `%` keeps TypeScript's meaning; `mod` is the mathematical one
 
-`%` is the **truncated remainder**, taking the sign of the *dividend*. That is
+`%` is the **truncated remainder**, taking the sign of the *dividend*. On
+`Float` that is C `fmod`, including at a zero divisor, where it is `NaN` rather
+than a fault — see "Float division by zero" below. That is
 what `%` means in TypeScript, so §0 requires it — but it is also the choice
 that makes the surface coherent, because every remainder pairs with a division:
 
@@ -136,11 +138,24 @@ free, each the same family as a bug already closed on another tier:
   a **compile error** where IEEE defines `+Inf`. Both are fixed by routing
   through `revlDiv(a, b float64)`: a call is not a constant expression, so it
   is an ordinary runtime float division.
-- **Untyped constant arithmetic is arbitrary precision.** `0.1 + 0.2` folds to
+- **Constant arithmetic is folded exactly, typed or not.** `0.1 + 0.2` folds to
   exactly `0.3` at compile time and compares equal to it — which is *not*
-  IEEE 754 binary64. Every float literal is emitted as `float64(...)` to force
-  ordinary float arithmetic. This one is unique to Go so far, and it is the
-  kind of divergence only execution finds.
+  IEEE 754 binary64. Typing each literal `float64(...)` stopped the *untyped*
+  fold, and was believed to be the whole of it. It is not: a TYPED constant
+  expression is still a constant expression, and a Go constant has neither a
+  signed zero nor an infinity. `(float64(0.0) - float64(1.0)) * float64(0.0)`
+  folded to `+0` where every other tier computes `-0.0` (observable as
+  `1.0 / x`: `+Inf` against `-Inf`), and `float64(1e308) * float64(10.0)` was
+  `constant 1e+309 of type float64 overflows float64`, a **compile error in the
+  emitted package**, where the other five tiers answer `+Inf`. A float literal
+  is emitted as `revlF(...)` now, an identity call, because a call is not a
+  constant expression — the same move `revlDiv` makes one line above. This one
+  is unique to Go so far, and it is the kind of divergence only execution
+  finds.
+- **`%` is not defined on `float64` at all.** Go is the only target where the
+  Float remainder is not spelled `%`, so `a % b` on two Floats was a compile
+  error in the emitted package too. It routes through `math.Mod`, which is the
+  C `fmod` the other tiers compute, zero divisor included.
 - The four named integer operations, of which `div_trunc` is native (Go `/`
   truncates) and `%` was already correct.
 
@@ -541,6 +556,22 @@ IEEE defines it as a *value*, not a fault: `1.0 / 0.0` is `+infinity`,
 `-1.0 / 0.0` is `-infinity`, and `0.0 / 0.0` is `NaN`. Python raises
 `ZeroDivisionError` and was the only tier out of step; it now goes through a
 helper that returns the IEEE result.
+
+Three edges of that helper, and of the Float `%` beside it, were wrong until
+issue #721 executed them (`tests/test_458_float_division_and_remainder.py`):
+
+- **A NaN dividend is not zero and has no sign.** The helper reached its
+  zero-divisor branch for `NaN / 0.0` — `a == 0` is false for a NaN — and read
+  the sign off it, answering `Infinity` where IEEE says `NaN`. python is the
+  *reference* tier, so this was the one tier disagreeing with the other five.
+- **`%` on `Float` has an IEEE answer at a zero divisor**, `NaN`, where the Int
+  `%` faults. It shared the Int helper on python and inherited that tier's
+  `ZeroDivisionError`. The two are separate helpers now: `x % 0.0` is `NaN` and
+  `x % 0` still faults, on every tier.
+- **A zero remainder keeps the dividend's sign.** `(-0.0) % 1.0` is `-0.0`, and
+  the python form — `abs(a) % abs(b) if a >= 0` — took the positive branch,
+  because `-0.0 >= 0` is true. The sign is invisible in `to_str` (both zeros
+  render `0`) and visible through a division.
 
 This is why `/` by zero is *not* refused while `div_trunc(0)` and `mod(0)`
 are: integer division at zero has no value, and float division does.

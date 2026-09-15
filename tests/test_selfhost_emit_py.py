@@ -139,6 +139,10 @@ CORPUS = [
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
     "floats.rvl",      # `_revl_ftoa` canonical Float->Str, gated by a float `${…}` interpolation
+    # issue #721 — `%` on Float is its own helper here, because IEEE gives it a
+    # VALUE at a zero divisor (NaN) where the Int `%` faults, and python's own
+    # `%` raises there. Shared with the go corpus, which needs the same shapes.
+    "../emit_go_corpus/float_rem.rvl",
     # item 548 / PR #703 (self-host port item 391): a Float `.to_str()` renders
     # through the canonical `_revl_ftoa`, byte-identical to a `${aFloat}`
     # interpolation. The frontend tags the builtin `recv: "Float"`; the emitter

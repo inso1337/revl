@@ -1,0 +1,16 @@
+// The Float half of division and modulo (issue #721). Three shapes no other
+// corpus document carries, each one a tier that used to answer differently:
+//
+//   * `%` on Float. Go has no `%` on float64 at all, so this document is the
+//     one that would not BUILD there before the lowering routed it through
+//     `math.Mod`; python's own `%` floors and raises at a zero divisor, so it
+//     builds the IEEE form instead.
+//   * a Float LITERAL inside arithmetic. On go it must not be a *constant*:
+//     Go folds constant expressions exactly, and a Go constant has neither a
+//     signed zero nor an infinity.
+//   * an Int literal at a Float-declared return, the `widen` marker over a
+//     `lit` — `float64(2)` is a constant too.
+fn frem(a: Float, b: Float) -> Float { return a % b }
+fn frem_lit(a: Float) -> Float { return a % 3.5 }
+fn scaled(a: Float) -> Float { return a * 0.5 + 1.25 }
+fn widened() -> Float { return 2 }

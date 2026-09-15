@@ -352,11 +352,22 @@ fn uses_opt_to_int(n: Any) -> Bool {
 // `%` floors, so this is the one operator the tier has to build.
 fn uses_trunc_rem(n: Any) -> Bool {
   if (node_kind(n) == "bin" && node_op(n) == "%") {
-    let opnd = node_operands(n)
-    if (opnd == "Int" || opnd == "Float") { return true }
+    if (node_operands(n) == "Int") { return true }
   }
   for (c of value_children(n)) {
     if (uses_trunc_rem(c)) { return true }
+  }
+  return false
+}
+
+// `_uses_float_rem`: a `%` on Float. IEEE gives it a value at a zero divisor,
+// so it is a different helper from the Int one, which faults there (#721).
+fn uses_float_rem(n: Any) -> Bool {
+  if (node_kind(n) == "bin" && node_op(n) == "%") {
+    if (node_operands(n) == "Float") { return true }
+  }
+  for (c of value_children(n)) {
+    if (uses_float_rem(c)) { return true }
   }
   return false
 }
@@ -725,7 +736,12 @@ fn render_bin(node: Any) -> Str {
   if (op == "/") {
     return `_revl_div(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
   }
-  if (op == "%" && (opnd == "Int" || opnd == "Float")) {
+  if (op == "%" && opnd == "Float") {
+    // The Float remainder is IEEE `fmod`, which has a VALUE at a zero
+    // divisor (NaN) where the Int one faults (issue #721).
+    return `_revl_frem(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
+  }
+  if (op == "%" && opnd == "Int") {
     return `_revl_rem(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
   }
   if (op == "&" || op == "|" || op == "^") {
@@ -1219,6 +1235,21 @@ fn rem_block() -> List[Str] {
   return o
 }
 
+fn float_rem_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_frem(a, b):")
+  o = o.push(`    """The Float remainder is IEEE fmod: a zero divisor is NaN, not a fault,"""`)
+  o = o.push(`    """and a zero remainder keeps the DIVIDEND sign."""`)
+  o = o.push("    if b == 0.0 or a != a or b != b:")
+  o = o.push("        return float('nan')")
+  o = o.push("    r = abs(a) % abs(b)")
+  o = o.push("    if r == 0.0:")
+  o = o.push("        return 0.0 * a")
+  o = o.push("    return r if a > 0 else -r")
+  o = o.push("")
+  return o
+}
+
 fn div_trunc_block() -> List[Str] {
   var o = []
   o = o.push("def _revl_div_trunc(a, b):")
@@ -1354,6 +1385,8 @@ fn div_block() -> List[Str] {
   o = o.push(`    """IEEE 754 true division: python raises where every other tier follows IEEE."""`)
   o = o.push("    if b:")
   o = o.push("        return a / b")
+  o = o.push("    if a != a:")
+  o = o.push("        return a")
   o = o.push("    if a == 0:")
   o = o.push("        return float('nan')")
   o = o.push("    return (_revl_math.copysign(float('inf'), a)")
@@ -2868,6 +2901,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     out = out.concat(str_at_block())
   }
   if (uses_trunc_rem(ir)) { out = out.concat(rem_block()) }
+  if (uses_float_rem(ir)) { out = out.concat(float_rem_block()) }
   if (uses_builtin_method(ir, "div_trunc")) { out = out.concat(div_trunc_block()) }
   if (uses_builtin_method(ir, "div_euclid")) { out = out.concat(div_euclid_block()) }
   if (uses_builtin_method(ir, "indexOf")) { out = out.concat(index_of_block()) }

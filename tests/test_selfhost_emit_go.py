@@ -93,6 +93,10 @@ CORPUS = [
     "../emit_wasm_corpus/strlit.rvl",
     "inference.rvl",
     "arith.rvl",     # trapping int/int32 + - *, / widening, %, comparisons, unary
+    # issue #721 — the Float half: `%` on Float is `math.Mod` (Go has no `%` on
+    # float64), and a Float literal goes through `revlF` so it is not a Go
+    # CONSTANT, whose exact fold has no signed zero and no infinity.
+    "float_rem.rvl",
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # var/let/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the call-return type pin on a `let`
