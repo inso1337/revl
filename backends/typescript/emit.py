@@ -4701,18 +4701,13 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         lines.append("  // drives the composition on a real cordis context and")
         lines.append("  // proves no residue after LIFO teardown (FR-5 / §7.1).")
         lines.append("  //")
-        lines.append("  // issue #1112: the driver runs inside its OWN async resource, so")
-        lines.append("  // ambient context an `@ts` extern binds with")
-        lines.append("  // `AsyncLocalStorage.enterWith` cannot escape into the next test in")
-        lines.append("  // this file. This is the ts equivalent of the py reference tier's")
-        lines.append("  // per-test isolation, where each lifecycle driver runs under its own")
-        lines.append("  // `asyncio.run` and therefore in its own copied context. Without it")
-        lines.append("  // the binding escapes the test that made it — always under the")
-        lines.append("  // plain-node tier runner, and on node <= 23 (no AsyncContextFrame)")
-        lines.append("  // under vitest too, which is why the leak reads as an")
-        lines.append("  // ubuntu-vs-macOS flake rather than as a node-version one.")
-        lines.append("  await new AsyncResource('revl:lifecycle-test')"
-                     ".runInAsyncScope(async () => {")
+        lines.append("  // issue #1112: the driver runs with the module's entry async")
+        lines.append("  // context restored, so ambient context an `@ts` extern bound with")
+        lines.append("  // `AsyncLocalStorage.enterWith` during an EARLIER test in this file")
+        lines.append("  // is not visible here. That is the py reference tier's per-test")
+        lines.append("  // isolation on the ts tier: each py lifecycle driver runs under its")
+        lines.append("  // own `asyncio.run`, hence in a fresh copy of the module's context.")
+        lines.append("  await _revl_test_context(async () => {")
         lines.extend(("  " + line if line else line) for line in body)
         lines.append("  })")
         lines.append("})")
@@ -4942,7 +4937,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         # a node builtin, which both vitest and plain node resolve; emitted
         # only when a lifecycle driver is, so every other document stays
         # byte-identical to before.
-        out.append("import { AsyncResource } from 'node:async_hooks'")
+        out.append("import { AsyncLocalStorage } from 'node:async_hooks'")
     # item 396 option B: a `@ts ref` extern emits a lazy thunk that resolves the
     # ref'd module at CALL time through a root the runner provides (so the
     # artifact text stays machine-independent) and imports the symbol then —
@@ -4962,6 +4957,24 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     out.extend(_revl_helpers(ir))
     if _uses_lifecycle_tests(ir):
         out.append("const _revl_settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))")
+        # issue #1112: per-test async-context isolation. The py reference tier
+        # runs every lifecycle driver under its own `asyncio.run`, so a
+        # contextvar a test binds dies with that test; the ts tier ran every
+        # driver in one shared async context, so an `@ts` extern that binds
+        # ambient context with `AsyncLocalStorage.enterWith` polluted every
+        # later test in the file. On node >= 24 (AsyncContextFrame) vitest
+        # happens to hide that, which is what makes it expensive: it reads as
+        # "fails on ubuntu, passes on macOS" when the real variable is the node
+        # version. Captured ONCE at module evaluation — the file's entry
+        # context, the ts analogue of the context each `asyncio.run` copies —
+        # and re-entered per test, so what an earlier test bound is not in
+        # scope for the next one.
+        #
+        # `AsyncResource.runInAsyncScope` is NOT enough on its own here, and
+        # was measured not to be: a driver awaits its `load` step before any
+        # extern runs, so the `enterWith` lands on a promise continuation that
+        # has already left the resource's synchronous scope.
+        out.append("const _revl_test_context = AsyncLocalStorage.snapshot()")
         out.append("")
 
     if types:
