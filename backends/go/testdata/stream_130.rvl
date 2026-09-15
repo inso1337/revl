@@ -20,6 +20,12 @@
 //     filtered item never reaches the body, a mapped one reaches it transformed,
 //     and a spent `take(n)` synthesises the `Closed` terminal that ends the loop
 //     — the same three answers the py reference gives for the same source.
+//   Windowed — the Slice 2 `block` drain WINDOW (§8): a `policy block drain <t>`
+//     subscription resumes its provider on the CLOCK COEFFECT rather than at the
+//     `next` that makes room. It is what pulls this tier's timer scheduler into
+//     the emitted module, so the window fires on `RevlClockAdvance` — a step in
+//     the timeline, the same answer the py reference gives — and the bracket
+//     inverse cancels an armed one, leaving no orphaned schedule.
 //   Iterate  — `every o in sub { … }` (Slice 4, §4.7): the async-iteration form,
 //     a plain blocking `next` loop on this tier. Each delivered item runs the
 //     effectful body (an emission to a required Sink); a `Closed` terminal ends
@@ -42,6 +48,12 @@ component Fanin {
   let a = effect Stream.source() undo a.close()
   let b = effect Stream.source() undo b.close()
   let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}
+
+component Windowed {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
   await sub.next()
 }
 
