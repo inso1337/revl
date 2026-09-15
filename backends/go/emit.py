@@ -2614,8 +2614,11 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
     deterministic timeline step it is on the reference rather than an early
     wall-clock guess. The window was refused here for as long as the reason held
     — "no deterministic clock on this tier" — and that reason stopped being true
-    once the clock coeffect landed; the refusal outlived it. java is the tier it
-    still holds for, and java refuses an `advance` step outright.
+    once the clock coeffect landed; the refusal outlived it. The other two
+    blocking tiers still refuse the window, each for a reason of its own: rust
+    has a clock but a `thread_local!` one, so a window would be armed by the
+    provider's thread and advanced by the consumer's and would never fire, and
+    java has no clock at all (it refuses an `advance` step by name).
 
     Replay is refused for a reason of its own rather than for a clock. It is a
     DURABILITY claim, and the half that makes it worth anything is §4.9's: a
