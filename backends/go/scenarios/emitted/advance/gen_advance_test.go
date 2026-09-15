@@ -434,6 +434,15 @@ type revlOptPair[T any] struct {
 
 func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }
 
+func revlListIndexOfEq[T any](xs []T, x T) int64 {
+	for i, v := range xs {
+		if revlEq(v, x) {
+			return int64(i)
+		}
+	}
+	return -1
+}
+
 func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}

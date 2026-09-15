@@ -959,7 +959,7 @@ fn collect_ctors(ts: Vec<Token>, start: i64, end: i64, multi: bool, acc: Vec<Str
 }
 
 fn type_ctors(ts: Vec<Token>) -> Vec<String> {
-    let mut out = vec![];
+    let mut out: Vec<String> = vec![];
     let mut i = 0i64;
     while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
         if atw(&ts, i, "type") {
@@ -2251,8 +2251,8 @@ fn realm_of(iso: &[ProvKey], key: &str, i: i64) -> String {
 fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
-    let mut reqs = vec![];
-    let mut provh = vec![];
+    let mut reqs: Vec<Bind> = vec![];
+    let mut provh: Vec<Bind> = vec![];
     while (atw(&ts, j.clone(), "requires") || atw(&ts, j.clone(), "provides")) {
         let isReq = atw(&ts, j.clone(), "requires");
         let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
@@ -3906,7 +3906,7 @@ fn append_stmts_str(a: Vec<String>, b: Vec<String>) -> Vec<String> {
 }
 
 fn spawn_templates(comps: &[CompD]) -> Vec<String> {
-    let mut out = vec![];
+    let mut out: Vec<String> = vec![];
     let mut i = 0i64;
     while (i < comps.revl_length()) {
         out = union_into(out.clone(), comp_all_spawns((comps)[(i) as usize].clone()));
@@ -5033,7 +5033,7 @@ fn cfg_struct_fields(t: &str) -> Vec<Bind> {
         return vec![];
     }
     let parts = split_top_commas(&(t.revl_slice(1i64, (t.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))));
-    let mut out = vec![];
+    let mut out: Vec<Bind> = vec![];
     let mut i = 0i64;
     while (i < parts.revl_length()) {
         let p = (parts)[(i) as usize].clone();
@@ -5185,7 +5185,7 @@ fn cfg_tparams(ts: &[Token], i: i64) -> Vec<String> {
 
 fn cfg_rec_fields(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<Bind> {
     let mut k = lo;
-    let mut out = vec![];
+    let mut out: Vec<Bind> = vec![];
     while ((k < hi) && (!atk(&ts, k, "}"))) {
         if (atk(&ts, k, "ident") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) {
             let nm = tkc(&ts, k).text;
@@ -5272,7 +5272,7 @@ fn cfg_decl_end(ts: &[Token], j: i64) -> i64 {
 fn cfg_one_type(ts: Vec<Token>, i: i64) -> CfgTyR {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
-    let mut params = vec![];
+    let mut params: Vec<String> = vec![];
     if atk(&ts, j.clone(), "[") {
         params = cfg_tparams(&ts, j.clone());
         j = skip_brackets(&ts, j.clone());
@@ -5876,7 +5876,7 @@ fn fb_one(ts: Vec<Token>, i: i64, hi: i64) -> FbStepR {
             return FbStepR { step: fb_bail(), i: hi };
         }
         let thenS = fb_scan(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"), (tend).checked_sub(1i64).expect("revl: Int overflow"));
-        let mut elseS = vec![];
+        let mut elseS: Vec<FbStep> = vec![];
         let mut nexti = tend;
         if (atw(&ts, tend, "else") && atk(&ts, (tend).checked_add(1i64).expect("revl: Int overflow"), "{")) {
             let eend = close_brace(&ts, (tend).checked_add(1i64).expect("revl: Int overflow"));
@@ -7690,8 +7690,8 @@ fn comp_has_kw(ts: &[Token], lo: i64, hi: i64, w: &str) -> bool {
 fn ir_component(ts: Vec<Token>, i: i64, fname: &str) -> IrCompR {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
-    let mut reqs = vec![];
-    let mut provs = vec![];
+    let mut reqs: Vec<Bind> = vec![];
+    let mut provs: Vec<Bind> = vec![];
     while (atw(&ts, j.clone(), "requires") || atw(&ts, j.clone(), "provides")) {
         let isReq = atw(&ts, j.clone(), "requires");
         let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
@@ -9419,7 +9419,7 @@ fn own_loop(body: &[OStep], entry: std::collections::HashMap<String, i64>, cond:
     let mut head = entry.clone();
     let mut marks = a.marks;
     let mut topFinal = entry.clone();
-    let mut brFinal = vec![];
+    let mut brFinal: Vec<WSt> = vec![];
     let mut done = false;
     let bound = ((2i64).checked_mul(own_map_size(entry.clone())).expect("revl: Int overflow")).checked_add(3i64).expect("revl: Int overflow");
     let mut it = 0i64;
@@ -9557,7 +9557,7 @@ fn own_one(ts: Vec<Token>, i: i64, hi: i64) -> OStepR {
         }
         let tend = tb.i;
         let thenS = tb.xs;
-        let mut elseS = vec![];
+        let mut elseS: Vec<OStep> = vec![];
         let mut nexti = tend;
         if (atw(&ts, tend, "else") && (!atw(&ts, (tend).checked_add(1i64).expect("revl: Int overflow"), "if"))) {
             let eb = own_body(ts.clone(), (tend).checked_add(1i64).expect("revl: Int overflow"), hi);

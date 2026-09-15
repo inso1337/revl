@@ -78,6 +78,10 @@ from revl import compile_files  # noqa: E402
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
     "arrow_containers.rvl",
+    # docs/closures.md — an arrow that READS an enclosing `var`. Every other
+    # arrow in this corpus reads only its own parameters, so `captures` was
+    # empty in all of them and the by-value pin was never compared.
+    "arrow_captures.rvl",
     "match_edges.rvl",
     "accumulator_hygiene.rvl",
     "accumulators.rvl",

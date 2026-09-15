@@ -2848,7 +2848,12 @@ fn revl_str_helper() -> Str {
   o = o.push("    const at = x.indexOf(v as string)")
   o = o.push("    return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)")
   o = o.push("  }")
-  o = o.push("  return BigInt(x.indexOf(v))")
+  // A List receiver searches by revl's ONE equality, which is structural
+  // (syntax-2.0 §3.4). `Array.prototype.indexOf` is `===`, i.e. IDENTITY for a
+  // record or a nested list, so a structurally equal element read back as -1 on
+  // this tier while py/go/rust/java answered its index.
+  o = o.push("  for (let i = 0; i < x.length; i++) { if (revlEq(x[i], v)) return BigInt(i) }")
+  o = o.push("  return -1n")
   o = o.push("}")
   return o.join(newline())
 }
@@ -3172,7 +3177,15 @@ fn uses_str_cmp(n: Any) -> Bool {
 // dependency order (revlI64 before the named integer operations that call it).
 fn revl_helpers(ir: Any) -> List[Str] {
   var out = []
-  if (uses_equality(ir)) { out = out.push(revl_eq_helper()); out = out.push("") }
+  // `revlIndexOf` compares List elements with `revlEq`, so the equality helper
+  // has to be in scope wherever that one is emitted, even in a document that
+  // never writes `==`. The condition is `uses_str_methods` and not "does this
+  // document call indexOf": `revlIndexOf` is part of `revl_str_helper()`,
+  // emitted as a UNIT for any of len/length/slice/charAt/charCodeAt/indexOf,
+  // so a document that only reads a `.length()` still gets the `revlIndexOf`
+  // body and the `revlEq` reference inside it. Mirrors `_revl_helpers` in
+  // backends/typescript/emit.py.
+  if (uses_equality(ir) || uses_str_methods(ir)) { out = out.push(revl_eq_helper()); out = out.push("") }
   if (uses_assert(ir)) { out = out.push(revl_show_helper()); out = out.push("") }
   if (uses_bounded_int(ir) || uses_int_arith(ir)) { out = out.push(revl_i64_helper()); out = out.push("") }
   if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
