@@ -6791,7 +6791,15 @@ class Session:
         and a crossing that states no amount against a stated bound is refused.
         Refused here means the crossing PROMPTS single-use, never that it is
         admitted, so the finding is always "this crossing cannot be shown to
-        refine the grant"."""
+        refine the grant".
+
+        Issue #1098: the GATE no longer reads the decision through this bool.
+        `_live_grant_for` calls `_grant_refusal` and keeps the object, because
+        the prompt it is about to raise has to say WHICH declaration the
+        crossing left, and a boolean carries no such sentence. This stays the
+        one-line reading of that same finding for a caller that wants only the
+        answer — the predicate the design notes name, and the one the revoke
+        path's `_grant_within` is the role-swap of."""
         return self._grant_refusal(grant, capability) is None
 
     def _grant_refusal(self, grant: dict, capability: str):
