@@ -164,7 +164,13 @@ describe('the jail is unchanged', () => {
     // witnessed ops and every inverse use. Widening the jail to make
     // observation convenient would recreate what item 422 F1 removed.
     expect(PATH_FAMILIES['named-endpoint']).toEqual(['resolveWithin'])
-    expect([...READ_HELPERS]).toEqual(['lexistsConfined', 'isDirConfined'])
+    // Pinned enumeration, peer of the py one: a read helper is a new way to
+    // LOOK at the filesystem through the jail, so widening this set is an edit
+    // in two places. `readPinnedConfined` (item 459 F6) yields file CONTENT and
+    // is narrower than the other two for it: it answers only when the bytes
+    // hash to a digest the caller already holds.
+    expect([...READ_HELPERS]).toEqual(['lexistsConfined', 'isDirConfined',
+      'readPinnedConfined'])
   })
 
   it('exposes no write primitive on the observation surface', () => {

@@ -3802,10 +3802,21 @@ def _revl_helpers(ir: dict) -> list[str]:
 # `xs[-1]` reads `undefined` in JS, so guard it here to throw the way go/rust/
 # java panic and python raises. A non-negative index reads as `xs[i]` always
 # did (an out-of-range positive index is a separate, unfixed divergence).
+#: A read at or past the end is a FAULT on every tier, and this helper is
+#: where ts joins them: `xs[i]` in JavaScript answers `undefined` for an index
+#: past the end, which is a value, not a fault. Measured on `[1, 2, 3][7]`,
+#: python raised `IndexError`, go and rust panicked, java threw
+#: `ArrayIndexOutOfBoundsException` — and ts read `undefined` while wasm read
+#: `0`. Issue #938 closed the half a static bound can see (a literal index into
+#: a `List` whose length the checker knows is now a compile error); this closes
+#: the half that is a runtime property by construction — `xs[i]`, `xs[f()]`,
+#: or any index into a list the checker cannot size.
+_LIST_OOB_MSG = "revl: list index out of range"
 _REVL_INDEX_HELPER = """function revlIndex<T>(xs: T[], i: number): T {
   if (i < 0) { throw new Error("revl: negative list index") }
+  if (i >= xs.length) { throw new Error("%s") }
   return xs[i]
-}"""
+}""" % _LIST_OOB_MSG
 
 # A `Map` subscript reads by key and a MISS faults, on every tier (issue #957):
 # `m[k]` is the partial form and `m.lookup(k)` the total one, the same split

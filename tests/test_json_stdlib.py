@@ -293,7 +293,16 @@ def test_go_tier_emits_json_bodies_and_hoists_encoding_json(consumer_ir):
 
 
 def test_wasm_tier_refuses_extern_without_body(consumer_ir):
-    with pytest.raises(Exception, match="not a lowerable function"):
+    """The refusal names the EXTERN and the tiers that do carry a body.
+
+    It used to read "callee 'json_parse' is not a lowerable function", which is
+    the sentence wasm also gives for a misspelled callee, so a portability limit
+    and a typo were indistinguishable. The five other emitters have always said
+    "extern `X` has no @<tier> body - not portable to this backend (available:
+    ...)"; wasm now says it too (item 459 F6)."""
+    with pytest.raises(Exception, match=r"extern `json_parse` has no @wasm body"):
+        _emit_with("wasm", consumer_ir)
+    with pytest.raises(Exception, match=r"available: go, py, rs, ts"):
         _emit_with("wasm", consumer_ir)
 
 

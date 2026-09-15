@@ -952,8 +952,11 @@ fn render_field(node: Any, s: Scope, depth: Int) -> WExpr {
 }
 
 // `_index_expr`: `xs[i]` over a List (`[u32 count][pad][slot…]`) or `s[i]` over a
-// Str. A constant index folds to a compile-time slot offset (`8 + 8*i`); a
-// variable index computes `8 + i*8` at runtime, the index narrowed i64->i32 once.
+// Str. The List address goes through `$list_slot`, which narrows the i64 index to
+// the i32 address space and TRAPS at or past the element count: the raw address
+// arithmetic this used to emit read whatever slot-sized bytes followed the list
+// and handed them back as the element type, so `[1, 2, 3][7]` answered `0` on
+// this tier where python raised and go/rust/java faulted.
 fn render_index(node: Any, s: Scope, depth: Int) -> WExpr {
   let tty = infer_val_ty(value_field(node, "target"), s)
   let idxNode = value_field(node, "index")
@@ -966,14 +969,7 @@ fn render_index(node: Any, s: Scope, depth: Int) -> WExpr {
   }
   let elem = list_elem(tty)
   let target = render_expr(value_field(node, "target"), s, tty, depth)
-  var addr = ""
-  if (node_kind(idxNode) == "lit" && value_kind(value_field(idxNode, "value")) == "int") {
-    let v = value_int(value_field(idxNode, "value"))
-    addr = `(i32.add ${target.wat} (i32.const ${num_str(8 + 8 * v)}))`
-  } else {
-    addr = `(i32.add ${target.wat}
-        (i32.add (i32.const 8) (i32.mul (i32.wrap_i64 ${index.wat}) (i32.const 8))))`
-  }
+  let addr = `(call $list_slot ${target.wat} ${index.wat})`
   return { wat: slot_load(addr, elem), ty: elem }
 }
 
@@ -2030,6 +2026,12 @@ fn helper_preamble() -> Str {
           (i64.gt_s (local.get $v) (i64.const 2147483647)))
       (then unreachable))
     (i32.wrap_i64 (local.get $v)))
+  (func $list_slot (param $list i32) (param $i i64) (result i32)
+    (if (i64.ge_u (local.get $i) (i64.extend_i32_u (i32.load (local.get $list))))
+      (then unreachable))
+    (i32.add (local.get $list)
+      (i32.add (i32.const 8)
+               (i32.mul (i32.wrap_i64 (local.get $i)) (i32.const 8)))))
   (func $list_push (param $list i32) (param $elem i64) (result i32)
     (local $n i32)
     (local $p i32)

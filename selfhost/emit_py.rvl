@@ -180,6 +180,10 @@ extern pure fn upper(s: Str) -> Str = @py { return s.upper() }
 fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
 fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
 fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
+// The static type the frontend recorded for a `${...}` operand, if any. It is
+// written only for `Float` and `Bool` — the two whose host default rendering
+// is not revl's — so an absent key reads back as "".
+fn node_interp_type(n: Any) -> Str { return value_str(value_field(n, "interp_type")) }
 
 fn ind(n: Int) -> Str { return "    ".repeat(n) }
 
@@ -367,6 +371,15 @@ fn uses_i32_shl(n: Any) -> Bool {
 
 // -------------------------------------------------------------- expressions
 // `_is_float_expr` (backends/python/emit.py): syntactically-certain Float.
+// Is this `${...}` operand a `Float`? The node-local proof first (it answers for
+// hand-written IR in the backend-ir dialect, which carries no annotation), then
+// the type the frontend recorded — the only way to see a Float that arrives
+// through a parameter, a local, a field or a call.
+fn interp_is_float(node: Any) -> Bool {
+  if (is_float_expr(node)) { return true }
+  return node_interp_type(node) == "Float"
+}
+
 fn is_float_expr(node: Any) -> Bool {
   let k = node_kind(node)
   if (k == "lit") { return value_kind(value_field(node, "value")) == "float" }
@@ -635,10 +648,16 @@ fn interp_fstring(parts: List[Any]) -> Str {
     if (k == "text") {
       pieces = pieces.push(py_repr(v))
     } else {
-      if (is_float_expr(v)) {
+      if (interp_is_float(v)) {
         pieces = pieces.push(`_revl_ftoa(${expr(v)})`)
       } else {
-        pieces = pieces.push(`str(${expr(v)})`)
+        if (node_interp_type(v) == "Bool") {
+          // `str(True)` is `'True'`; revl spells its Bool literals `true` and
+          // `false`, and every other tier renders them that way.
+          pieces = pieces.push(`('true' if ${expr(v)} else 'false')`)
+        } else {
+          pieces = pieces.push(`str(${expr(v)})`)
+        }
       }
     }
   }
@@ -2456,7 +2475,7 @@ fn user_case_names(types: Any) -> List[Str] {
 fn uses_float_interp(n: Any) -> Bool {
   if (node_kind(n) == "interp") {
     for (p of value_list(value_field(n, "parts"))) {
-      if (value_str(value_at(p, 0)) == "expr" && is_float_expr(value_at(p, 1))) { return true }
+      if (value_str(value_at(p, 0)) == "expr" && interp_is_float(value_at(p, 1))) { return true }
     }
   }
   if (node_kind(n) == "builtin"

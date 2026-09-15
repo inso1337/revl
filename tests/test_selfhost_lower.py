@@ -421,6 +421,91 @@ _QT_TAIL = """component UserCache requires db: Database provides cache: Cache {
 
 # Programs the reference admits — the gate must admit them too. Kept
 # reference-clean (no out-of-slice defect), so "" is the only agreement.
+# ---- item 391 / issue #106: the service-OPERATION head ----------------------
+#
+# `p_methods` read only `emission` / `async` / `idempotent`, so a declaration
+# carrying any other part of the reference's modifier slot (`parser.py::service`)
+# failed the WHOLE document with `BAD|bad method signature in service <S>` — and
+# a parse-stage refusal is the worst kind, because a verdict-direction comparison
+# reads it as agreement while no guarantee was reached at all.
+#
+# Every fixture below shares one shape, the pairing PR #1085 established. The
+# clause under test sits on the FIRST operation of `Cache`; a SECOND operation
+# (`put`) follows it, and the program's verdict depends on how `put` was
+# declared. So a step that overshoots and swallows `put` cannot pass: the
+# accepted half declares `put` an `emission` and must stay silent, the refused
+# half declares it plain and must still draw the reference's own G4
+# (`examples/rejections/g4_emission_not_declared.rvl`, verbatim).
+_SOP_HEAD = """service Database {
+  emission fn execute(sql: Str) -> Int
+}
+service Cache {
+"""
+
+
+def _sop(clause: str, put: str, impl: str) -> str:
+    """A `Cache` whose first operation carries `clause` and whose second is
+    declared `put`. `impl` is the provide method for the first operation."""
+    return _SOP_HEAD + "  " + clause + """
+  fn get(key: Str) -> Opt[Str]
+  """ + put + """
+}
+component LyingCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+""" + impl + """
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute("INSERT INTO log VALUES (1)")
+    }
+  }
+}
+"""
+
+
+_SOP_EMISSION_PUT = "emission fn put(key: Str, value: Str)"
+_SOP_PLAIN_PUT = "fn put(key: Str, value: Str)"
+
+# (label, the declaration carrying the clause, the provide method for it).
+_SOP_CLAUSES = [
+    # item 457: the `route <verb> "<path>"` clause HEADS the operation. This is
+    # the one the census corpus actually holds — `examples/app/notes.rvl`.
+    ("a route clause heading the operation",
+     'route get "/cache/{key}"\n  fn find(key: Str) -> Str',
+     '    fn find(key) = "x"'),
+    # Def. 39: order-independence, declared per operation.
+    ("a commutative operation",
+     "commutative fn touch(key: Str) -> Int",
+     "    fn touch(key) = 1"),
+    # item 343 + the endorsement slot: an origin set on an emission.
+    ("an endorse slot on an emission",
+     "emission endorse[trusted] fn audit(key: Str) -> Int",
+     '    fn audit(key) { emit db.execute("a")   return 1 }'),
+    # item 257: `validated`, and its `retry N` sibling.
+    ("a validated emission",
+     "emission validated fn audit(key: Str) -> Int",
+     '    fn audit(key) { emit db.execute("a")   return 1 }'),
+    ("a validated emission with a retry budget",
+     "emission validated retry 3 fn audit(key: Str) -> Int",
+     '    fn audit(key) { emit db.execute("a")   return 1 }'),
+    # item 310: the `cache` trailing clause, AFTER the return type.
+    ("a cache pure trailing clause",
+     "fn touch(key: Str) -> Int cache pure",
+     "    fn touch(key) = 1"),
+    ("a cache external clause with a ttl bound",
+     "emission fn audit(key: Str) -> Int cache external ttl 5m",
+     '    fn audit(key) { emit db.execute("a")   return 1 }'),
+    # the CONTROL: `emission[caps]` was already read, so this pair passes
+    # against the unported gate too. That is what it is for — it pins that the
+    # one bracket this slice reads rather than steps is still read.
+    ("an emission capability bound (control)",
+     "emission[db] fn audit(key: Str) -> Int",
+     '    fn audit(key) { emit db.execute("a")   return 1 }'),
+]
+
+
 ACCEPTED_PROGRAMS = [
     # ---- the qualified test heads (item 391) -------------------------------
     # `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
@@ -1067,6 +1152,13 @@ extern acquire fn listen(port: Int) -> Socket undo Ok(result) = @py { return por
 extern pure fn g(h: Int) = @py { return None }
 extern acquire fn f() undo g(1) = @py { return 1 }
 """),
+    # ---- item 391 / issue #106: the service-operation head -----------------
+    # The accepting half of each `_SOP_CLAUSES` pair: the clause in front of a
+    # `Cache` whose `put` is declared `emission`, which the reference admits.
+    # Every one of these drew `BAD|bad method signature in service Cache` from
+    # the gate before this slice.
+    *[(f"{label} is read", _sop(clause, _SOP_EMISSION_PUT, impl))
+      for label, clause, impl in _SOP_CLAUSES],
 ]
 
 
@@ -2008,6 +2100,14 @@ fn f() -> Int {
   return 1
 }
 """, "G1"),
+    # ---- item 391 / issue #106: the service-operation head -----------------
+    # The refusing half: the same clause, same position, in front of a `Cache`
+    # whose `put` is declared PLAIN. The reference's G4 names `put`, not the
+    # clause, so a step that swallowed the `put` declaration would turn this
+    # refusal into silence and the pair would red.
+    *[(f"{label} does not swallow the next operation",
+       _sop(clause, _SOP_PLAIN_PUT, impl), "G4")
+      for label, clause, impl in _SOP_CLAUSES],
 ]
 
 

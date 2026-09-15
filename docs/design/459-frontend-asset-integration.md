@@ -4,7 +4,7 @@
 **Builds on:** docs/design/526-webui-asset-alignment.md,
 docs/design/530-webui-entry-surface.md,
 docs/design/525-webapp-slice4-frontend.md ·
-**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · SOURCE MAPS LANDED (F2, insertion site + bundler chain) · REMAINDER NAMED BELOW
+**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · SOURCE MAPS LANDED (F2, insertion site + bundler chain) · RUNTIME ASSET READ LANDED (F6) · REMAINDER NAMED BELOW
 
 ## Purpose
 
@@ -312,13 +312,83 @@ author writes `attr="{{html:x}}"`).
   record (the reactive state), the RPC surface is the component's declared
   provisions, and `revl export client --lang ts --face webui --component NAME`
   projects both into the TypeScript the browser reads with `useRpc<T>()`.
-- **F6 - tiers.** Anything disk-backed at RUN time will start at `py`/`ts`, the
-  precedent set by `stdlib/fs.rvl` and `stdlib/shell.rvl`; reading a template
-  from disk is the case that is still open. It does not reach what has landed:
-  `stdlib/template.rvl` (holes, escaping, `render_mapped`, `source_map`) is pure
-  revl and runs on every tier, F1's `asset` resolution happens in the COMPILER
-  rather than in emitted code, and F2's bundler chain is a toolchain step that
-  emits nothing.
+- **F6 - tiers. LANDED.** The restatement this note gave F6 was precise about
+  what it does NOT reach: `stdlib/template.rvl` (holes, escaping,
+  `render_mapped`, `source_map`) is pure revl and runs on every tier, F1's
+  `asset` resolution happens in the COMPILER rather than in emitted code, and
+  F2's bundler chain is a toolchain step that emits nothing. What was left was
+  the one piece that genuinely needs a per-tier HOST BODY: reading a template
+  from disk at RUN time. `stdlib/asset.rvl` is that door.
+
+  `load(handle: AssetRef) -> Result[Str, FsError]` takes the F1 handle and
+  answers the file's text; `locate(handle)` answers the confinement decision
+  alone. `AssetRef` is also the canonical stdlib name for the handle's record
+  shape, which F1 explicitly left open.
+
+  Four decisions worth naming, because each is a place where a runtime read can
+  be wrong quietly.
+
+  **The pin is ENFORCED by the read, not dropped by it.** This is the question
+  the brief for this slice raised, and it does not need a new design: a runtime
+  read of a file the compiler already hashed is the obvious place to LOSE the
+  pin, so `load` hands the handle's `sha256` to the host body and the text comes
+  back only when the file's bytes still hash to it. An edited file is
+  `Err(EDIGEST)` and yields nothing, not the bytes, not their length, not a
+  prefix. The handle therefore keeps meaning at run time exactly what it meant
+  at compile time, and the runtime read is where that claim is CHECKED. The cost
+  is stated rather than hidden: this is not hot reload, and it cannot become hot
+  reload without the pin ceasing to pin anything.
+
+  **No second jail, because there is nothing to jail twice.** A path resolved at
+  run time is a file read, so the confinement decision is `stdlib/fs.rvl`'s
+  `resolve_within` - the same family-1 guard every witnessed mutation and every
+  inverse passes, realpath BEFORE the membership check, reached through the same
+  entry point - and the read is a listed READ HELPER in the same guard module,
+  `read_pinned_confined`, which re-establishes containment on the root-anchored
+  `O_NOFOLLOW` directory walk rather than re-traversing the name. The refusal
+  vocabulary is `FsError`, imported rather than restated. That is the same
+  argument F1 makes about reusing option B's jail, applied at the other end of
+  the pipeline, and it has a consequence worth stating: the run-time root is the
+  SESSION WORKSPACE ROOT, so a deployment that wants a component to read its own
+  assets points `REVL_FS_WORKSPACE` at the tree they ship in. An unconfigured
+  root is `Err(EWORKSPACE)`, never a fall-through to the working directory.
+
+  `stdlib/fs.rvl` already documents the shape a consumer was expected to use for
+  this: `resolve_within`, then read the confined path with your own `os` /
+  `node:fs`. `load` grants strictly LESS than that - the same guard decides the
+  path, and the digest must additionally match - which is why it is a narrowing
+  of an existing door rather than a new primitive on that surface. The raw
+  `load_pinned(path, sha256)` extern is PRIVATE for the same reason: the only
+  digests that should reach the guard are ones `resolve_assets` computed.
+
+  **A tier that cannot do it REFUSES BY NAME.** `rs`, `go`, `java` and `wasm`
+  carry no filesystem bodies anywhere in the stdlib, so a composition calling
+  `load` and targeting one of them is refused at COMPILE time, naming the extern
+  and the tiers that do have a body. Three of those four already said so; wasm
+  answered "callee 'load_pinned' is not a lowerable function", which is the
+  sentence it also gives for a misspelled name, so a portability limit and a
+  typo were indistinguishable. The wasm emitter now says what the other five
+  say. Emitting something that returned an empty template would have been the
+  alternative, and it would make a missing tier look like an empty page.
+
+  **What it does NOT claim.** Not a filesystem on the other four tiers:
+  `stdlib/fs.rvl` and `stdlib/shell.rvl` remain py plus ts (Slice 2b), so a
+  composition that must read at run time AND must target rust is waiting on
+  those bodies, not on this item. Not hot reload, above. And not a widened fs
+  surface: no unpinned read is exposed on either tier.
+
+  Guards: `tests/test_asset_runtime_load_459.py` covers the door, the pin, every
+  confinement arm driven rather than described, the per-tier refusals and a
+  py/ts corpus diffed case for case through the REAL emitted py guard and the
+  REAL ts entry point. Its twenty-one mutation table rebuilds the shipped guard
+  module with one defect at a time against twelve runnable checks, with a
+  baseline asserting the shipped module fails none, so the gate's ability to
+  fail is measured rather than claimed; every check is triggered by at least one
+  mutant and eighteen of the twenty-one are caught by exactly one check.
+  `backends/typescript/tests/asset_pinned_read_459.test.ts` is the ts peer, and
+  the existing family scans on both tiers cover the new read helper because
+  listing it is a deliberate edit to `READ_HELPERS`. Two controls exercise only
+  pre-existing surface and hold on both sides of the change.
 - **F7 - a `--face webui` CLI verb. LANDED.** `revl export client --lang ts
   --face webui --component NAME` renders a component's channel contract. It emits
   no ASSET: the entry is still contributed through the coeffect, and the verb
@@ -368,10 +438,10 @@ The design decisions worth naming:
   named `asset` still reads as a variable. That also keeps it out of the gate
   crate's digest inputs.
 
-Not done by F1: `prod_manifest` (a build output, above), a canonical stdlib name
-for the handle's record shape, and any consumption of the handle beyond the
-WebUI coeffect. F3 and F6 are unchanged; F2's insertion-site half landed
-separately, above.
+Not done by F1: `prod_manifest` (a build output, above) and any consumption of
+the handle beyond the WebUI coeffect. F3 is unchanged; F2's insertion-site half
+and F6's runtime read landed separately, below, and F6 is what gave the handle's
+record shape its canonical stdlib name (`AssetRef`).
 
 ## Verification
 

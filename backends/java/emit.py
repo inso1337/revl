@@ -1674,9 +1674,17 @@ def _uses_stdlib(ir: dict) -> bool:
 
 
 def _is_float_expr(node: object) -> bool:
-    """Node-local proof that an expression is a `Float`: a Float literal, a `/`
-    (true division), a Float-annotated arithmetic node, or a unary minus of
-    one — the shared proof the other tiers use (docs/strings.md)."""
+    """Is this expression certain to be a `Float`?
+
+    The node-local proof first: a Float literal, a `/` (true division), a
+    Float-annotated arithmetic node, or a unary minus of one. That proof
+    answers for hand-written IR in the backend-ir dialect, which carries no
+    annotation; it CANNOT see a `Float` that arrives through a parameter, a
+    local, a field or a call, so a `${...}` operand also carries the type the
+    frontend recorded. Java string concatenation applies `String.valueOf` to
+    such an operand, and that is not the canonical form (`1e21` becomes
+    "1.0E21", `3.0` stays "3.0"), so an unseen Float was a wrong string
+    (docs/strings.md)."""
     if not isinstance(node, dict):
         return False
     kind = node.get("kind")
@@ -1687,7 +1695,7 @@ def _is_float_expr(node: object) -> bool:
         return node.get("op") == "/" or node.get("operands") == "Float"
     if kind == "un":
         return node.get("op") == "-" and _is_float_expr(node.get("operand"))
-    return False
+    return node.get("interp_type") == "Float"
 
 
 def _uses_float_interp(ir: dict) -> bool:
@@ -1734,7 +1742,17 @@ def _emit_ftoa_helper() -> list[str]:
         "    if (Double.isInfinite(x)) { return x < 0 ? \"-Infinity\" : \"Infinity\"; }",
         "    if (x == 0.0) { return \"0\"; }",
         "    String sign = x < 0 ? \"-\" : \"\";",
-        "    String s = Double.toString(Math.abs(x));",
+        "    double a = Math.abs(x);",
+        # ECMAScript Number::toString renders the FEWEST digits that parse
+        # back to x. Double.toString is shortest-round-trip on JDK 19+ with one
+        # exception: it never emits fewer than two significant digits, so
+        # Double.MIN_VALUE comes out "4.9E-324" where the shortest decimal that
+        # round-trips is "5e-324". Measured: py/ts/go/rust all said "5e-324"
+        # and java said "4.9e-324". The one-digit form is the only one
+        # Double.toString can be too long for, so it is the only candidate that
+        # has to be tried.
+        "    String one = String.format(java.util.Locale.ROOT, \"%.0E\", a);",
+        "    String s = Double.parseDouble(one) == a ? one : Double.toString(a);",
         "    String mant = s;",
         "    long exp = 0;",
         "    int e = s.indexOf('E');",

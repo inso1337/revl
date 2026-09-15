@@ -2870,6 +2870,7 @@ fn revl_index_helper() -> Str {
   var o = []
   o = o.push("function revlIndex<T>(xs: T[], i: number): T {")
   o = o.push(`  if (i < 0) { throw new Error("revl: negative list index") }`)
+  o = o.push(`  if (i >= xs.length) { throw new Error("revl: list index out of range") }`)
   o = o.push("  return xs[i]")
   o = o.push("}")
   return o.join(newline())

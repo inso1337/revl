@@ -191,6 +191,7 @@ from __future__ import annotations
 import errno
 import functools
 import hashlib
+import hmac
 import os
 import re
 import stat
@@ -244,7 +245,8 @@ PATH_FAMILIES: dict[str, tuple[str, ...]] = {
 #: install tree. Widening this tuple is still a deliberate edit: a read helper
 #: is a new way to LOOK at the filesystem through the jail, and it must be
 #: listed before a body may call it.
-READ_HELPERS: tuple[str, ...] = ("lexists_confined", "is_dir_confined")
+READ_HELPERS: tuple[str, ...] = ("lexists_confined", "is_dir_confined",
+                                 "read_pinned_confined")
 
 #: Which positional arguments of a `syscall-time` entry point are PATHS (and so
 #: must have come from a family 1-3 guard). The rest are handles or data.
@@ -2079,6 +2081,84 @@ def lexists_confined(real: str) -> bool:
     if _binding_for_use() is not None:
         return _bound_stat(real) is not None
     return os.path.lexists(real)
+
+
+#: An asset digest is a sha256 written as 64 lowercase hex characters, the
+#: spelling `src/revl/hostref.py` pins into the handle at compile time. Anything
+#: else is refused before the open, so "no pin" cannot be spelled as an empty
+#: string or as a truncated prefix that would compare equal to nothing.
+_SHA256_HEX = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
+def read_pinned_confined(real: str, expected_sha256: str) -> str:
+    """The bytes of `real` as text, and ONLY when they hash to
+    `expected_sha256`. A READ helper (item 459 F6).
+
+    This is the one helper in this module that yields file CONTENT rather than a
+    fact about a name, so it is written as the narrowest shape that serves a
+    runtime asset load and nothing wider:
+
+    * `real` is a path a family 1-3 guard already resolved, and the open is
+      re-established through the root-anchored `O_NOFOLLOW` directory walk
+      (`_open_dirfd`) rather than by re-traversing the name, so the
+      check-to-syscall window the mutations close is closed here too;
+    * the OPENED descriptor is `fstat`ed and a non-regular file is refused
+      (`ENOTFILE`) before a byte is read, so a directory cannot answer and a
+      fifo cannot hang the reader;
+    * a digest mismatch returns NOTHING — not the bytes, not their length, not a
+      prefix — so the compile-time pin item 459 F1 puts in the handle is
+      ENFORCED by the runtime read rather than weakened by it. The comparison is
+      `hmac.compare_digest` because the value being compared is a content
+      commitment supplied by the caller;
+    * a malformed expected digest is refused (`EINVAL`) BEFORE the open, so a
+      caller cannot opt out of the pin by passing an empty string.
+
+    It grants strictly less reach than the pattern `stdlib/fs.rvl` already
+    documents for a consumer (`resolve_within` plus the consumer's own `open`):
+    the same jail decides the path, and the digest must additionally match.
+    """
+    if not isinstance(expected_sha256, str) or not _SHA256_HEX.match(expected_sha256):
+        raise FsOpError(
+            "EINVAL",
+            "expected digest is not a sha256 written as 64 lowercase hex "
+            "characters; a pinned read cannot be asked to skip the pin",
+            _sanitized(real))
+    parent, leaf = _split(real)
+    dirfd = _open_dirfd(parent)
+    try:
+        fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                     dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise FsOpError(
+                "ENOTFILE",
+                "pinned read target is not a regular file",
+                _sanitized(real))
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), expected_sha256):
+        raise FsOpError(
+            "EDIGEST",
+            "file content does not match the pinned sha256 recorded when the "
+            "asset was resolved at compile time",
+            _sanitized(real))
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise FsOpError(
+            "EENCODING",
+            "file content is not valid UTF-8 text",
+            _sanitized(real)) from None
 
 
 def is_dir_confined(real: str) -> bool:
