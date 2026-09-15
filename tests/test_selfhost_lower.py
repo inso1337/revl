@@ -2108,6 +2108,45 @@ fn f() -> Int {
     *[(f"{label} does not swallow the next operation",
        _sop(clause, _SOP_PLAIN_PUT, impl), "G4")
       for label, clause, impl in _SOP_CLAUSES],
+    # ---- item 391 / issue #106: the service bounds the key's call surface ---
+    # A6 (`_component_req_call`'s `decl is None` arm): what a required key
+    # OFFERS is what its service declares, and a call to anything else has no
+    # signature to check against. The gate resolved the key to its service
+    # already — that is how it judges G4 marking and A1 colour — and then walked
+    # past an absent method, so every shape below was a gate false-admit.
+    # `examples/rejections/a6_method_not_in_service.rvl` is the first row; the
+    # rest are the positions that fixture does not stand in.
+    ("a6 method not in service", _fixture("a6_method_not_in_service"), "A6"),
+    # the same bound inside a PROVIDE-METHOD body, not the activation body.
+    ("a6 absent method in a provide method", """
+service Database { fn query(sql: Str) -> List[Row] }
+service Reports { emission fn run(sql: Str) -> Int }
+component Reporter requires db: Database provides reports: Reports {
+  provide reports {
+    fn run(sql) {
+      emit db.execute(sql)
+      return 1
+    }
+  }
+}
+""", "A6"),
+    # an `undo` receiver: the inverse is walked under the same bound as the
+    # forward step, so an absent method there is refused too. The forward
+    # `query` resolves, which is what makes the `undo` the offending statement.
+    ("a6 absent method in an undo", """
+service Database { fn query(sql: Str) -> List[Row] }
+component Migrator requires db: Database {
+  let rows = effect db.query("SELECT 1") undo db.rollback()
+}
+""", "A6"),
+    # a key whose service declares NOTHING: an empty method list is a real
+    # declaration, not an unresolved name, so the bound applies at full strength.
+    ("a6 absent method on an empty service", """
+service Nothing { }
+component Caller requires n: Nothing {
+  let x = effect n.anything() undo n.forget(x)
+}
+""", "A6"),
 ]
 
 
@@ -2853,9 +2892,11 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 44. The self-declared async-colour
-# arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
-# binding-discipline slice) moved OUT of the gap into gate/reference agreement,
+# `examples/rejections/`; it now stands at 43. The self-declared async-colour
+# arrow (rule C1), the four fn-body BINDING fixtures (item 391's
+# binding-discipline slice), and `a6_method_not_in_service` (the service
+# declaration bounding what a required key's calls may name, `req_call`) moved
+# OUT of the gap into gate/reference agreement,
 # and two slices have moved fixtures IN by making the gate READ a body it used
 # to stop short of: the `pub` prefix slice brought `t29`/`t30` (hidden behind
 # the `pub extern` parse refusal), and the type-parameter-list slice brought
@@ -2966,7 +3007,6 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t16_provide_method_missing_return", "T1"),
         ("t31_index_non_int_provide_method", "T1"),
         ("t3_config_default_type", "T1"),
-        ("a6_method_not_in_service", "A6"),
         ("g6_method_local_shadows_component", "G6"),
         # the t29 field-read-on-`Any` shape inside a provide method, pinned for
         # the same reason: the `pub extern` parse refusal used to hide it.
@@ -2981,12 +3021,12 @@ _TYPE_LAYER_CASES = [
 ]
 
 
-def test_the_type_layer_gap_is_exactly_44_fixtures():
+def test_the_type_layer_gap_is_exactly_43_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 44, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 43, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 44, "a fixture is listed twice"
+    assert len(set(names)) == 43, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
