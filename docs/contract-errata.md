@@ -676,6 +676,16 @@ rejection (below).
   remains the total form for a position that may be past the end. Asserted in
   `tests/test_str_index_bounds_cross_tier.py` on all six tiers, with the wasm
   past-the-end read reproduced against a known neighbouring allocation.
+- **`repeat(-1)` faulted on TypeScript and answered `""` everywhere else**
+  (closed, uniform value). `x * n` on the reference tier is `""` for a
+  negative `n`, and go, rust and java agreed; JS `String.repeat` throws
+  (`RangeError: Invalid count value: -1`), so ts was the one tier of the five
+  that lower `repeat` to disagree, and it disagreed by faulting where the
+  reference answered. ts now clamps the count. A count is not an index — there
+  is no position that has to exist — so this takes `slice`'s out-of-domain
+  reading rather than the character reads' above. wasm lowers no `repeat` and
+  refuses it by name, unchanged. Asserted in
+  `tests/test_str_index_bounds_cross_tier.py`.
 - **`"+7".to_int()` was `Some(7)` on rust** (closed). The parse takes an
   optional leading `-` and no `+` (docs/stdlib-2.0.md §Str.to_int), so `"+7"`
   is `None`. Rust's `str::parse::<i64>` accepts a leading `+`; the emitter now

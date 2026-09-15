@@ -28,6 +28,7 @@ Measured on this branch's parent, one document per cell, six tiers each, with
 | `s.charCodeAt(-1)`       | **98**   | fault  | fault | fault | fault  | **97**      |
 | `s.codepoint_at(9)`      | fault    | fault  | fault | fault | fault  | **a byte**  |
 | `s.codepoint_at(-1)`     | **98**   | fault  | fault | fault | fault  | **97**      |
+| `"xy".repeat(-1)`        | `""`     | **fault** | `""` | `""` | `""`  | refused     |
 
 Every bolded cell is one of four shapes:
 
@@ -60,6 +61,17 @@ Every bolded cell is one of four shapes:
     `seen == 0` for any negative `cp`, so the offset comes back `0` and the
     read lands on index 0. `s.charCodeAt(-1)` was `97` (`"a"`) on wasm and `98`
     (`"b"`) on python — two different wrong answers to the same question.
+
+One more out-of-domain argument in the same family, measured beside these and
+closed with them: **`"xy".repeat(-1)`**. python answers `""` (`x * n`), and so
+do go, rust and java; JS `String.repeat` THROWS on a negative count
+(`RangeError: Invalid count value: -1`), so typescript was the one tier of the
+five that lower `repeat` to disagree, and it disagreed by FAULTING where the
+reference answered. wasm refuses `repeat` by name and is unaffected. ts now
+clamps the count, which is the reading `slice` already has for an out-of-domain
+bound (docs/stdlib-2.0.md §slice: clamp into range, never fault). That is the
+opposite direction from the character reads above, and deliberately so: an
+index names a position that has to exist, a count does not.
 
 THE CLOSE is the one the `List` side already took: an index outside
 `0 <= i < length()` FAULTS on every tier, for all three of `charAt`,
@@ -151,6 +163,21 @@ pub fn walk() -> Int {
   return n
 }
 """
+
+# `repeat` takes a COUNT, not an index, and an out-of-domain count clamps
+# rather than faults: the reference answers `""` for a negative one and so do
+# go, rust and java. Its own document and its own tier list, because wasm
+# refuses `repeat` by name and would take the whole file down with it.
+REPEAT_TIERS = ("py", "ts", "go")
+REPEAT_SLOW_TIERS = ("rust", "java")
+REPEAT_COUNT = _PRELUDE + """
+pub fn minus_one() -> Int { return 0 - 1 }
+test "a negative count is the empty string" { assert s().repeat(minus_one()) == "" }
+test "a zero count is the empty string"     { assert s().repeat(0) == "" }
+test "a positive count still repeats"       { assert "xy".repeat(3) == "xyxyxy" }
+test "a count of one is the receiver"       { assert s().repeat(1) == s() }
+"""
+
 
 # The wasm read that landed on the NEXT allocation. `mk()` is 4 bytes of heap
 # Str; `nxt()` is allocated straight after it and is 10 bytes long, so the byte
@@ -246,6 +273,37 @@ def test_wasm_past_the_end_read_saw_the_next_value():
         pytest.skip(f"wasm: {message}")
     assert status == "fail", (
         f"wasm read past the string's own bytes and answered: {message}")
+
+
+@pytest.mark.parametrize("tier", REPEAT_TIERS)
+def test_a_negative_repeat_count_is_the_empty_string(tier: str):
+    """JS `String.repeat` throws on a negative count, so ts FAULTED where the
+    reference — and go, rust and java — answered `""`. A count is not an
+    index: there is no position that has to exist, so the out-of-domain
+    reading is `slice`'s (clamp into range, never fault), not the character
+    reads' (fault)."""
+    status, message = _run(tier, REPEAT_COUNT)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@_SLOW
+@pytest.mark.parametrize("tier", REPEAT_SLOW_TIERS)
+def test_a_negative_repeat_count_is_the_empty_string_slow(tier: str):
+    status, message = _run(tier, REPEAT_COUNT)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+def test_wasm_still_refuses_repeat_by_name():
+    """wasm is the sixth tier and it lowers no `repeat` at all. A refusal is a
+    correct answer to a question a tier cannot answer; what this pins is that
+    it stays a REFUSAL and does not become a silent one."""
+    with pytest.raises(Exception) as excinfo:
+        _emit("wasm", REPEAT_COUNT)
+    assert "repeat" in str(excinfo.value), excinfo.value
 
 
 # ------------------------------------------------------- cheap static guards

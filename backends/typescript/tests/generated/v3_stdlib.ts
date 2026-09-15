@@ -112,7 +112,7 @@ export function joinWith(xs: string[], sep: string): string {
 }
 
 export function repeated(s: string, n: bigint): string {
-    return s.repeat(Number(n))
+    return s.repeat(Math.max(0, Number(n)))
 }
 
 export function indexOfSub(s: string, sub: string): bigint {

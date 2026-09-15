@@ -626,9 +626,12 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   // `revlSplit` routes the empty-sep case through `Array.from` (code points).
   if (method == "split") { return { text: `revlSplit(${target}, ${args[0]})`, counter: counter } }
   if (method == "join") { return { text: `${target}.join(${args[0]})`, counter: counter } }
+  // A NEGATIVE count is `""` — the reference tier's answer, and go/rust/java's.
+  // JS `String.repeat` THROWS on it, so this tier faulted where every other
+  // tier that lowers `repeat` answered. Clamp, the way `slice` clamps.
   if (method == "repeat") {
     let r = int_as_number(arg_nodes[0], counter, acx)
-    return { text: `${target}.repeat(${r.text})`, counter: r.counter }
+    return { text: `${target}.repeat(Math.max(0, ${r.text}))`, counter: r.counter }
   }
   if (method == "startsWith") { return { text: `${target}.startsWith(${args[0]})`, counter: counter } }
   if (method == "endsWith") { return { text: `${target}.endsWith(${args[0]})`, counter: counter } }

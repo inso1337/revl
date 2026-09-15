@@ -2842,7 +2842,15 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     if method == "join":
         return f"{target}.join({args[0]})"
     if method == "repeat":
-        return f"{target}.repeat({_int_as_number(arg_nodes[0], ctx)})"
+        # A NEGATIVE count is `""` — the reference tier's `x * n` answer, which
+        # go, rust and java give too. JS `String.repeat` THROWS on it
+        # (`RangeError: Invalid count value: -1`), so this tier was the only
+        # one of the five that lower `repeat` to disagree, and it disagreed by
+        # faulting where the others answered. Clamping matches the "out of
+        # domain clamps into range, never faults" reading `slice` already has
+        # for its bounds (docs/stdlib-2.0.md §slice).
+        return (f"{target}.repeat("
+                f"Math.max(0, {_int_as_number(arg_nodes[0], ctx)}))")
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
     # A code-point prefix of a string is a UTF-16 prefix (code-point
     # boundaries never split), so the native startsWith/endsWith are exact.

@@ -68,6 +68,12 @@ revl refuses.)
   may be past the end, `slice`-then-guard is the total form — `slice` clamps
   and never faults. Pinned by
   `tests/test_str_index_bounds_cross_tier.py` on all six tiers.
+- **`repeat(n)` with a NEGATIVE `n` is the empty string**, not a fault — the
+  reference's `x * n`, which go, rust and java already gave. JS
+  `String.repeat` throws on a negative count, so TypeScript clamps it. A count
+  is not an index: nothing has to exist at position `n`, so this takes
+  `slice`'s out-of-domain reading (clamp, never fault) rather than the
+  character reads' (fault). wasm lowers no `repeat` and refuses it by name.
 - `slice(a, b)` bounds are **end-relative**: a negative bound counts from the
   end of the receiver (`len + bound`), then both bounds clamp into `[0, len]`
   and the slice is empty if `b < a` — the python/JS reading, on every tier
