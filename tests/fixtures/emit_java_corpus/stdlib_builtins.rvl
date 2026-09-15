@@ -1,0 +1,49 @@
+// The stdlib surface (docs/stdlib-2.0.md) on the java tier: every `builtin` node
+// the covered subset reaches, plus the `len` node and the property-form
+// `.length`. Each method lowers to a distinct `revl*` static overload, and the
+// per-group helper splice (item 433 F6) must select exactly the groups these
+// calls reach - no more, no fewer.
+//
+// Item 429 blind-spot closure: before this fixture the java corpus spelled no
+// `builtin` node at all, so `kind=builtin` and every `method=..` arm of the
+// emitter was mirrored on both sides with nothing holding them to each other.
+
+// Str family.
+fn slen(s: Str) -> Int { return s.length() }
+fn head(s: Str) -> Str { return s.slice(0, 1) }
+fn catS(a: Str, b: Str) -> Str { return a.concat(b) }
+fn findS(s: Str, sub: Str) -> Int { return s.indexOf(sub) }
+fn parts(s: Str, sep: Str) -> List[Str] { return s.split(sep) }
+fn glue(xs: List[Str], sep: Str) -> Str { return xs.join(sep) }
+fn rep(s: Str, n: Int) -> Str { return s.repeat(n) }
+fn at(s: Str, i: Int) -> Str { return s.charAt(i) }
+fn code(s: Str, i: Int) -> Int { return s.charCodeAt(i) }
+fn scalar(s: Str, i: Int) -> Int { return s.codepoint_at(i) }
+fn parse(s: Str) -> Opt[Int] { return s.to_int() }
+fn leading(s: Str, p: Str) -> Bool { return s.startsWith(p) }
+fn trailing(s: Str, p: Str) -> Bool { return s.endsWith(p) }
+
+// List family.
+fn llen(xs: List[Int]) -> Int { return xs.length() }
+fn catL(xs: List[Int], ys: List[Int]) -> List[Int] { return xs.concat(ys) }
+fn findL(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
+fn pushL(xs: List[Int], v: Int) -> List[Int] { return xs.push(v) }
+fn takeL(xs: List[Int], a: Int, b: Int) -> List[Int] { return xs.slice(a, b) }
+
+// Int/Int32 renderings and widths (the non-Result forms).
+fn render(n: Int) -> Str { return n.to_str() }
+fn widen(a: Int32) -> Int { return a.to_int() }
+fn narrow(n: Int) -> Int32 { return n.to_int32() }
+fn truncq(a: Int, b: Int) -> Int { return a.div_trunc(b) }
+
+// Map surface.
+fn put(m: Map[Str, Int], k: Str, v: Int) -> Map[Str, Int] { return m.set(k, v) }
+fn get(m: Map[Str, Int], k: Str) -> Opt[Int] { return m.lookup(k) }
+fn holds(m: Map[Str, Int], k: Str) -> Bool { return m.has(k) }
+fn count(m: Map[Str, Int]) -> Int { return m.size() }
+fn ks(m: Map[Str, Int]) -> List[Str] { return m.keys() }
+fn drop(m: Map[Str, Int], k: Str) -> Map[Str, Int] { return m.remove(k) }
+
+// A non-atomic receiver takes parentheses before the call is appended, and a
+// nested builtin threads through the same renderer.
+fn nested(a: Str, b: Str, sep: Str) -> Int { return a.concat(b).split(sep).length() }

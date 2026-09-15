@@ -1788,7 +1788,13 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
       let elem = map_value_expr_type(args[0], var_types, comp, services, functions, ctx, types)
       if (elem != "") { return `List[${elem}]` }
     }
-    if (method == "length" || method == "charCodeAt" || method == "indexOf" || method == "to_int") { return "Int" }
+    // `codepoint_at` (item 276) answers the Unicode scalar at a code-point index,
+    // an Int exactly as `charCodeAt` does. Omitting it here left a `Map` whose
+    // values are codepoints pinned to the `Str` FALLBACK, and the emitted
+    // `Map<String>` then took a `long` (tests/fixtures/emit_java_corpus/
+    // map_inference_builtins.rvl).
+    if (method == "length" || method == "charCodeAt" || method == "codepoint_at"
+        || method == "indexOf" || method == "to_int") { return "Int" }
     if (method == "charAt" || method == "join" || method == "repeat" || method == "to_str" || method == "slice") { return "Str" }
     if (method == "split") { return "List[Str]" }
     if (method == "concat") { return map_value_expr_type(value_field(node, "target"), var_types, comp, services, functions, ctx, types) }
