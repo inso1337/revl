@@ -6903,11 +6903,28 @@ class Session:
             return grant["capability"]
         try:
             cap = cap_order.parse_cap(grant["capability"])
-            return cap_order.make_cap(
-                cap.token,
-                list(cap.params) + sorted(declared.items())).to_str()
         except cap_order.CapError:
             return grant["capability"]
+        if any(name in dict(cap.params) for name in declared):
+            return grant["capability"]   # the erasure did not happen: as stored
+        # `Cap` directly, not `make_cap`: the stored valuation is ALREADY
+        # canonical (a `path` is a component tuple by then, not the string
+        # `make_cap` would re-canonicalize), and the declared ceilings are the
+        # ints `split_ceilings` peeled off. Re-canonicalizing a canonical value
+        # raises, which is how this first shipped rendering the erased cone with
+        # the operator's ceiling silently missing from it.
+        params = tuple(sorted(tuple(cap.params) + tuple(declared.items())))
+        try:
+            spelling = cap_order.Cap(cap.token, params).to_str()
+            # and it has to be a spelling the order can READ back. Building the
+            # `Cap` directly skips `make_cap`'s admission rules, so the
+            # round-trip is what keeps this from putting text on a prompt that
+            # is not a capability (`*` tops the order and carries no parameter,
+            # so `*(calls=2)` is not a thing an operator could have granted).
+            cap_order.parse_cap(spelling)
+        except (cap_order.CapError, KeyError, TypeError):
+            return grant["capability"]
+        return spelling
 
     def _grant_refusal_note(self, grant: dict, capability: str,
                             refusal) -> str:
