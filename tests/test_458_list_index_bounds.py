@@ -70,22 +70,31 @@ SLOW_TIERS = ("rust", "java")
 #: The index reaches the subscript through a parameter and the list through a
 #: call, so `check_list_index_bounds` (#938) cannot fold either: this is the
 #: runtime-property case by construction.
+#:
+#: The assertion compares the read WITH ITSELF, and that spelling is the whole
+#: point. `assert at(7) == 0` cannot tell a fault from a wrong value: both read
+#: back as a failing test, which is exactly why the note in
+#: tests/test_cross_tier_execution.py said an equality assert could not express
+#: this row. `at(7) == at(7)` is TRUE of any value a tier invents — ts answered
+#: `undefined` and `Object.is(undefined, undefined)` is true, wasm answered `0`
+#: — so the probe PASSES on a tier that returns and FAILS only on a tier that
+#: faults. The assertion below is therefore that these documents FAIL.
 PAST_END = """
 pub fn xs() -> List[Int] { return [10, 20, 30] }
 pub fn at(i: Int) -> Int { return xs()[i] }
-test "a read past the end must not answer a value" { assert at(7) == 0 }
+test "a read past the end must not answer a value" { assert at(7) == at(7) }
 """
 
 FAR_PAST_END = """
 pub fn xs() -> List[Int] { return [10, 20, 30] }
 pub fn at(i: Int) -> Int { return xs()[i] }
-test "a read far past the end must not answer a value" { assert at(4096) == 0 }
+test "a read far past the end must not answer a value" { assert at(4096) == at(4096) }
 """
 
 NEGATIVE = """
 pub fn xs() -> List[Int] { return [10, 20, 30] }
 pub fn at(i: Int) -> Int { return xs()[i] }
-test "a negative index must not answer a value" { assert at(0 - 1) == 0 }
+test "a negative index must not answer a value" { assert at(0 - 1) == at(0 - 1) }
 """
 
 IN_RANGE = """
