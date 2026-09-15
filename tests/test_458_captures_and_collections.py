@@ -7,26 +7,42 @@ the `Int.MIN` face landed in `tests/test_cross_tier_execution.py`. This file
 pins four more, found the same way: by EXECUTING one source on all six tiers
 and comparing against the py reference, never by reading an emitter.
 
-MEASURED on this machine before the fix (py is the reference throughout;
-openjdk 26.0.2, cargo 1.9x, wasmtime, node 22, go 1.2x):
+MEASURED, by EXECUTING each row on all six tiers at 229bcf9f and comparing
+against the py reference (openjdk 26.0.2, cargo 1.85.1, wasmtime 47.0.3,
+node 26.7.0, go 1.26.5). Every cell below was observed, not read off an
+emitter; a starred cell is the tier that disagreed.
 
   closure reads an enclosing `var`,      py 6 · ts 6 · wasm 6 · rust 6 ·
   `var` reassigned after the arrow       java 6 · **go 105**
-  (`docs/closures.md`: by value)
+  (`docs/closures.md`: by value)         (also wrong for two captures, a `Str`
+                                         capture and a per-iteration `while`
+                                         capture: four rows, one cause)
 
   `[{id:1},{id:2}].indexOf({id:2})`      py 1 · go 1 · rust 1 · java 1 ·
                                          **ts -1** · wasm refused by name
 
+  `[[1],[2,3]].indexOf([2,3])`           py 1 · ts -1 · rust 1 · java 1 ·
+                                         **go DOES NOT BUILD** · wasm refused
+                                         (Go `==` is a compile error on a
+                                         slice, so `[T comparable]` could not
+                                         be instantiated at all)
+
   `[10,20,30,40].slice(2, 99).length()`  py 2 · ts 2 · go 2 · rust 2 ·
                                          java 2 · **wasm 97**
-  `[10,20,30,40].slice(3, 1)`            py/ts/go/rust/java empty ·
-                                         **wasm traps**
+  `[10,20,30,40].slice(3, 1).length()`   py/ts/go/rust/java 0 · **wasm traps**
+  `[10,20,30,40].slice(-2, 4)[0]`        py/ts/go/rust/java 30 · **wasm traps**
   `"abcd".slice(-2, -1)`                 py/ts/go/rust/java "c" · **wasm ""**
 
   `let xs: List[Int] = []`               py/ts/go/wasm/java compile and run ·
                                          **rust DOES NOT COMPILE** (E0282)
 
-Four distinct causes:
+Controls measured green on all six tiers at the same commit, so the rows above
+are not a broken harness: `[10,20,30].indexOf(20)` (1 everywhere),
+`"abcd".slice(2, 99)` ("cd" everywhere), and an unannotated accumulator
+(`var xs = []  xs = xs.push(1)`, 1 on the five tiers that lower it, refused BY
+NAME on wasm).
+
+Five distinct causes:
 
   - **the go tier ignored the arrow's `captures` list.** docs/closures.md
     decides that a revl closure captures strictly BY VALUE, and the front end
@@ -44,6 +60,14 @@ Four distinct causes:
     equal element read back as absent. This is the founding defect of
     tests/test_cross_tier_execution.py (`{a: 1} == {a: 1}` lowered to JS
     `===`) surviving one level down, inside a helper written after it.
+
+  - **the go tier could not search a list its `==` cannot compare.** Same
+    cause, opposite symptom: `revlListIndexOf[T comparable]` cannot be
+    instantiated for a `List[List[T]]`, because Go `==` is a COMPILE ERROR on
+    a slice or on a struct holding one. The document type-checked and emitted
+    and then would not build. The arm now makes the split the `==` arm already
+    made — a scalar element keeps the native operator, everything else goes
+    through `revlEq` (reflect.DeepEqual).
 
   - **the wasm `$list_slice` used both `Int` bounds raw.** No clamp, no
     end-relative negative, no empty-when-reversed — so a high bound past the
@@ -390,3 +414,73 @@ def test_wasm_still_refuses_a_record_equality_by_name():
         _emit("wasm", 'type R = { id: Int }\n'
                       'pub fn eq(a: R, b: R) -> Bool { return a == b }\n')
     assert "equality on this tier is lowerable" in str(failure.value)
+
+
+# ------------------------------------------- the go non-comparable element
+#
+# Measured separately from the ts row above because the SYMPTOM differs. On ts
+# a structurally equal element read back as absent — a wrong answer. On go the
+# module did not build at all: `revlListIndexOf[T comparable]` cannot be
+# instantiated for a `List[List[T]]`, because Go `==` is a compile error on a
+# slice. Both are the same cause (one equality, spelled structurally) and both
+# were reachable from a document the frontend accepted.
+
+NESTED_INDEX_OF = """
+pub fn at(xs: List[List[Int]], v: List[Int]) -> Int { return xs.indexOf(v) }
+"""
+SCALAR_INDEX_OF = """
+pub fn at(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
+"""
+
+
+def test_go_searches_a_non_comparable_element_through_revl_eq():
+    emitted = _emit("go", NESTED_INDEX_OF)
+    assert "revlListIndexOfEq(" in emitted, (
+        "Go `==` is a COMPILE ERROR on a slice, so the `[T comparable]` helper "
+        "could not be instantiated for a `List[List[T]]` at all: this document "
+        f"type-checked, emitted, and would not build:\n{emitted}")
+    assert "func revlListIndexOfEq[T any]" in emitted, emitted
+
+
+def test_go_keeps_the_native_operator_for_a_scalar_element():
+    """NON-VACUITY, and the same split the `==` arm already makes: a scalar
+    element is `comparable`, so it keeps the cheap helper rather than paying
+    for reflection on every comparison."""
+    emitted = _emit("go", SCALAR_INDEX_OF)
+    assert "revlListIndexOf(" in emitted, emitted
+    assert "revlListIndexOfEq(" not in emitted, emitted
+
+
+# ------------------------------------------ the helpers a helper depends on
+#
+# Found while VERIFYING the ts row above, not while reading it. `revlIndexOf`
+# now calls `revlEq`, but it is emitted as part of `_REVL_STR_HELPER` — one
+# block, emitted whole for any of `len`/`length`/`slice`/`charAt`/
+# `charCodeAt`/`indexOf`. Gating `revlEq` on "does this document call
+# `indexOf`" therefore left it undefined in every module that only reads a
+# `.length()`, which `tsc` rejects. The gate is the block's own condition.
+
+LENGTH_ONLY = """
+pub fn n(xs: List[Int]) -> Int { return xs.length() }
+"""
+
+
+def test_every_helper_the_ts_preamble_calls_is_defined_in_the_same_module():
+    """A helper that calls another helper is a dependency the emission gate has
+    to carry. Checked as a closure rather than as one name, so the next helper
+    to grow a call is caught by the same assertion."""
+    import re
+    emitted = _emit("typescript", LENGTH_ONLY)
+    called = set(re.findall(r"\b(revl[A-Za-z0-9_]*)\s*\(", emitted))
+    defined = set(re.findall(r"\bfunction\s+(revl[A-Za-z0-9_]*)", emitted))
+    assert called - defined == set(), (
+        f"emitted module calls {sorted(called - defined)} and defines none of "
+        f"them:\n{emitted}")
+
+
+def test_a_ts_document_with_no_stdlib_call_carries_no_equality_helper():
+    """NON-VACUITY for the widened gate: it is the string-helper block that
+    pulls `revlEq` in, not every document."""
+    emitted = _emit("typescript", "pub fn add(a: Int, b: Int) -> Int { return a + b }\n")
+    assert "function revlEq" not in emitted, emitted
+    assert "function revlIndexOf" not in emitted, emitted
