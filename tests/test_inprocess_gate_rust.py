@@ -504,32 +504,53 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
         "the rust manifest why-trace is not the reference's, verbatim:\n"
         f"  rust: {ambient['into']['message']!r}\n  py:   {py_message!r}")
 
-    # ---------------------------------------------------------- the open half
+    # ------------------------------------------------- the half that has closed
+    # The STANDALONE question about `cache_layer` is now answered, and answered
+    # in the reference's own words: `selfhost/lower.rvl` resolves a component's
+    # `requires`/`provides` annotations against its service table
+    # (docs/design/457 §2.4), so a candidate naming a service its own text does
+    # not declare is REFUSED rather than waved through. This used to be a
+    # conditional clause - "if it became a refusal, it must carry the reference's
+    # tag" - and is now a positive claim, which is the tightening the issue asks
+    # for.
     cache_layer = into_arms["cache_layer"]
     standalone_admitted, _ = _py_verdict(cache_layer["source"])
     assert standalone_admitted is False, (
         "py must refuse this candidate standalone - if that changed, the "
         "contrast this half draws no longer exists")
+    ref_tag, ref_message = _py_reference(cache_layer["source"])
+    assert cache_layer["verdict"] == "refused", (
+        "the rust gate must refuse this candidate standalone: it requires a "
+        "service its own text never declares, which is the reference's own "
+        f"first refusal (got {cache_layer['verdict']})")
+    assert cache_layer["code"] == ref_tag, (
+        f"tag drift: rust {cache_layer['code']!r} != py {ref_tag!r}")
+    assert cache_layer["message"] == ref_message, (
+        "the rust standalone why-trace is not the reference's, verbatim:\n"
+        f"  rust: {cache_layer['message']!r}\n  py:   {ref_message!r}")
+
+    # ---------------------------------------------------------- the open half
+    # What is STILL open is the other side of the same question: py's
+    # `admit_into` resolves `requires store: Store` against the running `Kv`
+    # PROVIDER and ADMITS; the rust gate resolves the service NAME against the
+    # manifest's `!services` block, finds it, and has nothing left to object to -
+    # which is a no-objection, not an admission. Closing that last step is the
+    # rest of the type layer (docs/design/457 T4-T6).
     public = py_gate.admit_into(cache_layer["source"], base)
     assert public.admitted is True, (
         "the py gate must still ADMIT this candidate INTO the running "
         "composition by resolving its `requires` against the live provider; "
-        "that resolution is what rust still cannot do")
+        "issuing that admission is what rust still cannot do")
     assert cache_layer["into"]["verdict"] == "no_objection", (
-        "rust cannot resolve a requires against the running composition, so the "
-        "only honest answer is a no-objection - if this became a refusal, the "
-        "self-host may have gained the layer (then tighten this test); if it "
-        f"became anything else, that is a defect ({cache_layer['into']['verdict']})")
+        "rust has no admission arm on the VERDICT surface, so the only honest "
+        "answer on the manifest arm is a no-objection - if this became a "
+        "refusal, that is a false alarm and a defect "
+        f"({cache_layer['into']['verdict']})")
     assert cache_layer["into"]["code"] is None, (
         "a no-objection must carry no code")
     assert '"admitted":false' in cache_layer["into"]["wire"], (
         "the still-open half may never read as an admission either")
     assert '"admitted":false' in cache_layer["wire"]
-    if cache_layer["verdict"] == "refused":
-        # It may legitimately become a refusal if the self-host gains the
-        # standalone requires-resolution check - that is an improvement, but it
-        # must then carry the reference's own tag.
-        assert cache_layer["code"] == _py_reference(cache_layer["source"])[0]
 
 
 # ------------------------------------------------- the two harnesses' bytes

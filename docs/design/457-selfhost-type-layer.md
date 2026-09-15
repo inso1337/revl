@@ -217,7 +217,16 @@ default is checked against the field type (`t3`), and a method-local binding
 may not shadow a component name (`g6_method_local_shadows_component`).
 `unknown service `S` in `requires`/`provides` of C` belongs here too (it is
 the standalone refusal the harness's `cache_layer` candidate gets, and the
-crate's `TYPE_LAYER_GAP` list carries the `provides` twin).
+crate's `TYPE_LAYER_GAP` list carried the `provides` twin).
+
+**That one has LANDED, ahead of T4** — see T4a in section 5. It is the only
+obligation in this section that needs no expression algebra: the component
+header carries a name, and the decision is whether the program declares a
+service by that name. The two exemptions it costs are written into the code:
+a parameterized annotation (`Stream[T]`) is not a service, as the reference
+also has it, and a text carrying a `use` declaration has no knowable service
+set because a module can export a service and this gate does not read modules.
+Both under-refuse, which is the direction the gate is allowed to err in.
 
 `selfhost/checker.rvl` slice two (`check_service_src`) already ports a part of
 this message-for-message (G4 declaration bound, required-service argument
@@ -566,6 +575,27 @@ Oracle: IR and emitted-bytes byte-exactness over every corpus (`test_selfhost_
 lower_ir.py`, `test_selfhost_compile.py`, every `test_selfhost_emit_*.py`),
 `tools/selfhost_differential_survey.py` unchanged. Net negative lines; its
 whole value is that two inference engines can no longer drift.
+
+**T4a. The component header's service-existence rule.** LANDED, out of order:
+it sits in T4's list at 2.4 but depends on nothing T1..T3 build, because it
+resolves a NAME rather than a term. `selfhost/lower.rvl` reads each component
+header's `<key>: <Service>` annotations with their lines (`SvcRef`, requires
+before provides, which is the reference's own order: `Env.__init__` walks
+`comp.requires`, `_lower_component` the provisions), and refuses the first that
+resolves against neither the program's own service declarations nor — on the
+ambient path — the running composition's. The item-346 `!services` block, which
+until now the manifest fold parsed and discarded, is what supplies the second
+set; its `!services` HEADER is the exhaustiveness claim, and a wire that makes
+no claim decides nothing. What it buys, measured: `admit_src` and `admit_into`
+now give DIFFERENT answers about `bench/admission_latency.py::CANDIDATE`, so
+clause 1 of section 6's exit test is met — the rust gate refuses `cache_layer`
+standalone with the reference's own sentence, and lifts that refusal against a
+manifest that declares `Store`. Four corpus documents (`demo/components/*`,
+`examples/ecosystem-consumer/candidates/leaky_tool.rvl`) moved from
+`no-objection-out-of-slice` to `agree-refuse/G1`, and the crate's
+`TYPE_LAYER_GAP` lost its `provides` row to the agreement corpus. What it does
+NOT buy: nothing about requirement RESOLUTION or the `Admitted` arm, which are
+still T4/T5/T6 in full.
 
 **T4. Provide-method and component bodies.** `cir_*` typed against the
 service signature (2.4); `unknown service` in `requires`/`provides`; config

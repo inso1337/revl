@@ -275,13 +275,24 @@ def _classify(e: RevlError) -> str:
     # message-shape families for the code-less remainder. It is append-only and
     # deliberately narrow: it must not name a refusal outside the type layer.
     # The extern-slot G4 family has since landed for real (item 391, above) and
-    # was struck from this list; `a2`/`a9`, `use`, the parser-form fixtures, the
-    # `unknown service` provide-clause refusals and the extern G5s (`deferred`
+    # was struck from this list, as has the component header's service-existence
+    # rule (docs/design/457 §2.4, the `in `requires`/`provides` of` arm below);
+    # `a2`/`a9`, `use`, the parser-form fixtures and the extern G5s (`deferred`
     # in teardown, a witnessed inverse that reaches an emission) stay "OUT:"
     # until their own slice lands and can refuse them natively.
     if e.code in ("T1", "T2", "HOST-METHOD"):
         return e.code
     if "is not declared in this function" in m:
+        return "G1"
+    # the component header's service-existence rule (`Env.__init__` over
+    # `comp.requires`, `_lower_component`'s `comp.provides` loop). The GATE now
+    # spells both byte for byte, so naming them here is what turns a parked
+    # divergence into a measured agreement. The marker carries the clause on
+    # purpose: lower.py's third `unknown service `S`` — the one a `provide`
+    # STATEMENT draws for a service the component never declared — is a
+    # different site the gate does not decide, and stays "OUT:".
+    if ("unknown service `" in m
+            and ("in `requires` of" in m or "in `provides` of" in m)):
         return "G1"
     if ("cannot reassign" in m
             or "is already declared in this function" in m
@@ -2108,6 +2119,28 @@ fn f() -> Int {
     *[(f"{label} does not swallow the next operation",
        _sop(clause, _SOP_PLAIN_PUT, impl), "G4")
       for label, clause, impl in _SOP_CLAUSES],
+    # ---- docs/design/457 §2.4: the component header's service-existence rule -
+    # The reference resolves every `requires`/`provides` annotation against its
+    # service table (`Env.__init__` for the requirements, `_lower_component`'s
+    # `comp.provides` loop for the provisions) and refuses an unresolved one by
+    # name. Both are here, plus the ORDER between them: the reference decides
+    # every requirement before it reaches the provisions, so a component whose
+    # two clauses both dangle is refused for its requirement.
+    ("an undeclared service in requires",
+     "component C requires s: S { }", "G1"),
+    ("an undeclared service in provides",
+     "component C provides s: S { }", "G1"),
+    ("requires is decided before provides",
+     "component C requires a: A provides b: B { }", "G1"),
+    # the issue-346 harness candidate, verbatim: the STANDALONE question about a
+    # component that requires a service the running composition provides. The
+    # manifest arm of the same bytes is `test_the_manifest_gap_is_priced_not_hidden`.
+    ("a candidate requiring an ambient-only service, standalone", """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheLayer requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.get(key) }
+}
+""", "G1"),
 ]
 
 
@@ -2979,6 +3012,37 @@ _TYPE_LAYER_CASES = [
     for family, rows in TYPE_LAYER_GAP.items()
     for name, tag in rows
 ]
+
+
+def test_the_service_existence_rule_stops_at_a_use_declaration(admit):
+    """The declared frontier of the component header's service-existence rule
+    (docs/design/457 §2.4), pinned as a divergence rather than left to be
+    discovered.
+
+    A `use` declaration can IMPORT a service — the reference admits
+    `use "./svc.rvl" { Store }` followed by `requires store: Store` when the
+    module is supplied — and `p_top` steps over `use` without reading the module,
+    so a text carrying one has no knowable service set. The gate therefore
+    decides nothing there. That is the UNDER-refusing direction, which is the one
+    this gate is allowed to err in: refusing a program the reference admits is
+    the false alarm it may not produce.
+
+    The reference's own verdict on such a single source is the missing-`modules=`
+    refusal, which is out of this gate's slice for the same reason the three
+    `v2_use_*` fixtures are: the crate cannot supply `modules=` either. When a
+    later slice teaches the gate to read modules, this test flips to an
+    agreement — it is not a waiver on the rule, it is the rule's boundary."""
+    src = 'use "./svc.rvl" { S }\ncomponent C requires s: S { }\n'
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag.startswith("OUT:") and "`modules=`" in ref_msg, (
+        f"the reference's single-source `use` refusal changed: {ref_msg!r}")
+    assert admit(src) == "", (
+        "a text whose services may come from a module must draw no "
+        "service-existence verdict")
+    # ... and the SAME text without the `use` is refused, so the exemption is
+    # doing the work rather than the program being harmless.
+    assert admit("component C requires s: S { }\n") == (
+        "G1|unknown service `S` in `requires` of C")
 
 
 def test_the_type_layer_gap_is_exactly_44_fixtures():

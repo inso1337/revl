@@ -330,9 +330,23 @@ type Route   = { key: Str, rlms: List[Str], strat: Str }
 // `_line(entry["name"])`), the ROUTE gap, the G3 cycle member, the setup
 // async-reach A1, and the `boot` count — as well as the parse-time metadata
 // refusal carried in `refuse`.
+// One `<key>: <Service>` annotation in a component header, in the order the
+// reference checks it (docs/design/457-selfhost-type-layer.md §2.4): every
+// `requires` entry in declaration order, then every `provides` entry, because
+// `Env.__init__` walks `comp.requires` before `_lower_component` reaches its
+// `comp.provides` loop. `line` is the KEY token's line, which is the line
+// `_parse_component` stamps on the entry (`bline = self.peek().line`) and
+// therefore the line the reference's diagnostic carries.
+//
+// A PARAMETERIZED annotation (`requires k: Stream[T]`, item 130's coeffect) is
+// NOT recorded: the reference exempts it from the service table by name
+// (`svc.startswith("Stream[")`), so there is no service to resolve and nothing
+// for this check to decide.
+type SvcRef  = { key: Str, svc: Str, line: Int, clause: Str }
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
                  reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey],
-                 routes: List[Route], refuse: Str, line: Int }
+                 routes: List[Route], refuse: Str, line: Int,
+                 svcRefs: List[SvcRef] }
 
 type Bind = { name: Str, ty: Str }
 
@@ -1046,12 +1060,21 @@ fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
             rq: List[Bind], su: List[Stmt], iso: List[ProvKey],
-            rts: List[Route], refuse: Str, ln: Int) -> CompD {
+            rts: List[Route], refuse: Str, ln: Int,
+            srefs: List[SvcRef]) -> CompD {
   return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso,
-           routes: rts, refuse: refuse, line: ln }
+           routes: rts, refuse: refuse, line: ln, svcRefs: srefs }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
+
+// Every `requires` annotation, then every `provides` one — the order the
+// reference decides them in, so the FIRST unresolved name this list yields is
+// the one the reference's diagnostic names.
+fn concat_refs(reqs: List[SvcRef], provs: List[SvcRef], i: Int) -> List[SvcRef] {
+  if (i >= provs.length()) { return reqs }
+  return concat_refs(reqs.push(provs[i]), provs, i + 1)
+}
 
 // ---------------------------------------------------------------- statements
 //
@@ -2317,6 +2340,12 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var j = i + 2
   var reqs: List[Bind] = []
   var provh: List[Bind] = []
+  // the same annotations again, with their lines and split by clause, for the
+  // service-existence check (`unknown_svc_verdict`). Kept beside `reqs`/`provh`
+  // rather than folded into them because `Bind` is this file's general
+  // name-to-type pair and three other walks read it.
+  var reqRefs: List[SvcRef] = []
+  var provRefs: List[SvcRef] = []
   while (atw(ts, j, "requires") || atw(ts, j, "provides")) {
     let isReq = atw(ts, j, "requires")
     var k = j + 1
@@ -2325,6 +2354,16 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
       if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
         let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
         if (isReq) { reqs = reqs.push(pair) } else { provh = provh.push(pair) }
+        // `Stream[T]` and every other PARAMETERIZED capability is skipped: the
+        // reference resolves only a bare service name against its service
+        // table, and the bracketed forms are out of this slice entirely.
+        if (!atk(ts, k + 3, "[")) {
+          let ref_ = { key: tkc(ts, k).text, svc: tkc(ts, k + 2).text,
+                       line: tkc(ts, k).line,
+                       clause: isReq ? "requires" : "provides" }
+          if (isReq) { reqRefs = reqRefs.push(ref_) }
+          else { provRefs = provRefs.push(ref_) }
+        }
         k += 3
       } else { k += 1 }
     }
@@ -2356,7 +2395,8 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   return mk_step(push_comp(pg,
                  mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso,
-                          body.routes, body.refuse, tkc(ts, i).line)),
+                          body.routes, body.refuse, tkc(ts, i).line,
+                          concat_refs(reqRefs, provRefs, 0))),
                  end)
 }
 
@@ -4345,6 +4385,76 @@ fn check_cache_fns(fns: List[FnD]) -> Verd {
     i += 1
   }
   return no_verd()
+}
+
+// ------------------------------------------- the service-existence obligation
+//
+// docs/design/457-selfhost-type-layer.md §2.4: `unknown service `S` in
+// `requires`/`provides` of C` — the declaration-level half of the component
+// dialect's type layer, and the standalone refusal the item-346 harness's
+// `cache_layer` candidate draws from the reference.
+//
+// Reference sites, in the order `_lower_component` reaches them:
+//   * `Env.__init__` (lower.py), over `comp.requires` in declaration order,
+//     before anything else the component decides. A `Stream[...]` requirement
+//     is exempt by name — it is a coeffect, not a service.
+//   * `_lower_component`'s `comp.provides` loop, after the config defaults and
+//     before the body.
+// Both RAISE, so the first unresolved name in that order is the whole verdict
+// for the component, which is why `svcRefs` is built requires-first.
+//
+// THE FRONTIER, and why it is the refusing direction that needs one. Refusing a
+// program the reference ADMITS is the false-alarm direction this gate may not
+// err in, so the check runs only where the gate KNOWS the full set of service
+// names:
+//   * a `use` declaration can import a service (`use "./svc.rvl" { Store }`
+//     followed by `requires store: Store` is admitted by the reference under
+//     `modules=`), and `p_top` steps over `use` without reading the module. A
+//     text carrying one therefore has no knowable service set and is skipped.
+//   * on the ambient path the running composition declares services of its own.
+//     They arrive as the item-346 `!services` block, and only the `!services`
+//     header makes that block exhaustive (`manifest_svcs_known`). A wire that
+//     makes no claim is skipped for the same reason.
+// Both exemptions UNDER-refuse, which is the direction the gate is allowed to
+// err in; neither can turn a reference refusal into an admission.
+fn svc_known(names: List[Str], amb: List[Str], svc: Str) -> Bool {
+  return contains(names, svc) || contains(amb, svc)
+}
+
+fn unknown_svc_msg(svc: Str, clause: Str, comp: Str) -> Str {
+  return "unknown service `".concat(svc).concat("` in `").concat(clause)
+    .concat("` of ").concat(comp)
+}
+
+fn unknown_svc_at(comp: CompD, names: List[Str], amb: List[Str],
+                  i: Int) -> Verd {
+  if (i >= comp.svcRefs.length()) { return no_verd() }
+  let r = comp.svcRefs[i]
+  if (!svc_known(names, amb, r.svc)) {
+    return mk_verd(tagged("G1", unknown_svc_msg(r.svc, r.clause, comp.name)),
+                   r.line)
+  }
+  return unknown_svc_at(comp, names, amb, i + 1)
+}
+
+// The program's own declared service names.
+fn svc_names(svcs: List[SvcD], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= svcs.length()) { return acc }
+  return svc_names(svcs, i + 1, acc.push(svcs[i].name))
+}
+
+// Does the text carry a `use` declaration? `use` is a keyword, so a linear scan
+// of the token stream is exact — there is no other position it can appear in.
+// ITERATIVE on purpose: this walks the WHOLE stream, and the deepest documents
+// in the corpus are this file's own siblings (`selfhost/compile.rvl` is tens of
+// thousands of tokens), so a per-token frame exhausts the descent.
+fn has_use_decl(ts: List[Token]) -> Bool {
+  var i = 0
+  while (i < ts.length()) {
+    if (atw(ts, i, "use")) { return true }
+    i += 1
+  }
+  return false
 }
 
 // G4 + A1 over one component. `no_verd()` = admitted, else a tagged refusal
@@ -7075,7 +7185,8 @@ type NoLink = { done: Bool, refs: List[Verd] }
 // instead, so a LINE TIE between a withdrawal and one of those two fell the
 // opposite way on the two sides. `admit_src` passes `[]`, so the single-source
 // path is byte-identical.
-fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd]) -> NoLink {
+fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
+                   ambSvcs: List[Str], ambSvcsKnown: Bool) -> NoLink {
   // the ADT constructors the program declares join the callable universe a bare
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
@@ -7123,6 +7234,10 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd]) -> NoLink {
   // unit so `admit_src` can order every refusal by `(line, seq)`.
   var refs: List[Verd] = []
   let cnames = comp_names(pg.comps, 0, [])
+  // the service-existence obligation's inputs, computed once: the declared
+  // names, and whether the gate knows the full set at all (see `svc_known`).
+  let sNames = svc_names(pg.svcs, 0, [])
+  let svcsDecidable = ambSvcsKnown && !has_use_decl(ts)
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
@@ -7132,7 +7247,15 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd]) -> NoLink {
     // validation — `comp.refuse`, already the full "<TAG>|<message>"), else a
     // code-less spawn-form refusal (bind-to-a-handle, unknown target), else the
     // component's own G4/A1/G1 verdict.
-    if (comp.refuse != "") {
+    // the HEADER obligation runs first: the reference decides `requires` in
+    // `Env.__init__` and `provides` immediately after, both before it lowers a
+    // single body statement, so an unknown service beats every body verdict
+    // `comp.refuse` and `check_component` carry.
+    let usv = svcsDecidable ? unknown_svc_at(comp, sNames, ambSvcs, 0)
+                            : no_verd()
+    if (usv.v != "") {
+      refs = refs.push(usv)
+    } else if (comp.refuse != "") {
       refs = refs.push(mk_verd(comp.refuse, comp.line))
     } else {
       let sf = spawn_form_comp(comp, cnames)
@@ -7171,7 +7294,9 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd]) -> NoLink {
 }
 
 fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
-  let nl = collect_nonlink(ts, pg, [])
+  // the single-source path: no ambient services, and the text IS the whole
+  // world, so its own service declarations are the complete set.
+  let nl = collect_nonlink(ts, pg, [], [], true)
   if (nl.done) { return nl.refs }
   // the G2/ROUTE/G3 link collects the rest, in that order (empty seed: a single
   // source composes only against its own text — no ambient provisions,
@@ -7354,15 +7479,20 @@ fn cut(s: Str, sep: Str) -> Cut {
 // deferred wave — and REFUSES admission by name rather than being silently
 // skipped (a row that parses and does nothing is worse than one that refuses).
 //
-// The item-346 SERVICE BLOCK (`!services` + `:S` rows) is parsed and validated
-// but adds no field here: a service declaration is not a composition edge, so
-// there is nothing for G2/G3, the withdrawal check or the realm table to fold it
-// into. The certifier that DOES use it reads the wire directly. A ROUTE row
-// (`C>k/r1,r2`, issue #1036) is the contrast that shows where the line is: its
-// legs ARE composition edges and a per-realm existence obligation, so it gets a
-// field (`routes`) and is folded in full.
+// The item-346 SERVICE BLOCK (`!services` + `:S` rows) contributes no
+// composition edge — a service declaration is not a provision, a requirement or
+// a node, so G2/G3, the withdrawal check and the realm table have nothing to
+// fold it into. What it DOES decide is whether a component's `requires k: S`
+// resolves: `svcs` is the running composition's declared service names and
+// `svcsKnown` is the `!services` completeness claim over them (a wire without
+// that header makes NO claim, src/revl/manifest.py's `SERVICES_HEADER`), which
+// is what `unknown_svc_verdict` reads. A ROUTE row (`C>k/r1,r2`, issue #1036)
+// is the contrast that shows where the composition line is: its legs ARE edges
+// and a per-realm existence obligation, so it gets a field (`routes`) and is
+// folded in full.
 type Manifest = { provs: List[Prov3], reqs: List[MReq], routes: List[MRoute],
-                  mnames: List[Str], repl: List[Str], halted: Bool, bad: Str }
+                  mnames: List[Str], repl: List[Str], halted: Bool, bad: Str,
+                  svcs: List[Str], svcsKnown: Bool }
 
 fn add_mname(names: List[Str], name: Str) -> List[Str] {
   if (contains(names, name)) { return names }
@@ -7440,37 +7570,48 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 // needs the type layer and stays open, so an incompatible redeclaration remains a
 // no-objection here (under-refusing, the direction this gate is allowed to err
 // in) rather than being refused in the reference's words.
+// `man` with `bad` set — the one field every malformed row writes, spelled once
+// so a new row kind cannot restate the six carried fields wrongly.
+fn man_bad(man: Manifest, msg: Str) -> Manifest {
+  return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+           mnames: man.mnames, repl: man.repl, halted: man.halted,
+           svcs: man.svcs, svcsKnown: man.svcsKnown,
+           bad: tagged("MANIFEST", msg) }
+}
+
 fn parse_row(row: Str, man: Manifest) -> Manifest {
   if (man.bad != "") { return man }
   if (row.slice(0, 1) == "!") {
     if (row == "!halted") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               mnames: man.mnames, repl: man.repl, halted: true, bad: "" }
+               mnames: man.mnames, repl: man.repl, halted: true,
+               svcs: man.svcs, svcsKnown: man.svcsKnown, bad: "" }
     }
-    // the completeness claim over the `:S` rows. It carries no data of its own —
-    // the claim is read by the admission certifier, which parses the same wire.
+    // the completeness claim over the `:S` rows: with it, the service block
+    // ENUMERATES the running composition's services and a name absent from it
+    // is absent from the composition. Without it a reader knows nothing, which
+    // is what `svcsKnown` carries to `unknown_svc_verdict`.
     if (row == "!services") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
+               mnames: man.mnames, repl: man.repl, halted: man.halted,
+               svcs: man.svcs, svcsKnown: true, bad: "" }
     }
-    return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-             mnames: man.mnames, repl: man.repl, halted: man.halted,
-             bad: tagged("MANIFEST", "unrecognized manifest header row `".concat(row).concat("`")) }
+    return man_bad(man, "unrecognized manifest header row `".concat(row)
+      .concat("`"))
   }
   if (row.slice(0, 1) == ":") {
     // a service the running composition declares. Its name is held to the same
     // BARE identifier rule a withdrawal name is — anything carrying a separator
-    // is a garbled row, not a declaration — and is then discarded: see the note
-    // above for why this fold has nothing to compute from it.
+    // is a garbled row, not a declaration.
     let sname = row.slice(1, row.length())
     if (!bare_ident(sname, 0)) {
-      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               mnames: man.mnames, repl: man.repl, halted: man.halted,
-               bad: tagged("MANIFEST", "manifest service row `".concat(row)
-                 .concat("` does not name a service")) }
+      return man_bad(man, "manifest service row `".concat(row)
+        .concat("` does not name a service"))
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-             mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
+             mnames: man.mnames, repl: man.repl, halted: man.halted,
+             svcs: contains(man.svcs, sname) ? man.svcs : man.svcs.push(sname),
+             svcsKnown: man.svcsKnown, bad: "" }
   }
   if (row.slice(0, 1) == "-") {
     // a withdrawal names a component, nothing more: `-C`. A name carrying a
@@ -7478,22 +7619,19 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     // read fails closed rather than withdrawing nothing in silence.
     let name = row.slice(1, row.length())
     if (!bare_ident(name, 0)) {
-      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               mnames: man.mnames, repl: man.repl, halted: man.halted,
-               bad: tagged("MANIFEST", "manifest replacement row `".concat(row)
-                 .concat("` does not name a component")) }
+      return man_bad(man, "manifest replacement row `".concat(row)
+        .concat("` does not name a component"))
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
              mnames: man.mnames,
              repl: contains(man.repl, name) ? man.repl : man.repl.push(name),
-             halted: man.halted, bad: "" }
+             halted: man.halted, svcs: man.svcs, svcsKnown: man.svcsKnown,
+             bad: "" }
   }
   if (ident_led(row)) {
     if (row.indexOf("=") != 0 - 1) {
-      return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               mnames: man.mnames, repl: man.repl, halted: man.halted,
-               bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
-                 .concat("` needs the deferred handoff/type-layer wave (item 186)")) }
+      return man_bad(man, "manifest handoff row `".concat(row)
+        .concat("` needs the deferred handoff/type-layer wave (item 186)"))
     }
     // the ROUTE row (issue #1036) is read BEFORE the requirement and provision
     // rows: it carries a `/` of its own (the realm field) and would otherwise
@@ -7507,22 +7645,22 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       // silence (which is exactly the blindness this row kind removes).
       if (!bare_ident(a.s, 0) || !bare_ident(b.s, 0)
           || a.rest.indexOf("/") == 0 - 1) {
-        return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-                 mnames: man.mnames, repl: man.repl, halted: man.halted,
-                 bad: tagged("MANIFEST", "manifest route row `".concat(row)
-                   .concat("` does not name a component, a key and its realms")) }
+        return man_bad(man, "manifest route row `".concat(row)
+          .concat("` does not name a component, a key and its realms"))
       }
       return { provs: man.provs, reqs: man.reqs,
                routes: man.routes.push({ comp: a.s, key: b.s,
                                          rlms: split_labels(b.rest, []) }),
                mnames: add_mname(man.mnames, a.s), repl: man.repl,
-               halted: man.halted, bad: "" }
+               halted: man.halted, svcs: man.svcs, svcsKnown: man.svcsKnown,
+               bad: "" }
     }
     if (row.indexOf("<") != 0 - 1) {
       let a = cut(row, "<")
       return { provs: man.provs, reqs: man.reqs.push(parse_mreq(a.s, a.rest)),
                routes: man.routes, mnames: add_mname(man.mnames, a.s),
-               repl: man.repl, halted: man.halted, bad: "" }
+               repl: man.repl, halted: man.halted, svcs: man.svcs,
+               svcsKnown: man.svcsKnown, bad: "" }
     }
     if (row.indexOf("/") != 0 - 1) {
       let a = cut(row, "/")
@@ -7530,12 +7668,11 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       return { provs: man.provs.push({ key: b.s, rlm: b.rest, comp: a.s }),
                reqs: man.reqs, routes: man.routes,
                mnames: add_mname(man.mnames, a.s),
-               repl: man.repl, halted: man.halted, bad: "" }
+               repl: man.repl, halted: man.halted, svcs: man.svcs,
+               svcsKnown: man.svcsKnown, bad: "" }
     }
   }
-  return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-           mnames: man.mnames, repl: man.repl, halted: man.halted,
-           bad: tagged("MANIFEST", "unrecognized manifest row `".concat(row).concat("`")) }
+  return man_bad(man, "unrecognized manifest row `".concat(row).concat("`"))
 }
 
 // An empty row (a trailing/duplicate ";") is skipped — a provisions-only wire
@@ -7549,7 +7686,21 @@ fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
 
 fn parse_manifest(m: Str) -> Manifest {
   return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], mnames: [],
-                                  repl: [], halted: false, bad: "" })
+                                  repl: [], halted: false, svcs: [],
+                                  svcsKnown: false, bad: "" })
+}
+
+// Does this wire ENUMERATE the running composition's services? The `!services`
+// header is the claim, and a wire that carries NO composition at all is the
+// second case: `admit_ambient(src, "")` is `admit_src(src)` byte for byte, so
+// an empty wire has to mean an empty running composition — which declares no
+// services — rather than an unknown one. Anything else (a composition wire
+// rendered before the service block existed, or by a producer that had no
+// service table to render) makes no claim, and `unknown_svc_verdict` then
+// decides nothing.
+fn manifest_svcs_known(man: Manifest) -> Bool {
+  if (man.svcsKnown) { return true }
+  return man.mnames.length() == 0 && man.repl.length() == 0
 }
 
 // ------------------------------------- item 186, the replacement wave (part 1)
@@ -7754,7 +7905,8 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   // a spawn-bound or BOOT refusal then fell to the gate one way and to the
   // reference the other.
   let nl = collect_nonlink(ts, pg,
-    withdrawal_refusals(keptReqs, lost, pg.comps, 0))
+    withdrawal_refusals(keptReqs, lost, pg.comps, 0),
+    man.svcs, manifest_svcs_known(man))
   if (nl.done) { return pick_min(nl.refs) }
   let wrefs = nl.refs
   // the LINK is the half the running manifest reshapes. Seed the per-(key,
@@ -12703,17 +12855,93 @@ test "a cycle closing through a routed running consumer is refused (ambient G3)"
     == "G3|dependency cycle: Router -> StoreB -> Router (G3)"
 }
 
+// ---- the component header's service-existence rule (docs/design/457 §2.4) ----
+//
+// The reference resolves every `requires`/`provides` annotation against its
+// service table and refuses an unresolved one by name. These are the gate's
+// port, in the reference's own words.
+
+test "an undeclared service in requires is refused by name" {
+  assert admit_src("component C requires s: S { }")
+    == "G1|unknown service `S` in `requires` of C"
+}
+
+test "an undeclared service in provides is refused by name" {
+  assert admit_src("component C provides s: S { }")
+    == "G1|unknown service `S` in `provides` of C"
+}
+
+// The reference walks `comp.requires` in `Env.__init__`, before it reaches the
+// `provides` loop, so a component whose BOTH clauses dangle is refused for its
+// requirement first.
+test "requires is decided before provides" {
+  assert admit_src("component C requires a: A provides b: B { }")
+    == "G1|unknown service `A` in `requires` of C"
+}
+
+// NON-VACUITY: a declared service resolves and the component admits.
+test "a declared service resolves" {
+  assert admit_src("service S { fn p(k: Str) -> Str } component C provides s: S { provide s { fn p(k) = k } }")
+    == ""
+}
+
+// `requires k: Stream[T]` is a COEFFECT, not a service: the reference exempts it
+// from the service table by name, so the gate must not look it up either.
+test "a Stream requirement is not a service lookup" {
+  assert admit_src("""service E { fn go(k: Str) -> Str } event Tick(key: id) { id: Str, at: Int } component C requires sub: Stream[Tick] provides e: E { provide e { fn go(k) = k } }""")
+    == ""
+}
+
+// The ambient arm: the running composition's `:S` rows are what a candidate's
+// `requires` resolves against. This is issue #346's `cache_layer` shape — the
+// candidate is refused STANDALONE for a service it never declares, and admitted
+// INTO a manifest that declares it.
+test "a candidate requires resolves against the running service block" {
+  let cand = "service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
+  assert admit_src(cand) == "G1|unknown service `Store` in `requires` of CacheLayer"
+  assert admit_ambient(cand, "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc") == ""
+}
+
+// ... and the claim is the `!services` HEADER, not the rows: a composition wire
+// that makes no claim about its services leaves the question undecided rather
+// than refusing a candidate whose requirement the running composition may well
+// satisfy (src/revl/manifest.py, "A wire carrying no `!services` header makes no
+// claim about the running services").
+test "a wire that claims nothing about its services decides nothing" {
+  let cand = "service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
+  assert admit_ambient(cand, "Kv/store/;App/app/;App<store") == ""
+}
+
+// ... while a wire that DOES claim exhaustiveness and omits the name refuses,
+// exactly as the standalone question does.
+test "an exhaustive service block that omits the name still refuses" {
+  let cand = "service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
+  assert admit_ambient(cand, "Kv/store/;App/app/;App<store;!services;:AppSvc")
+    == "G1|unknown service `Store` in `requires` of CacheLayer"
+}
+
+// The empty wire is an empty RUNNING COMPOSITION, not an unknown one, which is
+// what keeps `admit_ambient(src, "")` == `admit_src(src)` true on this arm too.
+test "the empty wire keeps the standalone verdict" {
+  let cand = "service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
+  assert admit_ambient(cand, "") == admit_src(cand)
+}
+
 test "a handoff row refuses until the deferred type layer lands" {
   let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
   assert admit_ambient(clean, "OldStore=db:D")
     == "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred handoff/type-layer wave (item 186)"
 }
 
-// The item-346 service block. It changes NO verdict this fold computes — that is
-// the claim, so it is measured: the same admissions and the same refusals hold
-// with the block on the wire and with it off, INCLUDING alongside the
-// replacement wave's withdrawal rows and realm-bearing requirement rows.
-test "the service block leaves every ambient verdict unmoved" {
+// The item-346 service block. It contributes no COMPOSITION edge — no
+// provision, no requirement, no graph node — so it moves no G2/ROUTE/G3/
+// withdrawal verdict, and that is measured: the same admissions and the same
+// refusals hold with the block on the wire and with it off, INCLUDING alongside
+// the replacement wave's withdrawal rows and realm-bearing requirement rows.
+// (What it DOES decide is whether a candidate's `requires k: S` resolves — the
+// service-existence tests below, whose programs name a service the incoming
+// text does not declare. Every program in this test declares its own.)
+test "the service block leaves every ambient composition verdict unmoved" {
   let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
   assert admit_ambient(clean, "OldCache/cache/;!services;:D;:Other") == ""
   assert admit_ambient(clean, "OldStore/db/;!services;:D")

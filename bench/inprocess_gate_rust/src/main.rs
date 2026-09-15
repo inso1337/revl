@@ -54,23 +54,28 @@
 //! candidate rather than to restate the design's expectations. Three things the
 //! measurement says, none of which was safe to assume:
 //!
-//! 1. **The gate catches the composition layer and nothing else.** Of the seven
-//!    batch candidates the py admission gate REFUSES, this gate refuses two
-//!    (`G2` provision conflict, `G4` undeclared emission). The other five - an
-//!    unresolved `requires`, an incomplete `provide`, a genuine parse failure, a
-//!    draft with an open hole, a type error - come back as no-objections. Every
-//!    one is in the tolerated direction (a no-objection is never an admission),
-//!    and every one is a reason a host may not treat a no-objection as a green.
+//! 1. **The gate catches the composition layer and the component header, and
+//!    nothing else.** Of the seven batch candidates the py admission gate
+//!    REFUSES, this gate refuses three (`G2` provision conflict, `G4`
+//!    undeclared emission, and the `G1` header rule - a `requires`/`provides`
+//!    naming a service the text never declares). The other four - an incomplete
+//!    `provide`, a genuine parse failure, a draft with an open hole, a type
+//!    error - come back as no-objections. Every one is in the tolerated
+//!    direction (a no-objection is never an admission), and every one is a
+//!    reason a host may not treat a no-objection as a green.
 //! 2. **The manifest arm refuses what py refuses, and admits nothing.** The
 //!    realistic agent shape - admit a candidate AGAINST the running
 //!    composition - is available here, and the batch carries the two
 //!    candidates that price it. A candidate that re-provides a key the running
 //!    composition already holds is REFUSED here (`G2`, the same code and the
-//!    same why-trace the py gate gives). The py harness's `cache_layer`,
-//!    whose `requires` RESOLVES against the running provider, is ADMITTED by
-//!    py and gets a no-objection here: that is the half of the question this
-//!    gate does not answer, and it is reported as a gap rather than as an
-//!    agreement.
+//!    same why-trace the py gate gives). The py harness's `cache_layer` is the
+//!    other: standalone it is REFUSED here, in the reference's own words,
+//!    because it names a service its text never declares; against the running
+//!    composition the name RESOLVES out of the manifest's `!services` block and
+//!    this gate has nothing left to object to. py goes one step further and
+//!    ISSUES an admission, resolving the requirement against the live provider.
+//!    That last step is the half of the question this gate does not answer, and
+//!    it is reported as a gap rather than as an agreement.
 //! 3. **The screen is not cheap, and its cost is super-linear in candidate
 //!    size.** The py in-process round-trip is tenths of a millisecond. This one
 //!    is milliseconds at 218 bytes and grows roughly with the SQUARE of the
@@ -150,12 +155,16 @@ component CacheLayer requires store: Store provides cache: Cache {
 
 /// `bench/admission_latency.py::CANDIDATE`, the py harness's `cache_layer`. py
 /// ADMITS it INTO the running composition (`admit_into`) and REFUSES it
-/// standalone. Standalone this gate raises no objection to a `requires` that
-/// resolves to nothing; admitted INTO the held composition it still raises no
-/// objection, because the fold has nothing to refuse - `cache_layer` neither
-/// collides with `Kv`/`App` nor closes a cycle. That is the still-open half of
-/// the manifest question, priced rather than papered over: RESOLVING the
-/// `requires` and ADMITTING is the reference type layer.
+/// standalone. This gate now answers both questions about it. STANDALONE it is
+/// refused with the reference's own first refusal - `unknown service `Store` in
+/// `requires` of CacheLayer` - because the component header's service-existence
+/// rule resolves every annotation against the declared services. INTO the held
+/// composition the name resolves out of the manifest's `!services` block, and
+/// the fold then has nothing to refuse: `cache_layer` neither collides with
+/// `Kv`/`App` nor closes a cycle, so the honest answer is a no-objection. The
+/// still-open half is the LAST step - resolving the requirement against the live
+/// PROVIDER and issuing an admission - which is the rest of the reference type
+/// layer.
 const CACHE_LAYER: &str = r#"
 service Cache { fn lookup(key: Str) -> Str }
 component CacheLayer requires store: Store provides cache: Cache {
@@ -281,7 +290,7 @@ fn batch() -> Vec<Candidate> {
         Candidate {
             name: "cache_layer",
             source: CACHE_LAYER,
-            note: "requires a Store not in the source; py refuses it standalone and ADMITS it into the running manifest",
+            note: "requires a Store not in the source; refused standalone by both gates, and py ADMITS it into the running manifest",
             shared_with_py: true,
             into: Some(HELD_MANIFEST),
         },
@@ -992,12 +1001,19 @@ What that closes and what it does not, against `held_manifest` =
   case: py's `revl.gate.admit_into` says `G2`, this gate says `G2` with the same
   sentence, and py's STANDALONE `admit` ADMITS the same bytes - so the manifest
   is demonstrably being read, not ignored.
-* **still open** - requirement RESOLUTION. py's `admit_into` resolves a
-  candidate's `requires` against the running providers; the self-host fold only
-  checks disjointness, acyclicity and route realms, so it cannot. `cache_layer`
-  is that half made concrete: py ADMITS it into the running manifest, this gate
-  can only decline to object. Closing it is the self-host TYPE LAYER's job, its
-  own roadmap lane, and is deliberately NOT attempted here.
+* **closed** - the component header's service-existence rule. `cache_layer`
+  names a `Store` its own text never declares. STANDALONE both gates now refuse
+  it with the same sentence (`unknown service \`Store\` in \`requires\` of
+  CacheLayer`); against the running composition the name resolves out of the
+  manifest's `!services` block and the refusal correctly goes away.
+* **still open** - requirement RESOLUTION and the admission itself. py's
+  `admit_into` resolves a candidate's `requires` against the running PROVIDER
+  and issues an admission; the self-host fold resolves the service NAME and then
+  checks disjointness, acyclicity and route realms, so the most it can say is
+  that it does not object. `cache_layer` is that last step made concrete: py
+  ADMITS it into the running manifest, this gate can only decline to object.
+  Closing it is the rest of the self-host TYPE LAYER's job, its own roadmap lane,
+  and is deliberately NOT attempted here.
 
 ## The batch, screened in-process
 
@@ -1017,11 +1033,11 @@ BOTH arms ({order}), which is the property that proves the gate is stateless.
 ### What the screen catches, measured
 
 Seven of these candidates are ones the py admission gate REFUSES. This gate
-refuses **two** of them: the `G2` provision conflict and the `G4` undeclared
-emission. The other five come back as no-objections:
+refuses **three** of them: the `G2` provision conflict, the `G4` undeclared
+emission, and `cache_layer`'s `G1` header rule (a `requires` naming a service the
+text never declares - the same sentence py gives). The other four come back as
+no-objections:
 
-* `cache_layer` - a `requires store: Store` that resolves to nothing (py refuses
-  it standalone, and ADMITS it into the running composition);
 * `incomplete_provide` - a `provide` block missing a declared method;
 * `syntax_error` - a source the reference parser rejects outright. The crate
   documents parse failures as `BAD`, and that arm is real (`@@@ not revl @@@`
@@ -1030,7 +1046,7 @@ emission. The other five come back as no-objections:
 * `hole_draft` - a draft with an open typed hole (py refuses `T3`);
 * `type_layer_miss` - a return-type mismatch (py refuses `T1`).
 
-Every one of those five is in the TOLERATED direction: a no-objection is never
+Every one of those four is in the TOLERATED direction: a no-objection is never
 an admission, so none of them is a false admit. Together they are the reason the
 crate has no `Admitted` arm, and the reason an embedder that reads a
 no-objection as a green ships an unsafe host. The one candidate this gate
@@ -1046,12 +1062,15 @@ composition - was not available on rust at all. It now is for the ambient half:
 ADMITS the same bytes) and is refused `G2` once the running composition is in
 the fold, on both arms, with the same why-trace. That is the half that closed.
 
-The other half is what `cache_layer` still prices. py's `admit_into` ADMITS it
-into the running manifest - it RESOLVES the `requires store: Store` against the
-running `Kv` provider - and the only thing this gate can say about it, with or
-without the manifest, is that it does not object. Requirement resolution is the
-self-host type layer's job, and this file is where the remaining distance is
-measured, not smoothed over.
+`cache_layer` prices what is left, and the distance shrank. Its service NAME is
+now resolved on both arms: standalone the gate refuses it in the reference's own
+words, and against the held manifest the `!services` block supplies `Store` and
+the refusal correctly lifts. What py does that this gate still cannot is the step
+after that - RESOLVING `requires store: Store` against the running `Kv` PROVIDER
+and ISSUING an admission - so the most this gate says about it into the manifest
+is that it does not object. That last step is the rest of the self-host type
+layer, and this file is where the remaining distance is measured, not smoothed
+over.
 
 ## Fail closed
 
