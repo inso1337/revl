@@ -156,10 +156,12 @@
 //! `selfhost/lower.rvl::admit_ambient`, compiled to rust like [`admit`].
 //!
 //! What this arm decides is the G2/G3 legs of ambient admission, the
-//! replacement wave's withdrawals, and nothing else. The handoff row (`C=k:T`)
-//! is the one kind still deferred behind the type layer, and it is REFUSED as
-//! `MANIFEST` rather than skipped, because a row this gate cannot honour is
-//! exactly where a stub that ignored its inputs would wave a program through.
+//! replacement wave's withdrawals and its state hand-offs (`C=k:T`, item 53 —
+//! a successor that cannot hold the running provider's exported state is
+//! refused), and nothing else. A row of no kind, or a garbled row of a kind the
+//! fold does know, is REFUSED as `MANIFEST` rather than skipped, because a row
+//! this gate cannot honour is exactly where a stub that ignored its inputs
+//! would wave a program through.
 //! The service block (`!services`, `:S`) is the one kind this fold accepts and
 //! computes nothing from, and it is the one kind whose meaning adds no provision,
 //! no requirement, no graph node and no withdrawable component: the consumer it
@@ -548,10 +550,9 @@ fn manifest_rows(manifest: &str) -> usize {
 ///
 /// * the reference TYPE layer — a type-incorrect candidate is
 ///   [`Verdict::NoObjection`] here, exactly as it is in [`admit`];
-/// * the row kinds the wire reserves for the deferred waves — a replacement row
-///   (`-C`) or a handoff row (`C=k:T`) is REFUSED with the fold's own `MANIFEST`
-///   code, never skipped. Skipping a row this gate cannot honour is the
-///   wave-through this crate exists to prevent;
+/// * a row of no kind, or a garbled row of a kind the fold does know, is
+///   REFUSED with the fold's own `MANIFEST` code, never skipped. Skipping a row
+///   this gate cannot honour is the wave-through this crate exists to prevent;
 /// * it does not RESOLVE the requirements a candidate declares; it checks them
 ///   for disjointness and acyclicity. A `requires` the union does not provide is
 ///   a no-objection, and the reference is the only tier that decides it.

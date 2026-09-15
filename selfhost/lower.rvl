@@ -330,9 +330,13 @@ type Route   = { key: Str, rlms: List[Str], strat: Str }
 // `_line(entry["name"])`), the ROUTE gap, the G3 cycle member, the setup
 // async-reach A1, and the `boot` count — as well as the parse-time metadata
 // refusal carried in `refuse`.
+// `hoff` is the component's declared `handoff <key>: <Type>` (item 53): the key
+// in `name`, the accepted state spelling in `ty`, both empty when the component
+// declares none. It is the incoming half of the item-186 wave-part-2
+// compatibility check against the running EXPORT the wire carries.
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
                  reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey],
-                 routes: List[Route], refuse: Str, line: Int }
+                 routes: List[Route], hoff: Bind, refuse: Str, line: Int }
 
 type Bind = { name: Str, ty: Str }
 
@@ -1046,9 +1050,9 @@ fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
             rq: List[Bind], su: List[Stmt], iso: List[ProvKey],
-            rts: List[Route], refuse: Str, ln: Int) -> CompD {
+            rts: List[Route], ho: Bind, refuse: Str, ln: Int) -> CompD {
   return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso,
-           routes: rts, refuse: refuse, line: ln }
+           routes: rts, hoff: ho, refuse: refuse, line: ln }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
@@ -1936,13 +1940,32 @@ fn bind_has(env: List[Bind], n: Str) -> Bool { return bind_lookup(env, n, 0) != 
 // rule (an `isolate`/`intercept` placed after an action) and `intercept`
 // metadata validation (a G1 target/uniqueness refusal). It is distinct from
 // `ok: false`, which is a structural parse failure ("BAD").
+// `hoff` is the component's declared `handoff <key>: <Type>` (item 53) — the
+// state shape it ACCEPTS when it replaces a running provider of that key, and
+// the incoming half of the item-186 wave-part-2 compatibility check. `name` is
+// the key and `ty` the declared spelling; an empty `name` is "this component
+// declares no hand-off", which is what every component that does not write one
+// carries and what makes the check a no-op for them.
 type ProvR = { provs: List[Provide], setup: List[Stmt], iso: List[ProvKey],
-               routes: List[Route], refuse: Str, i: Int, ok: Bool }
+               routes: List[Route], hoff: Bind, refuse: Str, i: Int, ok: Bool }
 
+fn no_hoff() -> Bind { return { name: "", ty: "" } }
+
+// Every exit but the clean one: a component whose body did not parse, or whose
+// own text already refuses, hands no `handoff` up. The reference reaches
+// `_admit_handoff_replacement` only with a component it LOWERED, so a body that
+// never lowered contributes no accepted shape there either.
 fn mk_provr(pv: List[Provide], su: List[Stmt], iso: List[ProvKey],
             rts: List[Route], refuse: Str, i: Int, ok: Bool) -> ProvR {
-  return { provs: pv, setup: su, iso: iso, routes: rts, refuse: refuse,
-           i: i, ok: ok }
+  return { provs: pv, setup: su, iso: iso, routes: rts, hoff: no_hoff(),
+           refuse: refuse, i: i, ok: ok }
+}
+
+// The clean exit, which is the one that carries the declared hand-off up.
+fn mk_provr_h(pv: List[Provide], su: List[Stmt], iso: List[ProvKey],
+              rts: List[Route], ho: Bind, i: Int) -> ProvR {
+  return { provs: pv, setup: su, iso: iso, routes: rts, hoff: ho,
+           refuse: "", i: i, ok: true }
 }
 
 // The prelude rule (lower.py `_lower_component`): realm/metadata declarations
@@ -2117,9 +2140,9 @@ fn handoff_twice_msg(cname: Str) -> Str {
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                reqh: List[Bind], cname: Str, provs: List[Provide],
                setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
-               icept: List[Str], hoff: Bool, action: Bool) -> ProvR {
+               icept: List[Str], hoff: Bind, action: Bool) -> ProvR {
   if (i >= end || atk(ts, i, "}")) {
-    return mk_provr(provs, setup, iso, rts, "", i, true)
+    return mk_provr_h(provs, setup, iso, rts, hoff, i)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
@@ -2197,12 +2220,19 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       return mk_provr(provs, setup, iso, rts,
         tagged("HANDOFF", handoff_target_msg(key, cname)), skip_line(ts, i), true)
     }
-    if (hoff) {
+    if (hoff.name != "") {
       return mk_provr(provs, setup, iso, rts,
         tagged("HANDOFF", handoff_twice_msg(cname)), skip_line(ts, i), true)
     }
+    // the declared SHAPE (item 186, wave part 2). The reference keeps the
+    // annotation verbatim (`HandoffStmt.state_type`, no alias erasure), so the
+    // gate reads the same spelling through the frontend's own type reader — an
+    // annotation the reader cannot parse leaves `ty` empty, which is a program
+    // the reference refuses at parse time and this gate is silent on, exactly
+    // as it is silent on every other unparsable annotation.
+    let hty = atk(ts, i + 2, ":") ? type_at(ts, i + 3).ty : ""
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                       setup, iso, rts, icept, true, action)
+                       setup, iso, rts, icept, { name: key, ty: hty }, action)
   }
   // `intercept <key> with { ... }` supplies metadata, not a realm; the prelude
   // rule applies first, then the target/uniqueness validation. Its block is
@@ -2268,7 +2298,7 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
 fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                 reqh: List[Bind], cname: Str, provs: List[Provide],
                 setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
-                icept: List[Str], hoff: Bool, action: Bool) -> ProvR {
+                icept: List[Str], hoff: Bind, action: Bool) -> ProvR {
   if (action) {
     return mk_provr(provs, setup, iso, rts,
                     tagged("PRELUDE", route_prelude_msg()), skip_line(ts, i), true)
@@ -2339,7 +2369,7 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
              i: ts.length() }
   }
   let body = p_comp_body(ts, j + 1, end - 1, provh, reqs, nm, [], [], [], [],
-                         [], false, false)
+                         [], no_hoff(), false)
   if (!body.ok) {
     return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
              i: end }
@@ -2356,7 +2386,8 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   return mk_step(push_comp(pg,
                  mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso,
-                          body.routes, body.refuse, tkc(ts, i).line)),
+                          body.routes, body.hoff, body.refuse,
+                          tkc(ts, i).line)),
                  end)
 }
 
@@ -4940,6 +4971,25 @@ fn find_route(rs: List[MRoute], comp: Str, key: Str, i: Int) -> MRoute {
   if (i >= rs.length()) { return { comp: comp, key: key, rlms: [] } }
   if (rs[i].comp == comp && rs[i].key == key) { return rs[i] }
   return find_route(rs, comp, key, i + 1)
+}
+
+// item 186 / issue #86, the replacement wave part 2: a manifest HANDOFF row —
+// the running component `comp` EXPORTS live state of shape `ty` at the key it
+// provides (item 53). This is the wire's carrier for
+// `compiler._running_handoffs`, the ambient table
+// `admission._admit_handoff_replacement` compares a replacement's ACCEPTED
+// shape against.
+type MHand = { comp: Str, key: Str, ty: Str }
+
+// The running export at `key`, or an empty record when nothing exports one.
+// Keyed by KEY ALONE and LAST-WINS, because that is exactly what the
+// reference's `_running_handoffs` builds: a dict keyed by `h["key"]`, filled
+// walking the IR components in order, so a second running exporter of one key
+// overwrites the first. A wire carrying no handoff row (every projection before
+// part 2) yields the empty record and the whole check is a no-op.
+fn find_mhand(hs: List[MHand], key: Str, i: Int, found: MHand) -> MHand {
+  if (i >= hs.length()) { return found }
+  return find_mhand(hs, key, i + 1, hs[i].key == key ? hs[i] : found)
 }
 
 fn find_provider(ps: List[Prov3], key: Str, rlm: Str, i: Int) -> Str {
@@ -7612,18 +7662,27 @@ pub fn admit_tag(src: Str) -> Str {
 //     reported twice. The legs are EDGES too (`manifest_edges`), so a cycle
 //     closing through a routed running consumer is seen rather than missed.
 //
-// The surface still behind the WAVE (item 186): `handoff` STATE compatibility
-// (`C=k:T` rows), blocked on the self-host type layer — such a row therefore
-// REFUSES here (fail-closed) rather than being silently mis-admitted — and the
-// item-419c multi-refusal ORDERING of an ambient refusal against an internal
-// one. See docs/design/186-ambient-admission-guarantees.md.
+//   * WAVE PART 2 — `handoff` STATE compatibility (item 53). The wire grows
+//     `C=k:T` rows (the shape each running provider EXPORTS), a component in
+//     the incoming text carries the shape it ACCEPTS, and `handoff_refusals`
+//     compares the two with the §5 relation pointed at state
+//     (`ho_compatible`, the `types=None` reading of `typecheck.compatible`),
+//     byte-identical to the reference's `_admit_handoff_replacement`. It needs
+//     no expression type layer: both shapes are declared SPELLINGS carried to
+//     the gate, so the only algebra it ports is the type-string one `ty_parse`
+//     already gives. A structural record cannot be one — the reference's
+//     `type_()` refuses `{` at a `handoff` annotation — which is why the
+//     structural branch of `compatible` is out of this port rather than
+//     approximated.
+//
+// See docs/design/186-ambient-admission-guarantees.md.
 //
 // The manifest is the linker's already-live composition, serialised as rows
 // joined by ";" — provisions "<component>/<key>/<realm>" (realm "" = shared),
 // requirements "<component><<key>" (with "<key>/<realm>" for a realm-resolved
 // one and "*<key>" for a multi-realm bind), routes
 // "<component>><key>/<realm>,<realm>" (the legs of that multi-realm bind),
-// withdrawals "-<component>", the "!halted" header, and the item-346 SERVICE
+// withdrawals "-<component>", handoffs "<component>=<key>:<type>", the "!halted" header, and the item-346 SERVICE
 // BLOCK ("!services" followed by one ":<service>" row per service the
 // composition declares) — e.g.
 // "Store/db/;KvA/kv/tenant_a;Store<net;Store>net/a,b;!services;:D;-KvA". An
@@ -7651,19 +7710,25 @@ fn cut(s: Str, sep: Str) -> Cut {
 // so `R` is a property of the admission CALL and never something the incoming
 // text can assert about itself. `halted` (the `!halted` header, item 443) makes
 // every admission refuse; `bad` (non-"") is a wire that does not parse — an
-// unknown row kind, or a `C=k:T` handoff row whose type layer is still the
-// deferred wave — and REFUSES admission by name rather than being silently
-// skipped (a row that parses and does nothing is worse than one that refuses).
+// unknown row kind, or a garbled row of a kind it does know — and REFUSES
+// admission by name rather than being silently skipped (a row that parses and
+// does nothing is worse than one that refuses). `hands` is the running EXPORT
+// table of the replacement wave's part 2 (`C=k:T`), keyed by KEY and not
+// filtered by `repl`: a provider being replaced is exactly the one whose
+// exported state the replacement must accept.
 //
 // The item-346 SERVICE BLOCK (`!services` + `:S` rows) is parsed and validated
 // but adds no field here: a service declaration is not a composition edge, so
 // there is nothing for G2/G3, the withdrawal check or the realm table to fold it
-// into. The certifier that DOES use it reads the wire directly. A ROUTE row
-// (`C>k/r1,r2`, issue #1036) is the contrast that shows where the line is: its
-// legs ARE composition edges and a per-realm existence obligation, so it gets a
-// field (`routes`) and is folded in full.
+// into. The certifier that DOES use it reads the wire directly. The ROUTE row
+// (`C>k/r1,r2`, issue #1036) and the HANDOFF row (`C=k:T`, wave part 2) are the
+// contrast that shows where the line is: a route's legs ARE composition edges
+// and a per-realm existence obligation, and a handoff row IS the predecessor
+// half of item 53's compatibility relation, so each gets a field (`routes`,
+// `hands`) and is folded in full.
 type Manifest = { provs: List[Prov3], reqs: List[MReq], routes: List[MRoute],
-                  mnames: List[Str], repl: List[Str], halted: Bool, bad: Str }
+                  hands: List[MHand], mnames: List[Str], repl: List[Str],
+                  halted: Bool, bad: Str }
 
 fn add_mname(names: List[Str], name: Str) -> List[Str] {
   if (contains(names, name)) { return names }
@@ -7721,7 +7786,7 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 //   !services header     (item 346)  -> the service block is EXHAUSTIVE
 //   :S        service     (item 346) -> the running composition declares S
 //   -C        replacing  (wave)      -> a withdrawn component name
-//   C=k:T     handoff    (deferred)  -> REFUSE (needs the self-host type layer)
+//   C=k:T     handoff    (wave 2)    -> an MHand row (the running EXPORT)
 //   anything else                    -> REFUSE (unknown row kind)
 // A `bad` already set rides through unchanged (first offending row wins).
 //
@@ -7732,8 +7797,10 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 // a service DECLARATION contributes no provision, no requirement, no graph node
 // and no withdrawable component, so there is nothing for G2/ROUTE/G3 or the
 // unmet-consumer check to compute from it, at any wire. `-C` and `C=k:T` are the
-// contrast: each of them CHANGES what the fold must compute, which is why one is
-// folded in full and the other still refuses. The consumer the service block
+// contrast: each of them CHANGES what the fold must compute — the first which
+// provisions survive, the second which state shapes a replacement must accept —
+// which is why both are folded in full and a `:S` row is read and dropped. The
+// consumer the service block
 // exists for is the ADMISSION certifier (`crates/revl-gate/src/admission.rs`),
 // which parses the wire itself and uses the names to tell a fresh interface from
 // a redeclaration of a running one. What this fold still does NOT do with them is
@@ -7746,15 +7813,18 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
   if (row.slice(0, 1) == "!") {
     if (row == "!halted") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: true, bad: "" }
     }
     // the completeness claim over the `:S` rows. It carries no data of its own —
     // the claim is read by the admission certifier, which parses the same wire.
     if (row == "!services") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             hands: man.hands,
              mnames: man.mnames, repl: man.repl, halted: man.halted,
              bad: tagged("MANIFEST", "unrecognized manifest header row `".concat(row).concat("`")) }
   }
@@ -7766,11 +7836,13 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     let sname = row.slice(1, row.length())
     if (!bare_ident(sname, 0)) {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest service row `".concat(row)
                  .concat("` does not name a service")) }
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             hands: man.hands,
              mnames: man.mnames, repl: man.repl, halted: man.halted, bad: "" }
   }
   if (row.slice(0, 1) == "-") {
@@ -7780,21 +7852,46 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     let name = row.slice(1, row.length())
     if (!bare_ident(name, 0)) {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: man.mnames, repl: man.repl, halted: man.halted,
                bad: tagged("MANIFEST", "manifest replacement row `".concat(row)
                  .concat("` does not name a component")) }
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+             hands: man.hands,
              mnames: man.mnames,
              repl: contains(man.repl, name) ? man.repl : man.repl.push(name),
              halted: man.halted, bad: "" }
   }
   if (ident_led(row)) {
+    // the HANDOFF row (`C=k:T`, the replacement wave part 2) is read FIRST of
+    // the ident-led kinds. Its TYPE field is the one place on the wire carrying
+    // an arbitrary type SPELLING, and a function type spells `->`: read after
+    // the route row, `Store=st:(Int) -> Str` would split at its `>` and parse
+    // as a route whose component name is `Store=st:(Int) -`.
     if (row.indexOf("=") != 0 - 1) {
+      let a = cut(row, "=")
+      let b = cut(a.rest, ":")
+      // `C=k:T` — a component, the provided key its live state hangs off, and a
+      // non-empty type spelling. A row missing any of the three is a garbled
+      // wire, not a handoff, and a wire the gate cannot read fails CLOSED
+      // rather than dropping a running export in silence — which would put the
+      // gate back where part 2 found it, admitting a swap that drops the state.
+      // The TYPE itself is NOT validated here: it is a type spelling, judged by
+      // the §5 relation `handoff_refusals` runs and by nothing else, so a shape
+      // this row cannot judge is left to the judgment that can.
+      if (!bare_ident(a.s, 0) || !bare_ident(b.s, 0)
+          || a.rest.indexOf(":") == 0 - 1 || b.rest == "") {
+        return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+                 hands: man.hands,
+                 mnames: man.mnames, repl: man.repl, halted: man.halted,
+                 bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
+                   .concat("` does not name a component, a key and its state type")) }
+      }
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               mnames: man.mnames, repl: man.repl, halted: man.halted,
-               bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
-                 .concat("` needs the deferred handoff/type-layer wave (item 186)")) }
+               hands: man.hands.push({ comp: a.s, key: b.s, ty: b.rest }),
+               mnames: add_mname(man.mnames, a.s), repl: man.repl,
+               halted: man.halted, bad: "" }
     }
     // the ROUTE row (issue #1036) is read BEFORE the requirement and provision
     // rows: it carries a `/` of its own (the realm field) and would otherwise
@@ -7809,6 +7906,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       if (!bare_ident(a.s, 0) || !bare_ident(b.s, 0)
           || a.rest.indexOf("/") == 0 - 1) {
         return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+                 hands: man.hands,
                  mnames: man.mnames, repl: man.repl, halted: man.halted,
                  bad: tagged("MANIFEST", "manifest route row `".concat(row)
                    .concat("` does not name a component, a key and its realms")) }
@@ -7816,12 +7914,14 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       return { provs: man.provs, reqs: man.reqs,
                routes: man.routes.push({ comp: a.s, key: b.s,
                                          rlms: split_labels(b.rest, []) }),
+               hands: man.hands,
                mnames: add_mname(man.mnames, a.s), repl: man.repl,
                halted: man.halted, bad: "" }
     }
     if (row.indexOf("<") != 0 - 1) {
       let a = cut(row, "<")
       return { provs: man.provs, reqs: man.reqs.push(parse_mreq(a.s, a.rest)),
+               hands: man.hands,
                routes: man.routes, mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted, bad: "" }
     }
@@ -7830,11 +7930,13 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       let b = cut(a.rest, "/")
       return { provs: man.provs.push({ key: b.s, rlm: b.rest, comp: a.s }),
                reqs: man.reqs, routes: man.routes,
+               hands: man.hands,
                mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted, bad: "" }
     }
   }
   return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+           hands: man.hands,
            mnames: man.mnames, repl: man.repl, halted: man.halted,
            bad: tagged("MANIFEST", "unrecognized manifest row `".concat(row).concat("`")) }
 }
@@ -7849,8 +7951,9 @@ fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: Str) -> Manifest {
-  return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], mnames: [],
-                                  repl: [], halted: false, bad: "" })
+  return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], hands: [],
+                                  mnames: [], repl: [], halted: false,
+                                  bad: "" })
 }
 
 // ------------------------------------- item 186, the replacement wave (part 1)
@@ -7991,6 +8094,140 @@ fn withdrawal_refusals(reqs: List[MReq], lost: List[Prov3], comps: List[CompD],
                   text_line_or_zero(comps, provider, 0))]
 }
 
+// ------------------------------- item 186, the replacement wave (part 2)
+//
+// `handoff` STATE compatibility (item 53). A stateful provider declares the
+// shape of the live state it EXPORTS when it is replaced; its replacement
+// declares the shape it ACCEPTS. The value flows predecessor -> successor, so
+// the accepted shape must admit everything the exported shape produces — the
+// same covariant `compatible(expected, actual)` §5 uses at a return position,
+// pointed at state instead of interface. A swap whose successor cannot hold the
+// predecessor's state is REFUSED, not allowed to drop it at runtime.
+//
+// Why this needs no expression type layer, which is what deferred it. Both
+// shapes reach the gate as declared SPELLINGS — the running one on the wire
+// (`C=k:T`), the incoming one off the component's own `handoff` annotation — so
+// the only algebra to port is the type-STRING one, which `ty_parse` already is.
+// The reference calls `compatible(accepted, exported)` with NO declared-type
+// table (`admission._handoff_compatible`), so the nominal-record resolution
+// that would need one is not on this path at all, and a STRUCTURAL record
+// cannot be a hand-off shape: the reference's `type_()` refuses a `{` at an
+// annotation position, so `handoff st: {a: Int}` is a parse error, never a
+// comparison. That leaves exactly the head algebra below.
+//
+// Direction: FAIL-CLOSED, like every other refusal on this surface. The
+// admission is what does not happen; the running composition keeps running with
+// its state where it is.
+
+// `typecheck._is_wildcard`, on the spellings this surface can see. "" is the
+// gate's rendering of the reference's `None` (a bare `Opt` has no argument),
+// which `_is_wildcard` answers True for, so it belongs here; a `?`-led name is
+// the checker's tparam marker and `!poison` its absorbing spelling.
+fn ho_wildcard(t: Str) -> Bool {
+  return t == "" || t == "Any" || t == "Never" || t == "!poison"
+      || t.slice(0, 1) == "?"
+}
+
+fn ho_arg(ps: TyParts, n: Int) -> Str {
+  return ps.args.length() > n ? ps.args[n] : ""
+}
+
+// The parameter positions of a function type meet CONTRAVARIANTLY and the
+// return covariantly, so a function value flows where a function type is
+// expected only if it accepts everything that position will pass it. The
+// generic elementwise rule would make the parameters covariant, which admits
+// `(Int) -> X` where `(Float) -> X` is required and then hands the callee a
+// Float.
+fn ho_params_ok(ea: List[Str], aa: List[Str], i: Int) -> Bool {
+  if (i + 1 >= ea.length()) { return true }
+  if (!ho_compatible(aa[i], ea[i])) { return false }
+  return ho_params_ok(ea, aa, i + 1)
+}
+
+fn ho_args_ok(ea: List[Str], aa: List[Str], i: Int) -> Bool {
+  if (i >= ea.length()) { return true }
+  if (!ho_compatible(ea[i], aa[i])) { return false }
+  return ho_args_ok(ea, aa, i + 1)
+}
+
+// May a value of type `actual` flow into a position typed `expected`? The
+// `types=None` reading of `typecheck.compatible`, which is the reading
+// `admission._handoff_compatible` asks for.
+fn ho_compatible(expected: Str, actual: Str) -> Bool {
+  let ep = ty_parse(expected)
+  let ap = ty_parse(actual)
+  // `Never` is the checker's inferred BOTTOM, not a two-way wildcard: it flows
+  // OUT of a `Never` position into any other (nothing inhabits it) and NOTHING
+  // flows in. The two-way reading was an unchecked cast under a spelling with
+  // no cast syntax.
+  if (ep.head == "Never" && !ho_wildcard(actual)) { return false }
+  if (ho_wildcard(expected) || ho_wildcard(actual)) { return true }
+  // `Value` is the stdlib erased-dynamic type (item 180): every concrete value
+  // boxes into it and it flows back out into any typed position, so it is
+  // compatible with anything in BOTH directions.
+  if (ep.head == "Value" || ap.head == "Value") { return true }
+  if (expected == actual) { return true }
+  if (ep.head == "Float" && ap.head == "Int") { return true }  // widening
+  // Int32 widens losslessly into Int and, through Int, into Float. The reverse
+  // can lose bits and must be spelled `.to_int32()`.
+  if ((ep.head == "Int" || ep.head == "Float") && ap.head == "Int32") {
+    return true
+  }
+  // a sync value coerces into an `Async[T]` position (a non-suspending function
+  // is a degenerate async one); the reverse is a head mismatch below.
+  if (ep.head == "Async" && ap.head != "Async") {
+    return ho_compatible(ho_arg(ep, 0), actual)
+  }
+  if (ep.head == "->") {
+    if (ap.head != "->" || ep.args.length() != ap.args.length()) { return false }
+    return ho_params_ok(ep.args, ap.args, 0)
+        && ho_compatible(ep.args[ep.args.length() - 1],
+                         ap.args[ap.args.length() - 1])
+  }
+  if (ep.head == "Opt") {
+    if (ap.head == "Opt") { return ho_compatible(ho_arg(ep, 0), ho_arg(ap, 0)) }
+    return ho_compatible(ho_arg(ep, 0), actual)  // T -> Opt[T] injection
+  }
+  if (ep.head == ap.head && ep.args.length() == ap.args.length()) {
+    return ho_args_ok(ep.args, ap.args, 0)
+  }
+  return false
+}
+
+fn handoff_drift_msg(key: Str, newName: Str, accepted: Str, oldName: Str,
+                     exported: Str) -> Str {
+  return "state hand-off on `".concat(key)
+    .concat("` differs from the running manifest: `").concat(newName)
+    .concat("` accepts `").concat(accepted).concat("`, but `").concat(oldName)
+    .concat("` exports `").concat(exported)
+    .concat("` — the successor cannot hold the predecessor's state, and ")
+    .concat("dropping it on the swap would be residue")
+}
+
+// At most ONE hand-off refusal per admission: the reference raises on the first
+// candidate whose accepted shape does not fit, and this walks the incoming
+// components in the same declaration order.
+//
+// Scope, exactly the reference's. A key the successor accepts but nothing
+// running exported starts COLD and is no conflict; a running export the
+// successor does not accept opts out of inheriting, which is a lossy choice the
+// author made explicit and not a refusal. So only a key present on BOTH sides
+// is compared. The running table is NOT filtered by the withdrawn set: the
+// provider being replaced is precisely the one whose exported state the
+// replacement has to accept.
+fn handoff_refusals(comps: List[CompD], hands: List[MHand], i: Int) -> List[Verd] {
+  if (i >= comps.length()) { return [] }
+  let c = comps[i]
+  if (c.hoff.name == "") { return handoff_refusals(comps, hands, i + 1) }
+  let old = find_mhand(hands, c.hoff.name, 0, { comp: "", key: "", ty: "" })
+  if (old.comp == "") { return handoff_refusals(comps, hands, i + 1) }
+  if (ho_compatible(c.hoff.ty, old.ty)) {
+    return handoff_refusals(comps, hands, i + 1)
+  }
+  return [mk_verd(tagged("G2", handoff_drift_msg(c.hoff.name, c.name, c.hoff.ty,
+                                                 old.comp, old.ty)), c.line)]
+}
+
 // Admit `src` against a running `manifest`. The INTERNAL refusals (a component
 // that refuses on its own text, a module-fn twin, a spawn/boot violation) are
 // collected exactly as the single-source path collects them — an ambient
@@ -8054,8 +8291,13 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   // seq is the tie-break when two refusals share a line: a withdrawal tying with
   // a spawn-bound or BOOT refusal then fell to the gate one way and to the
   // reference the other.
+  // wave part 2 rides at the reference's own phase position too:
+  // `_admit_handoff_replacement` is collected immediately BEFORE
+  // `_admit_provision_withdrawal`, so a hand-off drift and a stranded consumer
+  // that land on one LINE are broken the same way by `seq` on both sides.
   let nl = collect_nonlink(ts, pg,
-    withdrawal_refusals(keptReqs, lost, pg.comps, 0))
+    append_verds(handoff_refusals(pg.comps, man.hands, 0),
+                 withdrawal_refusals(keptReqs, lost, pg.comps, 0)))
   if (nl.done) { return pick_min(nl.refs) }
   let wrefs = nl.refs
   // the LINK is the half the running manifest reshapes. Seed the per-(key,
@@ -13004,10 +13246,69 @@ test "a cycle closing through a routed running consumer is refused (ambient G3)"
     == "G3|dependency cycle: Router -> StoreB -> Router (G3)"
 }
 
-test "a handoff row refuses until the deferred type layer lands" {
+// ---- the replacement wave, part 2: `handoff` STATE compatibility (item 53).
+// The wire carries what the running provider EXPORTS (`C=k:T`); the incoming
+// component declares what it ACCEPTS; the value flows old -> new, so the
+// accepted shape must admit everything the exported one produces.
+
+// A component that declares NO `handoff` and a wire carrying a running export
+// is the opt-out case: a stateless successor of a stateful provider is a lossy
+// choice the author made explicit, not a refusal. So the row alone moves no
+// verdict — which is also what keeps every pre-part-2 wire byte-identical.
+test "a handoff row alone moves no verdict" {
   let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
-  assert admit_ambient(clean, "OldStore=db:D")
-    == "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred handoff/type-layer wave (item 186)"
+  assert admit_ambient(clean, "OldStore=db:D") == ""
+  assert admit_ambient(clean, "OldStore=db:D") == admit_src(clean)
+}
+
+// The refusal. `NewStore` re-provides `db` and accepts `Int` where the running
+// `OldStore` exports `Str`: the successor cannot hold the predecessor's state,
+// and the swap is refused rather than admitted into a silent drop.
+test "a successor that cannot hold the running state is refused (handoff)" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:Str;-OldStore")
+    == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Int`, but `OldStore` exports `Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
+}
+
+// The relation is the §5 one pointed at state, in the value-flow direction: the
+// predecessor's `Str` injects into the successor's `Opt[Str]` (widening the
+// accepted shape is always safe), and the reverse does not.
+test "a widened accepted hand-off shape still admits" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Opt[Str]   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:Str;-OldStore") == ""
+}
+
+test "a narrowed accepted hand-off shape is refused" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Str   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:Opt[Str];-OldStore")
+    == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Str`, but `OldStore` exports `Opt[Str]` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
+}
+
+// A key the successor accepts but nothing running exported starts COLD: no
+// running export, no comparison, no refusal.
+test "a cold hand-off key is no conflict" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;-OldStore") == ""
+}
+
+// A function-typed state shape is why the handoff row is read AHEAD of the
+// route row: `(Int) -> Str` carries a `>`, and a route-first reading would
+// split the row inside its own type field. Parameters meet contravariantly, so
+// a successor accepting `(Float) -> Str` cannot hold an exported `(Int) -> Str`.
+test "a function-typed hand-off row is read, and meets contravariantly" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: (Float) -> Str   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:(Int) -> Str;-OldStore")
+    == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `(Float) -> Str`, but `OldStore` exports `(Int) -> Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
+}
+
+// A garbled handoff row is a wire the gate cannot read, and a wire it cannot
+// read fails CLOSED rather than dropping a running export in silence.
+test "a garbled handoff row refuses by name" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "OldStore=db")
+    == "MANIFEST|manifest handoff row `OldStore=db` does not name a component, a key and its state type"
+  assert admit_ambient(clean, "OldStore=db:")
+    == "MANIFEST|manifest handoff row `OldStore=db:` does not name a component, a key and its state type"
 }
 
 // The item-346 service block. It changes NO verdict this fold computes — that is

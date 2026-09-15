@@ -174,7 +174,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
 /// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
 /// bounds the admissions, and a consumer caching an admission compares THIS
 /// before trusting it against a gate built from another tree.
-pub(crate) const SURFACE_ID: &str = "admission-interface:7f785935949f66ab";
+pub(crate) const SURFACE_ID: &str = "admission-interface:a68e2c2b96f0b4fb";
 
 /// The tail every certificate carries, so the two halves of the basis line
 /// cannot drift apart.
@@ -491,9 +491,10 @@ struct Running<'a> {
 /// admission surface can account for, `None` otherwise.
 ///
 /// The accountable kinds are the provision (`C/k/r`), the requirement in its
-/// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`) and the
-/// service block (`!services`, `:S`). Everything else declines the wire, which is a withheld admission and
-/// not a refusal: a `!halted` header, a handoff row, and — deliberately, even
+/// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`), the
+/// handoff (`C=k:T`) and the service block (`!services`, `:S`). Everything else
+/// declines the wire, which is a withheld admission and
+/// not a refusal: a `!halted` header, and — deliberately, even
 /// though the fold has a full answer for it — a WITHDRAWAL row (`-C`). A
 /// withdrawal changes which provisions survive and can strand a running
 /// consumer; re-deriving that here would be a second implementation of the fold's
@@ -518,6 +519,17 @@ struct Running<'a> {
 /// the WHOLE wire, so leaving route rows out would have silently withheld the
 /// admission surface from every routed composition — the shape of the bug the
 /// `C<*k` and `C<k/r` spellings had here until they were read.
+///
+/// A HANDOFF row (`C=k:T`, item 186 wave part 2) is read the same way, for the
+/// same reason: it is the running provider's EXPORTED state shape, the fold
+/// compares it against the candidate's accepted shape with the §5 relation, and
+/// nothing here counts it. Its key is already on the wire as that component's
+/// own provision row. It is read BEFORE the route row because the TYPE field is
+/// the one place on the wire carrying an arbitrary type SPELLING and a function
+/// type spells `->`: read after, `Store=st:(Int) -> Str` would split at its `>`
+/// and look like a route. The TYPE itself is NOT validated against
+/// [`is_wire_name`] — it is a type spelling, not a name, and the only thing that
+/// may judge it is the relation that compares it.
 fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
     let mut provided: Vec<&str> = Vec::new();
     let mut required: Vec<&str> = Vec::new();
@@ -546,6 +558,14 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
         if row.starts_with('-') {
             // A withdrawal. The fold decides it; this surface does not.
             return None;
+        }
+        if let Some((component, spec)) = row.split_once('=') {
+            // `C=k:T` — the state shape `component` exports at `k` (item 53).
+            let (key, state) = spec.split_once(':')?;
+            if !is_wire_name(component) || !is_wire_name(key) || state.is_empty() {
+                return None;
+            }
+            continue;
         }
         if let Some((component, spec)) = row.split_once('>') {
             // `C>k/r1,r2` — the realms a running component binds `k` across. It
@@ -765,6 +785,30 @@ mod tests {
         // wave). This surface does not re-derive it: a wire carrying one is
         // withheld, whatever the candidate is.
         for wire in ["Kv/store/;-Kv", "Kv/store/;!services;:Store;-Kv", "-Kv"] {
+            assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
+        }
+    }
+
+    #[test]
+    fn a_handoff_row_is_read_rather_than_tripped_over() {
+        // `C=k:T` (item 186, wave part 2) is the running provider's EXPORTED
+        // state shape. The fold compares it against the candidate's accepted
+        // shape; this surface counts it as nothing, exactly as it counts a
+        // route row as nothing, and must not decline a wire for carrying one —
+        // declining would have silently withheld the admission arm from every
+        // STATEFUL running composition.
+        assert!(certify_into("", "Kv/store/;Kv=store:Str").is_some());
+        assert!(certify_into("", "Kv/store/;Kv=store:Str;App/app/;App<store").is_some());
+        // a function-typed shape carries a `>`, which is why the handoff row is
+        // read AHEAD of the route row: read after, this would split at its own
+        // arrow and look like a garbled route.
+        assert!(certify_into("", "Kv/store/;Kv=store:(Int) -> Str").is_some());
+        // the type is opaque here: it is a type SPELLING, not a wire name, and
+        // the only thing that may judge it is the relation that compares it
+        assert!(certify_into("", "Kv/store/;Kv=store:Map[Str, Int]").is_some());
+        // a garbled handoff row is still a row this surface cannot read
+        for wire in ["Kv/store/;Kv=store", "Kv/store/;Kv=store:", "Kv/store/;Kv=:Str",
+                     "Kv/store/;=store:Str"] {
             assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
         }
     }
