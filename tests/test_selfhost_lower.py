@@ -168,6 +168,17 @@ def _classify(e: RevlError) -> str:
     # it like every other G2 in this file.
     if "withdraws the running provider of" in m:
         return "G2"
+    # item 186, the replacement wave part 2: the state hand-off drift of
+    # `admission._admit_handoff_replacement` (item 53). Code-less, and the
+    # phrase "differs from the running manifest" is what routes it through
+    # `diagnostics.classify` to the same (G2, "admission") bucket every other
+    # admission rejection carries, so it classifies G2 here too. The marker is
+    # the hand-off HALF of that phrase and not the phrase itself: the §5 SERVICE
+    # drift of `_admit_service_replacement` spells it as well and the gate has
+    # no phase for that one, so naming it here would claim an agreement that
+    # does not exist.
+    if "state hand-off on `" in m:
+        return "G2"
     # G3 (dependency-cycle / self-provision) and G1 (undeclared access) set no
     # code, so their message markers classify them. G3's two shapes both end
     # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
@@ -3304,11 +3315,11 @@ def test_ambient_halted_header_refuses_every_incoming(admit_ambient):
     assert admit_ambient(clean, "") == ""
 
 
-def test_ambient_unknown_and_deferred_row_kinds_refuse(admit_ambient):
-    """An unknown row kind refuses naming the row; a `-C` row that does not name
-    a bare component refuses as a garbled wire; the one kind still deferred (the
-    `C=k:T` handoff row, blocked on the self-host type layer) fails closed
-    rather than mis-admitting."""
+def test_ambient_unknown_and_garbled_row_kinds_refuse(admit_ambient):
+    """An unknown row kind refuses naming the row, and a row of a kind the gate
+    DOES know that does not carry that kind's fields refuses as a garbled wire —
+    a withdrawal row naming no bare component, a handoff row naming no component,
+    key and state type. A wire the gate cannot read fails closed."""
     clean = ("service D { fn q(s: Str) -> Int } component NewStore provides "
              "db: D { provide db { fn q(s) { let x = s   return 0 } } }")
     assert admit_ambient(clean, "?A/a/") == (
@@ -3317,9 +3328,15 @@ def test_ambient_unknown_and_deferred_row_kinds_refuse(admit_ambient):
         assert admit_ambient(clean, "OldStore/db/;" + row) == (
             "MANIFEST|manifest replacement row `" + row
             + "` does not name a component"), row
-    assert admit_ambient(clean, "OldStore=db:D") == (
-        "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred "
-        "handoff/type-layer wave (item 186)")
+    for row in ("OldStore=db", "OldStore=db:", "OldStore=:D",
+                "OldStore=d/b:D"):
+        assert admit_ambient(clean, row) == (
+            "MANIFEST|manifest handoff row `" + row
+            + "` does not name a component, a key and its state type"), row
+    # a row that does not even START with an identifier is not a handoff row
+    # missing its component; it is a row of no kind at all, and says so.
+    assert admit_ambient(clean, "=db:D") == (
+        "MANIFEST|unrecognized manifest row `=db:D`")
 
 
 # ---------------------------------------- item 186, the REPLACEMENT wave, part 1
@@ -4070,3 +4087,154 @@ def test_the_single_source_sink_is_unchanged_by_the_ambient_splice(admit):
         for text in (src, _oneline(src)):
             ref_tag, ref_msg = _ref(text)
             assert admit(text) == ref_tag + "|" + ref_msg
+
+
+# ---------------------------------------- item 186, the REPLACEMENT wave, part 2
+#
+# `handoff` STATE compatibility (item 53), the last surface the wave held back.
+# A stateful provider declares the shape of the live state it EXPORTS when it is
+# replaced (`handoff <key>: <Type>`); its replacement declares the shape it
+# ACCEPTS. The value flows predecessor -> successor, so the accepted shape must
+# admit everything the exported one produces — the same covariant §5 relation an
+# interface return position uses, pointed at state. A swap whose successor
+# cannot hold the predecessor's state is REFUSED rather than admitted into a
+# runtime that silently drops it.
+#
+# The wire grows one kind, `C=k:T`, rendered by `manifest_wire` off the whole IR
+# document's `components` (whose `handoff` survives lowering) — the same place
+# `compiler._running_handoffs` reads, so the gate sees exactly the ambient table
+# the reference's own check sees.
+#
+# Why it needed no expression type layer, which is what deferred it: both shapes
+# reach the two gates as declared SPELLINGS, and `_handoff_compatible` calls
+# `compatible(accepted, exported)` with NO declared-type table. So the port is
+# the type-STRING algebra alone, and the structural-record branch that would
+# need a table is unreachable — `handoff st: {a: Int}` is a parse error on the
+# reference (`Parser.type_` refuses `{` at an annotation), never a comparison.
+#
+# FAILURE DIRECTION: fail-CLOSED. Every refusal here is an admission that does
+# not happen; the running composition keeps running with its state where it is.
+# The controls below pin that it does not refuse everything: an identical shape,
+# a WIDENED accepted shape, a cold key and a successor that declares no hand-off
+# at all all still admit.
+
+_H_SVC = "service D { fn q(s: Str) -> Int }\n"
+
+
+def _h_comp(name: str, accepts: str | None, key: str = "db",
+            extra: str = "") -> str:
+    """A component providing `key`, optionally declaring a `handoff` on it."""
+    line = f"  handoff {key}: {accepts}\n" if accepts else ""
+    return (_H_SVC + extra + f"component {name} provides {key}: D {{\n"
+            + line
+            + f"  provide {key} {{ fn q(s) {{ let x = s   return 0 }} }}\n}}\n")
+
+
+#: The running composition: one stateful provider exporting `Str` at `db`.
+_H_M = _h_comp("Store", "Str")
+
+
+def _h_drift(accepts: str, exports: str, new: str = "Store",
+             old: str = "Store", key: str = "db") -> str:
+    return ("G2|state hand-off on `" + key + "` differs from the running "
+            "manifest: `" + new + "` accepts `" + accepts + "`, but `" + old
+            + "` exports `" + exports + "` — the successor cannot hold the "
+            "predecessor's state, and dropping it on the swap would be residue")
+
+
+#: (name, running M, incoming X, replacing R, expected verdict). Every row is
+#: checked on BOTH legs of oracle B, so the expectation is a third witness and
+#: not the definition.
+_HANDOFF_CORPUS = (
+    ("a narrower accepted shape is refused",
+     _H_M, _h_comp("Store", "Int"), ("Store",), _h_drift("Int", "Str")),
+    ("an identical shape admits",
+     _H_M, _h_comp("Store", "Str"), ("Store",), ""),
+    ("a WIDENED accepted shape admits (T injects into Opt[T])",
+     _H_M, _h_comp("Store", "Opt[Str]"), ("Store",), ""),
+    ("the reverse narrowing is refused",
+     _h_comp("Store", "Opt[Str]"), _h_comp("Store", "Str"), ("Store",),
+     _h_drift("Str", "Opt[Str]")),
+    ("numeric widening: Float accepts an exported Int",
+     _h_comp("Store", "Int"), _h_comp("Store", "Float"), ("Store",), ""),
+    ("and the reverse does not",
+     _h_comp("Store", "Float"), _h_comp("Store", "Int"), ("Store",),
+     _h_drift("Int", "Float")),
+    ("containers meet elementwise",
+     _h_comp("Store", "List[Int]"), _h_comp("Store", "List[Float]"),
+     ("Store",), ""),
+    ("and elementwise the other way is refused",
+     _h_comp("Store", "List[Float]"), _h_comp("Store", "List[Int]"),
+     ("Store",), _h_drift("List[Int]", "List[Float]")),
+    ("a COLD key — nothing running exported it — is no conflict",
+     _h_comp("Store", None), _h_comp("Store", "Int"), ("Store",), ""),
+    ("a successor that declares no hand-off opts out, lossily but legally",
+     _H_M, _h_comp("Store", None), ("Store",), ""),
+    ("the table is keyed by KEY, so another component inherits the state too",
+     _H_M, _h_comp("Fresh", "Int"), ("Store",), _h_drift("Int", "Str", "Fresh")),
+    ("an ALIAS is not erased on either side, so the spellings differ",
+     _h_comp("Store", "S", extra="type S = Str\n"), _h_comp("Store", "Str"),
+     ("Store",), _h_drift("Str", "S")),
+    ("the implicit same-name replacement reaches it with no `replacing=`",
+     _H_M, _h_comp("Store", "Int"), (), _h_drift("Int", "Str")),
+)
+
+
+@pytest.mark.parametrize("name,running,incoming,replacing,expected",
+                         _HANDOFF_CORPUS,
+                         ids=[c[0] for c in _HANDOFF_CORPUS])
+def test_oracle_b_handoff_state_compatibility(admit_ambient, name, running,
+                                              incoming, replacing, expected):
+    """ORACLE B over the hand-off row: both legs derived from one artifact, and
+    the verdict string compared byte for byte."""
+    got = _gate_ambient(admit_ambient, incoming, running, replacing=replacing)
+    assert got == expected, name
+    assert got == _ref_ambient(incoming, running, replacing=replacing), name
+
+
+def test_manifest_wire_renders_the_handoff_row():
+    """`C=k:T` rides with its component, after that component's requirement and
+    route rows and ahead of the service block: it is a per-component COMPOSITION
+    row. The provision and requirement positions are untouched, so the `mnames`
+    DFS seed order cannot have moved, and a composition declaring no `handoff`
+    renders byte-identically to before."""
+    from revl import manifest_wire
+
+    rows = manifest_wire(compile_source(_H_M, "running.rvl")).split(";")
+    assert rows[0] == "Store/db/"
+    assert rows[1] == "Store=db:Str"
+    assert rows.index("!services") == 2
+    # a composition with no hand-off renders no such row at all
+    bare = manifest_wire(compile_source(_h_comp("Store", None), "running.rvl"))
+    assert "=" not in bare, bare
+
+
+def test_manifest_wire_renders_no_handoff_row_for_a_manifest_dict():
+    """The manifest PROJECTION drops `handoff`, so a bare manifest dict cannot
+    say what any provider exports — and the wire must not invent it. It renders
+    no row, which is exactly the empty hand-off table `_running_handoffs` builds
+    from the same input, so the two sides stay in step."""
+    from revl import manifest_wire
+
+    ir = compile_source(_H_M, "running.rvl")
+    assert "=" not in manifest_wire(ir["manifest"])
+
+
+def test_the_handoff_row_is_what_closed_it(admit_ambient):
+    """NON-VACUITY, the load-bearing half. Strip the `C=k:T` row from the wire
+    and the same admission goes back to the answer the gate gave before part 2:
+    ADMITTED, with the running state dropped on the swap and nothing said
+    anywhere. This is what pins that the row — not something already on the wire
+    — is what closed the divergence."""
+    from revl import manifest_wire
+
+    ir = compile_source(_H_M, "running.rvl")
+    wire = manifest_wire(ir, replacing=("Store",))
+    incoming = _h_comp("Store", "Int")
+    assert admit_ambient(incoming, wire) == _h_drift("Int", "Str")
+    stripped = ";".join(r for r in wire.split(";") if "=" not in r)
+    assert stripped != wire
+    assert admit_ambient(incoming, stripped) == ""
+    # ... while the reference refuses it either way: the divergence was real.
+    assert _ref_ambient(incoming, _H_M, replacing=("Store",)) == \
+        _h_drift("Int", "Str")

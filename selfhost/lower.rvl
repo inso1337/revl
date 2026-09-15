@@ -12945,10 +12945,69 @@ test "a cycle closing through a routed running consumer is refused (ambient G3)"
     == "G3|dependency cycle: Router -> StoreB -> Router (G3)"
 }
 
-test "a handoff row refuses until the deferred type layer lands" {
+// ---- the replacement wave, part 2: `handoff` STATE compatibility (item 53).
+// The wire carries what the running provider EXPORTS (`C=k:T`); the incoming
+// component declares what it ACCEPTS; the value flows old -> new, so the
+// accepted shape must admit everything the exported one produces.
+
+// A component that declares NO `handoff` and a wire carrying a running export
+// is the opt-out case: a stateless successor of a stateful provider is a lossy
+// choice the author made explicit, not a refusal. So the row alone moves no
+// verdict — which is also what keeps every pre-part-2 wire byte-identical.
+test "a handoff row alone moves no verdict" {
   let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
-  assert admit_ambient(clean, "OldStore=db:D")
-    == "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred handoff/type-layer wave (item 186)"
+  assert admit_ambient(clean, "OldStore=db:D") == ""
+  assert admit_ambient(clean, "OldStore=db:D") == admit_src(clean)
+}
+
+// The refusal. `NewStore` re-provides `db` and accepts `Int` where the running
+// `OldStore` exports `Str`: the successor cannot hold the predecessor's state,
+// and the swap is refused rather than admitted into a silent drop.
+test "a successor that cannot hold the running state is refused (handoff)" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:Str;-OldStore")
+    == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Int`, but `OldStore` exports `Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
+}
+
+// The relation is the §5 one pointed at state, in the value-flow direction: the
+// predecessor's `Str` injects into the successor's `Opt[Str]` (widening the
+// accepted shape is always safe), and the reverse does not.
+test "a widened accepted hand-off shape still admits" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Opt[Str]   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:Str;-OldStore") == ""
+}
+
+test "a narrowed accepted hand-off shape is refused" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Str   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:Opt[Str];-OldStore")
+    == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Str`, but `OldStore` exports `Opt[Str]` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
+}
+
+// A key the successor accepts but nothing running exported starts COLD: no
+// running export, no comparison, no refusal.
+test "a cold hand-off key is no conflict" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;-OldStore") == ""
+}
+
+// A function-typed state shape is why the handoff row is read AHEAD of the
+// route row: `(Int) -> Str` carries a `>`, and a route-first reading would
+// split the row inside its own type field. Parameters meet contravariantly, so
+// a successor accepting `(Float) -> Str` cannot hold an exported `(Int) -> Str`.
+test "a function-typed hand-off row is read, and meets contravariantly" {
+  let x = "service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: (Float) -> Str   provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(x, "OldStore/db/;OldStore=db:(Int) -> Str;-OldStore")
+    == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `(Float) -> Str`, but `OldStore` exports `(Int) -> Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
+}
+
+// A garbled handoff row is a wire the gate cannot read, and a wire it cannot
+// read fails CLOSED rather than dropping a running export in silence.
+test "a garbled handoff row refuses by name" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "OldStore=db")
+    == "MANIFEST|manifest handoff row `OldStore=db` does not name a component, a key and its state type"
+  assert admit_ambient(clean, "OldStore=db:")
+    == "MANIFEST|manifest handoff row `OldStore=db:` does not name a component, a key and its state type"
 }
 
 // The item-346 service block. It changes NO verdict this fold computes — that is
