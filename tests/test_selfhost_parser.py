@@ -112,6 +112,13 @@ def _render(n) -> str:
         return f"(index {_render(n.target)} {_render(n.index)})"
     if isinstance(n, P.ExprIf):
         return f"(if {_render(n.cond)} {_render(n.then)} {_render(n.otherwise)})"
+    if isinstance(n, P.ExprAsset):
+        # BEFORE the `ExprRecord` branch, and deliberately: `ExprAsset` IS an
+        # `ExprRecord` subclass (parser.py), and a freshly parsed one has EMPTY
+        # fields (the resolver fills `path`/`sha256` later), so the record
+        # branch would render every `asset "..."` as an indistinguishable
+        # `(rec )` and this oracle would not be comparing the path at all.
+        return f"(asset {n.written})"
     if isinstance(n, P.ExprRecord):
         return "(rec " + " ".join(f"(f {k} {_render(v)})" for k, v in n.fields) + ")"
     if isinstance(n, P.ExprList):
@@ -191,6 +198,24 @@ ACCEPTED = [
     "`${a || b}`", "`a|b`", "`100%`", "`%p`", "`${a || b}|${c}`",
     "`p${`inner ${x}`}q`",
     "hole", 'hole "why"', "hole[Int]", 'hole[List[Str]] "todo"',
+    # item 459 F1: `asset "<path>"`. The juxtaposed string literal is PART of
+    # the expression, not a second expression, and `p_seq` needs no comma
+    # between elements, so before this form was read every argument list
+    # holding one counted ONE ARGUMENT TOO MANY --
+    # `webui.add_entry(a, b, asset "./x.ts", d)` read as five, which is the
+    # shape `tests/test_checker_reference_census.py` had pinned by text on
+    # `examples/app/notes.rvl`.
+    'asset "./frontend/entry.client.ts"', 'asset "a.txt"',
+    'f(asset "a.txt")', 'f(1, asset "a.txt", 2)',
+    'g(asset "a.txt", asset "b.txt")',
+    '[asset "a.txt", asset "b.txt"]', '{ k: asset "a.txt" }',
+    'asset "a.txt" ?? d', 'c ? asset "a.txt" : asset "b.txt"',
+    # ... and the negative controls. `asset` is an IDENT and not a keyword on
+    # either side (neither lexer was touched), so every one of these is the
+    # plain variable it has always been; only a juxtaposed STRING makes it the
+    # asset form.
+    "asset", "asset + 1", "asset.path", "asset(1)", "f(asset, 1)",
+    "asset => asset", "{ asset: 1 }", "r.asset", "xs[asset]",
     "a.b ?? c.d", "xs[0] ?? 1", "f(a ?? b)", "[a ?? b]", "{ k: a ?? b }",
     "(a && b) ?? c", "a ?? (b && c)",
     "x => y => x + y", "f(x => x + 1)", "[x => x, y => y]",
@@ -203,6 +228,10 @@ REJECTED = [
     "a ? b", "a ? b : ", "match e { Ok => }",
     "match e {", "1 2", "a b", ".x", "=> x", "*", ")",
     "hole[", "hole[]", "`${}`", "(a: ) => a", "((a, b)) => a",
+    # an `asset` path is resolved, jailed and hashed at COMPILE time, so it
+    # cannot depend on a runtime value: a template path is refused rather than
+    # read (parser.py's `_asset_expr` raises, this parser returns `Bad`)
+    "asset `x`", "asset `${p}`",
 ]
 
 
@@ -227,6 +256,7 @@ ATOMS = [
     "(f: (Int) -> Bool) => f", "(a: Str?) => a", "emit g(1)",
     # payloads that collide with the lexer's part encoding
     "`${a || b}`", "`100%`", "`a|b`",
+    'asset "a.txt"', "asset",
 ]
 BINOPS = ["+", "-", "*", "/", "%", "<", ">", "<=", ">=", "==", "===",
           "!=", "!==", "&&", "||", "??", "&", "|", "^", "<<", ">>"]
