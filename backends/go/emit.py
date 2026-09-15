@@ -430,8 +430,18 @@ def _expr(node, env: _Env, expected=None) -> str:
                                node.get("stages") or [], env, "cordis-go")
         policy = node.get("policy") or "error"
         capacity = int(node.get("buffer") or 0)
-        return "StreamSubscribe(%s, %s, %d)" % (stream, _go_string(policy),
-                                                capacity)
+        # §8's `block` drain WINDOW. `StreamSubscribe` is VARIADIC in the
+        # window, so a subscription that declares none emits the exact
+        # three-argument call it always has — the same shape the py reference
+        # keeps by defaulting `drain_ms` to None and the ts tier by appending an
+        # options object only when something is declared.
+        drain = node.get("drain")
+        if drain is None:
+            return "StreamSubscribe(%s, %s, %d)" % (stream, _go_string(policy),
+                                                    capacity)
+        _flag_stream_drain()
+        return "StreamSubscribe(%s, %s, %d, %d)" % (
+            stream, _go_string(policy), capacity, int(drain))
     if kind == "call":
         # A built-in Opt/Result constructor arriving as call(callee=Some, ...).
         callee = node.get("callee")
@@ -1078,11 +1088,33 @@ _COMP_NEEDS_STREAM = False
 # emits byte-identically to before (no event preamble, no json import).
 _COMP_NEEDS_STREAM_EVENT = False
 
+# item 130 §8: a `policy block drain <t>` subscription additionally pulls in the
+# drain-window preamble (`_STREAM_DRAIN_PREAMBLE`), which installs the arming
+# hook the stream runtime calls, and the CLOCK COEFFECT the window fires on
+# (`_COMP_NEEDS_TIMER`). A subscription with no declared window never arms a
+# timer — its resume is eager — so a window-free stream program keeps the exact
+# preamble it emitted before, with no scheduler in it.
+_COMP_NEEDS_STREAM_DRAIN = False
+
 
 def _flag_stream() -> None:
     """Pull the stream host runtime into this module's preamble (item 130)."""
     global _COMP_NEEDS_STREAM
     _COMP_NEEDS_STREAM = True
+
+
+def _flag_stream_drain() -> None:
+    """Pull in the drain window and the clock coeffect it fires on (§8).
+
+    The window is a REVERTIBLE SCHEDULE like any other timer — armed when the
+    provider pauses, cancelled by the bracket inverse — so it rides this tier's
+    existing `revlScheduleAfter`/`RevlClockAdvance` scheduler rather than a
+    clock of its own. That is what makes the resume a deterministic timeline
+    step here, exactly as it is on the py reference."""
+    global _COMP_NEEDS_STREAM, _COMP_NEEDS_STREAM_DRAIN, _COMP_NEEDS_TIMER
+    _COMP_NEEDS_STREAM = True
+    _COMP_NEEDS_STREAM_DRAIN = True
+    _COMP_NEEDS_TIMER = True
 
 
 def _flag_stream_event() -> None:
@@ -2570,34 +2602,30 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
 
 
 def _refuse_unlowered_stream_surface(node, tier: str) -> None:
-    """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
+    """Refuse the item-130 stream surface this tier does not lower.
 
-    Slice 2 arrived on this tier in two landings and only one thing outlived
-    them. The derived combinator chain (`map`/`filter`/`take`) IS lowered now,
-    as derived stream links inside the subscription's acquisition (see
-    `_stream_chain`), and so are all four §4.4 backpressure policies:
-    `drop_newest`, `drop_oldest` and `block` mirror the py reference's
-    `Subscription._deliver` arm for arm, with `block` resuming EAGERLY at the
-    `next` that makes room, which is what the reference does when no window is
-    declared.
+    Only §4.5's `replay(…)` is left here. Slice 2 arrived in three landings and
+    nothing of it outlived them: the derived combinator chain
+    (`map`/`filter`/`take`) is lowered as derived stream links inside the
+    subscription's acquisition (see `_stream_chain`); all four §4.4 backpressure
+    policies mirror the py reference's `Subscription._deliver` arm for arm; and
+    the §8 `block` drain WINDOW now arms against this tier's own clock coeffect
+    (`revlScheduleAfter`/`RevlClockAdvance`, item 57), so its resume is the same
+    deterministic timeline step it is on the reference rather than an early
+    wall-clock guess. The window was refused here for as long as the reason held
+    — "no deterministic clock on this tier" — and that reason stopped being true
+    once the clock coeffect landed; the refusal outlived it. java is the tier it
+    still holds for, and java refuses an `advance` step outright.
 
-    What is left is the `drain` WINDOW, and it is the one that must stay refused
-    on principle: its resume fires on the deterministic test clock, which this
-    tier does not carry, so lowering it would resume EARLY and quietly disagree
-    with the reference. Emitting a subscription that SILENTLY dropped the window
-    is the worst outcome available — the program would run and answer
-    differently from the py reference — so refuse by name instead, the same call
-    the wasm tier makes for the whole surface.
-
-    §4.5's `replay(…)` is the other one, and it is refused for a reason of its
-    own rather than for the clock. Replay is a DURABILITY claim, and the half
-    that makes it worth anything is §4.9's: a durable cursor is what turns a
-    crashed subscription from residue into a re-issuable descriptor, and that
-    recovery surface is the WAL's, which lives on the py reference tier. A tier
-    that emitted a subscription while silently dropping the backlog would
-    deliver only live items and call it replay. Refused at the provider's
-    declaration as well as at the consumer's request, because a declared backlog
-    nothing holds is the same vacuous claim one end earlier."""
+    Replay is refused for a reason of its own rather than for a clock. It is a
+    DURABILITY claim, and the half that makes it worth anything is §4.9's: a
+    durable cursor is what turns a crashed subscription from residue into a
+    re-issuable descriptor, and that recovery surface is the WAL's, which lives
+    on the py reference tier. A tier that emitted a subscription while silently
+    dropping the backlog would deliver only live items and call it replay.
+    Refused at the provider's declaration as well as at the consumer's request,
+    because a declared backlog nothing holds is the same vacuous claim one end
+    earlier."""
     if node.get("replay"):
         raise EmitError(
             "a stream `replay(…)` is not lowered on the %s tier; replay is a "
@@ -2605,16 +2633,6 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
             "cursor is what makes a crashed subscription reconstructible rather "
             "than residue — and that recovery surface is the py reference "
             "tier's (item 130 §4.5, §4.9) — try `--backend py`" % tier)
-    if node.get("drain") is not None:
-        raise EmitError(
-            "a `drain` window is not lowered on the %s tier; the `block` policy "
-            "itself IS lowered here with the EAGER resume (the provider "
-            "un-pauses at the `next` that makes room, exactly what the py "
-            "reference does with no window declared), but a declared window "
-            "resumes only on the deterministic test clock, which lives on the "
-            "py reference tier (item 130 §8). Lowering the window without that "
-            "clock would resume EARLY and quietly disagree — try "
-            "`--backend py`" % tier)
 
 
 def _document_holds_stream(ir: dict) -> bool:
@@ -7574,27 +7592,53 @@ type Subscription struct {
 	closed bool
 	termed bool
 	// `block`-policy backpressure (§4.4): `paused` IS the design's `Paused`
-	// state index. The resume is EAGER — it happens at the `Next` that makes
-	// room — which is exactly what the py reference does when no `drain` window
-	// is declared. A declared window is refused by the emitter on this tier.
+	// state index. With no declared window the resume is EAGER — it happens at
+	// the `Next` that makes room — which is exactly what the py reference does
+	// when `drain_ms` is None.
 	paused bool
+	// §8's drain WINDOW (`policy block drain <t>`): `drainMs` is the window in
+	// milliseconds, 0 for the eager resume above. A windowed subscription does
+	// NOT resume when the consumer drains — it resumes when the clock coeffect
+	// steps the timeline past the window — so the window is what the provider
+	// waits on, not the buffer. `drainCancel` is the armed window's inverse,
+	// nil while none is armed.
+	drainMs     int64
+	drainCancel func() bool
 }
+
+// streamArmDrain arms one drain window against the clock coeffect and returns
+// its inverse. Installed by the drain-window preamble, which the emitter pulls
+// in — together with the scheduler itself — only for a document that declares a
+// `drain`. It stays nil in every window-free stream program, where no window is
+// ever armed and this is never called, which is what keeps such a program's
+// emitted module free of a timer scheduler it does not use.
+var streamArmDrain func(ms int64, body func()) func() bool
 
 // StreamSubscribe opens the single-consumer subscription a `subscribe` bracket
 // binds. `capacity` is the declared `buffer` (0 = the default); every buffer is
 // BOUNDED either way, since there are no unbounded buffers (design §4.4).
 // Subscribing to an already-terminal provider terminates immediately, so the
 // first `Next` cannot park on a provider that is already gone.
-func StreamSubscribe(src *Stream, policy string, capacity int) *Subscription {
+//
+// `drainMs` is VARIADIC so a subscription with no §8 window emits — and calls —
+// the exact three-argument form it always has; at most one is ever passed, by
+// the emitter, and it is the declared window in milliseconds.
+func StreamSubscribe(src *Stream, policy string, capacity int,
+	drainMs ...int64) *Subscription {
 	if capacity <= 0 {
 		capacity = StreamBufferCapacity
 	}
+	window := int64(0)
+	if len(drainMs) > 0 {
+		window = drainMs[0]
+	}
 	sub := &Subscription{
-		src:    src,
-		policy: policy,
-		items:  make(chan string, capacity),
-		cancel: make(chan struct{}),
-		term:   make(chan struct{}),
+		src:     src,
+		policy:  policy,
+		items:   make(chan string, capacity),
+		cancel:  make(chan struct{}),
+		term:    make(chan struct{}),
+		drainMs: window,
 	}
 	src.mu.Lock()
 	src.subs = append(src.subs, sub)
@@ -7672,6 +7716,9 @@ func (sub *Subscription) deliver(item string) bool {
 		sub.paused = true
 		sub.mu.Unlock()
 		hostRecord("stream.paused")
+		// §8: with a declared window the resume is the window's, not the
+		// consumer's, so arm it here — the moment the pause begins.
+		sub.armDrain()
 		return false
 	default: // "" | "error"
 		sub.mu.Unlock()
@@ -7682,18 +7729,84 @@ func (sub *Subscription) deliver(item string) bool {
 }
 
 // maybeResume releases a `block`-paused provider once the consumer has drained
-// an item. EAGER, matching the py reference with no `drain` window declared
-// (§4.4); a declared window is refused by this tier's emitter rather than
-// resumed early (§8).
+// an item. EAGER with no declared window, matching the py reference's
+// `Subscription._maybe_resume` when `drain_ms` is None (§4.4). With a window
+// declared, draining alone does NOT resume: only a clock `advance` past the
+// window does (§8), which is the whole observable difference a window makes.
 func (sub *Subscription) maybeResume() {
 	sub.mu.Lock()
-	if !sub.paused || sub.closed || len(sub.items) >= cap(sub.items) {
+	if !sub.paused || sub.closed || len(sub.items) >= cap(sub.items) ||
+		sub.drainMs > 0 {
 		sub.mu.Unlock()
 		return
 	}
 	sub.paused = false
 	sub.mu.Unlock()
 	hostRecord("stream.resume")
+}
+
+// armDrain arms the §8 drain window against the clock coeffect, at most one at
+// a time. A no-op when no window is declared, so a window-free subscription
+// never touches the scheduler.
+//
+// The window is a REVERTIBLE SCHEDULE like any timer: arming registers a firing
+// and `Close` cancels it, so a subscription torn down while Paused leaves no
+// armed window behind and the R1 residue proof stays exact.
+func (sub *Subscription) armDrain() {
+	sub.mu.Lock()
+	if sub.drainMs <= 0 || sub.closed || sub.drainCancel != nil {
+		sub.mu.Unlock()
+		return
+	}
+	ms := sub.drainMs
+	sub.mu.Unlock()
+	// Armed OUTSIDE `sub.mu`: the scheduler takes the clock lock, and a firing
+	// body takes `sub.mu`, so holding both here would be the one lock order
+	// this runtime does not otherwise use.
+	cancel := streamArmDrain(ms, sub.drainFire)
+	sub.mu.Lock()
+	if sub.closed || sub.drainCancel != nil {
+		// raced a Close (or a second arm): cancel the one nobody will own.
+		sub.mu.Unlock()
+		cancel()
+		return
+	}
+	sub.drainCancel = cancel
+	sub.mu.Unlock()
+}
+
+// drainFire is one drain-window firing, driven by RevlClockAdvance — a step in
+// the timeline, not a wall-clock wake-up. It resumes the provider if the
+// consumer has made room, and re-arms for the next window if it has not, so a
+// consumer that never drains keeps the provider suspended instead of being
+// handed items it cannot take (mirrors backends/python/runtime.py
+// `Subscription._drain_fire`).
+func (sub *Subscription) drainFire() {
+	sub.mu.Lock()
+	sub.drainCancel = nil
+	if sub.closed || !sub.paused {
+		sub.mu.Unlock()
+		return
+	}
+	if len(sub.items) >= cap(sub.items) {
+		sub.mu.Unlock()
+		sub.armDrain()
+		return
+	}
+	sub.paused = false
+	sub.mu.Unlock()
+	hostRecord("stream.resume")
+}
+
+// cancelDrain is the armed window's inverse, run by the bracket inverse.
+func (sub *Subscription) cancelDrain() {
+	sub.mu.Lock()
+	cancel := sub.drainCancel
+	sub.drainCancel = nil
+	sub.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // State is the design's state index (§1) as this runtime sees it: `closed` once
@@ -7795,6 +7908,9 @@ func (sub *Subscription) Close() bool {
 	sub.closed = true
 	sub.mu.Unlock()
 	close(sub.cancel)
+	// §8: an armed drain window is a live schedule this bracket owns — cancel it
+	// here, or a subscription torn down while Paused would leave one behind.
+	sub.cancelDrain()
 	sub.src.detach(sub)
 	hostRecord("stream.close")
 	revlHostRelease()
@@ -7864,6 +7980,29 @@ func StreamReset() {
 }
 '''
 
+
+# The DRAIN-WINDOW half of the stream runtime (item 130 §8). Emitted only for a
+# document that declares `policy block drain <t>` (`_COMP_NEEDS_STREAM_DRAIN`),
+# which also pulls in the clock coeffect + timer scheduler the window rides
+# (`_COMP_NEEDS_TIMER`, item 57) — so a window-free stream program keeps the
+# exact preamble it emitted before, with no scheduler in it.
+#
+# All the window LOGIC (arm / fire / re-arm / cancel) lives in the main stream
+# preamble beside the `block` policy it belongs to; this installs the one thing
+# that needs the scheduler, so the two halves can be emitted independently.
+_STREAM_DRAIN_PREAMBLE = '''// ---- the `block` drain window on the clock coeffect (item 130 §8) ----
+// The window fires on RevlClockAdvance, so a resume is a deterministic step in
+// the timeline — the same answer the py reference gives for the same source —
+// rather than a wall-clock guess. Arming takes the scheduler's live-resource
+// slot and cancelling returns it, so a window abandoned at teardown is residue
+// the R1 proof already counts.
+
+func init() {
+	streamArmDrain = func(ms int64, body func()) func() bool {
+		return revlScheduleAfter(ms, body).Cancel
+	}
+}
+'''
 
 # The typed-EVENT half of the stream runtime (item 130 Slice 5, design §6). A
 # faithful mirror of backends/python/runtime.py's `EventContract`/`_json_schema_error`
@@ -9049,7 +9188,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
-    global _COMP_NEEDS_STREAM_EVENT
+    global _COMP_NEEDS_STREAM_EVENT, _COMP_NEEDS_STREAM_DRAIN
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
     _COMP_NEEDS_TIMER = False
@@ -9057,6 +9196,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     _STREAM_ITER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
     _COMP_NEEDS_STREAM_EVENT = False
+    _COMP_NEEDS_STREAM_DRAIN = False
     # item 243/247: witnessed externs by name, for this document's component
     # steps (see `_witnessed_extern`); empty for a document with none, so
     # every existing v1/v2 golden emits exactly as before.
@@ -9231,6 +9371,8 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append(_TIMER_PREAMBLE)
     if _COMP_NEEDS_STREAM:
         out.append(_STREAM_PREAMBLE)
+    if _COMP_NEEDS_STREAM_DRAIN:
+        out.append(_STREAM_DRAIN_PREAMBLE)
     if _COMP_NEEDS_STREAM_EVENT:
         out.append(_STREAM_EVENT_PREAMBLE)
 
@@ -9748,6 +9890,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_STRCONV
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
+    global _COMP_NEEDS_STREAM_DRAIN
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
     _V3_MODE = True
@@ -9760,6 +9903,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
+    _COMP_NEEDS_STREAM_DRAIN = False
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
     has_spawn = _spawn_targets(ir) and any(
@@ -10002,6 +10146,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append(_TIMER_PREAMBLE)
     if _COMP_NEEDS_STREAM:
         out.append(_STREAM_PREAMBLE)
+    if _COMP_NEEDS_STREAM_DRAIN:
+        out.append(_STREAM_DRAIN_PREAMBLE)
     out.extend(body)
     out.extend(host_stubs)
 
