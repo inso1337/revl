@@ -199,7 +199,7 @@ was corrected by hand and had drifted back within a day.
 | verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
-| wasm-capabilities.md | needs-work | 35 | yes |
+| wasm-capabilities.md | needs-work | 36 | yes |
 | webapp-competitiveness-report.md | needs-work | 33 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
