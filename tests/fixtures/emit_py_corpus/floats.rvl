@@ -5,3 +5,11 @@
 fn fmt(a: Float, b: Float) -> Str {
   return `ratio ${a / b} end ${2.5}`
 }
+
+// The two operands the node's own shape cannot classify. `a` is a Float that
+// arrives through a parameter and `flag` is a Bool: python's `str()` renders
+// them `3.0`/`1e-07` and `True`, none of which is what any other tier prints,
+// so both read the `interp_type` the frontend records instead.
+fn tagged(a: Float, flag: Bool) -> Str {
+  return `value ${a} flag ${flag}`
+}

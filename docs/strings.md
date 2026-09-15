@@ -278,18 +278,35 @@ exponent case), which points here.
   one, so this is enforced (a lone surrogate is rejected) rather than
   converted; the real fix is that every backend now escapes *from code points*.
 - **python.** Reference for the unit. A `Float` renders through `_revl_ftoa`
-  (the canonical ES form) rather than `str(float)` **only where the emitter can
-  prove the interpolated expression is a `Float` from the node alone**: a
-  `Float` literal, a `/`, a `Float`-annotated arithmetic node, or a unary minus
-  of one (`_is_float_expr`). The emitter carries no type environment, so a
-  `Float` reached only through a `let`/`var` binding is *not* proven at the
-  interpolation site and still falls back to `str()`. That is a real remaining
-  gap, not a closed one: a `Float` bound as `let x: Float = 3.0` and then
-  interpolated as `${x}` emits `str(x)` and renders **`3.0`** on py, where ts
-  (which interpolates natively) renders `3`.
-  Closing it needs the interpolation site to carry the checker's type the way
-  `arithmetic.md`'s `"widen"` marker does. go, rust and java share the same
-  syntactic-proof limitation.
+  (the canonical ES form) rather than `str(float)`. The emitter carries no type
+  environment, so it used to answer this from the node alone (`_is_float_expr`:
+  a `Float` literal, a `/`, a `Float`-annotated arithmetic node, or a unary
+  minus of one) and fall back to `str()` for anything else. That proof cannot
+  see a `Float` that arrives through a parameter, a local, a field or a call,
+  and the fallback was wrong for every one of them: `${x}` for a `Float`
+  parameter rendered **`3.0`** on py, **`1e-07`** at 1e-7, and on rust and java
+  **`0.0000001`** and **`1.0E-7`**, where ts and go answered `1e-7`.
+
+  **Closed (item 458)** the way this paragraph asked for: the interpolation
+  site now carries the checker's type, exactly as `arithmetic.md`'s `"widen"`
+  marker does. `lower.py` writes `interp_type` on a `${...}` operand for the
+  two types whose host default rendering is not revl's (`Float` and `Bool`),
+  and python, rust and java read it. `Str` and `Int` stay TAG-LESS, because
+  every host's default is already right for both, so the IR for the common
+  template is byte-identical to what it was. Each backend still consults its
+  own node-local proof first, so a hand-written IR document in the backend-ir
+  dialect (which carries no annotation) renders the same as it always did.
+
+  `Bool` was the same defect with a different spelling: `str(True)` is
+  `'True'`, where ts, go, rust and java all print `true`. python now renders
+  the revl literals.
+
+  A COMPOUND operand is refused at the frontend instead. revl defines no
+  rendering for a `List`, a `Map`, an `Opt`, a `Result`, a record or a variant,
+  and the hosts did not agree on one: `${xs}` for `[1, 2]` was `[1, 2]` on py,
+  `1,2` on ts, `[1 2]` on go, and on rust it DID NOT COMPILE (`Vec<i64>` has no
+  `Display`). One diagnostic names the type and points at `.to_str()`; the wasm
+  tier had been refusing every one of them by name all along.
 - **go.** Literals emit valid UTF-8 escapes (`\uXXXX` for BMP, `\UXXXXXXXX`
   for astral) instead of the lone-surrogate `\uXXXX` `json.dumps` produced;
   the method helpers were already `[]rune`-based. `Float` interpolates through
