@@ -539,6 +539,50 @@ def test_the_near_misses_stay_misses(name):
     assert rules_fired(shape_of(_NEAR_MISSES[name])) == ()
 
 
+#: The list this file supersedes, as both artifact gates still spell it. Kept
+#: here so the claim "the shape catches what the list cannot" is checked against
+#: the real list rather than against a copy that drifted.
+SUPERSEDED_BLACKLIST = ("<!doctype", "<!DOCTYPE", "<html", "<script", "<style", "<div")
+
+_ARTIFACT_GATES = (
+    ROOT / "tests" / "test_app_frontend_725.py",
+    ROOT / "tests" / "test_webui_entry_asset_ref_459.py",
+)
+
+
+def test_the_substring_list_is_still_there_and_still_says_what_it_said():
+    """The two artifact gates were WIDENED, not replaced: each keeps its
+    parametrized list and gained a leg that runs `scan_text` over the same
+    artifact. If someone deletes the list, this reds — the list is a better
+    error message than the shape when it does hit."""
+    for gate in _ARTIFACT_GATES:
+        src = gate.read_text(encoding="utf-8")
+        assert "def test_no_inline_frontend_blob(" in src, (
+            f"{gate.name} no longer carries test_no_inline_frontend_blob"
+        )
+        for form in SUPERSEDED_BLACKLIST:
+            assert f'"{form}"' in src, f"{gate.name} dropped {form!r}"
+        assert "def test_no_embedded_frontend_document_in_the_artifact(" in src, (
+            f"{gate.name} no longer runs the structural detector over its "
+            "artifact, so that artifact is back to the substring list alone."
+        )
+
+
+def test_the_shape_catches_what_the_substring_list_cannot():
+    """Why this file exists. A page built out of `<section>`, `<header>`,
+    `<span>` and `<a href=...>` — with an inline event handler on it — contains
+    none of the six strings the artifact gates look for, and is a document."""
+    evasion = (
+        '<section><header><span>Signed in as </span>'
+        '<a href="/me" onclick="go()">you</a></header>'
+        '<ul><li><span>row</span></li></ul></section>'
+    )
+    assert not [f for f in SUPERSEDED_BLACKLIST if f in evasion], (
+        "the sample was written to evade the substring list; it no longer does"
+    )
+    assert rules_fired(shape_of(evasion)) == ("A",)
+
+
 def test_the_detector_does_not_read_tag_names():
     """The property that separates this from the blacklist it supersedes.
     Renaming every element to something nobody has heard of changes nothing,
