@@ -596,6 +596,41 @@ def test_no_native_ir_document_carries_a_manifest(lower_to_ir):
     manifest is worse than none: a consumer reading `loadOrder` off one would
     get an empty list and no signal that the producer never had one.
 
+    Item 391 went back and MEASURED what a complete one would take, over the
+    528-document census corpus (`tools/gate_reference_census.py`'s directories);
+    344 of those are reference-admitted and all 344 carry a manifest. Two things
+    block it, and the first kills the feasibility note this docstring used to
+    carry.
+
+    1. `templates` is NOT separable. It reads as the easy shape — it is the one
+       any emitter actually consumes, and the spawn targets are already
+       collected — but the 8 documents that carry a non-empty `templates` are
+       EXACTLY the 8 that carry `instances`, as sets, with neither difference
+       non-empty. `instances` is `_check_spawn_attenuation`'s per-instance
+       attenuation chain: a fold of structured `(T, P)` capabilities through
+       `cap_order.covers` with the key-to-token bridge and `config.` symbol
+       substitution. That is the cone/ceiling algebra this gate does not have,
+       and the gate census still records its absence as the two standing
+       `false-admit/G4` entries. So on every document where `templates` would
+       change an emitted byte, producing it alone IS the partial manifest this
+       test refuses.
+
+    2. `loadOrder` would be WRONG, not merely incomplete. `ir_component` emits
+       `name`/`source`/`config`/`requires`/`provides`/`body` and nothing else —
+       no `isolate`, `intercept`, `routes` or `boot`. Those are not only
+       conditional entry keys: `_link` partitions the provider table by
+       `(key, realm)` with the realm read off `isolate`, and a `realms(...)`
+       route contributes one graph edge per leg, so the Kahn order is computed
+       over a different graph on any document that isolates or routes.
+       Measured over the same 344: isolate on 28 documents, intercept on 7,
+       routes on 5, boot on 1, templates/instances on 8 — 40 distinct documents
+       needing a shape the native component IR does not carry. A manifest built
+       from `{name, file, inject, provides}` plus a plain Kahn pass would be
+       byte-identical on the other 304 and silently wrong on those 40.
+
+    The producible order is therefore: the four missing component-header shapes
+    first, then the attenuation algebra, then this key — not this key first.
+
     This fails the moment the key appears, which is the point — the next pass
     that produces it has to come here and say what it produces."""
     for rel in COMPONENT_DOCS:
