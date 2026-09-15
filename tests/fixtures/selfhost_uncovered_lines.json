@@ -31,14 +31,15 @@
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
         },
-        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every \u2026 in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on \u2026 as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 \u00a74.5 puts the `replay(\u2026)` refusal beside the surviving `drain` one. The two are refused for different reasons \u2014 the window for the deterministic clock this tier does not carry, replay for the recovery surface (\u00a74.9) that lives on py \u2014 and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
+        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every \u2026 in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on \u2026 as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 \u00a78's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the \u00a74.5 `replay(\u2026)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
           "_document_holds_stream": 3,
           "_flag_stream": 1,
+          "_flag_stream_drain": 3,
           "_flag_stream_event": 2,
           "_is_stream_next": 7,
           "_raw_go_ident": 3,
           "_refuse_required_stream": 3,
-          "_refuse_unlowered_stream_surface": 4,
+          "_refuse_unlowered_stream_surface": 2,
           "_stream_chain": 13,
           "_stream_head": 4,
           "_stream_stage_arrow": 16
@@ -72,7 +73,7 @@
           "_comp_infer": 60,
           "_construction_case": 15,
           "_emit_return": 26,
-          "_expr": 161,
+          "_expr": 165,
           "_format": 50,
           "_format.flush_text": 4,
           "_go_comp_match": 52,
@@ -164,7 +165,7 @@
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_v3_bridge_helpers": 52,
-          "_emit_v3_placement": 213,
+          "_emit_v3_placement": 216,
           "_go_bridge_arg_expr": 4,
           "_go_opt_inner": 4,
           "_go_result_inner": 5,
@@ -197,7 +198,7 @@
           "_go_v3_construct": 29
         },
         "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead.": {
-          "_emit": 107
+          "_emit": 110
         },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_go_v3_expr": 48

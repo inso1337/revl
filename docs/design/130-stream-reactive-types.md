@@ -280,12 +280,22 @@ the refused `emit` is traced as `stream.emit <item> refused` so backpressure is
 never a silent loss on any tier. The blocking tiers resume EAGERLY, at the `next`
 that makes room, which is what the reference does when no window is declared.
 
-The one thing those three tiers still refuse by name is the `drain` WINDOW
-below, whose resume is driven by the deterministic test clock. Lowering it
-without that clock would resume early and quietly disagree with the reference,
-which is worse than refusing. The §1 combinator chain came off that list in its
-own landing, so `_refuse_unlowered_stream_surface` on each blocking tier is now
-a single check.
+The `drain` WINDOW below is where the three blocking tiers part, and each of
+them for its own reason rather than one shared one. go carries item 57's clock
+coeffect, process-wide and stepped by the same `advance` statement the window
+shares on the reference, so the window is LOWERED there: it arms on a pause,
+fires on `RevlClockAdvance`, re-arms while the buffer is still full, and is
+cancelled by the bracket inverse. rust carries a clock too, but `thread_local!`,
+deliberately, so parallel `cargo test` threads never share one — a window would
+be armed by the provider's thread and advanced by the consumer's, so it would
+never fire and the provider would stay suspended forever. java carries no clock
+at all: timers do not lower there and an `advance` step is refused by name, so
+there is nothing to fire a window on. Those two refuse by name, each naming its
+own reason, because a program that compiles and answers differently from the
+reference is worse than one that refuses.
+
+`_refuse_unlowered_stream_surface` is now a single `replay` check on go, and a
+`replay` plus a `drain` check on rust and java.
 
 **A policy and a chain on one subscription share one signal.** The acceptance a
 `deliver` answers is the same boolean a `take(n)` link counts, and `take(n)`
@@ -363,8 +373,8 @@ end would emit a program that runs, drops items by the rule the author declared,
 and never replays what the author also declared. Where a head carries both an
 unlowered `replay` and an unlowered `drain` window, the replay refusal is the
 one reported: the two are refused for different reasons, the window for the
-deterministic clock and replay for the recovery surface, and a stable answer is
-what keeps an author from fixing the wrong half.
+clock coeffect and replay for the recovery surface, and a stable answer is what
+keeps an author from fixing the wrong half.
 
 The `"replay"` slot §5 reserves is threaded only when declared, so a replay-free
 program's IR is byte-identical.
@@ -397,12 +407,12 @@ interface (`func(string) string`, `java.util.function.Function<String,String>`,
 `|x: String| -> String`) rather than through the general arrow arm. Nothing else
 in a component body gains an arrow lowering.
 
-What those three tiers still refuse is the lossy backpressure policies and the
-`block`-policy drain window. The window is the one that must stay refused on
-principle: its resume fires on the deterministic clock of §8, which no blocking
-tier carries, so a lowering would resume EARLY and answer differently from the
-reference. A refusal is worse than a lowering; it is much better than a silent
-disagreement.
+What those tiers still refuse is the `block`-policy drain window, on the two of
+them that cannot fire it — rust, whose clock is thread-local, and java, which
+has no clock — for the reasons §4.4 gives. The lossy backpressure policies came
+off this list in their own landing and the window came off it on go, which
+carries a process-wide clock. A refusal is worse than a lowering; it is much
+better than a silent disagreement.
 
 The go/java/rust "erases to blocking" reading is the async family's family-2
 argument (async-extern.md §2): those tiers' methods are blocking, ordering
@@ -775,6 +785,16 @@ provider `emit`s items explicitly — but any time-windowed buffering fires on
 is also why wasm's refusal is consistent: wasm already skips `advance`
 (lifecycle.py:134), so a tier that cannot advance the clock cannot run a
 time-windowed stream either.
+
+The same test reads the other tiers, and it is the whole tier split for the
+window. A tier lowers the drain window exactly when it carries a clock every
+party to the window can see: py and ts do (one event loop), and go does (a
+process-wide scheduler with a mutex). rust carries a clock that is
+`thread_local!` by design, so the provider's thread arms a window the consumer's
+`advance` cannot reach; java carries none at all. Those two refuse the window by
+name, the way wasm refuses the whole surface — never lowering it against a
+substitute clock, because a resume at the wrong time is a program that runs and
+answers differently rather than one that says it cannot.
 
 ## 9. Adversarial review
 
