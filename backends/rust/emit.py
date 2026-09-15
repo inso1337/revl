@@ -489,11 +489,21 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
 
 # The concrete surface types that erase to a distinct Rust value (`String`,
 # `i64`, `i32`, `f64`, `bool`) and so must be BOXED when they flow into an
-# `Any`/`Value` parameter slot (`fn f(v: Value)`). A `Bytes`, list, record, ADT,
+# `Any`/`Value` parameter slot (`fn f(v: Value)`). A `Bytes`, record, ADT,
 # `Opt`, or already-erased `Any`/`Value` argument is out of this bounded fix:
 # the first three have no single canonical serde_json scalar image, and the last
 # is already a `Value`.
 _ANY_BOXABLE = frozenset(("Str", "Int", "Int32", "Float", "Bool"))
+
+# The ONE container that also has a canonical image: a `List[Any]` is
+# `Vec<Value>`, whose elements already carry the erased `serde_json::Value`, so
+# the whole list boxes as the JSON array those elements spell. That wrap is the
+# exact inverse of `stdlib/value.rvl`'s `value_list` `@rs` body (which reads a
+# `serde_json::Value::Array` back out as a `Vec<Value>`), so a list that makes
+# the round trip is unchanged. `List[Str]`, `List[Int]`, … stay OUT: their
+# elements are `String`/`i64`, not `Value`, so there is no element-wise recovery
+# to invert and a guess would be a silent representation change.
+_ANY_BOXABLE_LISTS = frozenset(("List[Any]", "List[Value]"))
 
 
 def _coerce_any_arg(arg_node: object, rendered: str, param_type: object,
@@ -533,7 +543,7 @@ def _coerce_any_arg(arg_node: object, rendered: str, param_type: object,
     if _is_fn_type(param_type):
         return rendered
     arg_ty = _v3_infer_type(arg_node, ctx)
-    if arg_ty not in _ANY_BOXABLE:
+    if arg_ty not in _ANY_BOXABLE and arg_ty not in _ANY_BOXABLE_LISTS:
         return rendered
     try:
         erased = _rust_type(param_type, ctx.types)
@@ -559,6 +569,18 @@ def _coerce_any_arg(arg_node: object, rendered: str, param_type: object,
                 f" Some(_n) => serde_json::Value::Number(_n),"
                 f' None => panic!("a non-finite Float has no representation '
                 f'in a dynamic value") }})')
+    if arg_ty in _ANY_BOXABLE_LISTS:
+        # A `Vec<Value>` whose elements already hold the erased
+        # `serde_json::Value` (`_ANY_BOXABLE_LISTS`): rebuild the JSON array
+        # `value_list` would read back. An element that is NOT a
+        # `serde_json::Value` cannot appear from the stdlib navigation surface
+        # this inverts, and maps to `Null` rather than aborting the emit —
+        # the same total shape `value_list` gives a non-list receiver.
+        return (f"Value::new(serde_json::Value::Array(({rendered}).iter()"
+                f".map(|_e| _e.downcast::<serde_json::Value>()"
+                f".map(|_j| (*_j).clone())"
+                f".unwrap_or(serde_json::Value::Null))"
+                f".collect::<Vec<serde_json::Value>>()))")
     return f"Value::new(serde_json::Value::from({rendered}))"
 
 
@@ -5788,6 +5810,15 @@ def _list_element_type(surface: object) -> str | None:
     return None
 
 
+def _opt_payload_type(surface: object) -> str | None:
+    """The payload surface type of an `Opt[T]` surface type, else None."""
+    if isinstance(surface, str):
+        m = re.match(r"^Opt\[(.+)\]$", surface)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
 def _v3_is_empty_list(node: object) -> bool:
     return (isinstance(node, dict) and node.get("kind") == "list"
             and not node.get("items"))
@@ -5913,6 +5944,61 @@ def _v3_empty_vec_elem_types(body: object, ctx: "_V3Ctx") -> dict:
         ctx.var_types = saved
 
 
+# The stdlib method table's UNCONDITIONAL result types — the builtins whose
+# surface result does not depend on the receiver (a mirror of
+# `revl.typecheck._BUILTIN_SIG`'s third column, restricted to the rows that name
+# a concrete type there). The backends run standalone (`python3 emit.py ir.json`,
+# no `revl` on the path), so the rows are spelled here rather than imported; a
+# row that disagreed with the frontend would be caught by the byte-agreement
+# corpus, which compiles through the real checker.
+#
+# DELIBERATELY ABSENT: `to_int` (its result differs by receiver family — `Int`
+# on Int32, `Opt[Int]` on Str) and `lookup` (`Opt[@elem]`, which needs the map's
+# value parameter). Both stay unknown rather than guessed.
+_BUILTIN_RESULT = {
+    "length": "Int", "charCodeAt": "Int", "codepoint_at": "Int",
+    "indexOf": "Int", "div_trunc": "Int", "div_floor": "Int",
+    "div_euclid": "Int", "mod": "Int", "size": "Int",
+    "charAt": "Str", "join": "Str", "repeat": "Str", "str": "Str",
+    "to_str": "Str",
+    "startsWith": "Bool", "endsWith": "Bool", "has": "Bool",
+    "is_alnum": "Bool", "is_digit": "Bool", "is_alpha": "Bool",
+    "is_space": "Bool",
+    "split": "List[Str]", "keys": "List[Str]",
+    "to_int32": "Int32",
+    "field": "Any", "list": "List[Any]",
+    "checked_div_trunc": "Result[Int, Str]",
+    "checked_div_floor": "Result[Int, Str]",
+    "checked_div_euclid": "Result[Int, Str]",
+    "checked_mod": "Result[Int, Str]",
+}
+
+# The `@self` rows: the result is the RECEIVER's type, so they are knowable
+# exactly when the receiver is (`s.slice(..)` on a `Str` local is a `Str`).
+_BUILTIN_SELF_RESULT = frozenset(("slice", "concat", "push", "set", "remove"))
+
+
+def _v3_builtin_return_type(node: dict, ctx: "_V3Ctx") -> str | None:
+    """The surface type of a stdlib method call (`kind == "builtin"`), when the
+    table names it without needing the receiver's element type.
+
+    Without this, a `let` bound to a method call (`let inner = name.slice(a, b)`,
+    `let joined = parts.join("")`) carried NO type, so every consumer of
+    `_v3_infer_type` treated it as unknown. The visible cost was at the
+    `Any`-boxing site: `_coerce_any_arg` fires only on a known concrete scalar,
+    so `f(inner)` against `fn f(v: Value)` emitted the bare `String` and the
+    crate failed to build (E0308) — the residual blocker under
+    docs/selfhost-compile.md's "native `compile_to` Stage 4".
+    """
+    method = node.get("method")
+    result = _BUILTIN_RESULT.get(method)
+    if result is not None:
+        return result
+    if method in _BUILTIN_SELF_RESULT:
+        return _v3_infer_type(node.get("target"), ctx)
+    return None
+
+
 def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
     """The surface type of an expression when it is knowable, else None.
 
@@ -5983,6 +6069,8 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
                 arm_ty = _v3_infer_type(arm.get("body"), ctx)
                 if isinstance(arm_ty, str):
                     return arm_ty
+        if kind == "builtin":
+            return _v3_builtin_return_type(node, ctx)
     if _v3_is_str(node, ctx):
         return "Str"
     if _v3_is_float(node):
@@ -6455,7 +6543,17 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             left = _render_expr(node["left"], ctx, rename)
             if node["left"].get("kind") not in _ATOMIC_KINDS:
                 left = f"({left})"
-            return f"{left}.unwrap_or_else(|| {_render_expr(node['right'], ctx, rename)})"
+            default = _render_expr(node["right"], ctx, rename)
+            # The DEFAULT-ARM half of the `Any`-boxing coercion: an
+            # `Opt[Any]` is `Option<Value>`, so `unwrap_or_else` must yield a
+            # `Value` — a concrete `3` default is E0308 there exactly as it
+            # would be in a `Value` parameter slot. Fires only when the left
+            # operand's `Opt[..]` payload is known (`_coerce_any_arg` is itself
+            # a no-op unless that payload erases to `Value`).
+            payload = _opt_payload_type(_v3_infer_type(node["left"], ctx))
+            if payload is not None:
+                default = _coerce_any_arg(node["right"], default, payload, ctx)
+            return f"{left}.unwrap_or_else(|| {default})"
         if node.get("op") == "+" and (
                 _v3_is_str(node.get("left"), ctx) or _v3_is_str(node.get("right"), ctx)):
             # Rust's `+` on strings takes `String + &str` only: `&str + String`
@@ -7670,8 +7768,16 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         if node.get("expr") is None:
             out.append(f"{pad}return;")
         else:
-            out.append(f"{pad}return "
-                       f"{_render_expr(node['expr'], ctx, expected=ctx.current_return)};")
+            rendered = _render_expr(node['expr'], ctx,
+                                    expected=ctx.current_return)
+            # The RETURN half of the `Any`-boxing coercion (`_coerce_any_arg`):
+            # a declared `-> Any` erases to the opaque `Value`, so returning a
+            # concrete `Str`/`Int`/… from such a function is E0308 exactly as
+            # passing one into a `Value` parameter was. Same wrap, same bound
+            # scalar set, so the two positions agree.
+            rendered = _coerce_any_arg(node['expr'], rendered,
+                                       ctx.current_return, ctx)
+            out.append(f"{pad}return {rendered};")
     elif step == "if":
         out.append(f"{pad}if {_render_expr(node['cond'], ctx)} {{")
         for child in node.get("then") or []:
