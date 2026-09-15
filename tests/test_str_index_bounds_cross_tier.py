@@ -279,8 +279,11 @@ def test_rust_char_access_still_faults_on_its_own():
     a lowering that reached for `unwrap_or_default()` would reintroduce the
     ts/java empty string on the one tier that never had it."""
     emitted = _emit("rust", _probe_doc("Str", "s().charAt(9)"))
-    assert ".chars().nth(" in emitted, emitted
-    assert "unwrap_or" not in emitted, emitted
+    body = emitted[emitted.index("pub fn d() -> String {"):]
+    body = body[:body.index("\n}")]
+    assert ".chars().nth(" in body, body
+    assert ".unwrap()" in body, body
+    assert "unwrap_or" not in body, body
 
 
 def test_every_tier_that_names_the_reason_spells_it_the_same_way():
