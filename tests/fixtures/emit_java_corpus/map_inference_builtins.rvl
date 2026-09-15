@@ -1,0 +1,44 @@
+// The host Map's value type learned from a BUILTIN-valued insert
+// (`_map_value_expr_type`'s `kind == "builtin"` arm). One map per arm, so each
+// map's `Map<V>` field/ctor/local declaration is the single witness for that
+// arm: an arm that answers nothing falls back to the historical `Str`, which is
+// a visible byte difference rather than a silent one.
+fn seed() -> Int { return 0 }
+
+service Sink {
+  emission fn note(s: Str, xs: List[Int], parts: List[Str], w: Int32)
+}
+
+component Scan provides sink: Sink {
+  let lengths = effect Map.new() undo lengths.drop()
+  let codes = effect Map.new() undo codes.drop()
+  let scalars = effect Map.new() undo scalars.drop()
+  let found = effect Map.new() undo found.drop()
+  let widened = effect Map.new() undo widened.drop()
+  let chars = effect Map.new() undo chars.drop()
+  let glued = effect Map.new() undo glued.drop()
+  let repeated = effect Map.new() undo repeated.drop()
+  let rendered = effect Map.new() undo rendered.drop()
+  let heads = effect Map.new() undo heads.drop()
+  let split_up = effect Map.new() undo split_up.drop()
+  let grown = effect Map.new() undo grown.drop()
+  let joined = effect Map.new() undo joined.drop()
+
+  provide sink {
+    fn note(s, xs, parts, w) {
+      effect lengths.insert("k", s.length()) undo lengths.remove("k")
+      effect codes.insert("k", s.charCodeAt(0)) undo codes.remove("k")
+      effect scalars.insert("k", s.codepoint_at(0)) undo scalars.remove("k")
+      effect found.insert("k", s.indexOf("x")) undo found.remove("k")
+      effect widened.insert("k", w.to_int()) undo widened.remove("k")
+      effect chars.insert("k", s.charAt(0)) undo chars.remove("k")
+      effect glued.insert("k", parts.join(",")) undo glued.remove("k")
+      effect repeated.insert("k", s.repeat(2)) undo repeated.remove("k")
+      effect rendered.insert("k", w.to_str()) undo rendered.remove("k")
+      effect heads.insert("k", s.slice(0, 1)) undo heads.remove("k")
+      effect split_up.insert("k", s.split(",")) undo split_up.remove("k")
+      effect grown.insert("k", xs.push(1)) undo grown.remove("k")
+      effect joined.insert("k", parts.concat(parts)) undo joined.remove("k")
+    }
+  }
+}
