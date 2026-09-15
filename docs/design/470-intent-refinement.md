@@ -625,6 +625,66 @@ Also explicitly out of scope for this item, not merely deferred:
   or ceiling clause touches `policy.rs`, the Python policy tier and the gate
   crate; it is a larger, cross-lane change and is not attempted here.
 
+## 5. The exit criterion, and where it is pinned
+
+Roadmap item 470's exit sentence is narrower than this note, and it is worth
+separating the two so a later reader does not have to re-derive which open stage
+the item is waiting on. The sentence is:
+
+> an action that exceeds its declared intent (a wider verb, a higher amount, a
+> different tenant, or an extra capability) is refused with the intent it
+> violated.
+
+Every clause of it is met by the slices in section 3, for a source program, in
+both stating slots:
+
+| the excess | what refuses it | what the refusal says |
+| --- | --- | --- |
+| a wider verb | `refine`'s verb dimension, via `_refine_one_crossing` | performs `ingest`, which the declared intent does not permit there |
+| a higher amount | the ceiling dimension, off `split_ceilings` | spends `calls=5`, above the declared ceiling `calls=1` |
+| a different tenant | the tenant dimension | runs in tenant `us`, confined to tenant `eu` |
+| an extra capability | the object dimension's `EXTRA_CAPABILITY` finding | reaches `db`, a capability the declared intent does not name |
+
+"With the intent it violated" is three separate things, and all three are in the
+rendered refusal: the OPERATION whose declaration was exceeded (`Worker.run`),
+the DECLARED value beside the requested one on the dimension that was exceeded,
+and the LINE the `within` clause is written on.
+
+`tests/test_470_exit_criterion.py` is that sentence as one executable claim,
+kept apart from the per-slice files on purpose. Section 3's slices are each
+covered where they landed, with the needle that slice introduced, so what no
+file stated was the sentence itself: all four excess kinds, in both stating
+slots, each carrying all three parts of the naming. The matrix is eight
+refusals, and each refused program is compiled a second time with the
+declaration removed and must compile, so no refusal in it comes from the
+boundary being crossed rather than from the declaration it cannot be shown to
+refine.
+
+Section 4's open stages are deliberately NOT part of that sentence, and reading
+them as blockers on it would be a misreading of both:
+
+- the LEASE PATH carries an intent into a runtime lease check. The exit sentence
+  says nothing about leases, and section 4 records that the stage has no
+  source-side half to land first, because a lease is acquired in a component
+  activation body where no declaration is ever in scope.
+- the VERB half of the operator profile gives the class-(c) gate a verb worth
+  stating. The verb dimension is already met at the frontend, where a verb
+  vocabulary exists because the declaration states one. The gate is a second
+  surface for the same rule, not the surface the sentence is about, and giving
+  it a verb needs the boundary-policy grammar change this note's last non-goal
+  rules out.
+
+One thing the frontend check deliberately does not do is worth stating here
+rather than leaving to be discovered, because it looks like a hole and is not
+one. The ceiling dimension compares a DECLARED bound against a STATED spend, and
+both are spellings: `fs.write(path="/tmp", calls=5)` against a declared
+`calls=1` is refused at compile time. It is not an execution count, so a
+crossing spelled `calls=1` inside a loop is admitted by this check and metered
+by `remainingUses` at the class-(c) gate instead, which is where section 3.6
+records the `calls` axis living and why that axis is erased from both sides of
+the comparison there. One quantity, one rule, and the rule for that one is a
+runtime counter.
+
 ## Relates to
 
 - [#822](https://github.com/inso1337/revl/issues/822), roadmap item 470 (this
