@@ -8309,12 +8309,21 @@ fn lir_fields(fields: Vec<InitN>, env: Vec<Bind>) -> String {
     return out;
 }
 
+fn lir_interp_operand(e: Expr, env: Vec<Bind>) -> String {
+    let inner = lir_expr(e.clone(), env.clone());
+    let ty = infer(e.clone(), env.clone());
+    if ((ty != "Float") && (ty != "Bool")) {
+        return inner;
+    }
+    return (((inner.revl_slice(0i64, (inner.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"interp_type\":")).revl_concat(&jstr(&ty))).revl_concat("}");
+}
+
 fn lir_parts(parts: Vec<PartN>, env: Vec<Bind>) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
     while (i < parts.revl_length()) {
         let p = (parts)[(i) as usize].clone();
-        let seg = if (p.kind == "t") { (String::from("[\"text\",").revl_concat(&jstr(&p.text))).revl_concat("]") } else { (String::from("[\"expr\",").revl_concat(&lir_expr(p.e.clone(), env.clone()))).revl_concat("]") };
+        let seg = if (p.kind == "t") { (String::from("[\"text\",").revl_concat(&jstr(&p.text))).revl_concat("]") } else { (String::from("[\"expr\",").revl_concat(&lir_interp_operand(p.e.clone(), env.clone()))).revl_concat("]") };
         out = if (i == 0i64) { seg.clone() } else { (out.revl_concat(",")).revl_concat(&seg) };
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
