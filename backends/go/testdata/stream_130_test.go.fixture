@@ -635,6 +635,166 @@ func TestBlock_PausesTheProviderUntilTheConsumerDrains(t *testing.T) {
 	}
 }
 
+// -------------------------------------------------------------------------
+// §8 — the `block` DRAIN WINDOW, on this tier's own clock coeffect.
+//
+// The window was refused here for as long as its reason held: "the resume fires
+// on a deterministic clock this tier does not carry". This tier carries one
+// (item 57's RevlClockAdvance), so the window rides it, and these three tests
+// are the reason the lowering is not a silent divergence — they are the go
+// transcription of the py reference's own window tests
+// (backends/python/tests/test_stream_runtime.py, §8):
+//
+//   * a windowed subscription does NOT resume when the consumer drains — only a
+//     clock advance PAST the window resumes it (the whole observable difference
+//     a window makes, and the thing an early resume would quietly get wrong);
+//   * a firing that finds the buffer still full RE-ARMS rather than resuming, so
+//     a consumer that never drains keeps the provider suspended;
+//   * the window is a revertible schedule: closing a Paused subscription cancels
+//     the armed one, so teardown leaves no orphaned interval.
+// -------------------------------------------------------------------------
+
+func TestDrainWindow_ResumesOnTheClockNotOnTheDrain(t *testing.T) {
+	reset()
+	RevlClockReset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "block", 2, 10)
+	if !src.Emit("i0") || !src.Emit("i1") {
+		t.Fatal("the first two items fit the bounded buffer")
+	}
+	if src.Emit("i2") {
+		t.Fatal("the provider must be TOLD it is blocked")
+	}
+	if st := sub.State(); st != "paused" {
+		t.Fatalf("state = %q, want paused", st)
+	}
+
+	nextItem(t, sub, "i0")
+	if st := sub.State(); st != "paused" {
+		t.Fatalf("draining resumed a WINDOWED subscription (state = %q); the "+
+			"window, not the buffer, is what the provider waits on", st)
+	}
+	if src.Emit("i2") {
+		t.Fatal("a windowed provider stays suspended until the window fires")
+	}
+
+	if n := RevlClockAdvance(5); n != 0 {
+		t.Fatalf("firings before the window elapsed = %d, want 0", n)
+	}
+	if st := sub.State(); st != "paused" {
+		t.Fatalf("state at half the window = %q, want paused", st)
+	}
+	if n := RevlClockAdvance(5); n != 1 {
+		t.Fatalf("firings at the window = %d, want 1", n)
+	}
+	if st := sub.State(); st != "active" {
+		t.Fatalf("state after the window fired = %q, want active", st)
+	}
+	if marksIndex(HostMarks(), "stream.resume") < 0 {
+		t.Fatalf("the resume was not recorded: %v", HostMarks())
+	}
+	if !src.Emit("i2") {
+		t.Fatal("the provider may emit again once the subscription is Active")
+	}
+	nextItem(t, sub, "i1")
+	nextItem(t, sub, "i2") // no silent loss: nothing was dropped
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+	if n := RevlClockPending(); n != 0 {
+		t.Fatalf("armed windows after close = %d, want 0", n)
+	}
+}
+
+func TestDrainWindow_ReArmsWhileTheBufferIsStillFull(t *testing.T) {
+	reset()
+	RevlClockReset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "block", 1, 10)
+	if !src.Emit("i0") {
+		t.Fatal("the first item fits the bounded buffer")
+	}
+	if src.Emit("i1") {
+		t.Fatal("the provider must be TOLD it is blocked")
+	}
+	// nothing drained: the window fires, finds the buffer still full, re-arms
+	if n := RevlClockAdvance(10); n != 1 {
+		t.Fatalf("firings = %d, want 1", n)
+	}
+	if st := sub.State(); st != "paused" {
+		t.Fatalf("state = %q, want paused — the buffer is still full", st)
+	}
+	if n := RevlClockPending(); n != 1 {
+		t.Fatalf("armed windows = %d, want the re-armed 1", n)
+	}
+	nextItem(t, sub, "i0")
+	if n := RevlClockAdvance(10); n != 1 {
+		t.Fatalf("firings on the re-armed window = %d, want 1", n)
+	}
+	if st := sub.State(); st != "active" {
+		t.Fatalf("state = %q, want active", st)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+	if n := RevlClockPending(); n != 0 {
+		t.Fatalf("close did not cancel the window: %d armed", n)
+	}
+}
+
+func TestDrainWindow_ClosingAPausedSubscriptionLeavesNoArmedWindow(t *testing.T) {
+	reset()
+	RevlClockReset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "block", 1, 10)
+	src.Emit("i0")
+	if src.Emit("i1") {
+		t.Fatal("the provider must be TOLD it is blocked")
+	}
+	if n := RevlClockPending(); n != 1 {
+		t.Fatalf("armed windows while Paused = %d, want 1", n)
+	}
+	sub.Close()
+	src.Close()
+	if n := RevlClockPending(); n != 0 {
+		t.Fatalf("armed windows after the bracket inverse = %d, want 0", n)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// An UNWINDOWED `block` subscription is untouched by the window machinery: it
+// still resumes eagerly at the `next` that makes room, and it arms nothing. The
+// window is opt-in, so this is what keeps the default behaviour the py
+// reference's `drain_ms=None` behaviour.
+func TestBlock_WithoutAWindow_ArmsNothing(t *testing.T) {
+	reset()
+	RevlClockReset()
+	src := StreamSource()
+	sub := StreamSubscribe(src, "block", 1)
+	src.Emit("i0")
+	if src.Emit("i1") {
+		t.Fatal("the provider must be TOLD it is blocked")
+	}
+	if n := RevlClockPending(); n != 0 {
+		t.Fatalf("an unwindowed pause armed %d timer(s), want 0", n)
+	}
+	nextItem(t, sub, "i0")
+	if st := sub.State(); st != "active" {
+		t.Fatalf("an unwindowed subscription must resume EAGERLY, state = %q", st)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
 // A `block`-paused subscription is still torn down by its own bracket inverse:
 // the pause is a provider-side refusal, never a hold on the consumer, so the
 // core guarantee (§9 Part A) is untouched by the policy.

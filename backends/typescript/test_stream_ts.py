@@ -43,7 +43,7 @@ pytestmark = pytest.mark.skipif(
 # emits. Written into the backend directory (so the relative import resolves)
 # under a pid-unique name, and removed in `finally`.
 _DRIVER = textwrap.dedent("""
-    import { Stream, host, StreamFaulted } from './runtime.ts'
+    import { Stream, host, Clock, StreamFaulted } from './runtime.ts'
 
     const log: string[] = []
 
@@ -108,6 +108,28 @@ _DRIVER = textwrap.dedent("""
       s3.close()
       log.push('fault=' + reason)
 
+      // Slice 2 §8: the `block` DRAIN WINDOW. The emitter puts `drainMs` in the
+      // options object, so this tier claims the window — and a claimed window
+      // that quietly resumed on the drain (or on wall-clock time) would answer
+      // differently from the reference while still compiling. It resumes on
+      // `Clock.advance` and on nothing else.
+      Clock.reset()
+      const s4 = host.Stream.source()
+      const sub4 = host.Stream.subscribe(s4, 'block', null,
+        { capacity: 2, drainMs: 10 })
+      s4.emit('w0')
+      s4.emit('w1')
+      log.push('window_refused_when_full=' + (s4.emit('w2') === false))
+      log.push('window_paused=' + sub4.state)
+      await sub4.next()                       // drains one slot
+      log.push('window_after_drain=' + sub4.state)   // still paused: the window owns the resume
+      log.push('window_half=' + Clock.advance(5) + ',' + sub4.state)
+      log.push('window_fired=' + Clock.advance(5) + ',' + sub4.state)
+      log.push('window_emit_after=' + s4.emit('w2'))
+      sub4.close()
+      s4.close()
+      log.push('window_armed_after_close=' + Clock.pending())
+
       // Residue (R4): after a full LIFO teardown, nothing is left open.
       log.push('pending=' + Stream.pending())
     }
@@ -145,6 +167,23 @@ def test_a_ts_stream_program_runs_under_plain_node():
     assert lines["cancel_first_closed"] == "true"
     # a provider fault surfaced as a throw carrying the reason
     assert lines["fault"] == "boom"
+    # §8, the `block` drain window: the emitter EMITS `drainMs` on this tier, so
+    # the runtime owes the reference's answer for it and not a plausible one.
+    # A full buffer refuses the delivery and parks the provider ...
+    assert lines["window_refused_when_full"] == "true"
+    assert lines["window_paused"] == "paused"
+    # ... draining a slot does NOT resume it — the window owns the resume, which
+    # is the whole observable difference between a windowed and an unwindowed
+    # `block` subscription, and the half an eager lowering gets silently wrong.
+    assert lines["window_after_drain"] == "paused"
+    # ... the resume happens on the CLOCK: nothing at half the window, one
+    # firing at the window, and only then is the provider Active again.
+    assert lines["window_half"] == "0,paused"
+    assert lines["window_fired"] == "1,active"
+    assert lines["window_emit_after"] == "true"
+    # ... and the window is a revertible schedule: the bracket inverse cancels
+    # the armed one, so teardown leaves no orphaned interval.
+    assert lines["window_armed_after_close"] == "0"
     # a full teardown left no listener, source or derived link behind
     assert lines["pending"] == "0"
 
