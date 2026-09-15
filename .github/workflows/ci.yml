@@ -207,7 +207,7 @@ jobs:
       # The `go` target is deliberately NOT here: its producer needs `gofmt`,
       # which this job has no reason to install, and a target that loud-skips
       # for a missing tool is a green line that checked nothing. It runs in
-      # `backend-go`, which provisions Go. `tests/test_golden_drift_runs_in_ci.py`
+      # `backend-go`, which provisions Go. `tests/test_emitted_artifacts_are_drift_gated.py`
       # pairs every target against a job that both checks it AND has the tools
       # its producer requires, so a target added with no home is a red.
       #
