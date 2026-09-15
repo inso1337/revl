@@ -337,6 +337,49 @@ _TH_BAD_TAIL = """component Auditor requires db: Database {
 _TH_BAD_MSG = "`db.query` argument `sql` expects `Str`, got `Int`"
 
 
+# ------------------------------- the DECLARATION SIGNATURES (item 391)
+#
+# The heads above are the ones `p_top` could not enter. These are the ones it
+# entered and then could not READ: an extern classification it had no case for,
+# a type-parameter list, a trailing `cache` clause, a record field named after a
+# grammar noun, and the service-operation modifier slot. Each failed the WHOLE
+# document at the parse stage, which reads as agreement. Measured over the
+# census corpus: 53 documents the reference ADMITS were refused this way — 29
+# at `expected fn after extern`, 16 at `bad method signature in service <S>`,
+# 6 at `expected { after fn signature` and 2 at `bad record field in type <T>`.
+#
+# Paired the same way: the ACCEPTED half puts the declaration in front of a
+# clean component, the REJECTED half in front of one carrying a real refusal,
+# so a step that overshoots turns a refusal into silence and is caught.
+_DS_WITNESSED = '''type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+extern pure fn unstash(w: Stash) -> Unit = @py { return None }
+extern witnessed[fs] fn stash(path: Str) -> Result[Stash, FsError] undo idempotent unstash(result) = @py { return 1 }
+'''
+
+_DS_ASYNC_EXTERN = (
+    'extern emission async fn http_post(url: Str, body: Str) -> Str'
+    ' = @py { return "" }\n')
+
+# the rest of the modifier slot, in one declaration each: item 309's
+# `idempotent`, item 245's `deferred`, item 257's `validated retry N`, item
+# 388's caller-decided `fn|async`, and item 373's `(confined: p)` reach clause
+_DS_MODIFIERS = '''extern emission idempotent fn ping(m: Str) -> Int = @py { return 1 }
+extern emission deferred fn mail(m: Str) -> Unit = @py { return None }
+extern emission validated retry 3 fn charge(m: Str) -> Int = @py { return 1 }
+extern emission fn|async engine_run(m: Str) -> Int = @py { return 1 }
+extern emission (confined: path) fn write_at(path: Str, body: Str) -> Int = @py { return 1 }
+'''
+
+_DS_GENERIC = "fn pair_up[T, U](a: T, b: U) -> T { return a }\n"
+_DS_CACHE = "fn twice(n: Int) -> Int cache pure { return n + n }\n"
+_DS_RECORD = '''type Envelope = {
+  config: Int, component: Int, requires: Int, realm: Int, intercept: Int,
+  isolate: Int, in: Int, with: Int, plain: Int,
+}
+'''
+
+
 ACCEPTED_PROGRAMS = [
     # `pub` is a visibility PREFIX, not a declaration head — the single largest
     # parse gap on this surface, and the one that made every `stdlib/*.rvl` and
@@ -415,6 +458,85 @@ component Tally provides counter: Counter {
     fn label(n) -> Str = n.to_str()
     fn flag() = true
   }
+}
+"""),
+    # ---- the declaration signatures (item 391) ---------------------------
+    # Five extern heads `p_extern` had no case for. `emission[caps]` /
+    # `witnessed[caps]` (item 343) and `async` (docs/design/async-extern.md §1)
+    # are the three the tree actually spells, 29 documents between them; the
+    # rest of the modifier slot is here because the reference consumes it in a
+    # LOOP, so any subset in any order has to parse.
+    ("a scoped emission extern", """
+extern emission[net.edge] fn ship(body: Str) -> Int = @py { return 1 }
+service Sink { emission[ship] fn send(m: Str) }
+component S provides sink: Sink {
+  provide sink { fn send(m) { emit ship(m) } }
+}
+"""),
+    ("a witnessed extern", _DS_WITNESSED + _TH_HEAD + _TH_TAIL),
+    ("an async extern and the async provide method implementing it",
+     _DS_ASYNC_EXTERN + """service Http { emission async fn post(url: Str, body: Str) -> Str }
+component Poster provides http: Http {
+  provide http { async fn post(url, body) = http_post(url, body) }
+}
+"""),
+    ("the rest of the extern modifier slot",
+     _DS_MODIFIERS + _TH_HEAD + _TH_TAIL),
+    # a type-parameter list between the name and the parameters: `params_at`
+    # walked into `[T, U]` and found no `{` where the body should be
+    ("a generic fn signature", _DS_GENERIC + _TH_HEAD + _TH_TAIL),
+    # the item-310 trailing clause, the only spelling in the tree and the only
+    # one the reference admits on a plain `fn`
+    ("a cache pure trailing clause", _DS_CACHE + _TH_HEAD + _TH_TAIL),
+    # `_record_key_name`: eight cordis-domain nouns are legal FIELD names even
+    # though they are genuine keywords where they can lead a form
+    ("record fields named after the grammar nouns",
+     _DS_RECORD + _TH_HEAD + _TH_TAIL),
+    # the whole service-operation modifier slot in one declaration, each
+    # operation implemented so the component is complete
+    ("the service-operation modifier slot", """
+service Api {
+  route get "/notes" fn list_notes() -> Str
+  emission idempotent fn put(k: Str)
+  commutative fn add(k: Str)
+  emission endorse[fs] fn run(k: Str)
+  emission validated retry 3 fn charge(k: Str) -> Int
+  fn look(k: Str) -> Int cache pure
+}
+extern emission fn w(k: Str) -> Int = @py { return 1 }
+component ApiHost provides api: Api {
+  provide api {
+    fn list_notes() = "x"
+    fn put(k) { emit w(k) }
+    fn add(k) { let x = 1 }
+    fn run(k) { emit w(k) }
+    fn charge(k) { emit w(k) return 1 }
+    fn look(k) = 1
+  }
+}
+"""),
+    # ---- A6, the negative controls ---------------------------------------
+    # The signature-agreement block whose refusals are in REJECTED_PROGRAMS
+    # below must stay SILENT on a provider that AGREES with its declaration:
+    # annotations that match, on both parameters and return, with matching
+    # async colours. A one-directional compatibility test, or an off-by-one in
+    # the positional pairing, reds here.
+    ("annotations that agree with the declaration", """
+service Database {
+  async fn query(sql: Str, n: Int) -> Int
+  fn plain(k: Str) -> Str
+}
+component C provides db: Database {
+  provide db {
+    async fn query(sql: Str, n: Int) -> Int = n
+    fn plain(k: Str) -> Str { return k }
+  }
+}
+"""),
+    ("a restated annotation that is the declared type exactly", """
+service Database { fn query(n: Float) -> Float }
+component C provides db: Database {
+  provide db { fn query(n: Float) -> Float = n }
 }
 """),
     # a provider may be purer than its declaration: no emission, no refusal
@@ -540,6 +662,122 @@ boot component B provides e: Env {
   provide e { fn a() = config.x }
 }
 ''' + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    # ---- the declaration signatures, negative controls (item 391) --------
+    # The same declaration in front of a component the checker must still
+    # REFUSE. A step that runs past the declaration and eats the component
+    # after it turns this refusal into silence.
+    ("a bad call-site type after a scoped emission extern",
+     "extern emission[net.edge] fn ship(body: Str) -> Int = @py { return 1 }\n"
+     + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a witnessed extern",
+     _DS_WITNESSED + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after an async extern",
+     _DS_ASYNC_EXTERN + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after the extern modifier slot",
+     _DS_MODIFIERS + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a generic fn",
+     _DS_GENERIC + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a cache pure fn",
+     _DS_CACHE + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    ("a bad call-site type after a keyword-named record field",
+     _DS_RECORD + _TH_HEAD + _TH_BAD_TAIL, _TH_BAD_MSG),
+    # The capability a `witnessed[fs]` extern SEEDS is its declared scope, not
+    # its own name (`_emitting_capabilities`, emission_analysis.py). Reading it
+    # as the name would answer "emits through `stash`" here, which is not a
+    # capability any service bound can mention, so this pins the seeding rule
+    # rather than the parse alone.
+    ("a witnessed extern reaching outside its declared scope",
+     _DS_WITNESSED + """service Keep { emission[net] fn hold(p: Str) }
+component K provides keep: Keep {
+  provide keep { fn hold(p) { effect stash(p) } }
+}
+""",
+     "`Keep.hold` is declared `emission[net]`, but this implementation emits "
+     "through `fs` (reaching `stash()`)"),
+    # An `async` provide method's BODY has to be reached and checked, not just
+    # stepped over: these two put the slice's own two verdict families inside
+    # one.
+    ("an async provide method reaching an undeclared emission", """
+service Store { async fn get(k: Str) -> Int }
+extern emission fn w(k: Str) -> Int = @py { return 1 }
+fn through(k: Str) -> Int { return w(k) }
+component C provides store: Store {
+  provide store { async fn get(k) { let n = through(k) return n } }
+}
+""",
+     "`Store.get` is declared plain, but this implementation reaches "
+     "`through()`"),
+    ("an async provide method mistyping a call-site argument", """
+service Store { async fn get(k: Str) -> Int }
+service Database { fn query(sql: Str) -> Int }
+component C requires db: Database provides store: Store {
+  provide store { async fn get(k) -> Int = db.query(42) }
+}
+""", "`db.query` argument `sql` expects `Str`, got `Int`"),
+    # ---- A6: the provider against its declaration (item 391) -------------
+    # The six rules of `_lower_provide`, in the reference's own order. None was
+    # decided here. The two checked-in fixtures come first: `t7` is the
+    # PARAMETER twin of the return annotation #1063 taught this parser to read
+    # and nothing then compared, and `v2_async_signature_mismatch` is the
+    # document the service-operation modifier slot above unmasked — it spent
+    # its life behind `(bad) bad method signature in service Database`.
+    ("t7 the checked-in parameter-annotation fixture",
+     _fixture("t7_provide_param_annotation_mismatch.rvl"),
+     "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`"),
+    ("v2 the checked-in async-agreement fixture",
+     _fixture("v2_async_signature_mismatch.rvl"),
+     "method `stats` of provision `db` is not async but service Database "
+     "declares it async"),
+    ("a6 the provider is not async and the declaration is", """
+service Database { async fn stats() -> Int }
+component C provides db: Database {
+  provide db { fn stats() = 1 }
+}
+""",
+     "method `stats` of provision `db` is not async but service Database "
+     "declares it async"),
+    ("a6 the arities disagree", """
+service Database { fn query(sql: Str) -> Int }
+component C provides db: Database {
+  provide db { fn query(sql, extra) = 1 }
+}
+""",
+     "method `query` of provision `db` takes 2 params but service Database "
+     "declares 1"),
+    ("a6 the provider implements a method the service never declared", """
+service Database { fn query(sql: Str) -> Int }
+component C provides db: Database {
+  provide db { fn upsert(sql) = 1 }
+}
+""", "`upsert` is not a method of service Database"),
+    ("a6 one method provided twice", """
+service Database { fn query(sql: Str) -> Int }
+component C provides db: Database {
+  provide db {
+    fn query(sql) = 1
+    fn query(sql) = 2
+  }
+}
+""", "duplicate method `query` in provision `db`"),
+    ("a6 the restated return type disagrees", """
+service Database { fn query(sql: Str) -> Int }
+component C provides db: Database {
+  provide db { fn query(sql) -> Str = "x" }
+}
+""",
+     "return type of `query` (from service `Database`) expects `Int`, got "
+     "`Str`"),
+    # A widening annotation is still not the published signature: `Float`
+    # accepts an `Int`, so a ONE-directional compatibility test would admit
+    # this. The reference tests both directions and so does the port.
+    ("a6 a restated parameter annotation that merely widens", """
+service Database { fn query(sql: Int) -> Int }
+component C provides db: Database {
+  provide db { fn query(sql: Float) = 1 }
+}
+""",
+     "parameter `sql` of `query` (from service `Database`) expects `Int`, got "
+     "`Float`"),
     ("g4 emission not declared",
      _fixture("g4_emission_not_declared.rvl"),
      "`Cache.put` is declared plain, but this implementation reaches `db.execute`"),
