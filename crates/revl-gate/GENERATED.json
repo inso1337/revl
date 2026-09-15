@@ -30,7 +30,7 @@
     "Str",
     "Unit"
   ],
-  "admission_surface": "admission-interface:db9e71ef9d4689c7",
+  "admission_surface": "admission-interface:e8857c21dd9d40ac",
   "admitted_layer": "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides",
   "covered_layer": "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer",
   "crate": "revl-gate",
@@ -44,7 +44,7 @@
     "src/revl/typecheck.py",
     "tools/build_gate_crate.py"
   ],
-  "frontier": "selfhost-admit:db9e71ef9d4689c7",
+  "frontier": "selfhost-admit:e8857c21dd9d40ac",
   "frontier_excluded_builtins": [],
   "frontier_excluded_keywords": [],
   "gate_api_version": "1.0.0",
@@ -84,7 +84,7 @@
     "selfhost/lower.rvl"
   ],
   "selfhost_root": "selfhost/lower.rvl",
-  "source_digest": "db9e71ef9d4689c73adb6ca53d8f775f66d35bd6638c67404b55c64d972916a8",
+  "source_digest": "e8857c21dd9d40ac7b74939a5e0f3bdd74f32251c8ef2ba8c26c88a4b767bee5",
   "symbols_api_version": "0.1.0",
   "verdict_arms": [
     "refused",

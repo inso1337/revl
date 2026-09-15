@@ -5318,7 +5318,17 @@ fn svc_caps_modelled(svcs: List[SvcD], i: Int) -> Bool {
 // (a missing ceiling is unbounded, hence wider).
 type CVio = { capStr: Str, param: Str, child: Int, parent: Int, dropped: Bool }
 
-fn cvio_key(v: CVio) -> Str { return v.capStr.concat("").concat(v.param) }
+// `sorted(key=lambda v: (v["cap"].to_str(), v["param"]))` — the TUPLE order,
+// spelled as a comparison rather than a concatenated key. Concatenating with
+// no separator compares `net` + `calls` against `net(calls=5)` + `size` as
+// `netcalls` vs `net(calls=5)size` and orders the parameterized capability
+// first, where the tuple orders the bare `net` first; and a discrete parameter
+// value may carry any byte but the five the spelling reserves, so no printable
+// separator makes a concatenated key faithful either.
+fn cvio_gt(a: CVio, b: CVio) -> Bool {
+  if (a.capStr != b.capStr) { return a.capStr > b.capStr }
+  return a.param > b.param
+}
 
 fn sort_cvios(xs: List[CVio]) -> List[CVio] {
   var out: List[CVio] = []
@@ -5329,7 +5339,7 @@ fn sort_cvios(xs: List[CVio]) -> List[CVio] {
     var placed = false
     var res: List[CVio] = []
     while (k < out.length()) {
-      if (!placed && cvio_key(out[k]) > cvio_key(v)) {
+      if (!placed && cvio_gt(out[k], v)) {
         res = res.push(v)
         placed = true
       }
