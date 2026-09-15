@@ -212,12 +212,13 @@ KNOWN_BYPASSES = {
     # `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
     # so both sides of the attenuation fold are spelled in the boundary's own
     # namespace and both refuse with the reference's message byte-for-byte.
-    # `examples/rejections/g4_spawn_key_rename_launders.rvl` and
-    # `examples/rejections/g4_dotted_capability_key.rvl` are the corpus
-    # documents for the two shapes that change caught and nothing spelled:
-    # a widening laundered through a key SPELLED the same on both sides, and a
-    # dotted item-343 emission scope that the old scope-list reader split into
-    # two capabilities.
+    # `examples/rejections/g4_dotted_capability_key.rvl` is the corpus document
+    # for the shape that change caught and nothing spelled: a dotted item-343
+    # emission scope, which the old scope-list reader split into two
+    # capabilities so that the wiring key landed in the declared scope by
+    # accident. The other shape it caught -- a widening laundered through a key
+    # SPELLED the same on both sides -- is pinned by an in-file test in
+    # `selfhost/lower.rvl` instead; see the capability-order header there.
 }
 
 

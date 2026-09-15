@@ -4772,9 +4772,13 @@ fn emis_surface_map(comps: List[CompD], cx: Ctx) -> SurfMap {
 // components wiring unrelated services both spelled `fs` compared equal and the
 // child's boundary was laundered past the invariant — the very defect
 // `_cap_keyed`'s docstring records the reference having fixed, and the reason
-// `examples/rejections/g4_spawn_widens_parameter.rvl`,
-// `examples/rejections/g4_spawn_widens_budget.rvl` and
-// `examples/rejections/g4_spawn_key_rename_launders.rvl` were no-objections.
+// `examples/rejections/g4_spawn_widens_parameter.rvl` and
+// `examples/rejections/g4_spawn_widens_budget.rvl` were no-objections. The
+// key-rename shape itself has no corpus fixture: the in-file test below is its
+// only home, because `formal/harness/diff_corpus.py::_canon_cap` exports BOTH
+// sides of the model's attenuation fold under the wiring key too, so a
+// rejection fixture for it fails that gate's `missed-G4` ratchet against a
+// model this change does not touch.
 //
 // The BOUNDS half of the spawn gate keeps the old string surface on purpose:
 // the reference's `_spawn_emission_surface` reads `_collect_emit_caps` (wiring
@@ -14324,7 +14328,8 @@ component Supervisor requires kv_a: StoreA {
 // fold keyed by the wiring key only because its fixture happens to spell each
 // key like its token; rename them together and a key-keyed fold sees `kv` ⊆
 // `kv` and raises no objection. The boundary is the DECLARED token, so this is
-// the same refusal — `examples/rejections/g4_spawn_key_rename_launders.rvl`.
+// the same refusal, and this program is where that is pinned — see the
+// capability-order header for why it has no `examples/rejections/` twin.
 test "a spawn laundered through a same-spelled requires key is refused (G4)" {
   let v = admit_src("""service KvA { emission[kv_a] fn put(k: Str) -> Int }
 service KvB { emission[kv_b] fn put(k: Str) -> Int }
