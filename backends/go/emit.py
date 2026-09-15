@@ -5446,10 +5446,25 @@ def _go_v3_optchain(node, ctx: _V3GoCtx, *, field=None, method=None, args=None):
     else:
         arg_renders = [_go_v3_expr(a, ctx) for a in args or []]
         # optcall receiver payload becomes _x; render the builtin against it.
+        # `_go_v3_builtin` dispatches several rows on the RECEIVER's surface
+        # type (`length` -> revlStrLen vs revlListLen, `concat`, `slice`,
+        # `indexOf`, `to_str` -> revlFtoa vs FormatInt), and the synthetic
+        # `__optx` node carried none: an `Opt[Str]?.length()` picked the List
+        # helper and the emitted package did not build
+        # ("type string of _x does not match []T"). The payload type is right
+        # here, so bind it for the length of the render.
         ret_surface = _v3_builtin_ret_type(method, payload)
-        body = _go_v3_builtin(
-            ctx, method, {"kind": "var", "name": "__optx"}, "_x", arg_renders
-        )
+        previous = ctx.var_types.get("__optx")
+        ctx.var_types["__optx"] = payload
+        try:
+            body = _go_v3_builtin(
+                ctx, method, {"kind": "var", "name": "__optx"}, "_x", arg_renders
+            )
+        finally:
+            if previous is None:
+                ctx.var_types.pop("__optx", None)
+            else:
+                ctx.var_types["__optx"] = previous
     go_ret = _go_v3_type(ret_surface, ctx.types) if ret_surface else "any"
     return (f"revlOptMap({target}, func(_x {go_payload}) {go_ret} "
             f"{{ return {body} }})")
