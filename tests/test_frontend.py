@@ -244,6 +244,13 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    # item 343: the same bound with a DOTTED, realm-style token. It is here
+    # because a dotted token is the shape a reader can silently split into two
+    # capabilities, which puts the wiring key into the declared scope by
+    # accident and passes the bound on a program the reference refuses.
+    "g4_dotted_capability_key.rvl":
+        "`Task.go` is declared `emission[fs.write]`, but this implementation "
+        "emits through `fs` (reaching `fs.ingest`)",
     # item 260: the BUDGET half of attenuation. Stripping the ceilings makes
     # both sides the same bare `net`, so only the dedicated ceiling check sees
     # it. Its accepted twin is `examples/budget_attenuation.rvl`; the pair is
@@ -252,6 +259,14 @@ REJECTIONS = {
         "with a wider resource budget than it holds: `net(calls=1000)` widens "
         "`calls` to 1000 over the parent's 100",
     "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
+    # The same widening as the line above, reached through a key SPELLED THE
+    # SAME on both sides. `g4_spawn_widens_capability` names its keys `kv_a` and
+    # `kv_b`, so a fold keyed by the wiring key catches it by accident; here both
+    # components spell theirs `kv` and only the declared TOKEN separates them,
+    # which is what `_cap_keyed` exists for (renaming a child's `requires` key
+    # was enough to launder the boundary past the invariant). The pair is what
+    # makes the difference between the two namespaces measurable.
+    "g4_spawn_key_rename_launders.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
     # item 82: an emission reached through a spawn handle (`w.task.run(...)`,
     # an `instance-get` provision access) must still be marked `emit` — an
     # unmarked crossing is refused, not silently lowered (and no longer a

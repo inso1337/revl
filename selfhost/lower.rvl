@@ -14320,6 +14320,163 @@ component Supervisor requires kv_a: StoreA {
   assert v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"
 }
 
+// The SAME widening with both keys spelled `kv`. The test above passes under a
+// fold keyed by the wiring key only because its fixture happens to spell each
+// key like its token; rename them together and a key-keyed fold sees `kv` ⊆
+// `kv` and raises no objection. The boundary is the DECLARED token, so this is
+// the same refusal — `examples/rejections/g4_spawn_key_rename_launders.rvl`.
+test "a spawn laundered through a same-spelled requires key is refused (G4)" {
+  let v = admit_src("""service KvA { emission[kv_a] fn put(k: Str) -> Int }
+service KvB { emission[kv_b] fn put(k: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Leaker requires kv: KvB provides worker: Worker {
+  provide worker { fn run() { emit kv.put("row")  return "k" } }
+}
+component Supervisor requires kv: KvA {
+  let w = effect spawn Leaker with { } undo w.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// item 294: a spawn widens a capability PARAMETER. Strip the valuation and both
+// sides are the same `fs.write` token, so only the (T, P) order sees it. The
+// refusal names the declared boundary, never the `fs` key it was reached
+// through — `examples/rejections/g4_spawn_widens_parameter.rvl`.
+test "a spawn reaching outside the parent's path cone is refused (G4)" {
+  let v = admit_src("""service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service EtcStore { emission[fs.write(path="/etc")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: EtcStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { } undo w.dispose()
+}""")
+  assert v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// The admitted twin: a child cone INSIDE the parent's (`/tmp/jobs` narrows
+// `/tmp`) attenuates. The path order is component-wise, so this must admit while
+// the sibling `/tmp-other` (a string prefix, not a component prefix) does not.
+test "a spawn narrowing into the parent's path cone admits" {
+  assert admit_src("""service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service JobStore { emission[fs.write(path="/tmp/jobs")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: JobStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { } undo w.dispose()
+}""") == ""
+}
+
+test "a sibling path is not a narrowing of the parent's cone (G4)" {
+  let v = admit_src("""service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service OtherStore { emission[fs.write(path="/tmp-other")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: OtherStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { } undo w.dispose()
+}""")
+  assert v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/tmp-other\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// item 260 §3.3: the BUDGET half. The crossing fold is ceiling-blind — stripped,
+// both sides are the bare `net` — so a widened ceiling is only ever seen by the
+// dedicated check. `requests` is the declared alias of the stored `calls`, which
+// is why the diagnostic names `calls`
+// (`examples/rejections/g4_spawn_widens_budget.rvl`).
+test "a spawn widening a budget ceiling is refused (G4)" {
+  let v = admit_src("""service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetWide { emission[net(requests=1000)] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+component Child requires net: NetWide provides worker: Worker {
+  provide worker { fn go() { emit net.call("row")  return 0 } }
+}
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"
+}
+
+// A child that DROPS a ceiling the parent declares widens it to unbounded, so it
+// is the same refusal spelled the other way.
+test "a spawn dropping the parent's budget ceiling is refused (G4)" {
+  let v = admit_src("""service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetBare { emission[net] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+component Child requires net: NetBare provides worker: Worker {
+  provide worker { fn go() { emit net.call("row")  return 0 } }
+}
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net` drops the `calls` budget (a missing ceiling is unbounded, hence wider). A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"
+}
+
+// The admitted twin: a NARROWER child ceiling attenuates.
+test "a spawn narrowing a budget ceiling admits" {
+  assert admit_src("""service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetNarrow { emission[net(requests=50)] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+component Child requires net: NetNarrow provides worker: Worker {
+  provide worker { fn go() { emit net.call("row")  return 0 } }
+}
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}""") == ""
+}
+
+// The bail (item 294 Slice 2): a per-instance `config.` capability symbol
+// resolves against the spawn site's `with { … }` literal bindings
+// (`cap_order.substitute`), and this gate's spawn reader keeps no `with` block.
+// Refusing an unresolved symbol WITHOUT the substitution that clears it would
+// refuse this program, which the reference ADMITS — `/tmp/jobs` resolves into
+// the parent's `/tmp` cone. So the attenuation verdict is unavailable rather
+// than wrong, and the agreement here is what pins that the bail is a
+// no-objection and not a false rejection.
+test "a per-instance capability symbol resolved into the parent's cone admits" {
+  assert admit_src("""service JobStore { emission[fs.write(path=config.job_root)] fn ingest(r: Str) -> Int }
+service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: JobStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+  config { job_root: Str }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { job_root: "/tmp/jobs" } undo w.dispose()
+}""") == ""
+}
+
+// The scope list is read as `_capability_list` reads it: a DOTTED realm-style
+// token (item 343) is ONE capability. Scraping every ident out of the brackets
+// made `emission[fs.write]` the two capabilities `fs` and `write`, so the
+// WIRING KEY `fs` the body crosses appeared in the declared scope by accident
+// and the declaration bound passed. The reference names the crossing by its
+// key and the declaration by its token, so the two do not match and the
+// implementation is refused — `examples/rejections/g4_dotted_capability_key.rvl`.
+test "a dotted capability token is one capability, not two (G4)" {
+  let v = admit_src("""service Store { emission[fs.write] fn ingest(r: Str) -> Int }
+service Task { emission[fs.write] fn go() -> Int }
+component Worker requires fs: Store provides task: Task {
+  provide task { fn go() { emit fs.ingest("x")  return 0 } }
+}""")
+  assert v == "G4|`Task.go` is declared `emission[fs.write]`, but this implementation emits through `fs` (reaching `fs.ingest`)"
+}
+
+// The admitted twin: the same dotted token declared on a method that does NOT
+// emit is within bound, so the reader change is inert wherever the scope is not
+// actually exercised.
+test "a dotted capability token on a non-emitting method admits" {
+  assert admit_src("""service Store { emission[fs.write] fn ingest(r: Str) -> Int }
+service Task { emission[fs.write] fn go() -> Int }
+component Worker provides task: Task {
+  provide task { fn go() { return 0 } }
+}""") == ""
+}
+
 // An emission reached through a spawn handle (`w.task.run`) must still be marked
 // `emit` — reaching it through a handle instead of a `requires` key does not
 // exempt it (G4, lower.py's `_instance_get_call`).

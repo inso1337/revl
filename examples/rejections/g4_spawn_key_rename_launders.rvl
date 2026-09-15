@@ -1,0 +1,36 @@
+// REJECTED - G4/item 66: a spawn grants a boundary the spawner does not hold,
+// reached through a key SPELLED THE SAME on both sides.
+//
+// `Supervisor` requires `KvA` and `Leaker` requires `KvB`. Two unrelated
+// boundaries - `kv_a` and `kv_b` - and both components happen to wire theirs
+// under the local key `kv`. Attenuation compares the DECLARED emission token,
+// never the local `requires` spelling it was reached through, so `kv_b` is not
+// covered by `kv_a` and the spawn is refused.
+//
+// This is the companion of `examples/rejections/g4_spawn_widens_parameter.rvl`,
+// which widens a capability PARAMETER under one token. Here the token itself
+// differs and only the key agrees, which is the case a key-keyed comparison
+// cannot see at all: renaming a child's `requires` key to match its parent's is
+// enough to launder any boundary past the invariant. `cap_order.covers`
+// clause 1 is a boundary identity test for exactly this reason.
+//
+// expected error:
+//   `Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds
+//   only `kv_a` - a spawn may narrow a child's capabilities, never widen them
+
+service KvA { emission[kv_a] fn put(k: Str, v: Str) -> Int }
+service KvB { emission[kv_b] fn put(k: Str, v: Str) -> Int }
+service Worker { emission fn run() -> Str }
+
+component Leaker requires kv: KvB provides worker: Worker {
+  provide worker {
+    fn run() {
+      emit kv.put("row", "1")
+      return "k"
+    }
+  }
+}
+
+component Supervisor requires kv: KvA {
+  let w = effect spawn Leaker with { } undo w.dispose()
+}
