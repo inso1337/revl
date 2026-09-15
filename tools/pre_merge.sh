@@ -236,7 +236,10 @@ gemit java "backend-java (emit goldens)" backends/java/test_emit_java.py
 # loud-SKIPS one whose tool is missing (`gofmt` for go) rather than reporting a
 # drift it cannot trust, so this is honest on a machine without Go and is the
 # full comparison on one with it. CI runs the same check in `lint` and
-# `backend-go`.
+# `backend-go`, and adds `--strict` there so a skip is an error: in CI the tool
+# is supposed to be present, and a gate that skipped compared nothing. Locally
+# a missing gofmt is an ordinary fact about the machine, so this line does not
+# pass it.
 step "goldens      (drift, all targets)" python3 tools/regen_goldens.py --check
 
 # 4. Generated-artifact gates (pure Python, always run): the README conformance

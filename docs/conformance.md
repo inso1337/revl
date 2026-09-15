@@ -366,21 +366,48 @@ reason. Both instances above are in the table; anything else is a red.
 ### Where the drift check runs
 
 A byte comparison that happens on a developer's machine is not a gate.
-`tools/regen_goldens.py --check` runs in CI twice, split by what the producers
-need:
+`tools/regen_goldens.py --check --strict` runs in CI twice, split by what the
+producers need:
 
 - `lint` checks `python`, `typescript`, `rust`, `java`, `wasm`, `gate-crate`
-  and `gate-wasm`. Every one of those producers is pure Python.
+  and `gate-wasm`. Every one of those producers runs with no language toolchain
+  present, which is verified rather than asserted:
+  `test_the_toolchain_free_targets_really_need_no_toolchain` runs that exact
+  list with a PATH holding a shell, python3 and coreutils and nothing else.
 - `backend-go` checks `go`. Its producer needs `gofmt` to make the emitted
-  bytes reproducible, and `regen_goldens.py` loud-SKIPS a target whose tool is
-  missing rather than reporting a drift it cannot trust, so the check has to
-  live in the job that provisions Go.
+  bytes reproducible, so the check lives in the job that provisions Go.
 
-That split is itself gated:
-`tests/test_emitted_artifacts_are_drift_gated.py::test_every_golden_target_is_drift_checked_by_a_job_that_can_see_it`
-pairs each target against a job that both checks it and provides its
+`--strict` is what makes the split a decision rather than a hope. Without it a
+target whose tool is absent loud-skips and the run still exits 0, so a target
+listed in the wrong job reports green having compared nothing. With it, that
+skip fails the job.
+
+The split is itself gated:
+`test_every_golden_target_is_drift_checked_by_a_job_that_can_see_it` pairs each
+target against a job that checks it **with `--strict`** and provides its
 `requires` tools. A target with no such home is a red, and so is a `--check`
-placed in a job that would only skip it.
+that omits `--strict`.
+
+### Three answers, not two
+
+A run of `--check` can end three ways, and they are not degrees of the same
+thing:
+
+| exit | meaning | resolution |
+|---|---|---|
+| 1 `DRIFT` | the golden and a fresh generation disagree | regenerate, review the diff, commit it |
+| 2 `BROKEN` | the producer could not be RUN here; nothing was compared | fix the producer or the machine; regenerating changes nothing |
+| 3 `SKIPPED` | a declared tool is absent; nothing was compared | run it where the tool is, or drop the claim that this job checks it |
+
+Conflating 2 with 1 is not hypothetical. The registry used to invoke every
+`regen.sh` as `sh <script>`, and those scripts are bash (`set -euo pipefail`,
+`${BASH_SOURCE[0]}`). On macOS `/bin/sh` is bash in POSIX mode and they ran; on
+ubuntu `/bin/sh` is dash and all three crashproof producers died on their
+seventh line. The run reported `DRIFT rust java wasm`, which points the reader
+at a regeneration for goldens that were never compared. Each producer is now
+invoked as the interpreter its own shebang names, and
+`test_every_shell_producer_runs_under_the_interpreter_its_shebang_names` pins
+the pairing so a new script cannot be added under the wrong one.
 
 Compiling and running an emitted module is a different property from comparing
 it. `backend-go` does both, and the reason both are there is that
