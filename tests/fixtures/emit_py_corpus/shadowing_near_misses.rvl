@@ -1,0 +1,93 @@
+// item 391 / issue #106: the ACCEPTING side of the two G6 shadowing refusals
+// (`selfhost/lower.rvl`'s `csh_refusal` and `mth_rebind`, the reference's
+// `_refuse_callable_shadowing` and `_check_rebind`). Both refusals were ported
+// into a gate that had never read either rule, and both are one careless
+// widening away from refusing programs the reference admits — a name that
+// merely coincides with a module callable, and a method-local that merely
+// coincides with another method's. This corpus had no example of either shape,
+// so nothing would have caught that widening: the census would have reported a
+// false-rejection, and the byte-agreement projections would have reported
+// nothing at all, because they only compare documents that still compile.
+//
+// Every declaration below therefore has to keep COMPILING and keep emitting the
+// same bytes on both sides. The comment on each says which arm of which rule it
+// stands in front of.
+
+// `_refuse_callable_shadowing` fires on the CALL position only. Here `name` is
+// a module fn and also a parameter and a local, and the coincidence is all it
+// is: nothing calls the bare name, so both readings agree and the program is
+// legal. This is the shape the reference's own note cites
+// (backends/wasm/golden/functions.revl).
+fn name(row: Str) -> Str { return row }
+
+fn make_row(id: Int, name: Str) -> Str {
+  return name.concat("/").concat(id.to_str())
+}
+
+fn rename(row: Str) -> Str {
+  let name = row
+  return make_row(1, name)
+}
+
+// The same coincidence through a METHOD call. `length` is a module fn and a
+// local, and `xs.length()` names the List surface rather than either of them —
+// a method call is not a bare identifier, so it can never be the ambiguous
+// position, and a reader that fired on every `ident (` would refuse this.
+fn length(k: Str) -> Str { return k }
+
+fn read_through(xs: List[Int], k: Str) -> Int {
+  let length = k
+  return xs.length() + length.length()
+}
+
+// A module callable CALLED in a body that binds nothing of its name: the other
+// half of the pair, and the overwhelmingly common one.
+fn total(xs: List[Int]) -> Int { return xs.length() }
+
+fn count(xs: List[Int]) -> Int { return total(xs) }
+
+// The `=>` fence in `csh_refusal`. A match ARM head is an identifier followed
+// by `(`, which is exactly what a bare call looks like to a token reader, so a
+// scan without the fence would read `Some(v)` as a call to a module callable
+// and refuse this document on the coincidence of the binding below.
+fn Wrap(n: Int) -> Int { return n }
+
+fn unwrap_or(o: Opt[Int]) -> Int {
+  let Wrap = 1
+  return match o { Some(v) => v, None => Wrap }
+}
+
+service Cache { fn set(key: Str)  fn put(key: Str)  fn tag(key: Str) -> Str }
+
+// `_check_rebind`'s accepting side: every binding below is legal, and each one
+// stands in front of a different way the rule could be widened into refusing it.
+//   * `slot` is bound afresh in `set` and again in `put` — the reference clears
+//     its local map between methods, so a scope carried across the whole
+//     component would refuse the second one;
+//   * `slot` is bound inside an `if` arm in `tag` and again after it, where the
+//     arm's binding is already out of scope;
+//   * `store` is a component-scope name these methods only READ. Rebinding it
+//     is the collision the gate does decide, and reading it must stay free.
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let slot = key
+      effect store.insert(slot, "v")
+      undo   store.remove(slot)
+    }
+    fn put(key) {
+      let slot = key
+      effect store.insert(slot, "w")
+      undo   store.remove(slot)
+    }
+    fn tag(key) -> Str {
+      if (key == "a") {
+        let slot = key.concat("-a")
+        return slot
+      }
+      let slot = key.concat("-z")
+      return slot
+    }
+  }
+}
