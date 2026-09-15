@@ -144,7 +144,12 @@ def test_v3_str_list_record_functions_emit():
     # back through the slot and is narrowed to its i32 address, the Int element
     # is the slot
     assert "(i32.wrap_i64 (i64.load (i32.add (local.get $p_row) (i32.const 8))))" in wat
-    assert "(i64.load (i32.add (local.get $p_xs) (i32.const 8)))" in wat
+    # ... and a List element goes through `$list_at`, which compares the index
+    # against the stored count and traps past it (item 458). The constant index
+    # no longer folds to a compile-time slot offset: this tier used to emit
+    # `(i32.add $p_xs (i32.const 8))` for `xs[0]` and read whatever followed
+    # the list for `xs[7]`, which is a value rather than a fault.
+    assert "(i64.load (call $list_at (local.get $p_xs) (i64.const 0)))" in wat
     assert '  (data (i32.const 0) "\\02\\00\\00\\00hi")' in wat
 
 
@@ -437,9 +442,28 @@ def test_v3_int_interpolation_runs_on_wasmtime(tmp_path):
 
 
 def test_v3_compound_interpolation_rejected_by_tier():
+    """Two refusals, and the frontend's comes first now.
+
+    Item 458 moved the compound `${...}` to a CHECKER refusal: no two hosts
+    render a List, a record or an `Opt` the same way and rust does not compile
+    one at all, so it is one diagnostic rather than six answers. The tier's own
+    refusal stays as the guard for a hand-written IR document in the backend-ir
+    dialect, which never passes through the checker — so it is exercised on
+    exactly such a document here, built by swapping a `.length()` operand for
+    its List receiver.
+    """
+    from revl.errors import RevlError
+
     emit = _emitter()
+    with pytest.raises(RevlError, match="cannot interpolate"):
+        compile_source("fn f(xs: List[Int]) -> Str { return `xs=${xs}` }")
+
+    ir = compile_source("fn f(xs: List[Int]) -> Str { return `xs=${xs.length()}` }")
+    parts = ir["functions"][0]["body"][0]["expr"]["parts"]
+    operand = next(p for p in parts if p[0] == "expr")
+    operand[1] = operand[1]["target"]
     with pytest.raises(emit.EmitError, match="Str, Int or Float on this tier"):
-        emit.emit(compile_source("fn f(xs: List[Int]) -> Str { return `xs=${xs}` }"))
+        emit.emit(ir)
 
 
 # local arrows (`let f = x => …; f(a)`) are inlined — they can't escape this
