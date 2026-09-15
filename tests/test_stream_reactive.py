@@ -759,13 +759,16 @@ def test_the_same_head_without_replay_still_lowers_its_policy(tier, policy):
 
 @pytest.mark.parametrize("tier", ["go", "rust", "java"])
 def test_replay_outranks_the_drain_refusal_on_a_blocking_tier(tier):
-    """Both unlowered halves on one head: a durable cursor (§4.5) and a `drain`
-    window (§8, still refused here because the deterministic clock lives on py).
+    """A durable cursor (§4.5) and a `drain` window (§8) on one head.
 
-    Either message would be honest, so the point is that WHICH one is stable.
-    Pinned because the two refusals are about different things — the window is
-    refused for the clock, replay for the recovery surface — and a silent flip
-    would send an author to fix the wrong half of their `subscribe`."""
+    On rust and java both halves are unlowered and either message would be
+    honest, so the point is that WHICH one is stable: the two refusals are about
+    different things — the window about the clock, replay about the recovery
+    surface — and a silent flip would send an author to fix the wrong half of
+    their `subscribe`. On go only replay is left to refuse, and the same
+    assertion holds for the plainer reason that the window lowers there; keeping
+    go in the list is what would catch a regression that brought its window
+    refusal back."""
     emit = _tier_emit(tier)
     head = 'policy block buffer 2 drain 10ms replay(from: "orders")'
     with pytest.raises(emit.EmitError) as excinfo:
@@ -1026,38 +1029,113 @@ def test_wasm_still_refuses_the_fan_in():
     assert "suspends a fiber" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("tier", ["go", "rust", "java"])
-@pytest.mark.parametrize(("head", "want"), [
-    ("subscribe a policy block drain 5s undo sub.close()", "`drain` window"),
-])
-def test_blocking_tiers_refuse_the_slice_2_surface_they_do_not_lower(tier, head, want):
-    """The ONE piece of Slice 2 still on the py reference tier: the
-    `block`-policy drain window.
+_DRAIN_HEAD = "subscribe a policy block drain 5s undo sub.close()"
 
-    It is the one that must stay refused on principle. Its resume fires on the
-    deterministic test clock, which no blocking tier carries (java refuses an
-    `advance` step outright), so a lowering would resume EARLY and quietly
-    disagree with the reference — the worst outcome available, because the
-    program would run and answer differently rather than refusing.
 
-    Two things came OFF this list, in two landings. The derived combinator chain
-    is lowered on all three now (`test_the_blocking_tiers_lower_the_combinator_chain`),
-    and so are the three non-default backpressure POLICIES
-    (`test_blocking_tiers_lower_every_backpressure_policy`, plus the executable
-    mirrors in backends/{go,rust,java}). What is left in
-    `_refuse_unlowered_stream_surface` on each tier is exactly this one check."""
+def _drain_program(head: str = _DRAIN_HEAD) -> str:
+    return ("component C {\n"
+            "  let a = effect Stream.source() undo a.close()\n"
+            f"  let sub = {head}\n"
+            "  await sub.next()\n"
+            "}\n")
+
+
+@pytest.mark.parametrize("tier", ["rust", "java"])
+def test_the_two_clockless_tiers_refuse_the_drain_window_by_name(tier):
+    """The `block`-policy drain window, on the two tiers that still cannot fire
+    it — and this is the whole of what `_refuse_unlowered_stream_surface` stops
+    for a non-replay program now.
+
+    The list used to be all three blocking tiers, under one shared reason: "the
+    deterministic test clock, which no blocking tier carries". That reason was
+    false. go carries item 57's clock coeffect (`RevlClockAdvance`), process-wide
+    and driven by the same `advance` statement the window shares on the
+    reference, so the window is LOWERED there —
+    `test_go_lowers_the_drain_window_against_its_own_clock` below, and the
+    executable proof in backends/go/test_stream_exec_130.py.
+
+    The two that remain refuse for two DIFFERENT reasons, which is why they no
+    longer share a text:
+
+      rust carries a clock, but `thread_local!` — deliberately, so parallel
+        `cargo test` threads never share one. The window would be armed by the
+        provider's thread and advanced by the consumer's (every scenario in
+        backends/rust/scenarios/stream.rs drives its provider from a spawned
+        thread), so it would never fire and the provider would stay suspended.
+      java carries no clock at all: timers do not lower and an `advance` step is
+        refused by name, so there is nothing to fire a window on.
+
+    Either way the rule is the same one wasm follows for the whole surface: a
+    tier that cannot lower something refuses it BY NAME. Compiling the program
+    and answering differently from the reference is the worst outcome available."""
     emit = _tier_emit(tier)
-    ir = compile_source(
-        "component C {\n"
-        "  let a = effect Stream.source() undo a.close()\n"
-        f"  let sub = {head}\n"
-        "  await sub.next()\n"
-        "}\n", "s.rvl")
     with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(ir)
+        emit.emit(compile_source(_drain_program(), "s.rvl"))
     msg = str(excinfo.value)
-    assert want in msg
+    assert "`drain` window" in msg
     assert "not lowered" in msg and "backend py" in msg
+    # the refusal names the tier's OWN reason, not the retired shared one
+    assert "THREAD-LOCAL" in msg if tier == "rust" else "NO CLOCK AT ALL" in msg
+    # and it points at the tier that does lower it, so an author has somewhere
+    # to go that is not only the reference
+    assert "backend go" in msg
+
+
+def test_go_lowers_the_drain_window_against_its_own_clock():
+    """go's refusal outlived its reason: this tier has carried item 57's clock
+    coeffect — process-wide, advanced by the same `advance` statement §8 names —
+    for as long as it has carried timers. The window rides it.
+
+    The call stays the three-argument one for every subscription that declares
+    no window (`test_a_declared_window_is_the_only_thing_that_changes_the_go_call`),
+    so this is additive: a window-free stream program emits exactly what it did.
+    """
+    code = _tier_emit("go").emit(compile_source(_drain_program(), "s.rvl"))
+    assert 'StreamSubscribe(a, "block", 0, 5000)' in code
+    # the window is armed against the clock coeffect, not a wall clock
+    assert "func RevlClockAdvance(ms int64) int {" in code
+    assert "streamArmDrain = func(ms int64, body func()) func() bool {" in code
+    assert "revlScheduleAfter(ms, body).Cancel" in code
+    # no `time.Sleep`/wall-clock deadline anywhere in the window's path
+    assert "time.Sleep" not in code
+
+
+def test_a_declared_window_is_the_only_thing_that_changes_the_go_call():
+    """A subscription with no §8 window emits the exact three-argument call it
+    always has, and pulls in no scheduler: `StreamSubscribe` is variadic in the
+    window, the same way the reference defaults `drain_ms` to None and the ts
+    tier appends an options object only when something is declared."""
+    code = _tier_emit("go").emit(compile_source(
+        _drain_program("subscribe a policy block undo sub.close()"), "s.rvl"))
+    assert 'StreamSubscribe(a, "block", 0)' in code
+    assert "func RevlClockAdvance" not in code, \
+        "a window-free stream program must not grow a timer scheduler"
+    assert "streamArmDrain = func" not in code
+
+
+def test_the_go_window_and_the_advance_statement_share_one_clock():
+    """§8 on the go tier, the same property the reference is pinned to by
+    `test_the_drain_window_and_the_advance_statement_share_one_clock`: the window
+    and the `advance <n><unit>` lifecycle statement step ONE clock, so stream
+    timing is testable with no wall-clock sleeps. Pinned on one emitted module so
+    the two can never drift onto separate clocks."""
+    code = _tier_emit("go").emit(compile_source(
+        "service Sink { emission fn write(v: Str) }\n"
+        "component C provides sink: Sink {\n"
+        "  let a = effect Stream.source() undo a.close()\n"
+        "  let sub = subscribe a policy block buffer 2 drain 10ms undo sub.close()\n"
+        "  provide sink { fn write(v: Str) { } }\n"
+        "}\n"
+        'lifecycle test "the window fires on a timeline step" {\n'
+        "  load C\n"
+        "  advance 10ms\n"
+        "  unload C\n"
+        "  assert no_residue\n"
+        "}\n", "s.rvl"))
+    assert 'StreamSubscribe(a, "block", 2, 10)' in code
+    assert "RevlClockAdvance(10)" in code
+    assert code.count("func RevlClockAdvance(ms int64) int {") == 1, \
+        "one scheduler, so the window and `advance` cannot be on two clocks"
 
 
 _CHAIN_HEAD = """
@@ -1207,21 +1285,24 @@ def test_a_chain_and_a_lossy_policy_coexist_on_one_subscription(tier, policy):
     assert ("Map(" in code) or ("map(" in code)
 
 
-@pytest.mark.parametrize("tier", ["go", "rust", "java"])
+@pytest.mark.parametrize("tier", ["rust", "java"])
 def test_the_drain_refusal_says_the_block_policy_itself_is_lowered(tier):
     """The refusal has to stay accurate or it sends an author to `--backend py`
-    for something this tier does: the window is refused, `block` is not."""
+    for something this tier does: the window is refused, `block` is not.
+
+    "Accurate" is load-bearing twice over here. This same clause carried a
+    reason that had quietly stopped being true — "the deterministic test clock,
+    which no blocking tier carries" — while two of the three tiers it named did
+    carry one. A refusal whose REASON is stale is a refusal nobody can act on,
+    so each tier now states its own and is pinned to it."""
     emit = _tier_emit(tier)
     with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(
-            "component C {\n"
-            "  let a = effect Stream.source() undo a.close()\n"
-            "  let sub = subscribe a policy block drain 5s undo sub.close()\n"
-            "  await sub.next()\n"
-            "}\n", "s.rvl"))
+        emit.emit(compile_source(_drain_program(), "s.rvl"))
     msg = str(excinfo.value)
     assert "`block` policy itself IS lowered" in msg
-    assert "deterministic test clock" in msg
+    assert "clock coeffect" in msg
+    # the retired blanket reason must not come back
+    assert "deterministic test clock, which lives on the" not in msg
 
 
 @pytest.mark.parametrize("tier", ["go", "rust", "java"])
