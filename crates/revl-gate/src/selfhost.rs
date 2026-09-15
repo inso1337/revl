@@ -162,6 +162,7 @@ pub struct RouteP {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ctx {
     svcs: std::collections::HashMap<String, SvcD>,
+    ambOps: std::collections::HashMap<String, Vec<String>>,
     reqMap: std::collections::HashMap<String, String>,
     caps: std::collections::HashMap<String, Vec<String>>,
     colored: Vec<String>,
@@ -342,6 +343,12 @@ pub struct Cut {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SvcOps {
+    name: String,
+    ops: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
     provs: Vec<Prov3>,
     reqs: Vec<MReq>,
@@ -352,6 +359,14 @@ pub struct Manifest {
     bad: String,
     svcs: Vec<String>,
     svcsKnown: bool,
+    svcOps: Vec<SvcOps>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OpsR {
+    xs: Vec<String>,
+    claimed: bool,
+    ok: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2578,6 +2593,25 @@ fn svc_of(cx: Ctx, svcName: String) -> SvcD {
 };
 }
 
+fn svc_decl_known(cx: Ctx, svcName: String) -> bool {
+    return (cx.svcs.contains_key(&svcName) || cx.ambOps.contains_key(&svcName));
+}
+
+fn svc_has_method(cx: Ctx, svcName: String, m: &str) -> bool {
+    if cx.svcs.contains_key(&svcName) {
+        return (find_msig(svc_of(cx.clone(), svcName.clone()), m, 0i64).name != "");
+    }
+    return match cx.ambOps.get(&svcName).cloned() {
+    Some(ops) => contains(&ops, m),
+    None => false,
+    _ => unreachable!(),
+};
+}
+
+fn not_a_method_msg(what: &str, svcName: &str) -> String {
+    return ((String::from("`").revl_concat(&what)).revl_concat("` is not a method of service ")).revl_concat(&svcName);
+}
+
 fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
     let marked = ((s.kind == "emit") || (s.kind == "compensate"));
     let scx = ctx_acq(cx.clone(), stmt_acq_where(&s.kind));
@@ -2803,6 +2837,9 @@ fn req_call(root_: String, meth: &str, args: &[Expr], marked: bool, cx: Ctx, a: 
 };
     let decl = find_msig(svc_of(cx.clone(), svcName.clone()), meth, 0i64);
     if (decl.name == "") {
+        if (svc_decl_known(cx.clone(), svcName.clone()) && (!svc_has_method(cx.clone(), svcName.clone(), meth))) {
+            return ac_refuse(a.clone(), String::from("A6"), not_a_method_msg(&((root_.revl_concat(".")).revl_concat(&meth)), &svcName));
+        }
         return walk_exprs(args, 0i64, marked, cx.clone(), a.clone());
     }
     if (decl.isEm && (!marked)) {
@@ -2904,23 +2941,23 @@ fn bare_declared(cx: Ctx, name: &str) -> bool {
 }
 
 fn ctx_bind(cx: Ctx, names: Vec<String>) -> Ctx {
-    return Ctx { svcs: cx.svcs.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: union_into(cx.scopeNames.clone(), names.clone()), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: union_into(cx.scopeNames.clone(), names.clone()), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
 }
 
 fn ctx_acq(cx: Ctx, where_: String) -> Ctx {
-    return Ctx { svcs: cx.svcs.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: where_.clone() };
+    return Ctx { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: where_.clone() };
 }
 
 fn ctx_alias(cx: Ctx, al: std::collections::HashMap<String, String>) -> Ctx {
-    return Ctx { svcs: cx.svcs.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: al.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: al.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
 }
 
 fn ctx_arrows(cx: Ctx, m: std::collections::HashMap<String, ArrowN>) -> Ctx {
-    return Ctx { svcs: cx.svcs.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: m.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: m.clone(), acqWhere: cx.acqWhere.clone() };
 }
 
 fn ctx_under_arrow(cx: Ctx) -> Ctx {
-    return Ctx { svcs: cx.svcs.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: true, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: true, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
 }
 
 fn field_check(target: Expr, marked: bool, cx: Ctx, a: Ac) -> Ac {
@@ -3056,11 +3093,22 @@ fn prov_key_svc(pg: Prog) -> std::collections::HashMap<String, String> {
 }
 
 fn mk_ctx(svcs: std::collections::HashMap<String, SvcD>, rm: std::collections::HashMap<String, String>, caps: std::collections::HashMap<String, Vec<String>>, colored: Vec<String>, emitting: Vec<String>, ai: Vec<String>, scope: Vec<String>, fnn: Vec<String>, cnm: String, slots: std::collections::HashMap<String, Vec<i64>>, pks: std::collections::HashMap<String, String>) -> Ctx {
-    return Ctx { svcs: svcs.clone(), reqMap: rm.clone(), caps: caps.clone(), colored: colored.clone(), emittingNames: emitting.clone(), asyncExterns: ai.clone(), scopeNames: scope.clone(), fnNames: fnn.clone(), compName: cnm.clone(), fnAsyncSlots: slots.clone(), underArrow: false, handles: std::collections::HashMap::new(), provKeySvc: pks.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position") };
+    return Ctx { svcs: svcs.clone(), ambOps: std::collections::HashMap::new(), reqMap: rm.clone(), caps: caps.clone(), colored: colored.clone(), emittingNames: emitting.clone(), asyncExterns: ai.clone(), scopeNames: scope.clone(), fnNames: fnn.clone(), compName: cnm.clone(), fnAsyncSlots: slots.clone(), underArrow: false, handles: std::collections::HashMap::new(), provKeySvc: pks.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position") };
 }
 
 fn ctx_with_callables(cx: Ctx, names: Vec<String>) -> Ctx {
-    return Ctx { svcs: cx.svcs.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: union_into(cx.fnNames.clone(), names.clone()), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: union_into(cx.fnNames.clone(), names.clone()), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+}
+
+fn amb_ops_map(xs: &[SvcOps], i: i64, acc: std::collections::HashMap<String, Vec<String>>) -> std::collections::HashMap<String, Vec<String>> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return amb_ops_map(xs, (i).checked_add(1i64).expect("revl: Int overflow"), { let mut c = acc.clone(); c.insert((xs)[(i) as usize].name.clone(), (xs)[(i) as usize].ops.clone()); c });
+}
+
+fn ctx_amb_ops(cx: Ctx, ops: std::collections::HashMap<String, Vec<String>>) -> Ctx {
+    return Ctx { svcs: cx.svcs.clone(), ambOps: ops.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
 }
 
 fn req_map_of(reqs: &[Bind]) -> std::collections::HashMap<String, String> {
@@ -3074,7 +3122,7 @@ fn req_map_of(reqs: &[Bind]) -> std::collections::HashMap<String, String> {
 }
 
 fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
-    return Ctx { svcs: base.svcs.clone(), reqMap: req_map_of(&comp.reqMap), caps: base.caps.clone(), colored: base.colored.clone(), emittingNames: base.emittingNames.clone(), asyncExterns: base.asyncExterns.clone(), scopeNames: scope_names_of(comp.clone()), fnNames: base.fnNames.clone(), compName: comp.name.clone(), fnAsyncSlots: base.fnAsyncSlots.clone(), underArrow: false, handles: handles_of(comp.clone()), provKeySvc: base.provKeySvc.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position") };
+    return Ctx { svcs: base.svcs.clone(), ambOps: base.ambOps.clone(), reqMap: req_map_of(&comp.reqMap), caps: base.caps.clone(), colored: base.colored.clone(), emittingNames: base.emittingNames.clone(), asyncExterns: base.asyncExterns.clone(), scopeNames: scope_names_of(comp.clone()), fnNames: base.fnNames.clone(), compName: comp.name.clone(), fnAsyncSlots: base.fnAsyncSlots.clone(), underArrow: false, handles: handles_of(comp.clone()), provKeySvc: base.provKeySvc.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position") };
 }
 
 fn handles_of(comp: CompD) -> std::collections::HashMap<String, String> {
@@ -6293,8 +6341,8 @@ fn closure_assign_scan(ts: &[Token]) -> Verd {
     return no_verd();
 }
 
-fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool) -> NoLink {
-    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone()));
+fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
+    let base = ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone())), amb_ops_map(&ambOps, 0i64, std::collections::HashMap::new()));
     let cfgv = config_data_refusal(ts.clone(), pg.clone());
     if (cfgv.v != "") {
         return NoLink { done: true, refs: vec![cfgv.clone()] };
@@ -6360,7 +6408,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<Stri
 }
 
 fn collect_refusals(ts: Vec<Token>, pg: Prog) -> Vec<Verd> {
-    let nl = collect_nonlink(ts.clone(), pg.clone(), vec![], vec![], true);
+    let nl = collect_nonlink(ts.clone(), pg.clone(), vec![], vec![], true, vec![]);
     if nl.done {
         return nl.refs;
     }
@@ -6485,7 +6533,37 @@ fn parse_mreq(comp: String, spec: String) -> MReq {
 }
 
 fn man_bad(man: Manifest, msg: &str) -> Manifest {
-    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, bad: tagged("MANIFEST", msg) };
+    return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: tagged("MANIFEST", msg) };
+}
+
+fn mk_ops_none() -> OpsR {
+    return OpsR { xs: vec![], claimed: false, ok: true };
+}
+
+fn mk_ops(rest: String) -> OpsR {
+    if (rest == "") {
+        return OpsR { xs: vec![], claimed: true, ok: true };
+    }
+    let mut xs: Vec<String> = vec![];
+    let mut s = rest.clone();
+    let mut ok = true;
+    let mut done = false;
+    while (!done) {
+        let comma = s.revl_index_of(",");
+        let one = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { s.clone() } else { s.revl_slice(0i64, comma.clone()) };
+        if (!bare_ident(&one, 0i64)) {
+            ok = false;
+            done = true;
+        } else {
+            xs = if contains(&xs, &one) { xs.clone() } else { xs.revl_push(one.clone()) };
+            if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                done = true;
+            } else {
+                s = s.revl_slice((comma).checked_add(1i64).expect("revl: Int overflow"), s.revl_length());
+            }
+        }
+    }
+    return OpsR { xs: if ok { xs.clone() } else { vec![] }, claimed: true, ok: ok };
 }
 
 fn parse_row(row: String, man: Manifest) -> Manifest {
@@ -6494,26 +6572,31 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
     }
     if (row.revl_slice(0i64, 1i64) == "!") {
         if (row == "!halted") {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: true, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         if (row == "!services") {
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: true, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: true, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         return man_bad(man.clone(), &((String::from("unrecognized manifest header row `").revl_concat(&row)).revl_concat("`")));
     }
     if (row.revl_slice(0i64, 1i64) == ":") {
-        let sname = row.revl_slice(1i64, row.revl_length());
+        let comma = row.revl_index_of(",");
+        let sname = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { row.revl_slice(1i64, row.revl_length()) } else { row.revl_slice(1i64, comma.clone()) };
         if (!bare_ident(&sname, 0i64)) {
             return man_bad(man.clone(), &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name a service")));
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: if contains(&man.svcs, &sname) { man.svcs } else { man.svcs.revl_push(sname.clone()) }, svcsKnown: man.svcsKnown, bad: String::from("") };
+        let ops = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { mk_ops_none() } else { mk_ops(row.revl_slice((comma).checked_add(1i64).expect("revl: Int overflow"), row.revl_length())) };
+        if (!ops.ok) {
+            return man_bad(man.clone(), &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name an operation")));
+        }
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: if contains(&man.svcs, &sname) { man.svcs } else { man.svcs.revl_push(sname.clone()) }, svcsKnown: man.svcsKnown, svcOps: if ops.claimed { man.svcOps.revl_push(SvcOps { name: sname.clone(), ops: ops.xs.clone() }) } else { man.svcOps }, bad: String::from("") };
     }
     if (row.revl_slice(0i64, 1i64) == "-") {
         let name = row.revl_slice(1i64, row.revl_length());
         if (!bare_ident(&name, 0i64)) {
             return man_bad(man.clone(), &((String::from("manifest replacement row `").revl_concat(&row)).revl_concat("` does not name a component")));
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: if contains(&man.repl, &name) { man.repl } else { man.repl.revl_push(name.clone()) }, halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, bad: String::from("") };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: man.mnames.clone(), repl: if contains(&man.repl, &name) { man.repl } else { man.repl.revl_push(name.clone()) }, halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
     }
     if ident_led(&row) {
         if (row.revl_index_of("=") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
@@ -6525,16 +6608,16 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
             if (((!bare_ident(&a.s, 0i64)) || (!bare_ident(&b.s, 0i64))) || (a.rest.revl_index_of("/") == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
                 return man_bad(man.clone(), &((String::from("manifest route row `").revl_concat(&row)).revl_concat("` does not name a component, a key and its realms")));
             }
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.revl_push(MRoute { comp: a.s.clone(), key: b.s.clone(), rlms: split_labels(b.rest.clone(), &(vec![])) }), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.revl_push(MRoute { comp: a.s.clone(), key: b.s.clone(), rlms: split_labels(b.rest.clone(), &(vec![])) }), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         if (row.revl_index_of("<") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "<");
-            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(parse_mreq(a.s.clone(), a.rest.clone())), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, bad: String::from("") };
+            return Manifest { provs: man.provs.clone(), reqs: man.reqs.revl_push(parse_mreq(a.s.clone(), a.rest.clone())), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
         if (row.revl_index_of("/") != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             let a = cut(row.clone(), "/");
             let b = cut(a.rest.clone(), "/");
-            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, bad: String::from("") };
+            return Manifest { provs: man.provs.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() }), reqs: man.reqs.clone(), routes: man.routes.clone(), mnames: add_mname(man.mnames.clone(), a.s.clone()), repl: man.repl.clone(), halted: man.halted, svcs: man.svcs.clone(), svcsKnown: man.svcsKnown, svcOps: man.svcOps.clone(), bad: String::from("") };
         }
     }
     return man_bad(man.clone(), &((String::from("unrecognized manifest row `").revl_concat(&row)).revl_concat("`")));
@@ -6550,7 +6633,7 @@ fn parse_manifest_rows(m: String, man: Manifest) -> Manifest {
 }
 
 fn parse_manifest(m: String) -> Manifest {
-    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], routes: vec![], mnames: vec![], repl: vec![], halted: false, svcs: vec![], svcsKnown: false, bad: String::from("") });
+    return parse_manifest_rows(m.clone(), Manifest { provs: vec![], reqs: vec![], routes: vec![], mnames: vec![], repl: vec![], halted: false, svcs: vec![], svcsKnown: false, svcOps: vec![], bad: String::from("") });
 }
 
 fn manifest_svcs_known(man: Manifest) -> bool {
@@ -6681,7 +6764,7 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let keptRoutes = keep_routes(man.routes.clone(), drop.clone(), 0i64, vec![]);
     let keptNames = keep_names(man.mnames.clone(), drop.clone(), 0i64, vec![]);
     let lost = lost_provs(split_provs(man.provs.clone(), drop.clone(), true, 0i64, vec![]), live_provs(live.clone(), 0i64, keptProvs.clone()), 0i64, vec![]);
-    let nl = collect_nonlink(ts.clone(), pg.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64), man.svcs.clone(), manifest_svcs_known(man.clone()));
+    let nl = collect_nonlink(ts.clone(), pg.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64), man.svcs.clone(), manifest_svcs_known(man.clone()), man.svcOps.clone());
     if nl.done {
         return pick_min(&nl.refs);
     }
@@ -13104,6 +13187,36 @@ fn async_declared_op_admits_the_same_async_body() {
 fn sync_method_implementing_an_async_op_is_refused__signature_parity_() {
     let v = admit_src(String::from("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }"));
     assert!((v == "A1|method `post` of provision `http` is not async but service Http declares it async"));
+}
+
+#[test]
+fn a_required_service_call_to_an_undeclared_operation_is_refused__a6_() {
+    let v = admit_src(String::from("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.execute(\"x\") undo db.query(\"y\") }"));
+    assert!((v == "A6|`db.execute` is not a method of service Database"));
+}
+
+#[test]
+fn the_same_call_to_a_declared_operation_is_admitted() {
+    let v = admit_src(String::from("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.query(\"x\") undo db.query(\"y\") }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_absent_operation_in_a_provide_method_is_refused__a6_() {
+    let v = admit_src(String::from("service Store { fn get(key: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component C requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nonexistent(key) } }"));
+    assert!((v == "A6|`store.nonexistent` is not a method of service Store"));
+}
+
+#[test]
+fn an_absent_operation_under__emit__is_a6__not_the_g4_marker_rule() {
+    let v = admit_src(String::from("service Bus { emission fn publish(topic: Str) } service Cache { fn put(key: Str) } component C requires bus: Bus provides cache: Cache { provide cache { fn put(key) { emit bus.broadcast(key) } } }"));
+    assert!((v == "A6|`bus.broadcast` is not a method of service Bus"));
+}
+
+#[test]
+fn a_stream_requirement_draws_no_member_verdict() {
+    let v = admit_src(String::from("service Cache { fn put(key: Str) } component C requires ticks: Stream[Int] provides cache: Cache { provide cache { fn put(key) { let x = key } } }"));
+    assert!((v == ""));
 }
 
 #[test]

@@ -829,6 +829,18 @@ component CacheLayer requires store: Store provides cache: Cache {\n\
   provide cache { fn lookup(key) = store.get(key) }\n\
 }\n";
 
+    /// The same candidate calling an operation the running `Store` does not
+    /// declare. Only a reader that resolved the requirement against the running
+    /// DECLARATION — not just its name — can tell the two apart.
+    const AMBIENT_MISSING_METHOD: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+component CacheMiss requires store: Store provides cache: Cache {\n\
+  provide cache { fn lookup(key) = store.nonexistent(key) }\n\
+}\n";
+
+    /// The issue-346 running composition's wire, operations included.
+    const HELD: &str =
+        "Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping";
+
     #[test]
     fn an_empty_manifest_is_the_standalone_gate() {
         for source in [
@@ -870,6 +882,34 @@ component CacheLayer requires store: Store provides cache: Cache {\n\
             Verdict::Refused { code, .. } => assert_eq!(code, "G2"),
             other => panic!("expected an ambient G2 refusal, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn a_requirement_resolves_against_the_running_services_operations() {
+        // Issue #346, the second half of the same question (docs/design/457
+        // T4b). With the running operations on the wire the gate resolves the
+        // requirement against the running DECLARATION, so a call to an
+        // operation `Store` declares is unobjectionable and a call to one it
+        // does not is refused in the reference's own words.
+        assert_eq!(admit_into(AMBIENT_ONLY_SERVICE, HELD), Verdict::NoObjection);
+        match admit_into(AMBIENT_MISSING_METHOD, HELD) {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "A6");
+                assert_eq!(
+                    message,
+                    "`store.nonexistent` is not a method of service Store"
+                );
+            }
+            other => panic!("expected the member refusal, got {:?}", other),
+        }
+        // The comma is the CLAIM. A wire whose rows carry only names says
+        // nothing about the running surface, so it decides no member — the
+        // under-refusing direction, and what every wire rendered by a producer
+        // with no operation table gets.
+        assert_eq!(
+            admit_into(AMBIENT_MISSING_METHOD, "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"),
+            Verdict::NoObjection
+        );
     }
 
     #[test]
