@@ -126,9 +126,20 @@ def produce_rust() -> dict[str, str]:
     emit = _load("emit", backend / "emit.py")
     revl = _frontend()
     jsonwire = revl.compile_files([str(backend / "scenarios" / "jsonwire.rvl")])
+    user_cache = emit.emit(_reference_ir())
     return {
-        "backends/rust/golden/user_cache.rs": emit.emit(_reference_ir()),
+        "backends/rust/golden/user_cache.rs": user_cache,
         "backends/rust/golden/jsonwire.rs": emit.emit(jsonwire),
+        # The placement runner's components module (issue #1089). `revl run
+        # --placement --backend rust` REGENERATES this file from the running
+        # IR and restores it afterwards (src/revl/placement.py::_build_rust,
+        # tests/test_run_rust.py), so the committed copy is the reference
+        # composition's emission and nothing else — the same bytes as the
+        # golden above, from the same producer and the same IR. It was a
+        # committed emitted artifact that no target declared and no test
+        # compared, and it had drifted 41 lines behind the emitter (its own
+        # header still said cordis-rs 0.3.x).
+        "backends/rust/placement_runner/src/components.rs": user_cache,
     }
 
 
@@ -223,9 +234,10 @@ TARGETS: tuple[Target, ...] = (
     ),
     Target(
         name="rust",
-        what="reference-IR and jsonwire goldens plus the crashproof scenario",
+        what="reference-IR, jsonwire and placement-runner goldens plus the crashproof scenario",
         files=("backends/rust/golden/user_cache.rs",
                "backends/rust/golden/jsonwire.rs",
+               "backends/rust/placement_runner/src/components.rs",
                "backends/rust/scenarios/crashproof/src/lib.rs"),
         produce=produce_rust,
         commands=(("sh", "backends/rust/scenarios/crashproof/regen.sh"),),
