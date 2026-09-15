@@ -191,6 +191,30 @@ jobs:
           python-version: "3.12"
       - run: pip install ruff==0.16.4 pyyaml==6.0.2 build==1.2.2.post1 hatchling==1.27.0
       - run: ruff check
+      # Golden drift, byte-wise, for every target whose producer needs no
+      # toolchain (issue #1089). The registry in `tools/regen_goldens.py` knows
+      # how to produce every checked-in emitted artifact, and `--check` emits
+      # each one into memory and compares it to the committed bytes -- so an
+      # emitter change that moves the bytes cannot land without the artifact
+      # being regenerated and the diff reviewed.
+      #
+      # It was previously run by no CI job at all. `tools/pre_merge.sh` ran the
+      # `typescript` target and nothing ran the other seven, which is how
+      # `backends/go/scenarios/emitted/secret_trace/gen_secret_trace_test.go`
+      # sat 239 lines stale on main: it still compiled, still ran, still passed,
+      # and "still works" is not "is what the emitter produces today".
+      #
+      # The `go` target is deliberately NOT here: its producer needs `gofmt`,
+      # which this job has no reason to install, and a target that loud-skips
+      # for a missing tool is a green line that checked nothing. It runs in
+      # `backend-go`, which provisions Go. `tests/test_golden_drift_runs_in_ci.py`
+      # pairs every target against a job that both checks it AND has the tools
+      # its producer requires, so a target added with no home is a red.
+      #
+      # Never add `|| true`, and never narrow the target list to make it pass:
+      # the fix for a red here is `python3 tools/regen_goldens.py <target>`,
+      # review the diff, and commit it (docs/conformance.md, golden policy).
+      - run: python3 tools/regen_goldens.py --check python typescript rust java wasm gate-crate gate-wasm
       # What the wheel ships, against what the commit tracks. `pyproject.toml`
       # used to `force-include` the whole of `backends/` and `stdlib/`;
       # force-include is exempt from every exclude rule and from the ignore
@@ -1244,6 +1268,16 @@ jobs:
       # file left five (opt gaps 280, reserved-word idents, result ctor 302,
       # router exec, stream exec 130) unrun. The root is ~6s.
       - run: pytest backends/go/ -q
+      # The `go` half of the golden drift gate (issue #1089). Every other
+      # target runs in `lint`; this one lives here because its producer
+      # (`backends/go/regen.sh`) needs `gofmt` to make the emitted bytes
+      # reproducible, and `regen_goldens.py` loud-SKIPS a target whose tool is
+      # missing rather than reporting a drift it cannot trust -- so running it
+      # in a job without Go would be a green line that checked nothing.
+      # `go test ./...` below compiles and runs the same modules, which is a
+      # different property: this step is what says they are the bytes the
+      # emitter produces today.
+      - run: python3 tools/regen_goldens.py --check go
       - run: cd backends/go/scenarios && go test ./...
       - run: cd backends/go/v3 && go test ./...
 
