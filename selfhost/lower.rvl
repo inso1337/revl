@@ -2973,7 +2973,28 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   let svcName = match cx.reqMap.lookup(root) { Some(v) => v, None => "" }
   let decl = find_msig(svc_of(cx, svcName), meth, 0)
   if (decl.name == "") {
-    // an unknown method: out of this slice (checker.rvl's typing catches it)
+    // A6: the service declaration BOUNDS the call surface of the key
+    // (`_component_req_call`, the `decl is None` arm). The gate already had to
+    // resolve the key to its service to judge G4/A1, so it already knows the
+    // method is not on that service; it used to walk on and leave the refusal
+    // to the type layer, which is how `a6_method_not_in_service.rvl` was
+    // admitted here and refused by the reference.
+    //
+    // Refused only when the service is DECLARED. `svc_of` answers an empty
+    // `SvcD` for a name it cannot find, so an unresolved service name makes
+    // every method look absent; refusing on that would turn the reference's
+    // "unknown service" refusal — a shape this gate does not mirror and which
+    // stays out of slice on purpose — into a false rejection wearing the wrong
+    // tag. A key whose declared type is not a service at all (`requires s:
+    // Stream[Event]`, item 130) takes the same exit: the reference refuses it
+    // by name BEFORE the service table is indexed, so answering A6 here would
+    // be the wrong message as well as the wrong tag.
+    if (cx.svcs.has(svcName)) {
+      return ac_refuse(a, "A6", "`".concat(root).concat(".").concat(meth)
+        .concat("` is not a method of service ").concat(svcName))
+    }
+    // an unknown method on a key the gate cannot resolve to a declared
+    // service: out of this slice (checker.rvl's typing catches it)
     return walk_exprs(args, 0, marked, cx, a)
   }
   if (decl.isEm && !marked) {
