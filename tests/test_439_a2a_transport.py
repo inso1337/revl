@@ -1821,3 +1821,267 @@ def test_revl_audit_over_a_module_is_unchanged(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "LocalSvc" in out
     assert "ping [net]" in out
+
+
+# ============ the REST of the shared compile group over a COMPOSITION document
+# Item 439 (issue #118), the slice after G8c. `revl audit` was one command on a
+# shared step: `main` compiles its file arguments as MODULES (`compile_files`)
+# and hands the one `ir` to `test`, `query`, `erase-report`, `audit`, `goal`,
+# `version` and `compile` alike. G8c fixed the document `audit` reads; the other
+# commands still read the empty one, and answered from it.
+#
+# WHICH WAY EACH ONE FAILED, which is the whole of why three of them are defects
+# and two are corrections:
+#
+#   compile       exit 0 and an IR document with `"services": {}`,
+#                 `"components": []` and an empty `loadOrder`. A POSITIVE
+#                 artifact asserting the composition contains nothing. FAIL-OPEN.
+#   version       reads that same document. `--emit-manifest` prints it as the
+#                 diff input a later `--against` reads, and a diff between two
+#                 of them derives "PATCH — the interface is unchanged" for a
+#                 composition that gained a whole remote provider and a
+#                 `net.<host>` crossing. FAIL-OPEN, on a release gate.
+#   test          collects nothing from the rows: "no tests to run", exit 0.
+#                 A green by vacuity. FAIL-OPEN.
+#   query         "unknown component: 'RemoteAgentProvider'" with an empty known
+#                 list, exit 1. FAIL-CLOSED, but a false statement about a name
+#                 the composition does define — corrected, not repaired.
+#   erase-report  "unknown realm: 'books'", exit 1. FAIL-CLOSED, same shape.
+#
+# `goal` is deliberately left on the module step. `goal audit`'s zero exit over
+# a composition with no termination contract is item 441/458's own decision
+# (`docs/design/458-termination-language-surface.md` §2.1), and widening the
+# document that decision is evaluated over is that item's call, not this one's.
+
+GROUP_SERVICES = AGENT + """
+service Ledger {
+  emission fn write(line: Str) -> Int
+}
+"""
+
+# One ordinary row's module, carrying the three things the rest of the group
+# reads out of a compilation that a composition compiled as a module has none
+# of: a component, a `lifecycle test`, and a realm.
+GROUP_KIT = """
+use "services.rvl" { }
+
+component LocalLedger provides ledger: Ledger {
+  isolate ledger in realm("books")
+  let cells = effect Map.new() undo cells.drop()
+  provide ledger {
+    fn write(line) {
+      effect cells.insert("last", line)
+      undo   cells.remove("last")
+      return 1
+    }
+  }
+}
+
+lifecycle test "the ledger reverts cleanly" {
+  load LocalLedger
+  let n = call ledger.write("a")
+  assert n == 1
+  unload LocalLedger
+  assert no_residue
+}
+"""
+
+GROUP = """
+composition Net {
+  use "services.rvl"
+  row @ledger from "kit.rvl" provides ledger
+  remote @agent provides agent: Agent
+    at host("agent.example:8443")
+    through a2a
+}
+"""
+
+
+def _group(tmp_path, services: str = GROUP_SERVICES):
+    """A composition with one ordinary row and one `through a2a` remote row."""
+    write(tmp_path, services=services, kit=GROUP_KIT, base=GROUP)
+    return tmp_path
+
+
+def _run(tmp_path, *argv, doc="base"):
+    return _cli([*argv, str(tmp_path / f"{doc}.rvl"), "--root", str(tmp_path)])
+
+
+# ------------------------------------------------------------------ `compile`
+
+def test_revl_compile_over_a_composition_writes_the_resolved_document(tmp_path,
+                                                                      capsys):
+    """`revl compile <composition>` writes the composition's OWN document.
+
+    Before: an IR document with no services, no components and an empty load
+    order, exit 0 — a positive artifact asserting the composition contains
+    nothing, which is the fail-open direction for everything downstream of it.
+    """
+    _group(tmp_path)
+    assert _run(tmp_path, "compile") == 0
+    document = json.loads(capsys.readouterr().out)
+
+    assert "Agent" in document["services"]
+    names = [c["name"] for c in document["components"]]
+    assert "LocalLedger" in names and "RemoteAgentProvider" in names
+    assert document["manifest"]["loadOrder"]
+    # and the synthesized crossing, with its folded reach, is IN the artifact
+    crossing, = [e for e in document["externs"]
+                 if e["name"] == "remote_agent_ask"]
+    assert crossing["capabilities"] == ["net.agent_example"]
+
+
+def test_revl_compile_over_a_module_is_unchanged(tmp_path, capsys):
+    """THE CONTROL, green on both trees: a module argument still compiles as a
+    module. The composition door is an added branch, not a change to the path
+    every other invocation takes."""
+    write(tmp_path, module=MODULE)
+    assert _cli(["compile", str(tmp_path / "module.rvl")]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert [c["name"] for c in document["components"]] == ["LocalSvc"]
+
+
+# ------------------------------------------------------------------ `version`
+
+def test_revl_version_over_a_composition_measures_the_interface_change(tmp_path,
+                                                                       capsys):
+    """The release gate. Two generations of the same composition, one whose
+    service gained a method, diffed through the CLI exactly as
+    `docs/derived-versioning.md` documents (`--emit-manifest`, then `--against`).
+
+    Before: both generations compiled to the same EMPTY document, so the
+    verdict was "PATCH — the interface is unchanged" for a change that is not.
+    """
+    previous = tmp_path / "prev"
+    previous.mkdir()
+    _group(previous)
+    assert _run(previous, "version", "--emit-manifest") == 0
+    manifest = tmp_path / "prev.json"
+    manifest.write_text(capsys.readouterr().out)
+
+    now = tmp_path / "now"
+    now.mkdir()
+    grown = _group(now, services=GROUP_SERVICES.replace(
+        "emission fn ask(question: Str) -> Str",
+        "emission fn ask(question: Str) -> Str\n"
+        "  emission fn echo(line: Str) -> Str"))
+    assert _cli(["version", str(grown / "base.rvl"), "--root", str(grown),
+                 "--against", str(manifest), "--json"]) == 0
+    verdict = json.loads(capsys.readouterr().out)
+
+    assert verdict["bump"] == "minor"
+    added, = [c for c in verdict["changes"] if c["method"] == "echo"]
+    assert added["service"] == "Agent"
+
+
+# --------------------------------------------------------------------- `test`
+
+def test_revl_test_over_a_composition_collects_the_rows_tests(tmp_path, capsys):
+    """`revl test --list <composition>` collects the `lifecycle test` a ROW's
+    module declares.
+
+    Before: "no tests to run", exit 0 — a green by vacuity, which is the worst
+    direction a test command can fail in.
+    """
+    _group(tmp_path)
+    assert _run(tmp_path, "test", "--list") == 0
+    out = capsys.readouterr().out
+    assert "the ledger reverts cleanly" in out
+    assert "1 test(s) collected" in out
+
+
+# -------------------------------------------------------------------- `query`
+
+def test_revl_query_over_a_composition_answers_for_the_synthesized_provider(
+        tmp_path, capsys):
+    """`revl query reaches` over a composition reaches the SYNTHESIZED provider.
+
+    Before: exit 1 with "unknown component: 'RemoteAgentProvider'" and an empty
+    known list — fail-closed, but a false statement about a name the
+    composition does define.
+    """
+    _group(tmp_path)
+    assert _run(tmp_path, "query", "reaches", "RemoteAgentProvider",
+                "--json") == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["ok"] is True
+    assert answer["component"] == "RemoteAgentProvider"
+    emitted = {e.get("name") for e in answer["surface"]["emissions"]}
+    assert "remote_agent_ask" in emitted
+
+
+# ------------------------------------------------------------- `erase-report`
+
+def test_revl_erase_report_over_a_composition_finds_the_rows_realm(tmp_path,
+                                                                   capsys):
+    """`revl erase-report --realm books` reports on the realm a ROW's module
+    declares, and names the remote provider among the survivors.
+
+    Before: exit 1 with "unknown realm: 'books'" — fail-closed, and false.
+    """
+    _group(tmp_path)
+    assert _run(tmp_path, "erase-report", "--realm", "books",
+                "--no-residue-proof", "--json") == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["realm"] == "books"
+    assert document["otherRealmsUntouched"]["untouched"] is True
+    assert "RemoteAgentProvider" in document["otherRealmsUntouched"]["survivors"]
+
+
+# --------------------------------------------- the refusals, on every command
+
+@pytest.mark.parametrize("command", ["compile", "version", "test",
+                                     "erase-report"])
+def test_every_command_on_the_door_refuses_a_layer_document(tmp_path, capsys,
+                                                            command):
+    """A layer is a DELTA over a composition (426 §2.4), so it has no
+    composition of its own to resolve — and compiled as a MODULE it yields the
+    same empty document a composition did. Each command refuses by name,
+    nonzero, rather than answering from the empty one."""
+    write(tmp_path, services=AGENT, base=LAYER_BASE, swap=LAYER)
+    extra = ["--realm", "books"] if command == "erase-report" else []
+    assert _cli([command, str(tmp_path / "swap.rvl"), "--root", str(tmp_path),
+                 *extra]) == 1
+    err = capsys.readouterr().err
+    assert f"`revl {command}`" in err
+    assert "swap.rvl" in err
+    assert "layer" in err and "DELTA" in err
+
+
+def test_revl_compile_refuses_a_composition_beside_modules(tmp_path, capsys):
+    """A composition NAMES the rows it compiles, so reading it beside
+    hand-listed modules would answer for a program neither describes."""
+    write(tmp_path, services=AGENT, base=WITHDRAW, module=MODULE)
+    assert _cli(["compile", str(tmp_path / "base.rvl"),
+                 str(tmp_path / "module.rvl"), "--root", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "`revl compile`" in err
+    assert "base.rvl" in err and "module.rvl" in err
+
+
+def test_revl_compile_refuses_two_composition_documents(tmp_path, capsys):
+    """A composition document IS the compiled unit, so two of them have no one
+    document to answer over."""
+    write(tmp_path, services=AGENT, base=WITHDRAW,
+          other=WITHDRAW.replace("composition Net", "composition Other"))
+    assert _cli(["compile", str(tmp_path / "base.rvl"),
+                 str(tmp_path / "other.rvl"), "--root", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "2 composition documents" in err
+
+
+# ------------------------------------------------------------ `goal` is LEFT
+def test_revl_goal_audit_over_a_composition_is_deliberately_untouched(tmp_path,
+                                                                      capsys):
+    """`goal audit` stays on the MODULE step, and this test pins that on
+    purpose so a later reader knows the omission is a decision.
+
+    Its zero exit over a composition with no termination contract is item
+    441/458's, stated in `docs/design/458-termination-language-surface.md`
+    §2.1. Routing it through this door would change the document that decision
+    is evaluated over without the review that belongs to it, so it is the one
+    command on the shared step this slice does not move.
+    """
+    _group(tmp_path)
+    assert _cli(["goal", "audit", str(tmp_path / "base.rvl")]) == 0
+    assert "no goal service" in capsys.readouterr().out
