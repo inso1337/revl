@@ -163,7 +163,7 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 
 /** The environment variable naming the session workspace root (ts tier, same
  * name and semantics as the py tier, backends/python/revl_fs_workspace.py). */
@@ -213,7 +213,8 @@ export const PATH_FAMILIES: Record<string, readonly string[]> = {
  * relative specifier into the install tree. Widening this list is still a
  * deliberate edit: a read helper is a new way to LOOK at the filesystem through
  * the jail. Peer of py `READ_HELPERS`. */
-export const READ_HELPERS: readonly string[] = ['lexistsConfined', 'isDirConfined']
+export const READ_HELPERS: readonly string[] = ['lexistsConfined', 'isDirConfined',
+  'readPinnedConfined']
 
 /** Which positional arguments of a `syscall-time` entry point are PATHS (and so
  * must have come from a family 1-3 guard). The rest are handles or data. Peer
@@ -1379,6 +1380,72 @@ function rawIsDirConfined(real: string): boolean {
   }
 }
 
+/** An asset digest is a sha256 written as 64 lowercase hex characters, the
+ * spelling `src/revl/hostref.py` pins into the handle at compile time. Peer of
+ * py `_SHA256_HEX`. */
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
+/** The bytes of `real` as text, and ONLY when they hash to `expectedSha256`. A
+ * READ helper (item 459 F6), peer of py `read_pinned_confined`.
+ *
+ * The one helper on this surface that yields file CONTENT rather than a fact
+ * about a name, so it is written as the narrowest shape that serves a runtime
+ * asset load and nothing wider:
+ *
+ * - `real` is a path a family 1-3 guard already resolved, and the parent chain
+ *   is re-walked (`assertRealDirChain`) and the LEAF `lstat`ed before the read,
+ *   so a directory component or a leaf swapped for a symlink after the
+ *   membership test is refused rather than followed. Node exposes no `*at()`
+ *   syscall and no read that takes a `O_NOFOLLOW` descriptor without an
+ *   `openSync`, so the check-to-read window is NARROWED here rather than closed,
+ *   which is this module's stated difference from the py directory-fd walk (see
+ *   "what node CANNOT express" at the top) and not a new one;
+ * - a non-regular file is refused (`ENOTFILE`) before a byte is read;
+ * - a digest mismatch returns NOTHING, not the bytes, not their length, not a
+ *   prefix, so the compile-time pin item 459 F1 puts in the handle is ENFORCED
+ *   by the runtime read rather than weakened by it;
+ * - a malformed expected digest is refused (`EINVAL`) BEFORE the open, so a
+ *   caller cannot opt out of the pin by passing an empty string. */
+function rawReadPinnedConfined(real: string, expectedSha256: string): string {
+  if (typeof expectedSha256 !== 'string' || !SHA256_HEX.test(expectedSha256)) {
+    throw new FsOpError(
+      'EINVAL',
+      'expected digest is not a sha256 written as 64 lowercase hex characters; '
+      + 'a pinned read cannot be asked to skip the pin',
+      sanitized(real))
+  }
+  const [parent] = splitLeaf(real)
+  assertRealDirChain(parent)
+  const st = fs.lstatSync(real)   // the LEAF, without following a link
+  if (st.isSymbolicLink()) {
+    throw new ConfinementError(
+      'EOUTSIDE',
+      'the pinned read target is a symlink, so the read would leave the '
+      + 'session workspace root',
+      sanitized(real))
+  }
+  if (!st.isFile()) {
+    throw new FsOpError(
+      'ENOTFILE', 'pinned read target is not a regular file', sanitized(real))
+  }
+  const data = fs.readFileSync(real)
+  const actual = Buffer.from(createHash('sha256').update(data).digest('hex'), 'utf8')
+  const expected = Buffer.from(expectedSha256, 'utf8')
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new FsOpError(
+      'EDIGEST',
+      'file content does not match the pinned sha256 recorded when the asset '
+      + 'was resolved at compile time',
+      sanitized(real))
+  }
+  const text = data.toString('utf8')
+  if (Buffer.compare(Buffer.from(text, 'utf8'), data) !== 0) {
+    throw new FsOpError(
+      'EENCODING', 'file content is not valid UTF-8 text', sanitized(real))
+  }
+  return text
+}
+
 // ---------------------------------------------------------------------------
 // apply totality over the enumeration, then export the wrapped entry points
 // ---------------------------------------------------------------------------
@@ -1411,6 +1478,7 @@ const RAW: Record<string, (...a: never[]) => unknown> = {
   discardWrite: rawDiscardWrite as (...a: never[]) => unknown,
   lexistsConfined: rawLexistsConfined as (...a: never[]) => unknown,
   isDirConfined: rawIsDirConfined as (...a: never[]) => unknown,
+  readPinnedConfined: rawReadPinnedConfined as (...a: never[]) => unknown,
 }
 
 const GUARD: Record<string, (...a: never[]) => unknown> = {}
@@ -1474,6 +1542,9 @@ export const discardWrite = GUARD.discardWrite as typeof rawDiscardWrite
 export const lexistsConfined = GUARD.lexistsConfined as typeof rawLexistsConfined
 /** read helper, see `rawIsDirConfined`. */
 export const isDirConfined = GUARD.isDirConfined as typeof rawIsDirConfined
+/** read helper, see `rawReadPinnedConfined`. */
+export const readPinnedConfined =
+  GUARD.readPinnedConfined as typeof rawReadPinnedConfined
 
 // -------------------------------------------------------- per-extern entry points
 // item 410 stage 5: the entry points a `stdlib/fs.rvl` `= @ts ref` thunk imports
@@ -1770,6 +1841,25 @@ export function fsIsDir(p: string): FsResult<boolean> {
   try {
     const target = resolveWithin(p)
     return { kind: 'Ok', value: isDirConfined(target) }
+  } catch (e) {
+    if (e instanceof FsOpError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
+}
+
+/** The text of the file `p` names, once confined, and only when its bytes hash
+ * to `expectedSha256`. The ts body of `stdlib/asset.rvl`'s private
+ * `load_pinned`, peer of its `@py` body (item 459 F6).
+ *
+ * The same family-1 guard decides the path that decides every mutation's path,
+ * so this reads nothing `fsResolveWithin` would refuse; the digest is then a
+ * second, independent condition on top of it. `Err` carries the guard's own
+ * `FsError` verbatim, so `EWORKSPACE` / `EOUTSIDE` / `ENOENT` / `ENOTFILE` /
+ * `EDIGEST` / `EENCODING` / `EINVAL` are one vocabulary rather than two. */
+export function fsReadPinned(p: string, expectedSha256: string): FsResult<string> {
+  try {
+    const target = resolveWithin(p)
+    return { kind: 'Ok', value: readPinnedConfined(target, expectedSha256) }
   } catch (e) {
     if (e instanceof FsOpError) return { kind: 'Err', value: e.asError() }
     throw e

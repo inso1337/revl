@@ -2983,6 +2983,21 @@ class _V3Emitter:
             for ext in self.externs
             if _extern_wasm_body(ext) is not None
         }
+        # An extern DECLARED in the composition but carrying no `@wasm` body is
+        # not "an unknown callee": it is a named thing this tier cannot do. The
+        # py/ts/go/java/rs emitters all refuse such a call by NAME, stating the
+        # tiers that do carry a body; before this, wasm answered "callee 'x' is
+        # not a lowerable function", which reads like a typo and hides which
+        # tiers the composition can still target. Mapping name -> the tiers that
+        # DO have one lets the call sites say the same sentence the other five
+        # say. (item 459 F6: `stdlib/asset.rvl`'s runtime asset read is py+ts,
+        # and a wasm target must be told that rather than left guessing.)
+        self.extern_tiers_elsewhere = {
+            ext.get("name"): sorted(set(ext.get("bodies") or {})
+                                    | set(ext.get("refs") or {}))
+            for ext in self.externs
+            if _extern_wasm_body(ext) is None
+        }
         self.literal_offsets: dict[str, int] = {}
         self.data_segments: list[tuple[int, bytes]] = []
         self.heap_start = 0
@@ -3055,6 +3070,27 @@ class _V3Emitter:
                     payload = case.get("payload") or "unit"
                     lines.append(f"  ;;   case {cname}: {payload}")
         return lines
+
+    def _refuse_bodyless_extern(self, name: str, where: str) -> None:
+        """Refuse a call to a DECLARED extern that has no `@wasm` body, by name.
+
+        Same sentence the other five emitters give, so "this tier cannot do that"
+        never arrives spelled as "that name does not exist". Returns quietly when
+        `name` is not a declared extern, leaving the caller's generic
+        unknown-callee refusal in place.
+
+        EVERY statement here is on a refusal path, which is why it is recorded in
+        tests/fixtures/selfhost_uncovered_lines.json rather than covered: the
+        byte-agreement corpus is documents the reference EMITS, and any input
+        that reaches this line makes it raise. The refusal itself is pinned by
+        tests/test_selfhost_emit_wasm.py::test_reference_refuses_a_bodyless_extern_by_name.
+        """
+        available = self.extern_tiers_elsewhere.get(name)
+        if available is not None:
+            raise EmitError(
+                f"{where + ': ' if where else ''}extern `{name}` has no @wasm "
+                f"body \u2014 not portable to this backend "
+                f"(available: {', '.join(available) or 'none'})")
 
     def _unsupported_comments(self) -> list[str]:
         # only externs with no @wasm body are unsupported now; a @wasm-bodied
@@ -4413,6 +4449,7 @@ class _V3Emitter:
             return f"Opt[{inner or 'Int'}]"
         sig = self.fn_sigs.get(name)
         if sig is None:
+            self._refuse_bodyless_extern(name, "")
             raise EmitError(f"callee {name!r} is not a lowerable function")
         return sig["returns"]
 
@@ -4851,6 +4888,7 @@ class _V3Emitter:
             return self._make_tagged(ty, "Some", payload, scope, where)
         sig = self.fn_sigs.get(name) or self.extern_sigs.get(name)
         if sig is None:
+            self._refuse_bodyless_extern(name, where)
             raise EmitError(f"{where}: callee {name!r} is not a lowerable function")
         args = node.get("args") or []
         if len(args) != len(sig["params"]):

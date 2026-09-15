@@ -329,3 +329,56 @@ def test_reference_abi_refusals(reference, tmp_path, source, reason):
     path.write_text(source)
     with pytest.raises(reference.EmitError, match=reason):
         reference.emit(compile_files([str(path)]))
+
+
+@pytest.mark.parametrize("body, where", [
+    ("fn g(s: Str) -> Str { return peek(s) }", "g: "),
+    ("fn g(s: Str) -> Str { let x = peek(s); return x }", ""),
+], ids=["call-position", "let-initializer"])
+def test_reference_refuses_a_bodyless_extern_by_name(reference, tmp_path, body, where):
+    """A DECLARED extern with no `@wasm` body is refused by NAME, stating the
+    tiers that do carry one.
+
+    This tier used to answer `callee 'peek' is not a lowerable function`, which
+    is the sentence it also gives for a MISSPELLED callee, so a portability limit
+    and a typo were indistinguishable. The other five emitters have always said
+    "extern `X` has no @<tier> body - not portable to this backend (available:
+    ...)"; wasm says it too (item 459 F6).
+
+    Both entry points are driven because they refuse independently: a call in
+    expression position goes through `_call_expr` (which prefixes the function it
+    is in), a call inferring a `let`'s type goes through `_call_type` (which has
+    no such context). Fixing only one leaves the misleading message on the other.
+
+    This is a REFERENCE refusal, the same shape as `test_reference_abi_refusals`
+    above, and it cannot be a CORPUS document: the corpus is documents the
+    reference EMITS and holds byte-identical against the port, while every input
+    reaching this arm raises. That is why the arm is carried in
+    tests/fixtures/selfhost_uncovered_lines.json, and this test is what keeps it
+    honest in the meantime."""
+    path = tmp_path / "bodyless.rvl"
+    path.write_text("extern pure fn peek(p: Str) -> Str = @py { return p }\n" + body)
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError) as exc:
+        reference.emit(ir)
+    message = str(exc.value)
+    assert message.startswith(f"{where}extern `peek` has no @wasm body"), message
+    assert "not portable to this backend" in message
+    assert "(available: py)" in message
+    assert "not a lowerable function" not in message
+
+
+def test_an_uncalled_bodyless_extern_still_emits(reference, tmp_path):
+    """The boundary of the refusal above, so it is not read as wider than it is.
+
+    rust, go and java refuse a bodyless extern at the DECLARATION loop, whether
+    or not it is called. wasm refuses at the CALL, and this change did not move
+    that: a document that merely declares a py-only extern and never calls it
+    still emits, and names the extern in the `unsupported on this tier` comment.
+    Widening wasm to the declaration-loop shape would refuse documents that
+    emit today, which is a separate decision from stating the message better."""
+    path = tmp_path / "uncalled.rvl"
+    path.write_text("extern pure fn peek(p: Str) -> Str = @py { return p }\n"
+                    "fn g(s: Str) -> Str { return s }\n")
+    wat = reference.emit(compile_files([str(path)]))["functions"]
+    assert "unsupported on this tier: externs peek (no @wasm body)" in wat

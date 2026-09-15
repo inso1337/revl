@@ -1,0 +1,148 @@
+// The revl stdlib ASSET module — loading a compile-time asset handle's bytes at
+// RUN time.
+// Roadmap item 459 F6 (issue #722), design docs/design/459-frontend-asset-integration.md,
+// module doc docs/frontend-assets.md.
+//
+// ---------------------------------------------------------------- what this is
+// `asset "<path>"` (item 459 F1) is a COMPILE-time act: the compiler resolves
+// the path relative to the declaring `.rvl`, jails the realpath to the root
+// compile tree and pins the file's sha256, and the program receives the record
+// `{ path: Str, sha256: Str }`. The bytes stay on disk. That is the whole point
+// of item 459 — a frontend asset is a file the composition ships, not a string
+// literal the artifact carries.
+//
+// This module is the one door that turns such a handle back into its bytes
+// while the program RUNS, which is what a component reading its own template at
+// run time needs (`stdlib/template.rvl` takes the template as a `Str` and says
+// so: "reading the template FROM DISK ... the text a resolved asset reference
+// loads").
+//
+//     use "stdlib/asset.rvl" { load }
+//     use "stdlib/template.rvl" { render }
+//
+//     fn page(title: Str) -> Result[Str, Str] {
+//       return match load(asset "./frontend/page.tpl") {
+//         Ok(tpl) => match render(tpl, [{ name: "title", value: title }]) {
+//           Ok(text) => Ok(text),
+//           Err(e) => Err(e.message),
+//         },
+//         Err(e) => Err(e.message),
+//       }
+//     }
+//
+// ------------------------------------------------------- the pin is ENFORCED
+// A runtime read of a file the compiler already hashed is the obvious place to
+// LOSE the pin: the artifact would claim one set of bytes and the process would
+// render another. `load` does the opposite. It hands the handle's `sha256` to
+// the host body, and the read returns the text only when the file's bytes still
+// hash to it. A file edited after the build is `Err(EDIGEST)` and yields
+// nothing — not the bytes, not their length, not a prefix. So the handle keeps
+// meaning exactly what it meant at compile time, and the runtime read is where
+// that claim is CHECKED rather than where it is dropped.
+//
+// A consequence worth stating: this is not hot reload. An edited template is a
+// refusal, not a new page. Serving edited bytes would be serving bytes no
+// review ever saw, and the handle would then pin nothing.
+//
+// ------------------------------------------------------------- confinement
+// A path resolved at run time is a file read, so this module writes NO jail of
+// its own. It routes through `stdlib/fs.rvl`'s `resolve_within` — the same
+// family-1 guard every witnessed mutation and every inverse passes (realpath
+// BEFORE the membership check), reached through the same entry point — and
+// reads through `read_pinned_confined`, which re-establishes containment on the
+// root-anchored `O_NOFOLLOW` directory walk rather than by re-traversing the
+// name. The refusal vocabulary is `FsError`, imported rather than restated, so
+// there is one of them on this surface and not two.
+//
+// Two consequences follow from reusing that jail rather than inventing a
+// second root:
+//
+//   * the run-time root is the SESSION WORKSPACE ROOT (`REVL_FS_WORKSPACE` on
+//     the py tier, the same variable on ts). A deployment that wants a
+//     component to read its own assets points that root at the tree the assets
+//     ship in. With no root configured the load is `Err(EWORKSPACE)`; it never
+//     falls back to the working directory, and it never reads outside the root;
+//   * `..` inside the handle's path is never refused as TEXT. Containment of
+//     the resolved realpath is the jail, exactly as it is for the compile-time
+//     `asset` (a symlink out of the tree is caught by the realpath, which no
+//     amount of reading the written text would catch).
+//
+// `load` grants strictly LESS reach than the pattern `stdlib/fs.rvl` already
+// documents for a consumer with its own host body (`resolve_within`, then read
+// the confined path yourself): the same guard decides the path, and the digest
+// must additionally match.
+//
+// ------------------------------------------------------------------ tier status
+// py + ts. `rs`, `go`, `java` and `wasm` have no filesystem bodies anywhere in
+// the stdlib (`stdlib/fs.rvl` and `stdlib/shell.rvl` are py+ts for the same
+// reason), so a composition that calls `load` and targets one of them is
+// REFUSED AT COMPILE TIME, by name:
+//
+//     extern `load_pinned` has no @rs body - not portable to this backend
+//     (available: py, ts)
+//
+// That refusal is the point. A tier that cannot read a file must say so with
+// the name of the thing it cannot do; the alternative — emitting something that
+// returns an empty template — would make a missing tier look like an empty
+// page.
+
+use "stdlib/fs.rvl" { FsError, resolve_within }
+
+// ---------------------------------------------------------------- the types
+
+// The compile-time asset handle, as `asset "<path>"` builds it: `path` is the
+// resolved path RELATIVE TO THE ROOT COMPILE TREE (never as written), `sha256`
+// is the hex digest of the file's bytes at compile time. Item 459 F1 left "a
+// canonical stdlib name for the handle's record shape" open; this is it.
+pub type AssetRef = { path: Str, sha256: Str }
+
+// ------------------------------------------------------------------ the read
+//
+// PRIVATE, and deliberately so. It takes a bare path and a bare digest, which
+// is the shape a host body needs but NOT a shape a caller should be able to
+// reach: the public door is `load`, whose argument is a handle the compiler
+// built. Keeping this unexported means the only digests that can be presented
+// to the guard are ones `resolve_assets` computed.
+extern pure fn load_pinned(path: Str, sha256: Str) -> Result[Str, FsError] = @py {
+    import revl_fs_workspace as _ws
+    try:
+        target = _ws.resolve_within(path)
+        text = _ws.read_pinned_confined(target, sha256)
+    except _ws.FsOpError as e:
+        # total by construction (item 422 F6): both entry points raise
+        # `FsOpError` or nothing, and `ConfinementError` is a subclass, so one
+        # `except` covers EWORKSPACE / EOUTSIDE / EINVAL / EDIGEST / ENOTFILE /
+        # EENCODING and the declared Result is the whole result.
+        return Err(e.as_error())
+    return Ok(text)
+} = @ts ref fsReadPinned from "../backends/typescript/revl_fs_ts.ts"
+
+// ----------------------------------------------------------------- the door
+
+// The text of `handle`'s file, read through the session workspace jail and
+// checked against the sha256 the compiler pinned into the handle.
+//
+// `Err` carries the guard's verbatim `FsError`:
+//   EWORKSPACE  no session workspace root is configured
+//   EOUTSIDE    the handle's path resolves outside that root
+//   ENOENT      the file named by the handle is not there any more
+//   ENOTFILE    it is there but is not a regular file
+//   EDIGEST     it is there and readable, and its bytes are NOT the bytes the
+//               compiler hashed. The content is not returned
+//   EENCODING   its bytes are not valid UTF-8 text
+//   EINVAL      the handle carries no usable digest (a hand-built record rather
+//               than one `asset "..."` produced)
+pub fn load(handle: AssetRef) -> Result[Str, FsError] {
+  return load_pinned(handle.path, handle.sha256)
+}
+
+// The confinement decision alone, for a caller that wants to know whether a
+// handle is reachable in this deployment without reading it. Same guard, same
+// refusals; `Ok` carries the resolved absolute path.
+//
+// It yields no CONTENT, so it is exactly `stdlib/fs.rvl`'s `resolve_within`
+// applied to a handle rather than to a caller-chosen string, and it is here so
+// a caller never has to take the handle apart to ask.
+pub fn locate(handle: AssetRef) -> Result[Str, FsError] {
+  return resolve_within(handle.path)
+}

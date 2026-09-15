@@ -152,6 +152,111 @@ string outright: accepting one would make the pin optional at the only place it
 is checked. That is the same split `hostref.plug_refs` has for a host-module
 ref.
 
+## Reading an asset at run time: `stdlib/asset.rvl`
+
+Everything above happens while the composition is compiled. `stdlib/asset.rvl`
+is the one door that turns a handle back into its bytes while the program is
+**running**, which is what a component that renders its own external template
+needs:
+
+```revl fragment
+// `load` takes the handle, not a path, and returns the file's text.
+match load(asset "./frontend/page.tpl") {
+  Ok(tpl) => render(tpl, [{ name: "title", value: title }]),
+  Err(e) => Err(e.message),
+}
+```
+
+`load(handle: AssetRef) -> Result[Str, FsError]` is the read. `AssetRef` is the
+canonical name for the handle's record shape, so a composition no longer
+declares that type itself. `locate(handle)` is the confinement decision without
+the read: it answers the resolved absolute path, or the same refusal `load`
+would give.
+
+### The pin is enforced, not dropped
+
+A runtime read of a file the compiler already hashed is the obvious place to
+lose the pin: the artifact would claim one set of bytes and the process would
+render another. `load` does the opposite. The handle's `sha256` is handed to the
+host body, and the text comes back only when the file's bytes still hash to it.
+
+A file edited after the build is `Err` with code `EDIGEST`, and it yields
+nothing: not the bytes, not their length, not a prefix. So the handle keeps
+meaning exactly what it meant at compile time, and the runtime read is where
+that claim is checked rather than where it is dropped.
+
+A consequence worth stating plainly: **this is not hot reload**. An edited
+template is a refusal, not a new page. Serving edited bytes would be serving
+bytes no review ever saw, and the handle would then pin nothing.
+
+### Confinement: the same jail, not a second one
+
+A path resolved at run time is a file read, so `stdlib/asset.rvl` writes no jail
+of its own. It routes through `stdlib/fs.rvl`'s `resolve_within`, the same
+family 1 guard every witnessed mutation and every inverse passes (realpath
+**before** the membership check), and reads through a listed read helper that
+re-establishes containment on the root-anchored `O_NOFOLLOW` directory walk.
+The refusal vocabulary is `FsError`, imported rather than restated.
+
+Two consequences follow from reusing that jail rather than inventing a second
+root:
+
+- the run-time root is the **session workspace root** (`REVL_FS_WORKSPACE`, the
+  same variable on both tiers). A deployment that wants a component to read its
+  own assets points that root at the tree the assets ship in. With no root
+  configured the load is `Err(EWORKSPACE)`. It never falls back to the working
+  directory, and it never reads outside the root;
+- `..` inside the handle's path is never refused as text. Containment of the
+  resolved realpath is the jail, exactly as it is for the compile-time `asset`,
+  so a symlink out of the tree is caught by the realpath rather than by reading
+  the written path.
+
+| Input | Outcome |
+|---|---|
+| the handle's file, unchanged | `Ok` with its text |
+| `./frontend/../frontend/page.tpl` | `Ok`: the same handle, since `..` inside the root resolves |
+| the file edited after the build | `Err(EDIGEST)`, and none of the new content appears in the refusal |
+| a symlink planted at the leaf whose target holds exactly the pinned bytes | `Err(EOUTSIDE)`: containment refuses before the digest is consulted |
+| a directory component swapped for a symlink out of the tree | `Err(EOUTSIDE)` |
+| a directory | `Err(ENOTFILE)`, refused before a byte is read |
+| a hand-built handle carrying an empty or malformed digest | `Err(EINVAL)`, refused before the open, so "no pin" is not spellable |
+| no `REVL_FS_WORKSPACE` configured | `Err(EWORKSPACE)` |
+
+`load` grants strictly less reach than the pattern `stdlib/fs.rvl` already
+documents for a consumer with its own host body (`resolve_within`, then read the
+confined path yourself): the same guard decides the path, and the digest must
+additionally match.
+
+### Tiers, and what a tier that cannot do it says
+
+`py` and `ts` carry the body. `rs`, `go`, `java` and `wasm` have no filesystem
+bodies anywhere in the stdlib, and a composition that calls `load` and targets
+one of them is refused **at compile time, by name**:
+
+```
+extern `load_pinned` has no @wasm body - not portable to this backend
+(available: py, ts)
+```
+
+That refusal is the point. A tier that cannot read a file must say so with the
+name of the thing it cannot do; emitting something that returned an empty
+template would make a missing tier look like an empty page. The wasm emitter
+used to answer `callee 'load_pinned' is not a lowerable function`, which is the
+same sentence it gives for a misspelled name, so a portability limit and a typo
+were indistinguishable. It now says what the other five emitters say.
+
+Nothing else in item 459 moved tier. `stdlib/template.rvl` (holes, escaping,
+`render_mapped`, `source_map`) is pure revl and still runs everywhere, `asset`
+resolution happens in the compiler, and the source map chain is a toolchain step
+that emits nothing.
+
+Guards: `tests/test_asset_runtime_load_459.py` for the door, the pin and the
+per-tier refusals, with a twenty-one mutation proof that its confinement checks
+can fail; `backends/typescript/tests/asset_pinned_read_459.test.ts` for the ts
+entry point; `backends/typescript/tests/fs_confinement_families.test.ts` and
+`tests/test_fs_confinement_families.py` for the single-choke-point scan the new
+read helper is listed in.
+
 ## The typed channel: `revl export client --face webui`
 
 Cordis WebUI's `addEntry(files, data)` publishes `data` as a reactive object: the
@@ -506,11 +611,12 @@ none of it should be assumed:
   resolve, jail or pin. `dev_source` is a typed handle (design note 459's
   **F1**, the section [The asset handle](#the-asset-handle-asset-path) above);
   pinning a built artifact needs a build-time step the toolchain does not have.
-- **The handle has no canonical stdlib name.** Its shape is the record
-  `{ path: Str, sha256: Str }`, and each composition declares that type itself,
-  as `examples/webui-entry/console.rvl` does. The compiler builds the value, so
-  writing the record by hand does not make a path resolved or a digest true, but
-  it does type-check: the record is a shape, not a capability.
+- **A hand-written handle still type-checks.** The shape now has a canonical
+  name, `AssetRef` in `stdlib/asset.rvl`, so a composition no longer declares
+  the record itself. The compiler builds the value, so writing the record by
+  hand does not make a path resolved or a digest true, but it does type-check:
+  the record is a shape, not a capability. What stops a forged handle at run
+  time is the jail and the digest, not the type.
 - **No template control flow** (`{{if}}`/`{{for}}`/includes/layouts, **F3**).
   This is deferred on a stated precondition rather than on effort, and the
   precondition is includes: an included template declares the context of its own
@@ -522,11 +628,12 @@ none of it should be assumed:
   the context by parsing the surrounding markup and re-escaping the included
   output, are both already ruled out by stage 1. Design note 459's F3 section
   carries the full argument.
-- **Tiers** are not extended beyond py/ts (**F6**). Both halves of the map,
-  `render_mapped` and `source_map`, are pure revl and run on every tier, and the
-  chain above is a toolchain step rather than an emitted one, so F6 reaches
-  neither. What it still reaches is reading a template from disk at run time,
-  which needs a per-tier host body.
+- **Tiers.** F6 is landed, above: `stdlib/asset.rvl` reads a pinned asset from
+  disk at run time on `py` and `ts`, and `rs`/`go`/`java`/`wasm` refuse it at
+  compile time by name. What that does **not** claim is a filesystem on those
+  four tiers. `stdlib/fs.rvl` and `stdlib/shell.rvl` are still py plus ts, so a
+  composition that must read at run time and must target rust is still waiting
+  on those bodies, not on this item.
 
 The typed reactive-state / RPC channel (design note 459 **F5**, filed as gap
 **G3** in
@@ -539,8 +646,8 @@ the `--face webui` verb (**F7**) are the section above; both are landed.
 The item's stated exit was app-gated on roadmap item 462 (the exemplary web
 application, issue #725, itself gated on item 461 / issue #724). Both have since
 closed, so the external gate has lifted, and F2's map chaining has since landed
-too, so what remains open against item 459 is F3 and F6 above. See [v2.0-roadmap.md](v2.0-roadmap.md) items 459 and
-462.
+too, and F6 with it, so what remains open against item 459 is F3 above. See
+[v2.0-roadmap.md](v2.0-roadmap.md) items 459 and 462.
 
 ## Related
 
