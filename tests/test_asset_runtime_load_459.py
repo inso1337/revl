@@ -261,6 +261,23 @@ def test_the_loaded_text_renders_through_the_stage_one_template_module(
         sys.modules.pop("revl_asset_f6_render", None)
 
 
+def test_locate_answers_the_confinement_decision_without_the_content(
+        tmp_path, monkeypatch):
+    """`locate` is `resolve_within` applied to a handle rather than to a
+    caller-chosen string: it answers where the asset is in this deployment, and
+    the same refusal `load` would give, without reading a byte."""
+    main = _app(tmp_path)
+    monkeypatch.setenv(ws.WORKSPACE_ENV, str(main.parent))
+    mod = _py_module(main, "revl_asset_f6_locate")
+    try:
+        assert mod.where_is_it() == os.path.realpath(
+            str(main.parent / "frontend" / "page.tpl"))
+        monkeypatch.delenv(ws.WORKSPACE_ENV, raising=False)
+        assert mod.where_is_it() == "EWORKSPACE"
+    finally:
+        sys.modules.pop("revl_asset_f6_locate", None)
+
+
 # ===========================================================================
 # 3. the pin is ENFORCED by the runtime read
 # ===========================================================================
