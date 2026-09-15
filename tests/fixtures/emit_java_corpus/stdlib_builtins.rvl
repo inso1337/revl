@@ -47,3 +47,18 @@ fn drop(m: Map[Str, Int], k: Str) -> Map[Str, Int] { return m.remove(k) }
 // A non-atomic receiver takes parentheses before the call is appended, and a
 // nested builtin threads through the same renderer.
 fn nested(a: Str, b: Str, sep: Str) -> Int { return a.concat(b).split(sep).length() }
+
+// The PROPERTY form `.length` on a sized value. In a fn body the frontend
+// lowers it to a `len` node (item 104's deliberate split); in a component
+// position it stays a `field` carrying `sized_length`, and both render through
+// the same `revlLength` overload set rather than as a record-slot read, which
+// would not resolve on a `String`.
+fn plenS(s: Str) -> Int { return s.length }
+fn plenL(xs: List[Int]) -> Int { return xs.length }
+
+service Measure { fn width(s: Str) -> Int }
+component Ruler provides measure: Measure {
+  provide measure {
+    fn width(s) = s.length
+  }
+}

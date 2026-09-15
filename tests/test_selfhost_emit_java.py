@@ -95,9 +95,12 @@ Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 6+):
     ``let``/``assign``/``await``/arrow bindings, and body-level ``while``/``for``/
     ``let_pattern`` (a component outside the supported subset surfaces a loud
     ``<<DEFER-component-nonsimple>>``);
-  * the stdlib surface (every ``builtin``/``len`` node and
-    ``_emit_stdlib_helpers``); the built-in Result surface (``Ok``/``Err`` ctor
-    and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``);
+  * the built-in Result surface (``Ok``/``Err`` ctor
+    and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``) and the
+    ``revlDivFloor``/``revlDivEuclid``/``revlMod`` int-arith block, so the
+    ``checked_*`` and ``div_floor``/``div_euclid``/``mod`` builtin methods stay
+    behind loud ``<<DEFER-checked-div:..>>`` / ``<<DEFER-int-arith:..>>``
+    markers;
   * functional record-update ``{r | f = e}`` (the Java reference itself RAISES on
     ``record_update`` — a structural exclusion);
   * externs / in-file ``test`` /
@@ -238,6 +241,18 @@ CORPUS = [
     "branch_shapes.rvl",
     "component_branches.rvl",
     "map_inference.rvl",
+    # Item 429 blind-spot closure (java): the stdlib surface. Before these two
+    # the java corpus spelled no `builtin` node at all, so `kind=builtin` and
+    # every `method=..` arm below it was implemented on BOTH sides with nothing
+    # holding them to each other.
+    "stdlib_builtins.rvl",       # every covered `builtin` method, the `len` node
+                                 # and the property-form `.length`, plus the
+                                 # per-group helper splice that selects exactly
+                                 # the `revl*` groups the emitted text calls
+    "map_inference_builtins.rvl",# `_map_value_expr_type`'s `builtin` arm, one
+                                 # host Map per answer so a missing arm shows up
+                                 # as a `Map<String>` fallback in the emitted
+                                 # field/ctor/local declarations
 ]
 
 
@@ -393,8 +408,11 @@ public final class Harness {
          "new RevlResult.Ok<>", "<<DEFER-result-ctor:Ok>>"),
         ("tests/fixtures/emit_py_corpus/control.rvl",
          "revlLength(", "<<UNSUPPORTED-EXPR:arrow>>"),
+        # The stdlib half of this document now agrees byte-for-byte (see
+        # emit_java_corpus/stdlib_builtins.rvl); what still diverges is its
+        # `Pool` host runtime.
         ("backends/java/scenarios/runtime_values.rvl",
-         "revlPush(", "<<UNSUPPORTED-EXPR:builtin>>"),
+         "class Pool", "<<DEFER-host-stub:Pool>>"),
         ("tests/fixtures/emit_py_corpus/floats.rvl",
          "private static String revlFtoa(double x)", None),
         ("bench/codegen/java/cases/extern_config/case.rvl",
