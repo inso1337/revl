@@ -66,6 +66,12 @@
           (i64.const 0))
       (then unreachable))
     (local.get $r))
+  (func $list_slot (param $list i32) (param $i i64) (result i32)
+    (if (i64.ge_u (local.get $i) (i64.extend_i32_u (i32.load (local.get $list))))
+      (then unreachable))
+    (i32.add (local.get $list)
+      (i32.add (i32.const 8)
+               (i32.mul (i32.wrap_i64 (local.get $i)) (i32.const 8)))))
   ;; --- record/variant layouts (docs/syntax-2.0.md §2) ---
   ;; @record Person { name:Str age:Int }
 
@@ -110,7 +116,7 @@
     return)
 
   (func $head (export "head") (param $p_xs i32) (result i64) (local $__revl_tmp i32)
-    (i64.load (i32.add (local.get $p_xs) (i32.const 8)))
+    (i64.load (call $list_slot (local.get $p_xs) (i64.const 0)))
     return)
 
   (func $roster (export "roster") (param $p_nm i32) (param $p_a i64) (result i32) (local $__revl_tmp i32) (local $__revl_tmp_n1 i32)

@@ -31,6 +31,7 @@ function revlEq(a: unknown, b: unknown): boolean {
 
 function revlIndex<T>(xs: T[], i: number): T {
   if (i < 0) { throw new Error("revl: negative list index") }
+  if (i >= xs.length) { throw new Error("revl: list index out of range") }
   return xs[i]
 }
 

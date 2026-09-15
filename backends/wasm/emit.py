@@ -3311,6 +3311,7 @@ class _V3Emitter:
             self._helper_list_push(),
             self._helper_list_concat(),
             self._helper_list_slice(),
+            self._helper_list_slot(),
         ]
 
     def _arith_helper_funcs(self) -> list[str]:
@@ -4002,6 +4003,30 @@ class _V3Emitter:
       (i32.store (local.get $cell) (i32.const 0))
       (i64.store (i32.add (local.get $cell) (i32.const 8)) (i64.const 0)))
     (local.get $cell))"""
+
+    def _helper_list_slot(self) -> str:
+        """The address of element `$i` of a list, or a trap.
+
+        Named `$list_slot` rather than `$list_at`: `tests/test_458_logical_
+        short_circuit.py` picks a function out of the module by substring, and
+        a helper whose name contains `at` shadows the `fn at(...)` its index
+        guard is written against.
+
+        `xs[i]` used to be raw address arithmetic on `[count][pad][slot]…`, so
+        an index at or past `count` read whatever slot-sized bytes followed the
+        list in linear memory and handed them back as the element type. That is
+        a value, not a fault: measured on `[1, 2, 3][7]` this tier answered `0`
+        while python raised, go and rust panicked and java threw. The bound is
+        compared UNSIGNED, so a negative index (`i64` sign bit set) is above
+        every count and traps on the same edge — matching the negative-index
+        fault the other tiers already have (#549).
+        """
+        return """  (func $list_slot (param $list i32) (param $i i64) (result i32)
+    (if (i64.ge_u (local.get $i) (i64.extend_i32_u (i32.load (local.get $list))))
+      (then unreachable))
+    (i32.add (local.get $list)
+      (i32.add (i32.const 8)
+               (i32.mul (i32.wrap_i64 (local.get $i)) (i32.const 8)))))"""
 
     def _helper_list_push(self) -> str:
         return """  (func $list_push (param $list i32) (param $elem i64) (result i32)
@@ -5163,17 +5188,11 @@ class _V3Emitter:
             if _is_unit_type(elem_ty):
                 raise EmitError(f"{where}: list of void is not lowerable")
             target = self._expr(node.get("target"), scope, where, target_ty)
-            # the index is an Int *value*; the address it lands on is i32, so
-            # it is narrowed exactly once, here
-            if index.wat.startswith("(i64.const "):
-                value = int(index.wat[len("(i64.const ") : -1])
-                address = f"(i32.add {target.wat} (i32.const {_SLOT + _SLOT * value}))"
-            else:
-                address = (
-                    f"(i32.add {target.wat}\n"
-                    f"        (i32.add (i32.const {_SLOT})"
-                    f" (i32.mul (i32.wrap_i64 {index.wat}) (i32.const {_SLOT}))))"
-                )
+            # `$list_slot` narrows the Int index to the i32 address space and
+            # TRAPS at or past the element count, so a read past the end faults
+            # the way it does on every other tier instead of returning the
+            # slot-sized bytes that happened to follow the list.
+            address = f"(call $list_slot {target.wat} {index.wat})"
             return _E(self._slot_load(address, elem_ty), elem_ty)
         raise EmitError(f"{where}: indexing is only lowerable for Str and List, got {target_ty!r}")
 
