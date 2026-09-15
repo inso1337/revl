@@ -219,7 +219,8 @@ may not shadow a component name (`g6_method_local_shadows_component`).
 the standalone refusal the harness's `cache_layer` candidate gets, and the
 crate's `TYPE_LAYER_GAP` list carried the `provides` twin).
 
-**That one has LANDED, ahead of T4** — see T4a in section 5. It is the only
+**That one has LANDED, ahead of T4** — see T4a in section 5, and T4b for
+`a6`, the member half of the same resolve-a-name-against-a-declaration shape. It is the only
 obligation in this section that needs no expression algebra: the component
 header carries a name, and the decision is whether the program declares a
 service by that name. The two exemptions it costs are written into the code:
@@ -594,8 +595,48 @@ manifest that declares `Store`. Four corpus documents (`demo/components/*`,
 `examples/ecosystem-consumer/candidates/leaky_tool.rvl`) moved from
 `no-objection-out-of-slice` to `agree-refuse/G1`, and the crate's
 `TYPE_LAYER_GAP` lost its `provides` row to the agreement corpus. What it does
-NOT buy: nothing about requirement RESOLUTION or the `Admitted` arm, which are
-still T4/T5/T6 in full.
+NOT buy: nothing about requirement RESOLUTION or the `Admitted` arm. The first of
+those is T4b below; the second is still T6 in full.
+
+**T4b. The required-service MEMBER rule (A6).** LANDED, out of order, for the
+same reason T4a was: it resolves a NAME against a held declaration rather than a
+term, so it needs nothing T1..T3 build. `selfhost/lower.rvl`'s `req_call` looks
+the operation up in the service the requirement resolves to and refuses an
+absent one with `` `db.execute` is not a method of service Database `` — at the
+reference's own position, ahead of the arity count and ahead of the G4 emit-marker
+arm, so an operation nothing declares draws A6 and not G4 even under `emit`. It
+fires only where the declaration is HELD (`svc_decl_known`), which is the whole
+soundness argument: `svc_of` answers an EMPTY method list for a service this gate
+has no declaration for, and refusing against that would refuse every call on an
+ambient service.
+
+Two sources are exhaustive enough to be held, and both are exhaustive by
+construction. The text's own `service S { … }`: `p_service` parses every
+operation or fails the whole document, so a parsed `SvcD` is the complete
+surface. And the RUNNING composition's, which is what makes this the
+requirement-RESOLUTION slice the previous entry said was still open: the
+item-346 `:S` row grew an operation list (`:S,get,bump,put`), rendered by
+`revl.manifest.manifest_wire` off the IR's service table, and the fold keeps
+those in `Ctx.ambOps` — deliberately NOT merged into `Ctx.svcs`, because an entry
+there carries the emission/async/capability flags the G4 and A1 arms judge and
+the wire carries operation NAMES only. The comma is the claim: `:S` is the wire
+every producer without an operation table renders and decides no member, `:S,` is
+the empty surface, `:S,a` is exactly `a`. A malformed list refuses the wire by
+name (`MANIFEST`) rather than claiming a shorter surface than the composition
+has, which would refuse calls the reference admits.
+
+What it buys, measured: `a6_method_not_in_service` moved from
+`false-admit/A6` to `agree-refuse/A6` (that census bucket is now EMPTY), and the
+rust gate's manifest arm now gives different answers about two candidates that
+differ only in the operation they call — `bench/inprocess_gate_harness.py::
+_CALLS_MISSING_METHOD` is refused `A6` with the reference's own sentence where
+`al.CANDIDATE` is not. That is clause 3 of section 6's exit test for the
+`calls_missing_method` candidate, and the second of the three things T4a left
+open. What it does NOT buy: argument typing and arity on the same call (both need
+the expression algebra, still T4), the §5 compatibility relation on a
+redeclaration (the block carries operation names, not signatures), and the
+`Admitted` arm — which is now the ONLY thing standing between the rust gate and
+clause 2, and is T6 in full.
 
 **T4. Provide-method and component bodies.** `cir_*` typed against the
 service signature (2.4); `unknown service` in `requires`/`provides`; config
