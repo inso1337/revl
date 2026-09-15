@@ -4736,7 +4736,7 @@ def _go_v3_is_interface(surface, types) -> bool:
     return bool(spec) and spec.get("kind") == "variant"
 
 
-def _go_v3_lit(node: dict) -> str:
+def _go_v3_lit(node: dict, ctx: "_V3GoCtx | None" = None) -> str:
     value = node.get("value")
     if value is True:
         return "true"
@@ -4751,12 +4751,21 @@ def _go_v3_lit(node: dict) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        # `float64(...)`, not a bare literal. Go evaluates *untyped constant*
-        # arithmetic at arbitrary precision, so `0.1 + 0.2` folds to exactly
-        # 0.3 at compile time and compares equal to it — which is not IEEE 754
-        # binary64, the semantics revl specifies (docs/arithmetic.md). Typing
-        # the literal forces ordinary float64 arithmetic.
-        return f"float64({_finite_float(value)!r})"
+        # Through `revlF`, so the literal is not a Go expression Go will fold.
+        # Typing it `float64(..)` stopped the arbitrary-precision UNTYPED fold
+        # that made `0.1 + 0.2` exactly 0.3 (docs/arithmetic.md) — but a TYPED
+        # constant expression is still folded exactly, and a Go constant has
+        # neither a signed zero nor an infinity. So
+        # `(float64(0.0) - float64(1.0)) * float64(0.0)` folded to `+0` where
+        # every other tier computes `-0.0`, and `float64(1e308) *
+        # float64(10.0)` was `constant 1e+309 overflows float64`, a compile
+        # error in the emitted package where IEEE (and the other five tiers)
+        # give `+Inf` (issue #721). A call is not a constant expression, so the
+        # arithmetic around it is ordinary runtime float64 — the move `revlDiv`
+        # already makes for `/`.
+        if ctx is not None:
+            ctx.needs_float_lit = True
+        return f"revlF({_finite_float(value)!r})"
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 
@@ -4846,22 +4855,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     kind = node["kind"]
 
     if kind == "lit":
-        if isinstance(node.get("value"), float) and not isinstance(
-                node.get("value"), bool):
-            # Through `revlF`, so the literal is not a Go CONSTANT. Typing it
-            # `float64(..)` was enough to stop the arbitrary-precision untyped
-            # fold, but a *typed* constant expression is still folded exactly,
-            # and Go constants have neither a signed zero nor an infinity:
-            # `(float64(0.0) - float64(1.0)) * float64(0.0)` folded to `+0`
-            # where every other tier computes `-0.0`, and `float64(1e308) *
-            # float64(10.0)` was `constant 1e+309 overflows float64`, a compile
-            # error in the emitted package where IEEE (and the other five
-            # tiers) give `+Inf` (issue #721). A call is not a constant
-            # expression, so the arithmetic around it is ordinary runtime
-            # float64 — the same move `revlDiv` already makes for `/`.
-            ctx.needs_float_lit = True
-            return f"revlF({_finite_float(node['value'])!r})"
-        return _go_v3_lit(node)
+        return _go_v3_lit(node, ctx)
 
     if kind in ("var", "name"):
         name = node.get("name") or node.get("id")
