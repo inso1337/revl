@@ -76,18 +76,27 @@ Measured over each tier's own emitter corpus, the enumerated document list
 |------|-------:|----------------------------:|-----------------------:|
 | py   |     54 |                   54 (100%) |             38 (70.4%) |
 | ts   |     60 |                   60 (100%) |             36 (60.0%) |
-| go   |     21 |                   21 (100%) |            21 (100.0%) |
+| go   |     22 |                   22 (100%) |            22 (100.0%) |
 | java |     49 |                   49 (100%) |             28 (57.1%) |
 | rust |     34 |                   34 (100%) |             32 (94.1%) |
-| wasm |     19 |                   19 (100%) |            19 (100.0%) |
-| **total** | **237** |              **237 (100%)** |        **174 (73.4%)** |
+| wasm |     20 |                   20 (100%) |            20 (100.0%) |
+| **total** | **239** |              **239 (100%)** |        **176 (73.6%)** |
 
-The two columns are the finding. Every one of the 237 documents is reproduced
+The two columns are the finding. Every one of the 239 documents is reproduced
 byte-for-byte by its self-host emitter when the emitter is fed the **reference**
-IR. Only 174 survive the **fully-native** chain. So all 63 residual documents are
+IR. Only 176 survive the **fully-native** chain. So all 63 residual documents are
 `selfhost/lower.rvl` gaps, the native IR producer, and not emitter gaps. The
 emitter half of item 146 is complete over the enumerated corpus; what is left of
 the maximal story belongs to the parity catch-up arc (item 391).
+
+The go and wasm rows read 21 and 19 when the table was first taken. Each corpus
+has since gained one document (`emit_go_corpus/arrow_captures.rvl`,
+`emit_wasm_corpus/shortcircuit.rvl`), and both are reproduced by the fully-native
+chain, so the rows move together and the 100% holds. Both are now named in
+`tests/test_selfhost_compile.py`'s `GO_DOCS`/`WASM_DOCS`, so the rows are pinned
+by a test rather than by this table: a document that joins an emitter corpus and
+does NOT survive the native chain now reds the capstone oracle instead of
+quietly aging the number here.
 
 `tests/test_selfhost_compile.py` pins both halves. `JAVA_LOWER_GAP_DOCS` names the
 21 java documents the native chain does not reproduce and asserts, for each, that
@@ -204,10 +213,48 @@ while `.revl_index_of()` on a `PartialEq` element type resolves exactly as befor
 over a `Vec<Value>` (`Clone`, non-`PartialEq`) compiles `length`/`slice`/`concat`/
 `push`, and `revl_index_of` on a `Vec<i64>` is unchanged.
 
-Blocker (2) remains: coercion misses where the v3 emitter cannot yet infer that an
-argument is a scalar (for example `let joined = fmt.join("")`, whose method-call
-return type `_v3_infer_type` does not track). That is a separate rust-backend emit
-gap, tracked for a later slice.
+Blocker (2) is now CLOSED, and with it the build. Measured before the fix: the
+emitted crate failed `cargo build` with nine `E0308`s and nothing else. All nine
+were the same class, a concrete value reaching the opaque `Value` slot that `Any`
+erases to with no boxing written at the crossing, in four distinct positions:
+
+1. an ARGUMENT whose type the emitter could not infer. `_v3_infer_type` named no
+   type for a `kind == "builtin"` node, so a `let` bound to a stdlib method call
+   (`let inner = name.slice(a, b)`, `let joined = fmt.join("")`) carried none and
+   `_coerce_any_arg`, which fires only on a known concrete scalar, passed the bare
+   `String` through. `_v3_builtin_return_type` now names the result of the stdlib
+   method table's unconditional rows, and resolves the `@self` rows
+   (`slice`/`concat`/`push`/`set`/`remove`) through the receiver. `to_int` and
+   `lookup` stay unnamed: their result depends on the receiver family or the map's
+   value parameter, and a guess there would be a silent representation change;
+2. a RETURN into a declared `-> Any`. The same erasure, the same `E0308`, and the
+   coercion was wired at argument positions only;
+3. an `Opt[Any] ?? <scalar>` DEFAULT. `unwrap_or_else` has to yield the `Value`
+   the `Option` carries;
+4. a `List[Any]` ARGUMENT. A `Vec<Value>` whose elements already hold the erased
+   `serde_json::Value` boxes as the JSON array `stdlib/value.rvl`'s `value_list`
+   reads back, which is the exact inverse of that accessor. It is the ONE
+   container admitted: `List[Str]`, `List[Int]` and the rest hold `String`/`i64`,
+   not `Value`, so there is no element-wise recovery to invert.
+
+With those four landed, `selfhost/emit_rust.rvl` emitted to rust `cargo build`s
+clean. `tests/test_selfhost_emit_rust.py::test_the_rust_emitter_builds_as_rust`
+holds it, running the build rather than inferring it from byte-exact emit, which
+is the item-266 lesson.
+
+What Stage 4 still needs after this is no longer an emit gap:
+
+* the emitted emitter has to be DRIVEN, and its entry takes the interchange IR as
+  an `Any`, which erases to `cordis::Value` with no rust-side constructor to build
+  one from source. That is why `tools/bench_selfhost_rust.py` records every
+  emitter stage as `ir_in` and measures none of them;
+* `crates/revl-gate` generates the FRONTEND only (`selfhost/lower.rvl` and its
+  `use` closure). Its `compile_to` names both blockers per tier now, rather than
+  giving one reason that fits neither;
+* `selfhost/emit_rust.rvl` does not mirror `_coerce_any_arg`, so no byte-agreement
+  corpus document can reach the four crossings above without flipping the oracle
+  red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines.json` with
+  that reason, which is the same shape the boxing coercion already carried.
 
 ## Files
 
