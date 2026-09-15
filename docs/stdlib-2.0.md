@@ -53,10 +53,17 @@ revl refuses.)
   positive index past the end is REFUSED AT COMPILE TIME when the checker can
   see the list's length** (`["a"][5]`, or `xs[5]` with `let xs = ["a"]` in
   scope) — `index 5 is out of range for a 1-element List`, coded `T1` (issue
-  #938). Every index the checker cannot bound statically — `xs[i]`,
-  `xs[f()]` — still faults at runtime, and that fault is what
-  `tests/test_cross_tier_execution.py` records as the residual divergence (ts
-  reads `undefined`, wasm reads `0`).
+  #938). Every index the checker cannot bound statically (`xs[i]`, `xs[f()]`,
+  or any index into a list it cannot size) faults at runtime, **on all six
+  tiers now** (item 458). That row used to be the residual divergence recorded
+  in `tests/test_cross_tier_execution.py`: py, go, rust and java faulted while
+  ts read `undefined` and wasm read `0`. `revlIndex` guarded only the negative
+  end and handed the rest to JavaScript; the wasm subscript was raw address
+  arithmetic over `[count][pad][slot]…` and returned whatever bytes followed
+  the list. ts now throws `revl: list index out of range` and wasm reads
+  through `$list_slot`, which compares the index against the stored count
+  UNSIGNED (so a negative index trips the same edge) and traps.
+  `tests/test_458_list_index_bounds.py` executes the row on all six.
 - `slice(a, b)` bounds are **end-relative**: a negative bound counts from the
   end of the receiver (`len + bound`), then both bounds clamp into `[0, len]`
   and the slice is empty if `b < a` — the python/JS reading, on every tier
