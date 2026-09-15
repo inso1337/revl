@@ -131,13 +131,13 @@ KNOWN_BYPASSES = {
     # arrow-body write form): `v2_let_reassignment`,
     # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
     # `g6_closure_mutates_capture` now refuse with the reference's message
-    # byte-for-byte and are struck from this list. What remains needs machinery
-    # this slice deliberately does not build: resolving a name READ against the
-    # whole callable universe (the two G1 rows below), and the whole-body
-    # callable-shadowing scan over every fn, component and test block.
+    # byte-for-byte and are struck from this list, and the callable-shadowing
+    # slice has since struck `shadowed_module_fn_call` the same way. What
+    # remains needs machinery neither slice builds: resolving a name READ
+    # against the whole callable universe, which is what both G1 rows below
+    # want.
     "examples/rejections/g1_template_undeclared.rvl",
     "examples/rejections/v2_undeclared_fn_var.rvl",
-    "examples/rejections/shadowed_module_fn_call.rvl",
     # -- expression typing (T1/T2) --
     "examples/rejections/t2_null_in_expression.rvl",
     "examples/rejections/t11_field_through_opt.rvl",
@@ -204,7 +204,6 @@ KNOWN_BYPASSES = {
     "examples/rejections/t16_provide_method_missing_return.rvl",
     "examples/rejections/t31_index_non_int_provide_method.rvl",
     "examples/rejections/t3_config_default_type.rvl",
-    "examples/rejections/g6_method_local_shadows_component.rvl",
     # -- NOT the type layer, and pre-dating this design --
     # `_check_spawn_attenuation`'s PARAMETERIZED capability-widening refusal
     # (item 294): `fs.write(path="/etc")` is not within the held

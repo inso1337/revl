@@ -8,10 +8,6 @@
    "examples/rejections/g4_spawn_widens_budget.rvl",
    "examples/rejections/g4_spawn_widens_parameter.rvl"
   ],
-  "false-admit/G6": [
-   "examples/rejections/g6_method_local_shadows_component.rvl",
-   "examples/rejections/shadowed_module_fn_call.rvl"
-  ],
   "false-admit/HOST-METHOD": [
    "examples/rejections/host_method_not_on_surface.rvl",
    "examples/rejections/t24_opaque_receiver_builtin.rvl"
@@ -211,18 +207,6 @@
     "tag": "G4"
    }
   },
-  "examples/rejections/g6_method_local_shadows_component.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`store` is already bound in `set`",
-    "tag": "G6"
-   }
-  },
   "examples/rejections/host_method_not_on_surface.rvl": {
    "bucket": "false-admit/HOST-METHOD",
    "gate": {
@@ -233,18 +217,6 @@
    "reference": {
     "message": "`Map` has no method `putt` (its surface: drop, get, insert, insert_if_absent, new, remove)",
     "tag": "HOST-METHOD"
-   }
-  },
-  "examples/rejections/shadowed_module_fn_call.rvl": {
-   "bucket": "false-admit/G6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`helper` is bound here and called in this body, and a module function of that name is in scope",
-    "tag": "G6"
    }
   },
   "examples/rejections/t10_call_arity.rvl": {

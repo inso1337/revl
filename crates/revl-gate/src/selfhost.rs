@@ -331,6 +331,25 @@ pub struct FbSpan {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CshBind {
+    name: String,
+    line: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CshBs {
+    bs: Vec<CshBind>,
+    ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CshU {
+    all: Vec<String>,
+    exts: Vec<String>,
+    heads: Vec<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NoLink {
     done: bool,
     refs: Vec<Verd>,
@@ -3985,6 +4004,20 @@ fn has_use_decl(ts: &[Token]) -> bool {
     return false;
 }
 
+fn mth_rebind(pm: ProvM, scope: &[String], i: i64) -> Verd {
+    if (i >= pm.body.revl_length()) {
+        return no_verd();
+    }
+    let s = (pm.body)[(i) as usize].clone();
+    if (s.bind == "") {
+        return mth_rebind(pm.clone(), scope, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    if contains(scope, &s.bind) {
+        return mk_verd(tagged("G6", &((((String::from("`").revl_concat(&s.bind)).revl_concat("` is already bound in `")).revl_concat(&pm.name)).revl_concat("`"))), s.line);
+    }
+    return mth_rebind(pm.clone(), &(scope.revl_push(s.bind.clone())), (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
 fn check_component(comp: CompD, cx: Ctx) -> Verd {
     let setupAlias = alias_in(&comp.setup, 0i64, cx.handles.clone(), std::collections::HashMap::new());
     let setupArrows = arrows_in(&comp.setup, 0i64, std::collections::HashMap::new());
@@ -4002,6 +4035,7 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
         return mk_verd(tagged("A1", &sA1), comp.line);
     }
     let pcx = cx.clone();
+    let compLocals = stmt_binds(comp.setup.clone(), 0i64, vec![]);
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
         let pv = (comp.provs)[(pi) as usize].clone();
@@ -4014,8 +4048,13 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
                 return mk_verd(tagged("A1", &async_sig_msg(&pv.key, &pm.name, &pv.svcName, pm.isAsync, decl.isAsync)), comp.line);
             }
             let mcx = ctx_arrows(ctx_alias(pcx.clone(), alias_in(&pm.body, 0i64, pcx.handles.clone(), setupAlias.clone())), arrows_in(&pm.body, 0i64, setupArrows.clone()));
+            let rb = mth_rebind(pm.clone(), &union_into(pm.params.clone(), compLocals.clone()), 0i64);
             let a = walk_stmts(&pm.body, 0i64, mcx.clone(), empty_ac());
             if (a.msg != "") {
+                let rl = refusal_line(&pm.body, 0i64, mcx.clone(), empty_ac());
+                if ((rb.v != "") && ((rl == 0i64) || (rb.line < rl))) {
+                    return rb;
+                }
                 return mk_verd(tagged(&a.tag, &a.msg), body_line(&pm.body, mcx.clone(), comp.line));
             }
             let mSda = self_async_body(&pm.body, 0i64);
@@ -4024,6 +4063,9 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
             }
             if ((!pm.isAsync) && has_await(&pm.body, 0i64)) {
                 return mk_verd(tagged("A1", "`await` is only allowed in a component body"), comp.line);
+            }
+            if (rb.v != "") {
+                return rb;
             }
             if (decl.name != "") {
                 let g4 = g4_verdict(&pv.svcName, &pm.name, decl.clone(), a.clone());
@@ -6292,6 +6334,235 @@ fn fb_refusal(ts: Vec<Token>, i: i64) -> Verd {
     return fb_refusal(ts.clone(), skip_line(&ts, i));
 }
 
+fn csh_word(isExt: bool) -> String {
+    return if isExt { String::from("extern") } else { String::from("function") };
+}
+
+fn csh_msg(name: &str, isExt: bool) -> String {
+    return (((String::from("`").revl_concat(&name)).revl_concat("` is bound here and called in this body, and a module ")).revl_concat(&csh_word(isExt))).revl_concat(" of that name is in scope");
+}
+
+fn csh_extern_name(ts: &[Token], i: i64, end: i64) -> String {
+    let mut j = i;
+    while (j < end) {
+        if (atw(ts, j, "fn") && (tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).kind == "ident")) {
+            return tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return String::from("");
+}
+
+fn csh_universe(ts: Vec<Token>) -> CshU {
+    let mut all: Vec<String> = vec![];
+    let mut exts: Vec<String> = vec![];
+    let mut heads: Vec<i64> = vec![];
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        let t = tkc(&ts, i);
+        let mut nx = skip_line(&ts, i);
+        if at_boot(&ts, i) {
+            nx = (i).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if at_event(&ts, i) {
+                nx = event_decl_end(&ts, i);
+            } else {
+                if (t.kind != "kw") {
+                    nx = skip_line(&ts, i);
+                } else {
+                    if at_pub_prefix(&ts, i) {
+                        nx = (i).checked_add(1i64).expect("revl: Int overflow");
+                    } else {
+                        if (t.text == "type") {
+                            nx = type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+                        } else {
+                            if (t.text == "use") {
+                                nx = skip_line(&ts, i);
+                            } else {
+                                if (t.text == "test") {
+                                    let e = test_block_end(&ts, i);
+                                    nx = if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) { e } else { skip_line(&ts, i) };
+                                } else {
+                                    if (t.text == "extern") {
+                                        let e = p_extern(ts.clone(), i, empty_prog()).i;
+                                        let n = csh_extern_name(&ts, i, e);
+                                        if (n != "") {
+                                            all = union_into(all.clone(), vec![n.clone()]);
+                                            exts = union_into(exts.clone(), vec![n.clone()]);
+                                        }
+                                        nx = e;
+                                    } else {
+                                        if (t.text == "service") {
+                                            nx = p_service(ts.clone(), i, empty_prog()).i;
+                                        } else {
+                                            if (t.text == "component") {
+                                                nx = p_component(ts.clone(), i, empty_prog()).i;
+                                            } else {
+                                                if (t.text == "fn") {
+                                                    if (tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).kind == "ident") {
+                                                        all = union_into(all.clone(), vec![tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text]);
+                                                    }
+                                                    let sp = fb_span(ts.clone(), i);
+                                                    if sp.ok {
+                                                        heads.push(i);
+                                                        nx = sp.next;
+                                                    } else {
+                                                        nx = skip_line(&ts, i);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (nx <= i) {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            i = nx;
+        }
+    }
+    return CshU { all: all.clone(), exts: exts.clone(), heads: heads.clone() };
+}
+
+fn csh_called(ts: &[Token], lo: i64, hi: i64) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut j = lo;
+    while (j < hi) {
+        if (((tkc(ts, j).kind == "ident") && atk(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "(")) && (!atk(ts, (j).checked_sub(1i64).expect("revl: Int overflow"), "."))) {
+            out = union_into(out.clone(), vec![tkc(ts, j).text]);
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn csh_inter(a: &[String], b: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < a.revl_length()) {
+        if contains(b, &(a)[(i) as usize]) {
+            out.push((a)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn csh_arrow_free(ts: &[Token], lo: i64, hi: i64) -> bool {
+    let mut j = lo;
+    while (j < hi) {
+        if atk(ts, j, "=>") {
+            return false;
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return true;
+}
+
+fn csh_add(b: CshBs, name: String, line: i64) -> CshBs {
+    return CshBs { bs: b.bs.revl_push(CshBind { name: name.clone(), line: line }), ok: b.ok };
+}
+
+fn csh_binders(steps: &[FbStep], i: i64, acc: CshBs) -> CshBs {
+    if (i >= steps.revl_length()) {
+        return acc;
+    }
+    let s = (steps)[(i) as usize].clone();
+    let mut out = acc.clone();
+    if (s.kind == "bail") {
+        out = CshBs { bs: acc.bs.clone(), ok: false };
+    }
+    if (s.kind == "let") {
+        out = csh_add(acc.clone(), s.name.clone(), s.line);
+    }
+    if (s.kind == "for") {
+        out = csh_binders(&s.body, 0i64, csh_add(acc.clone(), s.name.clone(), s.line));
+    }
+    if (s.kind == "if") {
+        out = csh_binders(&s.els, 0i64, csh_binders(&s.then_, 0i64, acc.clone()));
+    }
+    if (s.kind == "while") {
+        out = csh_binders(&s.body, 0i64, acc.clone());
+    }
+    return csh_binders(steps, (i).checked_add(1i64).expect("revl: Int overflow"), out.clone());
+}
+
+fn csh_param_line(ts: &[Token], lo: i64, hi: i64, name: &str, dflt: i64) -> i64 {
+    let mut j = lo;
+    while (j < hi) {
+        let t = tkc(ts, j);
+        if ((t.kind == "ident") && (t.text == name)) {
+            return t.line;
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return dflt;
+}
+
+fn csh_params(ts: &[Token], lo: i64, hi: i64, ps: &[ParamN], i: i64, dflt: i64, acc: CshBs) -> CshBs {
+    if (i >= ps.revl_length()) {
+        return acc;
+    }
+    return csh_params(ts, lo, hi, ps, (i).checked_add(1i64).expect("revl: Int overflow"), dflt, csh_add(acc.clone(), (ps)[(i) as usize].name.clone(), csh_param_line(ts, lo, hi, &(ps)[(i) as usize].name, dflt)));
+}
+
+fn csh_first(bs: &[CshBind], i: i64, amb: &[String], u: CshU) -> Verd {
+    if (i >= bs.revl_length()) {
+        return no_verd();
+    }
+    let b = (bs)[(i) as usize].clone();
+    if contains(amb, &b.name) {
+        return mk_verd(tagged("G6", &csh_msg(&b.name, contains(&u.exts, &b.name))), b.line);
+    }
+    return csh_first(bs, (i).checked_add(1i64).expect("revl: Int overflow"), amb, u.clone());
+}
+
+fn csh_function(ts: Vec<Token>, i: i64, sp: FbSpan, u: CshU) -> Verd {
+    let amb = csh_inter(&csh_called(&ts, sp.lo, sp.hi), &u.all);
+    if (amb.revl_length() == 0i64) {
+        return no_verd();
+    }
+    if (!csh_arrow_free(&ts, i, sp.hi)) {
+        return no_verd();
+    }
+    let pend = params_at(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow")).i;
+    let seed = csh_params(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), pend, &sp.ps, 0i64, tkc(&ts, i).line, CshBs { bs: vec![], ok: true });
+    let bs = csh_binders(&fb_scan(ts.clone(), sp.lo, sp.hi), 0i64, seed.clone());
+    if (!bs.ok) {
+        return no_verd();
+    }
+    return csh_first(&bs.bs, 0i64, &amb, u.clone());
+}
+
+fn csh_walk(ts: Vec<Token>, u: CshU, i: i64) -> Verd {
+    if (i >= u.heads.revl_length()) {
+        return no_verd();
+    }
+    let h = (u.heads)[(i) as usize].clone();
+    let sp = fb_span(ts.clone(), h);
+    if (!sp.ok) {
+        return csh_walk(ts.clone(), u.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    let v = csh_function(ts.clone(), h, sp.clone(), u.clone());
+    if (v.v != "") {
+        return v;
+    }
+    return csh_walk(ts.clone(), u.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn csh_refusal(ts: Vec<Token>) -> Verd {
+    let u = csh_universe(ts.clone());
+    if (u.all.revl_length() == 0i64) {
+        return no_verd();
+    }
+    return csh_walk(ts.clone(), u.clone(), 0i64);
+}
+
 fn closure_assign_msg(name: &str) -> String {
     return (String::from("a closure cannot assign to `").revl_concat(&name)).revl_concat("`: captures are by value, not by reference (G6)");
 }
@@ -6346,6 +6617,10 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<Stri
     let cfgv = config_data_refusal(ts.clone(), pg.clone());
     if (cfgv.v != "") {
         return NoLink { done: true, refs: vec![cfgv.clone()] };
+    }
+    let cshv = csh_refusal(ts.clone());
+    if (cshv.v != "") {
+        return NoLink { done: true, refs: vec![cshv.clone()] };
     }
     let fbv = fb_refusal(ts.clone(), 0i64);
     if (fbv.v != "") {
