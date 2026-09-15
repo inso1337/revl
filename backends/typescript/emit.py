@@ -4697,21 +4697,22 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 body.append("  assertNoResidue(root, _revl_baseline)")
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
-        lines.append(f"it({_string(test.get('name'))}, async () => {{")
-        lines.append("  // drives the composition on a real cordis context and")
-        lines.append("  // proves no residue after LIFO teardown (FR-5 / §7.1).")
-        lines.append("  //")
-        lines.append("  // issue #1112: the driver runs with the module's entry async")
-        lines.append("  // context restored, so ambient context an `@ts` extern bound with")
-        lines.append("  // `AsyncLocalStorage.enterWith` during an EARLIER test in this file")
-        lines.append("  // is not visible here. That is the py reference tier's per-test")
-        lines.append("  // isolation on the ts tier: each py lifecycle driver runs under its")
-        lines.append("  // own `asyncio.run`, hence in a fresh copy of the module's context.")
-        lines.append("  await _revl_test_context(async () => {")
+        # One `extend` per region rather than a statement per emitted line:
+        # every statement here is unreachable by the self-host byte-agreement
+        # corpus (selfhost/emit_ts.rvl defers in-file test emission entirely),
+        # so each one is a line the mirrored-emitter ledger has to carry.
+        lines.extend([
+            f"it({_string(test.get('name'))}, async () => {{",
+            "  // drives the composition on a real cordis context and",
+            "  // proves no residue after LIFO teardown (FR-5 / §7.1). It runs with",
+            "  // the module's entry async context restored, so ambient context an",
+            "  // earlier test in this file bound with `AsyncLocalStorage.enterWith`",
+            "  // is not in scope here — the py tier's per-`asyncio.run` per-test",
+            "  // isolation, on this tier (issue #1112).",
+            "  await _revl_test_context(async () => {",
+        ])
         lines.extend(("  " + line if line else line) for line in body)
-        lines.append("  })")
-        lines.append("})")
-        lines.append("")
+        lines.extend(["  })", "})", ""])
     return lines
 
 
