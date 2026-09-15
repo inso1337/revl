@@ -136,7 +136,7 @@ export function optName(row: Row | undefined): string | undefined {
 }
 
 export function optCode(s: string | undefined): bigint | undefined {
-    return ((v: number | undefined) => v === undefined ? undefined : BigInt(v))(s?.charCodeAt(0))
+    return (($revl_opt: any) => $revl_opt === undefined ? undefined : revlCharCodeAt($revl_opt, 0n))(s)
 }
 
 export function unwrapOr(o: bigint | undefined, d: bigint): bigint {

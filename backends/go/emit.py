@@ -5454,17 +5454,13 @@ def _go_v3_optchain(node, ctx: _V3GoCtx, *, field=None, method=None, args=None):
         # ("type string of _x does not match []T"). The payload type is right
         # here, so bind it for the length of the render.
         ret_surface = _v3_builtin_ret_type(method, payload)
-        previous = ctx.var_types.get("__optx")
+        # `__optx` is synthetic and written here only: the arguments above and
+        # the receiver are already rendered, so no other chain can be mid-render
+        # and there is nothing to save or restore.
         ctx.var_types["__optx"] = payload
-        try:
-            body = _go_v3_builtin(
-                ctx, method, {"kind": "var", "name": "__optx"}, "_x", arg_renders
-            )
-        finally:
-            if previous is None:
-                ctx.var_types.pop("__optx", None)
-            else:
-                ctx.var_types["__optx"] = previous
+        body = _go_v3_builtin(
+            ctx, method, {"kind": "var", "name": "__optx"}, "_x", arg_renders
+        )
     go_ret = _go_v3_type(ret_surface, ctx.types) if ret_surface else "any"
     return (f"revlOptMap({target}, func(_x {go_payload}) {go_ret} "
             f"{{ return {body} }})")

@@ -153,8 +153,8 @@
         "Only the Float interpolation arm remains: it sets needs_ftoa and formats through revlFtoa, whose scaffold is explicitly deferred. Expression-free templates and non-Float typed interpolation are now covered.": {
           "_go_v3_interp": 5
         },
-        "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior.": {
-          "_go_v3_optchain": 19
+        "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior. The count rose by one for the line that binds the payload's surface type before rendering the builtin against it: `_go_v3_builtin` picks revlStrLen vs revlListLen (and four more rows) off the receiver type, and the synthetic node carried none, so an `Opt[Str]?.length()` emitted a List helper over a string and the package did not build. It cannot become a corpus case: selfhost/emit_go.rvl ports no optional chaining at all, so a fixture spelling `?.` could not hold byte agreement. tests/test_458_conversion_dispatch.py executes it on the tier instead.": {
+          "_go_v3_optchain": 20
         },
         "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py. Issue #721's Float half adds five statements to the same deferred preamble block: the `math` import and the `revlF` identity helper that keeps a Float literal out of Go's CONSTANT world (a constant fold has no signed zero and no infinity), plus the `math.Mod` arm for `%` on Float, which Go does not define on float64 at all. No PLACEMENT corpus document carries a Float, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl excludes placement entirely; the reference half is executed on all six tiers by tests/test_458_float_division_and_remainder.py.": {
           "_bridge_decode_expr": 16,
@@ -280,7 +280,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 3091
+      "uncovered_statements": 3092
     },
     "java": {
       "statements": 2587,
@@ -1960,14 +1960,13 @@
           "render_un": 1,
           "v3_stmt": 1
         },
-        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx`, `renders_await`, and `optcall_result_is_int` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
+        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx` and `renders_await` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
           "expected_instance_get": 1,
           "expected_missing_adt": 1,
           "expected_ok_adt": 1,
           "expected_result_type": 1,
           "ind": 1,
           "indentation_is_two_spaces": 1,
-          "optcall_result_is_int": 1,
           "renders_await": 1,
           "sync_acx": 1
         },
@@ -1975,7 +1974,7 @@
           "ts_type_v1": 1
         }
       },
-      "uncovered_statements": 94
+      "uncovered_statements": 93
     },
     "wasm": {
       "statements": 1269,
