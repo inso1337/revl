@@ -166,6 +166,10 @@ EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 # every tier — python, typescript, go, rust and java — so one guarantee does not
 # read as five different bugs, the way `revl: Int overflow` already is.
 _MAP_MISS_MSG = "revl: map index: no entry for key"
+# A Str index outside `0 <= i < length()` (docs/stdlib-2.0.md
+# §Str.codepoint_at). Spelled identically on every tier that names it, so one
+# guarantee does not read as several different host errors.
+_STR_INDEX_MSG = "revl: Str index out of range"
 
 
 # ---------------------------------------------------------------- async (item 92)
@@ -996,16 +1000,21 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         return f"({target} + [{args[0]}])"
     if method == "slice":
         return f"{target}[{args[0]}:{args[1]}]"
+    # Character access routes through `_revl_str_at`, which faults for an index
+    # outside `0 <= i < length()` — python's `s[i]` is END-RELATIVE, so a bare
+    # `s[-1]` would read the LAST code point where go, rust, java and ts all
+    # fault. Same guard, same reason, as `_revl_index` on a List subscript
+    # (#549, docs/stdlib-2.0.md §Str.codepoint_at).
     if method == "charAt":
-        return f"{target}[{args[0]}]"
+        return f"_revl_str_at({target}, {args[0]})"
     if method == "charCodeAt":
-        return f"ord({target}[{args[0]}])"
+        return f"ord(_revl_str_at({target}, {args[0]}))"
     # Codepoint-at-index scan (item 276, docs/stdlib-2.0.md §Str.codepoint_at):
     # the Unicode scalar at index i, returned directly. `ord(s[i])` allocates
     # only the transient 1-char slice `ord` consumes — no persistent 1-char Str
     # the self-host lexer would otherwise index a second time via `code0`.
     if method == "codepoint_at":
-        return f"ord({target}[{args[0]}])"
+        return f"ord(_revl_str_at({target}, {args[0]}))"
     if method == "concat":
         return f"({target} + {args[0]})"
     if method == "indexOf":
@@ -5312,6 +5321,20 @@ def emit(ir: dict) -> str:
         out.add(0, "    if i < 0:")
         out.add(0, "        raise IndexError('revl: negative list index')")
         out.add(0, "    return xs[i]")
+        out.add(0)
+    if _scan.builtins & {"charAt", "charCodeAt", "codepoint_at"}:
+        # An index outside `0 <= i < length()` FAULTS on every tier
+        # (docs/stdlib-2.0.md §Str.codepoint_at). python's `s[i]` is
+        # END-RELATIVE, so `s.charAt(-1)` read the last code point here while
+        # go/rust/java/ts faulted — the `_revl_index` story (#549), one type
+        # over. `slice`-then-guard is still the total form.
+        out.add(0, "def _revl_str_at(s, i):")
+        out.add(0, '    """A Str index outside 0 <= i < length() faults on '
+                   'every tier; python"""')
+        out.add(0, '    """would otherwise read from the end, so guard it here."""')
+        out.add(0, "    if i < 0 or i >= len(s):")
+        out.add(0, f"        raise IndexError({_STR_INDEX_MSG!r})")
+        out.add(0, "    return s[i]")
         out.add(0)
     if _scan.map_index:
         # A `Map` subscript reads by key and a MISS faults, on every tier
