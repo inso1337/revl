@@ -144,12 +144,12 @@ def test_v3_str_list_record_functions_emit():
     # back through the slot and is narrowed to its i32 address, the Int element
     # is the slot
     assert "(i32.wrap_i64 (i64.load (i32.add (local.get $p_row) (i32.const 8))))" in wat
-    # ... and a List element goes through `$list_at`, which compares the index
+    # ... and a List element goes through `$list_slot`, which compares the index
     # against the stored count and traps past it (item 458). The constant index
     # no longer folds to a compile-time slot offset: this tier used to emit
     # `(i32.add $p_xs (i32.const 8))` for `xs[0]` and read whatever followed
     # the list for `xs[7]`, which is a value rather than a fault.
-    assert "(i64.load (call $list_at (local.get $p_xs) (i64.const 0)))" in wat
+    assert "(i64.load (call $list_slot (local.get $p_xs) (i64.const 0)))" in wat
     assert '  (data (i32.const 0) "\\02\\00\\00\\00hi")' in wat
 
 

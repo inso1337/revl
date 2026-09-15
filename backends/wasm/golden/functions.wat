@@ -55,7 +55,7 @@
           (i64.const 0))
       (then unreachable))
     (local.get $r))
-  (func $list_at (param $list i32) (param $i i64) (result i32)
+  (func $list_slot (param $list i32) (param $i i64) (result i32)
     (if (i64.ge_u (local.get $i) (i64.extend_i32_u (i32.load (local.get $list))))
       (then unreachable))
     (i32.add (local.get $list)
@@ -84,7 +84,7 @@
     return)
 
   (func $first (export "first") (param $p_xs i32) (result i64) (local $__revl_tmp i32)
-    (i64.load (call $list_at (local.get $p_xs) (i64.const 0)))
+    (i64.load (call $list_slot (local.get $p_xs) (i64.const 0)))
     return)
 
   (func $greet (export "greet") (result i32) (local $__revl_tmp i32)

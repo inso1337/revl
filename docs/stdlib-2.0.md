@@ -61,7 +61,7 @@ revl refuses.)
   end and handed the rest to JavaScript; the wasm subscript was raw address
   arithmetic over `[count][pad][slot]…` and returned whatever bytes followed
   the list. ts now throws `revl: list index out of range` and wasm reads
-  through `$list_at`, which compares the index against the stored count
+  through `$list_slot`, which compares the index against the stored count
   UNSIGNED (so a negative index trips the same edge) and traps.
   `tests/test_458_list_index_bounds.py` executes the row on all six.
 - `slice(a, b)` bounds are **end-relative**: a negative bound counts from the

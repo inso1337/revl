@@ -29,7 +29,7 @@ Two different causes with the same shape.
   * **wasm**: `xs[i]` was raw address arithmetic on the `[count][pad][slot]…`
     list layout with no bound at all, so the read returned whatever
     slot-sized bytes followed the list in linear memory, typed as the element
-    type. `$list_at` now compares the index against the stored count and
+    type. `$list_slot` now compares the index against the stored count and
     traps. The comparison is UNSIGNED, so a negative index (its i64 sign bit
     set) is above every count and trips the same edge.
 
@@ -198,20 +198,20 @@ def test_typescript_guards_both_ends_of_the_range():
 def test_wasm_reads_a_list_element_through_the_checked_helper():
     emitted = _emit("wasm", IN_RANGE)
     wat = emitted["functions"] if isinstance(emitted, dict) else emitted
-    assert "$list_at" in wat, (
+    assert "$list_slot" in wat, (
         "the wasm List subscript is back to raw address arithmetic; an index "
         "past the count reads the bytes that follow the list")
-    assert "(func $list_at" in wat
+    assert "(func $list_slot" in wat
     # the bound itself: an UNSIGNED compare against the stored count, so a
     # negative index is above every count and trips the same edge
     assert "i64.ge_u" in wat
 
 
-def test_wasm_list_at_traps_rather_than_clamping():
+def test_wasm_list_slot_traps_rather_than_clamping():
     """A clamp would answer the last element for `xs[7]` — a value again, and
     a more plausible one. The helper must `unreachable`."""
     emitted = _emit("wasm", IN_RANGE)
     wat = emitted["functions"] if isinstance(emitted, dict) else emitted
-    start = wat.index("(func $list_at")
+    start = wat.index("(func $list_slot")
     body = wat[start:start + 400]
     assert "unreachable" in body, body
