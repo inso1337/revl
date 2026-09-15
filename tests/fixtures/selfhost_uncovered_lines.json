@@ -1900,8 +1900,12 @@
       "uncovered_statements": 143
     },
     "ts": {
-      "statements": 2121,
+      "statements": 2132,
       "uncovered": {
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_ts_src` splices that block where the reference emits its vitest drivers. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits a driver section here and this port does not; a corpus document carrying one would therefore turn the byte-agreement oracle red rather than close the gap, which is why no emit_ts_corpus document carries a test section and these statements have no corpus case. Before #1123 the section was skipped in SILENCE - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_ts_src": 2
+        },
         "Async emission-node negative tests: `emission_call_node` returns false for a non-call, a call whose target is not `req`, or a requirement method absent from the component's async operation keys. Async req calls and async arrows exercise its true branch": {
           "emission_call_node": 3
         },
@@ -1975,7 +1979,7 @@
           "ts_type_v1": 1
         }
       },
-      "uncovered_statements": 94
+      "uncovered_statements": 98
     },
     "wasm": {
       "statements": 1269,
