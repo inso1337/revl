@@ -3624,12 +3624,24 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
     `next` that makes room, which is what the reference does when no window is
     declared.
 
-    What is left is the `drain` WINDOW, and it is the one that must stay refused
-    on principle: its resume fires on the deterministic test clock, which this
-    tier does not carry, so lowering it would resume EARLY and quietly disagree
-    with the reference. Emitting a subscription that SILENTLY dropped the window
-    is the worst outcome available — the program would run and answer
-    differently from the py reference — so refuse by name instead.
+    What is left is the `drain` WINDOW, and it must stay refused — but not for
+    the reason this refusal used to give. It said "the deterministic test clock,
+    which this tier does not carry", and that has been false since item 57
+    landed: `revl_clock_advance` is right here in this file, and the go tier now
+    lowers the window against its own equivalent.
+
+    The reason that DOES hold is narrower and specific to rust: this tier's
+    clock is `thread_local!`, deliberately, so parallel `cargo test` threads
+    never share one. A drain window is armed by whichever thread the PROVIDER
+    emits on, and `advance` is driven by the consumer's — two different threads
+    in every scenario this tier runs (see backends/rust/scenarios/stream.rs,
+    where each provider is driven from a `std::thread::spawn`). A window armed
+    on one thread is invisible to the other, so a lowered window would never
+    fire at all and the provider would stay suspended forever. That is a worse
+    failure than the early resume the old text feared, and it is exactly the
+    silent divergence a refusal exists to prevent. Lowering it here needs a
+    window clock the whole PROCESS shares, which this tier does not have and
+    which the thread-local design is a deliberate choice against.
 
     §4.5's `replay(…)` is the other one, and it is refused for a reason of its
     own rather than for the clock. Replay is a DURABILITY claim, and the half
@@ -3653,10 +3665,13 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
             "policy itself IS lowered here with the EAGER resume (the provider "
             "un-pauses at the `next` that makes room, exactly what the py "
             "reference does with no window declared), but a declared window "
-            "resumes only on the deterministic test clock, which lives on the "
-            "py reference tier (item 130 §8). Lowering the window without that "
-            "clock would resume EARLY and quietly disagree — try "
-            "`--backend py`")
+            "resumes on the clock coeffect, and this tier's clock is "
+            "THREAD-LOCAL so parallel `cargo test` threads never share one. The "
+            "window would be armed by the provider's thread and advanced by the "
+            "consumer's, so it would never fire and the provider would stay "
+            "suspended forever (item 130 §8) — try `--backend py`, or "
+            "`--backend go`, which carries a process-wide clock and does lower "
+            "the window")
 
 
 def _stream_head(node, ctx, rename) -> str:

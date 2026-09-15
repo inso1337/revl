@@ -359,3 +359,172 @@ def test_the_resource_subcone_revoke_is_unchanged():
     assert out["count"] == 0
     out = session.revoke_standing_grant(capability=_PLAIN)
     assert out["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The refusal reaches the prompt (issue #1098)
+# ---------------------------------------------------------------------------
+#
+# The finding above stops one call short of the operator. `_grant_refusal`
+# builds the whole `intent.Refusal` naming the declaration the crossing
+# violated, `_grant_covers` reads it as a bool, and the text was dropped before
+# anything rendered it: an operator whose standing grant was exceeded got an
+# ordinary single-use prompt with nothing saying they had already granted
+# something narrower and that this request falls outside it.
+#
+# `_find_standing_grant` now writes those findings onto the ticket it is about
+# to raise (`standingGrantRefusals`, capability -> sentence), which is the same
+# dict every surface hands the operator (`approval.two_step_payload`). These
+# tests pin the TEXT on that ticket, so they fail if the refusal object is ever
+# reduced back to a bare boolean at the coverage predicate.
+
+
+def _prompt(session, op, sink) -> dict:
+    """The ticket the gate raises when nothing standing covers the crossing —
+    the prompt the operator reads. `_fires` is this same call read as a bool;
+    this is the object it throws away, which is the shape of the bug."""
+    with pytest.raises(ApprovalRequired) as caught:
+        session.call("ops", op, [sink, "x"])
+    return caught.value.ticket
+
+
+@needs_cordis
+def test_the_prompt_names_the_grant_and_how_the_crossing_exceeds_it(sink):
+    """The exit criterion. An operator holding `fs.write(path="/tmp",
+    size="1MB")` who is re-asked for a `size="10MB"` crossing reads, ON THE
+    PROMPT, what they granted and how this request exceeds it.
+
+    Fails on main: the ticket carries no such field, because the refusal was
+    built and discarded one call earlier."""
+    session = _session()
+    session.mint_standing_grant(capability=_SMALL, uses=3)
+
+    ticket = _prompt(session, "a_big", sink)
+    notes = ticket["standingGrantRefusals"]
+    assert list(notes) == ticket["classCCapabilities"]
+    note = notes['fs.write(path="/tmp",size=10485760)']
+
+    # what they granted — in the spelling they granted it in, ceiling included.
+    # The STORED capability has the ceiling erased out of it, so naming that
+    # would name a narrower declaration than the one the operator made.
+    assert 'fs.write(path="/tmp",size=1048576)' in note
+    assert "grant:1:" in note
+    # how this request exceeds it
+    assert 'fs.write(path="/tmp",size=10485760)' in note
+    assert "above the declared ceiling `size=1048576`" in note
+    assert "Reduce the spend or widen the declared ceiling" in note
+    assert _lines(sink) == []            # still refused, still nothing fired
+
+
+@needs_cordis
+def test_the_prompt_carries_the_refusal_object_itself_not_a_restatement(sink):
+    """The anti-regression the exit criterion names: this fails if
+    `_grant_covers` goes back to returning a bare bool.
+
+    The sentence on the prompt CONTAINS `str(refusal)` — the `intent.Refusal`
+    that `_grant_refusal` builds, rendered in `errors.RevlError`'s
+    message-plus-hint shape. A predicate that decided coverage without building
+    that object would have nothing to put here, and a hand-written restatement
+    beside the kernel would drift from it. So the assertion is identity of text
+    with the kernel's own finding, not a keyword match."""
+    session = _session()
+    session.mint_standing_grant(capability=_SMALL, uses=3)
+    grant = session._grants[-1]
+
+    refusal = session._grant_refusal(grant, _BIG)
+    assert isinstance(refusal, intent.Refusal)   # not a bool
+
+    ticket = _prompt(session, "a_big", sink)
+    assert str(refusal) in ticket["standingGrantRefusals"][
+        'fs.write(path="/tmp",size=10485760)']
+
+
+@needs_cordis
+def test_the_unstated_ceiling_refusal_reaches_the_prompt_too(sink):
+    """The other refusal direction, and the one an operator is least likely to
+    work out unaided: the grant bounded no quantity, so it has authorized no
+    spend, and the crossing declaring `size="10MB"` is outside it. The prompt
+    says which dimension, not just that the answer was no."""
+    session = _session()
+    session.mint_standing_grant(capability=_PLAIN, uses=3)
+
+    note = _prompt(session, "a_big", sink)["standingGrantRefusals"][
+        'fs.write(path="/tmp",size=10485760)']
+    assert 'you hold a standing grant for `fs.write(path="/tmp")`' in note
+    assert "a ceiling the declared intent does not state" in note
+
+
+@needs_cordis
+def test_a_prompt_with_no_grant_behind_it_carries_no_refusal(sink):
+    """CONTROL, passes on main and on the branch. The field is not a fixture of
+    every class-(c) prompt: an operator who granted NOTHING is not told they
+    exceeded something, so the sentence stays a fact about their own grants."""
+    session = _session()
+    ticket = _prompt(session, "a_big", sink)
+    assert "standingGrantRefusals" not in ticket
+
+
+@needs_cordis
+def test_a_grant_whose_uses_ran_out_states_no_coverage_refusal(sink):
+    """CONTROL for HONESTY, passes on main and on the branch. `remainingUses`
+    exhaustion is a liveness fact, not a coverage one: the grant did cover this
+    crossing and is simply spent. Saying "this crossing is not within your
+    grant" there would be false, so only grants that are live on every other
+    axis and fail on coverage alone contribute a sentence (`_live_grant_for`)."""
+    session = _session()
+    session.mint_standing_grant(capability="model.complete(calls=1)")
+    assert _fires(session, "a_model", sink)
+    assert "standingGrantRefusals" not in _prompt(session, "a_model", sink)
+
+
+@needs_cordis
+def test_the_refusal_field_does_not_move_the_ticket_hash(sink):
+    """ADDITIVITY. The ticket hash is the outstanding-ticket key and the ledger
+    binding, so the explanation lands AFTER `build_ticket` computed it — the
+    same discipline `resourceScopeRefusals` follows. The identical crossing
+    hashes the same whether or not an exceeded grant put a sentence on it."""
+    bare = _prompt(_session(), "a_big", sink)
+
+    session = _session()
+    session.mint_standing_grant(capability=_SMALL, uses=3)
+    explained = _prompt(session, "a_big", sink)
+
+    assert "standingGrantRefusals" in explained
+    assert explained["hash"] == bare["hash"]
+
+
+@needs_cordis
+def test_a_covering_grant_still_auto_approves_and_explains_nothing(sink):
+    """NON-VACUITY for the admit path. Nothing about the DECISION moved: the
+    covered crossing fires, spends its use, and raises no ticket at all, so
+    there is no prompt for a refusal to reach."""
+    session = _session()
+    session.mint_standing_grant(capability=_BIG, uses=3)
+    assert _fires(session, "a_big", sink)
+    assert _lines(sink) == ["big:x"]
+    assert session._grants_consumed == 1
+
+
+def test_the_granted_spelling_is_rendered_from_the_kept_declaration():
+    """`_grant_spelling` alone — no composition needed. The mint erases the
+    ceiling out of the stored valuation and keeps it on `declaredCeilings`, and
+    the prompt has to put the two back together to name what the operator
+    stated. An unparseable spelling falls back to the stored text rather than
+    raising, the same additive fallback both coverage predicates keep."""
+    session = Session()
+    assert session._grant_spelling(
+        {"capability": _PLAIN, "declaredCeilings": {"size": 1048576}}
+    ) == 'fs.write(path="/tmp",size=1048576)'
+    assert session._grant_spelling(
+        {"capability": "model.complete", "declaredCeilings": {"calls": 3}}
+    ) == "model.complete(calls=3)"
+    # no declaration kept: the stored cone is what was stated
+    assert session._grant_spelling(
+        {"capability": _PLAIN, "declaredCeilings": {}}) == _PLAIN
+    assert session._grant_spelling({"capability": _PLAIN}) == _PLAIN
+    # unparseable, and a token that cannot carry parameters at all
+    assert session._grant_spelling(
+        {"capability": "fs.write(path=",
+         "declaredCeilings": {"size": 1}}) == "fs.write(path="
+    assert session._grant_spelling(
+        {"capability": "*", "declaredCeilings": {"calls": 2}}) == "*"
