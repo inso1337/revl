@@ -1664,3 +1664,160 @@ def test_a_well_formed_reply_is_unchanged_by_the_shape_gates():
         "kind": "message", "parts": [{"kind": "text", "text": "pong"}]}}
     out, _calls = _run_row_body(terminal)
     assert out == "pong"
+
+
+# ======================= `revl audit` over a COMPOSITION document (the CLI gap)
+# Item 439 (issue #118). `docs/design/439-a2a-task-lifecycle.md` decision 3
+# states G8 as "the boundary surface is the four (or one) synthesized externs,
+# enumerable on the boundary surface `revl audit` renders, each carrying the
+# folded `net.<host>` reach", and the two `_on_the_g8_audit_surface` tests above
+# pin that over the composition's COMPILED DOCUMENT.
+#
+# The CLI did not reach that document. `revl audit` compiles its arguments as
+# MODULES (`__main__`, `compile_files`), and a composition document declares no
+# module-level component: its rows, and the provider a `remote` row SYNTHESIZES,
+# exist only once the row table is resolved. So `revl audit base.rvl` printed
+#
+#     composition (providers first):
+#
+# and exited 0, for a composition that crosses to a peer over the network.
+# `docs/design/439-a2a-transport-binding.md`'s scope limits named this as the
+# gap between the property and the command.
+#
+# THE FAILURE DIRECTION, which is why it is a defect and not a missing feature:
+# an audit surface is read to ENUMERATE authority, so an empty one is read as an
+# ABSENCE of it. The silence failed OPEN — an operator counting what leaves the
+# process saw zero crossings for a composition holding a `net.<host>` emission,
+# with nothing on stderr and a zero exit to say the command had not looked. The
+# composition is now resolved, and each shape the command cannot resolve refuses
+# BY NAME with a nonzero exit rather than rendering an empty surface.
+
+from revl.__main__ import main as _cli  # noqa: E402
+
+MODULE = """
+service Local {
+  emission fn go(q: Str) -> Str
+}
+extern emission[net] fn ping(q: Str) -> Str = @py { return "" }
+component LocalSvc provides local: Local {
+  provide local {
+    fn go(q) {
+      let out = emit ping(q)
+      return out
+    }
+  }
+}
+"""
+
+LAYER_BASE = """
+composition Net {
+  use "services.rvl"
+  stack "swap.rvl"
+  remote @agent provides agent: Agent
+    at host("agent.example:8443")
+    through a2a
+}
+"""
+
+LAYER = """
+layer Swap for Net {
+  touches key("agent")
+}
+"""
+
+
+def _audit(tmp_path, *files, root=None):
+    """`revl audit` over `files`, with the project root pinned at `tmp_path` so
+    the row sources a composition names resolve where the fixture wrote them."""
+    args = ["audit", *[str(tmp_path / f) for f in files],
+            "--root", str(root or tmp_path)]
+    return _cli(args)
+
+
+def test_revl_audit_over_a_composition_renders_the_a2a_crossing(tmp_path, capsys):
+    """The exit test for the CLI half of G8: `revl audit <composition>` renders
+    the SYNTHESIZED crossing with its folded `net.<host>` reach.
+
+    Before this slice the same invocation printed an empty surface and exited 0.
+    """
+    write(tmp_path, services=AGENT, base=WITHDRAW)
+    assert _audit(tmp_path, "base.rvl") == 0
+    out = capsys.readouterr().out
+    assert "RemoteAgentProvider" in out
+    assert "remote_agent_ask [net.agent_example]" in out
+    # and the surface is not the empty one the module compile rendered
+    assert out.splitlines()[0].strip() != "composition (providers first):"
+
+
+def test_revl_audit_over_a_composition_carries_the_crossing_into_json(tmp_path,
+                                                                     capsys):
+    """The machine-readable surface, which is what a drift gate (`--diff`) and
+    a policy gate (`--policy`) read, carries the same crossing."""
+    write(tmp_path, services=AGENT, base=WITHDRAW)
+    assert _audit(tmp_path, "base.rvl", ) == 0
+    capsys.readouterr()
+    assert _cli(["audit", str(tmp_path / "base.rvl"), "--root", str(tmp_path),
+                 "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    provider = report["boundary"]["RemoteAgentProvider"]
+    crossing, = provider["externs"]
+    assert crossing["name"] == "remote_agent_ask"
+    assert crossing["class"] == "emission"
+    assert crossing["capabilities"] == ["net.agent_example"]
+
+
+def test_revl_audit_over_the_four_op_composition_renders_all_four(tmp_path,
+                                                                  capsys):
+    """The `long_running` form: an operator counting what leaves the process
+    reads four crossings from the CLI, the same four the compiled document
+    carries."""
+    _write_lr(tmp_path)
+    assert _audit(tmp_path, "base.rvl") == 0
+    out = capsys.readouterr().out
+    for op in ("start", "poll", "reply", "cancel"):
+        assert f"remote_researcher_research_{op} [net.agent_example]" in out
+
+
+def test_revl_audit_refuses_a_composition_beside_modules(tmp_path, capsys):
+    """A composition NAMES the rows it compiles, so auditing it beside
+    hand-listed modules would render a surface neither describes. Refused by
+    name, nonzero, rather than silently rendering one of the two."""
+    write(tmp_path, services=AGENT, base=WITHDRAW, module=MODULE)
+    assert _audit(tmp_path, "base.rvl", "module.rvl") == 1
+    err = capsys.readouterr().err
+    assert "base.rvl" in err and "module.rvl" in err
+    assert "composition" in err
+
+
+def test_revl_audit_refuses_two_composition_documents(tmp_path, capsys):
+    """A composition document IS the audited unit, so two of them have no one
+    boundary surface. Refused by name rather than rendering either."""
+    write(tmp_path, services=AGENT, base=WITHDRAW,
+          other=WITHDRAW.replace("composition Net", "composition Other"))
+    assert _audit(tmp_path, "base.rvl", "other.rvl") == 1
+    err = capsys.readouterr().err
+    assert "2 composition documents" in err
+    assert "base.rvl" in err and "other.rvl" in err
+
+
+def test_revl_audit_refuses_a_layer_document(tmp_path, capsys):
+    """A layer is a DELTA over a composition (426 §2.4), so it has no boundary
+    surface of its own — and compiled as a module it renders the same empty one
+    a composition used to. Refused by name, pointing at the composition that
+    stacks it."""
+    write(tmp_path, services=AGENT, base=LAYER_BASE, swap=LAYER)
+    assert _audit(tmp_path, "swap.rvl") == 1
+    err = capsys.readouterr().err
+    assert "swap.rvl" in err
+    assert "layer" in err and "DELTA" in err
+
+
+def test_revl_audit_over_a_module_is_unchanged(tmp_path, capsys):
+    """THE CONTROL, and it passes on both trees: a MODULE argument still
+    compiles as a module and renders its own crossing. The composition door is
+    an added branch, not a change to the one every other invocation takes."""
+    write(tmp_path, module=MODULE)
+    assert _audit(tmp_path, "module.rvl") == 0
+    out = capsys.readouterr().out
+    assert "LocalSvc" in out
+    assert "ping [net]" in out

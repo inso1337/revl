@@ -199,6 +199,15 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+    # item 439: a COMPOSITION document argument is resolved rather than
+    # compiled as a module, so its rows — and the providers a `remote` row
+    # synthesizes — are on the surface. Row provenance is recorded against the
+    # same project root `revl composition` uses.
+    audit.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document argument: the project root row "
+             "provenance and origins are recorded against (default: the "
+             "working directory). Ignored for module arguments")
     audit.add_argument(
         "--diff", metavar="PREV.json", default=None,
         help="authority-drift gate: re-audit the files and FAIL (nonzero) if "

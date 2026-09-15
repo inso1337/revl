@@ -390,12 +390,40 @@ for review instead. A row is a may-retain, and an absent row is not a proof of
 non-retention. Declared inverses are excluded: teardown closing a handle is the
 contract working, not a hazard.
 
+A `FILES` argument may be a MODULE or a single COMPOSITION document. A
+composition is RESOLVED before it is audited (roadmap item 439): its rows are
+compiled and the providers a `remote` row SYNTHESIZES are on the surface with
+their folded `net.<host>` reach, so a composition that crosses to a peer over
+the network audits as the crossings it makes. Before that the command compiled
+its arguments as modules, and a composition, which declares no module-level
+component, rendered an empty surface and exited 0. An empty audit surface reads
+as an absence of authority, so that silence failed open.
+
+The shapes the command cannot resolve refuse by name with a nonzero exit,
+rather than rendering an empty surface: a composition document listed beside
+modules (a composition names the rows it compiles, so the two describe
+different surfaces), two composition documents in one invocation (a composition
+document is the audited unit), and a layer document (a layer is a delta over
+the composition that stacks it, so it has no boundary surface of its own; audit
+the composition instead).
+
+A composition is admitted whole, never as a layer delta, so no row is skipped
+out of the surface being counted, and a non-first-party stack-layer row is
+compiled under its own untrusted-author profile. Both are the over-refusing
+direction. There is deliberately no `--trust-host-code` here: an audit that had
+to be told to trust the code it is enumerating would be answering a different
+question.
+
 - `FILES` (required).
 - `--json` - machine-readable output. This is the **supported surface for
   consumers**: a versioned, schema-published document
   ([interchange-format.md](interchange-format.md)). The default (prose) render
   is for people and is **not** a stability contract; its wording may change
   between releases. Parse `--json`, not the prose.
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory), the same root `revl composition` takes. Ignored for module
+  arguments.
 - `--diff PREV.json` - authority-drift gate: re-audit and FAIL (nonzero) if
   the new generation ADDS boundary crossings not in `PREV.json`
   ([audit-diff.md](audit-diff.md)).
