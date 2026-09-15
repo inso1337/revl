@@ -1113,6 +1113,38 @@ def test_a_declared_window_is_the_only_thing_that_changes_the_go_call():
     assert "streamArmDrain = func" not in code
 
 
+def test_a_windowed_and_an_unwindowed_subscription_coexist_in_one_go_module():
+    """One module carrying a windowed subscription, a typed-event handler and a
+    second `block` subscription with NO window.
+
+    The drain half of the go runtime is its own preamble, pulled in only by a
+    declared window; the event contract is another. A module reaching all three
+    is where a mis-gated preamble shows up — either as a missing arming hook or
+    as a duplicated one — and neither would be visible in a single-feature
+    program. `backends/go/test_stream_exec_130.py` compiles the emitted module;
+    this pins the assembly everywhere, including where no go toolchain exists."""
+    code = _tier_emit("go").emit(compile_source(
+        "event E(key: k) { k: Str }\n"
+        "service Sink { emission fn write(v: Str) }\n"
+        "component H requires sink: Sink {\n"
+        "  let src = effect Stream.source() undo src.close()\n"
+        "  let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()\n"
+        "  on E as e in sub { emit sink.write(e.k) }\n"
+        "}\n"
+        "component Plain {\n"
+        "  let a = effect Stream.source() undo a.close()\n"
+        "  let s2 = subscribe a policy block undo s2.close()\n"
+        "  await s2.next()\n"
+        "}\n", "s.rvl"))
+    assert 'StreamSubscribe(src, "block", 2, 10)' in code   # windowed
+    assert 'StreamSubscribe(a, "block", 0)' in code          # not windowed
+    # each preamble lands exactly once, however many components reach it
+    assert code.count("streamArmDrain = func") == 1
+    assert code.count("func RevlClockAdvance(ms int64) int {") == 1
+    assert code.count("func StreamSubscribe(") == 1
+    assert "func StreamContract(" in code or "EventContract" in code
+
+
 def test_the_go_window_and_the_advance_statement_share_one_clock():
     """§8 on the go tier, the same property the reference is pinned to by
     `test_the_drain_window_and_the_advance_statement_share_one_clock`: the window
