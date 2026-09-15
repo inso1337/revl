@@ -3260,6 +3260,8 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
     out.append("")
     out.append("func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }")
     out.append("")
+    out.append(_V3_LIST_INDEX_OF_EQ)
+    out.append("")
     used: set = set()
     for test in tests:
         tname = _go_v3_test_name(test.get("name") or "lifecycle", used)
@@ -5069,7 +5071,37 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         body_t = _go_v3_type(_go_v3_infer_type(node.get("body"), ctx), ctx.types)
         ctx.var_types = saved
         ret = f" {body_t}" if body_t else ""
-        return f"func({params}){ret} {{ return {body} }}"
+        rendered = f"func({params}){ret} {{ return {body} }}"
+        # By-value capture (docs/closures.md, syntax-2.0 §3.5). An arrow
+        # snapshots the mutable names it READS at arrow-creation time, and the
+        # front end owns which names those are: the node carries `captures`
+        # (`src/revl/lower.py::_mutable_free_vars`), so no backend re-derives
+        # them. A Go closure captures the enclosing VARIABLE rather than its
+        # value, so without a pin this tier answered the value the `var` held
+        # WHEN THE ARROW RAN — `var n = 1  let f = (x: Int) => x + n  n = 100
+        # return f(5)` gave 105 where every other tier gives 6, a plausible
+        # wrong number against an explicitly decided guarantee.
+        #
+        # `n := n` inside an enclosing scope is Go's own by-value snapshot, the
+        # idiom `_emit_pins` already uses for a derived inverse. It is spelled
+        # here as an IIFE AROUND the arrow rather than a statement before it,
+        # for two reasons: an arrow is an EXPRESSION (there is no statement
+        # position to pin in — `let f = (…) => …` is only one of the places one
+        # appears), and a shadow emitted at statement level would cover the
+        # rest of the enclosing body and swallow the very reassignment the
+        # snapshot exists to be immune to. The wrapper runs where the literal
+        # appears, so the copy is taken at CREATION time and not per call.
+        # `_ = n` follows each pin because a capture the rendered body reaches
+        # only through a nested arrow would otherwise be an unused variable,
+        # which is a compile error on this tier rather than a warning.
+        captures = node.get("captures") or []
+        if captures:
+            sig = ", ".join(_go_v3_type(t, ctx.types) or "any" for t in declared)
+            pins = " ".join(
+                f"{local} := {local}; _ = {local};"
+                for local in (_v3_ident(c, "capture") for c in captures))
+            return f"func() func({sig}){ret} {{ {pins} return {rendered} }}()"
+        return rendered
 
     if kind == "if":
         exp_t = _go_v3_type(expected, ctx.types) if expected else _go_v3_type(
@@ -5156,8 +5188,25 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return (f"revlStrSlice({target}, {args[0]}, {args[1]})" if is_str
                 else f"revlListSlice({target}, {args[0]}, {args[1]})")
     if method == "indexOf":
-        return (f"revlStrIndexOf({target}, {args[0]})" if is_str
-                else f"revlListIndexOf({target}, {args[0]})")
+        if is_str:
+            return f"revlStrIndexOf({target}, {args[0]})"
+        # revl has ONE equality and it is STRUCTURAL (syntax-2.0 §3.4). Go `==`
+        # is field-wise for a comparable element and a COMPILE ERROR for one
+        # that is not — a slice, or a struct holding one — so
+        # `revlListIndexOf[T comparable]` could not be instantiated at all for a
+        # `List[List[T]]`: `[[1], [2, 3]].indexOf([2, 3])` type-checked in the
+        # frontend, emitted cleanly, and would not build. The same split the
+        # `==` arm already makes above: a scalar element keeps the native
+        # operator, everything else goes through `revlEq` (reflect.DeepEqual),
+        # which is field-wise and element-wise all the way down and therefore
+        # the same relation for the elements `==` could also have compared.
+        elem = (rt[5:-1].strip()
+                if isinstance(rt, str) and rt.startswith("List[") and rt.endswith("]")
+                else None)
+        if elem in _GO_SCALARS:
+            return f"revlListIndexOf({target}, {args[0]})"
+        ctx.needs_reflect = True
+        return f"revlListIndexOfEq({target}, {args[0]})"
     if method == "split":
         return f"revlStrSplit({target}, {args[0]})"
     if method == "join":
@@ -8316,6 +8365,23 @@ func revlFtoa(x float64) string {
 	return sign + body
 }'''
 
+# `List.indexOf` over an element `==` cannot compare. Go `==` is a COMPILE
+# ERROR on a slice, or on a struct holding one, so `revlListIndexOf[T
+# comparable]` could not be instantiated for a `List[List[T]]` at all. This is
+# the element-wise sibling of the `==` arm's own scalar/`revlEq` split, and it
+# lives beside `revlEq` rather than in the unconditional stdlib preamble
+# because it CALLS it: emitting it where `revlEq` may be absent would leave an
+# undefined reference in every module that touches the stdlib.
+_V3_LIST_INDEX_OF_EQ = """func revlListIndexOfEq[T any](xs []T, x T) int64 {
+\tfor i, v := range xs {
+\t\tif revlEq(v, x) {
+\t\t\treturn int64(i)
+\t\t}
+\t}
+\treturn -1
+}"""
+
+
 _V3_STDLIB_PREAMBLE = '''// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 
@@ -8642,6 +8708,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         # record holding a List cannot use it at all; DeepEqual compares
         # float64 with `==`, so NaN stays unequal to itself as IEEE requires.
         out.append("func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }")
+        out.append("")
+        out.append(_V3_LIST_INDEX_OF_EQ)
         out.append("")
     if ctx.needs_float_div:
         # A function, not an expression: Go rejects a *constant* `1.0 / 0.0`
@@ -9806,6 +9874,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     if ctx.needs_reflect and not has_lifecycle:
         # structural equality (record/ADT `==` through DeepEqual)
         out.append("func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }")
+        out.append("")
+        out.append(_V3_LIST_INDEX_OF_EQ)
         out.append("")
     if ctx.needs_float_div:
         out.append("func revlDiv(a, b float64) float64 { return a / b }")

@@ -974,6 +974,27 @@ def test_549_divergence_now_agrees(tier: str, name: str):
     )
 
 
+#: The AGREED_549 rows this tier can EXECUTE. wasm is not in FAST_TIERS because
+#: most of the table needs a representation it does not have — `"+7".to_int()
+#: == None` compares an `Opt`, `div_trunc(Int.MIN, -1)` is fine but
+#: `split("")` builds a `List[Str]` — but the SLICE row is pure `List`/`Int`
+#: and runs. It was also WRONG: `$list_slice` used both `Int` bounds raw, so a
+#: negative bound made the length negative and trapped in `$alloc`, and
+#: `xs.slice(2, 99)` on a four-element list answered a length of 97 over bytes
+#: from past the list. "on every tier (issue #549)" is what docs/stdlib-2.0.md
+#: §slice says, and this row is the half of it nobody had run.
+WASM_549 = ("negative slice bounds are end-relative everywhere",)
+
+
+@pytest.mark.parametrize("name", WASM_549)
+def test_549_divergence_now_agrees_wasm(name: str):
+    source, verdict = AGREED_549[name]
+    observed = _observed("wasm", source)
+    assert observed == verdict, (
+        f"wasm now {observed}es {name!r}; #549 fixed it to {verdict} on every "
+        "tier, and this tier was never asked.")
+
+
 @pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
                     reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
 @pytest.mark.parametrize("name", sorted(AGREED_549))
@@ -1201,7 +1222,19 @@ test "rotl32 by zero is id"  { assert rotl32(305419896.to_int32(), 0.to_int32())
 """
 
 
-@pytest.mark.parametrize("tier", FAST_TIERS)
+#: wasm belongs here and was missing. `BITWISE` is Int32-only, and Int32 is the
+#: one numeric width this tier represents natively — `INT32_TIERS` below already
+#: walks py/ts/go/wasm for exactly that reason. The operators nonetheless ran on
+#: three tiers, because this pair of tests was written against
+#: FAST_TIERS/SLOW_TIERS before wasm executed anything here. MEASURED under item
+#: 458: all twelve assertions pass on wasm unchanged, so adding the column
+#: closes an UNMEASURED tier rather than a defect. Saying which of the two it
+#: was is the point — the previous two hunts each found a guard covering a
+#: subset of tiers, and in both cases nobody had looked.
+BITWISE_TIERS = FAST_TIERS + ("wasm",)
+
+
+@pytest.mark.parametrize("tier", BITWISE_TIERS)
 def test_bitwise_operators_agree(tier: str):
     status, message = _run(tier, BITWISE)
     if status == "skip":

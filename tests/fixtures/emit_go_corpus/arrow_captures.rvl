@@ -1,0 +1,51 @@
+// By-value capture (docs/closures.md, syntax-2.0 §3.5). Every other arrow
+// document in this corpus reads only its own parameters, so the `captures`
+// list on the node is empty in all of them and the oracle never compared the
+// snapshot that list exists to force. A Go closure captures the enclosing
+// VARIABLE, so the pin is the whole difference between 6 and 105 here.
+
+fn snapshotOne() -> Int {
+  var n = 1
+  let f = (x: Int) => x + n
+  n = 100
+  return f(5)
+}
+
+fn snapshotTwo() -> Int {
+  var a = 1
+  var b = 2
+  let f = (x: Int) => x + a * 10 + b
+  a = 9
+  b = 9
+  return f(0)
+}
+
+fn snapshotStr() -> Str {
+  var s = "a"
+  let f = (x: Str) => s + x
+  s = "z"
+  return f("!")
+}
+
+fn snapshotUntypedParam() -> Int {
+  var n = 3
+  let f = (x) => x + n
+  n = 40
+  return f(1)
+}
+
+fn noCapture() -> Int {
+  let k = (x: Int) => x + 1
+  return k(2)
+}
+
+// A captured arrow whose parameter type the hint cannot recover: `x` is never
+// read, so there is nothing to infer it from and the signature falls back to
+// `any`. The pin runs over the same arrow, so this is the one shape that
+// reaches the fallback inside the capture branch rather than beside it.
+fn snapshotUnusedParam() -> Int {
+  var n = 1
+  let f = (x) => n
+  n = 5
+  return f(0)
+}

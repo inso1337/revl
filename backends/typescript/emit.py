@@ -3755,7 +3755,17 @@ def _revl_helpers(ir: dict) -> list[str]:
     comes first because the named integer operations call it.
     """
     out: list[str] = []
-    if _uses_equality(ir):
+    # `revlIndexOf` compares List elements with `revlEq` (see the helper), so
+    # the equality helper has to be in scope wherever that one is emitted, even
+    # in a document that never writes `==`. The condition is deliberately
+    # `_uses_str_methods` and not "does this document call `indexOf`":
+    # `revlIndexOf` is part of `_REVL_STR_HELPER`, which is emitted as a UNIT
+    # for any of `len`/`length`/`slice`/`charAt`/`charCodeAt`/`indexOf`, so a
+    # document that only reads a `.length()` still gets the `revlIndexOf` body
+    # and the `revlEq` reference inside it. Gating on the call rather than on
+    # the emission left `revlEq` undefined in exactly those modules, which
+    # `tsc` rejects.
+    if _uses_equality(ir) or _uses_str_methods(ir):
         out.extend([_REVL_EQ_HELPER, ""])
     if _uses_assert(ir):
         out.extend([_REVL_SHOW_HELPER, ""])
@@ -3992,7 +4002,8 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
     const at = x.indexOf(v as string)
     return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)
   }
-  return BigInt(x.indexOf(v))
+  for (let i = 0; i < x.length; i++) { if (revlEq(x[i], v)) return BigInt(i) }
+  return -1n
 }"""
 
 _STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "codepoint_at",

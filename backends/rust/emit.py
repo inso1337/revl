@@ -5839,7 +5839,18 @@ def _v3_empty_vec_elem_types(body: object, ctx: "_V3Ctx") -> dict:
         def value_elem(val: object) -> str | None:
             """The element surface type a value would give an empty-vec binding."""
             if _v3_is_empty_list(val):
-                return None
+                # The DECLARED type, when the author wrote one. `let xs:
+                # List[Int] = []` carries `expected: "List[Int]"` on the
+                # literal, and that annotation is the most direct answer there
+                # is — but this pass only ever asked the LATER statements, so a
+                # binding that is declared and then never pushed into had no
+                # recovered type and emitted a bare `let xs = vec![];`. rustc
+                # then refused the whole module with E0282 ("type annotations
+                # needed for `Vec<_>`"), for a document py/ts/go/wasm/java all
+                # compile and run. Reading the annotation first also settles the
+                # accumulator that IS pushed into, one pass earlier.
+                return _list_element_type(
+                    val.get("expected") if isinstance(val, dict) else None)
             if isinstance(val, dict):
                 if val.get("kind") == "list" and val.get("items"):
                     return _v3_infer_type(val["items"][0], ctx)

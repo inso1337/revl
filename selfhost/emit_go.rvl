@@ -811,7 +811,34 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
   let bodyt = go_type(infer_type(value_field(node, "body"), bodyctx))
   var ret = ""
   if (bodyt != "") { ret = " ".concat(bodyt) }
-  return `func(${ps.join(", ")})${ret} { return ${body} }`
+  let rendered = `func(${ps.join(", ")})${ret} { return ${body} }`
+  // By-value capture (docs/closures.md, syntax-2.0 §3.5). The arrow snapshots
+  // the mutable names it READS at arrow-creation time; the front end names them
+  // on the node (`captures`) so no backend re-derives them. A Go closure
+  // captures the enclosing VARIABLE rather than its value, so without a pin this
+  // tier read whatever the `var` held when the arrow RAN. `n := n` in an
+  // enclosing scope is Go's own by-value snapshot, spelled as an IIFE around the
+  // arrow because an arrow is an expression and a statement-level shadow would
+  // cover the rest of the body. Mirrors `_go_v3_expr`'s arrow arm in
+  // backends/go/emit.py.
+  let captures = value_list(value_field(node, "captures"))
+  if (captures.length() > 0) {
+    var sigs = []
+    i = 0
+    while (i < names.length()) {
+      var st = go_type(declared[i])
+      if (st == "") { st = "any" }
+      sigs = sigs.push(st)
+      i = i + 1
+    }
+    var pins = []
+    for (cn of captures) {
+      let cm = v3_ident(value_str(cn))
+      pins = pins.push(`${cm} := ${cm}; _ = ${cm};`)
+    }
+    return `func() func(${sigs.join(", ")})${ret} { ${pins.join(" ")} return ${rendered} }()`
+  }
+  return rendered
 }
 
 // `_go_v3_interp`: a `${..}` template, rendered from the operand types the
