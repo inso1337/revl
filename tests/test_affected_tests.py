@@ -475,3 +475,75 @@ def test_a_comment_mentioning_bench_is_not_a_bench_dependant(tmp_path):
         'PATH = "bench/results/latency.json"\n', encoding="utf-8"
     )
     assert bench_dependants(tmp_path) == {"tests/test_reader.py"}
+
+
+# --- the committed site wheel: the selector must cover the builder's inputs - #
+def _build_wheel():
+    """The real `playground/build_wheel.py`, loaded as a module."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_build_wheel_for_gate", ROOT / "playground" / "build_wheel.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_every_site_wheel_input_selects_the_site_wheel_gate():
+    """The committed playground/site wheel is a generated artifact, and the only
+    thing that notices it has rotted is the `site-wheel` gate. So every file the
+    builder READS has to select that gate — otherwise a change stales the wheel
+    with nothing going red until the post-merge job on main.
+
+    That is not hypothetical. The selector covered `src/revl/**.py` and
+    `tools/check_site_wheel.py` and nothing else, while the builder also vendors
+    `backends/python/*.py`. PR #1092 changed backends/python/revl_fs_workspace.py,
+    passed every check, and left `site wheel drift` red on main across four
+    consecutive merges.
+
+    The input list is DERIVED from the builder (`wheel_inputs()`, which reports
+    the same table `main()` builds from) rather than restated here. A second
+    hand-written copy would only move the drift into this file: add a tree to the
+    builder and the copy would silently stop describing it. Read from the builder,
+    a new tree shows up here the moment it ships.
+    """
+    inputs = _build_wheel().wheel_inputs()
+    assert inputs, "playground/build_wheel.py reported no inputs at all"
+    missing = sorted(f for f in inputs if "site-wheel" not in sel(f)["gates"])
+    assert not missing, (
+        "playground/build_wheel.py reads these files, so a change to one stales "
+        "the committed wheel, but the selector does not select the `site-wheel` "
+        f"gate for them:\n  {missing}\n"
+        "Add a rule in tools/affected_tests.py::select (or let the path fall to "
+        "the fail-safe FULL gate, which carries every gate)."
+    )
+
+
+def test_a_vendored_python_backend_module_selects_the_wheel_gate_narrowly():
+    """The #1092 path itself: a py-tier module the wheel vendors picks up the
+    wheel gate, and does so WITHOUT escalating to FULL. Widening the selector
+    must not turn `site-wheel` into a full-gate trigger — site-wheel.yml's header
+    is explicit that a wheel check on every source change is its own outage
+    class."""
+    vendored = [f for f in _build_wheel().wheel_inputs()
+                if f.startswith("backends/python/")]
+    assert vendored, "the wheel no longer vendors any backends/python module"
+    for f in vendored:
+        r = sel(f)
+        assert r["full"] is False, f"{f} escalated to the FULL gate"
+        assert "site-wheel" in r["gates"], f"{f} did not select the wheel gate"
+        assert set(r["backends"]) == {"python"}, f"{f} widened the backend set"
+
+
+def test_the_wheel_gate_stays_off_what_the_wheel_does_not_vendor():
+    """The inverse failure. A gate that fires on everything is as useless as one
+    that never fires, so nothing outside the builder's input set may pull
+    `site-wheel` into a targeted selection."""
+    for f in ("backends/rust/emit.py", "backends/go/emit.py", "stdlib/json.rvl",
+              "bench/codegen/python/run.py", "backends/python/golden/x.py"):
+        r = sel(f)
+        assert r["full"] is False, f"{f} unexpectedly escalated to FULL"
+        assert "site-wheel" not in r["gates"], (
+            f"{f} is not an input to playground/build_wheel.py, but it selects "
+            "the site-wheel gate. Every source change now pays for a wheel "
+            "rebuild, which is the per-PR outage class roadmap 110c removed."
+        )

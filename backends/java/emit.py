@@ -555,22 +555,28 @@ def _finite_float(value):
 def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
     """Refuse the item-130 Slice 2 surface this blocking tier does not lower.
 
-    A byte-for-byte mirror of `backends/go/emit.py` and `backends/rust/emit.py`:
-    Slice 2 arrived on the blocking tiers in two landings and only one thing
-    outlived them. The derived combinator chain (`map`/`filter`/`take`) IS
-    lowered here now (see `_stream_chain`), and so are all four §4.4
-    backpressure policies: `drop_newest`, `drop_oldest` and `block` mirror the
-    py reference's `Subscription._deliver` arm for arm, with `block` resuming
-    EAGERLY at the `next` that makes room, which is what the reference does when
-    no window is declared.
+    The derived combinator chain (`map`/`filter`/`take`) IS lowered here now
+    (see `_stream_chain`), and so are all four §4.4 backpressure policies:
+    `drop_newest`, `drop_oldest` and `block` mirror the py reference's
+    `Subscription._deliver` arm for arm, with `block` resuming EAGERLY at the
+    `next` that makes room, which is what the reference does when no window is
+    declared.
 
-    What is left is the `drain` WINDOW, and it is the one that must stay refused
-    on principle: its resume fires on the deterministic test clock, which this
-    tier does not carry AT ALL (an `advance` step is refused here), so lowering
-    it would resume EARLY and quietly disagree with the reference. Emitting a
-    subscription that SILENTLY dropped the window is the worst outcome
-    available — the program would run and answer differently from the py
-    reference — so refuse by name instead.
+    What is left is the `drain` WINDOW, and this is the tier the old blanket
+    reason still holds for, in its strongest form. The window resumes on the
+    clock coeffect, and this tier has NO CLOCK AT ALL: timers (`every`/`after`)
+    do not lower here, and an `advance` lifecycle step is refused by name (see
+    the `advance` arm of `_lifecycle_step`). There is nothing to fire the window
+    on, so a lowering would have to resume on something else — early, late, or
+    never — and quietly disagree with the reference. Emitting a subscription
+    that SILENTLY dropped the window is the worst outcome available, so refuse
+    by name instead.
+
+    The other two blocking tiers have each moved off this text for their own
+    reason, which is why it is no longer a shared mirror: go lowers the window
+    against its process-wide clock, and rust refuses it because its clock is
+    thread-local and the window would be armed on the provider's thread and
+    advanced on the consumer's.
 
     §4.5's `replay(…)` is the other one, and it is refused for a reason of its
     own rather than for the clock. Replay is a DURABILITY claim, and the half
@@ -594,10 +600,12 @@ def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
             "itself IS lowered here with the EAGER resume (the provider "
             "un-pauses at the `next` that makes room, exactly what the py "
             "reference does with no window declared), but a declared window "
-            "resumes only on the deterministic test clock, which lives on the "
-            "py reference tier (item 130 §8). Lowering the window without that "
-            "clock would resume EARLY and quietly disagree — try "
-            "`--backend py`" % tier)
+            "resumes on the clock coeffect, and this tier has NO CLOCK AT ALL — "
+            "timers (`every`/`after`) do not lower here and an `advance` step "
+            "is refused by name. There is nothing to fire the window on, so "
+            "lowering it would quietly disagree with the reference (item 130 "
+            "§8) — try `--backend py`, or `--backend go`, which carries a "
+            "process-wide clock and does lower the window" % tier)
 
 
 # Dispatcher conformance (roadmap item 76a). This tier converged to ONE
