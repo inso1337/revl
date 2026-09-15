@@ -209,7 +209,25 @@ def test_the_sweep_can_actually_fail():
 #: with the Go toolchain, so a job that sets Go up has it.
 _TOOL_PROVIDERS: dict[str, tuple[str, ...]] = {"gofmt": ("actions/setup-go",)}
 
-_CHECK = re.compile(r"regen_goldens\.py\s+--check(?P<targets>(?:\s+[a-z][a-z-]*)*)")
+#: Tools every runner image has before a single step runs. `bash` is declared by
+#: the shell-producer targets so that a machine without it loud-SKIPS instead of
+#: dying halfway, not because a job has to install it.
+_AMBIENT = frozenset({"bash"})
+
+#: A `--check` step, with the flags and target names it carries. `--strict` and
+#: `--check` are read as flags; bare words after them are target names.
+_CHECK = re.compile(
+    r"regen_goldens\.py\s+--check(?P<rest>(?:\s+--?[a-z-]+|\s+[a-z][a-z-]*)*)")
+
+
+def _parse_check(run: str, known: set[str]) -> list[tuple[set[str], set[str]]]:
+    """Every `--check` invocation in one `run:` block, as (targets, flags)."""
+    out = []
+    for match in _CHECK.finditer(run):
+        flags = {word for word in match["rest"].split() if word.startswith("-")}
+        named = {word for word in match["rest"].split() if word in known}
+        out.append((named or set(known), flags))
+    return out
 
 
 def _jobs() -> dict[str, dict]:
@@ -221,17 +239,24 @@ def _jobs() -> dict[str, dict]:
     return jobs
 
 
-def _checking_jobs(jobs: dict[str, dict], known: set[str]) -> dict[str, set[str]]:
+def _checking_jobs(jobs: dict[str, dict], known: set[str],
+                   require_strict: bool = False) -> dict[str, set[str]]:
     """job id -> the target names its `--check` steps cover. A `--check` with no
-    target list covers every target."""
+    target list covers every target.
+
+    With `require_strict`, an invocation that omits `--strict` covers NOTHING:
+    without it a target whose tool the job lacks loud-skips and the step still
+    exits 0, so the job reports green having compared nothing for that target.
+    That is the failure the placement rule exists to prevent, and a check that
+    tolerates a skip is not evidence the job can see the target."""
     found: dict[str, set[str]] = {}
     for job_id, job in jobs.items():
         covered: set[str] = set()
         for step in job.get("steps") or []:
-            run = step.get("run") or ""
-            for match in _CHECK.finditer(run):
-                named = {word for word in match["targets"].split() if word in known}
-                covered |= named or set(known)
+            for named, flags in _parse_check(step.get("run") or "", known):
+                if require_strict and "--strict" not in flags:
+                    continue
+                covered |= named
         if covered:
             found[job_id] = covered
     return found
@@ -240,8 +265,8 @@ def _checking_jobs(jobs: dict[str, dict], known: set[str]) -> dict[str, set[str]
 def _job_tools(job: dict) -> set[str]:
     """The `requires` tools a job provides, read off the actions it uses."""
     text = "\n".join(str(step.get("uses") or "") for step in (job.get("steps") or []))
-    return {tool for tool, markers in _TOOL_PROVIDERS.items()
-            if any(marker in text for marker in markers)}
+    return set(_AMBIENT) | {tool for tool, markers in _TOOL_PROVIDERS.items()
+                            if any(marker in text for marker in markers)}
 
 
 def test_every_golden_target_is_drift_checked_by_a_job_that_can_see_it():
@@ -256,17 +281,20 @@ def test_every_golden_target_is_drift_checked_by_a_job_that_can_see_it():
     Go is a green step that compared nothing."""
     targets = {t.name: t for t in _regen_goldens().TARGETS}
     jobs = _jobs()
-    checking = _checking_jobs(jobs, set(targets))
-    assert checking, ("no CI job runs `tools/regen_goldens.py --check`. Every "
-                      "committed golden's byte comparison then happens nowhere.")
+    checking = _checking_jobs(jobs, set(targets), require_strict=True)
+    assert checking, ("no CI job runs `tools/regen_goldens.py --check --strict`. "
+                      "Every committed golden's byte comparison then happens "
+                      "nowhere, or happens where it can silently skip.")
     gaps = []
     for name, target in targets.items():
         homes = [job_id for job_id, covered in checking.items()
                  if name in covered and set(target.requires) <= _job_tools(jobs[job_id])]
         if not homes:
-            where = [job_id for job_id, covered in checking.items() if name in covered]
+            lax = _checking_jobs(jobs, set(targets))
+            where = [job_id for job_id, covered in lax.items() if name in covered]
             gaps.append(f"{name} (requires {', '.join(target.requires) or 'no tools'}; "
-                        f"checked in {', '.join(where) or 'no job'})")
+                        f"checked in {', '.join(where) or 'no job'} — a job listed here "
+                        f"either lacks those tools or omits --strict)")
     assert not gaps, (
         "golden target(s) with no CI job that both drift-checks them and "
         "provides their producer's tools:\n  " + "\n  ".join(gaps))
@@ -276,19 +304,158 @@ def test_the_ci_pairing_check_can_actually_fail():
     """Teeth for the pairing, against the exact bug it exists for: a `--check`
     of a tool-needing target in a job that does not provide the tool."""
     targets = {t.name: t for t in _regen_goldens().TARGETS}
-    assert "go" in targets and targets["go"].requires == ("gofmt",), \
+    assert "go" in targets and "gofmt" in targets["go"].requires, \
         "the go target no longer requires gofmt — repoint this self-test"
 
-    toolless = {"j": {"steps": [{"run": "python3 tools/regen_goldens.py --check go"}]}}
-    checking = _checking_jobs(toolless, set(targets))
-    assert checking == {"j": {"go"}}
+    run = "python3 tools/regen_goldens.py --check --strict go"
+    toolless = {"j": {"steps": [{"run": run}]}}
+    assert _checking_jobs(toolless, set(targets), require_strict=True) == {"j": {"go"}}
     assert not set(targets["go"].requires) <= _job_tools(toolless["j"]), \
         "a job with no setup-go must not read as providing gofmt"
 
-    tooled = {"j": {"steps": [{"uses": "actions/setup-go@v6"},
-                              {"run": "python3 tools/regen_goldens.py --check go"}]}}
+    tooled = {"j": {"steps": [{"uses": "actions/setup-go@v6"}, {"run": run}]}}
     assert set(targets["go"].requires) <= _job_tools(tooled["j"])
 
-    # a bare `--check` covers every target
-    bare = {"j": {"steps": [{"run": "python3 tools/regen_goldens.py --check"}]}}
-    assert _checking_jobs(bare, set(targets))["j"] == set(targets)
+    # WITHOUT --strict the same step covers nothing: a missing tool would make
+    # it skip and still exit 0, so it is not evidence the job checked anything.
+    lax = {"j": {"steps": [{"uses": "actions/setup-go@v6"},
+                           {"run": "python3 tools/regen_goldens.py --check go"}]}}
+    assert _checking_jobs(lax, set(targets), require_strict=True) == {}
+    assert _checking_jobs(lax, set(targets)) == {"j": {"go"}}
+
+    # a bare `--check --strict` covers every target
+    bare = {"j": {"steps": [{"run": "python3 tools/regen_goldens.py --check --strict"}]}}
+    assert _checking_jobs(bare, set(targets), require_strict=True)["j"] == set(targets)
+
+
+# --- the interpreter half: a check that cannot RUN is not a check -----------
+#
+# The first version of the CI wiring above put `rust`, `java` and `wasm` in
+# `lint` on the reasoning that their producers are pure Python, which is true,
+# and `lint` reported DRIFT for all three anyway. The producers never ran: the
+# registry invoked every `regen.sh` as `sh <script>`, the scripts are bash
+# (`set -euo pipefail`, `${BASH_SOURCE[0]}`), and `/bin/sh` is dash on ubuntu
+# and bash-in-POSIX-mode on macOS. It passed on a developer machine and died on
+# line 7 of every script in CI, and — because a producer that fails to run was
+# reported with the same word as a golden that is stale — the output said the
+# goldens had drifted.
+#
+# Both halves are gated below: the interpreter a script is invoked with must be
+# the one its own shebang names, and the targets a toolchain-free job claims to
+# check must actually complete with no toolchain on PATH.
+
+def test_every_shell_producer_runs_under_the_interpreter_its_shebang_names():
+    """`sh` is not a synonym for `bash`. A script whose shebang says bash and
+    whose body uses bash syntax must be invoked as bash, or it dies on a
+    POSIX-only shell and the driver reports whatever that looks like."""
+    registry = _regen_goldens()
+    checked = 0
+    for target in registry.TARGETS:
+        for argv in target.commands:
+            script = ROOT / argv[-1]
+            if not script.is_file():
+                continue
+            declared = registry.script_interpreter(script)
+            if declared is None:
+                continue
+            checked += 1
+            assert Path(argv[0]).name == declared, (
+                f"{target.name} runs {argv[-1]} as `{argv[0]}`, but the script's "
+                f"shebang names `{declared}`. On a runner whose /bin/sh is dash "
+                f"this dies before its first command and the target is reported "
+                f"as something other than what happened.")
+            if declared in {"bash", "ksh", "zsh"}:
+                # and it really is not POSIX-portable, so the pairing is load-
+                # bearing rather than cosmetic
+                body = script.read_text(encoding="utf-8")
+                assert ("BASH_SOURCE" in body or "pipefail" in body), (
+                    f"{argv[-1]} declares {declared} but uses nothing that needs "
+                    f"it — either give it a `sh` shebang or leave this comment")
+    assert checked >= 5, f"only inspected {checked} shell producer(s) — wrong paths?"
+
+
+def _toolchain_free_shim(tmp: Path) -> Path:
+    """A PATH holding a shell, python3 and coreutils, and no language toolchain.
+
+    `sh` points at a POSIX-only shell when the machine has one (dash — what
+    ubuntu runners use), because that is the difference between this check
+    reproducing CI and rubber-stamping a developer machine where /bin/sh is
+    bash."""
+    import os
+    import shutil as sh_mod
+    shim = tmp / "bin"
+    shim.mkdir(parents=True, exist_ok=True)
+    for name in ("bash", "env", "dirname", "pwd", "mkdir", "cat", "rm", "cp",
+                 "mv", "ls", "sed", "grep", "date", "printf", "uname", "sort",
+                 "head", "tail", "wc", "diff", "git", "gzip", "chmod"):
+        found = sh_mod.which(name)
+        if found:
+            (shim / name).symlink_to(found)
+    assert (shim / "bash").exists(), "no bash on PATH; the producers cannot run at all"
+    posix_sh = next((c for c in ("/bin/dash", "/usr/bin/dash", sh_mod.which("dash"))
+                     if c and os.path.exists(c)), sh_mod.which("sh"))
+    (shim / "sh").symlink_to(posix_sh)
+    (shim / "python3").symlink_to(sys.executable)
+    for absent in ("go", "gofmt", "cargo", "rustc", "javac", "java", "node",
+                   "npm", "wasmtime", "wasm-tools"):
+        assert not (shim / absent).exists(), f"{absent} leaked into the shim"
+    return shim
+
+
+def _lint_check_targets() -> set[str]:
+    """The targets the `lint` job claims to check."""
+    jobs = _jobs()
+    known = {t.name for t in _regen_goldens().TARGETS}
+    lint = next(job for job_id, job in jobs.items() if job_id.endswith(":lint"))
+    covered: set[str] = set()
+    for step in lint.get("steps") or []:
+        for named, _flags in _parse_check(step.get("run") or "", known):
+            covered |= named
+    return covered
+
+
+def test_the_toolchain_free_targets_really_need_no_toolchain(tmp_path):
+    """The placement claim, executed instead of argued.
+
+    `lint` installs ruff and nothing else, so every target it checks has to
+    complete with no Go, Rust, JDK, Node or wasm tooling anywhere. Run exactly
+    that list in exactly that environment. A target that cannot run there
+    belongs in its own `backend-*` job beside `go`."""
+    targets = _lint_check_targets()
+    assert targets, "the lint job checks no golden targets — read the wrong job?"
+    shim = _toolchain_free_shim(tmp_path)
+    proc = subprocess.run(
+        [str(shim / "python3"), "tools/regen_goldens.py", "--check", "--strict",
+         *sorted(targets)],
+        cwd=ROOT, capture_output=True, text=True,
+        env={"PATH": str(shim), "HOME": str(tmp_path)})
+    assert proc.returncode == 0, (
+        "the targets `lint` checks do not all complete without a toolchain, so "
+        "that job reports on goldens it cannot see:\n"
+        + proc.stdout + proc.stderr)
+    assert "SKIP" not in proc.stdout, (
+        "a target `lint` claims to check SKIPPED there:\n" + proc.stdout)
+
+
+def test_the_interpreter_and_placement_checks_can_fail(tmp_path):
+    """Teeth for both. The shebang pairing is re-run against the exact
+    arrangement that reached CI (`sh` for a bash script), and the toolchain-free
+    run is re-run against a target that genuinely needs one."""
+    registry = _regen_goldens()
+    script = ROOT / "backends" / "rust" / "scenarios" / "crashproof" / "regen.sh"
+    assert registry.script_interpreter(script) == "bash"
+    assert Path("sh").name != "bash", "the pairing assertion would be vacuous"
+
+    # `go` needs gofmt, so it must NOT pass in the toolchain-free environment —
+    # which is the whole reason it is checked in `backend-go` instead.
+    shim = _toolchain_free_shim(tmp_path)
+    proc = subprocess.run(
+        [str(shim / "python3"), "tools/regen_goldens.py", "--check", "--strict", "go"],
+        cwd=ROOT, capture_output=True, text=True,
+        env={"PATH": str(shim), "HOME": str(tmp_path)})
+    assert proc.returncode != 0 and "SKIP" in proc.stdout, (
+        "a toolchain-free run of the `go` target came back clean, so this check "
+        "would not notice a target placed in a job that cannot see it:\n"
+        + proc.stdout + proc.stderr)
+    assert "go" not in _lint_check_targets(), \
+        "the `go` target is listed in `lint`, where it can only skip"

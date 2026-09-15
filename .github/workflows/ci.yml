@@ -207,14 +207,22 @@ jobs:
       # The `go` target is deliberately NOT here: its producer needs `gofmt`,
       # which this job has no reason to install, and a target that loud-skips
       # for a missing tool is a green line that checked nothing. It runs in
-      # `backend-go`, which provisions Go. `tests/test_emitted_artifacts_are_drift_gated.py`
+      # `backend-go`, which provisions Go. `--strict` is what makes that a
+      # decision rather than a hope: with it, a target that skips for a missing
+      # tool FAILS the job instead of passing quietly, so a target listed in the
+      # wrong job reds here rather than reporting green having compared nothing.
+      #
+      # These seven need no toolchain, and that is verified rather than asserted:
+      # `test_the_toolchain_free_targets_really_need_no_toolchain` runs this exact
+      # list in a stripped environment with no go, cargo, javac, node or wasmtime
+      # on PATH. `tests/test_emitted_artifacts_are_drift_gated.py`
       # pairs every target against a job that both checks it AND has the tools
       # its producer requires, so a target added with no home is a red.
       #
       # Never add `|| true`, and never narrow the target list to make it pass:
       # the fix for a red here is `python3 tools/regen_goldens.py <target>`,
       # review the diff, and commit it (docs/conformance.md, golden policy).
-      - run: python3 tools/regen_goldens.py --check python typescript rust java wasm gate-crate gate-wasm
+      - run: python3 tools/regen_goldens.py --check --strict python typescript rust java wasm gate-crate gate-wasm
       # What the wheel ships, against what the commit tracks. `pyproject.toml`
       # used to `force-include` the whole of `backends/` and `stdlib/`;
       # force-include is exempt from every exclude rule and from the ignore
@@ -1277,7 +1285,7 @@ jobs:
       # `go test ./...` below compiles and runs the same modules, which is a
       # different property: this step is what says they are the bytes the
       # emitter produces today.
-      - run: python3 tools/regen_goldens.py --check go
+      - run: python3 tools/regen_goldens.py --check --strict go
       - run: cd backends/go/scenarios && go test ./...
       - run: cd backends/go/v3 && go test ./...
 
