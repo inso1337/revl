@@ -292,46 +292,46 @@ UNMASKED_UNDECIDED = {
     # -- extern host-import provenance, the same family as `stdlib/shell.rvl`
     # above: nothing in this slice reads extern BODIES --
     "stdlib/fs.rvl",
+
+    # ======================================================================
+    # The fourth unmasking, by `asset "<path>"` (item 459 F1) in the shared
+    # expression parser. These two did not come out of a parse `(bad)` like
+    # the three groups above: they came out of a WRONG SEMANTIC VERDICT,
+    # which is the worse shape. `selfhost/parser.rvl` read the juxtaposed
+    # string literal as a second expression, and `p_seq` needs no comma
+    # between elements, so every argument list holding an asset counted one
+    # argument too many and the checker refused a call the reference does
+    # not object to. `examples/app/notes.rvl` was pinned by exact text in
+    # the message-mismatch ledger below for that reason; with the form read
+    # as one expression both documents reach the checker's real verdict,
+    # and it has none. They are the live regression guard on the fix: if
+    # the arity comes back, both red here rather than churning a count.
+    # ======================================================================
+    "examples/app/notes.rvl",
+    "examples/webui-entry/console.rvl",
 }
 
 
 # The documents whose real verdict a parse refusal was hiding, and where the
-# verdict underneath turns out to DISAGREE with the reference's text.
+# verdict underneath turned out to DISAGREE with the reference's text.
 #
-# `UNMASKED_UNDECIDED` above is the honest shape of a slice that has no verdict.
-# This is the other outcome: the checker now reaches a verdict and its text is
-# not the reference's. Neither is newly admitted, and neither is a regression —
-# both were unreachable before — but a count would let them churn, so they are
-# by name with the reason, and a new one has to be added deliberately.
-UNMASKED_MESSAGE_MISMATCH = {
-    # The reference cannot resolve this document's `use` at all: the census
-    # hands it one file's TEXT and the reference needs `modules=` or real
-    # source paths, so it refuses at the link stage before reading a line of
-    # the program. The checker, which reads one document by construction,
-    # reaches the component and refuses a call-site arity — `asset "<path>"`
-    # (item 459) is a single argument to the reference's expression parser and
-    # two to this one's, so the four-argument `webui.add_entry` call reads as
-    # five. Two different stages refusing two different things about a program
-    # neither is seeing whole.
-    "examples/app/notes.rvl": (
-        "`webui.add_entry` takes 4 argument(s), 5 given"),
-}
-
-
-@pytest.mark.parametrize("rel", sorted(UNMASKED_MESSAGE_MISMATCH))
-def test_the_unmasked_mismatches_are_the_ones_named(verdicts, rel):
-    """Each named document, held at the verdict the parse fix exposed.
-
-    Reds when the reference starts admitting it, when the checker stops
-    refusing it, or when the checker's text changes — all three want a human in
-    the diff, and none can be made to pass by re-recording a baseline."""
-    assert rel in verdicts, f"{rel} is not in the census corpus"
-    want, got = verdicts[rel]
-    assert want != "", f"the reference now admits {rel}; drop it from the list"
-    assert got == UNMASKED_MESSAGE_MISMATCH[rel], (
-        f"{rel}: the checker now says {got!r}")
-    assert got != want, (
-        f"{rel} now AGREES with the reference; move it off this list")
+# This ledger is EMPTY, and it is empty because its one entry was closed rather
+# than re-recorded. `examples/app/notes.rvl` stood here with
+# "`webui.add_entry` takes 4 argument(s), 5 given": `asset "<path>"` (item 459
+# F1) was one argument to the reference's expression parser and two to this
+# one's, so a four-argument call read as five. `selfhost/parser.rvl` now reads
+# the form as a single expression, the count agrees, and the document moved
+# into `UNMASKED_UNDECIDED` above together with
+# `examples/webui-entry/console.rvl`, which carried the same wrong verdict
+# without ever having been pinned. Measured over the census corpus:
+# `msg-mismatch/semantic` 3 to 1, `no-objection` 156 to 158.
+#
+# A ledger in this repo only shrinks, so the entry is gone rather than
+# restated. What guards the fix is the pair of names in `UNMASKED_UNDECIDED`
+# (each asserted to be UNDECIDED, so a returning arity reds them) and the
+# `asset` corpus in `tests/test_selfhost_parser.py`, whose nine documents
+# render differently against the unported parser and whose nine negative
+# controls render the same.
 
 
 @pytest.mark.parametrize("rel", sorted(UNMASKED_UNDECIDED))
