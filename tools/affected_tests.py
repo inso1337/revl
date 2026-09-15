@@ -380,11 +380,30 @@ def _selfhost_oracles(root: Path, stems) -> set[str]:
 # --------------------------------------------------------------------------- #
 # Compile-reachability of src/revl (fail-safe core detection).                 #
 # --------------------------------------------------------------------------- #
+# One AST walk of `src/revl/**` per tree, not per `select()` call. The selector
+# is a pure function of (changed, tree) and every process that uses it is
+# short-lived, so re-parsing ~175 modules for each call bought nothing; callers
+# that ask the same question many times (tests/test_affected_tests.py,
+# tests/test_root_suite_coverage_is_unconditional.py) paid it every time. Same
+# shape as `_READ_CACHE` above.
+_REACH_CACHE: dict[Path, object] = {}
+
+
 def compile_reachable(root: Path):
     """Top-level module names reachable from the package entry (`revl/__init__`)
     through ALL imports, lazy/nested included. A change to any of these can run
     during compilation, so it fails safe to the FULL gate. Returns None if the
     tree cannot be analyzed (also -> FULL at the call site)."""
+    key = Path(root).resolve()
+    if key in _REACH_CACHE:
+        cached = _REACH_CACHE[key]
+        return None if cached is None else set(cached)
+    result = _compile_reachable_uncached(root)
+    _REACH_CACHE[key] = None if result is None else frozenset(result)
+    return result
+
+
+def _compile_reachable_uncached(root: Path):
     pkg = root / "src" / "revl"
     if not pkg.is_dir():
         return None
