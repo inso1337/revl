@@ -7,7 +7,7 @@ buys and, just as load-bearing, what it does not. Produced by
 `bench/inprocess_gate_rust` (`cargo run --release --manifest-path
 bench/inprocess_gate_rust/Cargo.toml -- --write`).
 
-Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:9c4962773755d602`.
+Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:ef07cdf723612cf8`.
 Layer decided: composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer.
 
 ## This gate issues no admissions - read this before wiring it in
@@ -34,7 +34,7 @@ arm, not an admission arm - it still reports `"admitted": false`, and it refuses
 what the py gate refuses, with the same code and the same why-trace.
 
 What that closes and what it does not, against `held_manifest` =
-`Kv/store/;App/app/;App<store;!services;:Store;:AppSvc` (the py harness's `base_manifest()` wire):
+`Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping` (the py harness's `base_manifest()` wire):
 
 * **closed** - the ambient half of G2/G3: a candidate whose provides collide
   with a RUNNING key is refused. `ambient_provision_conflict` below is the exit
@@ -46,14 +46,20 @@ What that closes and what it does not, against `held_manifest` =
   it with the same sentence (`unknown service \`Store\` in \`requires\` of
   CacheLayer`); against the running composition the name resolves out of the
   manifest's `!services` block and the refusal correctly goes away.
-* **still open** - requirement RESOLUTION and the admission itself. py's
-  `admit_into` resolves a candidate's `requires` against the running PROVIDER
-  and issues an admission; the self-host fold resolves the service NAME and then
-  checks disjointness, acyclicity and route realms, so the most it can say is
-  that it does not object. `cache_layer` is that last step made concrete: py
-  ADMITS it into the running manifest, this gate can only decline to object.
-  Closing it is the rest of the self-host TYPE LAYER's job, its own roadmap lane,
-  and is deliberately NOT attempted here.
+* **closed** - requirement RESOLUTION. The service block now carries each
+  running service's OPERATIONS, so a candidate's call through
+  `requires store: Store` is resolved against the running declaration:
+  `calls_missing_method` calls an operation the running `Store` does not declare
+  and is refused `A6` with py's own sentence, while `cache_layer` - the same
+  shape calling an operation `Store` does declare - is not. Telling those two
+  apart is the resolution; a gate reading the wire's service NAMES alone answers
+  the same thing about both.
+* **still open** - ISSUING the admission. py's `admit_into` ADMITS
+  `cache_layer` into the running manifest; `revl_gate::Verdict` has no
+  `Admitted` arm at all, so the most this gate says is that it does not object.
+  Closing that is the self-host TYPE LAYER's remaining job (argument typing, the
+  compatibility relation on a redeclaration, and the admission arm itself), its
+  own roadmap lane, and is deliberately NOT attempted here.
 
 ## The batch, screened in-process
 
@@ -61,6 +67,7 @@ What that closes and what it does not, against `held_manifest` =
 |---|---|---|---|---|
 | `standalone_twin` | no objection | not asked | yes | standalone-valid, Store inlined; py ADMITS it |
 | `cache_layer` | refuse (G1) | no objection | yes | requires a Store not in the source; refused standalone by both gates, and py ADMITS it into the running manifest |
+| `calls_missing_method` | refuse (G1) | refuse (A6) | yes | calls an operation the running Store does not declare; both gates refuse it into the running manifest (A6) |
 | `ambient_provision_conflict` | no objection | refuse (G2) | no | provides a key the running composition already provides; py refuses it into the manifest (G2) and ADMITS it standalone |
 | `incomplete_provide` | no objection | not asked | yes | provides a service but omits a declared method; py refuses |
 | `provision_conflict` | refuse (G2) | not asked | no | two components provide the same service; py refuses (G2) |
@@ -70,7 +77,7 @@ What that closes and what it does not, against `held_manifest` =
 | `type_layer_miss` | no objection | not asked | no | a type error; py refuses (T1) |
 | `frontier_oversized` | declined (FRONTIER) | not asked | no | a source over the size bound; py ADMITS, this gate is not entitled to decide |
 
-3 refused, 6 no-objection, 1 declined. Every one of them
+4 refused, 6 no-objection, 1 declined. Every one of them
 serialises as `"admitted": false`; nothing in this batch produced anything a
 host could read as an admission, and every refusal it did issue is a refusal the
 py admission gate also issues, with the same guarantee tag
@@ -82,11 +89,12 @@ BOTH arms (holds), which is the property that proves the gate is stateless.
 
 ### What the screen catches, measured
 
-Seven of these candidates are ones the py admission gate REFUSES. This gate
-refuses **three** of them: the `G2` provision conflict, the `G4` undeclared
-emission, and `cache_layer`'s `G1` header rule (a `requires` naming a service the
-text never declares - the same sentence py gives). The other four come back as
-no-objections:
+Eight of these candidates are ones the py admission gate REFUSES. This gate
+refuses **four** of them: the `G2` provision conflict, the `G4` undeclared
+emission, `cache_layer`'s `G1` header rule (a `requires` naming a service the
+text never declares - the same sentence py gives), and, on the manifest arm,
+`calls_missing_method`'s `A6` (a call to an operation the running service does
+not declare). The other four come back as no-objections:
 
 * `incomplete_provide` - a `provide` block missing a declared method;
 * `syntax_error` - a source the reference parser rejects outright. The crate
@@ -112,15 +120,17 @@ composition - was not available on rust at all. It now is for the ambient half:
 ADMITS the same bytes) and is refused `G2` once the running composition is in
 the fold, on both arms, with the same why-trace. That is the half that closed.
 
-`cache_layer` prices what is left, and the distance shrank. Its service NAME is
-now resolved on both arms: standalone the gate refuses it in the reference's own
-words, and against the held manifest the `!services` block supplies `Store` and
-the refusal correctly lifts. What py does that this gate still cannot is the step
-after that - RESOLVING `requires store: Store` against the running `Kv` PROVIDER
-and ISSUING an admission - so the most this gate says about it into the manifest
-is that it does not object. That last step is the rest of the self-host type
-layer, and this file is where the remaining distance is measured, not smoothed
-over.
+`cache_layer` prices what is left, and the distance shrank twice. Its service
+NAME is resolved on both arms: standalone the gate refuses it in the reference's
+own words, and against the held manifest the `!services` block supplies `Store`
+and the refusal correctly lifts. Its REQUIREMENT is now resolved too, against the
+operations the same block carries - `calls_missing_method` is the contrast that
+proves it, refused `A6` where `cache_layer` is not. What py does that this gate
+still cannot is the step after that: ISSUING an admission. `revl_gate::Verdict`
+has no `Admitted` arm, so the most this gate says about `cache_layer` into the
+manifest is that it does not object. That last step is the rest of the self-host
+type layer, and this file is where the remaining distance is measured, not
+smoothed over.
 
 ## Fail closed
 
@@ -143,18 +153,18 @@ I/O, no network, no toolchain, no Python, no process hop. Nothing else is in it.
 
 | candidate size | bytes | median (ms) | p90 (ms) | p99 (ms) | samples |
 |---|---|---|---|---|---|
-| small (3 methods) | 218 | 1.305 | 1.320 | 1.325 | 25 |
-| medium (12 methods) | 636 | 10.325 | 11.796 | 18.168 | 25 |
-| large (48 methods) | 2364 | 109.862 | 126.986 | 134.434 | 25 |
+| small (3 methods) | 218 | 0.845 | 0.862 | 0.878 | 25 |
+| medium (12 methods) | 636 | 5.904 | 6.018 | 6.039 | 25 |
+| large (48 methods) | 2364 | 69.021 | 71.517 | 147.575 | 25 |
 
 The representative scenario (the py harness's `standalone_twin`, 276 B)
-measured median **1.232 ms** (p90 1.340 ms, p99 1.373 ms,
+measured median **0.899 ms** (p90 1.238 ms, p99 2.314 ms,
 n=25).
 
 **This does not inherit the py headline, and it must not be reported as if it
 did.** The py in-process round-trip is tenths of a millisecond and grows roughly
 with candidate size. This one starts in the milliseconds and grows far faster
-than the source does: 10.8x the bytes costs 84x the time
+than the source does: 10.8x the bytes costs 82x the time
 across the size cells, which is quadratic-shaped, not linear. At a few kilobytes
 - an ordinary model-authored component - a single screen costs on the order of a
 second. An agent loop that screens every candidate inline would feel that.
@@ -167,12 +177,12 @@ would be flat across these rows; it is not.
 
 | shape | bytes | verdict | median (ms) | samples |
 |---|---|---|---|---|
-| declaration-heavy | 1212 | no_objection | 26.840 | 6 |
-| statement-heavy | 1214 | no_objection | 23.536 | 6 |
-| comment-padded | 1248 | no_objection | 1.331 | 6 |
+| declaration-heavy | 1212 | no_objection | 18.474 | 6 |
+| statement-heavy | 1214 | no_objection | 16.061 | 6 |
+| comment-padded | 1248 | no_objection | 0.835 | 6 |
 
 The comment-padded shape - the same byte count, a fraction of the tokens - is
-roughly 20x cheaper than the declaration-heavy one, while the
+roughly 22x cheaper than the declaration-heavy one, while the
 statement-heavy shape, which carries ONE declaration and a body full of
 statements, costs the same order as the declaration-heavy one. So the cost
 tracks TOKENS: it lives in the emitted lexer/parser, not in the composition gate
