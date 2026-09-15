@@ -4632,8 +4632,8 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
             continue
         where = f"lifecycle test {test['name']!r}"
         # issue #1112: the driver's statements are collected here and then
-        # emitted one level deeper, inside the test's own async resource (see
-        # the `runInAsyncScope` wrapper below).
+        # emitted one level deeper, inside the per-test async context the
+        # `_revl_test_context` wrapper below enters.
         body: list[str] = []
         body.append("  const root = new Context()")
         if any(s.get("step") == "advance" for s in test.get("body") or []):
@@ -4962,10 +4962,11 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         # contextvar a test binds dies with that test; the ts tier ran every
         # driver in one shared async context, so an `@ts` extern that binds
         # ambient context with `AsyncLocalStorage.enterWith` polluted every
-        # later test in the file. On node >= 24 (AsyncContextFrame) vitest
-        # happens to hide that, which is what makes it expensive: it reads as
-        # "fails on ubuntu, passes on macOS" when the real variable is the node
-        # version. Captured ONCE at module evaluation — the file's entry
+        # later test in the file. On node >= 24 the binding is confined by
+        # AsyncContextFrame and the escape does not happen at all, which is
+        # what makes this expensive: it reads as "fails on ubuntu, passes on
+        # macOS" when the real variable is the node version (22 on CI, 26 on a
+        # dev machine). Captured ONCE at module evaluation — the file's entry
         # context, the ts analogue of the context each `asyncio.run` copies —
         # and re-entered per test, so what an earlier test bound is not in
         # scope for the next one.

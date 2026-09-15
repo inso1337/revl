@@ -253,21 +253,24 @@ def test_without_the_isolation_the_first_test_leaks_into_the_next():
 
 
 @needs_toolchain
-def test_without_the_isolation_node_24_hides_the_leak():
+def test_without_the_isolation_node_24_confines_the_binding():
     """The half that makes it expensive, asserted rather than described.
 
-    With AsyncContextFrame on (node >= 24, the default) the un-isolated bytes
-    are green. Nothing about the emitted program changed; only the node did.
-    If a future node stopped hiding it, the gate above would be testing the
-    default mode and this says so.
+    With AsyncContextFrame on (node >= 24, the default) the `enterWith`
+    binding does not escape the callback it ran in, so the un-isolated bytes
+    are green: there is no concealed escape on that node, there is no escape.
+    Nothing about the emitted program changed; only the node did. If a future
+    node stopped confining it, the gate above would be measuring the default
+    mode rather than the legacy one, and this says so.
     """
     if not (_VERSION and _VERSION[0] >= 24):
         pytest.skip(f"needs node >= 24 (AsyncContextFrame on by default); "
                     f"have {_VERSION}")
     code, output = _run(_LEAKY, isolated=False, legacy=False)
     assert code == 0, (
-        "node >= 24 was expected to confine the `enterWith` binding, hiding "
-        "the leak entirely:\n" + output)
+        "node >= 24 was expected to confine the `enterWith` binding to the "
+        "callback it ran in, so that no cross-test leak exists there at "
+        "all:\n" + output)
 
 
 @needs_toolchain
