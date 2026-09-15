@@ -23,9 +23,13 @@ MEASURED on this machine before the fix (py is the reference tier):
                                         COMPILE** (E0277, `Vec<i64>` has no
                                         `Display`) · wasm refused by name
   `${p}` for a record {x: 1, y: 2}      py `{'x': 1, 'y': 2}` ·
-                                        ts `[object Object]` · rust E0277
+                                        ts `[object Object]` · go `{1 2}` ·
+                                        rust E0277 · **java an IDENTITY HASH**
+                                        (`...$P@<hex>`, not the field values)
   `${o}` for `Opt[Int]`                 py `1`/`None` · ts `1`/`undefined` ·
-                                        rust E0277
+                                        go `{1 true}`/`{0 false}` ·
+                                        rust E0277 ·
+                                        java `Optional[1]`/`Optional.empty`
 
 THREE CAUSES, and they are one cause seen three ways.
 
@@ -55,6 +59,17 @@ Separately, `revlFtoa` on java reformatted `Double.toString`'s digits, and
 `Double.MIN_VALUE` came out `4.9E-324` where the shortest decimal that parses
 back to it is `5e-324`. The helper now tries the one-digit form first, which
 is the only length `Double.toString` can be too long for.
+
+NOT CLOSED, and named so it is not mistaken for closed: a `${...}` inside a
+COMPONENT or provide-method body. That path lowers to a `format` node rather
+than an `interp` one, through `_lower_component_pure_expr`, which is not given
+a type environment at all — so there is nothing there to write `interp_type`
+from. python renders those args with `str(...)` inside the runtime `fmt`
+helper (backends/python/runtime.py), which is the same `True`/`3.0` this file
+removed from the fn-body path. Closing it needs `types`/`type_env` threaded
+into the component lowering, which is a wider change than this one and touches
+every tier's second renderer. Reproducer: any `component` whose method body
+returns `` `${b}` `` for a `Bool` field or parameter.
 
 NON-VACUITY CONTROLS, which carry the weight here:
 `test_an_int_template_carries_no_annotation` and
