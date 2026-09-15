@@ -3077,14 +3077,20 @@ class _V3Emitter:
         Same sentence the other five emitters give, so "this tier cannot do that"
         never arrives spelled as "that name does not exist". Returns quietly when
         `name` is not a declared extern, leaving the caller's generic
-        unknown-callee refusal in place."""
+        unknown-callee refusal in place.
+
+        EVERY statement here is on a refusal path, which is why it is recorded in
+        tests/fixtures/selfhost_uncovered_lines.json rather than covered: the
+        byte-agreement corpus is documents the reference EMITS, and any input
+        that reaches this line makes it raise. The refusal itself is pinned by
+        tests/test_selfhost_emit_wasm.py::test_reference_refuses_a_bodyless_extern_by_name.
+        """
         available = self.extern_tiers_elsewhere.get(name)
-        if available is None:
-            return
-        prefix = f"{where}: " if where else ""
-        raise EmitError(
-            f"{prefix}extern `{name}` has no @wasm body \u2014 not portable to this "
-            f"backend (available: {', '.join(available) or 'none'})")
+        if available is not None:
+            raise EmitError(
+                f"{where + ': ' if where else ''}extern `{name}` has no @wasm "
+                f"body \u2014 not portable to this backend "
+                f"(available: {', '.join(available) or 'none'})")
 
     def _unsupported_comments(self) -> list[str]:
         # only externs with no @wasm body are unsupported now; a @wasm-bodied
