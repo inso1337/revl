@@ -3692,18 +3692,130 @@ def test_manifest_wire_projects_the_service_block():
     """The projection renders the header and one row per declared service, in
     declaration order, between the composition rows and the withdrawal rows: a
     service declaration describes the composition, and a withdrawal acts on what
-    precedes it, so `-C` stays last."""
+    precedes it, so `-C` stays last.
+
+    Each row carries the service's OPERATION names after its name (T4b), which
+    is what lets a candidate's call through a required key be resolved against
+    the RUNNING declaration and not only against its name. The comma is the
+    claim: `:A,pa` says the surface is exactly `pa`, and a bare `:A` — every
+    wire a producer with no operation table renders — says nothing about it."""
     from revl import manifest_wire
 
     ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
-    assert manifest_wire(ir).endswith(";!services;:A;:B"), manifest_wire(ir)
+    assert manifest_wire(ir).endswith(";!services;:A,pa;:B,pb"), manifest_wire(ir)
     rows = manifest_wire(ir, replacing=("A",)).split(";")
     assert rows[-1] == "-A"
-    assert rows[-4:-1] == ["!services", ":A", ":B"]
+    assert rows[-4:-1] == ["!services", ":A,pa", ":B,pb"]
     # the composition rows keep their exact positions and order, so the G3 DFS
     # seed order cannot have moved
     assert rows[:rows.index("!services")] == manifest_wire(ir).split(
         ";")[:rows.index("!services")]
+
+
+# ---- docs/design/457 T4b: the requirement resolved against the RUNNING service
+
+#: The issue-346 harness scenario verbatim (bench/admission_latency.py): a
+#: running `Store` provided by `Kv` and consumed by `App`. The candidates below
+#: are the two questions a drafting agent asks about it.
+_T4B_RUNNING = """
+service Store {
+  fn get(key: Str) -> Str
+  fn bump(n: Int) -> Int
+  emission fn put(key: Str, value: Str)
+}
+service AppSvc { fn ping() -> Str }
+
+component Kv provides store: Store {
+  let m = effect Map.new() undo m.drop()
+  provide store {
+    fn get(key) = key
+    fn bump(n) = n
+    fn put(key, value) = value
+  }
+}
+component App requires store: Store provides app: AppSvc {
+  provide app { fn ping() = store.get("boot") }
+}
+"""
+
+#: Calls an operation the running `Store` declares: the reference admits it
+#: INTO the composition, and refuses it standalone for the service's absence.
+_T4B_CANDIDATE = """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheLayer requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.get(key) }
+}
+"""
+
+#: The same shape calling an operation the running `Store` does NOT declare.
+#: Only a reader that resolved the requirement against the running declaration
+#: can tell the two apart.
+_T4B_MISSING = """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheMiss requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nonexistent(key) }
+}
+"""
+
+
+def test_a_required_running_service_resolves_its_operations(admit_ambient):
+    """ORACLE B over the A6 member rule: a candidate whose `requires store:
+    Store` is satisfied by the RUNNING composition is checked against the
+    running service's declared operations, and agrees with the reference on
+    both answers — admitted for an operation `Store` declares, refused in the
+    reference's own words for one it does not.
+
+    This is the half `test_the_manifest_gap_is_priced_not_hidden` calls
+    requirement RESOLUTION: before it, the wire carried service NAMES and the
+    gate could say only that `Store` exists."""
+    assert _gate_ambient(admit_ambient, _T4B_CANDIDATE, _T4B_RUNNING) == ""
+    assert _ref_ambient(_T4B_CANDIDATE, _T4B_RUNNING) == ""
+
+    got = _gate_ambient(admit_ambient, _T4B_MISSING, _T4B_RUNNING)
+    assert got == "A6|`store.nonexistent` is not a method of service Store", got
+    assert got == _ref_ambient(_T4B_MISSING, _T4B_RUNNING)
+
+
+def test_a_wire_that_makes_no_operation_claim_decides_no_member(admit_ambient):
+    """The frontier of the same rule, pinned rather than left to be discovered.
+
+    A `:S` row with no comma names a running service and says NOTHING about its
+    surface — that is every wire a producer without an operation table renders.
+    Reading it as the EMPTY surface would refuse every call through that
+    requirement, which is the false-alarm direction this gate may not err in, so
+    it decides no member at all. The NAME still resolves, so the rule the
+    previous slice landed is untouched."""
+    named_only = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"
+    assert admit_ambient(_T4B_MISSING, named_only) == ""
+    assert admit_ambient(_T4B_CANDIDATE, named_only) == ""
+    # ... and the SAME wire carrying the claim refuses, so the silence is what
+    # is doing the work rather than the program being harmless
+    claimed = "Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping"
+    assert admit_ambient(_T4B_MISSING, claimed) == (
+        "A6|`store.nonexistent` is not a method of service Store")
+    assert admit_ambient(_T4B_CANDIDATE, claimed) == ""
+
+
+def test_the_empty_operation_claim_is_a_claim(admit_ambient):
+    """`:S,` is the running service that declares NO operation — a claim, and a
+    different one from `:S`. Every call through a requirement bound to it is
+    refused, which is what makes the trailing comma load-bearing rather than
+    cosmetic."""
+    empty_claim = "Kv/store/;App/app/;App<store;!services;:Store,;:AppSvc,ping"
+    assert admit_ambient(_T4B_CANDIDATE, empty_claim) == (
+        "A6|`store.get` is not a method of service Store")
+
+
+@pytest.mark.parametrize("row", [":Store,get,", ":Store,,get", ":Store,ge t",
+                                 ":Store,get/put"])
+def test_a_garbled_operation_list_refuses_the_wire(admit_ambient, row):
+    """A malformed operation list fails the WIRE by name. Reading it as a
+    shorter surface would refuse calls the reference admits, and skipping it
+    would leave a claim half-read: a wire the gate cannot read decides
+    nothing at all."""
+    got = admit_ambient(_T4B_CANDIDATE, f"Kv/store/;!services;{row}")
+    assert got.startswith("MANIFEST|"), got
+    assert "does not name an operation" in got or "does not name a service" in got
 
 
 def test_manifest_wire_makes_no_service_claim_for_a_manifest_dict():
@@ -3854,7 +3966,7 @@ def test_manifest_wire_renders_the_route_rows():
     assert rows.index("Router<*kv") < rows.index("Router>kv/r1,r2"), rows
     # ... and the whole ordering of the combined wire, in one line
     assert rows == ["StoreA/kv/r1", "StoreB/kv/r2", "Router/api/", "Router<*kv",
-                    "Router>kv/r1,r2", "!services", ":Kv", ":Api"], rows
+                    "Router>kv/r1,r2", "!services", ":Kv,get", ":Api,go"], rows
     # the withdrawal row stays last, after the service block
     assert manifest_wire(ir, replacing=("StoreB",)).split(";")[-1] == "-StoreB"
     # a composition with no route renders no route row (the earlier slices are
