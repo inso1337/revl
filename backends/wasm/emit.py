@@ -3762,12 +3762,21 @@ class _V3Emitter:
 
     def _helper_str_cp_slice(self) -> str:
         # `$start`/`$end` are code-point indices (Int values). JS slice
-        # semantics: out-of-range bounds clamp into [0, cp_length], never trap.
+        # semantics: a NEGATIVE bound counts from the end, out-of-range bounds
+        # clamp into [0, cp_length], and the slice is empty when the high bound
+        # lands below the low one — never a trap (docs/stdlib-2.0.md §slice).
+        # The end-relative step used to be missing: a negative bound clamped
+        # straight to 0, so `"abcd".slice(-2, -1)` answered `""` on this tier
+        # where every other answers `"c"`. `slice(-99, 4)` agreed by accident,
+        # because clamping and counting from the end land on the same 0 there.
         return """  (func $str_cp_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
     (local $cplen i32) (local $a i32) (local $b i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
     (local.set $cplen (call $str_cp_length (local.get $s)))
     (local.set $a (i32.wrap_i64 (local.get $start)))
     (local.set $b (i32.wrap_i64 (local.get $end)))
+    (if (i32.lt_s (local.get $a) (i32.const 0)) (then (local.set $a (i32.add (local.get $a) (local.get $cplen)))))
+    (if (i32.lt_s (local.get $b) (i32.const 0)) (then (local.set $b (i32.add (local.get $b) (local.get $cplen)))))
+    (if (i32.lt_s (local.get $b) (i32.const 0)) (then (local.set $b (i32.const 0))))
     (if (i32.lt_s (local.get $a) (i32.const 0)) (then (local.set $a (i32.const 0))))
     (if (i32.gt_s (local.get $a) (local.get $cplen)) (then (local.set $a (local.get $cplen))))
     (if (i32.lt_s (local.get $b) (local.get $a)) (then (local.set $b (local.get $a))))
@@ -4007,12 +4016,43 @@ class _V3Emitter:
 
     def _helper_list_slice(self) -> str:
         # `$start`/`$end` are `Int` values; the element stride is bytes.
+        #
+        # The bounds are NORMALISED first, to the one reading every other tier
+        # gives them (docs/stdlib-2.0.md §slice, issue #549): a negative bound
+        # counts from the end, both clamp into [0, length], and the slice is
+        # empty when the high bound lands below the low one. This helper used
+        # the two Int values RAW, so `xs.slice(2, 99)` on a four-element list
+        # computed a length of 97 and copied 776 bytes from beyond the list —
+        # a wrong length with unrelated heap behind it, where py/ts/go/rust/
+        # java all answer two elements — and `xs.slice(3, 1)` or a negative
+        # bound made the length negative, which reached `$alloc` as a huge
+        # unsigned size and trapped. The normalisation is the same one
+        # `$str_cp_slice` performs, over element counts rather than code
+        # points.
         return """  (func $list_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $n i32)
     (local $from i32)
+    (local $to i32)
     (local $len i32)
     (local $p i32)
+    (local.set $n (i32.load (local.get $s)))
     (local.set $from (i32.wrap_i64 (local.get $start)))
-    (local.set $len (i32.sub (i32.wrap_i64 (local.get $end)) (local.get $from)))
+    (local.set $to (i32.wrap_i64 (local.get $end)))
+    (if (i32.lt_s (local.get $from) (i32.const 0))
+      (then (local.set $from (i32.add (local.get $from) (local.get $n)))))
+    (if (i32.lt_s (local.get $from) (i32.const 0))
+      (then (local.set $from (i32.const 0))))
+    (if (i32.gt_s (local.get $from) (local.get $n))
+      (then (local.set $from (local.get $n))))
+    (if (i32.lt_s (local.get $to) (i32.const 0))
+      (then (local.set $to (i32.add (local.get $to) (local.get $n)))))
+    (if (i32.lt_s (local.get $to) (i32.const 0))
+      (then (local.set $to (i32.const 0))))
+    (if (i32.gt_s (local.get $to) (local.get $n))
+      (then (local.set $to (local.get $n))))
+    (if (i32.lt_s (local.get $to) (local.get $from))
+      (then (local.set $to (local.get $from))))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
     (local.set $p
       (call $alloc
         (i32.add (i32.mul (local.get $len) (i32.const 8)) (i32.const 8))))

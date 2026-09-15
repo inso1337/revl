@@ -79,7 +79,8 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
     const at = x.indexOf(v as string)
     return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)
   }
-  return BigInt(x.indexOf(v))
+  for (let i = 0; i < x.length; i++) { if (revlEq(x[i], v)) return BigInt(i) }
+  return -1n
 }
 
 export interface ToolReq {
