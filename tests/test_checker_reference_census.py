@@ -122,6 +122,32 @@ def test_no_admitted_document_fails_at_the_top_level_parse(census, verdicts):
         "parse:\n  " + "\n  ".join(failed))
 
 
+def test_no_admitted_document_fails_at_a_declaration_signature(census, verdicts):
+    """The third one-directional invariant on this surface.
+
+    The two above cover heads `p_top` could not ENTER. This one covers
+    declarations it entered and could not READ: an extern classification other
+    than a bare `pure`/`acquire`/`emission` (a capability scope, `witnessed`,
+    `async`, and the rest of the modifier slot), a type-parameter list between
+    a `fn`'s name and its parameters, the `cache` trailing clause, a record
+    field named after one of the eight grammar nouns the reference admits
+    there, and the service-operation modifier slot.
+
+    Measured before those were ported: 53 of the documents the reference admits
+    were refused here — 29 at `expected fn after extern`, 16 at `bad method
+    signature in service <S>`, 6 at `expected { after fn signature` and 2 at
+    `bad record field in type <T>`. Like its two siblings this is
+    one-directional and carries no baseline, so a document added tomorrow
+    passes it by being parseable and the only way to red it is to reintroduce
+    the gap."""
+    failed = sorted(
+        f"{name}: {got}" for name, (want, got) in verdicts.items()
+        if want == "" and got.startswith(census.SIGNATURE_REFUSALS))
+    assert not failed, (
+        "the reference admits these and the checker fails their declaration "
+        "signature:\n  " + "\n  ".join(failed))
+
+
 # The documents whose real verdict the provide-block parse refusal was HIDING.
 #
 # Every one is refused by the reference and drew a `(bad) bad provide block in
@@ -170,14 +196,13 @@ UNMASKED_UNDECIDED = {
     "examples/rejections/g4_arrow_param_emission.rvl",
     "examples/rejections/g4_unmarked_alias_emission.rvl",
     "examples/rejections/g4_unmarked_handle_emission.rvl",
-    # -- the type layer past the expression slice: a config-field default, and
-    # the PARAMETER twin of this very issue. `t7` checks a provide method's
-    # parameter annotation against the service declaration; the checker now
-    # parses the annotation and does not yet check it, which is the next step
-    # on this axis and not a regression — it was refused for being
-    # unparseable, never for being wrong --
+    # -- the type layer past the expression slice: a config-field default.
+    # `t7_provide_param_annotation_mismatch.rvl` stood here too — the PARAMETER
+    # twin of the return annotation #1063 taught the parser to read — until
+    # item 391 added A6's signature-agreement block (`a6_signature` in
+    # selfhost/checker.rvl) and the checker started deciding it. It is now a
+    # pinned refusal in tests/test_selfhost_checker.py instead --
     "examples/rejections/t3_config_default_type.rvl",
-    "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
 
     # ======================================================================
     # The second unmasking, by the TOP-LEVEL declaration heads (item 391).
@@ -222,7 +247,91 @@ UNMASKED_UNDECIDED = {
     # -- extern host-import provenance: a user-origin `@py` body importing a
     # backend module. Nothing in this slice reads extern bodies --
     "stdlib/shell.rvl",
+
+    # ======================================================================
+    # The third unmasking, by the DECLARATION SIGNATURES (item 391). 16 more
+    # documents moved out of a masked `msg-mismatch/parse` and into a plain
+    # no-objection, and one of the 16 — `v2_async_signature_mismatch.rvl` —
+    # is not on this list because the same change DECIDED it (A6's async
+    # agreement rule, `a6_signature` in selfhost/checker.rvl). The other 15
+    # are here. Same shape as the two groups above: the checker never decided
+    # any of them, and a parse `(bad)` had been standing where its verdict
+    # belongs.
+    # ======================================================================
+
+    # -- A1, the sync/async colour rules (item 117,
+    # docs/design/async-extern.md). Every one of these needs the async
+    # REACHABILITY fixed point `selfhost/lower.rvl` carries and this slice does
+    # not: the checker now reads the `async` modifier on a declaration and on a
+    # provide method (it has to, to decide A6's agreement rule) and colours
+    # nothing with it --
+    "examples/rejections/a1_async_arrow_sync_type.rvl",
+    "examples/rejections/a1_async_compensate_suspends.rvl",
+    "examples/rejections/a1_async_effect_not_awaited.rvl",
+    "examples/rejections/a1_async_emit_step_not_awaited.rvl",
+    "examples/rejections/a1_async_extern_sync_method.rvl",
+    "examples/rejections/a1_async_op_sync_ternary.rvl",
+    "examples/rejections/a1_async_undo_suspends.rvl",
+    "examples/rejections/a1_effect_await_block.rvl",
+    "examples/rejections/t34_arrow_self_declared_async.rvl",
+
+    # -- taint flow: G9's untrusted-to-authority rule and G-SECRET-FLOW's
+    # disclosure sinks. Both are a value-provenance analysis across a whole
+    # program; this slice follows callee NAMES and nothing else --
+    "examples/rejections/g9_closure_capture_launders_taint.rvl",
+    "examples/rejections/g9_service_return_launders_taint.rvl",
+    "examples/rejections/g9_spawn_config_launders_taint.rvl",
+    "examples/rejections/gsecret_service_return_discloses.rvl",
+
+    # -- generic INFERENCE: the type-parameter list is now stepped over
+    # (parameters erase), which is what the reference's IR does too, but
+    # deciding `List[U]` against `List[Int]` needs the unifier this slice's
+    # `compatible` is not --
+    "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
+
+    # -- extern host-import provenance, the same family as `stdlib/shell.rvl`
+    # above: nothing in this slice reads extern BODIES --
+    "stdlib/fs.rvl",
 }
+
+
+# The documents whose real verdict a parse refusal was hiding, and where the
+# verdict underneath turns out to DISAGREE with the reference's text.
+#
+# `UNMASKED_UNDECIDED` above is the honest shape of a slice that has no verdict.
+# This is the other outcome: the checker now reaches a verdict and its text is
+# not the reference's. Neither is newly admitted, and neither is a regression —
+# both were unreachable before — but a count would let them churn, so they are
+# by name with the reason, and a new one has to be added deliberately.
+UNMASKED_MESSAGE_MISMATCH = {
+    # The reference cannot resolve this document's `use` at all: the census
+    # hands it one file's TEXT and the reference needs `modules=` or real
+    # source paths, so it refuses at the link stage before reading a line of
+    # the program. The checker, which reads one document by construction,
+    # reaches the component and refuses a call-site arity — `asset "<path>"`
+    # (item 459) is a single argument to the reference's expression parser and
+    # two to this one's, so the four-argument `webui.add_entry` call reads as
+    # five. Two different stages refusing two different things about a program
+    # neither is seeing whole.
+    "examples/app/notes.rvl": (
+        "`webui.add_entry` takes 4 argument(s), 5 given"),
+}
+
+
+@pytest.mark.parametrize("rel", sorted(UNMASKED_MESSAGE_MISMATCH))
+def test_the_unmasked_mismatches_are_the_ones_named(verdicts, rel):
+    """Each named document, held at the verdict the parse fix exposed.
+
+    Reds when the reference starts admitting it, when the checker stops
+    refusing it, or when the checker's text changes — all three want a human in
+    the diff, and none can be made to pass by re-recording a baseline."""
+    assert rel in verdicts, f"{rel} is not in the census corpus"
+    want, got = verdicts[rel]
+    assert want != "", f"the reference now admits {rel}; drop it from the list"
+    assert got == UNMASKED_MESSAGE_MISMATCH[rel], (
+        f"{rel}: the checker now says {got!r}")
+    assert got != want, (
+        f"{rel} now AGREES with the reference; move it off this list")
 
 
 @pytest.mark.parametrize("rel", sorted(UNMASKED_UNDECIDED))
