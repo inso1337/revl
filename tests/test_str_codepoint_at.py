@@ -10,15 +10,23 @@ so the hot path allocates no intermediate 1-char `Str` and makes no fn call
 (see docs/bench-selfhost.md, the lexer before->after row).
 
 Spec: the receiver is a `Str`, the argument the index; the result is the
-Unicode scalar value at that index. Like `charAt`/`charCodeAt`, the index is
-assumed in bounds (`0 <= i < length`) — the self-host lexer only ever indexes
-a position it has already guarded, exactly as it did with `charAt`.
+Unicode scalar value at that index. Like `charAt`/`charCodeAt`, the index must
+be in bounds (`0 <= i < length`) — the self-host lexer only ever indexes a
+position it has already guarded, exactly as it did with `charAt` — and an index
+outside that range FAULTS on every tier (docs/stdlib-2.0.md, and
+tests/test_str_index_bounds_cross_tier.py, which measured the four different
+readings the unenforced version had). On python that bound is `_revl_str_at`,
+one host-level call, because `s[i]` is END-RELATIVE and would otherwise answer
+the last code point for `codepoint_at(-1)`. It is the same guard, on the same
+grounds and at the same cost, that `_revl_index` already pays on the List
+subscript (#549).
 
 Checked here:
   * the checker dispatches on the Str family, checks arity 1, types Int;
-  * the python tier answers EXACTLY `ord(s[i])` for every byte and evaluates a
-    side-effecting receiver once;
-  * the python lowering emits its documented inline shape (no fn call).
+  * the python tier answers EXACTLY `ord(s[i])` for every in-bounds byte and
+    evaluates a side-effecting receiver once;
+  * the python lowering still allocates no intermediate 1-char `Str` binding
+    and makes no revl-FN call — the thing item 276 was measuring.
 
 Other tiers (rust/java/ts/wasm/go) get a per-backend lowering too; py is the
 bench tier this item targets and the only tier selfhost/lexer.rvl is emitted
@@ -113,11 +121,24 @@ def test_python_receiver_evaluated_once():
 
 # ---------------------------------------------------------------- shape
 
-def test_python_lowering_is_inline_no_fn_call():
+def test_python_lowering_makes_no_revl_fn_call():
+    """The item-276 shape, with the index bound enforced.
+
+    The cost item 276 removed was a revl-FN round trip (`code0(...)`) plus the
+    1-char `Str` that `charAt(j)` allocated for it to index a second time.
+    Both are still gone: the lowering is one `ord` over one direct read. What
+    it gained is `_revl_str_at`, the host-level guard that makes an index
+    outside `0 <= i < length()` fault here as it does on the other five tiers
+    — python's `s[i]` reads from the END at a negative index, so without it
+    `codepoint_at(-1)` answered the last code point on the reference tier
+    (tests/test_str_index_bounds_cross_tier.py). `_revl_index` pays the same
+    call on the List subscript for the same reason (#549)."""
     spec = importlib.util.spec_from_file_location(
         "emit_codepoint_at_py", ROOT / "backends" / "python" / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     src = module.emit(compile_source(FN))
-    # a bare `ord(s[i])` — no revl-fn call, no intermediate charAt binding.
-    assert "ord(s[i])" in src
+    assert "ord(_revl_str_at(s, i))" in src
+    # no revl-fn call, and no intermediate charAt binding
+    assert "code0" not in src
+    assert "charAt" not in src

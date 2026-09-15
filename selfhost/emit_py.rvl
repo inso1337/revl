@@ -444,13 +444,17 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "length") { return `len(${target})` }
   if (method == "push") { return `(${target} + [${args[0]}])` }
   if (method == "slice") { return `${target}[${args[0]}:${args[1]}]` }
-  if (method == "charAt") { return `${target}[${args[0]}]` }
-  if (method == "charCodeAt") { return `ord(${target}[${args[0]}])` }
+  // Character access routes through `_revl_str_at`, which faults for an index
+  // outside `0 <= i < length()` — python's `s[i]` is END-RELATIVE, so a bare
+  // `s[-1]` would read the LAST code point where go, rust, java and ts all
+  // fault. Same guard, same reason, as `_revl_index` on a List subscript.
+  if (method == "charAt") { return `_revl_str_at(${target}, ${args[0]})` }
+  if (method == "charCodeAt") { return `ord(_revl_str_at(${target}, ${args[0]}))` }
   // Codepoint-at-index scan (item 276, item 391 self-host port): the Unicode
   // scalar at index i, returned directly. `ord(s[i])` allocates only the
   // transient 1-char slice `ord` consumes — no persistent 1-char Str the
   // self-host lexer would otherwise index a second time via `code0`.
-  if (method == "codepoint_at") { return `ord(${target}[${args[0]}])` }
+  if (method == "codepoint_at") { return `ord(_revl_str_at(${target}, ${args[0]}))` }
   if (method == "concat") { return `(${target} + ${args[0]})` }
   // A preamble helper, not a lambda built and applied at every evaluation
   // (item 436 F6): one frame, no function-object allocation.
@@ -1245,6 +1249,20 @@ fn index_block() -> List[Str] {
   o = o.push("    if i < 0:")
   o = o.push(`        raise IndexError('revl: negative list index')`)
   o = o.push("    return xs[i]")
+  o = o.push("")
+  return o
+}
+
+// A Str index outside `0 <= i < length()` FAULTS on every tier: python would
+// otherwise read from the end. Mirrors the reference `_revl_str_at` def.
+fn str_at_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_str_at(s, i):")
+  o = o.push(`    """A Str index outside 0 <= i < length() faults on every tier; python"""`)
+  o = o.push(`    """would otherwise read from the end, so guard it here."""`)
+  o = o.push("    if i < 0 or i >= len(s):")
+  o = o.push(`        raise IndexError('revl: Str index out of range')`)
+  o = o.push("    return s[i]")
   o = o.push("")
   return o
 }
@@ -2845,6 +2863,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (uses_i32_shl(ir)) { out = out.concat(i32_wrap_block()) }
   if (uses_true_division(ir)) { out = out.concat(div_block()) }
   if (uses_index(ir)) { out = out.concat(index_block()) }
+  if (uses_builtin_method(ir, "charAt") || uses_builtin_method(ir, "charCodeAt")
+      || uses_builtin_method(ir, "codepoint_at")) {
+    out = out.concat(str_at_block())
+  }
   if (uses_trunc_rem(ir)) { out = out.concat(rem_block()) }
   if (uses_builtin_method(ir, "div_trunc")) { out = out.concat(div_trunc_block()) }
   if (uses_builtin_method(ir, "div_euclid")) { out = out.concat(div_euclid_block()) }
