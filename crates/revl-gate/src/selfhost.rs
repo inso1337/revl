@@ -1769,6 +1769,54 @@ fn ret_at(ts: Vec<Token>, i: i64) -> i64 {
     return i;
 }
 
+fn cap_token_end(ts: &[Token], i: i64) -> i64 {
+    let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+    while atk(ts, j.clone(), ".") {
+        j = (j).checked_add(2i64).expect("revl: Int overflow");
+    }
+    return j;
+}
+
+fn cache_clause_end(ts: &[Token], i: i64) -> i64 {
+    if (!ati(ts, i, "cache")) {
+        return i;
+    }
+    let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+    if ((atw(ts, j.clone(), "pure") || ati(ts, j.clone(), "capability")) || ati(ts, j.clone(), "external")) {
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if ati(ts, j.clone(), "invalidated_by") {
+        j = cap_token_end(ts, (j).checked_add(1i64).expect("revl: Int overflow"));
+        while atk(ts, j, ",") {
+            j = cap_token_end(ts, (j).checked_add(1i64).expect("revl: Int overflow"));
+        }
+    }
+    if ati(ts, j, "ttl") {
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+        if atk(ts, j, "int") {
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((ati(ts, j, "ms") || ati(ts, j, "s")) || ati(ts, j, "m")) || ati(ts, j, "h")) {
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return j;
+}
+
+fn at_route_clause(ts: &[Token], i: i64) -> bool {
+    if (!ati(ts, i, "route")) {
+        return false;
+    }
+    if (!atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "string")) {
+        return false;
+    }
+    let v = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    if (v.kind != "ident") {
+        return false;
+    }
+    return ((((((v.text == "get") || (v.text == "post")) || (v.text == "put")) || (v.text == "patch")) || (v.text == "delete")) || (v.text == "head"));
+}
+
 fn fn_params_i(ts: &[Token], i: i64) -> i64 {
     if (!atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "[")) {
         return (i).checked_add(3i64).expect("revl: Int overflow");
@@ -1873,7 +1921,10 @@ fn p_methods(ts: Vec<Token>, i: i64, end: i64, acc: Vec<MSig>) -> MethsR {
     let mut isAsync = false;
     let mut isIdempotent = false;
     let mut caps: Vec<String> = vec![];
-    while ((atw(&ts, j, "emission") || atw(&ts, j, "async")) || atw(&ts, j, "idempotent")) {
+    if at_route_clause(&ts, j) {
+        j = (j).checked_add(3i64).expect("revl: Int overflow");
+    }
+    while ((((((atw(&ts, j, "emission") || atw(&ts, j, "async")) || atw(&ts, j, "idempotent")) || atw(&ts, j, "commutative")) || ati(&ts, j, "endorse")) || ati(&ts, j, "validated")) || ati(&ts, j, "retry")) {
         if atw(&ts, j, "emission") {
             em = true;
             j = (j).checked_add(1i64).expect("revl: Int overflow");
@@ -1888,12 +1939,31 @@ fn p_methods(ts: Vec<Token>, i: i64, end: i64, acc: Vec<MSig>) -> MethsR {
                 j = (k).checked_add(1i64).expect("revl: Int overflow");
             }
         } else {
-            if atw(&ts, j, "idempotent") {
-                isIdempotent = true;
+            if ati(&ts, j, "endorse") {
                 j = (j).checked_add(1i64).expect("revl: Int overflow");
+                if atk(&ts, j, "[") {
+                    let mut k2 = (j).checked_add(1i64).expect("revl: Int overflow");
+                    while ((k2 < end) && (!atk(&ts, k2.clone(), "]"))) {
+                        k2 = (k2).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                    j = (k2).checked_add(1i64).expect("revl: Int overflow");
+                }
             } else {
-                isAsync = true;
-                j = (j).checked_add(1i64).expect("revl: Int overflow");
+                if ati(&ts, j, "retry") {
+                    j = (j).checked_add(2i64).expect("revl: Int overflow");
+                } else {
+                    if atw(&ts, j, "idempotent") {
+                        isIdempotent = true;
+                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    } else {
+                        if atw(&ts, j, "async") {
+                            isAsync = true;
+                            j = (j).checked_add(1i64).expect("revl: Int overflow");
+                        } else {
+                            j = (j).checked_add(1i64).expect("revl: Int overflow");
+                        }
+                    }
+                }
             }
         }
     }
@@ -1905,7 +1975,7 @@ fn p_methods(ts: Vec<Token>, i: i64, end: i64, acc: Vec<MSig>) -> MethsR {
     }
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
-    let rti = ret_at(ts.clone(), ps.i);
+    let rti = cache_clause_end(&ts, ret_at(ts.clone(), ps.i));
     return p_methods(ts.clone(), rti, end, acc.revl_push(mk_msig(nm.clone(), em, caps.clone(), isAsync)));
 }
 
