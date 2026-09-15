@@ -11,6 +11,7 @@ teardown.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -48,11 +49,30 @@ class DevWebUI:
     shape ``hostref.plug_refs`` is for a host-module ref: the compiler checked a
     file, this process opens one, and only re-hashing proves they are the same
     bytes.  Every arm below refuses; none repairs.
+
+    ``prod_manifest`` is the OTHER half of the same pair and used to be the one
+    string this adapter never opened: it was stored verbatim, so every arm above
+    — confinement, existence, content — applied to the dev source and to nothing
+    else, and the asymmetry was invisible because both arrive in one call.  The
+    suite's own fixtures passed ``"m"`` for it.  It is now resolved the same way:
+    confined to the app root ALWAYS, and, when the frontend has actually been
+    built, opened and required to name the very entry the handle pins.  What it
+    still cannot be is content-pinned — a Vite manifest does not exist when the
+    composition is compiled, so there is no compile-time digest to check it
+    against, which is why the check is "does the built manifest name this asset"
+    rather than "are these the bytes".
     """
 
     def __init__(self, app_root: Path) -> None:
         self.app_root = app_root
         self.entries: list[tuple[str, str, tuple[str, ...]]] = []
+        #: for each registered entry, in registration order: the production
+        #: chunk the built Vite manifest maps the pinned dev source to
+        #: (root-relative), or ``None`` when the frontend is not built yet.
+        #: ``None`` is the ordinary dev state, not a failure: ``revl dev`` runs
+        #: Vite over the SOURCE, so requiring a build here would refuse the
+        #: command's own main path.  A manifest that DOES exist is checked.
+        self.prod_entries: list[str | None] = []
         #: the reactive state each entry published, in registration order. A
         #: production Cordis WebUI host hands this to ``addEntry`` as the reactive
         #: ``data`` object; locally it is recorded so the dev run shows the channel
@@ -90,15 +110,108 @@ class DevWebUI:
             )
         if not routes or any(not route.startswith("/") for route in routes):
             raise RuntimeError("WebUI entry routes must be absolute, non-empty paths")
+        built = self._prod_entry(prod_manifest, source, path)
         channel = dict(data or {})
         self.entries.append((path, prod_manifest, tuple(routes)))
         self.channels.append(channel)
         self.digests.append(digest)
+        self.prod_entries.append(built)
         fields = ", ".join(sorted(channel)) or "(none)"
         print(f"  webui  | entry {path} -> {', '.join(routes)}", flush=True)
         print(f"  webui  | asset sha256 {digest[:12]}", flush=True)
         print(f"  webui  | channel state {fields}", flush=True)
+        print(f"  webui  | prod entry {built or '(not built)'}", flush=True)
         return path
+
+    def _prod_entry(self, prod_manifest: object, source: Path,
+                    path: str) -> str | None:
+        """Resolve the production half of the asset pair.
+
+        The dev source and the built manifest are two names for ONE frontend,
+        and nothing checked that they agreed: the handle carries a path relative
+        to the compile-tree root (``frontend/entry.client.ts``) while a Vite
+        manifest is keyed relative to the VITE root (``entry.client.ts``), so a
+        production host that joined them by string would look up a key the
+        manifest does not have and serve nothing.  The join is therefore made by
+        FILE IDENTITY rather than by string surgery: the Vite root is not
+        declared anywhere, so each directory between the manifest and the app
+        root is tried as one, and an entry matches when its ``src`` names the
+        same file on disk as the pinned handle.  That needs no convention about
+        ``outDir`` or ``.vite/``, which are Vite's to change.
+
+        Refusals, all of them naming the file: a manifest that is not a relative
+        path under the app root (checked whether or not it exists, because that
+        is a property of the declaration), one that is not readable JSON, one
+        that names no entry for this asset, and one whose matching entry points
+        at a chunk that is not on disk.  A manifest that is simply ABSENT is not
+        a refusal — see ``prod_entries``.
+        """
+        if not isinstance(prod_manifest, str) or not prod_manifest:
+            raise RuntimeError(
+                f"WebUI entry {path!r} declares no production manifest path; "
+                f"`add_entry`'s second argument names the built Vite manifest "
+                f"(item 459)")
+        rel = Path(prod_manifest)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise RuntimeError(
+                f"WebUI production manifest {prod_manifest!r} must be a relative "
+                f"path under {self.app_root}")
+        manifest = (self.app_root / rel).resolve()
+        root = self.app_root.resolve()
+        try:
+            manifest.relative_to(root)
+        except ValueError:
+            raise RuntimeError(
+                f"WebUI production manifest {prod_manifest!r} escapes the app "
+                f"root {self.app_root}") from None
+        if not manifest.is_file():
+            return None
+        try:
+            records = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError(
+                f"WebUI production manifest {prod_manifest!r} is not readable "
+                f"JSON: {exc}") from None
+        if not isinstance(records, dict):
+            raise RuntimeError(
+                f"WebUI production manifest {prod_manifest!r} is not a Vite "
+                f"manifest object")
+        # every directory from the manifest's own up to the app root is a
+        # candidate Vite root; `src` is relative to whichever one it is.
+        roots = [manifest.parent, *manifest.parents]
+        roots = [d for d in roots if d == root or root in d.parents]
+        for key, record in records.items():
+            if not isinstance(record, dict) or not record.get("isEntry"):
+                continue
+            src = record.get("src") or key
+            if not isinstance(src, str) or Path(src).is_absolute():
+                continue
+            if not any((base / src).resolve() == source for base in roots):
+                continue
+            chunk = record.get("file")
+            if not isinstance(chunk, str) or not chunk:
+                raise RuntimeError(
+                    f"WebUI production manifest {prod_manifest!r} names entry "
+                    f"{key!r} for {path!r} with no `file` chunk")
+            # `file` is relative to the build's `outDir`, which is no more
+            # declared than the Vite root is, so it is located the same way.
+            on_disk = next(
+                (c for c in ((base / chunk).resolve() for base in roots)
+                 if c.is_file() and (c == root or root in c.parents)),
+                None,
+            )
+            if on_disk is None:
+                raise RuntimeError(
+                    f"WebUI entry {path!r} resolves through {prod_manifest!r} to "
+                    f"{chunk!r}, which is not on disk under {self.app_root}; "
+                    f"rebuild the frontend")
+            return str(on_disk.relative_to(root))
+        raise RuntimeError(
+            f"WebUI production manifest {prod_manifest!r} names no entry for the "
+            f"pinned asset {path!r}; its entries are "
+            f"{sorted(k for k, r in records.items() if isinstance(r, dict) and r.get('isEntry')) or '(none)'}. "
+            f"The dev source and the built manifest must describe one frontend "
+            f"(item 459)")
 
     @staticmethod
     def _handle(dev_source: object) -> tuple[str, str]:

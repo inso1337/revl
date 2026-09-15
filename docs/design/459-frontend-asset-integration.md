@@ -4,7 +4,7 @@
 **Builds on:** docs/design/526-webui-asset-alignment.md,
 docs/design/530-webui-entry-surface.md,
 docs/design/525-webapp-slice4-frontend.md ·
-**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · SOURCE MAPS LANDED (F2, insertion site + bundler chain) · RUNTIME ASSET READ LANDED (F6) · REMAINDER NAMED BELOW
+**Status:** STAGE 1 LANDED (templates + context-scoped escaping) · WEBUI ASSET MODEL + TYPED CHANNEL LANDED (F5, F7) · TYPED ASSET HANDLES LANDED (F1) · SOURCE MAPS LANDED (F2, insertion site + bundler chain) · RUNTIME ASSET READ LANDED (F6) · EXEMPLARY APP LANDED (F4) · PRODUCTION MANIFEST RESOLUTION LANDED (F8) · F3 DEFERRED ON A STATED PRECONDITION, AND IS THE ONLY REMAINDER
 
 ## Purpose
 
@@ -175,7 +175,9 @@ author writes `attr="{{html:x}}"`).
   What it does NOT claim. `prod_manifest` is still a `Str`: a Vite manifest is a
   build OUTPUT that does not exist when the composition is compiled, so there is
   nothing on disk to resolve or pin, and pinning it needs a build-time step the
-  toolchain does not have. The handle's record shape has no canonical stdlib
+  toolchain does not have. **F8 below closes the RUN-TIME half of that**, which
+  is a different claim and was the one genuinely missing piece of the pair.
+  The handle's record shape has no canonical stdlib
   name, so each composition declares the type; writing the record by hand
   type-checks, which is why it is a shape rather than a capability. And an
   `asset` is refused under the untrusted-author profile (`no_extern`), so an
@@ -303,9 +305,18 @@ author writes `attr="{{html:x}}"`).
   control flow multiplies those sites.
 
   What would lift the deferral is that separate note, not a slice of this one.
-- **F4 - the exemplary app.** Issue #725 (blocked on #724) and the slice-4
-  frontend gap G3 (`docs/design/525-webapp-slice4-frontend.md`). Item 459's
-  stated exit is app-gated on 462 and cannot close before it.
+- **F4 - the exemplary app. LANDED, and this line was stale.** It read "issue
+  #725 (blocked on #724) ... cannot close before 462" long after all three
+  cleared: item 462 is ticked in the roadmap, #724's `revl dev` shipped, and the
+  slice-4 frontend gap G3 is marked closed in
+  `docs/design/525-webapp-slice4-frontend.md`. `examples/app/frontend/` is a real
+  Vite/Vue project that builds, typechecks under `vue-tsc` against the actual
+  `@cordisjs/client`, and emits source maps naming `entry.client.ts`,
+  `NotesConsole.vue` and `notes.client.ts`; `examples/app/notes.rvl` reaches it
+  only through `requires webui: WebUI` and names external files. Guard:
+  `tests/test_app_frontend_725.py`, whose toolchain legs run in the
+  `frontend-assets` job with `REVL_REQUIRE_FRONTEND_TOOLCHAIN=1` so a missing
+  toolchain is a failure rather than a skip that reads as a pass.
 - **F5 - the typed reactive-state/RPC contract. LANDED.** Decision B of
   `docs/design/530-webui-entry-surface.md`, folded into item 457 and shipped as
   457 slice S4: `add_entry` takes a `data` parameter whose type is a declared
@@ -393,6 +404,59 @@ author writes `attr="{{html:x}}"`).
   --face webui --component NAME` renders a component's channel contract. It emits
   no ASSET: the entry is still contributed through the coeffect, and the verb
   projects the typed channel the assets consume.
+- **F8 - the production half of the asset pair. LANDED.** `add_entry` names two
+  external files, and until this slice only one of them was ever opened. The dev
+  source was confined, existence-checked and re-hashed; `prod_manifest` was
+  stored verbatim, so every arm above applied to one argument and to nothing
+  else. The asymmetry was invisible because both arrive in one call, and this
+  repo's own fixtures passed the literal string `"m"` for it in six places.
+
+  It was not cosmetic, because the two halves are keyed differently and nothing
+  said so. The handle carries a path relative to the compile-tree ROOT
+  (`frontend/entry.client.ts`, F1's decision that the value is the resolved
+  root-relative path); a Vite manifest is keyed relative to the VITE root
+  (`entry.client.ts`). A production host that joined them by string looks up a
+  key the manifest does not have, and 459's exit clause "462's UI is built from
+  external assets" fails in the one mode that ships, silently.
+
+  Four decisions worth naming.
+
+  **The join is by FILE IDENTITY, not by string surgery.** The Vite root is
+  declared nowhere (it is `vite.config.ts`'s `root`, which revl does not read),
+  so each directory between the manifest and the app root is tried as one, and an
+  entry matches when its `src` names the same file on disk as the pinned handle.
+  The emitted chunk is located the same way, because `outDir` is no more declared
+  than the root is. That assumes nothing about `dist/` or `.vite/`, which are
+  Vite's to change, and a convention hard-coded here would have been a second
+  place for the two halves to drift.
+
+  **An ABSENT manifest is recorded, not refused.** `revl dev` runs Vite over the
+  source, so an unbuilt frontend is the command's ordinary state; requiring a
+  build would refuse its own main path. `prod_entries` carries `None` for that
+  case, which is a different answer from "resolved", and the dev banner prints
+  which one it got.
+
+  **Confinement is a property of the DECLARATION, so it is checked whether or not
+  the file exists.** An absolute path, a `..` escape and a symlink out of the app
+  root are refused the same way the dev source's are, including for an unbuilt
+  frontend, because the path is wrong before the file is missing.
+
+  **Every other answer refuses by name**: unreadable JSON, a manifest that is not
+  an object, one that names no entry for this asset (listing the entries it does
+  have), a matching entry with no `file`, and a `file` that is not on disk. What
+  it still does NOT claim is a content pin on the built artifact: there is no
+  compile-time digest for a file the build has not produced yet, which is F1's
+  own reason for leaving `prod_manifest` a `Str`.
+
+  Guards: `tests/test_webui_prod_manifest_459.py` drives every arm above against
+  the real adapter, with two controls on pre-existing surface that hold on both
+  sides of the change; twenty of its twenty-two checks fail against the
+  pre-change `src/revl/dev.py` and the two that pass are exactly those controls.
+  `tests/test_app_frontend_725.py::test_the_built_manifest_resolves_the_asset_the_component_pinned`
+  is the end-to-end leg: it copies the app tree, runs a real `vite build`, takes
+  the handle and the manifest path the REAL compiler lowers from
+  `examples/app/notes.rvl`, and asserts the shipped `DevWebUI` resolves them to a
+  chunk that is on disk. It runs in the `frontend-assets` job.
 
 ## What stage 1 does not claim
 
