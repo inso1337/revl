@@ -44,6 +44,20 @@ roadmap-check:
 roadmap-check-all:
 	python3 tools/check_roadmap_markers.py --check-all
 
+# The roadmap's CITATIONS, resolved against the working tree. The gate above
+# asks git whether a marker contradicts a branch; this one asks the tree
+# whether a cited test, symbol, file:line or scoped absence claim still holds.
+# It is ADVISORY and deliberately NOT in `lint`: on 2026-09-15 the roadmap
+# carries six findings it reports, and a red gate on a 1.4 MB document only the
+# owner edits would block every open PR. `--check` is the CI mode, to be wired
+# into the lint line once those six are paid down. See the tool's docstring for
+# the rule that was measured and thrown away, and why.
+roadmap-claims:
+	python3 tools/check_roadmap_claims.py
+
+roadmap-claims-check:
+	python3 tools/check_roadmap_claims.py --check
+
 # issue #191: the workflow permission gate. A job-level `permissions` block
 # REPLACES the workflow-level one rather than merging into it, and the release
 # path is the one place where getting that wrong is invisible until a tag is

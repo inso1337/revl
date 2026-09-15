@@ -361,6 +361,16 @@ one, and two agents fixed the same defect in parallel because neither could see
 the other's scope. `make roadmap-check` (`tools/check_roadmap_markers.py`, run
 in the `lint` CI job) now fails when a marker contradicts git. Four rules:
 
+Git only answers questions about branches and shas, and on 2026-09-15 five
+agent reports each opened by correcting a roadmap sentence that git agreed with
+and the working TREE did not: a test renamed out from under its citation, a
+function lifted into a shared module while four paragraphs kept pointing at the
+old file, a named xfail registry emptied because its gap closed. `make
+roadmap-claims` (`tools/check_roadmap_claims.py`) resolves the roadmap's
+citations against the tree instead. It is advisory today and not in `lint`;
+`tools/roadmap_claim_allowlist.json` carries the citations that name a sibling
+project, each with a written reason.
+
 1. **State lives in GitHub issues. The roadmap holds the reasoning.** Whether
    something is open, assigned, in flight or closed is a tracker's job, and a
    tracker updates itself. The roadmap keeps what a tracker is bad at: the

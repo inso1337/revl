@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Citations in docs/v2.0-roadmap.md that tools/check_roadmap_claims.py cannot",
+    "resolve and that are NOT stale: they name an artifact that is genuinely not",
+    "in this tree. Every entry carries the rule it suppresses, the exact claim key",
+    "the checker prints, and a written reason, in the shape the harness repo's",
+    ".github/ci/known-red.json uses.",
+    "",
+    "An entry is NOT a way to silence a stale sentence. The checker reports any",
+    "entry that stops matching, so an allow-list line cannot outlive its reason.",
+    "A claim key is `<key>` for the path rule and `<symbol>@<path>` for the symbol",
+    "rule, printed verbatim by the checker."
+  ],
+  "entries": [
+    {
+      "rule": "path",
+      "claim": "src/services.rvl",
+      "reason": "Item 312 quotes `revl audit` OUTPUT from the out-of-tree lighthouse workload verbatim, to show the filename/line halves disagreeing. `src/services.rvl` is a path in THAT project, not in this repo, and rewriting the quote would destroy the evidence."
+    },
+    {
+      "rule": "path",
+      "claim": "cordis-rs-0.6.2/src/value.rs",
+      "reason": "Item 421 F6 pins where `cordis::Value`'s hand-written `Debug` lives in UPSTREAM cordis-rs 0.6.2. The roadmap pins foreign repos this way throughout; this one carries its version in the path, so it stays resolvable by a reader without being a file here."
+    },
+    {
+      "rule": "symbol",
+      "claim": "_start_automations@tools/web_server.py",
+      "reason": "Item 57's gap is described against the revl-HARNESS dogfood workload, whose `tools/web_server.py` is a separate repository. The citation is to that project's host-side timer pump, which is the whole point of the finding: the behaviour cannot be expressed in-language and lives host-side, there."
+    }
+  ]
+}
