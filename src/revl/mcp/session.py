@@ -6802,8 +6802,16 @@ class Session:
         Item 470's exit criterion is a refusal that names THE INTENT IT
         VIOLATED, and a bare predicate cannot carry one, so the finding is built
         here and the boolean is derived from it rather than the other way round.
-        The refusal's `message`/`hint` render in `errors.RevlError`'s shape, so a
-        later stage surfaces it on the prompt without a second convention."""
+        The refusal's `message`/`hint` render in `errors.RevlError`'s shape, so
+        the stage that surfaces it on the prompt introduces no second convention.
+
+        That stage is `_find_standing_grant`, which writes these findings onto
+        the ticket it is about to raise as `standingGrantRefusals` (issue #1098).
+        It is the reason this method exists at all: until it was wired, the
+        refusal was built here, read as a bool by `_grant_covers`, and dropped
+        one call before the prompt that needed it, so an operator whose standing
+        grant was exceeded saw an ordinary single-use question with nothing
+        saying they had already granted something narrower."""
         declared = _gate_intent(grant["capability"],
                                 grant.get("declaredCeilings"))
         crossing = _gate_action(capability)
@@ -6878,19 +6886,68 @@ class Session:
             return capability == grant["capability"]
         return _intent.refine(spelling, held) is None
 
-    def _live_grant_for(self, capability: str, ticket: dict, now: int):
+    def _grant_spelling(self, grant: dict) -> str:
+        """The spelling the operator STATED when this grant was minted: the
+        stored resource cone with the ceilings `_mint_grant` erased out of it
+        (`declaredCeilings`) put back.
+
+        The stored `capability` on its own is not what the operator read — a
+        grant minted `fs.write(path="/tmp", size="1MB")` stores as
+        `fs.write(path="/tmp")` — and a prompt whose job is to say WHAT THEY
+        GRANTED has to say it in the words they granted it in, or the sentence
+        names a narrower declaration than the one they made. Falls back to the
+        stored text for a spelling `cap_order` cannot parse, the same additive
+        fallback both coverage predicates keep."""
+        declared = grant.get("declaredCeilings") or {}
+        if not declared:
+            return grant["capability"]
+        try:
+            cap = cap_order.parse_cap(grant["capability"])
+            return cap_order.make_cap(
+                cap.token,
+                list(cap.params) + sorted(declared.items())).to_str()
+        except cap_order.CapError:
+            return grant["capability"]
+
+    def _grant_refusal_note(self, grant: dict, capability: str,
+                            refusal) -> str:
+        """One line of the prompt's "you already granted something narrower"
+        explanation: the declaration this operator made, the crossing that does
+        not refine it, and the `intent.Refusal` saying which dimension it
+        exceeded. `refusal` renders in `errors.RevlError`'s message-plus-hint
+        shape (`Refusal.__str__`), so this introduces no second convention."""
+        request_id = grant.get("requestId")
+        named = f" ({request_id})" if request_id else ""
+        return (
+            f"you hold a standing grant for `{self._grant_spelling(grant)}`"
+            f"{named}, and this crossing's `{capability}` is not within it, so "
+            f"the grant does not answer for it and you are being asked again: "
+            f"{refusal}")
+
+    def _live_grant_for(self, capability: str, ticket: dict, now: int,
+                        refusals_out: list | None = None):
         """The first LIVE standing grant covering `capability` under this ticket's
         live closure: `_grant_covers` on the minted key, the same component and
         reach-closure candidate hash (invariants 4/5), the same session, unexpired
         (clock checked HERE, not at mint — invariant 3), and uses remaining. None
         when nothing live covers it. A swap that changed the closure recomputes a
         different candidate hash, so a stale grant fails here with no revocation
-        bookkeeping (the same trick as the Slice-1 token)."""
+        bookkeeping (the same trick as the Slice-1 token).
+
+        `refusals_out`, when given, collects `(grant, refusal)` for every grant
+        that is live on every OTHER axis and fails only on coverage — the
+        `intent.Refusal` `_grant_refusal` already builds and `_grant_covers`
+        reads as a bool. That finding is what `_find_standing_grant` puts on the
+        ticket, so an operator whose standing grant was exceeded reads WHY the
+        prompt came back instead of an ordinary single-use question (issue
+        #1098). The coverage test is therefore evaluated LAST rather than first:
+        the clauses are conjunctive, so the result is unchanged, but a refusal
+        collected for a grant that is expired, spent, or minted for another
+        deputy would name a declaration that is not standing any more, which is
+        a worse sentence than none."""
         for g in self._grants:
             if g["consumed"]:
                 continue
-            if not self._grant_covers(g, capability):
-                continue                 # a grant for A does not cover B
             if g["component"] != ticket["component"]:
                 continue                 # invariant 5: minted for another deputy
             if g["candidateHash"] != ticket["candidateHash"]:
@@ -6902,6 +6959,13 @@ class Session:
             remaining = g.get("remainingUses")
             if remaining is not None and remaining <= 0:
                 continue                 # uses exhausted
+            refusal = self._grant_refusal(g, capability)
+            if refusal is not None:
+                # a grant for A does not cover B — and WHY not, kept rather than
+                # discarded with the boolean it was derived from.
+                if refusals_out is not None:
+                    refusals_out.append((g, refusal))
+                continue
             return g
         return None
 
@@ -6920,7 +6984,27 @@ class Session:
         the identical predicate `revoke_standing_grant` retires by. Class-(a)/(b)
         capabilities need no grant (they are absent from `classCCapabilities`).
         Several live grants MAY jointly cover a multi-capability call, but EVERY
-        class-(c) capability must be covered by some live grant."""
+        class-(c) capability must be covered by some live grant.
+
+        Issue #1098: when the answer is "no live grant covers it" and the reason
+        is COVERAGE — the operator holds a live grant here and this crossing is
+        outside it — the refusals `_live_grant_for` collected are written onto
+        the ticket as `standingGrantRefusals`, capability -> sentence. That is
+        the ticket the gate is about to raise, so the explanation reaches the
+        prompt the operator actually reads. Before it, `_grant_refusal` built a
+        full `intent.Refusal` naming the declaration the crossing violated,
+        `_grant_covers` read it as a bool, and the text was dropped one call
+        before the prompt that needed it: an operator who had already granted
+        something narrower got an ordinary single-use question with nothing
+        saying so. The field lands AFTER `build_ticket` computed `hash`, so the
+        outstanding-ticket key and the ledger binding are byte-identical — the
+        same additive discipline `resourceScopeRefusals` follows, and the same
+        reason: the operator reads the wide-but-true fact plus the sentence
+        naming what would change it.
+
+        Nothing about the DECISION moves. A refusal is still a refusal, the
+        crossing still prompts single-use, and a ticket with no live grant
+        behind it carries no field at all."""
         class_c = ticket.get("classCCapabilities") or []
         if not class_c:
             return None  # no class-(c) capability to cover (fail-closed)
@@ -6934,13 +7018,29 @@ class Session:
         now = self._now_ms()
         grants: list[dict] = []
         seen: set[int] = set()
+        notes: dict[str, str] = {}
+        missing = False
         for cap in class_c:
-            g = self._live_grant_for(cap, ticket, now)
+            refused: list = []
+            g = self._live_grant_for(cap, ticket, now, refusals_out=refused)
             if g is None:
-                return None  # a class-(c) capability with no live grant -> prompt
-            if id(g) not in seen:
+                # a class-(c) capability with no live grant -> prompt. Keep
+                # walking the rest: the operator is about to be asked about the
+                # WHOLE crossing, and a prompt that explains one uncovered
+                # capability while staying silent about the next one sends them
+                # back for a second round of the same surprise.
+                missing = True
+                if refused:
+                    notes[cap] = " ".join(
+                        self._grant_refusal_note(g_i, cap, refusal)
+                        for g_i, refusal in refused)
+            elif id(g) not in seen:
                 seen.add(id(g))
                 grants.append(g)
+        if missing:
+            if notes:
+                ticket["standingGrantRefusals"] = notes
+            return None
         return grants
 
     def _consume_grant(self, grant: dict) -> None:
