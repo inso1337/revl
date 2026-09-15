@@ -1415,6 +1415,7 @@ jobs:
           tests/test_458_str_ordering.py
           tests/test_458_captures_and_collections.py
           tests/test_int_min_edges_cross_tier.py
+          tests/test_str_index_bounds_cross_tier.py
           tests/test_realm_conformance.py
           tests/test_time_coeffect.py
           -q
