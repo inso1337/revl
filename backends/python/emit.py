@@ -657,7 +657,7 @@ def _scan_uses(root) -> _UsesScan:
                 if not scan.float_interp:
                     for part in node.get("parts") or []:
                         if (isinstance(part, (list, tuple)) and len(part) == 2
-                                and part[0] == "expr" and _is_float_expr(part[1])):
+                                and part[0] == "expr" and _interp_is_float(part[1])):
                             scan.float_interp = True
                             break
             elif kind == "index":
@@ -3281,6 +3281,22 @@ def _is_float_expr(node: object) -> bool:
     return False
 
 
+def _interp_type(node: object) -> str | None:
+    """The static type the frontend recorded for a `${...}` operand, if any.
+
+    `lower.py` writes `interp_type` for exactly the types whose host default
+    rendering is not revl's (`Float`, `Bool`); `Str` and `Int` stay tag-less
+    because `str()` is already right for both.
+    """
+    return node.get("interp_type") if isinstance(node, dict) else None
+
+
+def _interp_is_float(node: object) -> bool:
+    """Is this `${...}` operand a `Float`? The recorded type first, then the
+    syntactic proof for IR that predates the annotation."""
+    return _interp_type(node) == "Float" or _is_float_expr(node)
+
+
 def _interp_fstring(parts) -> str:
     """Emit a `${…}` template as a string concatenation.
 
@@ -3295,8 +3311,13 @@ def _interp_fstring(parts) -> str:
     for kind, value in parts:
         if kind == "text":
             pieces.append(repr(value))
-        elif _is_float_expr(value):
+        elif _interp_is_float(value):
             pieces.append(f"_revl_ftoa({_expr(value)})")
+        elif _interp_type(value) == "Bool":
+            # `str(True)` is `'True'`. revl spells its Bool literals `true` and
+            # `false`, and ts/go/rust/java all render them that way; python was
+            # the only tier leaking its host's spelling (`True`/`False`).
+            pieces.append(f"('true' if {_expr(value)} else 'false')")
         else:  # ["expr", ir_node]
             pieces.append(f"str({_expr(value)})")
     if not pieces:

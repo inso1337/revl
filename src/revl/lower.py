@@ -6937,10 +6937,43 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             if kind == "text":
                 parts.append(["text", value])
             else:
-                parts.append(["expr", _lower_pure_expr(
-                    value, scope, callables, alias_fns, filename, type_env, types)])
+                lowered = _lower_pure_expr(
+                    value, scope, callables, alias_fns, filename, type_env, types)
+                _mark_interp_type(lowered, value, type_env, types)
+                parts.append(["expr", lowered])
         return {"kind": "interp", "parts": parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
+
+
+#: The interpolated types whose host default rendering is NOT the revl one.
+#: `Float` must render through each tier's canonical ECMAScript `Number::
+#: toString` helper (docs/strings.md) and `Bool` must render as the revl
+#: literals `true`/`false`. `Str` and `Int` render identically under every
+#: host's default, so they stay TAG-LESS — the same discipline `to_str`'s
+#: `recv` annotation follows, and it keeps the IR byte-identical for the
+#: common case.
+_INTERP_TAGGED = ("Float", "Bool")
+
+
+def _mark_interp_type(node: dict, expr, type_env, types) -> None:
+    """Record the static type of a `${...}` operand on its lowered node.
+
+    The backends have no type environment, so before this they GUESSED from
+    the node's own shape (`_is_float_expr`: a float literal, a `/`, a
+    Float-annotated `bin`, or a unary minus of one). That proof cannot see a
+    `Float` that arrives through a parameter, a local, a field or a call, and
+    the fallback it drops to is the HOST's default rendering — which is not
+    revl's. Measured on a `Float` parameter `f`: `${f}` at `3.0` gave `3.0` on
+    python and `3.0` on java where ts/go answer `3`, and at `1e-7` python gave
+    `1e-07`, rust `0.0000001`, java `1.0E-7`. `${b}` on a `Bool` gave `True`
+    on python against `true` everywhere else. The type is known here, so it is
+    written down here instead of re-guessed five times.
+    """
+    if not isinstance(node, dict):
+        return
+    inferred = infer_ast(expr, type_env, types, None)
+    if inferred in _INTERP_TAGGED:
+        node["interp_type"] = inferred
 
 
 def _inject_opt(expected: str | None, actual: str | None, node: dict) -> dict:
