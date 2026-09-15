@@ -679,6 +679,7 @@ pub enum Expr {
     Templ(TemplN),
     Hole(HoleN),
     RecUpd(Box<RecUpdN>),
+    Asset(String),
     Bad(String),
 }
 
@@ -1175,6 +1176,7 @@ fn self_async_expr(e: Expr) -> String {
     Expr::NullLit => String::from(""),
     Expr::Var(_) => String::from(""),
     Expr::Hole(_) => String::from(""),
+    Expr::Asset(_) => String::from(""),
     Expr::Bad(_) => String::from(""),
     Expr::Bin(b) => { let b = *b; or2(self_async_expr(b.l.clone()), self_async_expr(b.r.clone())) },
     Expr::Un(u) => { let u = *u; self_async_expr(u.e.clone()) },
@@ -1638,6 +1640,7 @@ fn calls_in(e: Expr, acc: Vec<String>) -> Vec<String> {
     Expr::NullLit => acc,
     Expr::Var(_) => acc,
     Expr::Hole(_) => acc,
+    Expr::Asset(_) => acc,
     Expr::Bad(_) => acc,
     Expr::Bin(b) => { let b = *b; calls_in(b.r.clone(), calls_in(b.l.clone(), acc.clone())) },
     Expr::Un(u) => { let u = *u; calls_in(u.e.clone(), acc.clone()) },
@@ -1735,6 +1738,7 @@ fn acalls_in(e: Expr, sl: std::collections::HashMap<String, Vec<i64>>, acc: Vec<
     Expr::NullLit => acc,
     Expr::Var(_) => acc,
     Expr::Hole(_) => acc,
+    Expr::Asset(_) => acc,
     Expr::Bad(_) => acc,
     Expr::Bin(b) => { let b = *b; acalls_in(b.r.clone(), sl.clone(), acalls_in(b.l.clone(), sl.clone(), acc.clone())) },
     Expr::Un(u) => { let u = *u; acalls_in(u.e.clone(), sl.clone(), acc.clone()) },
@@ -2532,6 +2536,7 @@ fn walk_expr(e: Expr, marked: bool, cx: Ctx, a: Ac) -> Ac {
     Expr::NullLit => a,
     Expr::Var(n) => var_check(n, cx.clone(), a.clone()),
     Expr::Hole(_) => a,
+    Expr::Asset(_) => a,
     Expr::Bad(_) => a,
     Expr::Bin(b) => { let b = *b; walk_expr(b.r.clone(), marked, cx.clone(), walk_expr(b.l.clone(), marked, cx.clone(), a.clone())) },
     Expr::Un(u) => { let u = *u; walk_expr(u.e.clone(), marked, cx.clone(), a.clone()) },
@@ -3305,6 +3310,7 @@ fn reach_scan(e: Expr, cx: Ctx, cr: bool, a: ReachAcc) -> ReachAcc {
     Expr::NullLit => a,
     Expr::Var(_) => a,
     Expr::Hole(_) => a,
+    Expr::Asset(_) => a,
     Expr::Bad(_) => a,
     Expr::Bin(b) => { let b = *b; reach_scan(b.r.clone(), cx.clone(), cr, reach_scan(b.l.clone(), cx.clone(), cr, a.clone())) },
     Expr::Un(u) => { let u = *u; reach_scan(u.e.clone(), cx.clone(), cr, a.clone()) },
@@ -3428,6 +3434,7 @@ fn leaky_scan(e: Expr, coerced: bool, cx: Ctx, cr: bool) -> String {
     Expr::NullLit => String::from(""),
     Expr::Var(_) => String::from(""),
     Expr::Hole(_) => String::from(""),
+    Expr::Asset(_) => String::from(""),
     Expr::Bad(_) => String::from(""),
     Expr::Bin(b) => { let b = *b; or2(leaky_scan(b.l.clone(), false, cx.clone(), cr), leaky_scan(b.r.clone(), false, cx.clone(), cr)) },
     Expr::Un(u) => { let u = *u; leaky_scan(u.e.clone(), false, cx.clone(), cr) },
@@ -3504,6 +3511,7 @@ fn col_values(e: Expr, names: Vec<String>, acc: Vec<String>) -> Vec<String> {
     Expr::BoolLit(_) => acc,
     Expr::NullLit => acc,
     Expr::Hole(_) => acc,
+    Expr::Asset(_) => acc,
     Expr::Bad(_) => acc,
     Expr::Bin(b) => { let b = *b; col_values(b.r.clone(), names.clone(), col_values(b.l.clone(), names.clone(), acc.clone())) },
     Expr::Un(u) => { let u = *u; col_values(u.e.clone(), names.clone(), acc.clone()) },
@@ -3679,6 +3687,7 @@ fn acq_in(e: Expr) -> String {
     Expr::NullLit => String::from(""),
     Expr::Var(_) => String::from(""),
     Expr::Hole(_) => String::from(""),
+    Expr::Asset(_) => String::from(""),
     Expr::Bad(_) => String::from(""),
     Expr::Bin(b) => { let b = *b; or2(acq_in(b.l.clone()), acq_in(b.r.clone())) },
     Expr::Un(u) => { let u = *u; acq_in(u.e.clone()) },
@@ -5593,6 +5602,7 @@ fn ext_expr_verdict(e: Expr, nm: &str, slot: &str, bound: bool, declared: &[Stri
     Expr::BoolLit(_) => String::from(""),
     Expr::NullLit => String::from(""),
     Expr::Hole(_) => String::from(""),
+    Expr::Asset(_) => String::from(""),
     Expr::Bad(_) => String::from(""),
     Expr::Bin(b) => { let b = *b; ext_first(&(vec![ext_expr_verdict(b.l.clone(), nm, slot, bound, declared), ext_expr_verdict(b.r.clone(), nm, slot, bound, declared)])) },
     Expr::Un(u) => { let u = *u; ext_expr_verdict(u.e.clone(), nm, slot, bound, declared) },
@@ -6841,6 +6851,7 @@ fn taint_expr_mentions(e: Expr, bn: &str) -> bool {
     Expr::BoolLit(_) => false,
     Expr::NullLit => false,
     Expr::Hole(_) => false,
+    Expr::Asset(_) => false,
     Expr::Bad(_) => false,
     Expr::Bin(b) => { let b = *b; (taint_expr_mentions(b.l.clone(), bn) || taint_expr_mentions(b.r.clone(), bn)) },
     Expr::Un(u) => { let u = *u; taint_expr_mentions(u.e.clone(), bn) },
@@ -6910,6 +6921,7 @@ fn taint_witness_receiver(e: Expr, ds: &[TaintDecl]) -> bool {
     Expr::BoolLit(_) => false,
     Expr::NullLit => false,
     Expr::Hole(_) => false,
+    Expr::Asset(_) => false,
     Expr::Bad(_) => false,
     Expr::Bin(b) => { let b = *b; (taint_witness_receiver(b.l.clone(), ds) || taint_witness_receiver(b.r.clone(), ds)) },
     Expr::Un(u) => { let u = *u; taint_witness_receiver(u.e.clone(), ds) },
@@ -8204,6 +8216,7 @@ fn infer(e: Expr, env: Vec<Bind>) -> String {
     Expr::Templ(t) => String::from("Str"),
     Expr::RecUpd(r) => { let r = *r; infer(r.base.clone(), env.clone()) },
     Expr::Hole(h) => h.ty,
+    Expr::Asset(_) => String::from(""),
     Expr::Bad(m) => String::from(""),
     _ => unreachable!(),
 };
@@ -8842,6 +8855,7 @@ fn lir_expr(e: Expr, env: Vec<Bind>) -> String {
     Expr::Templ(t) => (String::from("{\"kind\":\"interp\",\"parts\":[").revl_concat(&lir_parts(t.parts, env.clone()))).revl_concat("]}"),
     Expr::RecUpd(r) => { let r = *r; (((String::from("{\"kind\":\"record_update\",\"base\":").revl_concat(&lir_expr(r.base.clone(), env.clone()))).revl_concat(",\"updates\":[")).revl_concat(&lir_updates(r.upds.clone(), 0i64, String::from(""), env.clone()))).revl_concat("]}") },
     Expr::Hole(h) => hole_json(h, String::from("")),
+    Expr::Asset(_) => String::from("{\"kind\":\"bad\"}"),
     Expr::Bad(m) => String::from("{\"kind\":\"bad\"}"),
     _ => unreachable!(),
 };
@@ -11647,6 +11661,7 @@ pub fn render(e: Expr) -> String {
     Expr::Templ(t) => (String::from("(templ ").revl_concat(&render_parts(&t.parts))).revl_concat(")"),
     Expr::Hole(h) => (((String::from("(hole ").revl_concat(&if (h.ty == "") { String::from("_") } else { h.ty })).revl_concat(" ")).revl_concat(&if (h.msg == "") { String::from("_") } else { h.msg })).revl_concat(")"),
     Expr::RecUpd(r) => { let r = *r; (((String::from("(update ").revl_concat(&render(r.base.clone()))).revl_concat(" ")).revl_concat(&render_inits(&r.upds))).revl_concat(")") },
+    Expr::Asset(p) => (String::from("(asset ").revl_concat(&p)).revl_concat(")"),
     Expr::Bad(m) => String::from("(bad)"),
     _ => unreachable!(),
 };
@@ -12601,6 +12616,12 @@ fn p_primary(ts: &[Token], i: i64, d: i64) -> PR {
     }
     if ((t.kind == "kw") && (t.text == "null")) {
         return PR { i: (i).checked_add(1i64).expect("revl: Int overflow"), e: Expr::NullLit };
+    }
+    if (((t.kind == "ident") && (t.text == "asset")) && (at(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "string") || at(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "template"))) {
+        if at(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "template") {
+            return bad(String::from("an `asset` path must be a plain string literal, not a `${...}` template"));
+        }
+        return PR { i: (i).checked_add(2i64).expect("revl: Int overflow"), e: Expr::Asset(tk(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text) };
     }
     if (t.kind == "ident") {
         if at(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "=>") {

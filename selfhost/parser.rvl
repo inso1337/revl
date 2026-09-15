@@ -76,6 +76,7 @@ pub type Expr =
   | Templ(TemplN)
   | Hole(HoleN)
   | RecUpd(RecUpdN)
+  | Asset(Str)
   | Bad(Str)
 
 // A parse result: the index after what was consumed, and the node.
@@ -236,6 +237,7 @@ pub fn render(e: Expr) -> Str {
                     .concat(h.msg == "" ? "_" : h.msg).concat(")"),
     RecUpd(r)  => "(update ".concat(render(r.base)).concat(" ")
                     .concat(render_inits(r.upds)).concat(")"),
+    Asset(p)   => "(asset ".concat(p).concat(")"),
     Bad(m)     => "(bad)",
   }
 }
@@ -988,6 +990,24 @@ fn p_primary(ts: List[Token], i: Int, d: Int) -> PR {
     return { i: i + 1, e: BoolLit(t.text) }
   }
   if (t.kind == "kw" && t.text == "null") { return { i: i + 1, e: NullLit } }
+  // item 459 F1: `asset "<path>"` — the resolved, jailed, content-pinned
+  // external asset handle. `asset` is an ident and not a keyword (the lexer is
+  // untouched on both sides), read as an asset only when a STRING LITERAL is
+  // JUXTAPOSED after it, which is a shape no other expression has, so a value
+  // legitimately named `asset` is still a plain variable reference. Without
+  // this the two tokens were two expressions, and `p_seq` needs no comma
+  // between elements, so every argument list holding one read ONE ARGUMENT
+  // TOO MANY: `webui.add_entry(a, b, asset "./x.ts", d)` counted five.
+  // A template path is refused rather than read, exactly as parser.py's
+  // `_asset_expr` refuses it: the path is resolved, jailed and hashed at
+  // compile time, so it cannot depend on a runtime value.
+  if (t.kind == "ident" && t.text == "asset"
+      && (at(ts, i + 1, "string") || at(ts, i + 1, "template"))) {
+    if (at(ts, i + 1, "template")) {
+      return bad("an `asset` path must be a plain string literal, not a `${...}` template")
+    }
+    return { i: i + 2, e: Asset(tk(ts, i + 1).text) }
+  }
   if (t.kind == "ident") {
     if (at(ts, i + 1, "=>")) {
       let b = p_expr_d(ts, i + 2, d + 1)
