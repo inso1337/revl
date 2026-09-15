@@ -200,11 +200,11 @@ Two honest limits, both fail-closed:
   arm does not RESOLVE the requirements a candidate declares either; it checks
   them for disjointness and acyclicity. The reference remains the only tier that
   admits.
-* **A row it cannot honour is REFUSED, never skipped.** The wire reserves row
-  kinds for waves that have not landed — replacement (`-C`) and handoff
-  (`C=k:T`), both of which need the type layer. Those rows come back as a
-  `MANIFEST` refusal. Ignoring a row would be the wave-through this crate exists
-  to prevent.
+* **A row it cannot honour is REFUSED, never skipped.** Every row kind the wire
+  defines is folded, including the replacement (`-C`) and handoff (`C=k:T`)
+  rows. A row of no kind, or a garbled row of a kind the fold does know, comes
+  back as a `MANIFEST` refusal. Ignoring a row would be the wave-through this
+  crate exists to prevent.
 
 ## What is deliberately absent
 
@@ -214,8 +214,11 @@ Two honest limits, both fail-closed:
 * **The reference type layer.** Still absent, in `admit` and in `admit_into`
   alike: neither arm issues an admission. That lane is the type layer's, not the
   manifest parameter's.
-* **The deferred manifest rows.** Replacement and handoff rows are refused, for
-  the reason in the section above: they need the type layer.
+* **The §5 SERVICE compatibility relation.** A candidate that REDECLARES a
+  running service is a no-objection here; the reference is the only tier that
+  runs `admission._admit_service_replacement`. The service block on the wire is
+  what lets the admission surface above tell that case from a fresh interface
+  and withhold it.
 * **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
   rust host, slices 1-2: the generation state machine, the untrusted-author
   admission entry (`propose`/`admit`/`admit_into`), and the item-245 call path
@@ -280,7 +283,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:1e8296532536788d"
+    // frontier "selfhost-admit:1045ef68e44bf164"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
