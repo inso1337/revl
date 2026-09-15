@@ -3265,6 +3265,7 @@ class _V3Emitter:
             self._helper_str_char_code_at(),
             self._helper_str_cp_length(),
             self._helper_str_cp_offset(),
+            self._helper_str_cp_offset_strict(),
             self._helper_str_cp_slice(),
             self._helper_str_cp_char_at(),
             self._helper_str_cp_char_code_at(),
@@ -3760,6 +3761,41 @@ class _V3Emitter:
         (br $loop)))
     (local.get $i))"""
 
+    def _helper_str_cp_offset_strict(self) -> str:
+        # The same walk as `$str_cp_offset`, but it TRAPS instead of clamping.
+        # `slice` needs the clamping form (a bound past the end is an empty
+        # slice, never a fault) and character access needs this one: an index
+        # outside `0 <= i < length()` has no character to read, so the other
+        # five tiers fault there and this tier must too (docs/stdlib-2.0.md
+        # §Str.codepoint_at). It matters more here than anywhere else, because
+        # the clamping form answers the byte LENGTH for an index at or past the
+        # end, and `$str_cp_char_code_at` then loaded from that offset — one
+        # byte PAST the string's own bytes, which is the next allocation's
+        # header. A negative index was worse than clamped: the walk's
+        # `seen >= cp` guard is already true at `seen == 0`, so the offset came
+        # back 0 and the read landed on the FIRST code point.
+        return """  (func $str_cp_offset_strict (param $s i32) (param $cp i32) (result i32)
+    (local $len i32) (local $i i32) (local $seen i32) (local $b i32)
+    (if (i32.lt_s (local.get $cp) (i32.const 0)) (then (unreachable)))
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (br_if $done (i32.ge_s (local.get $seen) (local.get $cp)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (block $cont_done
+          (loop $cont
+            (br_if $cont_done (i32.ge_u (local.get $i) (local.get $len)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+            (br_if $cont_done (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cont)))
+        (local.set $seen (i32.add (local.get $seen) (i32.const 1)))
+        (br $loop)))
+    (if (i32.lt_s (local.get $seen) (local.get $cp)) (then (unreachable)))
+    (if (i32.ge_u (local.get $i) (local.get $len)) (then (unreachable)))
+    (local.get $i))"""
+
     def _helper_str_cp_slice(self) -> str:
         # `$start`/`$end` are code-point indices (Int values). JS slice
         # semantics: a NEGATIVE bound counts from the end, out-of-range bounds
@@ -3797,7 +3833,7 @@ class _V3Emitter:
         return """  (func $str_cp_char_at (param $s i32) (param $idx i64) (result i32)
     (local $i i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
     (local.set $i (i32.wrap_i64 (local.get $idx)))
-    (local.set $from (call $str_cp_offset (local.get $s) (local.get $i)))
+    (local.set $from (call $str_cp_offset_strict (local.get $s) (local.get $i)))
     (local.set $to (call $str_cp_offset (local.get $s) (i32.add (local.get $i) (i32.const 1))))
     (local.set $len (i32.sub (local.get $to) (local.get $from)))
     (local.set $p (call $alloc_str (local.get $len)))
@@ -3813,7 +3849,7 @@ class _V3Emitter:
         # e.g. 128512, not the lead byte.
         return """  (func $str_cp_char_code_at (param $s i32) (param $idx i64) (result i64)
     (local $off i32) (local $base i32) (local $b0 i32)
-    (local.set $off (call $str_cp_offset (local.get $s) (i32.wrap_i64 (local.get $idx))))
+    (local.set $off (call $str_cp_offset_strict (local.get $s) (i32.wrap_i64 (local.get $idx))))
     (local.set $base (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $off)))
     (local.set $b0 (i32.load8_u (local.get $base)))
     (i64.extend_i32_u

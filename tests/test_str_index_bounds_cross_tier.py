@@ -181,7 +181,10 @@ def _emit(backend: str, source: str) -> str:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     emitted = module.emit(compile_source(source, "str_index_bounds.rvl"))
-    return emitted if isinstance(emitted, str) else str(emitted)
+    if isinstance(emitted, str):
+        return emitted
+    # the wasm emitter answers `{module name: WAT text}`
+    return "\n".join(str(part) for part in emitted.values())
 
 
 def _probe_doc(rt: str, expression: str) -> str:
@@ -299,16 +302,20 @@ def test_wasm_offset_helper_has_a_strict_and_a_clamping_form():
     fault) and character access must TRAP, and both read the same walk. The
     two uses are separate helpers now, so neither can be fixed into the
     other's semantics by accident."""
+    def _func(wat: str, name: str) -> str:
+        head = wat.index(f"(func {name} ")
+        tail = wat.find("\n  (func ", head)
+        return wat[head:tail if tail != -1 else len(wat)]
+
     wat = _emit("wasm", _probe_doc("Int", "s().charCodeAt(9)"))
-    assert "(func $str_cp_offset_strict" in wat, wat[:400]
-    strict = wat[wat.index("(func $str_cp_offset_strict"):]
-    strict = strict[:strict.index("\n  (func ")]
-    assert "unreachable" in strict, strict
+    assert "(func $str_cp_offset_strict " in wat, wat[:600]
+    assert "unreachable" in _func(wat, "$str_cp_offset_strict")
+    # and the character readers reach for the STRICT one
+    assert "call $str_cp_offset_strict" in _func(wat, "$str_cp_char_code_at")
     sliced = _emit("wasm", _probe_doc("Str", "s().slice(9, 10)"))
-    assert "(func $str_cp_offset " in sliced
-    clamping = sliced[sliced.index("(func $str_cp_offset "):]
-    clamping = clamping[:clamping.index("\n  (func ")]
+    clamping = _func(sliced, "$str_cp_offset")
     assert "unreachable" not in clamping, clamping
+    assert "call $str_cp_offset_strict" not in _func(sliced, "$str_cp_slice")
 
 
 def test_python_guards_the_read_it_would_otherwise_wrap():
