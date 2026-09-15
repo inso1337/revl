@@ -2848,7 +2848,12 @@ fn revl_str_helper() -> Str {
   o = o.push("    const at = x.indexOf(v as string)")
   o = o.push("    return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)")
   o = o.push("  }")
-  o = o.push("  return BigInt(x.indexOf(v))")
+  // A List receiver searches by revl's ONE equality, which is structural
+  // (syntax-2.0 §3.4). `Array.prototype.indexOf` is `===`, i.e. IDENTITY for a
+  // record or a nested list, so a structurally equal element read back as -1 on
+  // this tier while py/go/rust/java answered its index.
+  o = o.push("  for (let i = 0; i < x.length; i++) { if (revlEq(x[i], v)) return BigInt(i) }")
+  o = o.push("  return -1n")
   o = o.push("}")
   return o.join(newline())
 }
@@ -3055,6 +3060,20 @@ fn runtime_imports(ir: Any) -> Str {
   return `import { ${names.join(", ")} } from '../runtime.ts'`
 }
 
+// `revlIndexOf` compares List elements with `revlEq`, so a document that only
+// searches a list and never writes `==` still needs the equality helper in
+// scope. The scan does not separate a Str receiver from a List one (the
+// receiver kind is a typing question answered while rendering): a Str-only
+// document may carry a helper it does not call, which is a dead function
+// rather than a wrong answer.
+fn uses_index_of(n: Any) -> Bool {
+  if (node_kind(n) == "builtin" && value_str(value_field(n, "method")) == "indexOf") { return true }
+  for (c of value_children(n)) {
+    if (uses_index_of(c)) { return true }
+  }
+  return false
+}
+
 fn uses_equality(n: Any) -> Bool {
   if (node_kind(n) == "bin" && is_equality_op(node_op(n))) { return true }
   for (c of value_children(n)) {
@@ -3172,7 +3191,7 @@ fn uses_str_cmp(n: Any) -> Bool {
 // dependency order (revlI64 before the named integer operations that call it).
 fn revl_helpers(ir: Any) -> List[Str] {
   var out = []
-  if (uses_equality(ir)) { out = out.push(revl_eq_helper()); out = out.push("") }
+  if (uses_equality(ir) || uses_index_of(ir)) { out = out.push(revl_eq_helper()); out = out.push("") }
   if (uses_assert(ir)) { out = out.push(revl_show_helper()); out = out.push("") }
   if (uses_bounded_int(ir) || uses_int_arith(ir)) { out = out.push(revl_i64_helper()); out = out.push("") }
   if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
