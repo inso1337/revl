@@ -2141,6 +2141,34 @@ component CacheLayer requires store: Store provides cache: Cache {
   provide cache { fn lookup(key) = store.get(key) }
 }
 """, "G1"),
+    # ---- docs/design/457 T4b: the required-service member rule (A6) -------
+    # `_component_req_call` / `_lower_postfix`'s `req` branch look the operation
+    # up in the service the requirement resolves to and refuse an absent one by
+    # name, before they count arguments or judge the emit marking. Both body
+    # positions are here — a setup `effect` bracket (the `a6_method_not_in_service`
+    # fixture's own shape) and a provide-method call — plus the ORDER against
+    # G4: an absent operation cannot be an unmarked emission, so the A6 refusal
+    # is what an `emission`-less name draws even under `emit`.
+    ("an absent service operation in a setup effect bracket", """
+service Database { fn query(sql: Str) -> Int }
+component P requires db: Database {
+  let n = effect db.execute("x") undo db.query("y")
+}
+""", "A6"),
+    ("an absent service operation in a provide method", """
+service Store { fn get(key: Str) -> Str }
+service Cache { fn lookup(key: Str) -> Str }
+component C requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nonexistent(key) }
+}
+""", "A6"),
+    ("an absent service operation under `emit` is A6, not G4", """
+service Bus { emission fn publish(topic: Str) }
+service Cache { fn put(key: Str) }
+component C requires bus: Bus provides cache: Cache {
+  provide cache { fn put(key) { emit bus.broadcast(key) } }
+}
+""", "A6"),
 ]
 
 
@@ -2992,6 +3020,8 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # provide-method and component bodies: method params take the service
     # signature, the body checks against its return, required-service call
     # argument typing, config defaults, a method-local shadowing a component name.
+    # The member-EXISTENCE half of this family has landed (docs/design/457 T4b);
+    # what is left here all needs the expression algebra T1-T3 build.
     "provide-method and component bodies": [
         ("t1_service_arg_type", "T1"),
         ("t4_field_arg_type", "T1"),
@@ -2999,7 +3029,6 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t16_provide_method_missing_return", "T1"),
         ("t31_index_non_int_provide_method", "T1"),
         ("t3_config_default_type", "T1"),
-        ("a6_method_not_in_service", "A6"),
         ("g6_method_local_shadows_component", "G6"),
         # the t29 field-read-on-`Any` shape inside a provide method, pinned for
         # the same reason: the `pub extern` parse refusal used to hide it.
@@ -3045,12 +3074,12 @@ def test_the_service_existence_rule_stops_at_a_use_declaration(admit):
         "G1|unknown service `S` in `requires` of C")
 
 
-def test_the_type_layer_gap_is_exactly_44_fixtures():
+def test_the_type_layer_gap_is_exactly_43_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 44, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 43, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 44, "a fixture is listed twice"
+    assert len(set(names)) == 43, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
