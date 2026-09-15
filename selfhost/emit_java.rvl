@@ -15,8 +15,8 @@
 // covers scalar legacy providers as well as the reference's v3 path
 // (`_emit_v3` -> `_emit_v3_types` /
 // `_emit_service_interfaces_v3` / `_emit_v3_functions` / `_emit_component` ->
-// `_expr` / `_v3_stmt`) for a document with NO externs, NO tests, NO stdlib
-// builtins and NO built-in Result. Modern config/req, realm placement, Map/Job,
+// `_expr` / `_v3_stmt`) for a document with NO externs, NO tests and NO
+// built-in Result. Modern config/req, realm placement, Map/Job,
 // activation guards/await and compensated frame teardown are also supported.
 // Float arithmetic/widening and Opt are supported, not blanket exclusions.
 //
@@ -56,6 +56,14 @@
 //   * Later component slices (216/225/235/238): simple legacy providers and the
 //     modern component subset described above, including positional `format`.
 //     The corpus and Java ledger keys record the exact exercised conditions.
+//   * The STDLIB surface (item 429's java blind-spot closure) — `_v3_builtin`'s
+//     dispatch over the `revl*` typed static overloads, the `len` node and the
+//     property-form `.length` (`_v3_len`), `_map_value_expr_type`'s builtin arm,
+//     and `_emit_stdlib_helpers` with the item-433-F6 per-group splice: the slot
+//     is reserved where the reference reserves it and only the helper groups the
+//     rest of the emitted unit CALLS are spliced in, closed over helper-to-helper
+//     calls. Corpus: tests/fixtures/emit_java_corpus/stdlib_builtins.rvl and
+//     map_inference_builtins.rvl.
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on java-emitter slices, deliberately OUT of this slice —
@@ -63,11 +71,11 @@
 // it), NOT an approximation. Where a covered fixture could plausibly reach one, a
 // loud `<<DEFER-*>>` marker keeps a byte diff from silently passing (item 207):
 //   * a local bound to an UNANNOTATED `Map.empty()` (issue #274): the reference
-//     learns the map's value type from the body's `m.set(k, v)` writers and
-//     falls back to the raw `java.util.Map`, both of which need the builtin
-//     surface this slice defers; the annotated `var m: Map[Str, Int] =
-//     Map.empty()` IS covered (its pin rides on the literal), and the
-//     unannotated one surfaces `<<DEFER-map-local-unpinned>>`;
+//     learns the map's value type from the body's `m.set(k, v)` writers, or falls
+//     back to the raw `java.util.Map`; neither is ported (the HOST `Map.new()`
+//     inference is). The annotated `var m: Map[Str, Int] = Map.empty()` IS covered
+//     (its pin rides on the literal), and the unannotated one surfaces
+//     `<<DEFER-map-local-unpinned>>`;
 //   * the whole item-130 `Stream[T]` surface, which the reference java backend
 //     now LOWERS (the emitted `Stream`/`Subscription`/`EventContract` runtime,
 //     the `subscribe` acquisition, and the `stream-iter` loop behind
@@ -87,15 +95,19 @@
 //   * spawn/instances (`_v3_spawn`/`instance-get`/`RevlSpawnHandle`), timers and
 //     routers; and the `Pool` host runtime — `_emit_host_stubs` emits Map/Job, but
 //     a `Pool` acquisition surfaces a loud `<<DEFER-host-stub:Pool>>`;
-//   * the STDLIB surface — every `builtin`/`len` node and `_emit_stdlib_helpers`
-//     / `revlLength`;
 //   * the built-in Result surface — `Ok`/`Err` construction and `match`, the
-//     sealed `RevlResult` (`_emit_result_type`), and `_emit_checked_div_helpers`;
+//     sealed `RevlResult` (`_emit_result_type`), and `_emit_checked_div_helpers`,
+//     so the `checked_*` builtin methods stay behind a loud
+//     `<<DEFER-checked-div:..>>`; and the `revlDivFloor`/`revlDivEuclid`/`revlMod`
+//     int-arith block, so `div_floor`/`div_euclid`/`mod` stay behind a loud
+//     `<<DEFER-int-arith:..>>` (`div_trunc` is inline `Math.divideExact` and IS
+//     covered);
 //   * functional record-update `{r | f = e}` — the JAVA reference itself RAISES on
 //     `record_update` (only python/typescript emit it), a structural exclusion;
 //   * externs (`_emit_v3_externs`), in-file `test`/lifecycle-test emission, and
 //     the canonical Float->Str `revlFtoa` (so `${aFloat}` interpolation is
-//     excluded, since it also pulls in the `_emit_ftoa_helper` block);
+//     excluded, since it also pulls in the `_emit_ftoa_helper` block, and a Float
+//     `to_str()` receiver surfaces `<<DEFER-ftoa:to_str>>`);
 //   * java-specific NUANCES — the `_reject_fn_type` refusal of a declared function
 //     type, local `let`-bound arrows and their `_inline_arrow` beta-reduction, and
 //     `let_pattern` (the reference threads a per-`_V3Ctx` emission-order index
