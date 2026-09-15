@@ -1513,6 +1513,11 @@ fn overflow_preamble() -> List[Str] {
   o = o.push(line(1, "if a == 0 || b == 0 {"))
   o = o.push(line(2, "return 0"))
   o = o.push(line(1, "}"))
+  // `p/b != a` cannot see Int.MIN * -1: the product wraps back to Int.MIN and
+  // Go DEFINES `Int.MIN / -1` as Int.MIN, so the readback equals `a`.
+  o = o.push(line(1, "if a == (-9223372036854775807 - 1) && b == -1 {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
   o = o.push(line(1, "p := a * b"))
   o = o.push(line(1, "if p/b != a {"))
   o = o.push(line(2, `panic("revl: Int overflow")`))

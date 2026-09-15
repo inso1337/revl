@@ -8675,6 +8675,15 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("\tif a == 0 || b == 0 {")
         out.append("\t\treturn 0")
         out.append("\t}")
+        # `p/b != a` cannot see Int.MIN * -1: the product wraps back to
+        # Int.MIN, and Go DEFINES `Int.MIN / -1` as Int.MIN (spec, "Integer
+        # operators") rather than trapping — so the readback equals `a` and
+        # the check passes. Every other tier traps on this product; go
+        # returned Int.MIN silently. Name the one case the readback is blind
+        # to, the way revlDivTrunc/revlDivFloor already do.
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
         out.append("\tp := a * b")
         out.append("\tif p/b != a {")
         out.append('\t\tpanic("revl: Int overflow")')
@@ -8719,11 +8728,24 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("\treturn q")
         out.append("}")
         out.append("")
+        # Euclidean division without negating either operand. The old body
+        # was `b > 0 ? divFloor(a, b) : -divFloor(a, -b)`, and BOTH negations
+        # are partial in two's complement: `-b` wraps for b == Int.MIN (so
+        # `a.div_euclid(Int.MIN)` answered the negation of the right quotient)
+        # and the leading `-` wraps for b == -1 (so `Int.MIN.div_euclid(-1)`
+        # answered Int.MIN where the true quotient 2^63 must trap). This is
+        # the shape rust's std uses: truncate, then step the quotient toward
+        # the divisor's sign when the truncated remainder is negative.
         out.append("func revlDivEuclid(a, b int64) int64 {")
-        out.append("\tif b > 0 {")
-        out.append("\t\treturn revlDivFloor(a, b)")
+        out.append("\tq := revlDivTrunc(a, b)")
+        out.append("\tif a%b < 0 {")
+        out.append("\t\tif b > 0 {")
+        out.append("\t\t\tq--")
+        out.append("\t\t} else {")
+        out.append("\t\t\tq++")
+        out.append("\t\t}")
         out.append("\t}")
-        out.append("\treturn -revlDivFloor(a, -b)")
+        out.append("\treturn q")
         out.append("}")
         out.append("")
         out.append("func revlMod(a, b int64) int64 {")
@@ -9812,6 +9834,15 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append("\tif a == 0 || b == 0 {")
         out.append("\t\treturn 0")
         out.append("\t}")
+        # `p/b != a` cannot see Int.MIN * -1: the product wraps back to
+        # Int.MIN, and Go DEFINES `Int.MIN / -1` as Int.MIN (spec, "Integer
+        # operators") rather than trapping — so the readback equals `a` and
+        # the check passes. Every other tier traps on this product; go
+        # returned Int.MIN silently. Name the one case the readback is blind
+        # to, the way revlDivTrunc/revlDivFloor already do.
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
         out.append("\tp := a * b")
         out.append("\tif p/b != a {")
         out.append('\t\tpanic("revl: Int overflow")')
@@ -9852,11 +9883,24 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append("\treturn q")
         out.append("}")
         out.append("")
+        # Euclidean division without negating either operand. The old body
+        # was `b > 0 ? divFloor(a, b) : -divFloor(a, -b)`, and BOTH negations
+        # are partial in two's complement: `-b` wraps for b == Int.MIN (so
+        # `a.div_euclid(Int.MIN)` answered the negation of the right quotient)
+        # and the leading `-` wraps for b == -1 (so `Int.MIN.div_euclid(-1)`
+        # answered Int.MIN where the true quotient 2^63 must trap). This is
+        # the shape rust's std uses: truncate, then step the quotient toward
+        # the divisor's sign when the truncated remainder is negative.
         out.append("func revlDivEuclid(a, b int64) int64 {")
-        out.append("\tif b > 0 {")
-        out.append("\t\treturn revlDivFloor(a, b)")
+        out.append("\tq := revlDivTrunc(a, b)")
+        out.append("\tif a%b < 0 {")
+        out.append("\t\tif b > 0 {")
+        out.append("\t\t\tq--")
+        out.append("\t\t} else {")
+        out.append("\t\t\tq++")
+        out.append("\t\t}")
         out.append("\t}")
-        out.append("\treturn -revlDivFloor(a, -b)")
+        out.append("\treturn q")
         out.append("}")
         out.append("")
         out.append("func revlMod(a, b int64) int64 {")

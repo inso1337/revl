@@ -79,6 +79,10 @@ _REDACTED_SECRET = "<redacted:secret>"
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
 _DIV_ZERO_MSG = "revl: division by zero"
+#: The reason a `checked_*` quotient does not fit (`Int.MIN / -1` is 2^63, one
+#: past Int.MAX). Spelled exactly as the other five tiers spell it: the total
+#: forms answer it as a VALUE, where the faulting operations trap.
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 
 
 def _align4(value: int) -> int:
@@ -2581,8 +2585,9 @@ def _concat_arities(rendered: str) -> list[int]:
     return sorted({int(k) for k in _CONCAT_N_CALL.findall(rendered)})
 
 
-#: The arithmetic helpers, which need no memory. All six travel together
-#: because they call each other ($int_div_euclid -> $int_div_floor).
+#: The arithmetic helpers, which need no memory. All of them travel together
+#: rather than being pulled in one at a time ($int32_add/sub/mul all call
+#: $int32_narrow, and the i64 division family is one unit).
 _ARITH_TOKENS = (
     "$int_add", "$int_sub", "$int_mul",
     "$int_div_floor", "$int_div_euclid", "$int_mod",
@@ -3170,10 +3175,15 @@ class _V3Emitter:
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
                 if node.get("method") in _CHECKED_DIVS:
-                    # the total division forms carry their Err reason from
-                    # the emitter, not from a literal in the source — pool it
-                    # here so `_str_ptr` can name it at lowering time
+                    # the total division forms carry their Err reasons from
+                    # the emitter, not from a literal in the source — pool them
+                    # here so `_str_ptr` can name them at lowering time. The
+                    # three quotient forms carry a second one: `Int.MIN / -1`
+                    # has no representable quotient, and they answer that as a
+                    # value rather than trapping the way `/` does.
                     seen.setdefault(_DIV_ZERO_MSG, None)
+                    if node.get("method") != "checked_mod":
+                        seen.setdefault(_INT_OVERFLOW_MSG, None)
                 if node.get("kind") == "interp":
                     # template text segments are string literals too
                     for part_kind, part in node.get("parts") or []:
@@ -3634,12 +3644,24 @@ class _V3Emitter:
       (else (local.get $q))))"""
 
     def _helper_int_div_euclid(self) -> str:
+        # Never negate an operand. The old body was
+        # `b > 0 ? div_floor(a, b) : -div_floor(a, -b)`, and `i64.sub` WRAPS —
+        # so `-b` for b == Int.MIN stayed Int.MIN (the quotient against Int.MIN
+        # came back negated) and the leading `-` for b == -1 turned the
+        # trapping quotient 2^63 back into Int.MIN, silently. Truncate instead,
+        # then step the quotient toward the divisor's sign when the truncated
+        # remainder is negative: `i64.div_s` already traps on both Int.MIN / -1
+        # and a zero divisor, which is exactly what the other tiers do.
         return """  (func $int_div_euclid (param $a i64) (param $b i64) (result i64)
-    (if (result i64) (i64.gt_s (local.get $b) (i64.const 0))
-      (then (call $int_div_floor (local.get $a) (local.get $b)))
-      (else (i64.sub (i64.const 0)
-              (call $int_div_floor (local.get $a)
-                (i64.sub (i64.const 0) (local.get $b)))))))"""
+    (local $q i64)
+    (local.set $q (i64.div_s (local.get $a) (local.get $b)))
+    (if (result i64)
+      (i64.lt_s (i64.rem_s (local.get $a) (local.get $b)) (i64.const 0))
+      (then
+        (if (result i64) (i64.gt_s (local.get $b) (i64.const 0))
+          (then (i64.sub (local.get $q) (i64.const 1)))
+          (else (i64.add (local.get $q) (i64.const 1)))))
+      (else (local.get $q))))"""
 
     def _helper_int_mod(self) -> str:
         # Euclidean remainder: always in [0, |b|), for either sign of b.
@@ -4842,12 +4864,32 @@ class _V3Emitter:
                 ty, "Err",
                 {"kind": "lit", "value": _DIV_ZERO_MSG},
                 scope, where)
+            # A zero divisor is not the only input with no quotient:
+            # `Int.MIN / -1` is 2^63, one past Int.MAX. `i64.div_s` TRAPS on
+            # it, and so do `$int_div_floor`/`$int_div_euclid` through the same
+            # instruction — so this tier faulted where py/ts/go/rust/java all
+            # answer Err("revl: Int overflow"). A `checked_*` that can still
+            # fault is not checked, so the case is named here as a value.
+            # `checked_mod` is exempt: its answer at that divisor is 0.
+            if method == "checked_mod":
+                inner = ok_cell.wat
+            else:
+                overflow_cell = self._make_tagged(
+                    ty, "Err",
+                    {"kind": "lit", "value": _INT_OVERFLOW_MSG},
+                    scope, where)
+                inner = (f"(if (result i32)\n"
+                         f"        (i32.and\n"
+                         f"          (i64.eq {read_a} (i64.const -9223372036854775808))\n"
+                         f"          (i64.eq {read_b} (i64.const -1)))\n"
+                         f"        (then {overflow_cell.wat})\n"
+                         f"        (else {ok_cell.wat}))")
             wat = (f"{dividend.wat}\n      (local.set ${tmp_a})\n"
                    f"      {divisor.wat}\n      (local.set ${tmp_b})\n"
                    f"      (if (result i32)\n"
                    f"        (i64.eqz {read_b})\n"
                    f"        (then {err_cell.wat})\n"
-                   f"        (else {ok_cell.wat}))")
+                   f"        (else {inner}))")
             return _E(wat, ty)
         if method == "length":
             target = self._expr(target_node, scope, where, target_ty)

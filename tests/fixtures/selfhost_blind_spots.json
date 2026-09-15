@@ -246,7 +246,7 @@
         "kind=lease-revoke",
         "step=approval"
       ],
-      "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
+      "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 §4.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
         "kind=stream-merge",
         "kind=subscribe",
         "stage=take",
@@ -474,6 +474,9 @@
       ],
       "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
         "op=/"
+      ],
+      "The whole checked-division family is unported on this tier: selfhost/emit_wasm.rvl carries the $int_* arithmetic helper bodies but not the _builtin_expr arm that lowers checked_div_trunc/floor/euclid/mod into tagged Ok/Err cells, and no wasm corpus document spells a checked_* call. Only `checked_mod` shows up as a construct here because it is the one member the reference names by itself — it is the exception to the Int.MIN/-1 overflow Err the other three answer, since its own answer at that divisor is 0. The rest of the family reaches the reference through `method in _CHECKED_DIVS`, which is not a discriminant this census reads. A corpus case would need the tagged-union port first.": [
+        "method=checked_mod"
       ]
     }
   }

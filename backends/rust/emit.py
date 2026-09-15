@@ -6462,6 +6462,15 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # (docs/arithmetic.md).
             m = {"+": "checked_add", "-": "checked_sub", "*": "checked_mul"}[node["op"]]
             return (f'({left}).{m}({right}).expect("revl: Int32 overflow")')
+        if node.get("op") == "%" and node.get("operands") in ("Int", "Int32"):
+            # The truncated remainder is defined for every pair rust's `%` is,
+            # plus one: `Int.MIN % -1` is 0 (the true quotient is what does not
+            # fit, not the remainder). Rust's `%` PANICS there anyway, because
+            # it computes the quotient on the way — so this tier faulted where
+            # py/ts/go/java/wasm all answer 0. `wrapping_rem` is the same
+            # operation everywhere else and still panics on a zero divisor,
+            # which is the fault every tier does give.
+            return f"({left}).wrapping_rem({right})"
         if node.get("op") == "/" and node.get("operands") in ("Int", "Int32"):
             # `/` is true division and yields Float (docs/arithmetic.md), but
             # rust `/` on two i64 is integer division — it would compute 3 for
@@ -6483,6 +6492,16 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # bool). A bit op, so it never traps.
             return f"(!{operand})"
         if node.get("op") == "-":
+            # `-Int.MIN` is 2^63 and must trap, the same as `0 - Int.MIN`
+            # (docs/arithmetic.md). Rust's own unary minus only checks in DEBUG
+            # builds, so the bare operator gave the guarantee in `cargo test`
+            # and silently wrapped in a release profile — the same reason the
+            # `+`/`-`/`*` arms above reach for the `checked_*` family. go, py,
+            # ts and java all impose the bound here unconditionally.
+            if node.get("operands") in ("Int", "Int32"):
+                width = "Int32" if node["operands"] == "Int32" else "Int"
+                return (f'({operand}).checked_neg()'
+                        f'.expect("revl: {width} overflow")')
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 
@@ -6946,10 +6965,22 @@ def _v3_checked_div(method: str, target: str, arg: str) -> str:
         "checked_div_floor":
             "{ let q = a / b; if a % b != 0 && ((a < 0) != (b < 0)) { q - 1 } else { q } }",
         "checked_div_euclid": "a.div_euclid(b)",
-        "checked_mod": "a.rem_euclid(b).abs()",
+        # `rem_euclid` computes `self % rhs` first, and `Int.MIN % -1`
+        # overflows, so the -1 divisor is named: the Euclidean remainder
+        # against |-1| = 1 is 0 for every dividend.
+        "checked_mod": "if b == -1 { 0 } else { a.rem_euclid(b).abs() }",
     }[method]
+    # A quotient of 2^63 (`Int.MIN / -1`) does not fit i64. Every other tier
+    # answers Err("revl: Int overflow") here; rust's `/`, `div_euclid` and the
+    # `a % b` inside the floor arm all PANIC on it instead, which defeats the
+    # point of the total forms — a `checked_*` that can still fault is not
+    # checked. `mod` is exempt: its answer at that divisor is 0, in range.
+    overflow = "" if method == "checked_mod" else (
+        'else if a == i64::MIN && b == -1 '
+        '{ Err::<i64, String>("revl: Int overflow".to_string()) } ')
     return (f"{{ let a = ({target}); let b = ({arg}); "
             f'if b == 0 {{ Err::<i64, String>("{_DIV_ZERO_MSG}".to_string()) }} '
+            f'{overflow}'
             f'else {{ Ok::<i64, String>({ok}) }} }}')
 
 
@@ -7094,7 +7125,12 @@ def _v3_builtin(method: str, target: str, args: list[str],
     if method == "div_euclid":
         return f"(({target}).div_euclid({args[0]}))"
     if method == "mod":
-        return f"(({target}).rem_euclid({args[0]}).abs())"
+        # `i64::rem_euclid` computes `self % rhs` first, and `Int.MIN % -1`
+        # overflows — so `Int.MIN.mod(-1)` PANICKED on rust where py/ts/go/java
+        # all answer 0 (the Euclidean remainder against |−1| = 1 is always 0).
+        # Name that divisor rather than letting the intermediate decide.
+        return (f"{{ let (a, b) = (({target}), ({args[0]})); "
+                f"if b == -1 {{ 0 }} else {{ a.rem_euclid(b).abs() }} }}")
     # The total forms (docs/arithmetic.md): same quotient as the faulting
     # operation, but a zero divisor yields Err(reason) instead of panicking —
     # `fail` is refused in a pure fn, so the error travels as a value. The
