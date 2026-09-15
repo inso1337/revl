@@ -460,6 +460,24 @@ exit criterion is a refusal that NAMES THE INTENT IT VIOLATED and a predicate
 carries none. It renders in `errors.RevlError`'s message-plus-hint shape, so the
 stage that surfaces it on the operator's prompt introduces no second convention.
 
+That stage is wired (issue #1098). `_live_grant_for` keeps the `Refusal` for
+every grant that is live on every other axis and fails only on coverage, and
+`_find_standing_grant` writes them onto the ticket it is about to raise, as
+`standingGrantRefusals`: capability -> a sentence naming the declaration the
+operator made, in the spelling they made it in, and the rendered finding saying
+which dimension this crossing left. The field lands after `build_ticket`
+computed `hash`, the discipline `resourceScopeRefusals` set, so the
+outstanding-ticket key and the ledger binding do not move; the whole ticket is
+what every surface hands the operator (`approval.two_step_payload`), so nothing
+downstream has to opt in. Until it was wired the sentence was built here and
+read as a bool one call before the prompt that needed it, and an operator whose
+standing grant was exceeded got an ordinary single-use question with nothing
+saying they had already granted something narrower.
+
+Only a COVERAGE refusal is reported. A grant that is expired, spent, or minted
+for another deputy is not a declaration this crossing exceeded, and saying it
+was would be false, so those prompt unexplained exactly as they did.
+
 `attest.RULESET_MODULES` is untouched, on the precedent `quorum.py` set: that
 digest identifies the frontend ruleset producing a COMPILE verdict, and an MCP
 session admitting a runtime crossing is a different thing. The module list is
