@@ -129,21 +129,6 @@
       "Existing spawn/instance boundary: _v3_spawn emits instance creation; the port only detects spawn to defer the component. Strict instance_accessor.rvl reproduces this, not supported host acquisition.": [
         "kind=spawn"
       ],
-      "Existing stdlib boundary: _v3_builtin and map_value_expr_type dispatch list/string builtins; render_inner still rejects builtin nodes. Strict runtime_values.rvl/control.rvl reproduce it; Map inference's builtin recognition alone is not an implemented emitter.": [
-        "kind=builtin",
-        "method=charAt",
-        "method=charCodeAt",
-        "method=concat",
-        "method=indexOf",
-        "method=join",
-        "method=length",
-        "method=push",
-        "method=repeat",
-        "method=slice",
-        "method=split",
-        "method=to_int",
-        "method=to_str"
-      ],
       "Existing witnessed-extern boundary: _emit_witnessed_step and witnessed_names inspect class=witnessed; strict method_witnessed.rvl reproduces missing Result/witness lowering.": [
         "class=witnessed"
       ],
@@ -176,10 +161,6 @@
       ],
       "Existing spawn/instance boundary: _v3_instance_get emits provision lookup from a spawn handle; port render_inner has no instance-get arm. Strict instance_accessor.rvl reproduces the family.": [
         "kind=instance-get"
-      ],
-      "Existing stdlib boundary: _v3_len emits revlLength and _v3_builtin/map-value inference recognizes Unicode codepoint_at. Strict control.rvl/runtime_values.rvl reproduce missing helper demand; host Map support does not implement these builtins.": [
-        "kind=len",
-        "method=codepoint_at"
       ],
       "Existing witnessed-extern boundary: _emit_witnessed_step consults secret_witness when recording/redacting inverse witnesses. Extern/witness lowering is not ported; strict method_witnessed.rvl retains a representative divergence, not a claim that secrecy is unnecessary.": [
         "secret_witness=<true>"
