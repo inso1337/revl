@@ -9342,6 +9342,20 @@ fn lir_fields(fields: List[InitN], env: List[Bind]) -> Str {
   return out
 }
 
+// A `${...}` operand carries the type the checker gave it when that type is
+// one whose host default rendering is NOT revl's: `Float` must go through each
+// tier's canonical ECMAScript `Number::toString` helper and `Bool` must render
+// as `true`/`false`. `Str` and `Int` stay tag-less, so the common template is
+// byte-identical to what it was. The key is appended LAST, matching the
+// reference, which sets it on the finished node.
+fn lir_interp_operand(e: Expr, env: List[Bind]) -> Str {
+  let inner = lir_expr(e, env)
+  let ty = infer(e, env)
+  if (ty != "Float" && ty != "Bool") { return inner }
+  return inner.slice(0, inner.length() - 1)
+    .concat(",\"interp_type\":").concat(jstr(ty)).concat("}")
+}
+
 fn lir_parts(parts: List[PartN], env: List[Bind]) -> Str {
   var out = ""
   var i = 0
@@ -9349,7 +9363,7 @@ fn lir_parts(parts: List[PartN], env: List[Bind]) -> Str {
     let p = parts[i]
     let seg = p.kind == "t"
       ? "[\"text\",".concat(jstr(p.text)).concat("]")
-      : "[\"expr\",".concat(lir_expr(p.e, env)).concat("]")
+      : "[\"expr\",".concat(lir_interp_operand(p.e, env)).concat("]")
     out = i == 0 ? seg : out.concat(",").concat(seg)
     i += 1
   }
