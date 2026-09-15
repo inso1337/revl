@@ -875,6 +875,7 @@ fn self_async_expr(e: Expr) -> Str {
     NullLit     => "",
     Var(_)      => "",
     Hole(_)     => "",
+    Asset(_)    => "",
     Bad(_)      => "",
     Bin(b)      => or2(self_async_expr(b.l), self_async_expr(b.r)),
     Un(u)       => self_async_expr(u.e),
@@ -1401,6 +1402,7 @@ fn calls_in(e: Expr, acc: List[Str]) -> List[Str] {
     NullLit    => acc,
     Var(_)     => acc,
     Hole(_)    => acc,
+    Asset(_)    => acc,
     Bad(_)     => acc,
     Bin(b)     => calls_in(b.r, calls_in(b.l, acc)),
     Un(u)      => calls_in(u.e, acc),
@@ -1511,6 +1513,7 @@ fn acalls_in(e: Expr, sl: Map[Str, List[Int]], acc: List[Str]) -> List[Str] {
     NullLit     => acc,
     Var(_)      => acc,
     Hole(_)     => acc,
+    Asset(_)    => acc,
     Bad(_)      => acc,
     Bin(b)      => acalls_in(b.r, sl, acalls_in(b.l, sl, acc)),
     Un(u)       => acalls_in(u.e, sl, acc),
@@ -2695,6 +2698,7 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
     NullLit    => a,
     Var(n)     => var_check(n, cx, a),
     Hole(_)    => a,
+    Asset(_)    => a,
     Bad(_)     => a,
     Bin(b)     => walk_expr(b.r, marked, cx, walk_expr(b.l, marked, cx, a)),
     Un(u)      => walk_expr(u.e, marked, cx, a),
@@ -3882,6 +3886,7 @@ fn reach_scan(e: Expr, cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
     NullLit     => a,
     Var(_)      => a,
     Hole(_)     => a,
+    Asset(_)    => a,
     Bad(_)      => a,
     Bin(b)      => reach_scan(b.r, cx, cr, reach_scan(b.l, cx, cr, a)),
     Un(u)       => reach_scan(u.e, cx, cr, a),
@@ -3983,6 +3988,7 @@ fn leaky_scan(e: Expr, coerced: Bool, cx: Ctx, cr: Bool) -> Str {
     NullLit     => "",
     Var(_)      => "",
     Hole(_)     => "",
+    Asset(_)    => "",
     Bad(_)      => "",
     Bin(b)      => or2(leaky_scan(b.l, false, cx, cr), leaky_scan(b.r, false, cx, cr)),
     Un(u)       => leaky_scan(u.e, false, cx, cr),
@@ -4061,6 +4067,7 @@ fn col_values(e: Expr, names: List[Str], acc: List[Str]) -> List[Str] {
     BoolLit(_)  => acc,
     NullLit     => acc,
     Hole(_)     => acc,
+    Asset(_)    => acc,
     Bad(_)      => acc,
     Bin(b)      => col_values(b.r, names, col_values(b.l, names, acc)),
     Un(u)       => col_values(u.e, names, acc),
@@ -4229,6 +4236,7 @@ fn acq_in(e: Expr) -> Str {
     NullLit     => "",
     Var(_)      => "",
     Hole(_)     => "",
+    Asset(_)    => "",
     Bad(_)      => "",
     Bin(b)      => or2(acq_in(b.l), acq_in(b.r)),
     Un(u)       => acq_in(u.e),
@@ -6464,6 +6472,7 @@ fn ext_expr_verdict(e: Expr, nm: Str, slot: Str, bound: Bool,
     BoolLit(_) => "",
     NullLit => "",
     Hole(_) => "",
+    Asset(_) => "",
     Bad(_) => "",
     Bin(b) => ext_first([
       ext_expr_verdict(b.l, nm, slot, bound, declared),
@@ -8146,6 +8155,7 @@ fn taint_expr_mentions(e: Expr, bn: Str) -> Bool {
     BoolLit(_) => false,
     NullLit => false,
     Hole(_) => false,
+    Asset(_) => false,
     Bad(_) => false,
     Bin(b) => taint_expr_mentions(b.l, bn) || taint_expr_mentions(b.r, bn),
     Un(u) => taint_expr_mentions(u.e, bn),
@@ -8209,6 +8219,7 @@ fn taint_witness_receiver(e: Expr, ds: List[TaintDecl]) -> Bool {
     BoolLit(_) => false,
     NullLit => false,
     Hole(_) => false,
+    Asset(_) => false,
     Bad(_) => false,
     Bin(b) => taint_witness_receiver(b.l, ds)
               || taint_witness_receiver(b.r, ds),
@@ -9350,6 +9361,7 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     // spelling is the base's (`_expr_static_type` reads the same thing).
     RecUpd(r)   => infer(r.base, env),
     Hole(h)     => h.ty,
+    Asset(_)    => "",
     Bad(m)      => "",
   }
 }
@@ -10099,6 +10111,16 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
     RecUpd(r)   => "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(r.base, env))
                      .concat(",\"updates\":[").concat(lir_updates(r.upds, 0, "", env)).concat("]}"),
     Hole(h)     => hole_json(h, ""),
+    // item 459 F1: `asset "<path>"` lowers on the reference to the RESOLVED
+    // record `{ path, sha256 }` (`ExprAsset` IS an `ExprRecord`, and
+    // `revl.hostref.resolve_assets` fills its two fields by reading the file
+    // off disk). This producer is handed source text and nothing else, so it
+    // has neither the declaring file's directory to resolve against nor the
+    // bytes to digest, and a record carrying a fabricated path and no digest
+    // would be a handle naming no content. `bad` is the honest node: the
+    // parser now READS the form, so the argument list holding it has the right
+    // arity, and the projection says plainly that it cannot lower it.
+    Asset(_)    => "{\"kind\":\"bad\"}",
     Bad(m)      => "{\"kind\":\"bad\"}",
   }
 }
