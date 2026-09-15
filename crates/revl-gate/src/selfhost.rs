@@ -2775,6 +2775,9 @@ fn req_call(root_: String, meth: &str, args: &[Expr], marked: bool, cx: Ctx, a: 
 };
     let decl = find_msig(svc_of(cx.clone(), svcName.clone()), meth, 0i64);
     if (decl.name == "") {
+        if cx.svcs.contains_key(&svcName) {
+            return ac_refuse(a.clone(), String::from("A6"), ((((String::from("`").revl_concat(&root_)).revl_concat(".")).revl_concat(&meth)).revl_concat("` is not a method of service ")).revl_concat(&svcName));
+        }
         return walk_exprs(args, 0i64, marked, cx.clone(), a.clone());
     }
     if (decl.isEm && (!marked)) {
