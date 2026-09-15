@@ -342,10 +342,20 @@ def scan_file(path: Path, display: str | None = None) -> tuple[list[Finding], in
         if (f := scan_text(text, name, line)) is not None
     ]
     # The same file judged whole, so a document chopped into small strings still
-    # has to clear rules A and B in aggregate.
-    whole = scan_text("\n".join(t for _, t in candidates), name)
-    if whole is not None and "D" not in whole.rules and not findings:
-        findings.append(whole)
+    # has to clear rules A and B in aggregate. ONLY A and B: rule C would just
+    # restate a per-string hit, and rule D across a join is meaningless — a hole
+    # in one string and a pair in another never sat next to each other in the
+    # source. Reported only when no individual string already did, so one
+    # document is one finding rather than two.
+    if not findings:
+        aggregate = shape_of("\n".join(t for _, t in candidates))
+        scale = tuple(r for r in rules_fired(aggregate) if r in ("A", "B"))
+        if scale:
+            findings.append(Finding(
+                name, None, scale, aggregate,
+                f"{aggregate.pairs} closed elements spread across "
+                f"{len(candidates)} string literals in this file",
+            ))
     return findings, len(candidates), True
 
 
@@ -477,6 +487,34 @@ def test_the_planted_violation_is_the_only_thing_the_skip_hides():
     assert {f.path for f in with_it.findings} == {PLANTED.relative_to(ROOT).as_posix()}
     assert without.findings == []
     assert with_it.files == without.files + 1
+
+
+def test_the_per_file_aggregate_catches_a_document_chopped_into_fragments(tmp_path):
+    """The other path that can fire, driven on its own. No single string here
+    reaches a threshold — the largest holds one pair — and the file does. This
+    is what stops "split it across twenty strings" from being the answer to the
+    gate."""
+    fragments = [
+        "<section><h2>a</h2></section>",
+        "<article><p>b</p></article>",
+        "<aside><span>c</span></aside>",
+    ]
+    for one in fragments:
+        assert rules_fired(shape_of(one)) == (), one
+    doc = tmp_path / "chopped.rvl"
+    body = "\n".join(f'    fn f{i}() = "{s}"' for i, s in enumerate(fragments))
+    doc.write_text(
+        "service S {\n"
+        + "\n".join(f"  fn f{i}() -> Str" for i in range(len(fragments)))
+        + "\n}\n\ncomponent C provides s: S {\n  provide s {\n"
+        + body
+        + "\n  }\n}\n",
+        encoding="utf-8",
+    )
+    findings, strings, lexed = scan_file(doc, "chopped.rvl")
+    assert lexed and strings == len(fragments)
+    assert findings and findings[0].rules == ("A",), findings
+    assert findings[0].line is None, "an aggregate finding names the file, not a line"
 
 
 def test_the_control_passes_and_is_not_skipped(scan):
