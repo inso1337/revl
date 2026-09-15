@@ -585,7 +585,8 @@ class _UsesScan:
 
     __slots__ = (
         "bounded_int", "bounded_int32", "i32_shl", "true_division",
-        "trunc_rem", "float_interp", "opt_to_int", "list_index", "map_index",
+        "trunc_rem", "float_rem", "float_interp", "opt_to_int", "list_index",
+        "map_index",
         "builtins",
     )
 
@@ -595,6 +596,7 @@ class _UsesScan:
         self.i32_shl = False
         self.true_division = False
         self.trunc_rem = False
+        self.float_rem = False
         self.float_interp = False
         self.opt_to_int = False
         self.list_index = False
@@ -628,8 +630,10 @@ def _scan_uses(root) -> _UsesScan:
                     scan.i32_shl = True
                 elif op == "/":
                     scan.true_division = True
-                elif op == "%" and operands in ("Int", "Float"):
+                elif op == "%" and operands == "Int":
                     scan.trunc_rem = True
+                elif op == "%" and operands == "Float":
+                    scan.float_rem = True
             elif kind == "un":
                 if node.get("op") == "-":
                     operands = node.get("operands")
@@ -3579,7 +3583,14 @@ def _expr(node: dict) -> str:
         if node["op"] == "/":
             # true division, IEEE at zero (docs/arithmetic.md)
             return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
-        if node["op"] == "%" and node.get("operands") in ("Int", "Float"):
+        if node["op"] == "%" and node.get("operands") == "Float":
+            # The Float remainder is IEEE `fmod`, and IEEE gives it a VALUE at
+            # a zero divisor — `x % 0.0` is NaN, not a fault. python's own `%`
+            # raises `ZeroDivisionError` there, exactly as its `/` does, so it
+            # is the one tier that has to build the IEEE answer (issue #721).
+            # `_revl_rem` below is the Int form and must keep faulting at zero.
+            return f"_revl_frem({_expr(node['left'])}, {_expr(node['right'])})"
+        if node["op"] == "%" and node.get("operands") == "Int":
             # `%` is the TRUNCATED remainder — it takes the sign of the
             # dividend, as in TypeScript (§0) — and pairs with `div_trunc` so
             # that (a.div_trunc(b)) * b + a % b == a. Python's `%` floors and
@@ -5321,6 +5332,13 @@ def emit(ir: dict) -> str:
                    'other tier follows IEEE."""')
         out.add(0, "    if b:")
         out.add(0, "        return a / b")
+        # A NaN dividend is neither zero nor signed: IEEE says NaN / anything
+        # is NaN, and `a == 0` is false for it, so without this line the zero
+        # divisor branch below read the sign off a NaN and answered an
+        # INFINITY. python is the reference tier, so that was the one tier
+        # disagreeing with the other five (issue #721).
+        out.add(0, "    if a != a:")
+        out.add(0, "        return a")
         out.add(0, "    if a == 0:")
         out.add(0, "        return float('nan')")
         out.add(0, "    return (_revl_math.copysign(float('inf'), a)")
@@ -5364,6 +5382,23 @@ def emit(ir: dict) -> str:
         out.add(0, '    """TypeScript. python\'s own `%` floors and takes the '
                    'divisor\'s sign."""')
         out.add(0, "    return abs(a) % abs(b) if a >= 0 else -(abs(a) % abs(b))")
+        out.add(0)
+    if _scan.float_rem:
+        # The Float remainder is C `fmod`, and a zero divisor has an IEEE
+        # ANSWER there rather than a fault: `x % 0.0` is NaN. python's `%`
+        # raises `ZeroDivisionError` — the same step out of line its `/`
+        # takes, and closed the same way (issue #721). Everything else is the
+        # truncated remainder `_revl_rem` computes, so the two share a shape.
+        out.add(0, "def _revl_frem(a, b):")
+        out.add(0, '    """The Float remainder is IEEE fmod: a zero divisor '
+                   'is NaN, not a fault,"""')
+        out.add(0, '    """and a zero remainder keeps the DIVIDEND sign."""')
+        out.add(0, "    if b == 0.0 or a != a or b != b:")
+        out.add(0, "        return float('nan')")
+        out.add(0, "    r = abs(a) % abs(b)")
+        out.add(0, "    if r == 0.0:")
+        out.add(0, "        return 0.0 * a")
+        out.add(0, "    return r if a > 0 else -r")
         out.add(0)
     if "div_trunc" in _scan.builtins:
         out.add(0, "def _revl_div_trunc(a, b):")
