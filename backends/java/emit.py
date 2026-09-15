@@ -1738,7 +1738,17 @@ def _emit_ftoa_helper() -> list[str]:
         "    if (Double.isInfinite(x)) { return x < 0 ? \"-Infinity\" : \"Infinity\"; }",
         "    if (x == 0.0) { return \"0\"; }",
         "    String sign = x < 0 ? \"-\" : \"\";",
-        "    String s = Double.toString(Math.abs(x));",
+        "    double a = Math.abs(x);",
+        # ECMAScript Number::toString renders the FEWEST digits that parse
+        # back to x. Double.toString is shortest-round-trip on JDK 19+ with one
+        # exception: it never emits fewer than two significant digits, so
+        # Double.MIN_VALUE comes out "4.9E-324" where the shortest decimal that
+        # round-trips is "5e-324". Measured: py/ts/go/rust all said "5e-324"
+        # and java said "4.9e-324". The one-digit form is the only one
+        # Double.toString can be too long for, so it is the only candidate that
+        # has to be tried.
+        "    String one = String.format(java.util.Locale.ROOT, \"%.0E\", a);",
+        "    String s = Double.parseDouble(one) == a ? one : Double.toString(a);",
         "    String mant = s;",
         "    long exp = 0;",
         "    int e = s.indexOf('E');",
