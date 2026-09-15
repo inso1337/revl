@@ -478,6 +478,21 @@ def select(changed, root) -> dict:
             tier = parts[1] if len(parts) > 1 else ""
             if tier not in BACKEND_TIERS:
                 return _full(f"unknown backend path {f} -> full")
+            # The committed playground/site wheel vendors the py tier's
+            # TOP-LEVEL modules as `revl/backends/python/<name>.py`
+            # (playground/build_wheel.py's SOURCE_TREES), so a change to one of
+            # them stales the committed wheel exactly as a src/revl change does.
+            # Nothing here selected the gate for it: PR #1092 changed
+            # backends/python/revl_fs_workspace.py, passed every check, and left
+            # `site wheel drift` red on main across four merges. Deliberately
+            # matched to the builder's real glob — top level only, not a
+            # recursive walk — so subdirectories the wheel never ships
+            # (golden/, tests/) do not drag the gate in. Held to the builder by
+            # tests/test_affected_tests.py, which reads build_wheel's own
+            # input list rather than restating it.
+            vendored = tier == "python" and f.endswith(".py") and len(parts) == 3
+            if vendored:
+                gates.add("site-wheel")
             pytest_nodes |= _tier_tests(root, tier)
             # `_tier_tests` matches the tier NAME, by filename or by content, in
             # the tests it scans. The oracles that hold a tier's REFERENCE
@@ -496,7 +511,9 @@ def select(changed, root) -> dict:
             gates.add("conformance")
             if tier in BACKEND_STEP_TIERS:
                 backends.add(tier)
-            reasons.append(f"backends/{tier}/**")
+            reasons.append(
+                f"backends/{tier}/**" + (" (+ site wheel)" if vendored else "")
+            )
             continue
 
         # --- stdlib/<mod>.rvl ---------------------------------------------- #
