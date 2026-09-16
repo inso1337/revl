@@ -7818,12 +7818,30 @@ fn ty_has_opaque(t: Str, env: List[Bind]) -> Bool {
   return tk_nominal_name(t) && ty_declared_nonrecord(t, env)
 }
 
-// A name the document DECLARES (`type`/`event`) whose shape this walk does not
-// carry: an alias, or a variant. Built-in heads and declared records are not
-// this, and neither is a name nothing declares.
+// A TRANSPARENT ALIAS, as closely as a spelling can be narrowed to one: a name
+// the document declares (`decl <Name>`) that is neither a record (its
+// `field <Name>.<x>` rows) nor a variant (a `case <C>` row naming it). Built-in
+// heads are none of these, and neither is a name nothing declares.
+//
+// Excluding the VARIANT is what keeps a refusal's SENTENCE the reference's.
+// Laundering `type Body = Text(Str) | Empty` would leave a record carrying one
+// spelled `{body: Any, …}` where the reference writes `{body: Body, …}` — the
+// same refusal with a different message, which the crate promises never to
+// issue. A variant is a nominal type of its own, so reading it as one is right.
 fn ty_declared_nonrecord(h: Str, env: List[Bind]) -> Bool {
   return !tk_builtin_head(h) && !tk_record_base(h, env)
-    && tenv_get(env, "decl ".concat(h)) != ""
+    && tenv_get(env, "decl ".concat(h)) != "" && !ty_variant_decl(h, env)
+}
+
+// Does any declared ADT CASE name this type? The declaration scan records one
+// `case <Case>` row per case, valued with the type it belongs to.
+fn ty_variant_decl(h: Str, env: List[Bind]) -> Bool {
+  var i = 0
+  while (i < env.length()) {
+    if (env[i].ty == h && env[i].name.slice(0, 5) == "case ") { return true }
+    i += 1
+  }
+  return false
 }
 
 fn ty_any_opaque(ts: List[Str], i: Int, env: List[Bind]) -> Bool {
