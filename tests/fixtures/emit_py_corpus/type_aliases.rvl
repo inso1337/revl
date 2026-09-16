@@ -24,8 +24,14 @@ type Ratio = Float
 type Ids = List[Int]
 type Reg = Map[Str, Int]
 type Tally = Count
+type Handler = (Count) -> Sku
 type Row = { id: Count, name: Sku }
 type Found = Hit(Count) | Missing
+
+// NOT an alias: `Pending` names no declared type and no builtin, which is
+// TypeScript's TS2304 — so revl keeps the one-case-variant reading and the name
+// survives into the `types` section. The erasure must not fire on it.
+type Status = Pending
 
 extern pure fn bump(n: Count) -> Count = @py { return n + 1 }
 
@@ -43,8 +49,16 @@ fn annotated_let() -> Count { let c: Count = 1 return c }
 fn widened_let() -> Ratio { let r: Ratio = 1 return r }
 fn pinned_let() -> Ids { let xs: Ids = [] return xs }
 
+// The arrow's OWN annotations, which live inside a body and so are reached by
+// the reference's second sweep (`_subst_body_annotations`) rather than its
+// declaration sweep. The resolved `returns` follows from the same substitution.
+fn annotated_arrow() -> Sku { let f = (v: Count): Sku => "x" return f(1) }
+fn takes_a_handler(h: Handler) -> Sku { return h(1) }
+fn passes_an_arrow() -> Sku { return takes_a_handler((v: Count): Sku => "y") }
+
 // NEGATIVE CONTROLS in the same document: a declared type that is NOT an alias
 // (a record and a variant keep their own names everywhere), and the builtin
 // spellings the aliases expand to, written directly.
 fn build_a_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
 fn plain(a: Int, b: Int) -> Int { return a + b }
+fn nominal(s: Status) -> Status { return s }
