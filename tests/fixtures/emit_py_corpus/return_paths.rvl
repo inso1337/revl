@@ -1,0 +1,75 @@
+// RETURNS ON EVERY PATH, the ACCEPTING side (docs/design/457 T3b).
+//
+// `selfhost/lower.rvl`'s fn-body walk now runs `_check_returns_on_every_path`,
+// and the whole risk of that rule is the direction it may not err in: a body
+// that DOES return on every path but whose terminating statement the reader
+// fails to see is a false rejection, and a false rejection turns a compiling
+// program into a refusal with every unit oracle still green.
+//
+// Every shape below is one the reference judges terminating, or one whose
+// terminating statement sits behind something the reader has to walk through to
+// find. `else_if.rvl` carries the `else if` chain, `control.rvl` the
+// `break`/`continue` forms; what is new here is `while (true)`, whose divergence
+// (JLS 14.21, rust `loop {}` : `!`) is the one loop form that ends a path, and
+// the item-379 rule that decides it: a `break` counts only when it TARGETS that
+// loop, so one captured by a nested loop leaves the outer divergence intact.
+
+// the plain case: the only exit is the `return` inside a diverging loop.
+pub fn poll(limit: Int) -> Int {
+  var i = 0
+  while (true) {
+    i += 1
+    if (i >= limit) { return i }
+  }
+}
+
+// the nested-loop `break` belongs to the INNER loop, so the outer `while (true)`
+// still diverges and this body still returns on every path.
+pub fn scan_rows(rows: List[List[Int]], target: Int) -> Int {
+  var seen = 0
+  while (true) {
+    for (row of rows) {
+      for (v of row) {
+        if (v == target) { break }
+        seen += 1
+      }
+    }
+    return seen
+  }
+}
+
+// a `break` that DOES target the `while (true)`: the loop can fall through, so
+// the trailing `return` is what carries the path and must not be dropped.
+pub fn drain(xs: List[Int]) -> Int {
+  var total = 0
+  var i = 0
+  while (true) {
+    if (i >= xs.length()) { break }
+    total += xs[i]
+    i += 1
+  }
+  return total
+}
+
+// both arms of the `if`/`else` return, and nothing follows it.
+pub fn sign(n: Int) -> Str {
+  if (n < 0) {
+    return "neg"
+  } else {
+    return "nonneg"
+  }
+}
+
+// a loop that may run zero times, with the trailing `return` behind it.
+pub fn first_even(xs: List[Int]) -> Int {
+  for (x of xs) {
+    if (x % 2 == 0) { return x }
+  }
+  return 0 - 1
+}
+
+// a `fn` with no declared return type owes no value at all.
+pub fn note(xs: List[Int]) {
+  var total = 0
+  for (x of xs) { total += x }
+}
