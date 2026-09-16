@@ -3767,6 +3767,28 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
 
 // The line for an inline body refusal, with the component line as the fallback
 // for a refusal that is not a plain statement walk (0 from `refusal_line`).
+// The type layer over one provide-method body (docs/design/457 T3a). The TYPE
+// ENVIRONMENT is deliberately EMPTY: a method's names come from the component's
+// requirement handles, its activation locals, its config fields and the service
+// signature, none of which this walk carries, and inventing types for them is
+// how a gate starts refusing programs the reference admits. Over the empty
+// environment `tk_infer` knows only what the literals themselves determine, so
+// what it decides here is the environment-free half of the algebra — `null` in
+// an expression position (T2), a Float literal outside binary64 — and it is
+// silent about everything a name would have had to answer for.
+fn mth_type_verdict(body: List[Stmt], i: Int, fallback: Int) -> Verd {
+  if (i >= body.length()) { return no_verd() }
+  let s = body[i]
+  // a `skip` carries the parser's failure node and a spawn an inert placeholder;
+  // neither is an expression the reference types.
+  if (s.kind == "skip" || s.spawnTarget != "") {
+    return mth_type_verdict(body, i + 1, fallback)
+  }
+  let r = tk_infer(s.e, [])
+  if (r.v != "") { return mk_verd(r.v, s.line == 0 ? fallback : s.line) }
+  return mth_type_verdict(body, i + 1, fallback)
+}
+
 fn body_line(ss: List[Stmt], cx: Ctx, fallback: Int) -> Int {
   let ln = refusal_line(ss, 0, cx, empty_ac())
   if (ln == 0) { return fallback }
@@ -4701,6 +4723,15 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
         if (rb.v != "" && (rl == 0 || rb.line < rl)) { return rb }
         return mk_verd(tagged(a.tag, a.msg), body_line(pm.body, mcx, comp.line))
       }
+      // docs/design/457 T3a, the provide-method half: the reference lowers a
+      // provide-method body with the ordinary fn-body machinery
+      // (`_lower_pure_stmt`), so every expression in one is TYPED exactly as a
+      // module `fn`'s is. It is placed after the body walk above because that
+      // walk is the one that runs in statement order; a body carrying both a
+      // wiring verdict and a type one reports the wiring verdict, which is the
+      // under-refusing direction.
+      let mtv = mth_type_verdict(pm.body, 0, comp.line)
+      if (mtv.v != "") { return mtv }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
       // provide-method arrow may not name its own async colour either.
@@ -7388,7 +7419,16 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   if (tv.v != "") { return tv }
   let a = tk_items(c.args, 0, env, "")
   if (a.v != "") { return a }
-  return tk_ok(tk_call_result(infer_call_ty(c, env)))
+  let t = tk_call_result(infer_call_ty(c, env))
+  // A GENERIC callee's declared return is not the call's type: the reference
+  // unifies the type parameters against the actual arguments, so
+  // `ident("hello")` on `fn ident(x: T) -> T` is a `Str`. That unification is
+  // the signature slice's (docs/design/457 T2b); until it lands, a result that
+  // still mentions a type parameter is unknown here. Reporting the parameter's
+  // own name instead would refuse with the right verdict and the wrong
+  // sentence, which the crate promises never to do.
+  if (collect_tparams_ty(t, env, [], true, []).length() > 0) { return tk_ok("") }
+  return tk_ok(t)
 }
 
 // Two rules the annotation engine has no reason to apply and the checker does.
