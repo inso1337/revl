@@ -1,0 +1,33 @@
+// A host-object component (issue 1153). `let cache = effect Map.new() undo
+// cache.drop()` acquires the generic `Map<V>` host object, its value type `V`
+// learned per site from how the map is used (`insert(key, value)` with an Int
+// `value` pins `Map<i64>`).
+//
+// No corpus document declared a host object before this one, so the rust
+// emitter's byte-agreement measurement was VACUOUS on the whole host surface:
+// `emit_host_stubs` returned `[]` and the oracle agreed, because nothing it
+// compiled ever asked for a stub. The shapes this document forces are the
+// R1 live-resource counter, the `Map<V>` host runtime, the `Arc<Map<V>>`
+// provider field, the `let-effect` acquisition prelude with its
+// `ctx.effect(.., move || { .. drop_() .. })` inverse, and the host-Map call
+// convention (`get`/`remove` borrow the key, `insert` does not re-clone it).
+fn seed() -> Int {
+  return 0
+}
+
+service Store {
+  fn get(key: Str) -> Opt[Int]
+  emission fn put(key: Str, value: Int)
+}
+
+component Ledger provides store: Store {
+  let cache = effect Map.new() undo cache.drop()
+
+  provide store {
+    fn get(key) = cache.get(key)
+    fn put(key, value) {
+      effect cache.insert(key, value)
+      undo   cache.remove(key)
+    }
+  }
+}
