@@ -795,6 +795,69 @@ Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
 so this section is not read as "arithmetic is broken generally".
 
+## Conversion and parsing divergences (issue #721)
+
+A sweep of every conversion revl exposes — the FR-9 `Str.to_int()` parse, the
+`Int32.to_int()` widen, the checked `Int.to_int32()` narrow, `Int.to_str()`,
+`Float.to_str()`, `charCodeAt`/`codepoint_at`, the implicit Int->Float widen and
+the `${…}` rendering of each — over 909 probe programs on all six tiers, plus
+239 optional-chaining probes. Four things disagreed; all are closed and
+asserted in `tests/test_458_conversion_dispatch.py`.
+
+- **A magnitude past `Int.MAX` parsed to a VALUE on go** (closed).
+  `"18446744073709551616".to_int()` was `Some(0)`, `"18446744073709551617"`
+  was `Some(1)` and `"92233720368547758080"` was `Some(0)`, where every other
+  tier answers `None` (docs/stdlib-2.0.md §Str.to_int: an out-of-i64-range
+  magnitude is `None` like any non-digit). `revlParseInt` accumulates
+  `n = n*10 + d` in a `uint64` and tested the bound AFTER the step; uint64
+  arithmetic wraps, and at `n == 2**63` the next `n*10` is exactly `5*2**64`,
+  which comes back 0. 152 of 313 parse inputs hit it. The helper pre-checks
+  `n > (lim-d)/10` now, which is what the wasm helper already did and admits
+  `n*10+d` exactly when that value is at most `lim`.
+- **A `let`/`var` binding of a `Float` emitted an invalid module on wasm**
+  (closed, named refusal). Every local on that tier is an `i32` except an
+  `Int`, and a Float value is an `f64`, so `let x: Float = 0.5` produced a
+  module wasmtime rejects at load with `type mismatch: expected i32, found
+  f64` — on a program that never even read the binding. A Float parameter,
+  return, comparison, equality, list element, variant payload and `.to_str()`
+  were each already refused BY NAME; the binding was the one Float position
+  that emitted instead. It takes the same refusal
+  (docs/wasm-capabilities.md). An interpolated Float expression that is never
+  bound still lowers inside the documented `$f64_to_str` fence.
+- **A conversion reached through `?.` did not go through the builtin table**
+  (closed, three tiers). `?.m(..)` is an `optcall` node, which carries no
+  receiver type, and three emitters read the method name off it without
+  reaching the table a plain `.m(..)` uses.
+  * **ts** emitted `payload?.m(..)` verbatim. Fourteen of the twenty-nine
+    builtin forms are not JS methods, so the emitted module ran and threw:
+    `o?.to_int is not a function`, and the same for `to_str`, `to_int32`,
+    `length`, `codepoint_at`, the four named divisions, the two `checked_*`
+    forms and the four ASCII classifiers. 59 of 99 probes failed. It renders
+    through `_ts_builtin` now, with the payload bound by an arrow IIFE;
+    `to_int` splits its two receiver families on the payload at run time
+    (`revlOptToInt`).
+  * **py**, the reference tier, answered `'3.0'` for an `Opt[Float]`
+    `?.to_str()` where every other route to that conversion answers `'3'`, and
+    raised `NameError: _REVL_I64_MIN` for `?.div_trunc()`/`?.div_floor()`/
+    `?.div_euclid()` and `_revl_i32` for `?.to_int32()` in any document whose
+    only bounded-Int use was through `?.`: the preamble gate read only
+    `to_int` off an optcall node.
+  * **go** handed its builtin renderer a synthetic receiver with no type, so
+    the six rows that dispatch on the receiver family (`length`, `concat`,
+    `slice`, `indexOf` and both `to_str` rows) all took their List/Int branch
+    and the emitted package did not build (`type string of _x does not match
+    []T`).
+  rust, java and wasm refuse `?.` by name and are unchanged.
+
+Not everything diverges, and the negative result is executed rather than
+asserted: `Str.to_int` agrees on all six tiers for the empty string, `"-"`,
+`"+7"`, leading and trailing whitespace, `"12a"`, `"1_0"`, `"0x10"`, `"1e3"`,
+non-ASCII decimal digits, `"007"`, both `Int.MIN` spellings and every magnitude
+around 2^63; `Float.to_str` agrees at every ECMAScript rendering threshold
+probed and byte-for-byte with `${…}`; `Int.to_str` agrees at `Int.MIN` and
+`Int.MAX`; `.to_int32()` faults on all six tiers out of range; and both round
+trips hold everywhere.
+
 ## Arbitrary-precision `Integer` (fenced, designed, not built)
 
 `Int32` landed complete across all six tiers (docs/arithmetic.md, "Sized
