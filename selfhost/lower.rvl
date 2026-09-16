@@ -4169,15 +4169,25 @@ fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig,
 // declared-type table (the `field <Type>.<name>` rows and the module `fn`
 // signatures) the module-`fn` walk already builds once per admission.
 fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
-                    fallback: Int) -> Verd {
+                    ret: Str, mname: Str, fallback: Int) -> Verd {
   if (i >= body.length()) { return no_verd() }
   let s = body[i]
   // a `skip` carries the parser's failure node and a spawn an inert placeholder;
   // neither is an expression the reference types.
   if (s.kind == "skip" || s.spawnTarget != "") {
-    return mth_type_verdict(body, i + 1, env, cx, fallback)
+    return mth_type_verdict(body, i + 1, env, cx, ret, mname, fallback)
   }
   let ln = s.line == 0 ? fallback : s.line
+  // a `return` in a provide method is a CHECKING position against the service's
+  // declared result (`_do_return`'s `check_ir`), exactly as a module `fn`'s is
+  // against its own annotation. The activation body has no return to check, and
+  // a method whose service leaves the result unspelled has nothing to check
+  // against; both pass `ret` "" and fall through to the infer position.
+  if (s.kind == "return" && ret != "") {
+    let rc = tk_check(s.e, ret, env, "`".concat(mname).concat("` returns"))
+    if (rc.v != "") { return mk_verd(rc.v, ln) }
+    return mth_type_verdict(body, i + 1, env, cx, ret, mname, fallback)
+  }
   let r = tk_infer(s.e, env)
   if (r.v != "") { return mk_verd(r.v, ln) }
   // the requirement-call arguments, after the expression's own types
@@ -4194,7 +4204,7 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
     if (bound == "") { bound = r.ty }
     if (bound != "") { next = tenv_put(env, s.bind, bound) }
   }
-  return mth_type_verdict(body, i + 1, next, cx, fallback)
+  return mth_type_verdict(body, i + 1, next, cx, ret, mname, fallback)
 }
 
 // The declared RETURN of the requirement call an expression is, or "". An
@@ -5139,9 +5149,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // is held to its service signature exactly as a method-body call is. The
   // environment it leaves behind is what every provide method starts from — the
   // reference lowers setup first and restores to that map after each method.
-  let setupTv = mth_type_verdict(comp.setup, 0, gtys, scx, comp.line)
+  let setupTv = mth_type_verdict(comp.setup, 0, ir_stratum_env(gtys), scx,
+                                 "", "", comp.line)
   if (setupTv.v != "") { return setupTv }
-  let setupTys = mth_body_tys(comp.setup, 0, gtys, scx)
+  let setupTys = mth_body_tys(comp.setup, 0, ir_stratum_env(gtys), scx)
   // rule C1 on the component lowering path (`_assert_colour_is_positional`): a
   // self-declared arrow colour in setup is refused as it is anywhere else.
   let setupSda = self_async_body(comp.setup, 0)
@@ -5199,6 +5210,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // under-refusing direction.
       let mtv = mth_type_verdict(pm.body, 0,
                                  mth_param_tys(pm, decl, 0, setupTys), mcx,
+                                 tk_solid(taint_strip(decl.ret), gtys), pm.name,
                                  comp.line)
       if (mtv.v != "") { return mtv }
       // the missing-return rule, which the reference raises once the whole body
@@ -7738,6 +7750,31 @@ fn tk_struct_compat(expected: Str, actual: Str) -> Bool {
 
 // ------------------------------------------------- the refusing expression walk
 
+// ------------------------------------------------------- the two STRATA
+//
+// The reference types a module `fn` body with `infer_ast` and a component /
+// provide-method body with `infer_ir`, and the two are not the same oracle. One
+// difference reaches this walk: `infer_ast` reads the bare name `None` as the
+// empty optional `Opt[Any]` BEFORE it consults the environment, while
+// `infer_ir` looks it up like any other name and finds nothing. So
+// `effect up.read(None)` against a `Str` parameter is ADMITTED by the
+// reference, and a walk that carries the `Opt[Any]` reading into a component
+// body refuses a program the reference admits.
+//
+// The marker rides the environment rather than the signature because every
+// position in a body already threads one, and a body's stratum is fixed for the
+// whole walk. `ir_stratum_env` seeds it; nothing else writes the row, and the
+// name is not a legal revl identifier so no program can collide with it.
+fn ir_stratum_key() -> Str { return "!stratum ir" }
+
+fn ir_stratum(env: List[Bind]) -> Bool {
+  return tenv_get(env, ir_stratum_key()) != ""
+}
+
+fn ir_stratum_env(env: List[Bind]) -> List[Bind] {
+  return tenv_put(env, ir_stratum_key(), "1")
+}
+
 // ------------------------------------------ the OPAQUE nominal, and why it
 // launders
 //
@@ -7829,7 +7866,7 @@ fn tk_infer_raw(e: Expr, env: List[Bind]) -> TInf {
     // BEFORE the environment. The annotation engine leaves it unknown, which
     // cost every rule downstream of it its operand: `~None`, `!None`,
     // `assert None` and `let b: Int32 = None` all went unrefused.
-    Var(n)      => tk_ok(n == "None" ? "Opt[Any]"
+    Var(n)      => tk_ok(n == "None" && !ir_stratum(env) ? "Opt[Any]"
                      : (tenv_get(env, n) != "" ? tenv_get(env, n)
                                                : infer_bare_case(n, env))),
     Bin(b)      => tk_bin(b, env),
