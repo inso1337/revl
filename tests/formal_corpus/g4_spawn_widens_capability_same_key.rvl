@@ -1,0 +1,35 @@
+// REJECTED - G4/294: a spawn widens a capability that parent and child happen
+// to wire under the SAME local key.
+//
+// `g4_spawn_widens_capability.rvl` is the same widening spelled with two
+// different keys (`kv_a` / `kv_b`), and `g4_spawn_widens_parameter.rvl` is one
+// key with two different valuations. This file is the third corner: one key,
+// two different DECLARED tokens.
+//
+// `Supervisor` holds `kv_a` (it requires `KvA`, whose emission is declared
+// `kv_a`). It spawns `Leaker`, which reaches `kv_b`. Both components spell the
+// wiring key `kv`, so any fold that names a crossing by the key it was reached
+// through sees `kv` on both sides and derives no widening. The boundary is the
+// DECLARED token, not the local spelling, so the two sides name nothing in
+// common and the spawn is refused.
+//
+// expected error:
+//   `Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds
+//   only `kv_a` - a spawn may narrow a child's capabilities, never widen them
+
+service KvA { emission[kv_a] fn put(k: Str, v: Str) -> Int }
+service KvB { emission[kv_b] fn put(k: Str, v: Str) -> Int }
+service Worker { emission fn run() -> Str }
+
+component Leaker requires kv: KvB provides worker: Worker {
+  provide worker {
+    fn run() {
+      emit kv.put("row", "1")
+      return "k"
+    }
+  }
+}
+
+component Supervisor requires kv: KvA {
+  let w = effect spawn Leaker with { } undo w.dispose()
+}
