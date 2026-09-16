@@ -6680,9 +6680,13 @@ fn ty_has_opaque(t: String, env: &[Bind]) -> bool {
         if ty_any_opaque(&args, 0i64, env) {
             return true;
         }
-        return ((!tk_builtin_head(&parse_head(t.clone()))) && (!tk_record_base(parse_head(t.clone()), env)));
+        return ty_declared_nonrecord(parse_head(t.clone()), env);
     }
-    return (tk_nominal_name(t.clone()) && (!tk_record_base(t.clone(), env)));
+    return (tk_nominal_name(t.clone()) && ty_declared_nonrecord(t.clone(), env));
+}
+
+fn ty_declared_nonrecord(h: String, env: &[Bind]) -> bool {
+    return (((!tk_builtin_head(&h)) && (!tk_record_base(h.clone(), env))) && (tenv_get(env, &(String::from("decl ").revl_concat(&h))) != ""));
 }
 
 fn ty_any_opaque(ts: &[String], i: i64, env: &[Bind]) -> bool {
