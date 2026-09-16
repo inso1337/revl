@@ -204,7 +204,6 @@ KNOWN_BYPASSES = {
     "examples/rejections/t16_provide_method_missing_return.rvl",
     "examples/rejections/t31_index_non_int_provide_method.rvl",
     "examples/rejections/t3_config_default_type.rvl",
-    "examples/rejections/a6_method_not_in_service.rvl",
     # -- NOT the type layer, and pre-dating this design --
     # `_check_spawn_attenuation`'s PARAMETERIZED capability-widening refusal
     # (item 294): `fs.write(path="/etc")` is not within the held
