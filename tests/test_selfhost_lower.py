@@ -291,7 +291,10 @@ def _classify(e: RevlError) -> str:
     # `a2`/`a9`, `use`, the parser-form fixtures and the extern G5s (`deferred`
     # in teardown, a witnessed inverse that reaches an emission) stay "OUT:"
     # until their own slice lands and can refuse them natively.
-    if e.code in ("T1", "T2", "HOST-METHOD"):
+    # `HOST-ARITY` joins the pass-through set with the call-and-signature slice
+    # (docs/design/457 T2b): the gate now counts a host stub verb's arguments
+    # itself, and the code is the reference's own.
+    if e.code in ("T1", "T2", "HOST-METHOD", "HOST-ARITY"):
         return e.code
     if "is not declared in this function" in m:
         return "G1"
@@ -322,7 +325,20 @@ def _classify(e: RevlError) -> str:
             or "record destructuring requires a record" in m
             or "type alias cycle" in m
             or "`mod` by a literal zero" in m
-            or "Float literal is infinite" in m):
+            or "Float literal is infinite" in m
+            # docs/design/457 T2b: `builtin_check`'s code-less receiver-family
+            # refusals and the lowering-time builtin arity count, plus the
+            # `Map.empty()` arity. Their CODED siblings (the `has no form for`
+            # row miss, the `join` element constraint and every `argument
+            # expects` mismatch) carry T1 and are named by the code arm above;
+            # these three shapes carry none, and the gate spells each one byte
+            # for byte, so leaving them "OUT:" would file an agreement as a tag
+            # mismatch.
+            or ("builtin `" in m and "` needs a " in m
+                and " receiver, got " in m)
+            or ("builtin `" in m and "` takes " in m
+                and " argument(s), " in m)
+            or "takes no arguments, " in m):
         return "TYPE"
     return "OUT:" + m
 
@@ -1439,6 +1455,28 @@ boot component B2 provides e2: Env2 {
     ("dynamic reserved key: a field read on a json_parse result",
      (ROOT / "backends" / "typescript" / "tests" / "fixtures"
       / "dynamic_reserved_key.rvl").read_text(), "T1"),
+    # ---- calls and signatures (docs/design/457 T2b) ------------------------
+    # The same walk resolves a CALL against a declaration: the signature table's
+    # arity window and per-argument check (monomorphic by `compatible`, generic
+    # by `unify` + `substitute`), the host stub surface, `_BUILTIN_SIG`, and the
+    # four refusals the reference makes while LOWERING a method call rather than
+    # while typing it.
+    ("t10 a call at the wrong arity", _fixture("t10_call_arity"), "T1"),
+    ("t15 a generic fn's result at a call site",
+     _fixture("t15_generic_call_site"), "T1"),
+    ("t25 an explicit [T] list turns the implicit heuristic off",
+     _fixture("t25_explicit_tparam_heuristic_off"), "T1"),
+    ("v2 a Map value's `set` against the map's V",
+     _fixture("v2_map_set_value_mismatch"), "T1"),
+    ("v2 a method a Map value's stdlib surface does not name",
+     _fixture("v2_map_value_unknown_method"), "T1"),
+    ("a literal zero divisor", _fixture("arith_zero_divisor"), "TYPE"),
+    ("t24 a stdlib method on a receiver no constructor pins",
+     _fixture("t24_opaque_receiver_builtin"), "HOST-METHOD"),
+    ("a method the host stub surface does not name",
+     _fixture("host_method_not_on_surface"), "HOST-METHOD"),
+    ("g4 an extern undo slot's argument type",
+     _fixture("g4_extern_undo_wrong_arg_type"), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
@@ -3273,26 +3311,11 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     "expression typing (T1/T2)": [
         ("t14_optional_chain_on_nonoptional", "T1"),
     ],
-    # calls and signatures: arity, generic call sites, builtin/method receivers,
-    # the literal zero divisor, extern-undo argument typing.
-    "calls and signatures": [
-        ("t10_call_arity", "T1"),
-        ("t15_generic_call_site", "T1"),
-        # the third fixture this gap gained by being READ rather than by moving:
-        # `fn typo[T](xs: List[U])` was refused by the gate's PARSER, which did
-        # not spell a type-parameter list at all, so the census filed it as
-        # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. The
-        # parse now reaches the body and the gate's real state shows: the
-        # reference refuses the argument type in its TYPE layer, and the gate
-        # runs no type layer. Its two neighbours above are the same family.
-        ("t25_explicit_tparam_heuristic_off", "T1"),
-        ("v2_map_set_value_mismatch", "T1"),
-        ("v2_map_value_unknown_method", "T1"),
-        ("arith_zero_divisor", "TYPE"),
-        ("t24_opaque_receiver_builtin", "HOST-METHOD"),
-        ("host_method_not_on_surface", "HOST-METHOD"),
-        ("g4_extern_undo_wrong_arg_type", "T1"),
-    ],
+    # calls and signatures: LANDED whole (docs/design/457 T2b). The signature
+    # table, `unify`/`substitute`, the host stub surface, `_BUILTIN_SIG` and the
+    # four lowering-time method refusals moved all nine of this family's
+    # fixtures into REJECTED_PROGRAMS above, where tag AND message are compared,
+    # so the family has no row left here.
     # arrows and function values: arrow-body checking, function-value flow and
     # arity, arrow annotations. (The self-declared async colour,
     # t34_arrow_self_declared_async, was in this family until the gate learned
@@ -3466,17 +3489,18 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_28_fixtures():
+def test_the_type_layer_gap_is_exactly_19_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
-    two of them and the fn-body STATEMENT layer (T3a) eleven more of the
-    expression rows for the module-`fn` surface; the twelfth document that moved
-    with T3a, `dynamic_reserved_key`, never had a row here because this pin
-    addresses its fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 28, len(_TYPE_LAYER_CASES)
+    two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
+    rows for the module-`fn` surface, and the call-and-signature layer (T2b)
+    nine more; the twelfth document that moved with T3a,
+    `dynamic_reserved_key`, never had a row here because this pin addresses its
+    fixtures by bare name under `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 28, "a fixture is listed twice"
+    assert len(set(names)) == 19, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
