@@ -1,0 +1,28 @@
+// The alias-free twin of `type_aliases.rvl` — the same program with every
+// transparent alias spelled out as the type it aliases. It declares no alias, so
+// both frontends must already agree on it, on the tree before the erasure lands
+// as much as on the tree after.
+//
+// It is the control the erasure is measured against: `type_aliases.rvl` failing
+// and this passing says the divergence is the alias; both failing would say the
+// projection itself broke, which is the way a fix can masquerade.
+type Row = { id: Int, name: Str }
+type Found = Hit(Int) | Missing
+
+extern pure fn bump_c(n: Int) -> Int = @py { return n + 1 }
+
+fn add_c(a: Int, b: Int) -> Int { return a + b }
+fn label_c(s: Str) -> Str { return s }
+fn through_an_application_c(xs: List[Int]) -> Int { return xs[0] }
+fn inside_an_argument_c(xs: List[Int]) -> Int { return xs[0] }
+fn chained_c(n: Int) -> Int { return n }
+fn read_a_field_c(r: Row) -> Int { return r.id }
+fn scale_c(r: Float) -> Float { return r * 2.0 }
+fn keyed_c(m: Map[Str, Int], k: Str) -> Int { return m[k] }
+fn case_payload_c(f: Found) -> Int { return match f { Hit(n) => n, Missing => 0 } }
+fn calls_the_extern_c(n: Int) -> Int { return bump_c(n) }
+fn annotated_let_c() -> Int { let c: Int = 1 return c }
+fn widened_let_c() -> Float { let r: Float = 1 return r }
+fn pinned_let_c() -> List[Int] { let xs: List[Int] = [] return xs }
+fn build_a_row_c(id: Int, name: Str) -> Row { return { id: id, name: name } }
+fn plain_c(a: Int, b: Int) -> Int { return a + b }
