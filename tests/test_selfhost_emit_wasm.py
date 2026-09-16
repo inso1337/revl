@@ -139,6 +139,12 @@ CORPUS = [
                     # the strict single `i32.and`/`i32.or` when it provably
                     # cannot (constants, local reads, and `!`/comparison/logical
                     # combinations of those)
+    "externs.rvl",  # issue 1130: a DECLARED extern with no `@wasm` body. The
+                    # reference answers one with a named
+                    # `;; unsupported on this tier: externs … (no @wasm body)`
+                    # comment — a refusal it states in the output — and the port
+                    # reproduces it, so the byte oracle covers the sentence like
+                    # any other emitted text
     "loopctrl.rvl", # item 379 / 391: break/continue via named labels
                     # ($revl_brk_N/$revl_top_N, inner $revl_cnt_N so `for`'s
                     # continue still runs idx++), nested-if/nested-loop targeting,
