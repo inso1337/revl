@@ -1082,7 +1082,13 @@ fn check_list_t(items: List[Expr], expected: Str, env: List[Bind], tt: Tt,
     }
     return ok_ty("")
   }
-  let elem = ep.args.length() > 0 ? ep.args[0] : ""
+  // NOT `ep.args.length() > 0 ? ep.args[0] : ""`. The rust emitter infers a
+  // binding's surface type to decide whether a by-value use must clone, and a
+  // ternary initialiser has none — so `elem` was MOVED into the call and the
+  // second iteration of this loop borrowed a moved value (E0382). A call with
+  // a declared return type is a type it can read, which is the same shape
+  // `check_service_src`'s `caps` has always had.
+  let elem = arg_or_empty(ep.args, 0)
   var i = 0
   while (i < items.length()) {
     let c = check_t(items[i], elem, env, tt, ct,
@@ -1683,6 +1689,11 @@ fn mk_comp(nm: Str, rq: List[Bind], pv: List[Provide],
 }
 
 fn mk_ev2(l: List[Str], c: List[Str]) -> Ev { return { labels: l, caps: c } }
+
+fn tbl_or_empty(built: TblR) -> Tt {
+  if (built.err != "") { return Map.empty() }
+  return built.tbl
+}
 
 fn mk_ctx(nm: Str, rq: Map[Str, Str], sv: Map[Str, SvcD], fn_: Map[Str, FnD],
           cp: CapsT, tb: Tt) -> Ctx {
@@ -2878,9 +2889,12 @@ pub fn check_service_src(src: Str) -> Str {
   let pg = parse_prog(src)
   if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
   // A table this walk could not build leaves it exactly where it was before
-  // the table existed: silent on the comparisons that need one.
-  let built = build_types(pg.types)
-  let tbl: Tt = built.err == "" ? built.tbl : Map.empty()
+  // the table existed: silent on the comparisons that need one. `tbl_or_empty`
+  // rather than a ternary for the reason `check_list_t`'s `elem` spells out:
+  // the rust emitter reads a binding's type off its initialiser, and a ternary
+  // has none, so the binding is moved into the first component's `mk_ctx` and
+  // the second iteration of the loop below is an E0382.
+  let tbl = tbl_or_empty(build_types(pg.types))
   var svcs: Map[Str, SvcD] = Map.empty()
   var si = 0
   while (si < pg.services.length()) {
