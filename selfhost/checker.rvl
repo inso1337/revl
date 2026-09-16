@@ -1685,8 +1685,8 @@ fn mk_comp(nm: Str, rq: List[Bind], pv: List[Provide],
 fn mk_ev2(l: List[Str], c: List[Str]) -> Ev { return { labels: l, caps: c } }
 
 fn mk_ctx(nm: Str, rq: Map[Str, Str], sv: Map[Str, SvcD], fn_: Map[Str, FnD],
-          cp: CapsT) -> Ctx {
-  return { compName: nm, reqMap: rq, svcs: sv, fns: fn_, caps: cp }
+          cp: CapsT, tb: Tt) -> Ctx {
+  return { compName: nm, reqMap: rq, svcs: sv, fns: fn_, caps: cp, tt: tb }
 }
 
 fn mk_ck2(x: Ctx, en: List[Bind], e2: Ev, m: Str) -> Ck {
@@ -2498,8 +2498,16 @@ fn reached_caps(called: List[Str], caps: CapsT, i: Int,
 
 // ---------------------------------------------------------------- checking
 
+// `tt` is slice T2a's addition: slice one's expression walk now types a
+// record LITERAL structurally (item 71), so a literal handed to a service
+// method meets the method's declared record type. Without the program's
+// declared-type table that comparison cannot be resolved and the walk refused
+// a call the reference does not object to — `examples/app/notes.rvl` and
+// `examples/webui-entry/console.rvl`, both of which this file's census pins as
+// UNDECIDED. Carrying the table is what keeps them undecided for the right
+// reason instead of decided for the wrong one.
 type Ctx = { compName: Str, reqMap: Map[Str, Str], svcs: Map[Str, SvcD],
-             fns: Map[Str, FnD], caps: CapsT }
+             fns: Map[Str, FnD], caps: CapsT, tt: Tt }
 type Ev  = { labels: List[Str], caps: List[Str] }
 type Ck  = { ctx: Ctx, env: List[Bind], ev: Ev, msg: Str }
 
@@ -2639,7 +2647,7 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
     // calls in the value count even though the statement also binds
     next = walk_expr(s.e, s.kind == "emit", ck)
     if (next.msg != "") { return next }
-    let inf = infer(s.e, next.env)
+    let inf = infer_t(s.e, next.env, next.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(next, inf.msg) }
     next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
               ev: next.ev, msg: "" }
@@ -2751,10 +2759,10 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   }
   var k = 0
   while (k < args.length()) {
-    let inf = infer(args[k], ck.env)
+    let inf = infer_t(args[k], ck.env, ck.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(ck, inf.msg) }
     let pt = decl.params[k].ty
-    if (pt != "" && inf.ty != "" && !compatible(pt, inf.ty)) {
+    if (pt != "" && inf.ty != "" && !compat_tt(pt, inf.ty, ck.ctx.tt)) {
       return refuse_ck(ck, "`".concat(root).concat(".").concat(meth)
         .concat("` argument `").concat(decl.params[k].name)
         .concat("` expects `").concat(pt)
@@ -2818,10 +2826,10 @@ fn fn_sig_check(name: Str, args: List[Expr], ck: Ck) -> Ck {
   }
   var k = 0
   while (k < args.length()) {
-    let inf = infer(args[k], ck.env)
+    let inf = infer_t(args[k], ck.env, ck.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(ck, inf.msg) }
     let pt = d.params[k].ty
-    if (pt != "" && inf.ty != "" && !compatible(pt, inf.ty)) {
+    if (pt != "" && inf.ty != "" && !compat_tt(pt, inf.ty, ck.ctx.tt)) {
       return refuse_ck(ck, "argument ".concat(int_str(k + 1)).concat(" of `")
         .concat(name).concat("(...)` expects `").concat(pt)
         .concat("`, got `").concat(inf.ty).concat("`"))
@@ -2869,6 +2877,10 @@ fn g4_verdict(svcName: Str, mname: Str, decl: MethSig, ev: Ev) -> Str {
 pub fn check_service_src(src: Str) -> Str {
   let pg = parse_prog(src)
   if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  // A table this walk could not build leaves it exactly where it was before
+  // the table existed: silent on the comparisons that need one.
+  let built = build_types(pg.types)
+  let tbl: Tt = built.err == "" ? built.tbl : Map.empty()
   var svcs: Map[Str, SvcD] = Map.empty()
   var si = 0
   while (si < pg.services.length()) {
@@ -2885,7 +2897,7 @@ pub fn check_service_src(src: Str) -> Str {
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
-    let ctx: Ctx = mk_ctx(comp.name, bind_map(comp.reqs), svcs, fnt, caps)
+    let ctx: Ctx = mk_ctx(comp.name, bind_map(comp.reqs), svcs, fnt, caps, tbl)
     let sck = check_stmts(comp.setup, 0,
                           { ctx: ctx, env: [], ev: empty_ev(), msg: "" })
     if (sck.msg != "") { return sck.msg }
