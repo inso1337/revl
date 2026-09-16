@@ -827,7 +827,7 @@
       "statements": 3563,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
-          "_emit_step": 138,
+          "_emit_step": 92,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 2
         },
@@ -840,15 +840,15 @@
           "_bridge_ret_deser": 6,
           "_bridge_ret_ser": 7,
           "_bridge_serde_ok": 1,
-          "_emit_bridge": 9,
+          "_emit_bridge": 4,
           "_result_ok_err": 2,
           "_result_to_json": 1,
           "_split_result": 12
         },
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
           "_emit_component": 5,
-          "_emit_component_new": 27,
-          "_emit_components": 8,
+          "_emit_component_new": 23,
+          "_emit_components": 7,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
@@ -874,14 +874,13 @@
           "_rust_extern_config_bind": 9
         },
         "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs.": {
-          "_component_map_values": 5,
-          "_emit_host_stubs": 7,
-          "_emit_host_stubs.walk": 1,
-          "_host_of": 12,
-          "_map_expr_inserts": 20,
-          "_map_insert_candidates": 15,
-          "_map_value_expr_type": 71,
-          "_map_value_rust_type": 18
+          "_component_map_values": 1,
+          "_emit_host_stubs": 5,
+          "_host_of": 4,
+          "_map_expr_inserts": 3,
+          "_map_insert_candidates": 7,
+          "_map_value_expr_type": 67,
+          "_map_value_rust_type": 2
         },
         "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions.": {
           "_emit_v3_lifecycle_tests": 81,
@@ -893,7 +892,6 @@
           "_result_to_json_funneled": 1
         },
         "Ownership and string-view alternatives: residuals are the computed/non-atomic argument refusal, unknown or function-typed clone safety nets, positional char-view threading, and undo recloning branches. The corpus covers ordinary borrowed strings, owned calls, escaping callbacks, computed receivers, and safe string self-append.": {
-          "_acquire_moved_locals": 5,
           "_borrow_str_arg": 1,
           "_by_value_arg": 4,
           "_by_value_field_clone": 2,
@@ -902,7 +900,6 @@
           "_compute_char_views": 12,
           "_compute_char_views.threaded_index": 4,
           "_free_fn_call": 2,
-          "_method_undo_clones": 1,
           "_str_params_indexed.walk": 3,
           "_undo_reclone_locals": 1,
           "_v3_self_append_inplace": 19
@@ -923,11 +920,10 @@
           "_v3_stmt": 5
         },
         "Realm routing and child instances require intercept JSON metadata, deterministic realm identities, router structs, spawn handles, and runtime child configuration. The self-host emitter explicitly defers isolate/intercept/routes/spawn.": {
-          "_collect_realm_labels": 8,
+          "_collect_realm_labels": 2,
           "_emit_router_struct": 16,
           "_intercept_json_lit": 18,
           "_intercept_json_type": 34,
-          "_revl_realm_helper": 7,
           "_revl_spawn_handle": 1,
           "_uses_spawn": 1,
           "_v3_instance_get": 8,
@@ -969,7 +965,7 @@
         "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered.": {
           "_arg_ref_name": 2,
           "_config_default_lit": 1,
-          "_default_for_rust_type": 12,
+          "_default_for_rust_type": 11,
           "_escape_format_braces": 1,
           "_finite_float": 1,
           "_ident": 1,
@@ -988,9 +984,8 @@
           "emit": 3
         },
         "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction.": {
-          "_body_has_compensation": 3,
-          "_body_has_witnessed": 3,
-          "_component_has_effectful_methods": 1,
+          "_body_has_compensation": 2,
+          "_body_has_witnessed": 2,
           "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
           "_emit_activation_compensation": 13,
@@ -1001,16 +996,14 @@
           "_emit_teardown_begin": 3,
           "_emit_teardown_commit": 2,
           "_emit_witnessed_step": 26,
-          "_is_map_cas": 1,
-          "_method_bodies_have_compensation": 2,
-          "_method_bodies_have_witnessed": 2,
+          "_method_bodies_have_compensation": 1,
+          "_method_bodies_have_witnessed": 1,
           "_method_body_lines": 40,
-          "_method_body_pure_new": 1,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
         "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read \u2014 `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 \u00a74.5 adds two statements: the `replay(\u2026)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_render_expr": 69
+          "_render_expr": 59
         },
         "backends/rust/emit.py::_borrow_list_arg: item 437d borrow of a read-only list parameter into a `&[T]` slot. The already-lowered-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual statement is the List-index place-borrow arm (`&xs[i]` via _v3_strip_index_clone), which no byte-agreement corpus document passes into a borrowed `&[T]` argument, the same shape left uncovered on _v3_strip_index_clone itself.": {
           "_borrow_list_arg": 1
@@ -1291,9 +1284,6 @@
         "Remaining raise rejects len on a non-List/non-Str receiver; canonical frontend len nodes carry supported collection types.": {
           "_V3Emitter._len_expr": 1
         },
-        "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot \u2014 the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead.": {
-          "_V3Emitter._declare_local": 2
-        },
         "Remaining raises explicitly reject fault-injection or lifecycle test harnesses unsupported by the WASM backend.": {
           "_refuse_fault_tests": 2,
           "_refuse_lifecycle_tests": 2
@@ -1398,6 +1388,9 @@
           "_V3Emitter._helper_str_index_of": 1,
           "_V3Emitter._helper_str_join": 1,
           "_V3Emitter._helper_str_split": 1
+        },
+        "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot \u2014 the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead.": {
+          "_V3Emitter._declare_local": 2
         },
         "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
           "_ComponentEmitter._provide_routed": 18,
@@ -1817,12 +1810,12 @@
           "bridge_arg_ser": 1,
           "bridge_ret_deser": 1,
           "bridge_ret_ser": 1,
-          "emit_bridge": 5
+          "emit_bridge": 4
         },
         "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming.": {
           "checked_method": 5,
-          "default_for_rust_type": 12,
-          "emit_host_stubs": 1,
+          "default_for_rust_type": 11,
+          "emit_host_stubs": 5,
           "ind": 1,
           "is_addsubmul": 1,
           "is_builtin_ctor": 1,
@@ -1834,18 +1827,12 @@
           "set_vts": 1
         },
         "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered.": {
-          "binds": 1,
           "config_default_lit": 1,
-          "emit_component": 2,
-          "emit_component_new": 5,
-          "emit_provide_construction": 1,
+          "emit_component": 1,
+          "emit_component_new": 2,
           "has_extra_linebreak": 1,
           "is_extra_linebreak": 3,
           "method_body_lines": 5,
-          "method_has_effectful_steps": 1,
-          "method_scope_rename": 1,
-          "method_undo_clones": 1,
-          "method_undo_rename": 1,
           "mname": 1,
           "provide_let_type": 1,
           "provide_methods": 1,
@@ -1855,6 +1842,25 @@
         "Extern deferral boundary: the residual branches detect absent/non-Rust extern bodies and config/runtime extern scaffolding that the self-host pure-v3 module does not emit. Ordinary @rs externs are covered.": {
           "emit_v3_externs": 4,
           "extern_body_defer": 2
+        },
+        "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153).": {
+          "by_value_reuse": 2,
+          "component_map_values": 3,
+          "emit_comp_step": 5,
+          "emit_let_effect_step": 8,
+          "host_of": 6,
+          "map_insert_candidates": 8,
+          "map_value_expr_type": 75,
+          "map_value_surface_type": 1,
+          "steps_use_timer": 3,
+          "uses_stream_event": 1,
+          "uses_timer": 1,
+          "witnessed_acquire": 5
+        },
+        "Host-object blocks no corpus document acquires: the corpus declares a host `Map`, so the Pool and Job literal line lists (and the CAS verb test that selects `insert_if_absent`) are emitted by a branch the corpus never takes. Each is a verbatim transcription of the reference's own literal list, so there is nothing for a second implementation to get wrong beyond the gate on which block rides along, which the Map case does exercise (issue 1153).": {
+          "host_job_lines": 86,
+          "host_pool_lines": 129,
+          "is_map_cas_verb": 1
         },
         "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one \u2014 no rust corpus document negates an Int32.": {
           "borrow_str_arg": 1,
@@ -1867,8 +1873,8 @@
           "render_bin": 1,
           "render_builtin": 2,
           "render_call": 1,
-          "render_component_call": 3,
-          "render_inner": 5,
+          "render_component_call": 1,
+          "render_inner": 4,
           "render_interp": 2,
           "render_un": 2,
           "render_var": 2,
@@ -1891,6 +1897,9 @@
           "split_fn_params": 1,
           "split_fn_ret": 2,
           "v3_infer_type": 3
+        },
+        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
+          "collect_realm_labels": 3
         },
         "selfhost/emit_rust.rvl::borrow_list_arg: the self-host mirror of the reference _borrow_list_arg (item 437d) list-slice borrow. As on the reference tier the already-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual is the List-index place-borrow arm (`&xs[i]` via strip_index_clone), which no corpus document reaches, matching strip_index_clone.": {
           "borrow_list_arg": 1
