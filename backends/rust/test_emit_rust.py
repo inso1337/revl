@@ -554,6 +554,48 @@ def test_cargo_check_reused_uninferred_string_compiles(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+# item 146 — the same reuse rule INSIDE a `test` block. A test body's locals are
+# not in the emitter's `var_types` map (that is seeded from a fn's params), so
+# every bare name in a test is un-inferred and the reuse fallback is the only
+# thing that can decide the clone. It was never established for a test body, so
+# a non-Copy local consumed by value more than once was MOVED at the first use
+# and the second borrowed a moved value: the emitted crate built and its emitted
+# `cargo test` did not. Measured on `selfhost/emit_rust.rvl`, which generating
+# the gate crate's native emitter brought into a `cargo test` (4x E0382).
+_REUSED_IN_TEST_RVL = """
+fn use_map(m: Map[Str, Str], k: Str) -> Str { return m.lookup(k) ?? "" }
+
+test "a non-Copy local reused across calls" {
+  var tn: Map[Str, Str] = Map.empty()
+  tn = tn.set("a", "1")
+  assert use_map(tn, "a") == "1"
+  assert use_map(tn, "a") == "1"
+  let n = 1
+  assert n + n == 2
+}
+"""
+
+
+def test_a_reused_non_copy_local_in_a_test_block_clones_each_move():
+    src = emit.emit(compile_source(_REUSED_IN_TEST_RVL))
+    body = src.split("fn a_non_copy_local_reused_across_calls")[1].split("\n}")[0]
+    assert body.count("use_map(tn.clone(),") == 2, body
+    # a Copy scalar reused just as often never clones: the reuse signal only
+    # ever adds a clone where one is needed.
+    assert "checked_add(n)" in body, body
+    assert "checked_add(n.clone())" not in body, body
+
+
+@needs_cargo
+def test_cargo_check_a_reused_non_copy_local_in_a_test_block_compiles(tmp_path):
+    """The payoff: the emitted crate's TEST target now type-checks. `cargo
+    check` alone does not reach a `#[cfg(test)]` body, so this checks every
+    target — which is exactly the gap that let the defect through."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_REUSED_IN_TEST_RVL)),
+                          "--all-targets")
+    assert result.returncode == 0, result.stderr
+
+
 # item 282 — a read-only `Str` parameter (only ever a builtin receiver, a
 # builtin `&str` argument, an equality/`+` operand, or threaded straight to
 # another such parameter) lowers to a borrowed `&str`, so the call lends the
