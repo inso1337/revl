@@ -4923,6 +4923,13 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
 /// read a non-refusal as an admission — which is why the arm is `NoObjection`,
 /// why there is no `is_admitted()`, and why `to_json` reports
 /// `"admitted": false` on every arm.
+///
+/// `"fn f() -> Int { }"` used to sit in this list and no longer does: the
+/// self-host gained the returns-on-every-path rule (docs/design/457 T3b), so
+/// the crate now REFUSES it with the reference's own code and sentence. That is
+/// an agreement, and it is asserted by
+/// `a_body_that_never_returns_is_refused_with_the_reference_message` below
+/// rather than pinned here. The rest of the type layer is still a gap.
 #[test]
 fn type_layer_programs_are_not_refused_here_and_must_not_read_as_admitted() {
     let reference_refuses_all_of_these = [
@@ -4932,8 +4939,6 @@ fn type_layer_programs_are_not_refused_here_and_must_not_read_as_admitted() {
         "fn f() -> Int { return undefined_name }",
         // a return arrow with no return type at all
         "fn f() -> { }",
-        // a declared return type with no returning body
-        "fn f() -> Int { }",
     ];
     for src in reference_refuses_all_of_these {
         let verdict = admit(src);
@@ -4948,6 +4953,38 @@ update the crate docs and this test: {}",
         assert!(verdict.to_json().contains("\"admitted\":false"));
         assert_eq!(verdict.code(), None);
     }
+}
+
+/// The half of the type layer this crate DOES decide: a `fn` with a declared
+/// return type whose body cannot return on every path (docs/design/457 T3b).
+/// Both messages of the rule are here, and the code is the reference's own.
+#[test]
+fn a_body_that_never_returns_is_refused_with_the_reference_message() {
+    match admit("fn f() -> Int { }") {
+        Verdict::Refused { code, message } => {
+            assert_eq!(code, "T1");
+            assert_eq!(
+                message,
+                "`f` is declared to return `Int` but its body never returns a \
+value"
+            );
+        }
+        other => panic!("expected a T1 refusal, got {:?}", other),
+    }
+    match admit("fn f(c: Bool) -> Int {\n  if (c) { return 1 }\n}") {
+        Verdict::Refused { code, message } => {
+            assert_eq!(code, "T1");
+            assert_eq!(
+                message,
+                "`f` is declared to return `Int` but control can reach the end \
+of its body without a `return`"
+            );
+        }
+        other => panic!("expected a T1 refusal, got {:?}", other),
+    }
+    // and the accepting side, which is the direction this rule may not err in
+    assert!(!admit("fn f(c: Bool) -> Int { if (c) { return 1 } else { return 2 } }")
+        .is_refused());
 }
 
 // ------------------------------------------------------------- fail closed

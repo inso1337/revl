@@ -71,6 +71,10 @@ and the parser- and statement-form fixtures (`t19_union_type`,
 `v2_dynamic_realm`, `v2_fail_in_pure_fn`, `g6_impure_statement`,
 `v2_extern_acquire_no_undo`). Item 391's per-feature port list owns those.
 
+Of that table, the return-path pair (`t8_missing_return`,
+`t9_return_path_incomplete`) has since LANDED — see T3b(returns) in section 5 —
+so "return paths and match" now stands at its match half alone.
+
 Why the census does not show this today: `tools/gate_reference_census.py`
 buckets a false admission as `false-admit/<tag>` only when
 `tests/test_selfhost_lower.py::_classify` names the reference refusal with a
@@ -568,6 +572,75 @@ reference's message. Oracle: lower corpus; fixtures `t8`, `t9`, `t13`,
 `g6_closure_mutates_capture`. ~400 lines. Independent of T3a except for the
 shared channel; can be dispatched in parallel with it if T3a's channel lands
 first as a tiny preparatory PR.
+
+**T3b(returns). Returns on every path. LANDED, ahead of T3a and without its
+channel.** The return rule needs no channel and no expression algebra: it is a
+property of the STATEMENT TREE and the declared return spelling, and
+`selfhost/lower.rvl` has read that tree since item 391's binding-discipline
+slice (`fb_scan` builds `FbStep` with `if`/`while`/`for` arms and bodies for the
+scope walk). So `fb_function` now runs `_check_returns_on_every_path` after
+`fb_walk`, per `fn` in declaration order, which is exactly where `_lower_fns`
+runs it — after the body, ahead of the next declaration. Both sentences, both
+anchors: the never-returns one at the declaration line, the falls-through one at
+`decl.body[-1].line`. `_definitely_returns` ports verbatim, `while (true)`
+divergence included with item 379's targeting-`break` rule, and an `if` with no
+`else` needs no flag because an absent arm is an empty step list and an empty
+step list never returns.
+
+What it withholds, and why each silence is the sound direction. This reader sees
+fewer statements than the reference's AST walk and the asymmetry is the whole
+argument: a `return` it fails to see turns an admitting body into a refusal,
+which is the false-rejection direction this gate may not err in. So one "bail"
+anywhere in the tree — an `else if` chain, a destructuring binder, any statement
+`fb_one` cannot model — leaves the whole `fn` to the reference; `fb_scan` now
+records its cursor-stall truncation as a bail for the same reason, which is
+behaviour-preserving for `fb_walk` (both end a block clean). A declared return
+that mentions a transparent type alias is withheld too: `_resolve_type_aliases`
+substitutes `fn.returns` in place before the message is spelled, so quoting the
+written spelling would disagree on the text even where the verdict agrees. The
+alias detector deliberately over-includes, because naming one type too many
+withholds a verdict while naming one too few spells an erased message wrong.
+
+What it buys, measured. `t8_missing_return` and `t9_return_path_incomplete`
+moved from `false-admit/T1` to `agree-refuse/T1` (message AND line), leaving that
+census bucket at 29 over the baselined corpus. Over the `--all` sweep five
+further programs moved the same way, every one of them a model-written
+`bench/results` artifact, so the rule earns its keep outside the fixture
+directory. In the 400-draw fuzz at seed 7 the same change moved five programs OUT
+of a false-admit bucket and none into one, and no program anywhere moved toward
+`false-reject`: `agree-admit` is unchanged at 431.
+
+An ORDERING divergence it introduces, named rather than met. The reference lowers
+a body statement by statement and asks the return question LAST, so a body that
+both breaks an earlier rule and never returns draws the earlier refusal. This
+gate does not run the expression algebra and decides only the assignment position
+of the binding discipline, so on such a body it draws the return-path refusal
+instead. Both refusals are true and the program is refused either way, so this is
+a 419c-style naming divergence and never an admission the reference would not
+give — and it is strictly better than what it replaced, which was a no-objection.
+It shows only under the fuzz (three `tag-mismatch/G1->T1`, two `msg-mismatch/T1`,
+each from a mutant that both corrupts a name and loses its `return`), never on
+the baselined corpus, and it closes as the name-resolution and expression slices
+land. `test_an_unresolved_name_read_outranks_the_return_path_on_the_reference`
+pins it.
+
+What it does NOT buy: nothing about match exhaustiveness, unknown cases, alias
+cycles, duplicate declarations or declared-type wellformedness — the rest of T3b
+is untouched, and the four `no builtin method` / `non-exhaustive match` families
+still need the tables T2b and T2d build. It also does not close the T3a
+statement channel: this rule is the one obligation of the fn loop that can be
+decided from the tree alone, which is why it could land first.
+
+A gap it MEASURED on the way past, not caused and not fixed. The first corpus
+document to declare a transparent type alias (`type Count = Int`) showed that
+`selfhost/lower.rvl`'s `lower_to_ir` does not erase aliases at declaration sites:
+it emits `"returns": "Count"` where the reference, having run
+`_resolve_type_aliases`, emits `"returns": "Int"`. No corpus document under
+`tests/fixtures/emit_py_corpus/` had ever declared one, so both differential
+oracles agreed trivially — the absence, not a divergence. That erasure is
+§2.1 item 1 and belongs to T1's `types.rvl`; the alias case was dropped from
+`return_paths.rvl` rather than half-fixed here, and this paragraph is the record
+that it is known.
 
 **T3c. One engine.** Delete lower.rvl's private `infer`/`binop_ty`/
 `builtin_ret`/`join_ty`/`infer_field`/`infer_callee`/`operands_of` and the
