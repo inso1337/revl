@@ -151,22 +151,12 @@ KNOWN_BYPASSES = {
     "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
     "examples/rejections/t30_field_read_on_any_provide_method.rvl",
     # -- calls and signatures --
-    "examples/rejections/t10_call_arity.rvl",
-    "examples/rejections/t15_generic_call_site.rvl",
-    # The same story as t29/t30, one slice later. `fn typo[T](xs: List[U])` was
-    # refused by the gate's PARSER — it did not spell a type-parameter list at
-    # all — so the census filed it as `tag-mismatch/T1->BAD`: the right verdict
-    # for the wrong reason. `p_fn` now steps over `[T, U]` the way the reference
-    # does, the parse reaches the body, and the gate's real state shows. The
-    # reference refuses the ARGUMENT TYPE in its type layer and this gate runs no
-    # type layer; its two neighbours above are the same family.
-    "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
-    "examples/rejections/v2_map_set_value_mismatch.rvl",
-    "examples/rejections/v2_map_value_unknown_method.rvl",
-    "examples/rejections/arith_zero_divisor.rvl",
-    "examples/rejections/t24_opaque_receiver_builtin.rvl",
-    "examples/rejections/host_method_not_on_surface.rvl",
-    "examples/rejections/g4_extern_undo_wrong_arg_type.rvl",
+    # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
+    # type parameters, the arity window, `unify`/`substitute` at a generic call
+    # site, the host stub surface, `_BUILTIN_SIG` with its receiver families and
+    # bottom learning, and the four refusals the reference makes while LOWERING
+    # a method call. All nine of this family's fixtures now refuse with the
+    # reference's own tag and sentence and are struck from this list.
     # -- arrows and function values --
     "examples/rejections/t17_arrow_body_unchecked.rvl",
     "examples/rejections/t32_arrow_value_result_flows.rvl",

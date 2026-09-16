@@ -8518,14 +8518,36 @@ fn tk_method(c: CallN, env: List[Bind], argTys: List[Str],
       && tenv_get(env, root) == "") {
     return tk_hit(tk_host_ctor_check(root, f.name, argTys))
   }
-  if (recv == "" || tk_wild(recv)) { return tk_miss() }
   // item 383: a receiver-first list transform is SUGAR for its generic free
   // function, whose result a builtin row cannot express. Typing the desugared
   // call needs the arrow algebra, which is the next slice's.
   if (list_transform_free(f.name) != "" && !tk_is_host_family(recv)) {
     return tk_miss()
   }
+  if (recv == "" || tk_wild(recv)) { return tk_unknown_recv_check(f.name, argTys) }
   return tk_hit(tk_builtin_check(f.name, recv, argTys))
+}
+
+// `builtin_check` with target_type None. The reference skips exactly the rules
+// that need the receiver — the family pins, and the `@elem`/`@member`/`@self`
+// specs, which all resolve to "no expectation" — and still checks every
+// argument whose spec is a LITERAL type. Getting this half wrong is what made
+// `p.set(true)` draw the unpinned-receiver refusal where the reference has an
+// earlier argument mismatch: the same program, refused by both, named
+// differently.
+//
+// A MULTI-family row picks no row without a receiver and decides nothing, which
+// is the reference's `sig.get(None)` miss.
+fn tk_unknown_recv_check(method: Str, argTys: List[Str]) -> TCall {
+  if (tk_bsig_multi(method)) { return tk_miss() }
+  if (tk_bsig_family(method, "") == "") { return tk_miss() }
+  let m = tk_bargs(tk_bsig_params(method), argTys, 0, "", "", "", method)
+  if (m.v != "") { return tk_hit(m) }
+  // the row's RESULT, with the receiver-dependent spellings unresolved:
+  // `@self`/`@elem` are unknown and `Opt[@elem]` is the reference's
+  // `Opt[Never]`, which is what a `lookup` on an untyped receiver flows on.
+  return tk_hit(tk_ok(method == "lookup" ? "Opt[Never]"
+                                         : builtin_ret(method, "")))
 }
 
 fn tk_no_field() -> FieldN { return { target: NullLit, name: "" } }
