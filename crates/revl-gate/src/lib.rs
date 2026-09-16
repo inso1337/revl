@@ -722,8 +722,8 @@ fn verdict_from_wire(wire: &str) -> Verdict {
 /// arm exists and [`compile_to`] still fails closed: the self-host's
 /// `lower_to_ir` is behind the reference's (roadmap item 391), so a source
 /// lowered natively and then emitted natively can differ from the reference
-/// compile — measured at 63 of the 73 accepted programs in the covered corpus.
-/// Handed a REFERENCE-produced IR, the emitter half has no such gap.
+/// compile on most of the covered corpus. Handed a REFERENCE-produced IR, the
+/// emitter half has no such gap: that is the whole of what this arm claims.
 ///
 /// Fails closed, never silently:
 ///
@@ -785,12 +785,13 @@ pub fn emit_ir(ir_document: &str, tier: Tier) -> Result<String, Verdict> {
 /// * `rust` — the emitter is here, but the self-host's own `lower_to_ir` is
 ///   behind the reference's (roadmap item 391), so source compiled end to end
 ///   by the native chain is NOT the reference compile. Measured through this
-///   crate's own closure over the covered corpus: 10 of 73 accepted programs
-///   emit the reference's bytes, 63 diverge — a `.clone()` the native lowering
-///   does not insert on a reused binding, a `provide` method it drops when a
-///   callable is named as a value, a host-object preamble it does not stage.
-///   None of them is an emitter defect and none is visible to a caller, which
-///   is exactly why this arm refuses instead of returning them.
+///   the document set `tests/test_selfhost_compile.py` pins it byte-exact on
+///   (`RUST_FUNCTION_DOCS` + `RUST_COMPONENT_DOCS`), which is far narrower than
+///   this crate's covered corpus. Outside it the native lowering drops a
+///   `.clone()` on a reused binding, drops a `provide` method when a callable is
+///   named as a value, and omits a host-object preamble. None of those is an
+///   emitter defect and none is visible to a caller, which is exactly why this
+///   arm refuses instead of handing them back.
 ///
 /// So the honest surface is [`emit_ir`]: hand this crate an IR document the
 /// REFERENCE frontend produced and the emission is the reference's, byte for
