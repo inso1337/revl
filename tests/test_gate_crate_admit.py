@@ -1141,12 +1141,15 @@ TYPE_LAYER_GAP = [
     ("return type mismatch", 'fn f() -> Int { return "s" }'),
     ("undeclared name in a body", "fn f() -> Int { return undefined_name }"),
     ("return arrow with no type", "fn f() -> { }"),
-    ("declared return, non-returning body", "fn f() -> Int { }"),
     # `("unknown service in provides", "component C provides s: S { }")` used to
     # sit here. It left when the gate learned the component header's
     # service-existence rule (docs/design/457 §2.4): the crate now REFUSES it in
     # the reference's own words, so it is an agreement and lives in the oracle's
     # `REJECTED_PROGRAMS`, where tag AND message are compared.
+    # `("declared return, non-returning body", "fn f() -> Int { }")` left the
+    # same way one slice later, when the gate learned returns-on-every-path
+    # (docs/design/457 T3b). Its shapes are now rows of the oracle's
+    # `REJECTED_PROGRAMS`, which `agreement` above runs the crate over.
 ]
 
 
