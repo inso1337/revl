@@ -7603,17 +7603,21 @@ fn tk_index(target: Expr, idx: Expr, env: List[Bind]) -> TInf {
 // signature checking is T2b's slice, so the call's own type comes from the
 // annotation engine.
 fn tk_call(c: CallN, env: List[Bind]) -> TInf {
+  // The RECEIVER and the ARGUMENTS are each walked exactly once here and their
+  // types handed on: the resolution arms below need the types, and inferring a
+  // subtree a second time to get them costs a full extra descent per call
+  // level, which compounds with nesting.
   let tv = tk_callee(c.target, env)
   if (tv.v != "") { return tv }
-  let a = tk_items(c.args, 0, env, "")
-  if (a.v != "") { return a }
+  let a = tk_arg_walk(c.args, 0, env, [])
+  if (a.v != "") { return a.r }
   // docs/design/457 T2b: a bare-name callee against the signature table, and a
   // method callee against the host stub surface / `_BUILTIN_SIG`. Both MISS
   // rather than guess where the premise they need is not proven, and the
   // annotation engine's best effort below is what answers then.
-  let nmd = tk_named(c, env)
+  let nmd = tk_named(c, env, a.tys)
   if (nmd.hit) { return nmd.r }
-  let mth = tk_method(c, env)
+  let mth = tk_method(c, env, a.tys, tv.ty)
   if (mth.hit) { return mth.r }
   if (tk_unknown_receiver(c.target, env)) { return tk_ok("") }
   let t = tk_call_result(infer_call_ty(c, env))
@@ -7653,7 +7657,7 @@ fn tk_call_result(t: Str) -> Str {
 fn tk_callee(callee: Expr, env: List[Bind]) -> TInf {
   return match callee {
     Var(n)   => tk_ok(""),
-    Field(f) => tk_sub(f.target, env),
+    Field(f) => tk_infer(f.target, env),
     _        => tk_sub(callee, env),
   }
 }
@@ -8424,19 +8428,23 @@ fn tk_builtin_check(method: Str, recv: Str, argTys: List[Str]) -> TInf {
 
 // -------------------------------------------------------- the call positions
 
-// The TYPES of a call's arguments, in order ("" where unknown). The refusals
-// inside them were already collected by `tk_items`.
-fn tk_arg_tys(args: List[Expr], i: Int, env: List[Bind],
-              acc: List[Str]) -> List[Str] {
-  if (i >= args.length()) { return acc }
-  return tk_arg_tys(args, i + 1, env, acc.push(tk_infer(args[i], env).ty))
+// One descent per argument, carrying BOTH what the reference's `arg_types`
+// list carries and the first refusal reached inside any of them.
+type TArgs = { v: Str, r: TInf, tys: List[Str] }
+
+fn tk_arg_walk(args: List[Expr], i: Int, env: List[Bind],
+               acc: List[Str]) -> TArgs {
+  if (i >= args.length()) { return { v: "", r: tk_ok(""), tys: acc } }
+  let r = tk_infer(args[i], env)
+  if (r.v != "") { return { v: r.v, r: r, tys: acc } }
+  return tk_arg_walk(args, i + 1, env, acc.push(r.ty))
 }
 
 // A bare-name callee resolved against the signature table. Misses — silently —
 // on a name the body REBINDS (the reference reads a local of function type
 // first), on an ADT case (the case table is read ahead of the signature), and
 // on a declaration whose row was never built.
-fn tk_named(c: CallN, env: List[Bind]) -> TCall {
+fn tk_named(c: CallN, env: List[Bind], argTys: List[Str]) -> TCall {
   let n = match c.target { Var(v) => v, _ => "", }
   if (n == "") { return tk_miss() }
   if (!sig_declared(env, n)) { return tk_miss() }
@@ -8451,7 +8459,6 @@ fn tk_named(c: CallN, env: List[Bind]) -> TCall {
         .concat(" argument(s), ").concat(c.args.length().to_str())
         .concat(" given")))
   }
-  let argTys = tk_arg_tys(c.args, 0, env, [])
   if (tenv_get(env, sig_key("sigg", n)) != "1") {
     let m = tk_mono_args(ps, argTys, 0, n)
     if (m.v != "") { return tk_hit(m) }
@@ -8492,7 +8499,8 @@ fn tk_generic_args(ps: List[Str], argTys: List[Str], i: Int, sub: List[Bind],
 // A METHOD callee: the host constructor form, `Map.empty()`, and every receiver
 // whose type this walk has PROVEN. A receiver it cannot type misses, because
 // `builtin_check`'s family rows would then compare against an unknown.
-fn tk_method(c: CallN, env: List[Bind]) -> TCall {
+fn tk_method(c: CallN, env: List[Bind], argTys: List[Str],
+             recv: Str) -> TCall {
   let f = match c.target { Field(fd) => fd, _ => tk_no_field(), }
   if (f.name == "") { return tk_miss() }
   let root = match f.target { Var(v) => v, _ => "", }
@@ -8506,12 +8514,10 @@ fn tk_method(c: CallN, env: List[Bind]) -> TCall {
     }
     return tk_hit(tk_ok("Map[Str, Never]"))
   }
-  let argTys = tk_arg_tys(c.args, 0, env, [])
   if (tk_is_host_family(root) && contains(tk_host_verbs(root), f.name)
       && tenv_get(env, root) == "") {
     return tk_hit(tk_host_ctor_check(root, f.name, argTys))
   }
-  let recv = tk_infer(f.target, env).ty
   if (recv == "" || tk_wild(recv)) { return tk_miss() }
   // item 383: a receiver-first list transform is SUGAR for its generic free
   // function, whose result a builtin row cannot express. Typing the desugared
