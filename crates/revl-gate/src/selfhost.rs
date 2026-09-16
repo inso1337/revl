@@ -347,6 +347,9 @@ pub struct FbSpan {
     hi: i64,
     next: i64,
     ok: bool,
+    name: String,
+    line: i64,
+    retDecl: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -6868,7 +6871,7 @@ fn fb_one(ts: Vec<Token>, i: i64, hi: i64) -> FbStepR {
     if ((t.kind == "kw") && (t.text == "return")) {
         let r = expr_at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
         if (is_bad(r.e.clone()) || (r.i <= (i).checked_add(1i64).expect("revl: Int overflow"))) {
-            return FbStepR { step: fb_step(String::from("none"), String::from(""), false, t.line, Expr::NullLit), i: (i).checked_add(1i64).expect("revl: Int overflow") };
+            return FbStepR { step: fb_step7(String::from("return"), String::from(""), false, t.line, Expr::NullLit, String::from(""), String::from("bare")), i: (i).checked_add(1i64).expect("revl: Int overflow") };
         }
         return FbStepR { step: fb_step7(String::from("return"), String::from(""), false, t.line, r.e.clone(), String::from(""), String::from("")), i: r.i };
     }
@@ -6880,7 +6883,7 @@ fn fb_one(ts: Vec<Token>, i: i64, hi: i64) -> FbStepR {
         return FbStepR { step: fb_step7(String::from("assert"), String::from(""), false, t.line, r.e.clone(), String::from(""), String::from("")), i: r.i };
     }
     if ((t.kind == "kw") && ((t.text == "break") || (t.text == "continue"))) {
-        return FbStepR { step: fb_step(String::from("none"), String::from(""), false, t.line, Expr::NullLit), i: (i).checked_add(1i64).expect("revl: Int overflow") };
+        return FbStepR { step: fb_step(if (t.text == "break") { String::from("break") } else { String::from("other") }, String::from(""), false, t.line, Expr::NullLit), i: (i).checked_add(1i64).expect("revl: Int overflow") };
     }
     if ((t.kind == "kw") && (t.text == "if")) {
         let c = expr_at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
@@ -6960,6 +6963,7 @@ fn fb_scan(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<FbStep> {
             let so = fb_one(ts.clone(), i, hi);
             out.push(so.step.clone());
             if (so.i <= i) {
+                out.push(fb_bail());
                 i = hi;
             } else {
                 i = so.i;
@@ -7017,6 +7021,9 @@ fn fb_walk(steps: Vec<FbStep>, i: i64, scope: Vec<Bind>, tys: Vec<Bind>, ret: St
         return fb_walk(steps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), scope.clone(), tys.clone(), ret.clone());
     }
     if (s.kind == "return") {
+        if (s.op == "bare") {
+            return fb_walk(steps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), scope.clone(), tys.clone(), ret.clone());
+        }
         let r = tk_check(s.value.clone(), ret.clone(), tys.clone(), "this function's return");
         if (r.v != "") {
             return fb_type_refuse(r.v.clone(), s.line, scope.clone(), tys.clone());
@@ -7097,7 +7104,7 @@ fn fb_params_tys(ps: Vec<ParamN>, i: i64, acc: Vec<Bind>, tps: Vec<String>) -> V
 }
 
 fn fb_no_span() -> FbSpan {
-    return FbSpan { ps: vec![], ret: String::from(""), lo: 0i64, hi: 0i64, next: 0i64, ok: false };
+    return FbSpan { ps: vec![], ret: String::from(""), lo: 0i64, hi: 0i64, next: 0i64, ok: false, name: String::from(""), line: 0i64, retDecl: String::from("") };
 }
 
 fn fb_span(ts: Vec<Token>, i: i64) -> FbSpan {
@@ -7107,10 +7114,12 @@ fn fb_span(ts: Vec<Token>, i: i64) -> FbSpan {
     let ps = params_at(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"));
     let mut reti = ps.i;
     let mut ret = String::from("");
+    let mut retDecl = String::from("");
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
         if tr.ok {
             ret = taint_strip(tr.ty.clone());
+            retDecl = tr.ty;
         }
         reti = tr.i;
     }
@@ -7125,12 +7134,150 @@ fn fb_span(ts: Vec<Token>, i: i64) -> FbSpan {
         return fb_no_span();
     }
     let body = (reti).checked_add(1i64).expect("revl: Int overflow");
-    return FbSpan { ps: ps.ps.clone(), ret: ret.clone(), lo: body, hi: (bend).checked_sub(1i64).expect("revl: Int overflow"), next: bend, ok: true };
+    return FbSpan { ps: ps.ps.clone(), ret: ret.clone(), lo: body, hi: (bend).checked_sub(1i64).expect("revl: Int overflow"), next: bend, ok: true, name: tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, line: tkc(&ts, i).line, retDecl: retDecl.clone() };
+}
+
+fn rp_true_cond(e: Expr) -> bool {
+    return match e {
+    Expr::BoolLit(s) => (s == "true"),
+    _ => false,
+};
+}
+
+fn rp_has_return(steps: &[FbStep], i: i64) -> bool {
+    if (i >= steps.revl_length()) {
+        return false;
+    }
+    let s = (steps)[(i) as usize].clone();
+    if (s.kind == "return") {
+        return true;
+    }
+    if ((rp_has_return(&s.then_, 0i64) || rp_has_return(&s.els, 0i64)) || rp_has_return(&s.body, 0i64)) {
+        return true;
+    }
+    return rp_has_return(steps, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn rp_loop_break(steps: &[FbStep], i: i64) -> bool {
+    if (i >= steps.revl_length()) {
+        return false;
+    }
+    let s = (steps)[(i) as usize].clone();
+    if (s.kind == "break") {
+        return true;
+    }
+    if ((s.kind == "if") && (rp_loop_break(&s.then_, 0i64) || rp_loop_break(&s.els, 0i64))) {
+        return true;
+    }
+    return rp_loop_break(steps, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn rp_returns(steps: &[FbStep], i: i64) -> bool {
+    if (i >= steps.revl_length()) {
+        return false;
+    }
+    let s = (steps)[(i) as usize].clone();
+    if (s.kind == "return") {
+        return true;
+    }
+    if (((s.kind == "if") && rp_returns(&s.then_, 0i64)) && rp_returns(&s.els, 0i64)) {
+        return true;
+    }
+    if (((s.kind == "while") && rp_true_cond(s.value.clone())) && (!rp_loop_break(&s.body, 0i64))) {
+        return true;
+    }
+    return rp_returns(steps, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn rp_has_bail(steps: &[FbStep], i: i64) -> bool {
+    if (i >= steps.revl_length()) {
+        return false;
+    }
+    let s = (steps)[(i) as usize].clone();
+    if (s.kind == "bail") {
+        return true;
+    }
+    if ((rp_has_bail(&s.then_, 0i64) || rp_has_bail(&s.els, 0i64)) || rp_has_bail(&s.body, 0i64)) {
+        return true;
+    }
+    return rp_has_bail(steps, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn rp_aliases(ts: &[Token]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
+        if (atw(ts, i, "type") && (tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).kind == "ident")) {
+            let end = type_decl_end(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+            if ((atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "=") && (!atk(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "{"))) && (!has_top_bar(ts, (i).checked_add(1i64).expect("revl: Int overflow"), end))) {
+                out = union_into(out.clone(), vec![tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text]);
+            }
+            i = end;
+        } else {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn rp_mentions(ty: String, names: &[String]) -> bool {
+    if (names.revl_length() == 0i64) {
+        return false;
+    }
+    let ts = lex_src(ty.clone());
+    let mut i = 0i64;
+    while (i < ts.revl_length()) {
+        let t = (ts)[(i) as usize].clone();
+        if ((t.kind == "ident") && contains(names, &t.text)) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn rp_no_value_msg(name: &str, ret: &str) -> String {
+    return (((String::from("`").revl_concat(&name)).revl_concat("` is declared to return `")).revl_concat(&ret)).revl_concat("` but its body never returns a value");
+}
+
+fn rp_some_path_msg(name: &str, ret: &str) -> String {
+    return (((String::from("`").revl_concat(&name)).revl_concat("` is declared to return `")).revl_concat(&ret)).revl_concat("` but control can reach the end of its body without a `return`");
+}
+
+fn rp_last_line(steps: &[FbStep], dflt: i64) -> i64 {
+    if (steps.revl_length() == 0i64) {
+        return dflt;
+    }
+    return (steps)[((steps.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].line.clone();
+}
+
+fn rp_refusal(ts: &[Token], sp: FbSpan, steps: &[FbStep]) -> Verd {
+    if ((sp.retDecl == "") || (sp.name == "")) {
+        return no_verd();
+    }
+    if rp_returns(steps, 0i64) {
+        return no_verd();
+    }
+    if rp_has_bail(steps, 0i64) {
+        return no_verd();
+    }
+    if rp_mentions(sp.retDecl.clone(), &rp_aliases(ts)) {
+        return no_verd();
+    }
+    if (!rp_has_return(steps, 0i64)) {
+        return mk_verd(tagged("T1", &rp_no_value_msg(&sp.name, &sp.retDecl)), sp.line);
+    }
+    return mk_verd(tagged("T1", &rp_some_path_msg(&sp.name, &sp.retDecl)), rp_last_line(steps, sp.line));
 }
 
 fn fb_function(ts: Vec<Token>, i: i64, sp: FbSpan, gtys: Vec<Bind>) -> Verd {
     let tps = collect_tparams(sp.ps.clone(), sp.ret.clone(), gtys.clone(), explicit_tparams(&ts, i));
-    return fb_walk(fb_scan(ts.clone(), sp.lo, sp.hi), 0i64, fb_params_scope(sp.ps.clone(), 0i64, vec![]), fb_params_tys(sp.ps.clone(), 0i64, gtys.clone(), tps.clone()), mark_tparams(sp.ret.clone(), &tps)).v;
+    let steps = fb_scan(ts.clone(), sp.lo, sp.hi);
+    let v = fb_walk(steps.clone(), 0i64, fb_params_scope(sp.ps.clone(), 0i64, vec![]), fb_params_tys(sp.ps.clone(), 0i64, gtys.clone(), tps.clone()), mark_tparams(sp.ret.clone(), &tps)).v;
+    if (v.v != "") {
+        return v;
+    }
+    return rp_refusal(&ts, sp.clone(), &steps);
 }
 
 fn fb_refusal(ts: Vec<Token>, i: i64) -> Verd {
