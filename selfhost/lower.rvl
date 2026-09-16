@@ -7297,19 +7297,84 @@ fn tk_sub(e: Expr, env: List[Bind]) -> TInf {
   return tk_ok("")
 }
 
-// `check_ast`: an expression in a CHECKING position. The structure-directed
-// arms of the reference's bidirectional check (a record literal against a
-// declared record, an arrow against a function type, a list elementwise) are
-// the later slices'; what is ported here is the position's obligation —
-// the inferred type must flow into the expected one.
+// `check_ast`: an expression in a CHECKING position. A position with NO
+// expectation is the inference position (the reference's `expected is None`
+// arm), and two shapes are checked STRUCTURALLY rather than by comparing an
+// inferred type — a list elementwise, and a record update through its base.
+// The arms this slice does not port (a record literal against a declared
+// nominal record, an arrow against a function type) fall through to the flat
+// comparison, which is silent wherever `tk_compatible` cannot decide.
 fn tk_check(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
+  if (expected == "") { return tk_infer(e, env) }
+  return match e {
+    RecUpd(r) => tk_check_recupd(r.base, r.upds, expected, env, where_),
+    Lst(l)    => parse_head(expected) == "List"
+                   ? tk_check_list(l.items, 0, expected, env)
+                   : tk_check_flat(e, expected, env, where_),
+    _         => tk_check_flat(e, expected, env, where_),
+  }
+}
+
+fn tk_check_flat(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
   let r = tk_infer(e, env)
   if (r.v != "") { return r }
-  if (expected == "" || r.ty == "") { return r }
+  if (r.ty == "") { return r }
   if (!tk_compatible(expected, r.ty)) {
     return tk_mismatch(where_, expected, r.ty)
   }
   return tk_ok(expected)
+}
+
+// Each ELEMENT is checked against the element type, which names the offending
+// item rather than reporting the whole literal's joined type.
+fn tk_check_list(items: List[Expr], i: Int, expected: Str,
+                 env: List[Bind]) -> TInf {
+  if (i >= items.length()) { return tk_ok(expected) }
+  let r = tk_check(items[i], tk_arg1(expected), env,
+                   "element of `".concat(tk_render(expected)).concat("`"))
+  if (r.v != "") { return r }
+  return tk_check_list(items, i + 1, expected, env)
+}
+
+// A record update's result is its BASE's type (docs/records.md §3), so the
+// expectation is checked against that and the updates per field. The
+// "record update requires a record type" refusal the INFER position raises is
+// deliberately absent here, exactly as it is absent in the reference — and the
+// per-field `where` names the base, which the infer position's does not.
+fn tk_check_recupd(base: Expr, upds: List[InitN], expected: Str,
+                   env: List[Bind], where_: Str) -> TInf {
+  let b = tk_infer(base, env)
+  if (b.v != "") { return b }
+  let f = tk_upd_fields(b.ty, upds, 0, env, true)
+  if (f.v != "") { return f }
+  if (b.ty != "" && !tk_compatible(expected, b.ty)) {
+    return tk_mismatch(where_, expected, b.ty)
+  }
+  return tk_ok(b.ty)
+}
+
+// The per-field half of both record-update positions. `named` picks the
+// `where` the reference uses at each: the CHECK position names the base type,
+// the INFER position does not.
+fn tk_upd_fields(baseTy: Str, upds: List[InitN], i: Int, env: List[Bind],
+                 named: Bool) -> TInf {
+  if (i >= upds.length()) { return tk_ok(baseTy) }
+  let structural = tk_is_struct(baseTy)
+  let u = upds[i]
+  let fty = structural ? tk_struct_field(baseTy, u.name)
+                       : infer_field(baseTy, u.name, env)
+  if (structural && fty == "") {
+    return tk_no("TYPE", "record update names `".concat(u.name)
+      .concat("`, which is not a field of `").concat(tk_render(baseTy))
+      .concat("`"))
+  }
+  let where_ = named
+    ? "update of field `".concat(u.name).concat("` of `")
+        .concat(tk_render(baseTy)).concat("`")
+    : "update of field `".concat(u.name).concat("`")
+  let v = tk_check(u.value, fty, env, where_)
+  if (v.v != "") { return v }
+  return tk_upd_fields(baseTy, upds, i + 1, env, named)
 }
 
 // `_bool_cond`: an `if`/`while`/`assert` condition is a checking position for
@@ -7504,6 +7569,7 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   if (tv.v != "") { return tv }
   let a = tk_items(c.args, 0, env, "")
   if (a.v != "") { return a }
+  if (tk_unknown_receiver(c.target, env)) { return tk_ok("") }
   let t = tk_call_result(infer_call_ty(c, env))
   // A GENERIC callee's declared return is not the call's type: the reference
   // unifies the type parameters against the actual arguments, so
@@ -7546,6 +7612,24 @@ fn tk_callee(callee: Expr, env: List[Bind]) -> TInf {
   }
 }
 
+// A stdlib method call on a receiver of UNKNOWN type has no type either: the
+// reference cannot pick a form out of `_BUILTIN_SIG` without one — it refuses
+// the call outright, with the HOST-METHOD diagnostic this slice does not spell
+// — so answering with the method's usual result invents a type the reference
+// never had. `~c.to_str()` was refused for a `Str` operand nothing produced.
+fn tk_unknown_receiver(callee: Expr, env: List[Bind]) -> Bool {
+  return match callee {
+    Field(f) => is_builtin_method(f.name) && !is_empty_map_callee(callee)
+                && !tk_host_root(f.target)
+                && tk_infer(f.target, env).ty == "",
+    _ => false,
+  }
+}
+
+fn tk_host_root(e: Expr) -> Bool {
+  return match e { Var(n) => is_host_root(n), _ => false, }
+}
+
 fn tk_items(xs: List[Expr], i: Int, env: List[Bind], ty: Str) -> TInf {
   if (i >= xs.length()) { return tk_ok(ty) }
   let r = tk_infer(xs[i], env)
@@ -7571,23 +7655,7 @@ fn tk_rec(fields: List[InitN], env: List[Bind]) -> TInf {
 fn tk_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> TInf {
   let b = tk_infer(base, env)
   if (b.v != "") { return b }
-  let structural = tk_is_struct(b.ty)
-  var i = 0
-  while (i < upds.length()) {
-    let u = upds[i]
-    let fty = structural ? tk_struct_field(b.ty, u.name)
-                         : infer_field(b.ty, u.name, env)
-    if (structural && fty == "") {
-      return tk_no("TYPE", "record update names `".concat(u.name)
-        .concat("`, which is not a field of `").concat(tk_render(b.ty))
-        .concat("`"))
-    }
-    let v = tk_check(u.value, fty, env,
-                     "update of field `".concat(u.name).concat("`"))
-    if (v.v != "") { return v }
-    i += 1
-  }
-  return tk_ok(b.ty)
+  return tk_upd_fields(b.ty, upds, 0, env, false)
 }
 
 fn tk_if(cond: Expr, then_: Expr, els: Expr, env: List[Bind]) -> TInf {
