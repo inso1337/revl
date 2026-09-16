@@ -7150,6 +7150,21 @@ fn tk_struct_field(t: Str, name: Str) -> Str {
 
 fn tk_is_fn_ty(t: Str) -> Bool { return t.length() > 0 && t.charAt(0) == "(" }
 
+// The built-in type heads: nothing spelled with one is ever a declared record.
+fn tk_builtin_head(h: Str) -> Bool {
+  return h == "Int" || h == "Int32" || h == "Float" || h == "Str"
+    || h == "Bool" || h == "Bytes" || h == "Unit" || h == "List" || h == "Map"
+    || h == "Opt" || h == "Result" || h == "Async" || h == "Value"
+    || h == "Any" || h == "Never"
+}
+
+// A bare, argument-free, non-built-in name — the shape, and the only shape, a
+// declared record type is spelled with.
+fn tk_nominal_name(t: Str) -> Bool {
+  return t != "" && parse_head(t) == t && !tk_is_struct(t) && !tk_is_fn_ty(t)
+    && !tk_builtin_head(t)
+}
+
 // `_is_wildcard`: the spellings that launder in both directions.
 fn tk_wild(t: Str) -> Bool {
   return t == "" || t == "Any" || t == "Never" || t == "!poison"
@@ -7172,7 +7187,17 @@ fn tk_compatible(expected: Str, actual: Str) -> Bool {
   let es = tk_is_struct(expected)
   let as_ = tk_is_struct(actual)
   if (es && as_) { return tk_struct_compat(expected, actual) }
-  if (es || as_) { return true }   // needs the declared-type table: stay silent
+  // Exactly one side is structural. The reference resolves a NOMINAL RECORD on
+  // the other side field-wise through the declared-type table, which this walk
+  // does not carry — so that pairing, and only that pairing, stays silent. A
+  // bare name that is not a built-in head is the only shape a declared record
+  // has; everything else (a scalar, a container, a function type) falls through
+  // to the head algebra below, exactly as the reference lets it, so
+  // `let b: Int32 = { h: 1 }` is the definite disagreement it is and
+  // `Opt[{h: Str}]` still reaches the record through its injection rule.
+  if (es || as_) {
+    if (tk_nominal_name(es ? actual : expected)) { return true }
+  }
   if (tk_is_fn_ty(expected) || tk_is_fn_ty(actual)) { return true }
   let eh = parse_head(expected)
   let ah = parse_head(actual)
@@ -7235,8 +7260,13 @@ fn tk_infer(e: Expr, env: List[Bind]) -> TInf {
     // It survives only as a config default, which is not an expression position
     // this walk ever reaches.
     NullLit     => tk_no("T2", "`null` has no type in revl — absence is `Opt[T]`"),
-    Var(n)      => tk_ok(tenv_get(env, n) != "" ? tenv_get(env, n)
-                                                : infer_bare_case(n, env)),
+    // `None` is the empty optional, `Opt[Any]`, and the reference reads it
+    // BEFORE the environment. The annotation engine leaves it unknown, which
+    // cost every rule downstream of it its operand: `~None`, `!None`,
+    // `assert None` and `let b: Int32 = None` all went unrefused.
+    Var(n)      => tk_ok(n == "None" ? "Opt[Any]"
+                     : (tenv_get(env, n) != "" ? tenv_get(env, n)
+                                               : infer_bare_case(n, env))),
     Bin(b)      => tk_bin(b, env),
     Un(u)       => tk_un(u, env),
     Field(f)    => tk_field(f, env),
@@ -7311,6 +7341,40 @@ fn tk_bin(b: BinN, env: List[Bind]) -> TInf {
 // decide falls through to the non-raising `binop_ty`, so the type is the one
 // the annotation engine already agrees on and no new refusal appears.
 fn tk_binop(op: Str, lt: Str, rt: Str) -> TInf {
+  if (op == "==" || op == "!=" || op == "===" || op == "!==") {
+    // `incomparable`, NOT `mismatch`: equality has no expected/actual
+    // direction, so neither side is the position the other must fit.
+    if (lt != "" && rt != ""
+        && !tk_compatible(lt, rt) && !tk_compatible(rt, lt)) {
+      return tk_no("T1", "`".concat(op).concat("` cannot compare `")
+        .concat(tk_render(lt)).concat("` with `").concat(tk_render(rt))
+        .concat("` — the operands have no type in common"))
+    }
+    return tk_ok("Bool")
+  }
+  if (op == "&&" || op == "||") {
+    if (lt != "" && lt != "Bool") {
+      return tk_mismatch("operand of `".concat(op).concat("`"), "Bool", lt)
+    }
+    if (rt != "" && rt != "Bool") {
+      return tk_mismatch("operand of `".concat(op).concat("`"), "Bool", rt)
+    }
+    return tk_ok("Bool")
+  }
+  if (op == "??") {
+    // `a ?? b` supplies a fallback for an ABSENT optional; on a value that is
+    // always present the fallback is dead, and the tiers that model `Opt` as
+    // Option/Optional cannot render it at all.
+    if (parse_head(lt) != "Opt" && !tk_wild(lt)) {
+      return tk_no("T1", "`??` needs an optional on the left, got `"
+                     .concat(tk_render(lt)).concat("`"))
+    }
+    return tk_ok(binop_ty(op, lt, rt))
+  }
+  // The ORDERING family's refusal ("`<` cannot order `X` values") is code-less
+  // in the reference and classifies OUT of the gate's vocabulary, so spelling
+  // it here would trade a no-objection for a tag mismatch. It stays silent
+  // until the classifier names it.
   if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
     // Bitwise operators are Int32-only (item 366, docs/arithmetic.md): a bit
     // pattern is a fixed-width object and Int/Float have no uniform bitwise
