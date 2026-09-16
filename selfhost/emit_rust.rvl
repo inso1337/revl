@@ -2052,11 +2052,399 @@ fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
   return out
 }
 
-// `_emit_host_stubs`: DEFERRED. The reference emits `Map`/`Pool`/`Job` stubs and
-// an R1 live-resource counter only when the document USES a `host` object (or a
-// lifecycle test / timer). The covered subset declares none, so this is [] —
-// exactly what the reference returns for a host-object-free document.
-fn emit_host_stubs(ir: Any) -> List[Str] { return [] }
+// ------------------------------------------------- host objects (issue 1153)
+// `_emit_host_stubs`: the minimal revl host runtime for the objects THIS
+// document uses. `Map` is a real `String -> V` map, `Pool` a bounded connection
+// pool over a deterministic in-memory database, `Job` a cancellable future.
+// None of them panic with `todo!()`; Pool/Job semantics are normative and
+// shared across tiers (backends/python/runtime.py, `.. _pool-job-semantics:`).
+//
+// Until issue 1153 this returned `[]` with the note that "the covered subset
+// declares none" — true only because no corpus document declared a host
+// object, so the byte oracle agreed VACUOUSLY on the whole surface. The stream
+// host runtime is the one block still DEFERRED, and it is REPORTED: a document
+// that reaches it fires a `<<DEFER-stream-host>>` marker rather than silently
+// emitting a crate with no stream runtime in it.
+//
+// Each block below is a verbatim transcription of the reference's literal line
+// list; the only computed part is which blocks ride along.
+fn host_counter_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// R1 live-resource counter (lifecycle `assert no_residue`).")
+  o = o.push("/// Thread-local because `cargo test` runs tests on parallel")
+  o = o.push("/// threads: each test must observe only its own acquisitions.")
+  o = o.push("thread_local! {")
+  o = o.push("    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {")
+  o = o.push("        std::cell::Cell::new(0)")
+  o = o.push("    };")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+fn host_map_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// revl host object: a small thread-safe map with String keys.")
+  o = o.push("/// The value type is generic — each site's `Map.new()` pins `V`")
+  o = o.push("/// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).")
+  o = o.push("pub struct Map<V> {")
+  o = o.push("    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,")
+  o = o.push("}")
+  o = o.push("impl<V> Map<V> {")
+  o = o.push("    pub fn new() -> Self {")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));")
+  o = o.push("        Self {")
+  o = o.push("            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    pub fn drop_(&self) {")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));")
+  o = o.push("        self.inner.lock().unwrap().clear();")
+  o = o.push("    }")
+  o = o.push("    pub fn insert(&self, key: String, value: V) {")
+  o = o.push("        self.inner.lock().unwrap().insert(key, value);")
+  o = o.push("    }")
+  o = o.push("    // The atomic compare-and-set (item 397). ONE `lock()` spans the")
+  o = o.push("    // membership test AND the insert via the entry API, so no thread")
+  o = o.push("    // can witness the probe and the write as separable steps. Returns")
+  o = o.push("    // whether it inserted; a `false` (key present) leaves the existing")
+  o = o.push("    // value untouched. Under N concurrent callers, exactly one `true`.")
+  o = o.push("    pub fn insert_if_absent(&self, key: String, value: V) -> bool {")
+  o = o.push("        use std::collections::hash_map::Entry;")
+  o = o.push("        match self.inner.lock().unwrap().entry(key) {")
+  o = o.push("            Entry::Occupied(_) => false,")
+  o = o.push("            Entry::Vacant(e) => { e.insert(value); true }")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    pub fn remove(&self, key: &String) {")
+  o = o.push("        self.inner.lock().unwrap().remove(key);")
+  o = o.push("    }")
+  o = o.push("    // Iteration surface (docs/stdlib-2.0.md §Map): the checker")
+  o = o.push("    // promises `size()`/`keys()` on a host `Map.new()` receiver, and")
+  o = o.push("    // emit lowers both as method calls on this object. `size` is the")
+  o = o.push("    // entry count; `keys` yields the keys in ascending canonical Str")
+  o = o.push("    // order — Rust's `String: Ord` is byte-wise over UTF-8, which is")
+  o = o.push("    // exactly code-point order, so a plain sort is canonical. Both are")
+  o = o.push("    // read-only queries, no host trace.")
+  o = o.push("    pub fn size(&self) -> i64 {")
+  o = o.push("        self.inner.lock().unwrap().len() as i64")
+  o = o.push("    }")
+  o = o.push("    pub fn keys(&self) -> Vec<String> {")
+  o = o.push("        let mut ks: Vec<String> =")
+  o = o.push("            self.inner.lock().unwrap().keys().cloned().collect();")
+  o = o.push("        ks.sort();")
+  o = o.push("        ks")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("impl<V: Clone> Map<V> {")
+  o = o.push("    // The key is borrowed, not moved: a component that reads then")
+  o = o.push("    // writes the same key (the session ledger) keeps owning it.")
+  o = o.push("    pub fn get(&self, key: &String) -> Option<V> {")
+  o = o.push("        self.inner.lock().unwrap().get(key).cloned()")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+fn host_pool_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// revl host object: a bounded connection pool over a deterministic")
+  o = o.push("/// in-memory database (no driver dependency).  Semantics are shared")
+  o = o.push("/// across tiers — backends/python/runtime.py, `.. _pool-job-semantics:`:")
+  o = o.push("/// `size` connections numbered 1..size, acquire/release accounting,")
+  o = o.push("/// statements borrow a connection for their duration, `close` releases")
+  o = o.push("/// everything, and exhaustion / use-after-close panic.")
+  o = o.push("pub struct Pool {")
+  o = o.push("    url: String,")
+  o = o.push("    size: i64,")
+  o = o.push("    state: std::sync::Mutex<PoolState>,")
+  o = o.push("}")
+  o = o.push("struct PoolState {")
+  o = o.push("    idle: Vec<i64>,")
+  o = o.push("    in_use: Vec<i64>,")
+  o = o.push("    closed: bool,")
+  o = o.push("}")
+  o = o.push("impl Pool {")
+  o = o.push("    pub fn open(url: String, size: i64) -> Self {")
+  o = o.push("        if size < 1 {")
+  o = o.push("            panic!(\"pool size must be an integer >= 1 (got {})\", size);")
+  o = o.push("        }")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));")
+  o = o.push("        Self {")
+  o = o.push("            url,")
+  o = o.push("            size,")
+  o = o.push("            state: std::sync::Mutex::new(PoolState {")
+  o = o.push("                idle: (1..=size).collect(),")
+  o = o.push("                in_use: Vec::new(),")
+  o = o.push("                closed: false,")
+  o = o.push("            }),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    pub fn url(&self) -> String {")
+  o = o.push("        self.url.clone()")
+  o = o.push("    }")
+  o = o.push("    pub fn capacity(&self) -> i64 {")
+  o = o.push("        if self.state.lock().unwrap().closed { 0i64 } else { self.size }")
+  o = o.push("    }")
+  o = o.push("    pub fn in_use(&self) -> i64 {")
+  o = o.push("        self.state.lock().unwrap().in_use.len() as i64")
+  o = o.push("    }")
+  o = o.push("    pub fn available(&self) -> i64 {")
+  o = o.push("        self.state.lock().unwrap().idle.len() as i64")
+  o = o.push("    }")
+  o = o.push("    // NB: never panic while the guard is held — a panic under the")
+  o = o.push("    // lock poisons the Mutex, and every later call would then fail")
+  o = o.push("    // with a PoisonError instead of the intended message (which is")
+  o = o.push("    // not what the other tiers do: there the pool stays usable).")
+  o = o.push("    fn borrow_conn(&self, op: &str) -> i64 {")
+  o = o.push("        let outcome = {")
+  o = o.push("            let mut state = self.state.lock().unwrap();")
+  o = o.push("            if state.closed {")
+  o = o.push("                Err(format!(\"pool.{} after close/drop — use-after-free\", op))")
+  o = o.push("            } else if state.idle.is_empty() {")
+  o = o.push("                Err(format!(")
+  o = o.push("                    \"pool.{} exhausted (size={}, in_use={})\",")
+  o = o.push("                    op,")
+  o = o.push("                    self.size,")
+  o = o.push("                    state.in_use.len()")
+  o = o.push("                ))")
+  o = o.push("            } else {")
+  o = o.push("                let conn = state.idle.remove(0);")
+  o = o.push("                state.in_use.push(conn);")
+  o = o.push("                Ok(conn)")
+  o = o.push("            }")
+  o = o.push("        };")
+  o = o.push("        match outcome {")
+  o = o.push("            Ok(conn) => conn,")
+  o = o.push("            Err(message) => panic!(\"{}\", message),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    fn give_back(&self, conn: i64) {")
+  o = o.push("        let mut state = self.state.lock().unwrap();")
+  o = o.push("        if let Some(pos) = state.in_use.iter().position(|c| *c == conn) {")
+  o = o.push("            state.in_use.remove(pos);")
+  o = o.push("        }")
+  o = o.push("        state.idle.push(conn);")
+  o = o.push("        state.idle.sort_unstable();")
+  o = o.push("    }")
+  o = o.push("    pub fn acquire(&self) -> i64 {")
+  o = o.push("        self.borrow_conn(\"acquire\")")
+  o = o.push("    }")
+  o = o.push("    pub fn release(&self, conn: i64) {")
+  o = o.push("        let outcome = {")
+  o = o.push("            let state = self.state.lock().unwrap();")
+  o = o.push("            if state.closed {")
+  o = o.push("                Err(String::from(\"pool.release after close/drop — use-after-free\"))")
+  o = o.push("            } else if !state.in_use.contains(&conn) {")
+  o = o.push("                Err(format!(\"pool.release conn={} is not checked out\", conn))")
+  o = o.push("            } else {")
+  o = o.push("                Ok(())")
+  o = o.push("            }")
+  o = o.push("        };")
+  o = o.push("        if let Err(message) = outcome {")
+  o = o.push("            panic!(\"{}\", message);")
+  o = o.push("        }")
+  o = o.push("        self.give_back(conn);")
+  o = o.push("    }")
+  o = o.push("    pub fn close(&self) {")
+  o = o.push("        let already_closed = {")
+  o = o.push("            let mut state = self.state.lock().unwrap();")
+  o = o.push("            if state.closed {")
+  o = o.push("                true")
+  o = o.push("            } else {")
+  o = o.push("                state.in_use.clear();")
+  o = o.push("                state.idle.clear();")
+  o = o.push("                state.closed = true;")
+  o = o.push("                false")
+  o = o.push("            }")
+  o = o.push("        };")
+  o = o.push("        if already_closed {")
+  o = o.push("            panic!(\"pool.close after close/drop — use-after-free\");")
+  o = o.push("        }")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));")
+  o = o.push("    }")
+  o = o.push("    pub fn query(&self, _sql: String) -> Vec<Value> {")
+  o = o.push("        let conn = self.borrow_conn(\"query\");")
+  o = o.push("        self.give_back(conn);")
+  o = o.push("        Vec::new()")
+  o = o.push("    }")
+  o = o.push("    pub fn execute(&self, _sql: String) -> i64 {")
+  o = o.push("        let conn = self.borrow_conn(\"execute\");")
+  o = o.push("        self.give_back(conn);")
+  o = o.push("        1i64")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+fn host_job_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// 0 = pending, 1 = done, 2 = cancelled")
+  o = o.push("#[derive(Clone)]")
+  o = o.push("pub struct JobToken(std::sync::Arc<std::sync::atomic::AtomicU8>);")
+  o = o.push("impl JobToken {")
+  o = o.push("    /// pending -> cancelled (true); a no-op returning false otherwise.")
+  o = o.push("    pub fn cancel(&self) -> bool {")
+  o = o.push("        self.0")
+  o = o.push("            .compare_exchange(")
+  o = o.push("                0u8,")
+  o = o.push("                2u8,")
+  o = o.push("                std::sync::atomic::Ordering::SeqCst,")
+  o = o.push("                std::sync::atomic::Ordering::SeqCst,")
+  o = o.push("            )")
+  o = o.push("            .is_ok()")
+  o = o.push("    }")
+  o = o.push("    pub fn state(&self) -> &'static str {")
+  o = o.push("        match self.0.load(std::sync::atomic::Ordering::SeqCst) {")
+  o = o.push("            1u8 => \"done\",")
+  o = o.push("            2u8 => \"cancelled\",")
+  o = o.push("            _ => \"pending\",")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("pub struct JobHandle {")
+  o = o.push("    name: String,")
+  o = o.push("    remaining: u32,")
+  o = o.push("    state: std::sync::Arc<std::sync::atomic::AtomicU8>,")
+  o = o.push("}")
+  o = o.push("impl JobHandle {")
+  o = o.push("    pub fn name(&self) -> String {")
+  o = o.push("        self.name.clone()")
+  o = o.push("    }")
+  o = o.push("    pub fn token(&self) -> JobToken {")
+  o = o.push("        JobToken(self.state.clone())")
+  o = o.push("    }")
+  o = o.push("    pub fn state(&self) -> &'static str {")
+  o = o.push("        self.token().state()")
+  o = o.push("    }")
+  o = o.push("    pub fn cancel(&self) -> bool {")
+  o = o.push("        self.token().cancel()")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("impl std::future::Future for JobHandle {")
+  o = o.push("    type Output = String;")
+  o = o.push("    fn poll(")
+  o = o.push("        self: std::pin::Pin<&mut Self>,")
+  o = o.push("        cx: &mut std::task::Context<'_>,")
+  o = o.push("    ) -> std::task::Poll<String> {")
+  o = o.push("        let this = self.get_mut();")
+  o = o.push("        match this.state.load(std::sync::atomic::Ordering::SeqCst) {")
+  o = o.push("            1u8 => return std::task::Poll::Ready(this.name.clone()),")
+  o = o.push("            2u8 => panic!(\"job \\\"{}\\\" cancelled\", this.name),")
+  o = o.push("            _ => {}")
+  o = o.push("        }")
+  o = o.push("        if this.remaining == 0u32 {")
+  o = o.push("            this.state")
+  o = o.push("                .store(1u8, std::sync::atomic::Ordering::SeqCst);")
+  o = o.push("            return std::task::Poll::Ready(this.name.clone());")
+  o = o.push("        }")
+  o = o.push("        this.remaining -= 1u32;")
+  o = o.push("        cx.waker().wake_by_ref();")
+  o = o.push("        std::task::Poll::Pending")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("impl Job {")
+  o = o.push("    /// scheduler turns of simulated work (same number on every tier)")
+  o = o.push("    pub const TICKS: u32 = 5u32;")
+  o = o.push("    /// Schedule a cancellable job.  The handle is the future; take")
+  o = o.push("    /// `handle.token()` first if you need to cancel it from elsewhere.")
+  o = o.push("    pub fn spawn(name: String) -> JobHandle {")
+  o = o.push("        JobHandle {")
+  o = o.push("            name,")
+  o = o.push("            remaining: Self::TICKS,")
+  o = o.push("            state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0u8)),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    /// Run a job to completion — the `await Job.run(name)` form emitted")
+  o = o.push("    /// code uses.  On this path a divert cancels by dropping the future;")
+  o = o.push("    /// use `spawn` when the host needs an explicit cancellation token.")
+  o = o.push("    pub async fn run(name: String) -> String {")
+  o = o.push("        Self::spawn(name).await")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// Which host roots this document uses: the `fn` prefix of every `host` node
+// anywhere in the components/functions/tests/types subtrees.
+fn collect_host_roots(node: Any, acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    if (value_str(value_field(node, "kind")) == "host") {
+      m = m.set(value_str(value_field(node, "fn")).split(".")[0], "1")
+    }
+  }
+  for (child of value_children(node)) { m = collect_host_roots(child, m) }
+  return m
+}
+
+fn host_roots_used(ir: Any) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  m = collect_host_roots(value_field(ir, "components"), m)
+  m = collect_host_roots(value_field(ir, "functions"), m)
+  m = collect_host_roots(value_field(ir, "tests"), m)
+  m = collect_host_roots(value_field(ir, "types"), m)
+  return m
+}
+
+// `_uses_timer`: a timer takes a live-resource slot on arming (its schedule /
+// cancel pair joins the same R1 accounting), so it pulls the counter in even
+// with no host object. Nested `if` arms count.
+fn steps_use_timer(steps: List[Any]) -> Bool {
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "timer") { return true }
+    if (k == "if") {
+      if (steps_use_timer(value_list(value_field(s, "then")))) { return true }
+      if (steps_use_timer(value_list(value_field(s, "else")))) { return true }
+    }
+  }
+  return false
+}
+fn uses_timer(components: List[Any]) -> Bool {
+  for (c of components) {
+    if (steps_use_timer(value_list(value_field(c, "body")))) { return true }
+  }
+  return false
+}
+
+// `_uses_stream_event`: an `on <Event> as .. in <sub>` handler is the only
+// thing that needs the typed-event contract, and the contract traces through
+// the stream host runtime. A plain `every .. in` program carries no `event`.
+fn uses_stream_event(ir: Any) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    for (step of value_list(value_field(comp, "body"))) {
+      if (value_str(value_field(step, "step")) == "stream-iter"
+          && !value_is_null(value_field(step, "event"))) { return true }
+    }
+  }
+  return false
+}
+
+fn emit_host_stubs(ir: Any) -> List[Str] {
+  let used = host_roots_used(ir)
+  var lifecycle = false
+  for (t of value_list(value_field(ir, "tests"))) {
+    if (value_bool(value_field(t, "lifecycle"))) { lifecycle = true }
+  }
+  let timer = uses_timer(value_list(value_field(ir, "components")))
+  var out = []
+  if (used.has("Map") || used.has("Pool") || used.has("Stream") || lifecycle || timer) {
+    out = out.concat(host_counter_lines())
+  }
+  if (used.has("Map")) { out = out.concat(host_map_lines()) }
+  if (used.has("Pool")) { out = out.concat(host_pool_lines()) }
+  if (used.has("Job")) { out = out.concat(host_job_lines()) }
+  // The `Stream[T]` runtime (item 130) is the one host block not ported: it is
+  // ~750 lines of literal Rust plus a second typed-event block. REPORTED, so a
+  // document that reaches it diverges loudly instead of quietly emitting a
+  // crate with no stream runtime.
+  if (used.has("Stream") || uses_stream_event(ir)) { out = out.push("<<DEFER-stream-host>>") }
+  return out
+}
 
 // The provide-step methods for a provision `key` (`_provision_methods`): the
 // `provide` body step whose `name` matches, else `[]`.
