@@ -6292,10 +6292,12 @@ class _V3Ctx:
         # disambiguates a non-unique field-set (item 268). Set per fn by
         # `_emit_v3_functions`; None everywhere the context is unknown.
         self.current_return: str | None = None
-        # Bindings referenced more than once in the fn body currently being
-        # emitted. A by-value use of one whose surface type is unknown must
-        # clone (see `_by_value_arg`); reset per fn by `_emit_v3_functions`,
-        # empty everywhere the reuse context is not established.
+        # Bindings whose reads in the fn body currently being emitted can run
+        # more than once -- referenced more than once textually, or referenced
+        # inside a loop body that repeats the read (#1157). A by-value use of
+        # one whose surface type is unknown must clone (see `_by_value_arg`);
+        # reset per fn by `_emit_v3_functions`, empty everywhere the reuse
+        # context is not established.
         self.multi_use: set[str] = set()
         # `id()` of every `for` node whose bare-name iterable is dead after the
         # loop and so may be MOVED rather than `.clone()`d (item 437f); reset per

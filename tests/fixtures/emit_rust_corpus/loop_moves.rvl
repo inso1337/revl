@@ -1,0 +1,90 @@
+// issue #1157 — the reuse signal that could not see a loop.
+//
+// The rust emitter decides a by-value move from a binding's surface type, and
+// falls back to a REFERENCE COUNT when it cannot infer one. A ternary
+// initialiser is exactly that un-inferable case, so a binding read once inside
+// a `while` counted as single-use and was MOVED — sound on the first iteration,
+// `E0382: use of moved value` on the second. No corpus document had the shape,
+// so the failure only ever surfaced in the cargo-backed gates.
+//
+// Every function here is `pub`: the whole file is dead code otherwise, and the
+// point is that the emitted crate BUILDS, which `cargo check --all-targets`
+// over this document is what states.
+
+// A callee that takes its `Str` OWNED: the argument is moved in, so a caller
+// that needs the value again must clone at the call. A read-only `Str`
+// parameter lowers to `&str` instead and would borrow, hiding the shape.
+fn own(s: Str) -> List[Str] {
+  return [s]
+}
+
+// THE SHAPE. `head` has a ternary initialiser, so the emitter types it None;
+// it is read exactly once, textually, but the read is inside the loop and so
+// runs on every iteration.
+pub fn ternary_read_in_while(xs: List[Str], n: Int) -> Int {
+  let head = xs.length() > 0 ? xs[0] : ""
+  var i = 0
+  var t = 0
+  while (i < n) {
+    t += own(head).length()
+    i += 1
+  }
+  return t
+}
+
+// One level down: `inner` is declared by the OUTER loop's body and read by the
+// INNER loop, so it is still repeated. Being declared inside *a* loop is not
+// enough — it has to be declared inside the loop that repeats the read.
+pub fn ternary_read_in_nested_while(xs: List[Str], n: Int) -> Int {
+  var i = 0
+  var t = 0
+  while (i < n) {
+    let inner = xs.length() > 1 ? xs[1] : ""
+    var j = 0
+    while (j < n) {
+      t += own(inner).length()
+      j += 1
+    }
+    i += 1
+  }
+  return t
+}
+
+// THE CONTROL. Same initialiser, same single read, but the binding is DECLARED
+// inside the loop that reads it: every iteration gets its own value, so the
+// move strands nothing and no clone is needed.
+pub fn ternary_declared_in_while(xs: List[Str], n: Int) -> Int {
+  var i = 0
+  var t = 0
+  while (i < n) {
+    let each = xs.length() > 0 ? xs[0] : ""
+    t += own(each).length()
+    i += 1
+  }
+  return t
+}
+
+// A `for` ITERABLE is evaluated once, before the loop opens, so it is read
+// outside the body it repeats and a single-use iterable still moves.
+pub fn for_iterable_moves(rows: List[Str]) -> Int {
+  var t = 0
+  for (row of rows) {
+    t += row.length()
+  }
+  return t
+}
+
+// The same iterable under an outer `while` is read once per outer iteration,
+// so it is repeated and the `for` has to clone or the second outer iteration
+// walks a moved `Vec`.
+pub fn for_iterable_in_while_clones(rows: List[Str], n: Int) -> Int {
+  var i = 0
+  var t = 0
+  while (i < n) {
+    for (row of rows) {
+      t += row.length()
+    }
+    i += 1
+  }
+  return t
+}
