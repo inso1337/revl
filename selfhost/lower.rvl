@@ -3810,6 +3810,68 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   return refusal_line(ss, i + 1, cx, na)
 }
 
+// ============================ the provide-method SIGNATURE (docs/design/457)
+//
+// `_lower_provide`'s two annotation rules. A provide method may RESTATE what
+// the service already declares — `fn query(sql: Str) -> Int` against
+// `service Db { fn query(sql: Str) -> Int }` — and the service is the source of
+// truth for both halves (A6), so a restatement that disagrees is a T1.
+//
+// Both tests run in BOTH directions, as the reference's do: an annotation that
+// merely WIDENS the declared type is still not the signature the service
+// published, and a one-way test would admit `sql: Any` against a declared `Str`.
+// An UNWRITTEN annotation ("") is not a disagreement — the reference skips a
+// `None` annotation outright.
+//
+// The rules are gated on the signature already AGREEING in shape. The reference
+// raises the arity, colour, duplicate-method and unknown-operation refusals
+// ahead of these, and this gate decides only the colour one; running the
+// annotation test over a signature whose arity does not match would answer a
+// program with the wrong one of two real refusals, which is the mismatch
+// direction rather than the silent one.
+fn a6_param_msg(pm: ProvM, decl: MSig, svcName: Str, i: Int) -> Str {
+  if (i >= pm.ps.length() || i >= decl.ps.length()) { return "" }
+  let ann = taint_strip(pm.ps[i].ty)
+  let dt = taint_strip(decl.ps[i].ty)
+  if (ann != "" && dt != ""
+      && !(tk_compatible(dt, ann) && tk_compatible(ann, dt))) {
+    return "parameter `".concat(pm.ps[i].name).concat("` of `")
+      .concat(pm.name).concat("` (from service `").concat(svcName)
+      .concat("`) expects `").concat(tk_render(dt)).concat("`, got `")
+      .concat(tk_render(ann)).concat("`")
+  }
+  return a6_param_msg(pm, decl, svcName, i + 1)
+}
+
+// Has a method of this name already been provided earlier in the same
+// provision? The reference refuses the duplicate before it reaches either
+// annotation rule, so a second `fn get` is left to that refusal.
+fn prov_dup_before(ms: List[ProvM], upto: Int, nm: Str, i: Int) -> Bool {
+  if (i >= upto) { return false }
+  if (ms[i].name == nm) { return true }
+  return prov_dup_before(ms, upto, nm, i + 1)
+}
+
+fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig) -> Verd {
+  let pm = pv.methods[mi]
+  if (decl.name == "" || pm.ps.length() != decl.ps.length()
+      || prov_dup_before(pv.methods, mi, pm.name, 0)) {
+    return no_verd()
+  }
+  let pmsg = a6_param_msg(pm, decl, pv.svcName, 0)
+  if (pmsg != "") { return mk_verd(tagged("T1", pmsg), pm.line) }
+  let pr = taint_strip(pm.ret)
+  let dr = taint_strip(decl.ret)
+  if (pr != "" && dr != ""
+      && !(tk_compatible(dr, pr) && tk_compatible(pr, dr))) {
+    return mk_verd(tagged("T1",
+      "return type of `".concat(pm.name).concat("` (from service `")
+        .concat(pv.svcName).concat("`) expects `").concat(tk_render(dr))
+        .concat("`, got `").concat(tk_render(pr)).concat("`")), pm.line)
+  }
+  return no_verd()
+}
+
 // The line for an inline body refusal, with the component line as the fallback
 // for a refusal that is not a plain statement walk (0 from `refusal_line`).
 // The type layer over one provide-method body (docs/design/457 T3a). The TYPE
@@ -4753,6 +4815,11 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
         return mk_verd(tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
                                           pm.isAsync, decl.isAsync)), comp.line)
       }
+      // the two RESTATED-annotation rules, decided where the reference decides
+      // them: after the colour parity above and before a single body statement
+      // is lowered.
+      let sigv = a6_annotation_verdict(pv, mi, decl)
+      if (sigv.v != "") { return sigv }
       let mcx = ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
         arrows_in(pm.body, 0, setupArrows))
