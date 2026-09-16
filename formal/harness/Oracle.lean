@@ -78,9 +78,23 @@ Fact rows in (tab-separated, one fact per line):
   B <file> <svc> <meth> <plain|any|scoped>   service-method emission bound
   Q <file> <svc> <meth> <entry>              a scoped bound's declared entry
   C <file> <comp> <key> <svc>                provide key -> service
-  K <file> <comp> <local> <cap>              require-held capability
-  A <file> <comp> <cap>                      activation emit-step surface
-  F <file> <comp> <key> <svc> <meth> <cap>   provide-method emission reach
+  K <file> <comp> <local> <cap>              require-held capability, named
+                                             by the DECLARED boundary
+  A <file> <comp> <cap>                      activation emit-step surface,
+                                             named by the DECLARED boundary
+  F <file> <comp> <key> <svc> <meth> <cap> <bound>
+                                             provide-method emission reach.
+                                             TWO spellings of the same
+                                             crossing: `cap` is the declared
+                                             BOUNDARY (what the attenuation
+                                             fold compares across a component
+                                             edge) and `bound` is the WIRING
+                                             KEY it went through (what the
+                                             provide-method bound compares
+                                             against its service's
+                                             `emission[...]`). `A` and `K`
+                                             feed the fold alone and carry
+                                             the boundary spelling only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context
@@ -831,6 +845,21 @@ structure ARow where
   comp : String
   cap : String
 
+/-- A provide method's reached crossing. It is the one fact row two
+surfaces read, and they name a crossing in DIFFERENT namespaces, so it
+carries both spellings:
+
+* `cap` is the ATTENUATION element — the DECLARED boundary token and its
+  valuation (`lower._cap_keyed`), or the namespaced wiring key where no
+  declaration tokens it (`lower._wire_cap`). `Attenuates` compares a
+  parent's grant with a child's demand across a component boundary, and
+  `covers` clause 1 is a boundary IDENTITY test, so a local wiring key —
+  which two components spell however each likes — names nothing there;
+* `bound` is the BOUND element — the wiring key the crossing went through,
+  which is exactly how the reference names it when it measures a provide
+  method against its own service's `emission[...]` declaration.
+
+`A` and `K` feed only the attenuation fold and carry only that spelling. -/
 structure FRow where
   path : String
   comp : String
@@ -838,6 +867,7 @@ structure FRow where
   svc : String
   meth : String
   cap : String
+  bound : String
 
 structure KRow where
   path : String
@@ -1094,7 +1124,8 @@ def parseA (f : List String) : Option ARow :=
 
 def parseF (f : List String) : Option FRow :=
   match f with
-  | ["F", path, comp, key, svc, meth, cap] => some ⟨path, comp, key, svc, meth, cap⟩
+  | ["F", path, comp, key, svc, meth, cap, bound] =>
+      some ⟨path, comp, key, svc, meth, cap, bound⟩
   | _ => none
 
 def parseK (f : List String) : Option KRow :=
@@ -1312,7 +1343,7 @@ def main (args : List String) : IO UInt32 := do
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
     let allCaps := ((arows.map (·.cap)) ++ (frows.map (·.cap))
-                    ++ (krows.map (·.cap))).eraseDups
+                    ++ (frows.map (·.bound)) ++ (krows.map (·.cap))).eraseDups
     let missing := allCaps.filter (fun c => (capOf capTable c).isNone)
     if !missing.isEmpty then
       IO.eprintln s!"oracle: capability rows without a Z decomposition: {missing}"
@@ -1404,7 +1435,7 @@ def main (args : List String) : IO UInt32 := do
       for k in fkeys do
         let caps := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
                                 && r.svc == k.2.2.1 && r.meth == k.2.2.2))
-                    |>.map (·.cap) |>.eraseDups
+                    |>.map (·.bound) |>.eraseDups
         let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 caps
         let pv := if ok then "ok" else "fail"
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"

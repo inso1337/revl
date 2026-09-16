@@ -273,8 +273,57 @@ def attenuation_coverage() -> list[str]:
     return findings
 
 
+# A crossing has TWO names, and they live in different namespaces. The
+# exporter ships both, because the two surfaces that read a crossing disagree
+# about which one names it:
+#
+#   * the BOUND rule (`P`) asks whether a provide method stayed inside its own
+#     service's `emission[...]` declaration, and the reference names the
+#     crossing there by the WIRING KEY it went through — "`Cache.put` is
+#     declared `emission[db]`, but this implementation emits through `bus`"
+#     (`examples/rejections/g4_capability_not_declared.rvl`). `_canon_cap`
+#     below is that namespace and is right for it;
+#   * the ATTENUATION fold (`W`) compares a parent's grant against a child's
+#     demand ACROSS a component boundary, and two components wire the same
+#     boundary under whatever key each likes. `covers` clause 1 is a boundary
+#     IDENTITY test, so the fold element must be the DECLARED token — exactly
+#     what `lower._cap_keyed` says, and what `_declared_cap` builds here.
+#
+# Spelling both sides of the attenuation fold in the key namespace is a
+# LAUNDERING hole: `Supervisor requires kv: KvA` spawning
+# `Leaker requires kv: KvB` reaches a different boundary under the same key,
+# and the fold saw `kv` on both sides and derived no widening
+# (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
+_WIRE_NS = "key:"
+
+
+def _wire_cap(key: str) -> str:
+    """`lower._wire_cap`: the attenuation-fold element for a wiring key that no
+    declaration tokens (a bare `emission`, a plain or unresolvable service).
+    The key gets its OWN namespace so a key spelling can never masquerade as a
+    declared token, and so two such boundaries still compare by name."""
+    return _WIRE_NS + key
+
+
+def _declared_cap(declared: str) -> str:
+    """`lower._cap_keyed`: the attenuation-fold element for a crossing that a
+    declaration DOES token. The boundary is the declared token and its
+    valuation, never the local wiring key it was reached through, canonicalized
+    by the checker's own parser (so `net(requests=100)` and `net(calls=100)`
+    are one element and not two).
+
+    A malformed stored spelling degrades to the unnameable `*`, fail-closed on
+    both sides exactly as the bridge does: covered by nothing as a reach
+    element, covering nothing but `*` as a held one."""
+    try:
+        return parse_cap(declared).to_str()
+    except cap_order.CapError:
+        return "*"
+
+
 def _canon_cap(root: str, declared: str) -> str:
-    """Token the wiring key, params from the declared valuation: a declaring
+    """The BOUND namespace (`P` row only — see the note above): token the
+    wiring key, params from the declared valuation, so a declaring
     `fs.write(path="/tmp")` crossed through key `fs` renders `fs(path="/tmp")`,
     the spelling the checker's diagnostics use. A bare declared token keeps
     the bare key."""
@@ -611,16 +660,20 @@ def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
         apply_bindings(stmt)
 
 
-def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
-               psvc: dict, bounds: dict, em_set: set, emitting: set,
-               aliases: dict | None = None) -> None:
-    """Collect the canonical emission caps `node` crosses.
+def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
+               handles: dict, psvc: dict, bounds: dict, em_set: set,
+               emitting: set, aliases: dict | None = None) -> None:
+    """Collect the emission caps `node` crosses, each as the PAIR
+    `(attenuation spelling, bound spelling)` — the two namespaces a crossing
+    has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
+    its surface reads; nothing downstream has to re-derive the other.
 
     `region` is "emit-step" (count only MARKED crossings — the attenuation
     surface, like `_collect_emit_caps_pairs`) or "all" (also count any
     resolved emission call — a provide method's reach for the bound, like
     `_method_emissions.walk`). A spawn-handle emission is the unnameable
-    `*`; an emission extern / emitting-fn call contributes `*` too."""
+    `*`; an emission extern / emitting-fn call contributes `*` too. `*` is
+    unnameable in BOTH namespaces, so it is its own spelling on both sides."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
@@ -639,16 +692,20 @@ def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
                 svc, meth = res
                 if (svc, meth) in em_set:
                     if root in handles or (aliases and root in aliases):
-                        out.add("*")
+                        out.add(("*", "*"))
                     else:
                         mode, entries = bounds[(svc, meth)]
                         if mode == "any":
-                            out.add(root)
+                            # No declared token: the wiring key names the
+                            # boundary, in its own namespace for the fold and
+                            # bare for the bound.
+                            out.add((_wire_cap(root), root))
                         else:
                             for e in entries:
-                                out.add(_canon_cap(root, e))
+                                out.add((_declared_cap(e),
+                                         _canon_cap(root, e)))
             elif res is None and region == "all" and root in emitting:
-                out.add("*")
+                out.add(("*", "*"))
         for a in node.args:
             walk_reach(a, out, region, requires, handles, psvc, bounds,
                        em_set, emitting, aliases)
@@ -1021,19 +1078,23 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # require-held capability facts (K): the boundaries a requires
             # binding hands this component — the structured valuations of the
             # service's emission declarations (the held side of attenuation).
+            # K feeds the attenuation fold and nothing else, so it carries the
+            # ATTENUATION spelling only: the declared token where the service
+            # declares one, the namespaced wiring key where it does not
+            # (`lower._held_capabilities_pairs`, clause for clause).
             krows: list[tuple[str, str]] = []
             for local, svc in requires:
                 em = [(mode, ents) for (s, _m), (mode, ents) in bounds.items()
                       if s == svc and mode != "plain"]
                 if not em:
-                    krows.append((local, local))
+                    krows.append((local, _wire_cap(local)))
                     continue
                 for mode, ents in em:
                     if mode == "any":
-                        krows.append((local, local))
+                        krows.append((local, _wire_cap(local)))
                     else:
                         for e in ents:
-                            krows.append((local, _canon_cap(local, e)))
+                            krows.append((local, _declared_cap(e)))
             for local, cap in sorted(krows):
                 caps_seen.add(cap)
                 tsv.append("\t".join(["K", rel, c.name, local, cap]))
@@ -1071,12 +1132,15 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
 
             # activation emit-step surface (A): the component's OWN marked
             # crossings — the base of the attenuation reach.
-            act_reach: set[str] = set()
+            # A feeds the attenuation fold and nothing else, so — like K — it
+            # carries the attenuation spelling only.
+            act_reach: "set[tuple[str, str]]" = set()
             for stmt in c.body:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
                            psvc, bounds, em_set, emitting, aliases)
-            caps_seen.update(act_reach)
-            for cap in sorted(act_reach):
+            act_caps = {cap for cap, _bound in act_reach}
+            caps_seen.update(act_caps)
+            for cap in sorted(act_caps):
                 tsv.append("\t".join(["A", rel, c.name, cap]))
 
             # host acquisition facts (HA): each host-family acquisition the
@@ -1088,21 +1152,27 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
 
             # provide-method reach (F): emission caps a method's body crosses
             # (all-call) — the bound check's left side and, with A, the
-            # component surface for attenuation.
+            # component surface for attenuation. It is the ONE row both
+            # surfaces read, so it carries BOTH spellings: `cap` is the
+            # attenuation element (the declared boundary) and `bound` is the
+            # bound element (the wiring key the crossing went through). They
+            # differ, and collapsing them is the laundering hole.
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     svc = psvc.get(c.name, {}).get(stmt.key)
                     if svc is None:
                         continue
                     for pm in stmt.methods:
-                        reach: set[str] = set()
+                        reach: "set[tuple[str, str]]" = set()
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
                                        psvc, bounds, em_set, emitting, aliases)
-                        caps_seen.update(reach)
-                        for cap in sorted(reach):
+                        for cap, bound in sorted(reach):
+                            caps_seen.add(cap)
+                            caps_seen.add(bound)
                             tsv.append("\t".join(
-                                ["F", rel, c.name, stmt.key, svc, pm.name, cap]))
+                                ["F", rel, c.name, stmt.key, svc, pm.name,
+                                 cap, bound]))
 
             calls: list[tuple[str, str, str, str]] = []
             kinds: list[str] = []
@@ -2140,7 +2210,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     brows = [r for r in rows if r and r[0] == "B" and len(r) == 5]
     qrows = [r for r in rows if r and r[0] == "Q" and len(r) == 5]
     arows = [r for r in rows if r and r[0] == "A" and len(r) == 4]
-    frows = [r for r in rows if r and r[0] == "F" and len(r) == 7]
+    frows = [r for r in rows if r and r[0] == "F" and len(r) == 8]
     krows = [r for r in rows if r and r[0] == "K" and len(r) == 5]
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
@@ -2205,9 +2275,12 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         comps[(rel, compn)] = "fail" if (raw or acquire) else "ok"
 
     providers: dict[tuple[str, str, str, str, str], str] = {}
+    # The BOUND surface reads the F row's bound spelling (column 8): the
+    # reference names a crossing by the wiring key it went through when it
+    # measures a provide method against its own service's declaration.
     fmethods: dict[tuple[str, str, str, str, str], set[str]] = {}
     for r in frows:
-        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), set()).add(r[6])
+        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), set()).add(r[7])
     for k, caps in fmethods.items():
         mode, ents = bounds_by_file.get((k[0], k[3], k[4]), ("plain", set()))
         if mode == "any":
@@ -2218,6 +2291,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             ok = {parse_cap(c).token for c in caps} <= ents
         providers[k] = "ok" if ok else "fail"
 
+    # ... and the ATTENUATION surface reads the same row's column 7, the
+    # declared boundary. A and K carry that spelling and no other.
     owns: dict[tuple[str, str], set[str]] = {}
     for r in arows:
         owns.setdefault((r[1], r[2]), set()).add(r[3])
