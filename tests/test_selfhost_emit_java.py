@@ -124,6 +124,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _boundary_witness import shared_witness_token_reason  # noqa: E402
+
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
     # slice 1 (item 199) — functions-only base surface
@@ -448,6 +452,12 @@ def test_declared_boundary_still_diverges(
     got = emitted["emit_java_src"](ir)
     if reference_fragment not in want:
         pytest.fail(f"{rel} no longer exercises its reference boundary")
+    # A port fragment the reference emits too witnesses nothing (item 1136).
+    # This arm reports through pytest.fail rather than an assertion because the
+    # case is xfail-strict on AssertionError and would otherwise swallow it.
+    reason = shared_witness_token_reason(want, port_fragment)
+    if reason is not None:
+        pytest.fail(f"{rel}: {reason}")
     if port_fragment is not None and port_fragment not in got:
         pytest.fail(f"{rel} no longer exercises its port boundary")
     if port_fragment is None and reference_fragment in got:

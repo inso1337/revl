@@ -75,6 +75,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _boundary_witness import assert_boundary_witness  # noqa: E402
+
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
     "arrow_containers.rvl",
@@ -329,12 +333,21 @@ def test_builder_text_literal_does_not_import_strings(emitted, reference):
                  "utf8.RuneCountInString", "<<UNSUPPORTED-EXPR:builtin>>", id="stdlib-runtime"),
     pytest.param("fn f(a: List[Int], b: List[Int]) -> Bool { return a == b }",
                  "reflect.DeepEqual", "<<DEFER-reflect-eq>>", id="structural-equality"),
+    # No port-only text: the port emits the CALL `revlFtoa(x)` (so did the
+    # reference, which is why that token could not witness anything) and drops
+    # the helper's DEFINITION and the "math"/"strconv"/"strings" import block
+    # with it. Witnessed by the definition's absence from the port's output.
     pytest.param("fn f(x: Float) -> Str { return `x=${x}` }",
-                 "func revlFtoa", "revlFtoa(x)", id="float-format-helper"),
+                 "func revlFtoa", None, id="float-format-helper"),
     pytest.param('extern pure fn f() -> Str = @go {\n//revl:import strings\nreturn strings.ToUpper("x")\n}',
                  '"strings"', "<<DEFER-EXTERN-import:f>>", id="extern-imports"),
+    # The port drops the whole in-file test section and puts nothing in its
+    # place, so there is no port-only text to pin: witnessed by the absence of
+    # the reference's test driver from the port's output. (This case used to
+    # pin `func f()`, the document's own emitted function, which both sides
+    # emit -- see tests/_boundary_witness.py.)
     pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
-                 "*testing.T", "func f()", id="in-file-tests"),
+                 "*testing.T", None, id="in-file-tests"),
     pytest.param("service S { fn f() -> Int }\ncomponent C provides s: S { provide s { fn f() = 1 } }",
                  "stc-go", "pure typed-core tier", id="live-component"),
 ])
@@ -345,9 +358,28 @@ def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
     path.write_text(source)
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
-    assert reference_token in want
-    assert port_token in got
-    assert got != want, "boundary is stale: move its witness into CORPUS"
+    assert_boundary_witness(want, got, reference_token, port_token)
+
+
+def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_path):
+    """Non-vacuity for the meta-check, planting the exact token it was written for.
+
+    Until item 1136 the `in-file-tests` case above pinned `func f()` as its port
+    token. Both sides emit it -- it is the document's own function -- so the case
+    passed green while the port dropped the entire `testing` section. Plant it
+    back and the witness must now refuse it by name; the honest form of the same
+    case (the reference's driver, absent from the port) still passes.
+    """
+    path = tmp_path / "planted.rvl"
+    path.write_text('fn f() -> Bool { return true }\ntest "probe" { assert f() }')
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert "func f()" in want and "func f()" in got, (
+        "the plant is only a proof while it is text BOTH sides emit"
+    )
+    with pytest.raises(AssertionError, match="text the REFERENCE also emits"):
+        assert_boundary_witness(want, got, "*testing.T", "func f()")
+    assert_boundary_witness(want, got, "*testing.T", None)
 
 
 def test_record_update_is_a_reference_refusal(reference, tmp_path):
