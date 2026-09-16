@@ -1,0 +1,39 @@
+// The call surface a required key OFFERS is bounded by its own service
+// declaration (A6, `_component_req_call`'s `decl is None` arm). The gate has to
+// resolve the key to its service anyway — that is how it judges G4 marking and
+// A1 colour — so the bound costs it nothing, and `selfhost/lower.rvl`'s
+// `req_call` now draws the same refusal the reference draws.
+//
+// This document is the ACCEPTING half of that bound. Every call below names a
+// method its service really declares, in each position a required-key call can
+// stand: an `effect` acquisition and its `undo`, an `emit` and its
+// `compensate`, a plain call in a provide-method body, and a second key in the
+// same body. A bound drawn one name too wide refuses this document, and it is
+// globbed into every byte-agreement projection over `emit_py_corpus`, so that
+// shows up as a corpus-wide red rather than as a report from a user.
+
+service Store {
+  fn open() -> Int
+  fn close(h: Int) -> Int
+  emission fn put(key: Str, value: Int) -> Int
+}
+
+service Audit {
+  emission fn note(msg: Str) -> Int
+}
+
+service Api {
+  emission fn run(x: Int) -> Int
+}
+
+component Gateway requires store: Store, audit: Audit provides api: Api {
+  let h = effect store.open() undo store.close(h)
+
+  provide api {
+    fn run(x) {
+      emit store.put("k", x) compensate audit.note("rolled back")
+      emit audit.note("stored")
+      return x
+    }
+  }
+}
