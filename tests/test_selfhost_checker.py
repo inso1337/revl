@@ -1598,6 +1598,35 @@ def test_generated_check_positions_agree_on_the_message(verdict_env, seed):
                    rng.choice(T2A_EXPECTED), rng.choice(T2A_WHERE))
 
 
+# `List[Row]` is deliberately NOT here: the descent reaches the record against
+# `Row` only through the element rule, which `compatible` refuses on the head
+# before the reason is sought, so the reference reports a plain T1 there too.
+@pytest.mark.parametrize("expected", ["Row", "S", "Opt[S]", "Opt[Opt[Row]]"])
+def test_an_undeclared_nominal_expectation_is_the_one_bounded_divergence(
+        verdict_env, expected):
+    """The single place this slice knowingly differs, pinned rather than
+    described.
+
+    A record literal meeting a nominal head the compilation does not declare is
+    not a mismatch the checker made — it is a comparison it never made. The
+    reference says so with `unresolved_nominal_reason`, which needs the
+    declared-type resolution `types.rvl` leaves out of the spelling algebra
+    (design §3.1, "NOT in this slice"), so the self-host reports the mismatch
+    without that clause. The divergence is bounded exactly here: the message is
+    the reference's up to the `;`, and the tag differs only because a
+    T-UNRESOLVED carries no type-layer marker.
+
+    Nothing real reaches it — `_validate_declared_types` refuses an undeclared
+    annotation before any body is typed — which is why this is a pin and not a
+    bug, and why the T2a fuzz above does not draw one. A slice that ports the
+    resolution deletes this test and adds the rows to the corpus."""
+    where = "`let v: T`"
+    want = _ref_verdict("", "", "{ h: s }", expected, where)
+    got = verdict_env("", "", "{ h: s }", expected, where)
+    assert "has no declaration in this compilation" in want
+    assert got == "T1|" + want.split("|", 1)[1].split(";")[0]
+
+
 def test_checker_in_file_tests_pass(ns):
     """`selfhost/checker.rvl`'s own `test` blocks, run under the python
     backend. Nothing ran them before this slice, which is how an assertion
