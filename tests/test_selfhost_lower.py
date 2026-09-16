@@ -1230,6 +1230,13 @@ component C provides ops: Ops {
   provide ops { fn go() = 1 }
 }
 """),
+    ("a component config field written as a secret", """
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { t: Secret[Str] }
+  provide ops { fn go() = 1 }
+}
+"""),
 
     # ---- item 391 / issue #106: extern declarations and inverse slots ------
     # The accepting twins of the extern refusals pinned in REJECTED_PROGRAMS.
@@ -2631,6 +2638,23 @@ type Cb = (Int) -> Str
 extern pure fn render(body: Str) -> Str
   config { cb: Cb }
   = @py { return body }
+""", "G4"),
+    # the alias TARGET keeps its qualifier, and that is what decides this one.
+    # A config field WRITTEN `Secret[Str]` is legitimate — the parser takes the
+    # qualifier off the annotation, so `cfg.type` is `Str` and the walk sees
+    # data — but an alias target is a TYPE SPELLING, so substitution puts
+    # `Secret[Str]` itself into the field and the walk finds `Secret` opaque.
+    # This reader stripped the qualifier off a declaration's right-hand side
+    # when it recorded it, remembered `type Tok = Secret[Str]` as `Str`, and
+    # drew nothing. Its accepting twin — the same field written out — is in
+    # ACCEPTED_PROGRAMS.
+    ("a component config field aliasing a secret", """
+type Tok = Secret[Str]
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { t: Tok }
+  provide ops { fn go() = 1 }
+}
 """, "G4"),
     # the CONTROLS that must keep refusing unchanged: the same field written
     # without an alias, on both owners.
