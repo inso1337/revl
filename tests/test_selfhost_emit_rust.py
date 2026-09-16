@@ -765,6 +765,62 @@ def test_selfhost_stages_cargo_build_and_run(tmp_path):
     assert "py_repr" in res.reason or "IR" in res.reason, res.reason
 
 
+# --------------------------------------------------------------------------
+# item 146 / issue #98 Stage 4 — the rust EMITTER builds AS RUST.
+#
+# The item-266 gate above builds the four FRONTEND stages (lexer/parser/checker/
+# lower). The emitter tail was the half that did not build: with every
+# host-formatting extern in selfhost/emit_rust.rvl carrying an `@rs` body and
+# stdlib/value.rvl's `@rs` accessors present, the module EMITTED to rust and then
+# failed `cargo build` with nine E0308s, all one class -- a concrete value
+# reaching the opaque `Value` slot that `Any` erases to, with no boxing written
+# at the crossing. docs/selfhost-compile.md named that residue as the blocker
+# under "Compiling `emit_rust.rvl` itself to rust", and crates/revl-gate's own
+# `compile_to` cites it as why Stage 4 has no native emitter to call.
+#
+# Nine sites, four crossings: an argument whose type the emitter could not infer
+# (a `let` bound to a stdlib method call), a `return` into a declared `-> Any`,
+# an `Opt[Any] ?? <scalar>` default, and a `List[Any]` argument. This gate holds
+# the result: the rust emitter, emitted to rust, compiles. Byte-exact emit does
+# not prove it (the item-266 lesson), so the build is run, not inferred.
+#
+# It is a BUILD gate, not a run gate. Driving the emitted emitter needs a
+# rust-side IR constructor to feed its `Any` parameter, which is the next slice
+# and is why tools/bench_selfhost_rust.py records emitter stages as `ir_in`.
+
+
+@pytest.mark.skipif(
+    shutil.which("cargo") is None,
+    reason="cargo not installed: cannot gate the rust emitter BUILD (item 146)",
+)
+def test_the_rust_emitter_builds_as_rust(reference, tmp_path):
+    """selfhost/emit_rust.rvl emitted to rust `cargo build`s clean.
+
+    Loud gate: a cordis-rs runtime that does not resolve skips with the reason
+    rather than passing vacuously, the same honesty gate the item-266 build uses.
+    """
+    bench = _load_bench_rust()
+    runtime_reason = bench.rust_runtime_reason()
+    if runtime_reason is not None:
+        pytest.skip(f"cordis-rs runtime does not resolve here: {runtime_reason}")
+
+    # The reference REFUSES an extern with no `@rs` body by name rather than
+    # emitting a bodyless one, so this call is itself the first half of the gate.
+    module = reference.emit(
+        compile_files([str(ROOT / "selfhost" / "emit_rust.rvl")]))
+
+    crate = tmp_path / "selfhost_emit_rust_native"
+    (crate / "src").mkdir(parents=True, exist_ok=True)
+    (crate / "src" / "lib.rs").write_text(module, encoding="utf-8")
+    (crate / "Cargo.toml").write_text(
+        reference.cargo_toml("revl_selfhost_emit_rust"), encoding="utf-8")
+
+    built = bench._cargo("build", crate)
+    assert built.returncode == 0, (
+        "selfhost/emit_rust.rvl does not build as rust (item 146 / #98 Stage 4 "
+        "regression):\n" + (built.stderr or built.stdout or "").strip()[-3000:])
+
+
 # ---------------------------------------------------------------------------
 # The deferred in-file test section stays LOUD (issue #1123).
 #

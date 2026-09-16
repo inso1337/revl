@@ -40,14 +40,59 @@ import.
 
 ---
 
+## A COMPOSITION document argument
+
+Six commands share one compile step: `compile`, `audit`, `version`, `test`,
+`query` and `erase-report`. A `FILES` argument may be a MODULE or a single
+COMPOSITION document, and a composition is RESOLVED rather than compiled as a
+module (roadmap item 439): its rows are compiled, and the providers a `remote`
+row SYNTHESIZES are in the document these commands answer from, with their
+folded `net.<host>` reach.
+
+Before that they compiled every argument as a module, and a composition
+document, which declares no module-level component, compiled to nothing. Each
+command then answered from the empty compilation: `compile` wrote an IR
+document with no services and no components and exited 0, `version` read that
+same document and derived "the interface is unchanged", `test` printed "no
+tests to run", `query` answered "unknown component", and `erase-report`
+answered "unknown realm".
+
+The shapes these commands cannot resolve refuse by name with a nonzero exit,
+rather than answering from an empty compilation: a composition document listed
+beside modules (a composition names the rows it compiles, so the two describe
+different programs), two composition documents in one invocation (a composition
+document is the compiled unit), and a layer document (a layer is a delta over
+the composition that stacks it, so it has no composition of its own; run the
+command over the composition instead).
+
+A composition is admitted whole, never as a layer delta, so no row is skipped,
+and a non-first-party stack-layer row is compiled under its own untrusted-author
+profile. Both are the over-refusing direction, and there is deliberately no
+`--trust-host-code` on this path.
+
+Each of the six takes `--root DIR`: the project root row provenance and origins
+are recorded against (default: the working directory), the same root `revl
+composition` takes. It is ignored for module arguments.
+
+`revl goal` shares the same compile step and is deliberately NOT on this path.
+`goal audit`'s exit code over a composition with no termination contract is
+roadmap item 441/458's decision, and widening the document it is evaluated over
+belongs to that item.
+
+---
+
 ## Authoring and admission
 
 ### `revl compile`
 
 Parse, check, link, and lower `FILES` to a backend IR document.
 
-- `FILES` - one or more sources (required).
+- `FILES` - one or more sources, or a single composition document (required;
+  see [A COMPOSITION document argument](#a-composition-document-argument)).
 - `-o`, `--output PATH` - write the IR here (default: stdout).
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--json-diagnostics` - on rejection, print a structured diagnostic (code,
   guarantee, expected/actual, `fix` hint) instead of the human rendering.
 
@@ -513,6 +558,12 @@ measurement of the change, not a policy choice.
   when given, the computed next version is printed too.
 - `--emit-manifest` - print the compiled composition document (the diff input
   a later `--against` reads) and exit, instead of deriving a bump.
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments. See
+  [A COMPOSITION document argument](#a-composition-document-argument): a
+  composition compiled as a module derived "the interface is unchanged" for a
+  composition whose rows had changed.
 - `--json` - machine-readable derivation.
 
 ### `revl changelog`
@@ -583,6 +634,11 @@ Static (over source; each takes `TARGET FILES`):
 - `drift SERVICE FILES` - which providers and call sites a service interface
   change implicates. Adds `--gains METHOD` and `--loses METHOD` (each
   repeatable) to model a method the service would gain or lose.
+
+Every static verb's `FILES` may be a single COMPOSITION document instead of
+modules, and each takes `--root DIR` (see [A COMPOSITION document argument](#a-composition-document-argument)). A composition
+compiled as a module answered "unknown component" for every name its rows
+define.
 
 Historical (over a recorded run):
 
@@ -1085,8 +1141,12 @@ Right-to-erasure evidence for one realm: in-process state gone (no-residue
 proof), boundary crossings compensated-vs-bare, and other realms provably
 untouched ([erase-report.md](erase-report.md)).
 
-- `FILES` (required).
+- `FILES` - sources, or a single composition document (required; see [A COMPOSITION document argument](#a-composition-document-argument)). A composition compiled as a module answered "unknown realm" for
+  every realm its rows declare.
 - `--realm R` - the realm to report erasure evidence for (required).
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--json` - machine-readable, versioned report document.
 - `--no-residue-proof` - skip the runtime teardown proof (static sections
   only; use where the cordis runtime is unavailable).
@@ -1185,7 +1245,11 @@ lower to the same IR).
 Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 `lifecycle test`).
 
-- `FILES` (required).
+- `FILES` - sources, or a single composition document (required; see [A COMPOSITION document argument](#a-composition-document-argument)). A composition compiled as a module collected nothing and printed
+  "no tests to run".
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--backend {py, ts, rust, java, wasm, go, all}` - tier to run the blocks on
   (default: `py`); `all` runs every tier whose toolchain is present.
 - `--list` - print every test name the compilation collects (plain `test`,

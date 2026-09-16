@@ -215,8 +215,27 @@ def test_the_emitted_handle_pins_the_resolved_path_and_the_real_bytes(ts):
 )
 def test_no_inline_frontend_blob(ts, blob):
     """The emitted artifact carries no HTML/CSS/JS document string. This is the
-    property the string-carried console cannot state about itself."""
+    property the string-carried console cannot state about itself.
+
+    Kept as written, and no longer the only guard: this list is seven forms
+    somebody thought of, and `<span`, `<a href=` and `document.createElement`
+    all pass it. `test_no_embedded_frontend_document_in_the_artifact` below
+    states the same property by shape, and
+    `tests/test_no_embedded_frontend_document_1120.py` states it over every
+    `.rvl` in the repository rather than over this one artifact.
+    """
     assert blob not in ts
+
+
+def test_no_embedded_frontend_document_in_the_artifact(ts):
+    """The same artifact, by structure instead of by substring: no markup tree,
+    no document declaration, no value interpolated into markup. Widens the
+    parametrized list above — it does not replace it, because the two can fail
+    for different reasons and a substring hit is a clearer error message."""
+    from test_no_embedded_frontend_document_1120 import scan_text
+
+    found = scan_text(ts, "the emitted typescript artifact")
+    assert found is None, str(found)
 
 
 def test_frontend_entry_is_a_real_ts_asset():
