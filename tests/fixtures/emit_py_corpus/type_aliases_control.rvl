@@ -8,6 +8,7 @@
 // projection itself broke, which is the way a fix can masquerade.
 type Row = { id: Int, name: Str }
 type Found = Hit(Int) | Missing
+type Status_c = Pending_c
 
 extern pure fn bump_c(n: Int) -> Int = @py { return n + 1 }
 
@@ -24,5 +25,9 @@ fn calls_the_extern_c(n: Int) -> Int { return bump_c(n) }
 fn annotated_let_c() -> Int { let c: Int = 1 return c }
 fn widened_let_c() -> Float { let r: Float = 1 return r }
 fn pinned_let_c() -> List[Int] { let xs: List[Int] = [] return xs }
+fn annotated_arrow_c() -> Str { let f = (v: Int): Str => "x" return f(1) }
+fn takes_a_handler_c(h: (Int) -> Str) -> Str { return h(1) }
+fn passes_an_arrow_c() -> Str { return takes_a_handler_c((v: Int): Str => "y") }
 fn build_a_row_c(id: Int, name: Str) -> Row { return { id: id, name: name } }
 fn plain_c(a: Int, b: Int) -> Int { return a + b }
+fn nominal_c(s: Status_c) -> Status_c { return s }
