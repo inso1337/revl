@@ -10,18 +10,11 @@
   ],
   "false-admit/T1": [
    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-   "examples/rejections/t16_provide_method_missing_return.rvl",
    "examples/rejections/t17_arrow_body_unchecked.rvl",
-   "examples/rejections/t1_service_arg_type.rvl",
-   "examples/rejections/t30_field_read_on_any_provide_method.rvl",
-   "examples/rejections/t31_index_non_int_provide_method.rvl",
    "examples/rejections/t32_arrow_value_result_flows.rvl",
    "examples/rejections/t33_arrow_value_arity.rvl",
    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-   "examples/rejections/t3_config_default_type.rvl",
-   "examples/rejections/t4_field_arg_type.rvl",
    "examples/rejections/t6_bare_generic.rvl",
-   "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
    "examples/rejections/v2_match_nonexhaustive.rvl"
   ],
   "false-admit/TYPE": [
@@ -168,18 +161,6 @@
     "tag": "T1"
    }
   },
-  "examples/rejections/t16_provide_method_missing_return.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`get` implements `Store.get`, which returns `Str`, but this body never returns a value",
-    "tag": "T1"
-   }
-  },
   "examples/rejections/t17_arrow_body_unchecked.rvl": {
    "bucket": "false-admit/T1",
    "gate": {
@@ -202,42 +183,6 @@
    "reference": {
     "message": "type alias cycle: Handle -> Ref -> Handle",
     "tag": "TYPE"
-   }
-  },
-  "examples/rejections/t1_service_arg_type.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`db.query` argument `sql` expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t30_field_read_on_any_provide_method.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "field read `.kind` on a value of type `Any` \u2014 an erased value has no known fields",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t31_index_non_int_provide_method.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "index expects `Int`, got `Str`",
-    "tag": "T1"
    }
   },
   "examples/rejections/t32_arrow_value_result_flows.rvl": {
@@ -276,30 +221,6 @@
     "tag": "T1"
    }
   },
-  "examples/rejections/t3_config_default_type.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "config field `n` default expects `Int`, got `Str`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t4_field_arg_type.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`s.take` argument `s` expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
   "examples/rejections/t5_destructure_nonrecord.rvl": {
    "bucket": "false-admit/TYPE",
    "gate": {
@@ -321,18 +242,6 @@
    },
    "reference": {
     "message": "`Opt` takes 1 type argument(s), got 0 (`Opt`)",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t7_provide_param_annotation_mismatch.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`",
     "tag": "T1"
    }
   },

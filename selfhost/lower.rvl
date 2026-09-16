@@ -4204,9 +4204,20 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
     if (rc.v != "") { return mk_verd(rc.v, ln) }
     return mth_type_verdict(body, i + 1, env, cx, ret, mname, fallback)
   }
-  let r = tk_infer(s.e, env)
+  // WHICH STATEMENTS THE REFERENCE SWEEPS. `_sweep` (item 404's raising oracle)
+  // runs from `_do_let` and `_do_return` and from nowhere else: a
+  // statement-level `effect`/`emit`/`undo` in a component body is lowered
+  // without it, so `effect m.insert("k", w.to_str())` with `w: Int32` is
+  // ADMITTED there while the same call in a `let` or a `return` is refused. A
+  // walk that sweeps every statement refuses programs the reference admits, and
+  // `tests/fixtures/emit_java_corpus/map_inference_builtins.rvl` is thirteen of
+  // them in one document.
+  //
+  // The REQUIREMENT-call argument rule is not part of that: it lives in
+  // `_component_req_call`, which every crossing statement goes through, so
+  // `ct_scan` runs over all of them.
+  let r = ct_swept(s) ? tk_infer(s.e, env) : tk_ok("")
   if (r.v != "") { return mk_verd(r.v, ln) }
-  // the requirement-call arguments, after the expression's own types
   let rq = ct_scan(s.e, cx, env)
   if (rq != "") { return mk_verd(rq, ln) }
   var next = env
@@ -4217,10 +4228,47 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
     // `type_env` for it), then what the value itself infers to.
     var bound = tk_solid(s.bindTy, env)
     if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
-    if (bound == "") { bound = r.ty }
+    if (bound == "" && !ct_crossing(s)) { bound = r.ty }
     if (bound != "") { next = tenv_put(env, s.bind, bound) }
   }
   return mth_type_verdict(body, i + 1, next, cx, ret, mname, fallback)
+}
+
+// A statement that CROSSES the boundary: an `effect` acquisition or an `emit`.
+// What such a binding names is a host-frontier value, and the reference's type
+// for one is ADVISORY — `infer_ir` answers nothing for a host acquire node, so
+// `let store = effect Map.new()` leaves `store` untyped and `store.size()` is
+// admitted even though `Map` has no `size` on its stdlib surface. Reading the
+// handle as a `Map` instead applies the stdlib surface, arity and argument rules
+// to a value the reference never claimed was one, which refuses programs it
+// admits. The one type such a binding DOES take is the declared return of a
+// REQUIREMENT call, which is a published signature rather than a host value —
+// `ct_stmt_req_ret` above, and it is consulted first for that reason.
+fn ct_crossing(s: Stmt) -> Bool {
+  return s.kind == "effect" || s.kind == "emit"
+}
+
+// The statements the reference runs its RAISING type oracle over, measured
+// rather than assumed:
+//
+//   * a BINDING (`_do_let`'s `_sweep`) and a `return` (`_do_return`'s
+//     `check_ir`) — `let z = 1 + "s"` and `return 1 + "s"` are both refused
+//     inside a provide method;
+//   * an `emit`, whose operand is lowered as an ordinary pure expression —
+//     `emit lg(!k)` with `k: Str` draws the reference's `!` refusal, bound or
+//     not.
+//
+// and NOT: a statement-level `effect`/`undo`/`compensate`, nor a bare
+// expression statement. `effect m.insert("x", !k)` and the arrow-form body
+// `fn count() = store.size()` are both ADMITTED by the reference, and sweeping
+// them refused seventeen corpus documents.
+//
+// A CROSSING binding (`let h = effect …`) is excluded for the same reason its
+// TYPE is: what it names is the boundary's result, lowered through the host or
+// provision path rather than as an expression this walk typed.
+fn ct_swept(s: Stmt) -> Bool {
+  return s.kind == "return" || s.kind == "emit"
+    || (s.bind != "" && !ct_crossing(s))
 }
 
 // The declared RETURN of the requirement call an expression is, or "". An
@@ -4244,7 +4292,7 @@ fn mth_body_tys(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind
   }
   var bound = tk_solid(s.bindTy, env)
   if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
-  if (bound == "") { bound = tk_infer(s.e, env).ty }
+  if (bound == "" && ct_swept(s)) { bound = tk_infer(s.e, env).ty }
   return mth_body_tys(body, i + 1,
                       bound == "" ? env : tenv_put(env, s.bind, bound), cx)
 }
@@ -8246,6 +8294,19 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // level, which compounds with nesting.
   let tv = tk_callee(c.target, env)
   if (tv.v != "") { return tv }
+  // THE HOST-OBJECT CALL, in a component body. An untyped method receiver there
+  // is an acquired handle, a requirement handle or a provision alias, and the
+  // reference lowers a call on one through the host / provision path — which
+  // runs no pure-expression type oracle over the receiver, the call, OR ITS
+  // ARGUMENTS. `effect m.insert("x", !k)` and `let z = m.get(!k)` with `k: Str`
+  // are both admitted; the same `!k` in an ordinary call is refused. So the
+  // whole subtree is left undecided rather than only its head — descending into
+  // the arguments is what refused those two.
+  //
+  // The requirement call's own ARGUMENT rule is untouched: it lives in
+  // `ct_args`, which infers each argument itself against the service's declared
+  // parameter type, exactly where `_component_req_call` does.
+  if (ir_stratum(env) && ct_host_object_call(c.target, env)) { return tk_ok("") }
   let a = tk_arg_walk(c.args, 0, env, [])
   if (a.v != "") { return a.r }
   // docs/design/457 T2b: a bare-name callee against the signature table, and a
@@ -8321,6 +8382,17 @@ fn tk_unknown_receiver(callee: Expr, env: List[Bind]) -> Bool {
 
 fn tk_host_root(e: Expr) -> Bool {
   return match e { Var(n) => is_host_root(n), _ => false, }
+}
+
+// A method call whose RECEIVER this walk has no type for, in a component body.
+// The host family ROOTS (`Map.new()`, `Map.empty()`) are excluded: those are
+// constructors, not calls on an acquired value, and the reference types them.
+fn ct_host_object_call(callee: Expr, env: List[Bind]) -> Bool {
+  return match callee {
+    Field(f) => !tk_host_root(f.target) && !is_empty_map_callee(callee)
+                && tk_wild(tk_infer(f.target, env).ty),
+    _        => false,
+  }
 }
 
 fn tk_items(xs: List[Expr], i: Int, env: List[Bind], ty: Str) -> TInf {
@@ -9161,7 +9233,20 @@ fn tk_method(c: CallN, env: List[Bind], argTys: List[Str],
   if (list_transform_free(f.name) != "" && !tk_is_host_family(recv)) {
     return tk_miss()
   }
-  if (recv == "" || tk_wild(recv)) { return tk_unknown_recv_check(f.name, argTys) }
+  // The unknown-receiver fallback is an AST-STRATUM rule. In a module `fn` body
+  // an untyped receiver really is a stdlib value the walk failed to type, and
+  // the reference runs `builtin_check` with `target_type None` over it. In a
+  // COMPONENT body it is not: an untyped receiver there is a requirement handle,
+  // a provision alias, a spawn handle or an acquired host object, and the
+  // reference resolves the call through the component's own tables
+  // (`_component_req_call` and its neighbours) without ever reaching the builtin
+  // rows. Running them anyway read `kv.set(7, 100)` on `service Kv { fn set(k:
+  // Int, v: Int) }` as the `Map` builtin and refused it — a program the
+  // reference admits.
+  if (recv == "" || tk_wild(recv)) {
+    if (ir_stratum(env)) { return tk_miss() }
+    return tk_unknown_recv_check(f.name, argTys)
+  }
   return tk_hit(tk_builtin_check(f.name, recv, argTys))
 }
 
