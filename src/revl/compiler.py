@@ -1118,6 +1118,98 @@ def _reject_clashing_private_externs(included: list[_LoadedModule]) -> None:
                 )
 
 
+def _reject_cross_module_case_collisions(included: list[_LoadedModule]) -> None:
+    """Refuse an ADT CASE name that another module already spends on a top-level
+    `type`, `fn` or `extern` (issue #1145).
+
+    Item 228's private-namespace rule builds exactly two tables — fn/extern
+    names and `type` DECLARATION names — and renames a private decl whose bare
+    name is not unique across the merged set. A case name is in neither table,
+    so the merge never sees it, and the merged program ends up with one name
+    carrying two meanings:
+
+        selfhost/types.rvl   type Field = { name: Str, ty: Str }   (a record)
+        selfhost/parser.rvl  pub type Expr = … | Field(FieldN) | … (a case)
+
+    Merged by a `use` edge the two compile with no diagnostic. Both are
+    CONSTRUCTORS in the merged value namespace, so `Field(x)` has two readings;
+    both are also emitted as one top-level symbol per tier (`class Field:` for
+    the record and `class Field(Expr):` for the case land in the same module),
+    so which one survives is decided by the order the merge happened to flatten
+    the modules in. The measured consequence was 415 of 761 census programs
+    faulting with `Field() takes no arguments` while every unit oracle — each of
+    which compiles its file ALONE — stayed green.
+
+    Why refuse rather than rename apart, which is what 228 does for a private
+    fn or type: a case name cannot be renamed. It has no visibility of its own
+    (it inherits its ADT's), so a case of a `pub` type is part of the module's
+    interface — `use "./parser.rvl" { Expr }` imports the right to write
+    `Field(n)` and to match on `Field`. The bare spelling is also the emitted
+    representation: it is the IR's `"case": "Field"`, the pattern name in every
+    `match`, and the per-tier constructor symbol. Renaming it apart is not
+    invisible, so there is nothing to mangle and the only honest answer is the
+    one 228 already gives when neither side can move (two `pub` names, or the
+    private-extern case above): refuse by name, citing both declaration sites.
+
+    Deliberately NOT refused here:
+
+    * the same file declaring both. The merge seam is where the two spellings
+      stop being visible to their author; inside one file they are, and the
+      single-module rule is unchanged (`examples/rejections/t18_type_alias_cycle
+      .rvl` declares exactly that shape and must keep refusing for its own
+      reason).
+    * two modules declaring the SAME case name on different ADTs. That one is
+      already loud rather than silent: `lower.py::_case_table` drops an
+      ambiguous case from the constructor table, so the use site refuses with
+      "`Field` is not declared in this function" (G1) instead of building a
+      wrong program.
+    """
+    cases: dict[str, list[tuple[_LoadedModule, TypeDecl, object]]] = {}
+    others: dict[str, list[tuple[_LoadedModule, str, int]]] = {}
+    for module in included:
+        seen_cases: set[str] = set()
+        for decl in module.program.type_decls:
+            others.setdefault(decl.name, []).append((module, "type", decl.line))
+            for case in decl.cases:
+                # a case repeated inside one ADT is `duplicate case` in
+                # lower.py; record the first so the citation is stable.
+                if case.name in seen_cases:
+                    continue
+                seen_cases.add(case.name)
+                cases.setdefault(case.name, []).append((module, decl, case))
+        for fn in module.program.fn_decls:
+            others.setdefault(fn.name, []).append((module, "fn", fn.line))
+        for ext in module.program.externs:
+            others.setdefault(ext.name, []).append((module, "extern", ext.line))
+
+    # `included` is already deterministic (roots, then the closure walked in
+    # path order), and both tables preserve it, so the pair reported for a
+    # program with several collisions is stable across compiles.
+    for module, decl, case in [entry for name in cases for entry in cases[name]]:
+        for other, kind, line in others.get(case.name, ()):
+            if id(other) == id(module):
+                continue
+            case_path = os.path.abspath(module.path)
+            other_path = os.path.abspath(other.path)
+            article = "an" if kind == "extern" else "a"
+            raise RevlError(
+                case_path, case.line,
+                f"duplicate name `{case.name}` across a `use` edge: a case of "
+                f"`{decl.name}` declared in {case_path}:{case.line} and "
+                f"{article} {kind} `{case.name}` declared in "
+                f"{other_path}:{line}",
+                hint="the two merge into one program, where `"
+                     f"{case.name}(…)` names both — a case constructor and "
+                     f"{article} {kind} — and each tier emits them as one "
+                     "symbol, so which one a call resolves to depends on the "
+                     "order the modules were merged in. Unlike a private `fn` "
+                     "or `type`, a case name cannot be renamed apart per "
+                     "module: it is the module's interface (what `use` imports "
+                     "and what a `match` arm spells) and the emitted "
+                     "constructor. Rename one of the two declarations.",
+            )
+
+
 def _apply_module_privacy(included: list[_LoadedModule]) -> None:
     """Namespace every module-private top-level declaration (roadmap 228).
 
@@ -1153,6 +1245,10 @@ def _apply_module_privacy(included: list[_LoadedModule]) -> None:
     # service. Catch the collision HERE, before the rename, and report it AS a
     # duplicate that names both declaring files and the signature mismatch.
     _reject_clashing_private_externs(included)
+    # issue #1145: the third name kind the two tables below never see — an ADT
+    # CASE. Checked BEFORE the rename, so both sites are cited by the spelling
+    # the author wrote rather than by a `__m3` internal name.
+    _reject_cross_module_case_collisions(included)
 
     val_owners: dict[str, set[int]] = {}   # fn/extern name -> {id(module)}
     type_owners: dict[str, set[int]] = {}   # type name      -> {id(module)}
