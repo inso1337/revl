@@ -3620,6 +3620,79 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
+# ---- issue #1151: rule C1 is not reachable through a type alias ------------
+#
+# The issue reads `refuse_self_declared_async` as a site that asks a type
+# question BEFORE alias erasure: the reference erases first and sees
+# `Async[Int]`, the gate asks first and sees `Later`. The reading is right about
+# the order and wrong about the consequence, and the difference is worth an
+# executable pin rather than a sentence, because it is the reason this gate has
+# nothing to erase there.
+#
+# `_resolve_type_aliases` calls `check_type_wellformed` on every alias TARGET,
+# with `allow_async_param=False`, before it expands anything. `Async` is
+# position-restricted: outside a function type's return it is "not a value
+# type", and inside one it is "only supported as a module `fn` parameter". So an
+# alias whose target mentions `Async` at all is refused AT ITS OWN DECLARATION,
+# in the erasure pass, and no arrow annotation naming it is ever reached. An
+# expansion can only introduce `Async` through some link whose immediate target
+# spells it, and that link is checked too, so a chain cannot smuggle one either.
+#
+# These programs are deliberately NOT rows in ACCEPTED_PROGRAMS or
+# REJECTED_PROGRAMS: those lists are census corpus (`load_corpus`), the
+# reference refusal here carries `code="A1"`, and the gate runs no type
+# well-formedness layer — so filing them there would book a `false-admit/A1`
+# against a divergence that is the type-layer gap already named above.
+ALIAS_OF_ASYNC = [
+    ("a bare alias of Async", """
+type Later = Async[Int]
+fn run() -> Int {
+  let g = (n: Int): Later => n
+  return 1
+}
+"""),
+    ("an alias of a function type returning Async", """
+type Task = (Int) -> Async[Str]
+fn run() -> Int {
+  let g = (n: Int): Task => (m: Int) => "x"
+  return 1
+}
+"""),
+    ("an alias of an alias of a function type returning Async", """
+type Inner = (Int) -> Async[Str]
+type Task = Inner
+fn run() -> Int {
+  let g = (n: Int): Task => (m: Int) => "x"
+  return 1
+}
+"""),
+    ("the alias declared after the arrow that names it", """
+fn run() -> Int {
+  let g = (n: Int): Task => (m: Int) => "x"
+  return 1
+}
+type Task = (Int) -> Async[Str]
+"""),
+]
+
+
+@pytest.mark.parametrize("name,src", ALIAS_OF_ASYNC,
+                         ids=[n for n, _ in ALIAS_OF_ASYNC])
+def test_an_alias_mentioning_async_is_refused_at_its_declaration(name, src):
+    """Not by rule C1, and not at the arrow: by the erasure pass itself.
+
+    The line the reference reports is the ALIAS declaration's, which is what
+    makes the point — C1 never runs on these programs, so an alias table
+    threaded into `self_async_expr` would have no input that changes an answer.
+    """
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "A1", (name, ref_tag, ref_msg)
+    assert "may not declare its own async colour" not in ref_msg, (name, ref_msg)
+    assert ("is not a value type" in ref_msg
+            or "only supported as a module `fn` parameter" in ref_msg), \
+        (name, ref_msg)
+
+
 def test_the_type_layer_gap_is_exactly_19_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
