@@ -1,0 +1,60 @@
+// PLANTED VIOLATION for tests/test_no_embedded_frontend_document_1120.py.
+//
+// This file exists to be caught. It is a reduced transcription of the shape
+// that `src/components/web_page.rvl` has in the sibling harness repository:
+// a whole HTML document — markup, stylesheet and script — assembled inside one
+// revl template string, with server-supplied values interpolated straight into
+// it. The harness's copy is ~4,800 lines of it; this is the same shape at a
+// size somebody can read.
+//
+// It is the ONLY `.rvl` in the tree the repo-wide gate is allowed to skip, and
+// the gate asserts that the skip list has exactly this one entry AND that the
+// detector fires on it. If the detector ever stops firing here, the gate goes
+// red rather than quietly passing over an empty tree.
+//
+// Do not "fix" this file. Delete it only together with the gate.
+service Page {
+  fn render(title: Str, who: Str, rows: Str) -> Str
+}
+
+component PageSvc provides page: Page {
+  provide page {
+    fn render(title, who, rows) {
+      return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>${title}</title>
+    <style>
+      body { font: 14px/1.5 system-ui; margin: 0; background: #fbfbfa; }
+      .wrap { max-width: 720px; margin: 0 auto; padding: 24px; }
+      .row { display: flex; gap: 8px; align-items: baseline; }
+      .row .name { font-weight: 600; }
+      .row .val { color: #666; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>${title}</h1>
+      <p>Signed in as <span class="name">${who}</span>.</p>
+      <ul class="rows">
+        ${rows}
+      </ul>
+      <a href="/logout" onclick="return confirm('sign out?')">sign out</a>
+    </div>
+    <script>
+      const list = document.querySelector('.rows')
+      function addRow(name, val) {
+        const li = document.createElement('li')
+        li.className = 'row'
+        li.innerHTML = '<span class="name">' + name + '</span>' +
+                       '<span class="val">' + val + '</span>'
+        list.appendChild(li)
+      }
+      addRow(${who}, 'now')
+    </script>
+  </body>
+</html>`
+    }
+  }
+}
