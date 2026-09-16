@@ -243,17 +243,20 @@ gemit java "backend-java (emit goldens)" backends/java/test_emit_java.py
 step "goldens      (drift, all targets)" python3 tools/regen_goldens.py --check
 
 # 4. Generated-artifact gates (pure Python, always run): the README conformance
-#    matrix and the site/playground wheel must match a fresh generation, the same
-#    contract the frontend CI job enforces.
+#    matrix must match a fresh generation, the same contract the frontend CI job
+#    enforces. The playground wheel is not committed (pages.yml builds it into
+#    the published artifact), so its gate checks the deploy contract instead:
+#    that pages.yml still builds it, under the name the two playground pages
+#    fetch, from what git tracks.
 if want gate conformance; then
     step "conformance matrix (--check-readme)" python3 tools/conformance.py --check-readme
 else
     note "conformance matrix (--check-readme)"
 fi
 if want gate site-wheel; then
-    step "site wheel freshness"                python3 tools/check_site_wheel.py
+    step "site wheel deploy contract"          python3 tools/check_site_wheel.py
 else
-    note "site wheel freshness"
+    note "site wheel deploy contract"
 fi
 
 # issue #255: the source-derived doc blocks (the MCP verb table, the CLI verb
