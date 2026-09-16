@@ -530,13 +530,56 @@ extended with fields/index/records. Fixtures flipped: `t2`, `t11`, `t12`,
 `t21`, `t22`, `t23`, `t28`, `t26`, `t27`, `t36` (flipped in the pin test only;
 they reach `admit_src` at T3a). ~500 lines.
 
-**T2b. Calls and signatures.** `FnSig` table with marked tparams, arity
-window and defaults, monomorphic and generic call typing, ADT case calls,
-`builtin_check` with bottom learning and per-receiver rows, host families,
-`Map.empty`, list-transform desugar. Oracle: checker corpus with a program
-prefix (`infer_prog_expr` already takes one) per shape; fuzz over
-signatures. Fixtures: `t10`, `t15`, `v2_map_set_value_mismatch`, `t24`,
-`host_method_not_on_surface`, `g4_extern_undo_wrong_arg_type`. ~600 lines.
+**T2b. Calls and signatures. LANDED, in `lower.rvl` rather than
+`checker.rvl`.** The obligation is expression typing, but the nine documents it
+owns are measured through `admit_src`, and T3a had already built the refusing
+expression walk there — so the slice extends that engine instead of starting a
+second one. What it adds: a signature table for every module `fn` AND `extern`,
+built in a second pass over the token stream (the single-uppercase heuristic is
+switched off by a DECLARED type, and a `type` may be written after the `fn` that
+mentions it), with each signature's type parameters marked once; the arity
+window; `compatible` per argument for a monomorphic signature and
+`unify`/`substitute` for a generic one; the host stub surface at both its
+positions (`Root.verb(..)` as a constructor, whose result is the FAMILY, and a
+method on a family-typed receiver); `builtin_check` with its receiver-family
+rows, `@elem`/`@member`/`@self` specs, bottom learning and the `List[Str]`
+constraint on `join`; and §4.4 step 6, the four refusals the reference makes
+while LOWERING a method call rather than while typing it, as a second walk over
+the same statement expression run only after the checking walk is clean.
+
+Its premises are proven or it says nothing. A signature row is built only for a
+parameter list this reader can spell in full, so a default value (item 187)
+withholds the arity window rather than counting a call short. A name the body
+rebinds is not resolved against the module declaration, because the reference
+reads a local of function type first. The builtin surface, arity and
+zero-divisor rules need the receiver PROVEN a stdlib value; the
+unpinned-receiver refusal needs it PROVABLY untyped, which a binding whose
+initialiser calls a declaration that returns nothing is and a type this walk
+merely failed to infer is not.
+
+What it buys, measured. All nine documents moved from `false-admit` to
+`agree-refuse` on tag AND message: `t10_call_arity`, `t15_generic_call_site`,
+`t25_explicit_tparam_heuristic_off`, `v2_map_set_value_mismatch`,
+`v2_map_value_unknown_method`, `g4_extern_undo_wrong_arg_type` (the extern
+inverse slot runs `check_ast` over its expression, so its call arguments are
+typed like any other call site), `arith_zero_divisor`, `t24_opaque_receiver_
+builtin` and `host_method_not_on_surface`. `false-admit/T1` 20 -> 14,
+`false-admit/HOST-METHOD` 2 -> 0, `false-admit/TYPE` 4 -> 3; nothing entered a
+false-admit bucket and `false-reject` is unchanged. Over 1500 drawn
+call-carrying fn bodies, both gates run on the SAME inputs, agreement went 117
+-> 1488 and message mismatches 811 -> 0.
+
+A FALSE REJECTION it closed on the way. `case_binds` spells a module `fn`'s own
+name as a function type and gives a returnless `fn` the return `Unit`, which is
+the IR's spelling; the reference's signature table records `None` there, so
+`assert nores(1)` reads as an unknown condition and is ADMITTED. Reading `Unit`
+back off the function type refused it. The signature table's own return row is
+empty and the call types unknown.
+
+One divergence CLASS is left, pinned as a test: the reference desugars a
+receiver-first list transform to its free function and then refuses that
+undeclared NAME, which is the G1 name-read family no slice has built. The gate
+refuses later, or not at all, which is the under-refusing direction. ~750 lines.
 
 **T2c. Arrows and function values.** Parser: `ArrowN.tok`/`ptys`/`ret`,
 `HoleN.tok`. Checker: §3.1/3.2 inference, `_check_arrow`,
