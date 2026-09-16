@@ -328,8 +328,17 @@ type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, li
 // the result — the reference turns it into a return, so the missing-return rule
 // does not apply to one. `line` is the `fn` keyword's source line, the line the
 // reference's signature diagnostics carry (`method.line`).
+// `mayRet` is read off the body's TOKEN span rather than off `body`, and it is
+// deliberately an over-approximation: true when a `return` keyword appears at any
+// depth in the method, and true as well for a `while`, whose `while (true) { … }`
+// form terminates a body without one. The statement reader collapses a control
+// form it cannot model into a `skip` and steps to the end of the source LINE, so
+// a `return` written inside a one-line `if (c) { return x }` is not in `body` at
+// all — deciding the missing-return rule off `body` would refuse a program the
+// reference admits, which is the one direction this gate may not err in.
 type ProvM   = { name: Str, params: List[Str], body: List[Stmt], isAsync: Bool,
-                 ps: List[ParamN], ret: Str, isArrow: Bool, line: Int }
+                 ps: List[ParamN], ret: Str, isArrow: Bool, line: Int,
+                 mayRet: Bool }
 type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
 // A declared provision key and the realm it lives in ("" = the shared realm).
 type ProvKey = { key: Str, rlm: Str }
@@ -1948,6 +1957,18 @@ fn param_names(ps: List[ParamN]) -> List[Str] {
 // reference refuses with a G4 came back tagged BAD from a parse stage that
 // never reached the guarantee. `ret_at` is the same step `p_methods` already
 // takes over a service declaration's return type.
+// Does this token span carry a `return`, or a `while` whose infinite form ends a
+// body without one? Both keywords are read at ANY depth: a `return` nested in a
+// control arm is still a return the reference sees.
+fn span_may_return(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var i = lo
+  while (i < hi) {
+    if (atw(ts, i, "return") || atw(ts, i, "while")) { return true }
+    i += 1
+  }
+  return false
+}
+
 fn p_prov_methods(ts: List[Token], i: Int, end: Int,
                   acc: List[ProvM]) -> ProvMR {
   if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
@@ -1977,7 +1998,8 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
     return p_prov_methods(ts, nx, end,
                           acc.push({ name: nm, params: pnames, body: r.ss,
                                      isAsync: masync, ps: ps.ps, ret: pret,
-                                     isArrow: true, line: mline }))
+                                     isArrow: true, line: mline,
+                                     mayRet: true }))
   }
   if (!atk(ts, si, "{")) { return { xs: acc, i: si, ok: false } }
   let bend = close_brace(ts, si)
@@ -1986,7 +2008,8 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
   return p_prov_methods(ts, bend, end,
                         acc.push({ name: nm, params: pnames, body: bbody,
                                    isAsync: masync, ps: ps.ps, ret: pret,
-                                   isArrow: false, line: mline }))
+                                   isArrow: false, line: mline,
+                                   mayRet: span_may_return(ts, si + 1, bend - 1) }))
 }
 
 // The names bound by a list of `key: Service` pairs (a header row).
@@ -3852,6 +3875,30 @@ fn prov_dup_before(ms: List[ProvM], upto: Int, nm: Str, i: Int) -> Bool {
   return prov_dup_before(ms, upto, nm, i + 1)
 }
 
+// `_lower_provide`'s missing-return rule, the twin of the module-`fn` one on the
+// other surface that declares a return: a provider must produce what its service
+// promises, or the emitted java method and rust trait impl both fall off the end
+// while python hands the caller a silent `None`.
+//
+// Only the "never returns a value" half is decided. Its sibling ("control can
+// reach the end of its body without a `return`") answers a body that DOES return
+// somewhere but not on every path, which needs the control-flow shape
+// `span_may_return` deliberately refuses to guess at; a body carrying one is left
+// to the slice that models those arms.
+fn prov_missing_return(pv: Provide, mi: Int, decl: MSig) -> Verd {
+  let pm = pv.methods[mi]
+  if (decl.name == "" || decl.ret == "" || pm.isArrow || pm.mayRet
+      || pm.ps.length() != decl.ps.length()
+      || prov_dup_before(pv.methods, mi, pm.name, 0)) {
+    return no_verd()
+  }
+  return mk_verd(tagged("T1",
+    "`".concat(pm.name).concat("` implements `").concat(pv.svcName)
+      .concat(".").concat(pm.name).concat("`, which returns `")
+      .concat(tk_render(decl.ret))
+      .concat("`, but this body never returns a value")), pm.line)
+}
+
 fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig) -> Verd {
   let pm = pv.methods[mi]
   if (decl.name == "" || pm.ps.length() != decl.ps.length()
@@ -4844,6 +4891,10 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
       // under-refusing direction.
       let mtv = mth_type_verdict(pm.body, 0, comp.line)
       if (mtv.v != "") { return mtv }
+      // the missing-return rule, which the reference raises once the whole body
+      // is lowered and so after every statement verdict above.
+      let mrv = prov_missing_return(pv, mi, decl)
+      if (mrv.v != "") { return mrv }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
       // provide-method arrow may not name its own async colour either.
