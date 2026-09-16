@@ -324,9 +324,8 @@ def test_every_use_closure_in_the_tree_is_free_of_case_collisions():
     every multi-module `use` closure the repository contains, so a future
     composition that reintroduces the collision fails here as well as at the
     compile that first merges the two files."""
-    included_paths = []
     closures = 0
-    edges = 0
+    edges: set[tuple[str, str]] = set()
     for path in sorted(p for p in ROOT.rglob("*.rvl")
                        if ".git" not in p.parts and "node_modules" not in p.parts):
         loader = _ModuleLoader()
@@ -348,9 +347,12 @@ def test_every_use_closure_in_the_tree_is_free_of_case_collisions():
         if len(included) < 2:
             continue
         closures += 1
-        edges += sum(len(m.program.uses) for m in included)
-        included_paths.append(path)
+        for module in included:
+            for use in module.program.uses:
+                edges.add((module.path, use.path))
         # the production check, on the real closure
         _reject_cross_module_case_collisions(included)
+    # the denominator, asserted so that a selector or loader change which
+    # quietly stops finding compositions fails here instead of passing vacuously.
     assert closures >= 20, f"only {closures} multi-module closures found"
-    assert edges >= 60, f"only {edges} `use` edges inside them"
+    assert len(edges) >= 40, f"only {len(edges)} distinct `use` edges inside them"
