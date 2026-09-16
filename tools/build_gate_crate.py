@@ -172,6 +172,14 @@ GATE_API_VERSION = "1.0.0"
 # admission surface it has no `revl.gate` twin to stay in lockstep with.
 SYMBOLS_API_VERSION = "0.1.0"
 
+# The semver of the NATIVE EMITTER surface (`revl_gate::emit_ir`, roadmap item
+# 146 condition 4). Independent of the gate api above, for the same reason the
+# navigation surface is: it issues no verdicts and has no `revl.gate` twin to
+# stay in lockstep with. Bumping `GATE_API_VERSION` for it would move the wasm
+# world's WIT package (`revl:gate@<api>`) for a function that world does not
+# export.
+EMIT_API_VERSION = "0.1.0"
+
 # The crate's own version. Independent of the language version, per the design's
 # versioning split (`api` is bumped by surface changes only).
 CRATE_VERSION = "0.1.0"
@@ -1885,6 +1893,12 @@ pub const LANGUAGE_VERSION: &str = "@LANGUAGE_VERSION@";
 /// no twin on py, so the two move independently; the self-host pin both are
 /// drawn from is [`FRONTIER_ID`].
 pub const SYMBOLS_API_VERSION: &str = "0.1.0";
+
+/// The semver of the NATIVE EMITTER surface ([`emit_ir`]), versioned on its own
+/// for the same reason the navigation surface is: it issues no verdicts and has
+/// no `revl.gate` twin to stay in lockstep with. The bytes it produces are
+/// pinned to the reference by the emitter corpus, not by this number.
+pub const EMIT_API_VERSION: &str = "@EMIT_API_VERSION@";
 
 /// What this gate actually decides, in one line. The reference type layer is
 /// deliberately absent — see the crate docs, "The verdict surface issues no
@@ -6873,6 +6887,7 @@ def render_generated_json(digest: str, fid: str, language: str,
         "admission_scalar_types": admission["scalars"],
         "admission_reserved_type_names": admission["reserved"],
         "symbols_api_version": SYMBOLS_API_VERSION,
+        "emit_api_version": EMIT_API_VERSION,
         "navigation_surface": "revl_gate::symbols — declarations and their lines; issues no verdicts",
         # The native EMITTER surface (roadmap item 146 condition 4).
         # `selfhost/emit_rust.rvl` is generated into `selfhost` alongside the
@@ -6969,6 +6984,7 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
                       .replace("@FRONTIER_ID@", fid)),
         "src/lib.rs": (LIB_RS_TEMPLATE
                        .replace("@GATE_API_VERSION@", GATE_API_VERSION)
+                       .replace("@EMIT_API_VERSION@", EMIT_API_VERSION)
                        .replace("@COVERED_LAYER@", COVERED_LAYER)
                        .replace("@ADMITTED_LAYER@", ADMITTED_LAYER)
                        .replace("@LANGUAGE_VERSION@", language)),

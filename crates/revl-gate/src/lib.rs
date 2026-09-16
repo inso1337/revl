@@ -276,6 +276,12 @@ pub const LANGUAGE_VERSION: &str = "2.0.0";
 /// drawn from is [`FRONTIER_ID`].
 pub const SYMBOLS_API_VERSION: &str = "0.1.0";
 
+/// The semver of the NATIVE EMITTER surface ([`emit_ir`]), versioned on its own
+/// for the same reason the navigation surface is: it issues no verdicts and has
+/// no `revl.gate` twin to stay in lockstep with. The bytes it produces are
+/// pinned to the reference by the emitter corpus, not by this number.
+pub const EMIT_API_VERSION: &str = "0.1.0";
+
 /// What this gate actually decides, in one line. The reference type layer is
 /// deliberately absent — see the crate docs, "The verdict surface issues no
 /// admissions", and [`ADMITTED_LAYER`] for the sliver it is sound to admit in.
