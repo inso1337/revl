@@ -3921,26 +3921,60 @@ fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig) -> Verd {
 
 // The line for an inline body refusal, with the component line as the fallback
 // for a refusal that is not a plain statement walk (0 from `refusal_line`).
-// The type layer over one provide-method body (docs/design/457 T3a). The TYPE
-// ENVIRONMENT is deliberately EMPTY: a method's names come from the component's
-// requirement handles, its activation locals, its config fields and the service
-// signature, none of which this walk carries, and inventing types for them is
-// how a gate starts refusing programs the reference admits. Over the empty
-// environment `tk_infer` knows only what the literals themselves determine, so
-// what it decides here is the environment-free half of the algebra — `null` in
-// an expression position (T2), a Float literal outside binary64 — and it is
-// silent about everything a name would have had to answer for.
-fn mth_type_verdict(body: List[Stmt], i: Int, fallback: Int) -> Verd {
+// The type layer over one provide-method body (docs/design/457). The reference
+// lowers such a body with the ordinary fn-body machinery and runs the SAME
+// raising oracle over it (`_lower_provide`'s `_sweep`, item 404), so every
+// expression in one is typed exactly as a module `fn`'s is.
+//
+// WHAT THE ENVIRONMENT CARRIES, and what it leaves on the gradual frontier.
+// Three name families are written down in the source and so are known here:
+//
+//   * the method's PARAMETERS, at the service's declared types. The service is
+//     the source of truth for a provider's signature (A6), which is why an
+//     unannotated `fn read(s)` still types `s` — the reference seeds
+//     `env.type_env` from `decl.params` before it lowers a single statement.
+//   * the body's own ANNOTATED bindings (`let v: Any = …`), the annotation
+//     being what the reference writes into `env.type_env` for them.
+//   * an unannotated binding at the type its value INFERS to, which is the
+//     reference's `elif swept is not None` arm. An undecidable value contributes
+//     nothing and the name stays unknown.
+//
+// Everything else — a requirement handle, a config field, an activation local —
+// resolves through tables this walk does not carry, and an unknown name is the
+// gradual frontier's "": silent, never guessed at. `gtys` is the program-wide
+// declared-type table (the `field <Type>.<name>` rows and the module `fn`
+// signatures) the module-`fn` walk already builds once per admission.
+fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind],
+                    fallback: Int) -> Verd {
   if (i >= body.length()) { return no_verd() }
   let s = body[i]
   // a `skip` carries the parser's failure node and a spawn an inert placeholder;
   // neither is an expression the reference types.
   if (s.kind == "skip" || s.spawnTarget != "") {
-    return mth_type_verdict(body, i + 1, fallback)
+    return mth_type_verdict(body, i + 1, env, fallback)
   }
-  let r = tk_infer(s.e, [])
+  let r = tk_infer(s.e, env)
   if (r.v != "") { return mk_verd(r.v, s.line == 0 ? fallback : s.line) }
-  return mth_type_verdict(body, i + 1, fallback)
+  var next = env
+  if (s.bind != "") {
+    let bound = s.bindTy != "" ? s.bindTy : r.ty
+    if (bound != "") { next = tenv_put(env, s.bind, bound) }
+  }
+  return mth_type_verdict(body, i + 1, next, fallback)
+}
+
+// The method's parameters at the types the SERVICE declares, over the
+// program-wide table. A method's own annotation is preferred where it wrote one
+// (the two have already been held to each other by `a6_annotation_verdict`, so
+// they agree wherever both are present), and a parameter neither side spells
+// contributes nothing.
+fn mth_param_tys(pm: ProvM, decl: MSig, i: Int, acc: List[Bind]) -> List[Bind] {
+  if (i >= pm.params.length()) { return acc }
+  var ty = ""
+  if (i < pm.ps.length()) { ty = taint_strip(pm.ps[i].ty) }
+  if (ty == "" && i < decl.ps.length()) { ty = taint_strip(decl.ps[i].ty) }
+  return mth_param_tys(pm, decl, i + 1,
+                       ty == "" ? acc : tenv_put(acc, pm.params[i], ty))
 }
 
 fn body_line(ss: List[Stmt], cx: Ctx, fallback: Int) -> Int {
@@ -4814,7 +4848,7 @@ fn mth_rebind(pm: ProvM, scope: List[Str], i: Int) -> Verd {
 // statement's line (`body_line`), every whole-component verdict — signature
 // parity, the aggregate G4/A1 over a walked body, the setup async-reach — the
 // component's declaration line, matching the reference.
-fn check_component(comp: CompD, cx: Ctx) -> Verd {
+fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // setup gets G4/A1/G1 too: an undeclared access or unmarked emission in
   // setup is refused exactly as in a provide body, bare values included (see
   // `var_check`). There is no longer a per-body-kind context: the two bodies
@@ -4889,7 +4923,8 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
       // walk is the one that runs in statement order; a body carrying both a
       // wiring verdict and a type one reports the wiring verdict, which is the
       // under-refusing direction.
-      let mtv = mth_type_verdict(pm.body, 0, comp.line)
+      let mtv = mth_type_verdict(pm.body, 0,
+                                 mth_param_tys(pm, decl, 0, gtys), comp.line)
       if (mtv.v != "") { return mtv }
       // the missing-return rule, which the reference raises once the whole body
       // is lowered and so after every statement verdict above.
@@ -8766,6 +8801,10 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
   // `_validate_declared_types`, the earliest of all), then cache-purity,
   // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
   // the component loop.
+  // the program-wide declared-type table (the `field <Type>.<name>` rows, the
+  // case/payload rows, the module `fn` signatures), built ONCE: it reads the
+  // whole token stream, so rebuilding it per component would be quadratic.
+  let gtys = case_binds(ts)
   let cfgv = config_data_refusal(ts, pg)
   if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
   // the SHADOWED MODULE CALLABLE (item 391): `_refuse_callable_shadowing` runs
@@ -8780,7 +8819,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
   // than this, while the classification word is the parser's and so is earlier;
   // the merged `extern_decl_refusal` below carries both, and no corpus program
   // trips one of them together with a binding violation.
-  let fbv = fb_refusal(ts, 0)
+  let fbv = fb_refusal_at(ts, 0, gtys)
   if (fbv.v != "") { return { done: true, refs: [fbv] } }
   // the extern DECLARATION: its classification word (G8, refused by the
   // reference's parser) and its `undo`/`compensate` slots (G4,
@@ -8835,7 +8874,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
         refs = refs.push(mk_verd(sf, comp.line))
       } else {
         let cx = ctx_for(base, comp)
-        let v = check_component(comp, cx)
+        let v = check_component(comp, cx, gtys)
         if (v.v != "") { refs = refs.push(v) }
       }
     }
