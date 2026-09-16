@@ -26,13 +26,18 @@ watch the gate refuse it, with the reason.
 ## Run it locally
 
 The page fetches a wheel and Pyodide's runtime, so it must be served over HTTP
-(opening `index.html` from `file://` will not work). Any static server does:
+(opening `index.html` from `file://` will not work). The wheel is **not
+committed** — build it first, then any static server does:
 
 ```
+python3 tools/check_site_wheel.py --write   # -> playground/vendor/ and site/vendor/
 cd playground
 python3 -m http.server 8000
 # then open http://localhost:8000/
 ```
+
+The build is stdlib-only and takes about a second. Rerun it whenever
+`src/revl/` changes, or the page runs the compiler you last built.
 
 or with Node:
 
@@ -51,7 +56,12 @@ revl is pure Python (`src/revl/`, a hatchling project). The playground loads it
 1. `vendor/revl-<version>-py3-none-any.whl` is a wheel built straight from the
    in-tree source by `build_wheel.py` (revl has no dependencies and no native
    code, so a wheel is just a zip with a `.dist-info` — the script builds it
-   without needing pip or a build backend).
+   without needing pip or a build backend). It is gitignored, not committed: it
+   vendors the whole of `src/revl`, so a committed copy is stale the moment any
+   module changes and can only be refreshed by a commit that races the merge
+   queue. `.github/workflows/pages.yml` builds it into the published site, and
+   you build it locally. `tools/check_site_wheel.py`'s header has the full
+   reasoning.
 2. On load, the page installs that wheel into Pyodide with `micropip`.
 3. `app.js` then calls the *same functions the CLI calls* — no shelling out, no
    re-implementation:
@@ -71,6 +81,9 @@ source or examples change:
 python3 playground/build_wheel.py     # -> playground/vendor/revl-<version>-...whl
 python3 playground/gen_examples.py     # -> playground/examples.js
 ```
+
+(`python3 tools/check_site_wheel.py --write` runs the first of those and copies
+the result into `site/vendor/` too, which is what the Pages deploy runs.)
 
 The playground touches nothing under `src/revl/`; it only reads the source to
 build the wheel and to embed the examples.

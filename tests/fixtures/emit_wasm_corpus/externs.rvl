@@ -1,0 +1,14 @@
+// Externs the wasm tier cannot carry: declared with a body for another tier and
+// no `@wasm` body at all. The reference emits no function for one — it emits a
+// named `;; unsupported on this tier: externs …` comment instead, which is a
+// refusal stated in the output rather than a silence. This document declares
+// two of them (so the comma-joined name list and its document order are pinned)
+// and never CALLS either, because a call is refused outright by both sides.
+extern pure fn peek(p: Str) -> Str = @py { return p }
+extern pure fn probe(n: Int) -> Int =
+  @py { return n }
+  = @ts { return n; }
+
+fn passthrough(s: Str) -> Str { return s }
+
+fn twice(n: Int) -> Int { return n + n }

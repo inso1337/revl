@@ -153,8 +153,8 @@
         "Only the Float interpolation arm remains: it sets needs_ftoa and formats through revlFtoa, whose scaffold is explicitly deferred. Expression-free templates and non-Float typed interpolation are now covered.": {
           "_go_v3_interp": 5
         },
-        "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior.": {
-          "_go_v3_optchain": 19
+        "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior. The count rose by one for the line that binds the payload's surface type before rendering the builtin against it: `_go_v3_builtin` picks revlStrLen vs revlListLen (and four more rows) off the receiver type, and the synthetic node carried none, so an `Opt[Str]?.length()` emitted a List helper over a string and the package did not build. It cannot become a corpus case: selfhost/emit_go.rvl ports no optional chaining at all, so a fixture spelling `?.` could not hold byte agreement. tests/test_458_conversion_dispatch.py executes it on the tier instead.": {
+          "_go_v3_optchain": 20
         },
         "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py. Issue #721's Float half adds five statements to the same deferred preamble block: the `math` import and the `revlF` identity helper that keeps a Float literal out of Go's CONSTANT world (a constant fold has no signed zero and no infinity), plus the `math.Mod` arm for `%` on Float, which Go does not define on float64 at all. No PLACEMENT corpus document carries a Float, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl excludes placement entirely; the reference half is executed on all six tiers by tests/test_458_float_division_and_remainder.py.": {
           "_bridge_decode_expr": 16,
@@ -258,6 +258,9 @@
         "The non-boxing Result[T, E] match discriminator (item 434(d), #114): `_go_v3_match_result` renders the `.Ok` if/else for a v3 Result match, the sibling of `_go_v3_match_opt`. The go v3 module byte-agreement corpus has no Result-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
           "_go_v3_match_result": 61
         },
+        "backends/go/emit.py::_refuse_fault_tests: every statement is on the refusal path. A `fault_tests` section is rejected by name on this tier (docs/fault-tests.md section 6), and the byte-agreement corpus is documents the reference EMITS, so no corpus document can carry one. Pinned by tests/test_fault_tests.py::test_other_tiers_refuse_the_section_by_name.": {
+          "_refuse_fault_tests": 2
+        },
         "declared out of every self-host slice: realm placements, routers, spawn/instances. The two lines the item 421 F5 stage-2 seam hook adds -- `if _SECRET_MODE:` installing `bridge.SecretScrub` -- sit inside that slice: the hook is only built when the composition declares `Secret[T]`, and no placement corpus document is a secret-mode composition, so the generated seam funnel is never asked to redact a secret value.": {
           "_emit_placement": 18
         },
@@ -280,7 +283,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 3091
+      "uncovered_statements": 3092
     },
     "java": {
       "statements": 2587,
@@ -1185,11 +1188,6 @@
           "_V3Emitter._helper_str_concat_n": 18,
           "_V3Emitter._interp_expr": 20
         },
-        "Extern @wasm body lookup/emission and comments for missing bodies are explicitly deferred by the module oracle; source-defined functions do not exercise raw-WAT extern handling.": {
-          "_V3Emitter._unsupported_comments": 2,
-          "_emit_extern_func": 17,
-          "_extern_wasm_body": 2
-        },
         "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float.": {
           "_f64_literal": 1,
           "_finite_float": 3,
@@ -1211,7 +1209,7 @@
           "_V3Emitter._bin_expr": 20
         },
         "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission.": {
-          "_V3Emitter.emit": 13
+          "_V3Emitter.emit": 12
         },
         "Remaining branches add src/ for standalone imports or translate invalid ownerless/session-commit emissions to EmitError. In-process successful pure documents take neither exceptional path.": {
           "_refuse_deferred_emissions": 10
@@ -1224,7 +1222,7 @@
           "_V3Emitter._emit_stmts": 14
         },
         "Remaining branches merge equivalent async/sync polymorphic externs and rewrite call names after colour erasure; extern emission is outside the WASM module corpus.": {
-          "_dedup_colour_erased_poly_externs": 14,
+          "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6
         },
         "Remaining branches resolve deferred inline arrows or reject unknown/non-callable callees and argument-count/type mismatches; direct declared calls are covered. Item 459 F6 adds one statement here: before raising the generic unknown-callee error, the arm asks `_refuse_bodyless_extern` whether the name is a DECLARED extern with no `@wasm` body, so a portability limit is no longer spelled as a typo. It is on the same refusal path as the rest of this entry and is uncovered for the same reason.": {
@@ -1293,8 +1291,8 @@
         "Remaining raise rejects len on a non-List/non-Str receiver; canonical frontend len nodes carry supported collection types.": {
           "_V3Emitter._len_expr": 1
         },
-        "Remaining raise rejects rebinding one emitted local name at incompatible WASM widths; valid typed source locals retain their declared width.": {
-          "_V3Emitter._declare_local": 1
+        "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot \u2014 the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead.": {
+          "_V3Emitter._declare_local": 2
         },
         "Remaining raises explicitly reject fault-injection or lifecycle test harnesses unsupported by the WASM backend.": {
           "_refuse_fault_tests": 2,
@@ -1332,6 +1330,9 @@
         "Remaining traversal/raise detects unresolved holes, including service signatures; successful compiled source documents contain no holes.": {
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1
+        },
+        "Rendering a @wasm-bodied extern as a real `(func $name \u2026)` is outside the module oracle's subset; source-defined functions do not exercise raw-WAT extern handling. The NAMING of a bodyless extern is no longer deferred: tests/fixtures/emit_wasm_corpus/externs.rvl reaches `_unsupported_comments` and `_extern_wasm_body` (issue 1130).": {
+          "_emit_extern_func": 17
         },
         "Residual declarations allocate locals for deferred match bindings/scrutinees and inline arrows; test_mode appends its success result. The empty non-Unit body fallback is a defensive path: frontend return checking rejects such functions. Empty Unit source is covered and emits nop, not unreachable.": {
           "_V3Emitter._emit_function": 6
@@ -1403,7 +1404,7 @@
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1544
+      "uncovered_statements": 1545
     }
   },
   "selfhost": {
@@ -1961,14 +1962,13 @@
           "render_un": 1,
           "v3_stmt": 1
         },
-        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx`, `renders_await`, and `optcall_result_is_int` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
+        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx` and `renders_await` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
           "expected_instance_get": 1,
           "expected_missing_adt": 1,
           "expected_ok_adt": 1,
           "expected_result_type": 1,
           "ind": 1,
           "indentation_is_two_spaces": 1,
-          "optcall_result_is_int": 1,
           "renders_await": 1,
           "sync_acx": 1
         },
@@ -1976,7 +1976,7 @@
           "ts_type_v1": 1
         }
       },
-      "uncovered_statements": 94
+      "uncovered_statements": 93
     },
     "wasm": {
       "statements": 1269,

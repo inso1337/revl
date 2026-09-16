@@ -47,6 +47,15 @@ Int/Bool/Str/Bytes/List/record/variant/Opt/Result values
 
 (`Map[Str, Int]` gets the same message with the type named.)
 
+A **`let`/`var` binding** of a `Float` is refused with the same wording, by
+`_declare_local`. Every local on this tier is an `i32` except an `Int`, so
+`let x: Float = 0.5` used to set an `f64` into an `i32` local and produce a
+module that does not validate (`type mismatch: expected i32, found f64`) —
+a diagnostic from wasmtime at load, not from the emitter, and the only Float
+position that emitted anything at all rather than saying no. Interpolating a
+Float *expression* that is never bound (`` `${3.0}` ``, `` `${1.0 + 2.0}` ``)
+still lowers, within the `$f64_to_str` fence below.
+
 ## String and collection builtins
 
 The fixed-shape stdlib surface (docs/stdlib-2.0.md) lowers over the canonical

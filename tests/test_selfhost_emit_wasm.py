@@ -94,6 +94,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _boundary_witness import assert_boundary_witness  # noqa: E402
+
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
     "scratch_names.rvl",
@@ -139,6 +143,12 @@ CORPUS = [
                     # the strict single `i32.and`/`i32.or` when it provably
                     # cannot (constants, local reads, and `!`/comparison/logical
                     # combinations of those)
+    "externs.rvl",  # issue 1130: a DECLARED extern with no `@wasm` body. The
+                    # reference answers one with a named
+                    # `;; unsupported on this tier: externs … (no @wasm body)`
+                    # comment — a refusal it states in the output — and the port
+                    # reproduces it, so the byte oracle covers the sentence like
+                    # any other emitted text
     "loopctrl.rvl", # item 379 / 391: break/continue via named labels
                     # ($revl_brk_N/$revl_top_N, inner $revl_cnt_N so `for`'s
                     # continue still runs idx++), nested-if/nested-loop targeting,
@@ -301,12 +311,26 @@ def test_fn_type_param_refused(emitted, reference):
                  "cdiv_", "<<UNSUPPORTED-BUILTIN:checked_div_trunc>>", id="checked-division"),
     pytest.param("fn f(n: Int) -> Int { let add = (x: Int) => x + 1; return add(n) }",
                  "$f", "<<UNSUPPORTED-EXPR:arrow>>", id="inline-arrow"),
+    # `(data` opens the segment on BOTH sides -- what diverges is its bytes:
+    # the reference pools the UTF-8 encoding of `\u00e9` (2 bytes, length 2),
+    # the port pools the code point as one byte. Pin the port's segment.
     pytest.param('fn f() -> Str { return "\u00e9" }',
-                 "\\c3\\a9", "(data", id="utf8-string-pool"),
+                 "\\c3\\a9", '"\\01\\00\\00\\00\\e9"', id="utf8-string-pool"),
+    # `;; Generated` is the banner both sides write. The port-only text is at
+    # the CALL: an `@wasm`-bodied extern is never registered as a function by
+    # the port, so `render_direct_call` refuses the call by name while the
+    # reference renders both the call and `(func $f`. Ordinary calls ARE ported
+    # (calls.rvl is in CORPUS above), so this marker names the extern deferral
+    # and not calls in general.
     pytest.param("extern pure fn f() -> Int = @wasm { (i64.const 7) }\nfn g() -> Int { return f() }",
-                 "(func $f", ";; Generated", id="wasm-extern"),
+                 "(func $f", "<<UNSUPPORTED-CALL:f>>", id="wasm-extern"),
+    # The port drops the whole in-file test section and puts nothing in its
+    # place, so there is no port-only text to pin: witnessed by the absence of
+    # the reference's test function from the port's output. (This case used to
+    # pin `$f`, the document's own emitted function, which both sides emit --
+    # see tests/_boundary_witness.py.)
     pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
-                 "$revl_test_probe", "$f", id="in-file-tests"),
+                 "$revl_test_probe", None, id="in-file-tests"),
 ])
 def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
                                          reference_token, port_token):
@@ -315,9 +339,28 @@ def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
     path.write_text(source)
     ir = compile_files([str(path)])
     want, got = reference.emit(ir)["functions"], emitted["emit_wasm_src"](ir)
-    assert reference_token in want
-    assert port_token in got
-    assert got != want, "boundary is stale: move its witness into CORPUS"
+    assert_boundary_witness(want, got, reference_token, port_token)
+
+
+def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_path):
+    """Non-vacuity for the meta-check, planting the exact token it was written for.
+
+    Until item 1136 the `in-file-tests` case above pinned `$f` as its port
+    token. Both sides emit it -- it is the document's own function -- so the case
+    passed green while the port dropped the entire test section. Plant it back
+    and the witness must now refuse it by name; the honest form of the same case
+    (the reference's test function, absent from the port) still passes.
+    """
+    path = tmp_path / "planted.rvl"
+    path.write_text('fn f() -> Bool { return true }\ntest "probe" { assert f() }')
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir)["functions"], emitted["emit_wasm_src"](ir)
+    assert "$f" in want and "$f" in got, (
+        "the plant is only a proof while it is text BOTH sides emit"
+    )
+    with pytest.raises(AssertionError, match="text the REFERENCE also emits"):
+        assert_boundary_witness(want, got, "$revl_test_probe", "$f")
+    assert_boundary_witness(want, got, "$revl_test_probe", None)
 
 
 @pytest.mark.parametrize("source, reason", [
