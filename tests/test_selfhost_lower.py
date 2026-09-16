@@ -5114,6 +5114,307 @@ def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
     assert _ref_ambient(src, _H_MO_M) == expected
 
 
+# ======================= calls and signatures (docs/design/457 T2b) ==========
+#
+# `_tsb_program` draws a module `fn` whose body CALLS things: module `fn`s at
+# every arity and both genericities, an `extern` that declares no return, the
+# stdlib method table over every receiver family the walk can prove, the host
+# stub surface through its constructor roots and through a bound host value, and
+# `Map.empty()`. It is a DIFFERENTIAL draw, not an expectation table, compared
+# on TAG and MESSAGE.
+#
+# One divergence CLASS survives, pinned below rather than described in a
+# comment: the reference desugars a receiver-first list transform to its free
+# function and then refuses that undeclared NAME, which is the G1 name-read
+# family no slice has built. The gate refuses later, or not at all — an
+# under-refusal. The bound the draw actually holds is absolute.
+
+_TSB_HEAD = """type TsbRow = { h: Str }
+
+fn mono(a: Int, b: Str) -> Int {
+  return a
+}
+
+fn nores(a: Int) {
+  let z = a
+}
+
+fn ident(x: T) -> T {
+  return x
+}
+
+fn pick[T](xs: List[T]) -> T {
+  return xs[0]
+}
+
+extern pure fn opaque(s: Str) = @py { return None }
+
+"""
+
+_TSB_ARGS = ["1", '"s"', "true", "3.5", "[]", "[1]", '["a"]', "None", "a", "b",
+             "c", '{ h: "x" }', "Map.empty()", "0"]
+# never a bare `[` at a receiver head: a statement STARTING with one is a parser
+# refusal in the reference and a "bail" in this reader, which is the parser's
+# surface and not this slice's.
+_TSB_RECV = ["a", "b", "c", '"str"', "Map.empty()", "m", "p", "1", "3.5"]
+_TSB_METH = ["length", "push", "slice", "charAt", "concat", "indexOf", "split",
+             "join", "repeat", "startsWith", "to_int", "to_int32", "to_str",
+             "keys", "set", "lookup", "has", "size", "remove", "mod",
+             "div_trunc", "checked_mod", "putt", "fetch", "map", "field", "str"]
+_TSB_HOSTV = ["new", "drop", "insert", "insert_if_absent", "remove", "get",
+              "open", "close", "query", "run", "nope"]
+_TSB_TYPES = ["Int", "Int32", "Float", "Str", "Bool", "Opt[Int]", "List[Int]",
+              "List[Str]", "Any", "TsbRow", "Map[Str, Int]", "Map[Str, Str]"]
+
+
+def _tsb_args(rng, n):
+    return ", ".join(rng.choice(_TSB_ARGS) for _ in range(n))
+
+
+def _tsb_call(rng, depth=1):
+    k = rng.randrange(8)
+    n = rng.randrange(0, 3)
+    if k == 0:
+        return f"mono({_tsb_args(rng, rng.randrange(0, 4))})"
+    if k == 1:
+        return f"ident({_tsb_args(rng, 1)})"
+    if k == 2:
+        return f"pick({_tsb_args(rng, 1)})"
+    if k == 3:
+        return f"nores({_tsb_args(rng, n)})"
+    if k == 4:
+        return (f"{rng.choice(_TSB_RECV)}.{rng.choice(_TSB_METH)}"
+                f"({_tsb_args(rng, n)})")
+    if k == 5:
+        root = rng.choice(["Map", "Pool", "Job"])
+        return f"{root}.{rng.choice(_TSB_HOSTV)}({_tsb_args(rng, n)})"
+    if k == 6:
+        return f"m.{rng.choice(_TSB_HOSTV)}({_tsb_args(rng, n)})"
+    inner = (_tsb_call(rng, 0) if depth and rng.randrange(3) == 0
+             else _tsb_args(rng, 1))
+    return f"mono({inner}, {_tsb_args(rng, 1)})"
+
+
+def _tsb_stmt(rng):
+    e = _tsb_call(rng)
+    k = rng.randrange(6)
+    tag = rng.randrange(99)
+    if k == 0:
+        return f"let z{tag} = {e}"
+    if k == 1:
+        return f"let z{tag}: {rng.choice(_TSB_TYPES)} = {e}"
+    if k == 2:
+        return f"var w{tag} = {e}"
+    if k == 3:
+        return e
+    if k == 4:
+        return f"if ({e}) {{ let q{tag} = 1 }}"
+    return f"assert {e}"
+
+
+def _tsb_program(rng) -> str:
+    body = "\n  ".join(_tsb_stmt(rng) for _ in range(rng.randrange(1, 4)))
+    return (f"{_TSB_HEAD}fn f(a: Int, b: Str, c: List[Int]) -> "
+            f"{rng.choice(_TSB_TYPES)} {{\n"
+            f'  let m = Map.new()\n  let p = opaque("x")\n'
+            f"  {body}\n  return {rng.choice(_TSB_ARGS)}\n}}\n")
+
+
+# The one family whose EARLIER reference refusal this slice does not build: a
+# receiver-first list transform desugars to a free function and the reference
+# refuses that undeclared NAME. Resolving a name READ needs the whole callable
+# universe, which is still open (`g1_template_undeclared`,
+# `v2_undeclared_fn_var` in TYPE_LAYER_GAP above).
+_TSB_LATER_SLICES = ("is not declared in this function",)
+
+_TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
+
+
+@pytest.mark.parametrize("seed", [5, 17, 31])
+def test_call_and_signature_fuzz_never_refuses_what_the_reference_admits(
+        admit, seed):
+    """THE BOUND, over 400 drawn call-carrying fn bodies per seed.
+
+      * the gate NEVER refuses a program the reference admits — absolute, with
+        no allowance;
+      * where the reference's own refusal is in this slice's vocabulary and
+        outside the family a later slice owns, the gate's verdict is the
+        reference's TAG AND SENTENCE, byte for byte.
+    """
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(400):
+        src = _tsb_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _TSB_TAGS:
+            continue
+        if any(m in ref_msg for m in _TSB_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 350, drawn
+    assert compared >= 150, compared
+
+
+def test_the_stdlib_surface_the_gate_lists_is_the_references_own(ns):
+    """`no builtin method` names the WHOLE stdlib surface, sorted, and the two
+    tables are edited in different files. Held byte-exact so a method added to
+    `_BUILTIN_METHODS` reds here rather than inside a message diff."""
+    from revl.lower import _BUILTIN_METHODS
+    assert ns["tk_stdlib_surface"]() == ", ".join(sorted(_BUILTIN_METHODS))
+
+
+def test_the_host_stub_surface_the_gate_lists_is_the_references_own(ns):
+    """The same, per host family: the verb list the `has no method` refusal
+    quotes, and the declared argument types the arity and argument rules use."""
+    from revl.typecheck import _HOST_FAMILIES
+    for family, verbs in _HOST_FAMILIES.items():
+        assert ns["tk_host_verbs"](family) == sorted(verbs), family
+        for verb, params in verbs.items():
+            assert ns["tk_host_params"](family, verb) == list(params), \
+                f"{family}.{verb}"
+
+
+def test_a_fn_that_declares_no_return_types_its_call_unknown(admit):
+    """A FALSE REJECTION this slice closed, kept as its own case.
+
+    `case_binds` spells a module `fn`'s own name as a function type, and gives a
+    returnless `fn` the return `Unit` — which is the IR's spelling. The
+    reference's signature table records `None` there (no return type, not the
+    unit type), so `assert nores(1)` reads as an UNKNOWN condition and the
+    program is admitted. Reading `Unit` back off the function type refused it,
+    which is the one direction this gate may not err in. The signature table's
+    own `sigr` row is "" and the call types unknown."""
+    src = """fn nores(a: Int) {
+  let z = a
+}
+
+fn f() -> Int {
+  assert nores(1)
+  return 1
+}
+"""
+    assert _ref(src) == ("", "")
+    assert admit(src) == ""
+
+
+def test_the_call_and_signature_layer_reaches_a_module_fn_body(admit):
+    """NON-VACUITY, spelled out: each position the slice opens draws the
+    reference's own sentence, and the probe asserts the reference still spells
+    it that way."""
+    from revl.lower import _BUILTIN_METHODS
+    cases = [
+        # the arity window
+        ("fn g(a: Int) -> Int { return a }\n"
+         "fn f() -> Int { return g(1, 2) }\n",
+         "T1|`g` takes 1 argument(s), 2 given"),
+        # a monomorphic argument
+        ("fn g(a: Int) -> Int { return a }\n"
+         'fn f() -> Int { return g("s") }\n',
+         "T1|argument 1 of `g(...)` expects `Int`, got `Str`"),
+        # a generic call site: unify, then the UNIFIED return
+        ("fn id(x: T) -> T { return x }\n"
+         'fn f() -> Int { return id("s") }\n',
+         "T1|this function's return expects `Int`, got `Str`"),
+        # an explicit [T] list turns the implicit heuristic off, so `U` is an
+        # ordinary undeclared nominal
+        ("fn g[T](xs: List[U]) -> T { return xs[0] }\n"
+         "fn f() -> Int { return g([1]) }\n",
+         "T1|argument 1 of `g(...)` expects `List[U]`, got `List[Int]`"),
+        # the builtin argument specs, through `@elem`
+        ("fn f(m: Map[Str, Int], k: Str) -> Map[Str, Int] "
+         '{ return m.set(k, "one") }\n',
+         "T1|builtin `set` argument expects `Int`, got `Str`"),
+        # a builtin's receiver family
+        ("fn f(s: Str) -> Int { return s.div_trunc(2) }\n",
+         "TYPE|builtin `div_trunc` needs a Int receiver, got `Str`"),
+        # the multi-family row miss
+        ("fn f(b: Bool) -> Str { return b.to_str() }\n",
+         "T1|builtin `to_str` has no form for a `Bool` receiver "
+         "(its receiver families: Float, Int)"),
+        # the host stub surface, reached through a constructor-bound value
+        ('fn f() { let m = Map.new()  m.putt("k", "v") }\n',
+         "HOST-METHOD|`Map` has no method `putt` (its surface: drop, get, "
+         "insert, insert_if_absent, new, remove)"),
+        # the host constructor's own argument count
+        ('fn f() { let p = Pool.open("dsn") }\n',
+         "HOST-ARITY|host builtin `Pool.open` takes 2 arguments, got 1"),
+        # the LOWERING refusals: the surface, the arity, the divisor
+        ("fn f(m: Map[Str, Int], k: Str) -> Int { return m.fetch(k) ?? 0 }\n",
+         "T1|no builtin method `fetch` on values — the stdlib surface is "
+         + ", ".join(sorted(_BUILTIN_METHODS)) + " (docs/stdlib-2.0.md)"),
+        ("fn f(s: Str) -> Str { return s.charAt() }\n",
+         "TYPE|builtin `charAt` takes 1 argument(s), 0 given"),
+        ("fn f(n: Int) -> Int { return n.div_euclid(0) }\n",
+         "TYPE|`div_euclid` by a literal zero is undefined"),
+        # `Map.empty()` takes none
+        ('fn f() -> Map[Str, Int] { return Map.empty("k") }\n',
+         "TYPE|`Map.empty()` takes no arguments, 1 given"),
+    ]
+    for src, expected in cases:
+        ref_tag, ref_msg = _ref(src)
+        assert f"{ref_tag}|{ref_msg}" == expected, f"the probe drifted:\n{src}"
+        assert admit(src) == expected, src
+
+
+def test_a_defaulted_parameter_list_builds_no_signature_row(admit):
+    """A signature carrying a DEFAULT (item 187) gets no row, so the arity
+    window is never counted: a call omitting the default must not be refused
+    short. `params_at` cannot spell such a list, and `sig_walk` gates the row on
+    it spelling the whole one.
+
+    The gate still refuses this program, and the refusal is the PARSER's, not
+    this slice's — `fb_span`/`p_fn` read the same parameter list and neither
+    spells a default, so `fn g(a: Int, b: Str = "s")` never reaches a body. That
+    divergence is older than this slice (the reference admits the program) and
+    is not closed here; what is asserted is that the CALL layer adds nothing to
+    it, which is what the withheld row buys."""
+    src = ('fn g(a: Int, b: Str = "s") -> Int { return a }\n'
+           "fn f() -> Int { return g(1) }\n")
+    assert _ref(src) == ("", "")
+    got = admit(src)
+    assert got.startswith("BAD|"), got
+    assert "argument(s)" not in got, got
+
+
+def test_the_call_layer_stays_silent_where_it_cannot_prove_the_premise(admit):
+    """The companion bound: the shapes this slice must NOT decide, each with the
+    reason it cannot. A refusal appearing here is a false rejection waiting to
+    happen on real code."""
+    quiet = [
+        # a name the body REBINDS: the reference reads a local of function type
+        # first, and typing a function-value call is the arrow slice's (T2c).
+        "fn g(a: Int) -> Int { return a }\n"
+        "fn f() -> Int { let h = g\n  return 1 }\n",
+        # a receiver whose type is merely not inferred HERE — an arrow's result
+        # — is not a receiver PROVABLY without one, so the unpinned-receiver
+        # refusal must not reach it.
+        "fn f() -> Int { let k = (x: Int) => x\n  let v = k(1)\n  return 1 }\n",
+    ]
+    for src in quiet:
+        assert _ref(src) == ("", ""), \
+            f"the probe is not admitted by the reference:\n{src}"
+        assert admit(src) == "", src
+    # A list transform is SUGAR for a free function, and the reference types the
+    # DESUGARED call — so a builtin row must not be consulted for it. The
+    # reference's own refusal here is the undeclared `list_map` NAME, which is
+    # the G1 family no slice has built; what this slice owes is not to invent a
+    # builtin refusal in its place.
+    sugar = "fn f(c: List[Int]) -> List[Str] { return c.map(n => n.to_str()) }\n"
+    assert _ref(sugar)[0] == "G1", _ref(sugar)
+    got = admit(sugar)
+    assert "builtin `" not in got and "stdlib method `" not in got, got
+
+
 # ================================ the fn-body TYPE layer (docs/design/457 T3a)
 #
 # `_typed_fn_body` draws a module `fn` whose signature and body are built out of
