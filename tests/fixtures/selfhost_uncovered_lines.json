@@ -882,7 +882,7 @@
         },
         "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions.": {
           "_emit_v3_lifecycle_tests": 81,
-          "_emit_v3_tests": 26,
+          "_emit_v3_tests": 30,
           "_lifecycle_uses_advance": 1,
           "_refuse_fault_tests": 2
         },
