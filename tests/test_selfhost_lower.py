@@ -5795,13 +5795,6 @@ def _provide_program(rng) -> str:
 # The reference messages whose family the provide-method slice leaves to a later
 # one, exactly as `_TFB_LATER_SLICES` does for the fn-body one.
 _PV_LATER_SLICES = _TFB_LATER_SLICES + (
-    # T2b: a BARE call's declared signature (item 423). `_PV_TYPES` puts
-    # deliberate mismatches at a module `fn` / extern call site and the
-    # reference holds the call to its declaration; the gate types the call's
-    # RESULT and judges no argument, which is the same gap
-    # `t10_call_arity` and `t15_generic_call_site` are still pinned for.
-    "(...)` expects `",
-    " argument(s), ",
     # T2b: the unified signature of a generic / builtin receiver, and the
     # arity and existence halves of the A6 provision rules the gate steps over
     "is not a method of service",
