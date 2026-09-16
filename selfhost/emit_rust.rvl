@@ -2560,6 +2560,17 @@ fn binds(comp: Any) -> List[Str] {
 // A bare renderer context over the document's type tables: what the inference
 // below needs (`rbf`, for a record literal's nominal type) and what the
 // activation-body steps render against.
+// The context an ACTIVATION-BODY step renders against. The reference reaches
+// this point with `var_types` still holding the last provide method's table,
+// whose load-bearing half is the host-Map bind markers — what tells the
+// renderer a `get`/`remove` key is borrowed. Those are seeded here explicitly
+// rather than left to the order the reference happens to run in.
+fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, Str]) -> Ctx {
+  var c = plain_ctx(tables, fr)
+  for (b of map_values.keys()) { c = set_vt(c, b, `Map[${map_get(map_values, b)}]`) }
+  return c
+}
+
 fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
   return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
 }
@@ -3267,6 +3278,74 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   return out
 }
 
+// `_emit_step`, the remaining ACTIVATION-BODY arms this port lowers.
+//
+//   * `effect` — a bare bracket: the acquisition runs for its side effect and
+//     the site-spelled inverse is registered on the ctx.effect ledger, with
+//     each required service recloned so the move closure owns its own handle;
+//   * `emit` — a fire-and-forget emission (a `compensate` clause is DEFERRED:
+//     it registers onto the two-phase teardown accumulator, not the bracket);
+//   * `fail` — the activation's own refusal;
+//   * `if` — a conditional whose arms are themselves steps.
+//
+// `timer`, `await`, `stream-iter` and a `setup` block stay DEFERRED, each with
+// a marker, because each needs a runtime preamble this port does not assemble.
+fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
+                  map_values: Map[Str, Str], indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  let kind = value_str(value_field(step, "step"))
+  let name = value_str(value_field(comp, "name"))
+  var out = []
+  if (kind == "let-effect") { return emit_let_effect_step(comp, step, ir, ctx, map_values, indent) }
+  if (kind == "effect") {
+    if (value_list(value_field(step, "setup")).length() > 0) {
+      out = out.push(`${pad}<<DEFER-effect-setup:${name}>>`)
+    }
+    if (witnessed_acquire(ir, value_field(step, "acquire"))) {
+      out = out.push(`${pad}<<DEFER-effect-witnessed:${name}>>`)
+      return out
+    }
+    let acq_src = render_expr(value_field(step, "acquire"), ctx)
+    var undoR: Map[Str, Str] = Map.empty()
+    for (req of value_keys(value_field(comp, "requires"))) {
+      out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
+      undoR = undoR.set(req, `${req}_undo`)
+    }
+    let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
+    out = out.push(`${pad}let _ = ${acq_src};`)
+    out = out.push(`${pad}ctx.effect(${string_lit(`${name}.effect`)}, move || { ${undox}; Ok(()) })?;`)
+    return out
+  }
+  if (kind == "emit") {
+    out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), ctx)};`)
+    if (!value_is_null(value_field(step, "compensate"))) {
+      out = out.push(`${pad}<<DEFER-emit-compensate:${name}>>`)
+    }
+    return out
+  }
+  if (kind == "fail") {
+    let msg = render_expr(value_field(step, "message"), ctx)
+    out = out.push(`${pad}return Err(cordis::CordisError::with_message(cordis::ErrorCode::Plugin, ${msg}));`)
+    return out
+  }
+  if (kind == "if") {
+    out = out.push(`${pad}if ${render_expr(value_field(step, "cond"), ctx)} {`)
+    for (nested of value_list(value_field(step, "then"))) {
+      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1))
+    }
+    let alt = value_list(value_field(step, "else"))
+    if (alt.length() > 0) {
+      out = out.push(`${pad}} else {`)
+      for (nested of alt) {
+        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1))
+      }
+    }
+    out = out.push(`${pad}}`)
+    return out
+  }
+  return [`<<DEFER-comp-step:${kind}>>`]
+}
+
 // `_emit_component` (the SIMPLE provider path): a component with NO isolate /
 // intercept and NO effectful (`effect`/`emit`) method — but it MAY carry config
 // and required services (item 218). The provider struct captures each required
@@ -3313,11 +3392,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
-      if (kind == "let-effect") {
-        out = out.concat(emit_let_effect_step(comp, step, ir, plain_ctx(tables, fr), map_values, 3))
-      } else {
-        out = out.push(`<<DEFER-comp-step:${kind}>>`)
-      }
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3))
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")
@@ -3381,11 +3456,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
-      if (kind == "let-effect") {
-        out = out.concat(emit_let_effect_step(comp, step, ir, plain_ctx(tables, fr), map_values, 3))
-      } else {
-        out = out.push(`<<DEFER-comp-step:${kind}>>`)
-      }
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3))
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")

@@ -237,6 +237,14 @@ CORPUS = [
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
+    "comp_body_steps.rvl",   # the activation-body steps other than `provide`:
+                             #   the bare `effect`/`undo` bracket over a required
+                             #   service, the fire-and-forget `emit`, and the
+                             #   `if`/`else` guard whose arms `fail`. Before this
+                             #   document every one of those arms emitted a
+                             #   `<<DEFER-comp-step>>` marker and the oracle
+                             #   agreed, because no corpus document had a
+                             #   component body step that was not a provision.
 ]
 
 

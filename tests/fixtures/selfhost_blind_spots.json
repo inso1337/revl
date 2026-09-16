@@ -326,7 +326,6 @@
         "step=advance",
         "step=assert_no_residue",
         "step=call",
-        "step=fail",
         "step=load",
         "step=unload"
       ],

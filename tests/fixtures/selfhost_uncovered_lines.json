@@ -827,7 +827,7 @@
       "statements": 3563,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
-          "_emit_step": 117,
+          "_emit_step": 92,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 2
         },
@@ -965,7 +965,7 @@
         "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered.": {
           "_arg_ref_name": 2,
           "_config_default_lit": 1,
-          "_default_for_rust_type": 12,
+          "_default_for_rust_type": 11,
           "_escape_format_braces": 1,
           "_finite_float": 1,
           "_ident": 1,
@@ -984,8 +984,8 @@
           "emit": 3
         },
         "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction.": {
-          "_body_has_compensation": 3,
-          "_body_has_witnessed": 3,
+          "_body_has_compensation": 2,
+          "_body_has_witnessed": 2,
           "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
           "_emit_activation_compensation": 13,
@@ -1814,7 +1814,7 @@
         },
         "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming.": {
           "checked_method": 5,
-          "default_for_rust_type": 12,
+          "default_for_rust_type": 11,
           "emit_host_stubs": 5,
           "ind": 1,
           "is_addsubmul": 1,
@@ -1828,8 +1828,8 @@
         },
         "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered.": {
           "config_default_lit": 1,
-          "emit_component": 4,
-          "emit_component_new": 3,
+          "emit_component": 1,
+          "emit_component_new": 2,
           "has_extra_linebreak": 1,
           "is_extra_linebreak": 3,
           "method_body_lines": 5,
@@ -1846,12 +1846,13 @@
         "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153).": {
           "by_value_reuse": 2,
           "component_map_values": 3,
+          "emit_comp_step": 5,
           "emit_let_effect_step": 8,
           "host_of": 6,
           "map_insert_candidates": 8,
           "map_value_expr_type": 75,
           "map_value_surface_type": 1,
-          "steps_use_timer": 5,
+          "steps_use_timer": 3,
           "uses_stream_event": 1,
           "uses_timer": 1,
           "witnessed_acquire": 5

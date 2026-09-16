@@ -1,0 +1,34 @@
+// The ACTIVATION-BODY step surface (issue 1153): a bare `effect`/`undo`
+// bracket over a required service, a fire-and-forget `emit`, and an `if`/`else`
+// guard whose arms `fail` the activation.
+//
+// No corpus document carried an activation-body step other than `provide`
+// before this one, so every arm of the reference's `_emit_step` beyond the
+// provision was measured VACUOUSLY: the port emitted one `<<DEFER-comp-step>>`
+// marker per step and the oracle, seeing no such document, agreed.
+//
+// The shapes this document forces are the required-service reclone into the
+// undo closure, the `ctx.effect(<comp>.effect, ..)` bracket label, the `let _ =`
+// emission, the `cordis::CordisError::with_message` refusal, and the nested
+// step recursion under an `if`. The trivial `fn` forces ir_version 3.
+fn seed() -> Int {
+  return 0
+}
+
+service Sink {
+  emission fn send(msg: Str)
+  fn write(line: Str) -> Int
+}
+
+component Guard requires sink: Sink {
+  config { prefix: Str, level: Int = 1 }
+
+  effect sink.write(config.prefix) undo sink.write("bye")
+  emit sink.send("started")
+
+  if (config.level < 0) {
+    fail "bad level"
+  } else {
+    fail "unreachable"
+  }
+}
