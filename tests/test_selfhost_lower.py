@@ -286,13 +286,24 @@ def _classify(e: RevlError) -> str:
     # message-shape families for the code-less remainder. It is append-only and
     # deliberately narrow: it must not name a refusal outside the type layer.
     # The extern-slot G4 family has since landed for real (item 391, above) and
-    # was struck from this list; `a2`/`a9`, `use`, the parser-form fixtures, the
-    # `unknown service` provide-clause refusals and the extern G5s (`deferred`
+    # was struck from this list, as has the component header's service-existence
+    # rule (docs/design/457 §2.4, the `in `requires`/`provides` of` arm below);
+    # `a2`/`a9`, `use`, the parser-form fixtures and the extern G5s (`deferred`
     # in teardown, a witnessed inverse that reaches an emission) stay "OUT:"
     # until their own slice lands and can refuse them natively.
     if e.code in ("T1", "T2", "HOST-METHOD"):
         return e.code
     if "is not declared in this function" in m:
+        return "G1"
+    # the component header's service-existence rule (`Env.__init__` over
+    # `comp.requires`, `_lower_component`'s `comp.provides` loop). The GATE now
+    # spells both byte for byte, so naming them here is what turns a parked
+    # divergence into a measured agreement. The marker carries the clause on
+    # purpose: lower.py's third `unknown service `S`` — the one a `provide`
+    # STATEMENT draws for a service the component never declared — is a
+    # different site the gate does not decide, and stays "OUT:".
+    if ("unknown service `" in m
+            and ("in `requires` of" in m or "in `provides` of" in m)):
         return "G1"
     if ("cannot reassign" in m
             or "is already declared in this function" in m
@@ -2265,6 +2276,56 @@ component C provides cache: Cache {
     *[(f"{label} does not swallow the next operation",
        _sop(clause, _SOP_PLAIN_PUT, impl), "G4")
       for label, clause, impl in _SOP_CLAUSES],
+    # ---- docs/design/457 §2.4: the component header's service-existence rule -
+    # The reference resolves every `requires`/`provides` annotation against its
+    # service table (`Env.__init__` for the requirements, `_lower_component`'s
+    # `comp.provides` loop for the provisions) and refuses an unresolved one by
+    # name. Both are here, plus the ORDER between them: the reference decides
+    # every requirement before it reaches the provisions, so a component whose
+    # two clauses both dangle is refused for its requirement.
+    ("an undeclared service in requires",
+     "component C requires s: S { }", "G1"),
+    ("an undeclared service in provides",
+     "component C provides s: S { }", "G1"),
+    ("requires is decided before provides",
+     "component C requires a: A provides b: B { }", "G1"),
+    # the issue-346 harness candidate, verbatim: the STANDALONE question about a
+    # component that requires a service the running composition provides. The
+    # manifest arm of the same bytes is `test_the_manifest_gap_is_priced_not_hidden`.
+    ("a candidate requiring an ambient-only service, standalone", """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheLayer requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.get(key) }
+}
+""", "G1"),
+    # ---- docs/design/457 T4b: the required-service member rule (A6) -------
+    # `_component_req_call` / `_lower_postfix`'s `req` branch look the operation
+    # up in the service the requirement resolves to and refuse an absent one by
+    # name, before they count arguments or judge the emit marking. Both body
+    # positions are here — a setup `effect` bracket (the `a6_method_not_in_service`
+    # fixture's own shape) and a provide-method call — plus the ORDER against
+    # G4: an absent operation cannot be an unmarked emission, so the A6 refusal
+    # is what an `emission`-less name draws even under `emit`.
+    ("an absent service operation in a setup effect bracket", """
+service Database { fn query(sql: Str) -> Int }
+component P requires db: Database {
+  let n = effect db.execute("x") undo db.query("y")
+}
+""", "A6"),
+    ("an absent service operation in a provide method", """
+service Store { fn get(key: Str) -> Str }
+service Cache { fn lookup(key: Str) -> Str }
+component C requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nonexistent(key) }
+}
+""", "A6"),
+    ("an absent service operation under `emit` is A6, not G4", """
+service Bus { emission fn publish(topic: Str) }
+service Cache { fn put(key: Str) }
+component C requires bus: Bus provides cache: Cache {
+  provide cache { fn put(key) { emit bus.broadcast(key) } }
+}
+""", "A6"),
 ]
 
 
@@ -3115,6 +3176,8 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # provide-method and component bodies: method params take the service
     # signature, the body checks against its return, required-service call
     # argument typing, config defaults, a method-local shadowing a component name.
+    # The member-EXISTENCE half of this family has landed (docs/design/457 T4b);
+    # what is left here all needs the expression algebra T1-T3 build.
     "provide-method and component bodies": [
         ("t1_service_arg_type", "T1"),
         ("t4_field_arg_type", "T1"),
@@ -3122,7 +3185,6 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t16_provide_method_missing_return", "T1"),
         ("t31_index_non_int_provide_method", "T1"),
         ("t3_config_default_type", "T1"),
-        ("a6_method_not_in_service", "A6"),
         # the t29 field-read-on-`Any` shape inside a provide method, pinned for
         # the same reason: the `pub extern` parse refusal used to hide it.
         ("t30_field_read_on_any_provide_method", "T1"),
@@ -3136,12 +3198,132 @@ _TYPE_LAYER_CASES = [
 ]
 
 
-def test_the_type_layer_gap_is_exactly_44_fixtures():
+def test_the_service_existence_rule_stops_at_a_use_declaration(admit):
+    """The declared frontier of the component header's service-existence rule
+    (docs/design/457 §2.4), pinned as a divergence rather than left to be
+    discovered.
+
+    A `use` declaration can IMPORT a service — the reference admits
+    `use "./svc.rvl" { Store }` followed by `requires store: Store` when the
+    module is supplied — and `p_top` steps over `use` without reading the module,
+    so a text carrying one has no knowable service set. The gate therefore
+    decides nothing there. That is the UNDER-refusing direction, which is the one
+    this gate is allowed to err in: refusing a program the reference admits is
+    the false alarm it may not produce.
+
+    The reference's own verdict on such a single source is the missing-`modules=`
+    refusal, which is out of this gate's slice for the same reason the three
+    `v2_use_*` fixtures are: the crate cannot supply `modules=` either. When a
+    later slice teaches the gate to read modules, this test flips to an
+    agreement — it is not a waiver on the rule, it is the rule's boundary."""
+    src = 'use "./svc.rvl" { S }\ncomponent C requires s: S { }\n'
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag.startswith("OUT:") and "`modules=`" in ref_msg, (
+        f"the reference's single-source `use` refusal changed: {ref_msg!r}")
+    assert admit(src) == "", (
+        "a text whose services may come from a module must draw no "
+        "service-existence verdict")
+    # ... and the SAME text without the `use` is refused, so the exemption is
+    # doing the work rather than the program being harmless.
+    assert admit("component C requires s: S { }\n") == (
+        "G1|unknown service `S` in `requires` of C")
+
+
+# ---- the A6 member rule against item 391's G6 shadowing discipline ----------
+#
+# Two slices landed a refusal into the SAME walk: the A6 member rule
+# (docs/design/457 T4b) refuses inside `req_call`, and `mth_rebind`
+# (`_check_rebind`, item 391) refuses a provide-method binding that collides
+# with a name already in scope. Both are raised by the reference DURING the body
+# lowering, so on a program carrying both the EARLIER SOURCE LINE wins - and the
+# gate has to pick the same one. That exact class of disagreement is item 419c,
+# and it is not something a per-slice corpus can see, because every corpus
+# program carries exactly one refusal.
+#
+# `csh_refusal` (`_refuse_callable_shadowing`, item 391's other half) is the
+# contrast: the reference runs it in `check_and_lower` BEFORE it lowers a single
+# component, so it beats a body refusal regardless of line order.
+
+_A6_G6_SVCS = ("service Store { fn get(key: Str) -> Str }\n"
+               "service Cache { fn lookup(key: Str) -> Str }\n")
+
+@pytest.mark.parametrize("name,src", [
+    # the method-PARAMETER arm of `_check_rebind`, each order
+    ("A6 on the earlier line", _A6_G6_SVCS + """component C requires store: Store provides cache: Cache {
+  provide cache {
+    fn lookup(key) {
+      let a = store.nope(key)
+      let key = "x"
+      return "y"
+    }
+  }
+}
+"""),
+    ("the rebind on the earlier line", _A6_G6_SVCS + """component C requires store: Store provides cache: Cache {
+  provide cache {
+    fn lookup(key) {
+      let key = "x"
+      let a = store.nope(key)
+      return "y"
+    }
+  }
+}
+"""),
+    # the COMPONENT-LOCAL arm, in the shape of the corpus fixture
+    # `g6_method_local_shadows_component.rvl`, each order
+    ("A6 before a component-local rebind",
+     "service Store { fn get(key: Str) -> Str }\n"
+     "service Cache { fn set(key: Str) }\n" + """component C requires svc: Store provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let a = svc.nope(key)
+      let store = key
+    }
+  }
+}
+"""),
+    ("a component-local rebind before the A6",
+     "service Store { fn get(key: Str) -> Str }\n"
+     "service Cache { fn set(key: Str) }\n" + """component C requires svc: Store provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let store = key
+      let a = svc.nope(key)
+    }
+  }
+}
+"""),
+    # the fail-fast phase, with the A6 deliberately on the EARLIER line
+    ("callable shadowing fails fast ahead of an earlier-line A6",
+     _A6_G6_SVCS + """component C requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nope(key) }
+}
+fn helper(xs: List[Int]) -> Int { return xs.length() }
+fn shadowed(g: (List[Int]) -> Int) -> Int {
+  let helper = g
+  return helper([1, 2, 3])
+}
+"""),
+])
+def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
+        admit, name, src):
+    """Both refusals are true of the program; the gate must name the one
+    `check_and_lower` names, not merely refuse something."""
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag in ("A6", "G6"), (
+        f"probe bug: the reference answers {ref_tag!r} ({ref_msg!r}), so this "
+        f"program does not pit the two rules against each other")
+    assert admit(src) == f"{ref_tag}|{ref_msg}"
+
+
+def test_the_type_layer_gap_is_exactly_41_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 42, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 41, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 42, "a fixture is listed twice"
+    assert len(set(names)) == 41, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -3760,18 +3942,130 @@ def test_manifest_wire_projects_the_service_block():
     """The projection renders the header and one row per declared service, in
     declaration order, between the composition rows and the withdrawal rows: a
     service declaration describes the composition, and a withdrawal acts on what
-    precedes it, so `-C` stays last."""
+    precedes it, so `-C` stays last.
+
+    Each row carries the service's OPERATION names after its name (T4b), which
+    is what lets a candidate's call through a required key be resolved against
+    the RUNNING declaration and not only against its name. The comma is the
+    claim: `:A,pa` says the surface is exactly `pa`, and a bare `:A` — every
+    wire a producer with no operation table renders — says nothing about it."""
     from revl import manifest_wire
 
     ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
-    assert manifest_wire(ir).endswith(";!services;:A;:B"), manifest_wire(ir)
+    assert manifest_wire(ir).endswith(";!services;:A,pa;:B,pb"), manifest_wire(ir)
     rows = manifest_wire(ir, replacing=("A",)).split(";")
     assert rows[-1] == "-A"
-    assert rows[-4:-1] == ["!services", ":A", ":B"]
+    assert rows[-4:-1] == ["!services", ":A,pa", ":B,pb"]
     # the composition rows keep their exact positions and order, so the G3 DFS
     # seed order cannot have moved
     assert rows[:rows.index("!services")] == manifest_wire(ir).split(
         ";")[:rows.index("!services")]
+
+
+# ---- docs/design/457 T4b: the requirement resolved against the RUNNING service
+
+#: The issue-346 harness scenario verbatim (bench/admission_latency.py): a
+#: running `Store` provided by `Kv` and consumed by `App`. The candidates below
+#: are the two questions a drafting agent asks about it.
+_T4B_RUNNING = """
+service Store {
+  fn get(key: Str) -> Str
+  fn bump(n: Int) -> Int
+  emission fn put(key: Str, value: Str)
+}
+service AppSvc { fn ping() -> Str }
+
+component Kv provides store: Store {
+  let m = effect Map.new() undo m.drop()
+  provide store {
+    fn get(key) = key
+    fn bump(n) = n
+    fn put(key, value) = value
+  }
+}
+component App requires store: Store provides app: AppSvc {
+  provide app { fn ping() = store.get("boot") }
+}
+"""
+
+#: Calls an operation the running `Store` declares: the reference admits it
+#: INTO the composition, and refuses it standalone for the service's absence.
+_T4B_CANDIDATE = """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheLayer requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.get(key) }
+}
+"""
+
+#: The same shape calling an operation the running `Store` does NOT declare.
+#: Only a reader that resolved the requirement against the running declaration
+#: can tell the two apart.
+_T4B_MISSING = """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheMiss requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nonexistent(key) }
+}
+"""
+
+
+def test_a_required_running_service_resolves_its_operations(admit_ambient):
+    """ORACLE B over the A6 member rule: a candidate whose `requires store:
+    Store` is satisfied by the RUNNING composition is checked against the
+    running service's declared operations, and agrees with the reference on
+    both answers — admitted for an operation `Store` declares, refused in the
+    reference's own words for one it does not.
+
+    This is the half `test_the_manifest_gap_is_priced_not_hidden` calls
+    requirement RESOLUTION: before it, the wire carried service NAMES and the
+    gate could say only that `Store` exists."""
+    assert _gate_ambient(admit_ambient, _T4B_CANDIDATE, _T4B_RUNNING) == ""
+    assert _ref_ambient(_T4B_CANDIDATE, _T4B_RUNNING) == ""
+
+    got = _gate_ambient(admit_ambient, _T4B_MISSING, _T4B_RUNNING)
+    assert got == "A6|`store.nonexistent` is not a method of service Store", got
+    assert got == _ref_ambient(_T4B_MISSING, _T4B_RUNNING)
+
+
+def test_a_wire_that_makes_no_operation_claim_decides_no_member(admit_ambient):
+    """The frontier of the same rule, pinned rather than left to be discovered.
+
+    A `:S` row with no comma names a running service and says NOTHING about its
+    surface — that is every wire a producer without an operation table renders.
+    Reading it as the EMPTY surface would refuse every call through that
+    requirement, which is the false-alarm direction this gate may not err in, so
+    it decides no member at all. The NAME still resolves, so the rule the
+    previous slice landed is untouched."""
+    named_only = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"
+    assert admit_ambient(_T4B_MISSING, named_only) == ""
+    assert admit_ambient(_T4B_CANDIDATE, named_only) == ""
+    # ... and the SAME wire carrying the claim refuses, so the silence is what
+    # is doing the work rather than the program being harmless
+    claimed = "Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping"
+    assert admit_ambient(_T4B_MISSING, claimed) == (
+        "A6|`store.nonexistent` is not a method of service Store")
+    assert admit_ambient(_T4B_CANDIDATE, claimed) == ""
+
+
+def test_the_empty_operation_claim_is_a_claim(admit_ambient):
+    """`:S,` is the running service that declares NO operation — a claim, and a
+    different one from `:S`. Every call through a requirement bound to it is
+    refused, which is what makes the trailing comma load-bearing rather than
+    cosmetic."""
+    empty_claim = "Kv/store/;App/app/;App<store;!services;:Store,;:AppSvc,ping"
+    assert admit_ambient(_T4B_CANDIDATE, empty_claim) == (
+        "A6|`store.get` is not a method of service Store")
+
+
+@pytest.mark.parametrize("row", [":Store,get,", ":Store,,get", ":Store,ge t",
+                                 ":Store,get/put"])
+def test_a_garbled_operation_list_refuses_the_wire(admit_ambient, row):
+    """A malformed operation list fails the WIRE by name. Reading it as a
+    shorter surface would refuse calls the reference admits, and skipping it
+    would leave a claim half-read: a wire the gate cannot read decides
+    nothing at all."""
+    got = admit_ambient(_T4B_CANDIDATE, f"Kv/store/;!services;{row}")
+    assert got.startswith("MANIFEST|"), got
+    assert "does not name an operation" in got or "does not name a service" in got
 
 
 def test_manifest_wire_makes_no_service_claim_for_a_manifest_dict():
@@ -3922,7 +4216,7 @@ def test_manifest_wire_renders_the_route_rows():
     assert rows.index("Router<*kv") < rows.index("Router>kv/r1,r2"), rows
     # ... and the whole ordering of the combined wire, in one line
     assert rows == ["StoreA/kv/r1", "StoreB/kv/r2", "Router/api/", "Router<*kv",
-                    "Router>kv/r1,r2", "!services", ":Kv", ":Api"], rows
+                    "Router>kv/r1,r2", "!services", ":Kv,get", ":Api,go"], rows
     # the withdrawal row stays last, after the service block
     assert manifest_wire(ir, replacing=("StoreB",)).split(";")[-1] == "-StoreB"
     # a composition with no route renders no route row (the earlier slices are
@@ -4155,6 +4449,90 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
     assert ref, f"the corpus must refuse: {name}/{layout}"
     got = _gate_ambient(admit_ambient, src, _W_M)
     assert got == ref, (name, layout, got, ref)
+
+
+# ---- an OPEN ordering divergence: the handoff verdict vs a body refusal -----
+#
+# `_admit_handoff_replacement` runs over `live_components`, which
+# `src/revl/lower.py` builds by DROPPING every component whose body lowering
+# raised (it appends a `poisoned` header stub instead). So on the reference a
+# component whose body refuses contributes NO handoff verdict at all — the body
+# refusal is the whole answer, whatever line either sits on.
+#
+# `selfhost/lower.rvl`'s `handoff_refusals` walks every component in the text,
+# poisoned or not, and its verdict is anchored at the COMPONENT declaration
+# line. `pick_min` orders by `(line, seq)`, so it beats any INLINE body refusal,
+# which `body_line` anchors at the offending STATEMENT — a strictly later line.
+#
+# This predates the A6 member rule and is not caused by it: the reproducer below
+# uses the G1 undeclared-access refusal, which has been inline-anchored since
+# long before docs/design/457. A whole-component AGGREGATE verdict (the G4
+# emission-reach one) is anchored at the component line, ties, and is saved by
+# `seq` — which is why no corpus program has caught this.
+#
+# Both refusals are TRUE of the program, so this is a 419c naming divergence and
+# never a false admission. Pinned rather than fixed here: the fix belongs to the
+# handoff slice that owns `handoff_refusals`, needs the poisoned-component set
+# threaded into `collect_nonlink`, and carries its own oracle rows.
+
+_HO_RUNNING = """service D { fn q(s: Str) -> Int }
+service Extra { fn e(s: Str) -> Str }
+component OldStore provides db: D {
+  handoff db: Str
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+"""
+
+#: (label, source) — each carries a handoff drift AND one body refusal.
+_HO_PAIRS = [
+    # the PRE-A6 member: an undeclared access, inline-anchored for many slices.
+    ("a G1 undeclared access", """service D { fn q(s: Str) -> Int }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { emit nope.execute(s)   return 0 } }
+}
+"""),
+    # the A6 member of the same family (docs/design/457 T4b), which is how this
+    # divergence was found.
+    ("an A6 member refusal", """service D { fn q(s: Str) -> Int }
+service Extra { fn e(s: Str) -> Str }
+component NewStore provides db: D requires ex: Extra {
+  handoff db: Int
+  provide db { fn q(s) { let y = ex.nope(s)   return 0 } }
+}
+"""),
+]
+
+
+@pytest.mark.parametrize("label,src", _HO_PAIRS, ids=[n for n, _ in _HO_PAIRS])
+def test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate(
+        admit_ambient, label, src):
+    """The divergence, measured in both directions so it cannot drift silently.
+
+    The reference names the BODY refusal (the component never reaches the
+    handoff pass); the gate names the handoff drift. Both are true, so this is a
+    naming divergence and not a false alarm — and the gate still REFUSES, which
+    is the property that matters for soundness.
+
+    When the handoff slice threads the poisoned set through, this test flips to
+    an agreement: delete the `!=` arm and assert equality."""
+    ref = _ref_ambient(src, _HO_RUNNING, replacing=("OldStore",))
+    got = _gate_ambient(admit_ambient, src, _HO_RUNNING, replacing=("OldStore",))
+    assert ref.startswith(("G1|", "A6|")), (
+        f"the reference must name the body refusal for {label}: {ref!r}")
+    assert got.startswith("G2|state hand-off on `db` differs"), (
+        f"the gate is expected to name the handoff drift for {label}: {got!r}")
+    assert got != ref, (
+        "this pin exists because the two disagree; if they now agree, the "
+        "handoff slice has been fixed - replace this test with an equality "
+        "assertion rather than deleting it")
+    # NON-VACUITY: with the handoff made compatible, the two agree on the body
+    # refusal, so the divergence is the handoff verdict's ranking and nothing
+    # else about these programs.
+    compatible = src.replace("handoff db: Int", "handoff db: Str")
+    assert _gate_ambient(admit_ambient, compatible, _HO_RUNNING,
+                         replacing=("OldStore",)) == _ref_ambient(
+        compatible, _HO_RUNNING, replacing=("OldStore",))
 
 
 def test_oracle_b_a_withdrawal_tying_with_a_spawn_bound_names_the_withdrawal(
