@@ -5337,7 +5337,9 @@ def test_a_transparent_alias_is_not_a_type_of_its_own(admit):
     alias and never saw it; these are hand-written for that reason.
 
     Until alias erasure lands (it is its own slice), a spelling mentioning a
-    nominal name this walk cannot resolve decides nothing."""
+    DECLARED name whose shape this walk does not carry decides nothing. The
+    `decl <Name>` row is what bounds that to the alias question — see
+    `test_an_undeclared_type_name_is_still_decided` for the other side of it."""
     admitted = [
         # a service parameter, reaching the method body's index rule
         "type Idx = Int\nservice S { fn at(xs: List[Int], i: Idx) -> Int }\n"
@@ -5443,3 +5445,20 @@ def test_a_wiring_refusal_outranks_an_earlier_type_one(admit):
     clean = src.replace("      let z = undeclared\n", "")
     assert _ref(clean) == (ref_tag, ref_msg)
     assert admit(clean) == f"{ref_tag}|{ref_msg}"
+
+
+def test_an_undeclared_type_name_is_still_decided(admit):
+    """THE OTHER SIDE of the alias launder, so the narrowing is a decision
+    rather than a leftover.
+
+    A name the document never DECLARES is not an alias: the reference has no
+    type for it either and refuses the document for that. Laundering it as well
+    would trade a divergent refusal for a no-objection on a program the
+    reference refuses — the bypass direction — so it keeps the reading it has.
+    The two sides disagree on WHICH refusal (the reference reaches the undeclared
+    type first), which is a message mismatch and not a bypass; both refuse."""
+    src = ("fn put(m: Map[Str, Int], k: Str) -> Ma[Str, Int] {\n"
+           "  return m.set(k, \"one\")\n}\n")
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "T1" and ref_msg != ""
+    assert admit(src).startswith("T1|"), "an undeclared head must still decide"

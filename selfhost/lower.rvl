@@ -7780,22 +7780,30 @@ fn ir_stratum_env(env: List[Bind]) -> List[Bind] {
 //
 // A bare nominal name this walk can resolve is a declared RECORD: the
 // declaration scan contributes its `field <Type>.<name>` rows and every rule
-// below reads the shape through them. A bare name with no such rows is
-// something else, and the two things it can be are not distinguishable from a
-// spelling:
+// below reads the shape through them. A DECLARED name with no such rows is a
+// TRANSPARENT TYPE ALIAS or a variant, and from a spelling the two are the same
+// thing — which matters because of the alias:
 //
-//   * a TRANSPARENT TYPE ALIAS (`type Idx = Int`). The reference ERASES one
-//     before it compares anything, so `xs[i]` with `i: Idx` is an `Int` index
-//     and is admitted. Reading the alias as a type of its own refuses a program
-//     the reference admits — a false rejection, the one direction this gate may
-//     not err in, and it reaches every rule at once (`assert b` with
-//     `type Flag = Bool`, `i + 1` with `type Idx = Int`, an argument, a return).
-//   * a variant, an opaque handle, or a name out of another module.
+//   `type Idx = Int` is ERASED by the reference before it compares anything, so
+//   `xs[i]` with `i: Idx` is an `Int` index and is admitted. Reading the alias
+//   as a type of its own refuses a program the reference admits — a false
+//   rejection, the one direction this gate may not err in, and it reaches every
+//   rule at once: `assert b` with `type Flag = Bool`, `i + 1` with
+//   `type Idx = Int`, an argument, a return, a record's own field type.
 //
-// Alias erasure is its own slice. Until it lands, a spelling that MENTIONS an
-// unresolvable nominal anywhere inside it is answered "" — the gradual
-// frontier — rather than guessed at, which turns the whole family into
-// silence instead of a wrong refusal.
+// Alias erasure is its own slice. Until it lands, a spelling that MENTIONS such
+// a name anywhere inside it is answered "" — the gradual frontier — rather than
+// guessed at, which turns the whole family into silence instead of a wrong
+// refusal.
+//
+// The `decl <Name>` row is what bounds this to the alias question. A name the
+// document never declares is not an alias — it is a name the REFERENCE has no
+// type for either, and it keeps the reading it had, because laundering it would
+// trade a divergent refusal for a no-objection on a program the reference
+// refuses. (A name imported through a `use` is the residual: this gate steps
+// over module declarations, so an imported alias is still read as itself. Every
+// other verdict on such a document is already out of slice for the same
+// reason.)
 fn ty_has_opaque(t: Str, env: List[Bind]) -> Bool {
   if (t == "" || t.slice(0, 1) == "?" || tk_builtin_head(t)) { return false }
   if (tk_is_struct(t)) {
@@ -7805,9 +7813,17 @@ fn ty_has_opaque(t: Str, env: List[Bind]) -> Bool {
   let args = tk_args(t)
   if (args.length() > 0) {
     if (ty_any_opaque(args, 0, env)) { return true }
-    return !tk_builtin_head(parse_head(t)) && !tk_record_base(parse_head(t), env)
+    return ty_declared_nonrecord(parse_head(t), env)
   }
-  return tk_nominal_name(t) && !tk_record_base(t, env)
+  return tk_nominal_name(t) && ty_declared_nonrecord(t, env)
+}
+
+// A name the document DECLARES (`type`/`event`) whose shape this walk does not
+// carry: an alias, or a variant. Built-in heads and declared records are not
+// this, and neither is a name nothing declares.
+fn ty_declared_nonrecord(h: Str, env: List[Bind]) -> Bool {
+  return !tk_builtin_head(h) && !tk_record_base(h, env)
+    && tenv_get(env, "decl ".concat(h)) != ""
 }
 
 fn ty_any_opaque(ts: List[Str], i: Int, env: List[Bind]) -> Bool {
