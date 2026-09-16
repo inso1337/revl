@@ -7282,6 +7282,23 @@ fn tk_check(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
   return tk_ok(expected)
 }
 
+// `_bool_cond`: an `if`/`while`/`assert` condition is a checking position for
+// `Bool`. A HOLE in that position takes the expectation as its type and is done
+// (`pin_hole`), so it is not compared.
+fn tk_cond(e: Expr, env: List[Bind], where_: Str) -> TInf {
+  let r = tk_infer(e, env)
+  if (r.v != "") { return r }
+  if (tk_is_hole(e)) { return tk_ok("Bool") }
+  if (r.ty != "" && r.ty != "Bool") {
+    return tk_mismatch("`".concat(where_).concat("` condition"), "Bool", r.ty)
+  }
+  return tk_ok("Bool")
+}
+
+fn tk_is_hole(e: Expr) -> Bool {
+  return match e { Hole(h) => true, _ => false, }
+}
+
 fn tk_bin(b: BinN, env: List[Bind]) -> TInf {
   let l = tk_infer(b.l, env)
   if (l.v != "") { return l }
@@ -7357,14 +7374,18 @@ fn tk_un(u: UnN, env: List[Bind]) -> TInf {
     return tk_ok("Bool")
   }
   if (u.op == "~") {
-    if (t != "" && parse_head(t) != "Int32") { return tk_bitwise_no("~", t) }
+    // the UNARY complement's sentence is its own: one operand, so "operand"
+    // rather than the binary family's "operands".
+    if (t != "" && parse_head(t) != "Int32") {
+      return tk_no("T1", "`~` requires an `Int32` operand, got `"
+                     .concat(tk_render(t)).concat("`"))
+    }
     return tk_ok("Int32")
   }
-  if (u.op == "-") {
-    if (t != "" && !is_numeric(t)) {
-      return tk_mismatch("operand of unary `-`", "Int", t)
-    }
-    return tk_ok(t)
+  // unary `-`, the reference's fall-through arm: a numeric operand, and the
+  // result is that operand's own type.
+  if (t != "" && !is_numeric(t)) {
+    return tk_mismatch("operand of unary `-`", "Int", t)
   }
   return tk_ok(t)
 }
@@ -7915,13 +7936,18 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
-  if (s.kind == "expr" || s.kind == "assert") {
+  if (s.kind == "expr") {
     let r = tk_infer(s.value, tys)
     if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
+  if (s.kind == "assert") {
+    let r = tk_cond(s.value, tys, "assert")
+    if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
+    return fb_walk(steps, i + 1, scope, tys, ret)
+  }
   if (s.kind == "if") {
-    let c = tk_infer(s.value, tys)
+    let c = tk_cond(s.value, tys, "if")
     if (c.v != "") { return fb_type_refuse(c.v, s.line, scope, tys) }
     let a = fb_walk(s.then_, 0, scope, tys, ret)
     if (a.v.v != "") { return a }
@@ -7930,7 +7956,7 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
   if (s.kind == "while") {
-    let c = tk_infer(s.value, tys)
+    let c = tk_cond(s.value, tys, "while")
     if (c.v != "") { return fb_type_refuse(c.v, s.line, scope, tys) }
     let a = fb_walk(s.body, 0, scope, tys, ret)
     if (a.v.v != "") { return a }
