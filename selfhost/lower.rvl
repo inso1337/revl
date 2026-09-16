@@ -9027,12 +9027,18 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     // comparison at an assignment is NOT made here: it is the one position the
     // reference widens a bottom at (`widen_bottom`), and an approximation of
     // that rule refuses accumulator code the reference admits.
-    let val = s.op == "=" ? s.value
-                          : Bin({ op: s.op, l: Var(s.name), r: s.value,
-                                  paren: false })
+    // issue #1157: the rust emitter MOVES a once-read binding whose initialiser
+    // is an untyped ternary, so `s.value` read again below borrowed after the
+    // move and the regenerated crate did not compile. The annotation is what
+    // keeps the initialiser typed, and the lowering pass reads `val` — a
+    // desugared compound carries the same expression under a `Var` and a
+    // literal operator, so the two walks reach exactly the same method calls.
+    let val: Expr = s.op == "=" ? s.value
+                                : Bin({ op: s.op, l: Var(s.name), r: s.value,
+                                        paren: false })
     let r = tk_infer(val, tys)
     if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
-    let lo = tk_low(s.value, tys)
+    let lo = tk_low(val, tys)
     if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
