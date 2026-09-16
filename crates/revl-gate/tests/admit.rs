@@ -73,9 +73,8 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
 #[test]
 fn type_layer_programs_are_not_refused_here_and_must_not_read_as_admitted() {
     let reference_refuses_all_of_these = [
-        // return type / body type mismatch
-        "fn f() -> Int { return \"s\" }",
-        // an undeclared name in a function body
+        // an undeclared name in a function body: resolving a name READ needs
+        // the whole callable universe, which no slice has built yet
         "fn f() -> Int { return undefined_name }",
         // a return arrow with no return type at all
         "fn f() -> { }",
@@ -95,6 +94,14 @@ update the crate docs and this test: {}",
         assert!(verdict.to_json().contains("\"admitted\":false"));
         assert_eq!(verdict.code(), None);
     }
+    // NON-VACUITY, and the record of what left this list: a declared return is
+    // a checking position the fn-body statement layer carries
+    // (docs/design/457 T3a), so a return-type mismatch is an AGREEMENT now —
+    // refused here in the reference's own sentence. What stays above is what is
+    // genuinely still outside the covered layer, not what has not been tried.
+    let refused = admit("fn f() -> Int { return \"s\" }");
+    assert!(refused.is_refused());
+    assert!(refused.to_json().contains("\"admitted\":false"));
 }
 
 // ------------------------------------------------------------- fail closed
