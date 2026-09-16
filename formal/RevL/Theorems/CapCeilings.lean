@@ -313,12 +313,29 @@ discharged from that shape.
 | `_activation_spawn_sites` (activation-body spawns only) | `Comp.spawns` |
 | `_check_spawn_attenuation` (both relations, per edge) | `SpawnsAdmitted` |
 
-`_cap_keyed` is the bridge that makes this line up with `capKeys`: the
-token of a derived capability is the **wiring key**, and the valuation
-rides in from the service's declared emission. So a derived held set's
-tokens are the component's declared `requires` keys — proved below as
-`derived_held_tokens_are_declared_keys`, which is what turns the
-`capKeys` bridge from an assumption into a lemma.
+`capKeys` is the bridge: the token of a derived capability here is the
+**wiring key**, and the valuation rides in from the service's declared
+emission. So a derived held set's tokens are the component's declared
+`requires` keys — proved below as `derived_held_tokens_are_declared_keys`,
+which is what turns the `capKeys` bridge from an assumption into a lemma,
+and what `derived_confinement_within_ceiling` needs to join G6's
+require-key roots to this order.
+
+**That key namespace is a precision loss, and it is this section's, not
+the reference's.** `lower._cap_keyed` (item 294) names the boundary by the
+DECLARED token and keeps the wiring key in its own `key:` namespace
+(`lower._wire_cap`), precisely so that two components wiring different
+boundaries under the same local spelling do not compare equal. This
+derivation keeps the pre-294 shape, in which an element is its key: it is
+the namespace G6 confinement reads, and moving it means carrying both
+namespaces through every `derived_*` theorem. The consequence is stated
+rather than hidden: `SpawnsAdmitted` over these derived sets admits an
+edge whose parent and child wire DIFFERENT declared boundaries under the
+SAME key, which the reference refuses under G4. The differential oracle
+does not inherit it — `formal/harness/diff_corpus.py` exports the
+attenuation surface in the declared-token namespace and the
+provide-method bound in the key namespace, as two columns, so the `W` row
+decides the reference's rule (issue 1132).
 
 ### What the L0 fragment cannot derive, stated rather than assumed
 
@@ -362,7 +379,8 @@ the checker — never looser.
 /-! ### The program shape -/
 
 /-- A service's declared emission valuations — the right-hand side of
-`_cap_keyed(key, cap_str)`. A service with no parameterized emission
+`_cap_keyed(key, cap_str)`, WITHOUT its declared token (see the namespace
+note in the section header). A service with no parameterized emission
 declaration maps to `[]`, which `capsOfDecls` reads as the bare key. -/
 abbrev Iface := String → List Valuation
 
