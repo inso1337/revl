@@ -382,28 +382,62 @@ def _wiring_documents(paths: list[str]) -> tuple[list[str], list[str]]:
     return compositions, layers
 
 
-def _audit_composition(args):
-    """`revl audit` over a COMPOSITION document (item 439, issue #118).
+# The commands on the shared module compile step that RESOLVE a composition
+# document argument instead (item 439, issue #118). Every command below reads
+# `ir`; a composition compiled as a module makes that `ir` empty, and each one
+# then answers from the empty document rather than from the composition.
+#
+# `goal` shares the same step and is deliberately NOT here. `goal audit` over a
+# composition with no termination contract exits 0 by item 441/458's decision
+# (`docs/design/458-termination-language-surface.md` §2.1); changing the
+# document that decision is evaluated over is that item's call, not this one's.
+_RESOLVES_A_COMPOSITION = frozenset({
+    "audit", "compile", "version", "test", "query", "erase-report"})
 
-    The shared compile step compiles its arguments as MODULES. A composition
-    document declares no module-level component — its rows, and the providers a
-    `remote` row SYNTHESIZES, exist only once the row table is resolved — so
-    pointing `revl audit` at one used to print an EMPTY boundary surface and
-    exit 0.
 
-    That is the wrong direction on an attestation surface, and the A2A binding
-    is the sharpest case of it: `docs/design/439-a2a-task-lifecycle.md` decision
-    3 states G8 as "the boundary surface is the four (or one) synthesized
-    externs, enumerable on the boundary surface `revl audit` renders, each
-    carrying the folded `net.<host>` reach". An operator who ran the CLI over a
+def _composition_document(args):
+    """A COMPOSITION document argument, for the commands that share the module
+    compile step (item 439, issue #118).
+
+    `main` compiles its file arguments as MODULES (`compile_files`). A
+    composition document declares no module-level component: its rows, and the
+    providers a `remote` row SYNTHESIZES, exist only once the row table is
+    RESOLVED. So every command on the shared step used to read an EMPTY
+    compilation for a composition, and answer from it.
+
+    Slice G8c fixed that for `revl audit`, where the empty answer was an empty
+    BOUNDARY SURFACE: `docs/design/439-a2a-task-lifecycle.md` decision 3 states
+    G8 as "the boundary surface is the four (or one) synthesized externs,
+    enumerable on the boundary surface `revl audit` renders, each carrying the
+    folded `net.<host>` reach", and an operator who ran the CLI over a
     composition holding a `remote ... through a2a` row read "no crossings" for a
     composition that crosses to a peer over the network. An empty surface is
-    read as an ABSENCE of authority, so the silence failed OPEN.
+    read as an ABSENCE of authority, so that silence failed OPEN.
 
-    A composition is now RESOLVED and compiled (`compile_composition`, the same
-    door `tests/test_439_a2a_transport.py::test_the_a2a_crossing_is_on_the_g8_
-    audit_surface` pins the property over), and every shape this command cannot
-    resolve REFUSES BY NAME instead of printing an empty surface.
+    The same wrong document reaches the rest of the group, and three of them
+    fail open in the same direction (the failure direction is recorded per
+    command in `docs/design/439-a2a-transport-binding.md`):
+
+      * `compile` prints an IR document with no services, no components and an
+        empty load order, and exits 0. It is a POSITIVE artifact asserting that
+        the composition contains nothing.
+      * `version` reads that same document — `--emit-manifest` prints it as the
+        diff input a later `--against` reads, and a diff between two of them
+        derives "PATCH, the interface is unchanged" for a composition that
+        gained or lost a whole remote provider.
+      * `test` collects nothing from the rows and prints "no tests to run" with
+        exit 0, which is a green by vacuity.
+
+    Two fail CLOSED today and are corrected here rather than repaired:
+    `query` answers "unknown component" / "unknown service" with an empty known
+    list, and `erase-report` answers "unknown realm" — each a nonzero exit, but
+    each a false statement about a name the composition does define.
+
+    `goal` is deliberately NOT on this door. `goal audit`'s zero exit over a
+    composition with no termination contract is item 441/458's own decision
+    (`docs/design/458-termination-language-surface.md` §2.1), and routing it
+    through here would change the document that decision is made over without
+    the review that belongs to it.
 
     Returns `None` when no argument declares a composition (the caller falls
     through to the shared module compile), an `int` exit code when the command
@@ -413,6 +447,7 @@ def _audit_composition(args):
 
     from .composition import compile_composition  # noqa: PLC0415 — lazy
 
+    command = args.command
     docs, layers = _wiring_documents(args.files)
 
     def _refuse(message: str, hint: str) -> int:
@@ -423,44 +458,45 @@ def _audit_composition(args):
     if layers:
         # A layer is a DELTA over a composition (426 §2.4): its rows are only
         # meaningful folded into the base that stacks it, so a layer on its own
-        # has no boundary surface to render. Compiled as a module it has none
-        # either, which is the same empty answer for a different reason, and an
-        # empty surface reads as an absence of authority.
+        # is not a document any of these commands can answer over. Compiled as a
+        # module it yields the same empty compilation a composition did, which
+        # is the same wrong answer for a different reason.
         named = ", ".join(os.path.basename(layer) for layer in layers)
         return _refuse(
-            f"`revl audit` was given the layer document{'s' if len(layers) > 1 else ''} "
-            f"{named}; a layer is a DELTA over a composition, so it has no "
-            f"boundary surface of its own",
-            "audit the composition that names this layer in its `stack` (or "
-            "`site`) list: the folded surface is the one an operator reads")
+            f"`revl {command}` was given the layer document"
+            f"{'s' if len(layers) > 1 else ''} {named}; a layer is a DELTA over "
+            f"a composition, so it has no composition of its own to resolve",
+            f"run `revl {command}` over the composition that names this layer "
+            f"in its `stack` (or `site`) list: the folded document is the one "
+            f"an operator reads")
     if not docs:
         return None
 
     names = ", ".join(os.path.basename(doc) for doc in docs)
     if len(docs) > 1:
         return _refuse(
-            f"`revl audit` was given {len(docs)} composition documents "
-            f"({names}); a composition document IS the audited unit, so there "
-            f"is no one boundary surface to render",
-            "audit one composition document per invocation")
+            f"`revl {command}` was given {len(docs)} composition documents "
+            f"({names}); a composition document IS the compiled unit, so there "
+            f"is no one document to answer over",
+            f"run `revl {command}` over one composition document per invocation")
     if len(args.files) > 1:
         others = ", ".join(os.path.basename(f) for f in args.files if f not in docs)
         return _refuse(
-            f"`revl audit` was given the composition document `{names}` "
+            f"`revl {command}` was given the composition document `{names}` "
             f"alongside modules ({others}); a composition names the rows it "
-            f"compiles, so auditing it beside hand-listed modules would render "
-            f"a surface neither of them describes",
-            f"audit the composition alone (`revl audit {names}`), or audit the "
+            f"compiles, so reading it beside hand-listed modules would answer "
+            f"for a program neither of them describes",
+            f"run the composition alone (`revl {command} {names}`), or run the "
             f"modules without it")
 
     # WHOLE-composition admission, and `confine=True` as `revl composition
     # --admit` uses it: every row is compiled (never a layer delta, so nothing
-    # is skipped out of the surface an operator is counting), and a
+    # is skipped out of the document being answered over), and a
     # non-first-party stack-layer row compiles under its own untrusted-author
     # profile. Both choices are the over-refusing direction. There is
-    # deliberately no `--trust-host-code` on this command: an audit that had to
-    # be told to trust the code it is enumerating would be answering a
-    # different question.
+    # deliberately no `--trust-host-code` on this door: a command that had to be
+    # told to trust the code it is enumerating would be answering a different
+    # question.
     try:
         return compile_composition(args.files[0], getattr(args, "root", None),
                                    confine=True)
@@ -1397,18 +1433,23 @@ def main(argv: list[str] | None = None) -> int:
         from .cli.retention import _run_retention_receipt  # noqa: PLC0415
         return _run_retention_receipt(args)
 
-    # item 439 (issue #118): `revl audit` over a COMPOSITION document. The
-    # shared compile step below compiles its arguments as MODULES, so a
-    # composition — whose rows, and whose SYNTHESIZED remote providers, exist
-    # only once the row table is resolved — used to audit as an empty boundary
-    # surface with exit 0. `_audit_composition` resolves it instead, and
-    # refuses by name for the shapes it cannot.
+    # item 439 (issue #118): a COMPOSITION document argument, for the commands
+    # that share the module compile step below. That step compiles its
+    # arguments as MODULES, so a composition — whose rows, and whose
+    # SYNTHESIZED remote providers, exist only once the row table is resolved —
+    # used to reach every one of these commands as an EMPTY compilation.
+    # `_composition_document` resolves it instead, and refuses by name for the
+    # shapes it cannot.
+    #
+    # `goal` is deliberately absent from this set: `goal audit`'s zero exit
+    # over a composition with no termination contract is item 441/458's own
+    # decision, and widening the document it is made over belongs to that item.
     ir = None
-    if args.command == "audit":
-        audited = _audit_composition(args)
-        if isinstance(audited, int):
-            return audited
-        ir = audited
+    if args.command in _RESOLVES_A_COMPOSITION:
+        resolved = _composition_document(args)
+        if isinstance(resolved, int):
+            return resolved
+        ir = resolved
 
     if ir is None:
         try:

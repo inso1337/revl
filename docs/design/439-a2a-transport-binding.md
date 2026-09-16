@@ -483,7 +483,7 @@ them, and neither note contradicts the other.
   ABSENCE of it. The silence failed OPEN: an operator counting what leaves the
   process saw zero crossings for a composition holding a `net.<host>` emission,
   with nothing on stderr and a zero exit to say the command had not looked.
-  `_audit_composition` (`src/revl/__main__.py`) now resolves and compiles the
+  `_composition_document` (`src/revl/__main__.py`) now resolves and compiles the
   document through `compile_composition`, the same door the two
   `_on_the_g8_audit_surface` tests pin the property over, so the CLI and the
   property read the same surface. Admission is WHOLE-composition, never a layer
@@ -511,6 +511,53 @@ them, and neither note contradicts the other.
   and renders no surface). The control, which passes on both trees:
   `::test_revl_audit_over_a_module_is_unchanged`, because the composition door
   is an added branch and not a change to the path every other invocation takes.
+- **The REST of the shared compile step resolves a composition too (CLOSED,
+  slice G8d).** `revl audit` was one command on a shared step. `main` compiles
+  its file arguments as MODULES (`compile_files`) and hands the one `ir` to
+  `test`, `query`, `erase-report`, `audit`, `goal`, `version` and `compile`
+  alike, so closing the audit path left six commands reading the same empty
+  compilation of a composition document. `_composition_document` is now the door
+  for six of them (`_RESOLVES_A_COMPOSITION`), and the refusals G8c wrote name
+  whichever command was run.
+  **Which way each one failed, since three were defects and two were
+  corrections.** `revl compile` printed an IR document with no services, no
+  components and an empty `loadOrder`, and exited 0: a POSITIVE artifact
+  asserting that the composition contains nothing, which is fail-OPEN for
+  everything downstream that reads it. `revl version` reads that same document,
+  so `--emit-manifest` published it as the diff input a later `--against` takes,
+  and a diff between two generations of a composition derived "PATCH, the
+  interface is unchanged" for a composition that had gained a whole remote
+  provider and a `net.<host>` crossing: fail-OPEN, on a release gate. `revl
+  test` collected nothing out of the rows and printed "no tests to run" with
+  exit 0, a green by vacuity. Those three are the G8c defect class. The other
+  two failed CLOSED and are corrected rather than repaired: `revl query`
+  answered "unknown component" / "unknown service" with an empty known list, and
+  `revl erase-report` answered "unknown realm". Each is a nonzero exit, and each a
+  false statement about a name the composition does define.
+  `goal` is deliberately NOT on the door, and a test pins the omission so a
+  later reader knows it is a decision. `goal audit`'s zero exit over a
+  composition with no termination contract is item 441/458's, stated in
+  `docs/design/458-termination-language-surface.md` §2.1; changing the document
+  that decision is evaluated over belongs to that item's review, not to this
+  slice.
+  Admission is the same as G8c's: whole-composition, `confine=True`, no
+  `--trust-host-code`. Each of the five commands gained a `--root` with the same
+  meaning it has on `revl audit` and `revl composition` (the project root row
+  provenance and origins are recorded against), ignored for module arguments.
+  Exit tests:
+  `tests/test_439_a2a_transport.py::test_revl_compile_over_a_composition_writes_the_resolved_document`,
+  `::test_revl_version_over_a_composition_measures_the_interface_change`,
+  `::test_revl_test_over_a_composition_collects_the_rows_tests`,
+  `::test_revl_query_over_a_composition_answers_for_the_synthesized_provider`
+  and
+  `::test_revl_erase_report_over_a_composition_finds_the_rows_realm`.
+  Negative exit tests:
+  `::test_every_command_on_the_door_refuses_a_layer_document` (parametrized over
+  the four commands that take a bare document argument),
+  `::test_revl_compile_refuses_a_composition_beside_modules` and
+  `::test_revl_compile_refuses_two_composition_documents`. The controls, green
+  on both trees: `::test_revl_compile_over_a_module_is_unchanged` and
+  `::test_revl_goal_audit_over_a_composition_is_deliberately_untouched`.
 - **`@py` tier only.** As with the canonical wire, an `emission` method emits a
   synchronous ts function and a network round trip is not synchronous, so a ts
   body would be `await` inside a non-`async` function. The remote row must not
@@ -658,15 +705,17 @@ replay has to decide first.
   crossing, the funnel present on every generated ts crossing, the REST wire's
   one-way identity, the correlation refusal rendering nothing of the peer's,
   and the ts body's identity.
-- `src/revl/__main__.py`: slice G8c. `_wiring_documents` (which of the
+- `src/revl/__main__.py`: slices G8c and G8d. `_wiring_documents` (which of the
   arguments declare a composition, and which a layer, read by parsing alone) and
-  `_audit_composition` (resolve and compile the one composition, or refuse by
-  name), routed from `main` ahead of the shared module compile.
+  `_composition_document` (resolve and compile the one composition, or refuse by
+  name), routed from `main` ahead of the shared module compile for every command
+  in `_RESOLVES_A_COMPOSITION`.
 - `tests/test_439_a2a_transport.py`: the seam/remote-provider exit test for the
   binding, the C3 taint section, the modality refusals, the four-op projection,
   `test_no_marked_value_can_cross_the_a2a_wire`, which pins question (2)'s
-  precondition, and the `revl_audit` block, which is slice G8c's exit test, its
-  three refusals and its control.
+  precondition, the `revl_audit` block, which is slice G8c's exit test, its
+  three refusals and its control, and the shared-compile-group block, which is
+  slice G8d's five exit tests, its refusals and its two controls.
 - `tests/test_439_a2a_task.py`: slice T0's exit test (the runtime maps a
   marker-bearing transport fault to provider withdrawal) and the T1 vocabulary.
 - `tests/test_424_remote_row.py`: `test_a_named_through_transport_is_refused`
