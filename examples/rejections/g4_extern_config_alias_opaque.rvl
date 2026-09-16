@@ -1,0 +1,21 @@
+// REJECTED — an EXTERN config field whose declared type is a transparent alias.
+// Same rule as the component case (item 378, config is static data), and a
+// different diagnostic, because the erasure the reference performs is not the
+// same on both owners: it substitutes a component's config field types and does
+// NOT substitute an extern's. The alias declaration is dropped either way, so by
+// the time the extern's config block is judged, `Handler` names nothing at all.
+//
+// A head that resolves to no declaration proves nothing about the field being
+// data, so it is refused as opaque rather than waved through (item 378). That is
+// the honest answer: naming the arrow behind the alias would be reporting a
+// resolution the reference never performed here.
+//
+// expected error:
+//   config field `on_row` of extern `load_rows` has type `Handler`, which
+//   reaches the opaque type `Handler`; a config field must be static data
+
+type Handler = (Int) -> Str
+
+extern pure fn load_rows(path: Str) -> Str
+  config { on_row: Handler }
+  = @py { return path }
