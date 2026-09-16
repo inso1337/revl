@@ -1186,6 +1186,51 @@ service S { fn go(u: Str) -> Int }
 component C provides s: S { provide s { fn go(u) = 1 } }
 """),
 
+    # ---- issue #1151: what is NOT a transparent alias -----------------------
+    # `type Sv = Ops` and `type O = Unknown` look like aliases and are not: the
+    # reference's `_alias_target` reads the CLASSIFIER, and a right-hand side
+    # that is neither an application, a builtin head nor a declared type is a
+    # one-case VARIANT whose single case is a nullary tag. A nullary tag carries
+    # no type to walk, so both are data and both ADMIT. The gate classified by
+    # RHS shape, called them aliases, followed the right-hand side into the
+    # service and into the unresolvable head, and refused — in the FAIL-FAST
+    # config phase, so nothing behind it ran either.
+    ("a one-case nominal whose case name is a service name", """
+service Ops { fn go() -> Int }
+type Sv = Ops
+component C provides ops: Ops {
+  config { s: Sv }
+  provide ops { fn go() = 1 }
+}
+"""),
+    ("a one-case nominal whose case name is declared nowhere", """
+type Opaque = NotDeclaredAnywhere
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { x: Opaque }
+  provide ops { fn go() = 1 }
+}
+"""),
+    # the CONTROL: a transparent alias that really is data still admits, and a
+    # variant of nullary tags — the shape the two rows above are misread as —
+    # admits as it always did.
+    ("a component config field aliasing a scalar", """
+type Name = Str
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { n: Name = "x" }
+  provide ops { fn go() = 1 }
+}
+"""),
+    ("a component config field of a nullary-tag variant", """
+type Colour = Red | Green
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { c: Colour }
+  provide ops { fn go() = 1 }
+}
+"""),
+
     # ---- item 391 / issue #106: extern declarations and inverse slots ------
     # The accepting twins of the extern refusals pinned in REJECTED_PROGRAMS.
     # Each is a legal extern whose inverse slot must keep admitting: an
@@ -2534,6 +2579,73 @@ fn f() -> Int {
   let n = 2
 }
 """, "T1"),
+
+
+    # ---- issue #1151: the config-is-data walk asks AFTER alias erasure -----
+    # `_resolve_type_aliases` runs before `check_config_field_is_data`, so the
+    # reference asks the config question of a program in which every transparent
+    # alias is already substituted and its declaration dropped. The gate read the
+    # WRITTEN spelling and followed the alias itself, which named the alias in
+    # the diagnostic where the reference names the erased type. Each row below
+    # pins the byte the reference writes, and the pair of them pins the two
+    # DIFFERENT answers the same alias draws either side of the substitution
+    # boundary: a component's `config` IS a substitution site, an extern's is
+    # NOT — so the extern sees an alias head with no declaration left behind it
+    # and calls it opaque.
+    ("a component config field aliasing an arrow type", """
+type Cb = (Int) -> Str
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: Cb }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("a component config field aliasing a list of arrows", """
+type Cb = (Int) -> Str
+type Row = List[Cb]
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: Row }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("a component config field aliasing an alias of an arrow", """
+type Inner = (Int) -> Str
+type Outer = Inner
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: Outer }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("a component config field aliasing the erased type", """
+type Loose = Any
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { x: Loose }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("an extern config field aliasing an arrow type is OPAQUE", """
+type Cb = (Int) -> Str
+extern pure fn render(body: Str) -> Str
+  config { cb: Cb }
+  = @py { return body }
+""", "G4"),
+    # the CONTROLS that must keep refusing unchanged: the same field written
+    # without an alias, on both owners.
+    ("a component config field written as an arrow type", """
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: (Int) -> Str }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("an extern config field written as an arrow type", """
+extern pure fn render(body: Str) -> Str
+  config { cb: (Int) -> Str }
+  = @py { return body }
+""", "G4"),
 ]
 
 
