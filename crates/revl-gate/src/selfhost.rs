@@ -6686,7 +6686,18 @@ fn ty_has_opaque(t: String, env: &[Bind]) -> bool {
 }
 
 fn ty_declared_nonrecord(h: String, env: &[Bind]) -> bool {
-    return (((!tk_builtin_head(&h)) && (!tk_record_base(h.clone(), env))) && (tenv_get(env, &(String::from("decl ").revl_concat(&h))) != ""));
+    return ((((!tk_builtin_head(&h)) && (!tk_record_base(h.clone(), env))) && (tenv_get(env, &(String::from("decl ").revl_concat(&h))) != "")) && (!ty_variant_decl(&h, env)));
+}
+
+fn ty_variant_decl(h: &str, env: &[Bind]) -> bool {
+    let mut i = 0i64;
+    while (i < env.revl_length()) {
+        if (((env)[(i) as usize].ty == h) && ((env)[(i) as usize].name.revl_slice(0i64, 5i64) == "case ")) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
 }
 
 fn ty_any_opaque(ts: &[String], i: i64, env: &[Bind]) -> bool {
