@@ -1162,8 +1162,18 @@ test "Float contaminates +" {
   assert infer_expr_str("f + 1") == "Float"
 }
 
-test "string + number is accepted but unknown" {
-  assert infer_expr_str("s + 1") == "?"
+// Issue #549 made a KNOWN non-Str operand of a string `+` a refusal on every
+// tier; this assertion kept the pre-#549 answer. It was never caught because
+// nothing ran this file's in-file tests until slice T2a added the gate
+// (tests/test_selfhost_checker.py::test_checker_in_file_tests_pass), while
+// `s + 1` has sat in that file's REJECTED corpus, pinning the opposite, the
+// whole time.
+test "string + a KNOWN number is refused (issue #549)" {
+  assert infer_expr_str("s + 1") == "refuse"
+}
+
+test "string + an UNKNOWN operand stays on the gradual frontier" {
+  assert infer_expr_str("s + q") == "?"
 }
 
 test "string + string is Str" {
@@ -1192,6 +1202,110 @@ test "equality with an unknown local is Bool" {
 
 test "null is refused" {
   assert infer_expr_str("null") == "refuse"
+}
+
+// ------------------------------------------------------- slice T2a in-file
+//
+// The tags this slice mints, pinned here as well as in `_classify`: a refusal
+// that loses its tag is a refusal the census cannot bucket.
+
+test "a refusal carries the reference's tag and message" {
+  assert infer_expr_verdict("null")
+    == "T2|`null` has no type in revl — absence is `Opt[T]`"
+}
+
+test "an accepted expression carries no verdict" {
+  assert infer_expr_verdict("1 + 2") == ""
+}
+
+test "the Int32 width mix is T1, named" {
+  assert infer_expr_verdict("m + x") == "T1|`+` does not mix `Int32` and `Int`"
+}
+
+test "Int32 is numeric, so two Int32 operands add" {
+  assert infer_expr_str("m + m") == "Int32"
+}
+
+test "a Str has no index operator" {
+  assert infer_expr_verdict("s[0]")
+    == "T1|`Str` has no index operator — `[...]` indexes a `List` only"
+}
+
+test "an index through an optional is the opt escape" {
+  assert infer_expr_verdict("opt[0]")
+    == "T1|index `[...]` on `Opt[Str]`: the optional wrapper has no such "
+         .concat("member — `T` flows into `Opt[T]`, never silently back out")
+}
+
+test "a list indexes to its element" {
+  assert infer_expr_str("xs[0]") == "Int"
+}
+
+test "disagreeing ternary branches are TYPE" {
+  assert infer_expr_verdict("flag ? 1 : s")
+    == "TYPE|ternary branches disagree: `Int` vs `Str`"
+}
+
+test "a record literal infers its sorted structural shape" {
+  assert infer_expr_str("{ b: s, a: 1 }") == "{a: Int, b: Str}"
+}
+
+test "a repeated field keeps the last value under one key" {
+  assert infer_expr_str("{ a: s, a: 1 }") == "{a: Int}"
+}
+
+test "an unknown element leaves the list accumulator unset" {
+  assert infer_expr_str("[q, y]") == "List[Int]"
+}
+
+test "an update names a field the literal does not have" {
+  assert infer_expr_verdict("{ { h: s } | missing = s }")
+    == "TYPE|record update names `missing`, which is not a field of `{h: Str}`"
+}
+
+test "an update replaces a field with the wrong type" {
+  assert infer_expr_verdict("{ { h: s } | h = 5 }")
+    == "T1|update of field `h` expects `Str`, got `Int`"
+}
+
+test "an update on a non-record is TYPE" {
+  assert infer_expr_verdict("{ x | h = 5 }")
+    == "TYPE|record update requires a record type, `Int` is not one"
+}
+
+test "a Float literal outside binary64 is refused" {
+  assert infer_expr_verdict("1e999")
+    == "TYPE|Float literal is infinite: it is outside the range of a 64-bit float"
+}
+
+test "a Float literal inside binary64 is not" {
+  assert infer_expr_verdict("1.7976931348623157e308") == ""
+  assert infer_expr_verdict("1e308") == ""
+  assert infer_expr_verdict("0.0") == ""
+}
+
+test "a field read through an optional is the opt escape" {
+  assert infer_expr_verdict("opt.length")
+    == "T1|field access `.length` on `Opt[Str]`: the optional wrapper has no "
+         .concat("such member — `T` flows into `Opt[T]`, never silently back out")
+}
+
+test "a check position names its where-string" {
+  assert check_prog_verdict("", "x", "Int32", "this function\'s return")
+    == "T1|this function\'s return expects `Int32`, got `Int`"
+}
+
+test "a record literal checks against a declared record" {
+  assert check_prog_verdict("type Row = { name: Str }", "{ name: s }", "Row",
+                            "`let r: Row`") == ""
+  assert check_prog_verdict("type Row = { name: Str }", "{ nom: s }", "Row",
+                            "`let r: Row`")
+    == "TYPE|record literal for `Row` has missing `name`; unknown `nom`"
+}
+
+test "a record literal reaches a declared record through an Opt" {
+  assert check_prog_verdict("type Row = { name: Str }", "{ name: s }",
+                            "Opt[Row]", "`let r: Opt[Row]`") == ""
 }
 
 // ================================================================ slice two
@@ -3237,6 +3351,58 @@ pub fn infer_prog_verdict(progSrc: Str, exprSrc: Str) -> Str {
   let e = parse_expr_str(exprSrc)
   if (is_bad(e)) { return "(bad)" }
   return verdict_of(infer_t(e, base_env(), built.tbl, ct))
+}
+
+// One expression against a program's declarations AND a written environment —
+// the entry point the corpus of `examples/rejections` fixtures uses, because a
+// fixture's message names the types its own `fn` signature declares
+// (`Opt[Row]`, `Any`, `Int32`) and `base_env()` cannot carry every one of
+// them. `envSpec` is `name: Type` entries separated by `;` — the separator
+// types.rvl's own string-in/string-out entry points use, because a revl string
+// literal has no `\n` escape (item 183, docs/strings.md) and a type spelling
+// never contains a semicolon. An empty `expected` is the inference position.
+pub fn check_env_verdict(progSrc: Str, envSpec: Str, exprSrc: Str,
+                         expected: Str, where_: Str) -> Str {
+  let pg = parse_prog(progSrc)
+  if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  let built = build_types(pg.types)
+  if (built.err != "") { return "(table) ".concat(built.err) }
+  let ct = build_cases(built.tbl)
+  let e = parse_expr_str(exprSrc)
+  if (is_bad(e)) { return "(bad)" }
+  return verdict_of(check_t(e, expected, env_of(envSpec), built.tbl, ct, where_))
+}
+
+// "name: Type" entries -> `base_env()` EXTENDED, the written bindings first so
+// one of them shadows a base binding of the same name (`lookup_at` answers the
+// first match). The oracle's reference side is `dict(ENV)` with the same
+// overrides applied, so the two environments are the same environment. An
+// entry with no colon is skipped, so an empty spec IS `base_env()`.
+fn env_of(spec: Str) -> List[Bind] {
+  var out: List[Bind] = []
+  let lines = spec.split(";")
+  var i = 0
+  while (i < lines.length()) {
+    let ln = lines[i]
+    let c = ln.indexOf(":")
+    if (c != 0 - 1) {
+      out = out.push({ name: trim_ws(ln.slice(0, c)),
+                       ty: trim_ws(ln.slice(c + 1, ln.length())) })
+    }
+    i += 1
+  }
+  let base = base_env()
+  var k = 0
+  while (k < base.length()) { out = out.push(base[k])  k += 1 }
+  return out
+}
+
+fn trim_ws(x: Str) -> Str {
+  var lo = 0
+  var hi = x.length()
+  while (lo < hi && is_space_ch(x.slice(lo, lo + 1))) { lo += 1 }
+  while (hi > lo && is_space_ch(x.slice(hi - 1, hi))) { hi -= 1 }
+  return x.slice(lo, hi)
 }
 
 // One expression in CHECK position against a declared type — the
