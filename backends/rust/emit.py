@@ -308,6 +308,116 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+# Steps that DECLARE a fresh binding, keyed by the field the name sits in. A
+# declaration is what makes a name loop-local — the iteration gets its own
+# value, so moving it strands nothing. `assign` is deliberately absent: a
+# rebind under an `if` (`if (c) { s = t }` then `f(s)`) does not re-establish
+# the value on every path, so a name merely ASSIGNED in a loop stays repeated.
+_DECL_NAME_STEPS = frozenset({"let"})
+_DECL_BIND_STEPS = frozenset({"for", "let-effect"})
+
+
+def _decl_site_names(node: dict) -> "list[str]":
+    """The binding names a single IR node DECLARES (possibly none).
+
+    A def site is always a plain string field, never a reference node — the
+    same fact `_body_multi_use` relies on from the other side. `let` spells it
+    `name`, `for`/`let-effect` spell it `bind`, the destructuring `let_pattern`
+    spells `names` + `rest`, a `match` arm spells its payload bind in `bind`,
+    and an `arrow` spells its parameters in `params`."""
+    out: list[str] = []
+    step = node.get("step")
+    if step in _DECL_NAME_STEPS and isinstance(node.get("name"), str):
+        out.append(node["name"])
+    if step in _DECL_BIND_STEPS and isinstance(node.get("bind"), str):
+        out.append(node["bind"])
+    if step == "let_pattern":
+        for key in ("names", "name", "rest"):
+            value = node.get(key)
+            if isinstance(value, str):
+                out.append(value)
+            else:
+                out.extend(v for v in (value or []) if isinstance(v, str))
+    if "pattern" in node and isinstance(node.get("bind"), str):
+        out.append(node["bind"])          # a `match` arm's payload binding
+    if node.get("kind") == "arrow":
+        out.extend(p for p in node.get("params") or [] if isinstance(p, str))
+    return out
+
+
+def _loop_repeated_reads(body: object) -> "set[str]":
+    """Names whose reads sit inside a loop body and so execute MORE THAN ONCE,
+    even when the body spells the name exactly once (issue #1157).
+
+    `_body_multi_use` is a TEXTUAL reference count with no notion of a loop, so
+    a binding the emitter could not type (a ternary initialiser, a block
+    expression) that is read once inside a `while`/`for` body counted as
+    single-use and was MOVED — sound on the first iteration, E0382 on the
+    second. A binding whose surface type IS known never had this problem: the
+    known-non-Copy path clones regardless of the count, which is why
+    `let caps = emit_caps(pg.fns)` (a call with a declared return type) always
+    compiled where `let elem = cond ? xs[0] : ""` did not.
+
+    So a read inside a loop body is a REUSE, and joins the same `ctx.multi_use`
+    set the textual count feeds. Two exclusions keep it from cloning what a move
+    already handles:
+
+      * a name BOUND inside that loop body is fresh on every iteration, so
+        moving it strands nothing (`for (x of xs) { f(x) }` is unchanged); and
+      * a `for` iterable is evaluated ONCE, before the loop, so it is read
+        outside the frame it opens — `_movable_for_iterables` keeps deciding
+        that position on the textual count alone.
+
+    A `while` CONDITION is inside the frame: it is re-evaluated per iteration
+    exactly as the body is. The analysis nests, so a binding introduced by the
+    outer loop and read only by an inner one is still repeated.
+    """
+    repeated: set[str] = set()
+    # One (reads, bound) frame per enclosing loop body, innermost last.
+    frames: list[tuple[set[str], set[str]]] = []
+
+    def close(frame: "tuple[set[str], set[str]]") -> None:
+        reads, bound = frame
+        repeated.update(reads - bound)
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") in ("var", "name", "req"):
+                ident = node.get("id") or node.get("name")
+                if ident is not None:
+                    for reads, _ in frames:
+                        reads.add(ident)
+            for name in _decl_site_names(node):
+                for _, bound in frames:
+                    bound.add(name)
+            step = node.get("step")
+            if step in ("while", "for"):
+                # The `for` iterable runs once, before the loop opens; a `while`
+                # condition runs once per iteration, so it belongs to the frame.
+                if step == "for":
+                    walk(node.get("iterable"))
+                frame: tuple[set[str], set[str]] = (set(), set())
+                frames.append(frame)
+                if step == "for":
+                    bind = node.get("bind")
+                    if isinstance(bind, str):
+                        frame[1].add(bind)
+                for key, value in node.items():
+                    if key != "iterable":
+                        walk(value)
+                frames.pop()
+                close(frame)
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(body)
+    return repeated
+
+
 def _movable_for_iterables(body: object, multi_use: "set[str]") -> "set[int]":
     """The `id()` of every `for` node whose bare-name iterable may be MOVED
     (`for x in v`) instead of CLONED (`for x in v.clone()`) — item 437f.
@@ -8048,7 +8158,11 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         ctx.current_return = fn.get("returns")
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
-        ctx.multi_use = {n for n, c in counts.items() if c > 1}
+        # The textual count, widened by the reads a LOOP repeats (#1157): a name
+        # spelled once inside a `while`/`for` body is still consumed on every
+        # iteration, so it is a reuse even though the count says one.
+        ctx.multi_use = ({n for n, c in counts.items() if c > 1}
+                         | _loop_repeated_reads(fn.get("body") or []))
         # `for` iterables that are dead after the loop and so move rather than
         # clone (item 437f). Computed from the same whole-body reference counts.
         ctx.movable_for_iterables = _movable_for_iterables(
