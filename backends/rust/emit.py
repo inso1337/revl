@@ -308,40 +308,43 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
-# Steps that DECLARE a fresh binding, keyed by the field the name sits in. A
-# declaration is what makes a name loop-local — the iteration gets its own
-# value, so moving it strands nothing. `assign` is deliberately absent: a
-# rebind under an `if` (`if (c) { s = t }` then `f(s)`) does not re-establish
-# the value on every path, so a name merely ASSIGNED in a loop stays repeated.
-_DECL_NAME_STEPS = frozenset({"let"})
-_DECL_BIND_STEPS = frozenset({"for", "let-effect"})
+# Step -> the field(s) carrying the names that step DECLARES. A declaration is
+# what makes a name loop-local: the iteration gets its own value, so moving it
+# strands nothing. `assign` is deliberately ABSENT — a rebind under a branch
+# (`if (c) { s = t }` then `f(s)`) does not re-establish the value on every
+# path, so a name merely ASSIGNED in a loop stays repeated.
+_DECL_FIELDS = {
+    "let": ("name",),
+    "for": ("bind",),
+    "let-effect": ("bind",),
+    "let_pattern": ("names", "rest"),
+}
 
 
 def _decl_site_names(node: dict) -> "list[str]":
     """The binding names a single IR node DECLARES (possibly none).
 
     A def site is always a plain string field, never a reference node — the
-    same fact `_body_multi_use` relies on from the other side. `let` spells it
-    `name`, `for`/`let-effect` spell it `bind`, the destructuring `let_pattern`
-    spells `names` + `rest`, a `match` arm spells its payload bind in `bind`,
-    and an `arrow` spells its parameters in `params`."""
-    out: list[str] = []
+    same fact `_body_multi_use` relies on from the other side. A statement
+    spells it in the field `_DECL_FIELDS` names; the two EXPRESSION binders
+    carry no `step`, so they are recognised by shape: an `arrow` declares its
+    `params`, and a `match` arm (a `pattern` with a payload) declares `bind`."""
     step = node.get("step")
-    if step in _DECL_NAME_STEPS and isinstance(node.get("name"), str):
-        out.append(node["name"])
-    if step in _DECL_BIND_STEPS and isinstance(node.get("bind"), str):
-        out.append(node["bind"])
-    if step == "let_pattern":
-        for key in ("names", "name", "rest"):
-            value = node.get(key)
-            if isinstance(value, str):
-                out.append(value)
-            else:
-                out.extend(v for v in (value or []) if isinstance(v, str))
-    if "pattern" in node and isinstance(node.get("bind"), str):
-        out.append(node["bind"])          # a `match` arm's payload binding
-    if node.get("kind") == "arrow":
-        out.extend(p for p in node.get("params") or [] if isinstance(p, str))
+    if step is not None:
+        keys = _DECL_FIELDS.get(step) or ()
+    elif node.get("kind") == "arrow":
+        keys = ("params",)
+    elif "pattern" in node:
+        keys = ("bind",)
+    else:
+        keys = ()
+    out: list[str] = []
+    for key in keys:
+        value = node.get(key)
+        if isinstance(value, str):
+            out.append(value)
+        elif value:
+            out.extend(name for name in value if isinstance(name, str))
     return out
 
 
