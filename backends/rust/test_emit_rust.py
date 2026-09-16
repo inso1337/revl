@@ -2723,11 +2723,22 @@ def test_ternary_binding_read_once_inside_a_loop_clones():
     assert "for row in rows.clone() {" in src
 
 
+def test_test_body_gets_the_same_by_value_analysis_as_a_function_body():
+    """`_emit_v3_tests` ran the by-value rules with an EMPTY reuse set, so a
+    reused local in a `#[cfg(test)]` body moved at its first use. `cargo check`
+    stops at the lib, so no oracle compiled the body that held the error."""
+    src = _loop_moves_src()
+    body = src[src.index("#[cfg(test)]"):]
+    assert body.count("own(head.clone())") == 3   # 2 textual reuses + 1 in a loop
+    assert "own(head)" not in body
+
+
 @needs_cargo
 def test_loop_moves_corpus_cargo_checks_all_targets(tmp_path):
     """`cargo check` alone does not reach a `#[cfg(test)]` body, so the gate for
     this shape is `--all-targets`. On the pre-fix emitter this document failed
-    with `use of moved value` for `head`, `inner` and `rows`."""
+    with `use of moved value` for `head`, `inner` and `rows` in the lib, and for
+    `head` twice more in the test target."""
     result = _cargo_check(tmp_path, _loop_moves_src(), "--all-targets")
     assert result.returncode == 0, result.stderr
 

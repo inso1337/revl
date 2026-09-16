@@ -8428,6 +8428,21 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
         if not test.get("body"):
             out.append("    // (empty test body)")
         else:
+            # A test body is a function body: it gets the same per-fn analyses
+            # `_emit_v3_functions` establishes, or the by-value rules run with
+            # an EMPTY reuse set and every move is unconditional. `cargo check`
+            # stops at the lib and never compiles `#[cfg(test)]`, so a test
+            # body that moved a reused local was invisible to every oracle
+            # (issue #1157); `--all-targets` is what sees it. Bindings are
+            # per-test, so the type table is reset with them.
+            ctx.var_types = {}
+            counts: dict[str, int] = {}
+            _body_multi_use(test["body"], counts)
+            ctx.multi_use = ({n for n, c in counts.items() if c > 1}
+                             | _loop_repeated_reads(test["body"]))
+            ctx.movable_for_iterables = _movable_for_iterables(
+                test["body"], ctx.multi_use)
+            ctx.vec_elems = _v3_empty_vec_elem_types(test["body"], ctx)
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, out, 1, test_mode=True)
         out.append("}")
