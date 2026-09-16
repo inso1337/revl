@@ -1353,6 +1353,36 @@ boot component B2 provides e2: Env2 {
   provide e2 { fn b() = config.y }
 }
 """, "BOOT"),
+    # ---- the fn-body TYPE layer (docs/design/457 T3a) ----------------------
+    # The statement walk over a module `fn` body now carries a type environment
+    # beside its binding scope: parameters at their declared types over the
+    # program-wide declaration table, the written annotation at a `let`, and
+    # the declared return as every `return`'s checking position. Each of these
+    # was a `false-admit` in `tools/gate_reference_census.py` until it was, and
+    # each is compared on TAG and MESSAGE here.
+    ("t2 null in an expression", _fixture("t2_null_in_expression"), "T2"),
+    ("t11 field read through an optional",
+     _fixture("t11_field_through_opt"), "T1"),
+    ("t12 index on a Str", _fixture("t12_str_index"), "T1"),
+    ("t21 implicit Int -> Int32 narrowing at a return",
+     _fixture("t21_int32_narrow_implicit"), "T1"),
+    ("t22 mixed-width arithmetic", _fixture("t22_int32_width_mix"), "T1"),
+    ("t23 remainder on Int32 operands", _fixture("t23_int32_remainder"), "T1"),
+    ("t26 record update with a wrong field type",
+     _fixture("t26_anon_record_update_wrong_type"), "T1"),
+    ("t27 record update naming a field the literal has not",
+     _fixture("t27_anon_record_update_undeclared_field"), "TYPE"),
+    ("t28 bitwise on non-Int32 operands",
+     _fixture("t28_bitwise_non_int32"), "T1"),
+    ("t29 field read on an erased Any", _fixture("t29_field_read_on_any"), "T1"),
+    ("t36 a Float literal outside binary64",
+     _fixture("t36_float_literal_range"), "TYPE"),
+    # the same erased-`Any` field read reached through a backend fixture rather
+    # than a rejection fixture — the one census entry of this family with no
+    # `examples/rejections/` name.
+    ("dynamic reserved key: a field read on a json_parse result",
+     (ROOT / "backends" / "typescript" / "tests" / "fixtures"
+      / "dynamic_reserved_key.rvl").read_text(), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
@@ -3108,25 +3138,19 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("v2_undeclared_fn_var", "G1"),
     ],
     # expression typing (T1/T2): the operator/field/index/record algebra and the
-    # literal-range and `null` refusals.
+    # literal-range and `null` refusals. The fn-body STATEMENT layer
+    # (docs/design/457 T3a) landed this family: the `lir_*` walk now carries a
+    # `TEnv` beside its binding scope and consults the algebra at each position
+    # `_lower_pure_stmt` does, so `t2`, `t11`, `t12`, `t21`, `t22`, `t23`,
+    # `t26`, `t27`, `t28`, `t29`, `t36` and the backend fixture
+    # `dynamic_reserved_key` moved into REJECTED_PROGRAMS above, where tag AND
+    # message are compared, and left this list.
+    #
+    # What stays needs the optional-chaining rules the expression slice did not
+    # build: `?.` on a non-optional is decided from the target's type at the
+    # CHAIN, which is T2d's.
     "expression typing (T1/T2)": [
-        ("t2_null_in_expression", "T2"),
-        ("t11_field_through_opt", "T1"),
-        ("t12_str_index", "T1"),
         ("t14_optional_chain_on_nonoptional", "T1"),
-        ("t21_int32_narrow_implicit", "T1"),
-        ("t22_int32_width_mix", "T1"),
-        ("t23_int32_remainder", "T1"),
-        ("t28_bitwise_non_int32", "T1"),
-        ("t26_anon_record_update_wrong_type", "T1"),
-        ("t27_anon_record_update_undeclared_field", "TYPE"),
-        ("t36_float_literal_range", "TYPE"),
-        # a field read on an erased `Any`. Pinned here once `p_top` learned the
-        # reference's `pub` prefix set: before that the fixture never reached a
-        # body at all, because its `pub extern` declaration drew a parse refusal,
-        # so the census filed it as tag-mismatch rather than as the type-layer
-        # false-admit it has always been.
-        ("t29_field_read_on_any", "T1"),
     ],
     # calls and signatures: arity, generic call sites, builtin/method receivers,
     # the literal zero divisor, extern-undo argument typing.
@@ -3318,12 +3342,16 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_41_fixtures():
+def test_the_type_layer_gap_is_exactly_30_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
-    leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 41, len(_TYPE_LAYER_CASES)
+    leave or join the pinned set without this number moving in the diff. It was
+    41 until the fn-body STATEMENT layer (docs/design/457 T3a) closed eleven of
+    the expression rows for the module-`fn` surface; the twelfth document that
+    moved with them, `dynamic_reserved_key`, never had a row here because this
+    pin addresses its fixtures by bare name under `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 30, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 41, "a fixture is listed twice"
+    assert len(set(names)) == 30, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -4856,3 +4884,219 @@ def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
     expected = "G4|call to emission `bus.publish` must be marked `emit` (G4)"
     assert _gate_ambient(admit_ambient, src, _H_MO_M) == expected
     assert _ref_ambient(src, _H_MO_M) == expected
+
+
+# ================================ the fn-body TYPE layer (docs/design/457 T3a)
+#
+# `_typed_fn_body` draws a module `fn` whose signature and body are built out of
+# the spellings the statement layer decides over: every scalar and container
+# type in a parameter and a return position, every operator family, literals at
+# the `Float` bound, field and index reads, record literals and updates, and the
+# statement forms that open a checking position (`let` with and without an
+# annotation, assignment and its compound form, `return`, `if`/`while`/`assert`).
+#
+# It is a DIFFERENTIAL draw, not an expectation table: the reference is the
+# ground truth on every input, and the two are compared on TAG and MESSAGE.
+#
+# Three divergence CLASSES survive by design; they are pinned below as named
+# tests rather than described in a comment, so a slice that closes one has to
+# come here and delete it. Each is the gate refusing LATER than the reference
+# because the reference's earlier refusal belongs to a surface this slice does
+# not build — an under-refusal, never a false rejection. The bound the fuzz
+# actually holds is absolute: the gate never refuses a program the reference
+# admits, and it never refuses with a tag or a sentence the reference does not
+# have for that program.
+
+_TFB_TYPES = ["Int", "Int32", "Float", "Str", "Bool", "Opt[Int]", "Opt[Str]",
+              "List[Int]", "List[Str]", "Any", "TfbRow", "Map[Str, Int]"]
+_TFB_BIN = ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", "==", "!=",
+            "<", "<=", ">", ">=", "&&", "||", "??"]
+_TFB_UN = ["!", "-", "~"]
+_TFB_LITS = ["1", "2", "0", "3.5", "1e999", "1e308", "1.8e308", "0.5", '"s"',
+             "true", "false", "null", "[]", "[1]", '["a"]', "{ h: 1 }",
+             '{ h: "x" }', "None"]
+_TFB_NAMES = ["a", "b", "c"]
+_TFB_HEAD = "type TfbRow = { h: Str, name: Str }\n\n"
+
+
+def _tfb_atom(rng, depth: int) -> str:
+    k = rng.randrange(10)
+    if depth <= 0 or k < 4:
+        return rng.choice(_TFB_LITS + _TFB_NAMES)
+    if k == 4:
+        field = rng.choice(["h", "name", "length", "kind", "missing"])
+        return f"{rng.choice(_TFB_NAMES)}.{field}"
+    if k == 5:
+        return f"{_tfb_atom(rng, depth - 1)}[{_tfb_atom(rng, depth - 1)}]"
+    if k == 6:
+        return (f"({_tfb_atom(rng, depth - 1)} {rng.choice(_TFB_BIN)} "
+                f"{_tfb_atom(rng, depth - 1)})")
+    if k == 7:
+        return f"{rng.choice(_TFB_UN)}{_tfb_atom(rng, depth - 1)}"
+    if k == 8:
+        return ("{ " + f"{rng.choice(_TFB_NAMES)} | h = "
+                f"{_tfb_atom(rng, depth - 1)}" + " }")
+    verb = rng.choice(["to_str", "to_int", "to_int32", "length", "push"])
+    return f"{rng.choice(_TFB_NAMES)}.{verb}()"
+
+
+def _tfb_stmt(rng) -> str:
+    k = rng.randrange(8)
+    name = rng.choice(_TFB_NAMES)
+    if k == 0:
+        return f"let {name} = {_tfb_atom(rng, 2)}"
+    if k == 1:
+        return f"let {name}: {rng.choice(_TFB_TYPES)} = {_tfb_atom(rng, 2)}"
+    if k == 2:
+        return f"var {name} = {_tfb_atom(rng, 2)}"
+    if k == 3:
+        return f"{name} = {_tfb_atom(rng, 2)}"
+    if k == 4:
+        return f"{name} += {_tfb_atom(rng, 2)}"
+    if k == 5:
+        return f"if ({_tfb_atom(rng, 2)}) {{ let z = {_tfb_atom(rng, 1)} }}"
+    if k == 6:
+        return f"assert {_tfb_atom(rng, 2)}"
+    return _tfb_atom(rng, 2)
+
+
+def _typed_fn_body(rng) -> str:
+    params = ", ".join(f"{n}: {rng.choice(_TFB_TYPES)}"
+                       for n in _TFB_NAMES[:rng.randrange(1, 4)])
+    body = "\n  ".join(_tfb_stmt(rng) for _ in range(rng.randrange(1, 5)))
+    return (f"{_TFB_HEAD}fn f({params}) -> {rng.choice(_TFB_TYPES)} {{\n"
+            f"  {body}\n  return {_tfb_atom(rng, 2)}\n}}\n")
+
+
+# The reference messages whose family this slice deliberately leaves to a later
+# one. A program whose reference refusal starts with one of these may be refused
+# LATER by the gate (or not at all); a program whose reference refusal does NOT
+# is held to tag and message exactly.
+_TFB_LATER_SLICES = (
+    # T2b: `builtin_check`'s receiver families and the unknown-receiver
+    # HOST-METHOD refusal.
+    "builtin `",
+    "stdlib method `",
+    # G1 name READS — resolving one needs the whole callable universe.
+    "is not declared in this function",
+    # item 485: the `List` index bounds pass, which runs over a body before it
+    # is lowered and so precedes every verdict here.
+    "is out of range for a",
+    # the INFER-position record update on a base that is not a record: code-less
+    # in the reference and classified OUT of the gate's vocabulary, so spelling
+    # it would trade a no-objection for a tag mismatch.
+    "record update requires a record type",
+    # the ordering family: `<`/`>` on an unorderable operand is code-less too.
+    "cannot order `",
+    # the NAMED record's field-existence rule, which needs the declared field
+    # SET the statement layer's environment does not enumerate.
+    "has no field `",
+)
+
+
+# The tags this slice issues. A program whose reference minimum carries a tag
+# outside this set is decided by some OTHER phase of the gate, and which of the
+# two refusals is the minimum is that phase's ordering question, not this one's.
+_TFB_TAGS = ("T1", "T2", "TYPE")
+
+
+@pytest.mark.parametrize("seed", [11, 23, 97])
+def test_typed_fn_body_fuzz_never_refuses_what_the_reference_admits(admit, seed):
+    """THE BOUND, over 400 drawn fn bodies per seed.
+
+    Two claims, in the order they matter:
+
+      * the gate NEVER refuses a program the reference admits. Absolute, with no
+        allowance — a false rejection is the one direction a gate may not err in;
+      * where both sides' minimum refusal is in this slice's own vocabulary
+        (`_TFB_TAGS`) and outside the families a later slice owns
+        (`_TFB_LATER_SLICES`), the gate's verdict is the reference's TAG AND
+        SENTENCE, byte for byte.
+
+    What is deliberately not claimed: which of several true refusals is the
+    minimum when one of them belongs to a surface this slice does not build.
+    That is an under-refusal — the gate reports a LATER refusal, both of them
+    real — and the census tracks it as a tag or message mismatch rather than a
+    bypass."""
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(400):
+        src = _typed_fn_body(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _TFB_TAGS:
+            continue
+        if any(m in ref_msg for m in _TFB_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    # non-vacuity: the draw really does reach the layer under test
+    assert drawn >= 350, drawn
+    assert compared >= 50, compared
+
+
+def test_the_type_layer_reaches_a_module_fn_body(admit):
+    """NON-VACUITY, spelled out: each statement position the slice opens draws
+    the reference's own sentence."""
+    cases = [
+        ("fn f(n: Int) -> Int32 {\n  return n\n}\n",
+         "T1|this function's return expects `Int32`, got `Int`"),
+        ("fn f(a: Int32, b: Int) -> Int {\n  return a + b\n}\n",
+         "T1|`+` does not mix `Int32` and `Int`"),
+        ("fn f(s: Str) -> Str {\n  let c = s[0]\n  return c\n}\n",
+         "T1|`Str` has no index operator — `[...]` indexes a `List` only"),
+        ("fn f() -> Int {\n  var n = 1\n  n += 1e999\n  return n\n}\n",
+         "TYPE|Float literal is infinite: it is outside the range of a "
+         "64-bit float"),
+        ("fn f(s: Str) -> Int {\n  assert s\n  return 0\n}\n",
+         "T1|`assert` condition expects `Bool`, got `Str`"),
+        ("fn f(s: Str) -> Int {\n  while (s) { let z = 1 }\n  return 0\n}\n",
+         "T1|`while` condition expects `Bool`, got `Str`"),
+        ("fn f(xs: List[Int]) -> Int {\n  for (x of xs) { let z = ~x }\n"
+         "  return 0\n}\n",
+         "T1|`~` requires an `Int32` operand, got `Int`"),
+        ("fn f() -> List[Int] {\n  return [\"a\"]\n}\n",
+         "T1|element of `List[Int]` expects `Int`, got `Str`"),
+    ]
+    for src, expected in cases:
+        assert admit(src) == expected, src
+        _agree(admit, src)
+
+
+def test_the_type_layer_stays_silent_where_it_cannot_decide(admit):
+    """The other half of the bound, as named cases: each of these is a program
+    the reference ADMITS whose shape the walk approximates, and the walk must
+    say nothing about any of them."""
+    admitted = [
+        # a structural record literal flowing into a NOMINAL record — resolved
+        # through the declared-type table this walk does not carry
+        "type R = { h: Str }\n\nfn f() -> R {\n  return { h: \"x\" }\n}\n",
+        # a container of them, which the bracket-only argument split used to
+        # read as a two-argument `List`
+        "type R = { h: Str }\n\nfn f() -> List[R] {\n"
+        "  return [{ h: \"x\" }]\n}\n",
+        # calling an async-typed value yields the UNWRAPPED `T` (item 92 §2)
+        "fn run(start: Str, step: (Str) -> Async[Str]) -> Str {\n"
+        "  let a = step(start)\n  return a\n}\n",
+        # a generic callee's declared return is unified at the call site, which
+        # is the signature slice's; the parameter's own name is not the answer
+        "fn ident(x: T) -> T {\n  return x\n}\n"
+        "fn use_it() -> Str {\n  return ident(\"hello\")\n}\n",
+        # the accumulator idiom: a bottom-typed binding learns its element type
+        # at the first reassignment
+        "fn f() -> Map[Str, Int] {\n  var m = Map.empty()\n"
+        "  m = m.set(\"k\", 1)\n  return m\n}\n",
+        # a `Float` literal at the very edge of binary64 is finite
+        "fn f() -> Float {\n  return 1.7976931348623157e308\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src

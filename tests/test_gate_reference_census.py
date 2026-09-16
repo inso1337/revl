@@ -139,33 +139,17 @@ KNOWN_BYPASSES = {
     "examples/rejections/g1_template_undeclared.rvl",
     "examples/rejections/v2_undeclared_fn_var.rvl",
     # -- expression typing (T1/T2) --
-    "examples/rejections/t2_null_in_expression.rvl",
-    "examples/rejections/t11_field_through_opt.rvl",
-    "examples/rejections/t12_str_index.rvl",
+    # The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
+    # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
+    # `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
+    # reference's own sentence and have been struck from this list. What remains
+    # is the optional-chain rule (T2d) and the provide-method BODY, whose type
+    # environment — requirement handles, activation locals, config fields, the
+    # service signature — is the component slice's to build; the gate walks one
+    # over the empty environment today, which decides `null` and the `Float`
+    # literal bound and stays silent about every rule a name would answer for.
     "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-    "examples/rejections/t21_int32_narrow_implicit.rvl",
-    "examples/rejections/t22_int32_width_mix.rvl",
-    "examples/rejections/t23_int32_remainder.rvl",
-    "examples/rejections/t28_bitwise_non_int32.rvl",
-    "examples/rejections/t26_anon_record_update_wrong_type.rvl",
-    "examples/rejections/t27_anon_record_update_undeclared_field.rvl",
-    "examples/rejections/t36_float_literal_range.rvl",
-    # The field-read-on-`Any` family. These three were ALREADY type-layer
-    # false-admits; they were merely hidden behind a `pub extern` parse refusal
-    # ("unexpected declaration"), which made the census file them as
-    # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. `p_top`
-    # now accepts `pub` before every declaration form the reference accepts it
-    # before, so the parse reaches the body and the real state of the gate shows:
-    # the reference refuses "field read `.x` on a value of type `Any`" in its
-    # TYPE layer and the gate runs no type layer. Nothing new is admitted that
-    # was not already outside the covered surface.
-    "examples/rejections/t29_field_read_on_any.rvl",
     "examples/rejections/t30_field_read_on_any_provide_method.rvl",
-    # the same `Any` field read, reached through a backend fixture rather than a
-    # rejection fixture. It is the one entry on this list that has no row in
-    # `TYPE_LAYER_GAP`: that pin addresses its fixtures by bare name under
-    # `examples/rejections/`, and this program does not live there.
-    "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
     # -- calls and signatures --
     "examples/rejections/t10_call_arity.rvl",
     "examples/rejections/t15_generic_call_site.rvl",
