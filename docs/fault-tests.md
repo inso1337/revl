@@ -237,8 +237,9 @@ injection point:
 
 ## 6. Tiers
 
-`fault test` runs on the **python reference tier only**. The other four
-emitters **refuse** a document that carries a `fault_tests` section, by name:
+`fault test` runs on the **python reference tier only**. The other five
+emitters (ts, go, rust, java, wasm) **refuse** a document that carries a
+`fault_tests` section, by name:
 
 ```
 fault tests do not lower to the cordis-rs tier ('db dies mid-activation') —
@@ -250,8 +251,8 @@ quietly disappears is a guarantee nobody is checking. A document carrying fault
 tests also lowers as `ir_version 3`, so a consumer that predates the section
 rejects the whole document rather than dropping it.
 
-`revl test --backend {ts,rust,java}` is friendlier than the raw emitter: it
-strips the section, prints
+`revl test --backend {ts,go,rust,java,wasm}` is friendlier than the raw
+emitter: it strips the section, prints
 
 ```
 [ts] note: 2 fault test(s) not run on this tier — `fault test` runs on the py

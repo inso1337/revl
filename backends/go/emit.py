@@ -9060,6 +9060,23 @@ def _refuse_holes(ir: dict) -> None:
     )
 
 
+# A `fault test` is executed by driving a real activation and inspecting the
+# runtime's residue afterwards (docs/fault-tests.md).  The cordis-go tier
+# has no such driver, so it is refused loudly instead of being dropped on the
+# floor: a silently-missing fault test is a guarantee nobody is checking.
+def _refuse_fault_tests(ir) -> None:
+    fault_tests = (ir or {}).get("fault_tests") or []
+    if not fault_tests:
+        return
+    names = ", ".join(repr(unit.get("name")) for unit in fault_tests)
+    raise EmitError(
+        f"fault tests do not lower to the cordis-go tier ({names}) — `fault test` runs "
+        f"on the python reference tier only (docs/fault-tests.md). Compile "
+        f"this document with --backend py, or move the fault tests to a "
+        f"module that is not emitted for this tier."
+    )
+
+
 def _refuse_deferred_emissions(ir: dict) -> None:
     """Roadmap 245 Decision 2 tier gate: a CALL to a `deferred` emission needs a
     session-owner runtime (the deferral queue and the commit verb) this tier does
@@ -9170,6 +9187,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
+    _refuse_fault_tests(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old

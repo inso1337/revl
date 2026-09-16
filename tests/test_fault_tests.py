@@ -4,7 +4,7 @@ Three layers, gated separately so a missing runtime never looks like a pass:
 
 * **frontend** — syntax, the injection scheme, the compile-time refusals, the
   IR shape.  No runtime needed; these always run.
-* **backend contract** — the py tier lowers the section, the other four refuse
+* **backend contract** — the py tier lowers the section, the other five refuse
   it by name.  No runtime needed; these always run.
 * **judging** — the residue/LIFO/emission verdicts and their wording, driven
   against a fabricated outcome so the *failure* paths are covered without
@@ -160,7 +160,7 @@ def test_python_tier_lowers_the_section_into_the_module():
     assert "'step': 3" in module
 
 
-@pytest.mark.parametrize("tier", ["typescript", "rust", "java", "wasm"])
+@pytest.mark.parametrize("tier", ["typescript", "go", "rust", "java", "wasm"])
 def test_other_tiers_refuse_the_section_by_name(tier):
     """Requirement: never a *silent* mis-emit. Each tier names the fault
     tests it cannot lower and points at the doc."""
@@ -177,7 +177,7 @@ def test_other_tiers_refuse_the_section_by_name(tier):
 # carries a `config` block, and the cordis-wasm runtime has no
 # instantiation-config channel. It is NOT the `Str` params — that tier
 # lowers `Str` across the service boundary as a canonical-ABI pointer.
-@pytest.mark.parametrize("tier", ["typescript", "rust", "java"])
+@pytest.mark.parametrize("tier", ["typescript", "go", "rust", "java"])
 def test_other_tiers_still_emit_the_same_document_without_the_section(tier):
     """The refusal is about the section, not about the document."""
     emit = _emitter(tier)

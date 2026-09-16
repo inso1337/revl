@@ -258,6 +258,9 @@
         "The non-boxing Result[T, E] match discriminator (item 434(d), #114): `_go_v3_match_result` renders the `.Ok` if/else for a v3 Result match, the sibling of `_go_v3_match_opt`. The go v3 module byte-agreement corpus has no Result-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
           "_go_v3_match_result": 61
         },
+        "backends/go/emit.py::_refuse_fault_tests: every statement is on the refusal path. A `fault_tests` section is rejected by name on this tier (docs/fault-tests.md section 6), and the byte-agreement corpus is documents the reference EMITS, so no corpus document can carry one. Pinned by tests/test_fault_tests.py::test_other_tiers_refuse_the_section_by_name.": {
+          "_refuse_fault_tests": 2
+        },
         "declared out of every self-host slice: realm placements, routers, spawn/instances. The two lines the item 421 F5 stage-2 seam hook adds -- `if _SECRET_MODE:` installing `bridge.SecretScrub` -- sit inside that slice: the hook is only built when the composition declares `Secret[T]`, and no placement corpus document is a secret-mode composition, so the generated seam funnel is never asked to redact a secret value.": {
           "_emit_placement": 18
         },
@@ -1185,11 +1188,6 @@
           "_V3Emitter._helper_str_concat_n": 18,
           "_V3Emitter._interp_expr": 20
         },
-        "Extern @wasm body lookup/emission and comments for missing bodies are explicitly deferred by the module oracle; source-defined functions do not exercise raw-WAT extern handling.": {
-          "_V3Emitter._unsupported_comments": 2,
-          "_emit_extern_func": 17,
-          "_extern_wasm_body": 2
-        },
         "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float.": {
           "_f64_literal": 1,
           "_finite_float": 3,
@@ -1211,7 +1209,7 @@
           "_V3Emitter._bin_expr": 20
         },
         "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission.": {
-          "_V3Emitter.emit": 13
+          "_V3Emitter.emit": 12
         },
         "Remaining branches add src/ for standalone imports or translate invalid ownerless/session-commit emissions to EmitError. In-process successful pure documents take neither exceptional path.": {
           "_refuse_deferred_emissions": 10
@@ -1224,7 +1222,7 @@
           "_V3Emitter._emit_stmts": 14
         },
         "Remaining branches merge equivalent async/sync polymorphic externs and rewrite call names after colour erasure; extern emission is outside the WASM module corpus.": {
-          "_dedup_colour_erased_poly_externs": 14,
+          "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6
         },
         "Remaining branches resolve deferred inline arrows or reject unknown/non-callable callees and argument-count/type mismatches; direct declared calls are covered. Item 459 F6 adds one statement here: before raising the generic unknown-callee error, the arm asks `_refuse_bodyless_extern` whether the name is a DECLARED extern with no `@wasm` body, so a portability limit is no longer spelled as a typo. It is on the same refusal path as the rest of this entry and is uncovered for the same reason.": {
@@ -1332,6 +1330,9 @@
         "Remaining traversal/raise detects unresolved holes, including service signatures; successful compiled source documents contain no holes.": {
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1
+        },
+        "Rendering a @wasm-bodied extern as a real `(func $name \u2026)` is outside the module oracle's subset; source-defined functions do not exercise raw-WAT extern handling. The NAMING of a bodyless extern is no longer deferred: tests/fixtures/emit_wasm_corpus/externs.rvl reaches `_unsupported_comments` and `_extern_wasm_body` (issue 1130).": {
+          "_emit_extern_func": 17
         },
         "Residual declarations allocate locals for deferred match bindings/scrutinees and inline arrows; test_mode appends its success result. The empty non-Unit body fallback is a defensive path: frontend return checking rejects such functions. Empty Unit source is covered and emits nop, not unreachable.": {
           "_V3Emitter._emit_function": 6
