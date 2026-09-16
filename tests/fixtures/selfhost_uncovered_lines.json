@@ -1292,8 +1292,8 @@
         "Remaining raise rejects len on a non-List/non-Str receiver; canonical frontend len nodes carry supported collection types.": {
           "_V3Emitter._len_expr": 1
         },
-        "Remaining raise rejects rebinding one emitted local name at incompatible WASM widths; valid typed source locals retain their declared width.": {
-          "_V3Emitter._declare_local": 1
+        "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot \u2014 the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead.": {
+          "_V3Emitter._declare_local": 2
         },
         "Remaining raises explicitly reject fault-injection or lifecycle test harnesses unsupported by the WASM backend.": {
           "_refuse_fault_tests": 2,
@@ -1402,7 +1402,7 @@
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1544
+      "uncovered_statements": 1545
     }
   },
   "selfhost": {
