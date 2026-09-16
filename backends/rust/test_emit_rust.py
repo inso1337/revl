@@ -2728,9 +2728,9 @@ def test_test_body_gets_the_same_by_value_analysis_as_a_function_body():
     reused local in a `#[cfg(test)]` body moved at its first use. `cargo check`
     stops at the lib, so no oracle compiled the body that held the error."""
     src = _loop_moves_src()
-    body = src[src.index("#[cfg(test)]"):]
-    assert body.count("own(head.clone())") == 3   # 2 textual reuses + 1 in a loop
-    assert "own(head)" not in body
+    tests = src[src.index("#[test]"):]
+    assert tests.count("own(head.clone())") == 3  # 2 textual reuses + 1 in a loop
+    assert "own(head)" not in tests
 
 
 @needs_cargo
