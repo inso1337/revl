@@ -5636,6 +5636,10 @@ fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
         let mut fi = 0i64;
         while (fi < o.flds.revl_length()) {
             let f = (o.flds)[(fi) as usize].clone();
+            let wf = wf_site_verd(WfSite { ty: f.fty.clone(), line: f.line, asyncOk: false });
+            if (wf.v != "") {
+                return wf;
+            }
             let r = cfg_walk(&f.fname, &o.owner, &f.fty, &f.fty, &svcs, &decls, &(vec![]), &(vec![]));
             if (r != "") {
                 return mk_verd(r.clone(), f.line);
