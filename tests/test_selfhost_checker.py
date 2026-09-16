@@ -94,8 +94,11 @@ def check_src(ns):
 # Mirrored by base_env() in selfhost/checker.rvl. Keep the two in lockstep.
 # `m` is Int32 — the one operand type the bitwise operators accept (item 366);
 # without it the positive bitwise path (`m & m` -> Int32) could not be exercised.
+# `opt`/`xs` are slice T2a's: the optional-escape refusals (a field read and an
+# index THROUGH an `Opt`) and the `??` rule need an optional in scope, and the
+# index rules need a `List`. The fuzz generators do not draw either name.
 ENV = {"x": "Int", "y": "Int", "f": "Float", "s": "Str", "flag": "Bool",
-       "m": "Int32"}
+       "m": "Int32", "opt": "Opt[Str]", "xs": "List[Int]"}
 
 
 def _ref_parse(src: str):

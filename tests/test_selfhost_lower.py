@@ -315,14 +315,30 @@ def _classify(e: RevlError) -> str:
         return "A6"
     if ("no builtin method" in m
             or "non-exhaustive match" in m
-            or "type argument(s), got" in m):
+            or "type argument(s), got" in m
+            # the unknown-field read, structural (item 71) and nominal alike.
+            # Code-less in the reference, but `revl.diagnostics.classify`
+            # already files it as a type mismatch, so it carries the T1 the
+            # design's §4.3 vocabulary gives it (slice T2a).
+            or "has no field" in m):
         return "T1"
     if ("is not a case of" in m
             or "record update names" in m
             or "record destructuring requires a record" in m
             or "type alias cycle" in m
             or "`mod` by a literal zero" in m
-            or "Float literal is infinite" in m):
+            or "Float literal is infinite" in m
+            # slice T2a's three remaining code-less expression refusals, named
+            # in the design's §4.3 TYPE list. Each is a zero-hit marker over the
+            # whole census corpus today (no program in the tree draws one), so
+            # naming them moves no document between buckets; they exist so the
+            # checker oracle can compare a TAG as well as a message when the
+            # statement layer (T3a) starts carrying these to `admit_src`.
+            or "cannot order" in m
+            or "ternary branches disagree" in m
+            or "record update requires" in m
+            or "record literal for `" in m
+            or "but the record has " in m):
         return "TYPE"
     return "OUT:" + m
 
