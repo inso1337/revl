@@ -8,19 +8,11 @@
    "examples/rejections/g4_spawn_widens_budget.rvl",
    "examples/rejections/g4_spawn_widens_parameter.rvl"
   ],
-  "false-admit/HOST-METHOD": [
-   "examples/rejections/host_method_not_on_surface.rvl",
-   "examples/rejections/t24_opaque_receiver_builtin.rvl"
-  ],
   "false-admit/T1": [
-   "examples/rejections/g4_extern_undo_wrong_arg_type.rvl",
-   "examples/rejections/t10_call_arity.rvl",
    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-   "examples/rejections/t15_generic_call_site.rvl",
    "examples/rejections/t16_provide_method_missing_return.rvl",
    "examples/rejections/t17_arrow_body_unchecked.rvl",
    "examples/rejections/t1_service_arg_type.rvl",
-   "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
    "examples/rejections/t30_field_read_on_any_provide_method.rvl",
    "examples/rejections/t31_index_non_int_provide_method.rvl",
    "examples/rejections/t32_arrow_value_result_flows.rvl",
@@ -30,12 +22,9 @@
    "examples/rejections/t4_field_arg_type.rvl",
    "examples/rejections/t6_bare_generic.rvl",
    "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
-   "examples/rejections/v2_map_set_value_mismatch.rvl",
-   "examples/rejections/v2_map_value_unknown_method.rvl",
    "examples/rejections/v2_match_nonexhaustive.rvl"
   ],
   "false-admit/TYPE": [
-   "examples/rejections/arith_zero_divisor.rvl",
    "examples/rejections/t13_unknown_match_case.rvl",
    "examples/rejections/t18_type_alias_cycle.rvl",
    "examples/rejections/t5_destructure_nonrecord.rvl"
@@ -119,18 +108,6 @@
     "tag": ""
    }
   },
-  "examples/rejections/arith_zero_divisor.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`mod` by a literal zero is undefined",
-    "tag": "TYPE"
-   }
-  },
   "examples/rejections/g1_template_undeclared.rvl": {
    "bucket": "false-admit/G1",
    "gate": {
@@ -141,18 +118,6 @@
    "reference": {
     "message": "`nobody` is not declared in this function",
     "tag": "G1"
-   }
-  },
-  "examples/rejections/g4_extern_undo_wrong_arg_type.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "argument 1 of `close_ledger(...)` expects `Int`, got `Str`",
-    "tag": "T1"
    }
   },
   "examples/rejections/g4_spawn_widens_budget.rvl": {
@@ -179,30 +144,6 @@
     "tag": "G4"
    }
   },
-  "examples/rejections/host_method_not_on_surface.rvl": {
-   "bucket": "false-admit/HOST-METHOD",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Map` has no method `putt` (its surface: drop, get, insert, insert_if_absent, new, remove)",
-    "tag": "HOST-METHOD"
-   }
-  },
-  "examples/rejections/t10_call_arity.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`scale` takes 1 argument(s), 2 given",
-    "tag": "T1"
-   }
-  },
   "examples/rejections/t13_unknown_match_case.rvl": {
    "bucket": "false-admit/TYPE",
    "gate": {
@@ -224,18 +165,6 @@
    },
    "reference": {
     "message": "`?.` needs an optional on the left, got `Row`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t15_generic_call_site.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "this function's return expects `Int`, got `Str`",
     "tag": "T1"
    }
   },
@@ -284,30 +213,6 @@
    },
    "reference": {
     "message": "`db.query` argument `sql` expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t24_opaque_receiver_builtin.rvl": {
-   "bucket": "false-admit/HOST-METHOD",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "stdlib method `remove` on a value of unknown type \u2014 no constructor pins this receiver as a Str/List/Int/Int32/Bytes/Map value, so the checker refuses to lower the call as the builtin",
-    "tag": "HOST-METHOD"
-   }
-  },
-  "examples/rejections/t25_explicit_tparam_heuristic_off.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`",
     "tag": "T1"
    }
   },
@@ -428,30 +333,6 @@
    },
    "reference": {
     "message": "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/v2_map_set_value_mismatch.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "builtin `set` argument expects `Int`, got `Str`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/v2_map_value_unknown_method.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "no builtin method `fetch` on values \u2014 the stdlib surface is charAt, charCodeAt, checked_div_euclid, checked_div_floor, checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, is_alpha, is_digit, is_space, join, keys, length, list, lookup, mod, push, remove, repeat, set, size, slice, split, startsWith, str, to_int, to_int32, to_str (docs/stdlib-2.0.md)",
     "tag": "T1"
    }
   },
