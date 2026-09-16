@@ -1194,3 +1194,128 @@ def test_native_ir_types_a_match_used_as_a_value(lower_to_ir):
     native = json.loads(lower_to_ir(source))["functions"]
     assert reference[0]["body"][1]["body"][0]["value"]["operands"] == "Int"
     assert native == reference
+
+
+# --------------------------------------------------------- item 391: the
+# component dialect's host frontier and realm-placement prelude.
+#
+# Both shapes below were INVISIBLE to every oracle in this file before they were
+# written, and that is the point of adding them. `cir_body` refuses a step it
+# cannot lower, and a refused step drops the WHOLE `body` key rather than
+# emitting a wrong one — so a component whose first statement is a host
+# acquisition (or whose first line is an `isolate` pin) produced an IR entry with
+# no `body` at all. The corpus oracle that walks bodies
+# (`test_native_ir_matches_reference_bodies_where_covered`) iterates only the
+# components that HAVE one, so a dropped body reads as "nothing to check" and the
+# suite stayed green. These pin the presence as well as the content.
+
+_HOST_SOURCE = """service Cache { fn put(key: Str, value: Str) -> Str }
+component HonestCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      return key
+    }
+  }
+}
+"""
+
+
+def test_native_ir_lowers_a_host_acquisition_in_a_component_body(lower_to_ir):
+    """`let store = effect Map.new() undo store.drop()` — an upper-cased callable
+    head is a HOST ACQUISITION (`{kind: "host", fn: "Map.new"}`), not a required
+    service and not a scoped name. The native producer resolved neither, refused
+    the step, and dropped the component body with it."""
+    reference = compile_source(_HOST_SOURCE)["components"][0]
+    native = json.loads(lower_to_ir(_HOST_SOURCE))["components"][0]
+    assert "body" in native, "the component body is still dropped"
+    assert reference["body"][0]["acquire"] == {"kind": "host", "fn": "Map.new",
+                                               "args": []}
+    assert native == reference
+
+
+def test_a_host_locals_verb_is_a_call_and_not_a_stdlib_builtin(lower_to_ir):
+    """The dual dispatch the acquisition buys: `remove` is spelled by BOTH the
+    stdlib method table and the host Map surface, and on a host-acquired receiver
+    it is the host verb — a plain `call` node selected by receiver KIND, never a
+    `builtin`. Reading the builtin table first would produce a node the runtimes
+    do not define for that receiver."""
+    reference = compile_source(_HOST_SOURCE)["components"][0]
+    undo = reference["body"][1]["methods"][0]["body"][0]["undo"]
+    assert undo == {"kind": "call", "target": {"kind": "name", "id": "store"},
+                    "method": "remove", "args": [{"kind": "name", "id": "key"}]}
+    native = json.loads(lower_to_ir(_HOST_SOURCE))["components"][0]
+    assert native["body"][1]["methods"][0]["body"][0]["undo"] == undo
+
+
+def test_the_host_acquisition_oracle_is_not_vacuous(lower_to_ir):
+    """NON-VACUITY for the two above: the comparison is a real one. A single
+    byte changed in the expected acquisition — `Map.new` to `Map.nex` — must make
+    it fail, and a component with no host acquisition must not gain a body key it
+    did not have."""
+    native = json.loads(lower_to_ir(_HOST_SOURCE))["components"][0]
+    reference = compile_source(_HOST_SOURCE)["components"][0]
+    corrupted = json.loads(json.dumps(reference))
+    corrupted["body"][0]["acquire"]["fn"] = "Map.nex"
+    # the `!=` is only evidence while the `==` holds: a producer that matched
+    # nothing would pass the inequality on its own
+    assert native == reference
+    assert native != corrupted
+
+
+_REALM_SOURCE = """service Store { fn put(key: Str, val: Str) }
+service Reader { fn read(key: Str) -> Str }
+component AuditReader requires store: Store provides reader: Reader {
+  isolate reader in realm("r1")
+  intercept store with { tags: ["audit", "v2"], level: 3, enabled: true, note: null }
+  provide reader {
+    fn read(key) { return "x" }
+  }
+}
+"""
+
+
+def test_native_ir_lowers_the_realm_placement_prelude(lower_to_ir):
+    """`isolate <key> in realm("…")` and `intercept <key> with { … }` are
+    component HEADER declarations that emit no activation step. The body walk had
+    no arm for either, so it refused at the first one and the component lost its
+    `body`, its `isolate` and its `intercept` together."""
+    reference = compile_source(_REALM_SOURCE)["components"][0]
+    native = json.loads(lower_to_ir(_REALM_SOURCE))["components"][0]
+    assert reference["isolate"] == {"reader": "r1"}
+    assert reference["intercept"] == {
+        "store": {"tags": ["audit", "v2"], "level": 3, "enabled": True,
+                  "note": None}}
+    assert native == reference
+
+
+def test_the_prelude_tables_keep_the_references_key_order(lower_to_ir):
+    """`isolate` and `intercept` are stamped AFTER `body`, which is the order the
+    reference writes them in. It is not cosmetic: `crates/revl-gate` reads the
+    interchange document through `serde_json` with `preserve_order`, so a record's
+    fields reach the native emitter in DOCUMENT order, and a table written before
+    `body` would reach it in a different one than the reference's."""
+    reference = compile_source(_REALM_SOURCE)["components"][0]
+    native = json.loads(lower_to_ir(_REALM_SOURCE))["components"][0]
+    assert list(reference) == ["name", "source", "config", "requires",
+                              "provides", "body", "isolate", "intercept"]
+    assert list(native) == list(reference)
+
+
+def test_the_prelude_oracle_is_not_vacuous(lower_to_ir):
+    """NON-VACUITY: one byte changed in the expected realm label fails the
+    comparison, and a metadata value the record-literal grammar does not admit
+    withholds the whole table rather than stamping a guess."""
+    native = json.loads(lower_to_ir(_REALM_SOURCE))["components"][0]
+    reference = compile_source(_REALM_SOURCE)["components"][0]
+    corrupted = json.loads(json.dumps(reference))
+    corrupted["isolate"]["reader"] = "r2"
+    assert native == reference
+    assert native != corrupted
+    # and the metadata grammar itself is the reference's: a value outside
+    # `Parser.record_literal` (a name rather than a literal) is refused at PARSE
+    # time there, so the producer never has to guess at one
+    with pytest.raises(Exception):
+        compile_source(_REALM_SOURCE.replace("level: 3", "level: tag"))
