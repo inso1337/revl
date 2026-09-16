@@ -3906,10 +3906,13 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
 // annotation test over a signature whose arity does not match would answer a
 // program with the wrong one of two real refusals, which is the mismatch
 // direction rather than the silent one.
-fn a6_param_msg(pm: ProvM, decl: MSig, svcName: Str, i: Int) -> Str {
+fn a6_param_msg(pm: ProvM, decl: MSig, svcName: Str, i: Int,
+                gtys: List[Bind]) -> Str {
   if (i >= pm.ps.length() || i >= decl.ps.length()) { return "" }
-  let ann = taint_strip(pm.ps[i].ty)
-  let dt = taint_strip(decl.ps[i].ty)
+  // an alias and its expansion are the SAME type to the reference, and this walk
+  // cannot tell them apart, so a spelling it cannot resolve is not compared.
+  let ann = tk_solid(taint_strip(pm.ps[i].ty), gtys)
+  let dt = tk_solid(taint_strip(decl.ps[i].ty), gtys)
   if (ann != "" && dt != ""
       && !(tk_compatible(dt, ann) && tk_compatible(ann, dt))) {
     return "parameter `".concat(pm.ps[i].name).concat("` of `")
@@ -3917,7 +3920,7 @@ fn a6_param_msg(pm: ProvM, decl: MSig, svcName: Str, i: Int) -> Str {
       .concat("`) expects `").concat(tk_render(dt)).concat("`, got `")
       .concat(tk_render(ann)).concat("`")
   }
-  return a6_param_msg(pm, decl, svcName, i + 1)
+  return a6_param_msg(pm, decl, svcName, i + 1, gtys)
 }
 
 // Has a method of this name already been provided earlier in the same
@@ -3941,7 +3944,7 @@ fn prov_dup_before(ms: List[ProvM], upto: Int, nm: Str, i: Int) -> Bool {
 // to the slice that models those arms.
 fn prov_missing_return(pv: Provide, mi: Int, decl: MSig) -> Verd {
   let pm = pv.methods[mi]
-  if (decl.name == "" || decl.ret == "" || pm.isArrow || pm.mayRet
+  if (decl.name == "" || taint_strip(decl.ret) == "" || pm.isArrow || pm.mayRet
       || pm.ps.length() != decl.ps.length()
       || prov_dup_before(pv.methods, mi, pm.name, 0)) {
     return no_verd()
@@ -4006,7 +4009,7 @@ fn ct_req_op(tg: Expr) -> Str {
 fn ct_args(root: Str, meth: Str, decl: MSig, args: List[Expr],
            env: List[Bind], i: Int) -> Str {
   if (i >= args.length() || i >= decl.ps.length()) { return "" }
-  let pt = taint_strip(decl.ps[i].ty)
+  let pt = tk_solid(taint_strip(decl.ps[i].ty), env)
   let inf = tk_infer(args[i], env)
   if (inf.v == "" && pt != "" && inf.ty != "" && !tk_compatible(pt, inf.ty)) {
     return tagged("T1", "`".concat(root).concat(".").concat(meth)
@@ -4106,28 +4109,30 @@ fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
 // A `null` default is the documented optional exception: `cfg_lit_ty` answers ""
 // for it, exactly as the reference's reader answers `None`, and an unspelled
 // literal type is never judged.
-fn cfg_default_verdict(comp: CompD, i: Int) -> Verd {
+fn cfg_default_verdict(comp: CompD, i: Int, gtys: List[Bind]) -> Verd {
   if (i >= comp.cfgDflts.length()) { return no_verd() }
   let f = comp.cfgDflts[i]
-  if (f.fty != "" && !tk_compatible(f.fty, f.litTy)) {
+  let fty = tk_solid(f.fty, gtys)
+  if (fty != "" && !tk_compatible(fty, f.litTy)) {
     return mk_verd(tagged("T1",
       "config field `".concat(f.fname).concat("` default expects `")
-        .concat(tk_render(f.fty)).concat("`, got `")
+        .concat(tk_render(fty)).concat("`, got `")
         .concat(tk_render(f.litTy)).concat("`")), f.line)
   }
-  return cfg_default_verdict(comp, i + 1)
+  return cfg_default_verdict(comp, i + 1, gtys)
 }
 
-fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig) -> Verd {
+fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig,
+                         gtys: List[Bind]) -> Verd {
   let pm = pv.methods[mi]
   if (decl.name == "" || pm.ps.length() != decl.ps.length()
       || prov_dup_before(pv.methods, mi, pm.name, 0)) {
     return no_verd()
   }
-  let pmsg = a6_param_msg(pm, decl, pv.svcName, 0)
+  let pmsg = a6_param_msg(pm, decl, pv.svcName, 0, gtys)
   if (pmsg != "") { return mk_verd(tagged("T1", pmsg), pm.line) }
-  let pr = taint_strip(pm.ret)
-  let dr = taint_strip(decl.ret)
+  let pr = tk_solid(taint_strip(pm.ret), gtys)
+  let dr = tk_solid(taint_strip(decl.ret), gtys)
   if (pr != "" && dr != ""
       && !(tk_compatible(dr, pr) && tk_compatible(pr, dr))) {
     return mk_verd(tagged("T1",
@@ -4184,8 +4189,8 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
     // RETURN of the requirement call it binds (`let r = effect s.get()` binds
     // the service's declared result, which is what the reference writes into
     // `type_env` for it), then what the value itself infers to.
-    var bound = s.bindTy
-    if (bound == "") { bound = ct_stmt_req_ret(s.e, cx) }
+    var bound = tk_solid(s.bindTy, env)
+    if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
     if (bound == "") { bound = r.ty }
     if (bound != "") { next = tenv_put(env, s.bind, bound) }
   }
@@ -4211,8 +4216,8 @@ fn mth_body_tys(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind
   if (s.kind == "skip" || s.spawnTarget != "" || s.bind == "") {
     return mth_body_tys(body, i + 1, env, cx)
   }
-  var bound = s.bindTy
-  if (bound == "") { bound = ct_stmt_req_ret(s.e, cx) }
+  var bound = tk_solid(s.bindTy, env)
+  if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
   if (bound == "") { bound = tk_infer(s.e, env).ty }
   return mth_body_tys(body, i + 1,
                       bound == "" ? env : tenv_put(env, s.bind, bound), cx)
@@ -4228,6 +4233,7 @@ fn mth_param_tys(pm: ProvM, decl: MSig, i: Int, acc: List[Bind]) -> List[Bind] {
   var ty = ""
   if (i < pm.ps.length()) { ty = taint_strip(pm.ps[i].ty) }
   if (ty == "" && i < decl.ps.length()) { ty = taint_strip(decl.ps[i].ty) }
+  ty = tk_solid(ty, acc)
   return mth_param_tys(pm, decl, i + 1,
                        ty == "" ? acc : tenv_put(acc, pm.params[i], ty))
 }
@@ -5115,7 +5121,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // after each method), a method's own are not visible to the next one.
   // the config-default rule runs ahead of every body verdict, which is where the
   // reference raises it (`_lower_component`, before the provision loop).
-  let cdv = cfg_default_verdict(comp, 0)
+  let cdv = cfg_default_verdict(comp, 0, gtys)
   if (cdv.v != "") { return cdv }
   let setupAlias = alias_in(comp.setup, 0, cx.handles, Map.empty())
   // local arrows are scoped per body exactly as provision aliases are: setup's
@@ -5167,7 +5173,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // the two RESTATED-annotation rules, decided where the reference decides
       // them: after the colour parity above and before a single body statement
       // is lowered.
-      let sigv = a6_annotation_verdict(pv, mi, decl)
+      let sigv = a6_annotation_verdict(pv, mi, decl, gtys)
       if (sigv.v != "") { return sigv }
       let mcx = ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
@@ -7732,7 +7738,84 @@ fn tk_struct_compat(expected: Str, actual: Str) -> Bool {
 
 // ------------------------------------------------- the refusing expression walk
 
+// ------------------------------------------ the OPAQUE nominal, and why it
+// launders
+//
+// A bare nominal name this walk can resolve is a declared RECORD: the
+// declaration scan contributes its `field <Type>.<name>` rows and every rule
+// below reads the shape through them. A bare name with no such rows is
+// something else, and the two things it can be are not distinguishable from a
+// spelling:
+//
+//   * a TRANSPARENT TYPE ALIAS (`type Idx = Int`). The reference ERASES one
+//     before it compares anything, so `xs[i]` with `i: Idx` is an `Int` index
+//     and is admitted. Reading the alias as a type of its own refuses a program
+//     the reference admits — a false rejection, the one direction this gate may
+//     not err in, and it reaches every rule at once (`assert b` with
+//     `type Flag = Bool`, `i + 1` with `type Idx = Int`, an argument, a return).
+//   * a variant, an opaque handle, or a name out of another module.
+//
+// Alias erasure is its own slice. Until it lands, a spelling that MENTIONS an
+// unresolvable nominal anywhere inside it is answered "" — the gradual
+// frontier — rather than guessed at, which turns the whole family into
+// silence instead of a wrong refusal.
+fn ty_has_opaque(t: Str, env: List[Bind]) -> Bool {
+  if (t == "" || t.slice(0, 1) == "?" || tk_builtin_head(t)) { return false }
+  if (tk_is_struct(t)) {
+    return ty_fields_opaque(tk_split_depth(t.slice(1, t.length() - 1)), 0, env)
+  }
+  if (tk_is_fn_ty(t)) { return ty_any_opaque(ty_fn_parts(t), 0, env) }
+  let args = tk_args(t)
+  if (args.length() > 0) {
+    if (ty_any_opaque(args, 0, env)) { return true }
+    return !tk_builtin_head(parse_head(t)) && !tk_record_base(parse_head(t), env)
+  }
+  return tk_nominal_name(t) && !tk_record_base(t, env)
+}
+
+fn ty_any_opaque(ts: List[Str], i: Int, env: List[Bind]) -> Bool {
+  if (i >= ts.length()) { return false }
+  if (ty_has_opaque(ty_trim(ts[i]), env)) { return true }
+  return ty_any_opaque(ts, i + 1, env)
+}
+
+// the `<name>: <Type>` rows of a structural record spelling, each row's TYPE
+fn ty_fields_opaque(rows: List[Str], i: Int, env: List[Bind]) -> Bool {
+  if (i >= rows.length()) { return false }
+  let ci = rows[i].indexOf(":")
+  let fty = ci == 0 - 1 ? rows[i] : rows[i].slice(ci + 1, rows[i].length())
+  if (ty_has_opaque(ty_trim(fty), env)) { return true }
+  return ty_fields_opaque(rows, i + 1, env)
+}
+
+// `(A, B) -> R` split into its parameter types plus the result.
+fn ty_fn_parts(t: Str) -> List[Str] {
+  let close = t.indexOf(")")
+  if (close == 0 - 1) { return [] }
+  let inner = ty_trim(t.slice(1, close))
+  let ps = inner == "" ? [] : tk_split_depth(inner)
+  let ar = t.indexOf("->")
+  if (ar == 0 - 1) { return ps }
+  return ps.push(ty_trim(t.slice(ar + 2, t.length())))
+}
+
+// A type spelling as this walk may USE it: itself, or "" when it mentions a
+// nominal name whose structure the walk does not carry.
+fn tk_solid(t: Str, env: List[Bind]) -> Str {
+  return ty_has_opaque(t, env) ? "" : t
+}
+
+// Every type this walk decides over passes through here, which is what makes
+// the opaque-nominal launder above a single rule rather than one per predicate:
+// a sub-expression's type is itself a `tk_infer` result, so the whole tree is
+// normalised by normalising each node.
 fn tk_infer(e: Expr, env: List[Bind]) -> TInf {
+  let r = tk_infer_raw(e, env)
+  if (r.v != "" || r.ty == "") { return r }
+  return tk_ok(tk_solid(r.ty, env))
+}
+
+fn tk_infer_raw(e: Expr, env: List[Bind]) -> TInf {
   return match e {
     IntLit(v)   => tk_ok("Int"),
     FloatLit(v) => tk_float_lit(v),
@@ -8639,7 +8722,9 @@ fn fb_params_scope(ps: List[ParamN], i: Int, acc: List[Bind]) -> List[Bind] {
 fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
                  tps: List[Str]) -> List[Bind] {
   if (i >= ps.length()) { return acc }
-  let ty = mark_tparams(taint_strip(ps[i].ty), tps)
+  // an annotation mentioning a nominal name this walk cannot resolve is left
+  // out rather than read as a type of its own (`tk_solid`).
+  let ty = tk_solid(mark_tparams(taint_strip(ps[i].ty), tps), acc)
   return fb_params_tys(ps, i + 1,
                        ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps)
 }
@@ -8684,7 +8769,7 @@ fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
   let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
   return fb_walk(fb_scan(ts, sp.lo, sp.hi), 0, fb_params_scope(sp.ps, 0, []),
                  fb_params_tys(sp.ps, 0, gtys, tps),
-                 mark_tparams(sp.ret, tps)).v
+                 tk_solid(mark_tparams(sp.ret, tps), gtys)).v
 }
 
 // The first refusing module `fn` in declaration order. Top-level forms other than
