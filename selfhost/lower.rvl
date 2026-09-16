@@ -379,10 +379,17 @@ type SvcRef  = { key: Str, svc: Str, line: Int, clause: Str }
 // `svcRefs` and `hoff` are independent halves of the same header: one is every
 // `<key>: <Service>` annotation the header resolves, the other is the single
 // `handoff` clause it may carry. Neither subsumes the other.
+// One `config { <name>: <Type> = <literal> }` row that WRITES a default.
+// `litTy` is the surface type of the literal (`_config_default_type`), "" for a
+// default this reader does not spell — a non-literal one is deferred by the
+// reference's own reader too. `line` is the field name's line, the line the
+// reference's diagnostic carries (`cfg.line`).
+type CfgDflt = { fname: Str, fty: Str, litTy: Str, line: Int }
+
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
                  reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey],
                  routes: List[Route], hoff: Bind, refuse: Str, line: Int,
-                 svcRefs: List[SvcRef] }
+                 svcRefs: List[SvcRef], cfgDflts: List[CfgDflt] }
 
 type Bind = { name: Str, ty: Str }
 
@@ -1098,9 +1105,10 @@ fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
             rq: List[Bind], su: List[Stmt], iso: List[ProvKey],
             rts: List[Route], ho: Bind, refuse: Str, ln: Int,
-            srefs: List[SvcRef]) -> CompD {
+            srefs: List[SvcRef], cdfs: List[CfgDflt]) -> CompD {
   return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso,
-           routes: rts, hoff: ho, refuse: refuse, line: ln, svcRefs: srefs }
+           routes: rts, hoff: ho, refuse: refuse, line: ln, svcRefs: srefs,
+           cfgDflts: cdfs }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
@@ -2499,8 +2507,54 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
                  mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso,
                           body.routes, body.hoff, body.refuse,
                           tkc(ts, i).line,
-                          concat_refs(reqRefs, provRefs, 0))),
+                          concat_refs(reqRefs, provRefs, 0),
+                          cfg_defaults_in(ts, j + 1, end - 1))),
                  end)
+}
+
+// The surface type of a config default LITERAL, `_config_default_type`'s four
+// answers. Anything else — a name, a call, a container, an interpolation — is
+// "", the reference's `None`: a non-literal default is deferred there too and
+// the field is not judged against it.
+fn cfg_lit_ty(e: Expr) -> Str {
+  return match e {
+    IntLit(_)   => "Int",
+    FloatLit(_) => "Float",
+    BoolLit(_)  => "Bool",
+    StrLit(_)   => "Str",
+    _           => "",
+  }
+}
+
+// The `config { … }` rows of one component that WRITE a default, read off the
+// same `<name>: <Type> [= <expr>]` shape `ir_config` lowers. Rows without a
+// default contribute nothing: there is no literal to disagree with the type.
+fn cfg_defaults_in(ts: List[Token], lo: Int, hi: Int) -> List[CfgDflt] {
+  var j = lo
+  while (j < hi && !(atw(ts, j, "config") && atk(ts, j + 1, "{"))) { j += 1 }
+  if (j >= hi) { return [] }
+  let ce = close_brace(ts, j + 1)
+  let cend = ce == 0 - 1 ? hi : ce - 1
+  var k = j + 2
+  var out: List[CfgDflt] = []
+  while (k < cend) {
+    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+      let nm = tkc(ts, k).text
+      let tr = type_at(ts, k + 2)
+      var nx = tr.i
+      if (atk(ts, tr.i, "=")) {
+        let r = expr_at(ts, tr.i + 1)
+        let lt = cfg_lit_ty(r.e)
+        if (lt != "") {
+          out = out.push({ fname: nm, fty: taint_strip(tr.ty), litTy: lt,
+                           line: tkc(ts, k).line })
+          nx = r.i
+        }
+      }
+      k = nx > k ? nx : k + 1
+    } else { k += 1 }
+  }
+  return out
 }
 
 fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
@@ -3899,6 +3953,25 @@ fn prov_missing_return(pv: Provide, mi: Int, decl: MSig) -> Verd {
       .concat("`, but this body never returns a value")), pm.line)
 }
 
+// A config default must FIT the declared field type. The reference decides this
+// at the head of `_lower_component`, before the `provides` clause is resolved and
+// before a single body statement is lowered, so it runs first here too.
+//
+// A `null` default is the documented optional exception: `cfg_lit_ty` answers ""
+// for it, exactly as the reference's reader answers `None`, and an unspelled
+// literal type is never judged.
+fn cfg_default_verdict(comp: CompD, i: Int) -> Verd {
+  if (i >= comp.cfgDflts.length()) { return no_verd() }
+  let f = comp.cfgDflts[i]
+  if (f.fty != "" && !tk_compatible(f.fty, f.litTy)) {
+    return mk_verd(tagged("T1",
+      "config field `".concat(f.fname).concat("` default expects `")
+        .concat(tk_render(f.fty)).concat("`, got `")
+        .concat(tk_render(f.litTy)).concat("`")), f.line)
+  }
+  return cfg_default_verdict(comp, i + 1)
+}
+
 fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig) -> Verd {
   let pm = pv.methods[mi]
   if (decl.name == "" || pm.ps.length() != decl.ps.length()
@@ -4858,6 +4931,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // provision provenance is per BODY: setup's aliases are visible to every
   // provide method (the reference lowers setup first and restores to that map
   // after each method), a method's own are not visible to the next one.
+  // the config-default rule runs ahead of every body verdict, which is where the
+  // reference raises it (`_lower_component`, before the provision loop).
+  let cdv = cfg_default_verdict(comp, 0)
+  if (cdv.v != "") { return cdv }
   let setupAlias = alias_in(comp.setup, 0, cx.handles, Map.empty())
   // local arrows are scoped per body exactly as provision aliases are: setup's
   // are visible to every provide method, a method's own are not visible to the
