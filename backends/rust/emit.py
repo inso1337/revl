@@ -8309,8 +8309,29 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
         if not test.get("body"):
             out.append("    // (empty test body)")
         else:
+            # The reuse signal, per test body, exactly as `_emit_v3_functions`
+            # establishes it per fn. Without it a non-Copy local consumed by
+            # value more than once inside a `test` block is MOVED at the first
+            # use and the second use borrows a moved value (E0382): the emitted
+            # crate builds and the emitted `cargo test` does not. Measured on
+            # `selfhost/emit_rust.rvl`, whose `test "rust_type maps user type
+            # names and their generics"` passes one `Map[Str, Str]` local to
+            # five calls.
+            #
+            # A test body's locals are not in `ctx.var_types` (that map is
+            # seeded from a fn's params), so every bare name in a test is
+            # un-inferred and the reuse fallback in `_by_value_arg` /
+            # `_by_value_tail` is the only thing that can decide the clone.
+            # Setting it can only ADD clones — each consumer reads `multi_use`
+            # to turn a move into a `.clone()` and never the other way — so the
+            # change is in the sound direction: a single-use name stays a move
+            # and is byte-identical to before.
+            counts: dict[str, int] = {}
+            _body_multi_use(test["body"], counts)
+            ctx.multi_use = {n for n, c in counts.items() if c > 1}
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, out, 1, test_mode=True)
+            ctx.multi_use = set()
         out.append("}")
         out.append("")
     return out
