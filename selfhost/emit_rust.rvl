@@ -964,6 +964,20 @@ fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
   return rendered.concat(".clone()")
 }
 
+// `_by_value_reuse`: the clone for a position that moves ONLY on reuse — a
+// host/builtin method argument. The reference clones a binding the body READS
+// AGAIN (`ctx.multi_use`), and `multi_use` is populated in exactly one place:
+// the free-function pass. A component's `_V3Ctx` is a fresh object, so at the
+// component surface — the only surface this port calls it from — `multi_use` is
+// empty, the Copy test is unreachable, and the only live arm is the borrowed
+// `&str` param safety net.
+fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let name = ref_name(arg_node)
+  if (name == "") { return rendered }
+  if (ctx.bp.has(name)) { return rendered.concat(".to_string()") }
+  return rendered
+}
+
 fn str_readonly_arg_builtin(method: Str) -> Bool {
   return method == "concat" || method == "indexOf" || method == "split" || method == "join" || method == "startsWith" || method == "endsWith"
 }
@@ -1380,10 +1394,11 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
 }
 
 // The component-form call `target.method(args)` (no `callee`): a service call
-// through a `req`, or a receiver-expression method call. Host-Map receivers
-// (`get`/`remove` key-borrow, `insert` no-clone) are DEFERRED — the covered
-// subset declares no host `Map` binding, so `recv_ty` never starts with `Map[`
-// and every argument takes the by-value service-call clone.
+// through a `req`, or a receiver-expression method call. A host-Map receiver
+// (`recv_ty` starting `Map[`) takes the FR-4 convention instead of the
+// service-call clone: `get`/`remove` BORROW the key, so a component that reads
+// then writes the same key keeps owning it, and every other verb moves its
+// value in under the reuse rule (issue 1153).
 fn render_component_call(node: Any, ctx: Ctx) -> Str {
   let target = value_field(node, "target")
   let method = mangle(mname(value_str(value_field(node, "method"))))
@@ -1395,12 +1410,26 @@ fn render_component_call(node: Any, ctx: Ctx) -> Str {
   if (tkind == "req") { tname = value_str(value_field(target, "name")) }
   else { tname = ref_name(target) }
   let recv_ty = map_get(ctx.vt, tname)
-  if (recv_ty.startsWith("Map[")) { return `<<DEFER-host-map-call:${method}>>` }
+  let raw_method = value_str(value_field(node, "method"))
   var bv = []
   var i = 0
-  while (i < arg_nodes.length()) {
-    bv = bv.push(by_value_arg(arg_nodes[i], arg_exprs[i], ctx))
-    i = i + 1
+  if (recv_ty.startsWith("Map[") && (raw_method == "get" || raw_method == "remove")) {
+    while (i < arg_exprs.length()) {
+      if (i == 0) { bv = bv.push(`&${arg_exprs[0]}`) } else { bv = bv.push(arg_exprs[i]) }
+      i = i + 1
+    }
+  } else {
+    if (recv_ty.startsWith("Map[")) {
+      while (i < arg_nodes.length()) {
+        bv = bv.push(by_value_reuse(arg_nodes[i], arg_exprs[i], ctx))
+        i = i + 1
+      }
+    } else {
+      while (i < arg_nodes.length()) {
+        bv = bv.push(by_value_arg(arg_nodes[i], arg_exprs[i], ctx))
+        i = i + 1
+      }
+    }
   }
   var recv = ""
   if (tkind == "req") {
@@ -2511,10 +2540,7 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
 }
 
 // ------------------------------------------------------------ config (item 218)
-// `_binds`: the `let-effect` bind names (host acquisitions). Host bindings
-// themselves are DEFERRED; this only reports their names so a component that
-// declares one surfaces a `<<DEFER-bind-field>>` marker rather than silently
-// dropping a struct field.
+// `_binds`: the `let-effect` bind names (host acquisitions), document order.
 fn binds(comp: Any) -> List[Str] {
   var out = []
   for (s of value_list(value_field(comp, "body"))) {
@@ -2522,6 +2548,253 @@ fn binds(comp: Any) -> List[Str] {
   }
   return out
 }
+// ------------------------------------------ FR-4 host Map value type (1153)
+// The host `Map` is generic over its value type, and the frontend types a map
+// by that parameter — every `store.insert(k, v)` names it — so the emitter
+// carries it into the `Map<V>` it emits: a provider-struct field becomes
+// `Arc<Map<Vec<Msg>>>` and the acquisition `Map::<Vec<Msg>>::new()`. This is a
+// tiny oracle over the shapes an `insert` value takes in practice; anything it
+// cannot prove stays "" and the emitter falls back to `String`, the historical
+// surface, so a String-valued map keeps emitting byte-identically.
+//
+// A bare renderer context over the document's type tables: what the inference
+// below needs (`rbf`, for a record literal's nominal type) and what the
+// activation-body steps render against.
+fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
+  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
+}
+
+// `_map_value_expr_type`: best-effort SURFACE type of an expression. "" is the
+// reference's `None`.
+fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services: Any,
+                       functions: List[Any], ctx: Ctx) -> Str {
+  if (value_kind(node) != "record") { return "" }
+  let kind = node_kind(node)
+  if (kind == "name" || kind == "var") {
+    var nm = value_str(value_field(node, "id"))
+    if (nm == "") { nm = value_str(value_field(node, "name")) }
+    return map_get(var_types, nm)
+  }
+  if (kind == "lit") {
+    let k = value_kind(value_field(node, "value"))
+    if (k == "bool") { return "Bool" }
+    if (k == "int") { return "Int" }
+    if (k == "float") { return "Float" }
+    if (k == "str") { return "Str" }
+    return ""
+  }
+  if (kind == "format" || kind == "interp") { return "Str" }
+  if (kind == "list") {
+    let items = value_list(value_field(node, "items"))
+    if (items.length() == 0) { return "" }
+    let first = map_value_expr_type(items[0], var_types, comp, services, functions, ctx)
+    if (first == "") { return "" }
+    return `List[${first}]`
+  }
+  if (kind == "builtin") {
+    let method = value_str(value_field(node, "method"))
+    let args = value_list(value_field(node, "args"))
+    // `push` returns the receiver list extended by its argument, so the result
+    // element type is the argument's even when the receiver is untyped.
+    if (method == "push" && args.length() > 0) {
+      let elem = map_value_expr_type(args[0], var_types, comp, services, functions, ctx)
+      if (elem != "") { return `List[${elem}]` }
+    }
+    if (method == "length" || method == "charCodeAt" || method == "codepoint_at"
+        || method == "indexOf" || method == "to_int") { return "Int" }
+    if (method == "charAt" || method == "join" || method == "repeat"
+        || method == "to_str" || method == "slice") { return "Str" }
+    if (method == "split") { return "List[Str]" }
+    if (method == "concat") {
+      return map_value_expr_type(value_field(node, "target"), var_types, comp, services, functions, ctx)
+    }
+    return ""
+  }
+  if (kind == "fn") {
+    let nm = value_str(value_field(node, "name"))
+    for (f of functions) {
+      if (value_str(value_field(f, "name")) == nm) {
+        let r = value_field(f, "returns")
+        if (value_is_null(r)) { return "" }
+        return value_str(r)
+      }
+    }
+    return ""
+  }
+  if (kind == "call") {
+    let target = value_field(node, "target")
+    if (node_kind(target) == "req") {
+      let svc = map_get(reqs_map(comp), value_str(value_field(target, "name")))
+      if (svc != "" && !value_is_null(value_field(services, svc))) {
+        let decl = value_field(value_field(value_field(services, svc), "methods"),
+                               value_str(value_field(node, "method")))
+        let r = value_field(decl, "returns")
+        if (value_is_null(r)) { return "" }
+        return value_str(r)
+      }
+    }
+    return ""
+  }
+  if (kind == "record") {
+    var names = []
+    for (f of value_list(value_field(node, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+    let tn = record_type_for_fields(ctx, names)
+    // the reference RAISES on no-unique-match and treats that as "unknown"
+    if (tn.startsWith("<<")) { return "" }
+    return tn
+  }
+  // a lowered ADT construction carries its type on the node
+  if (kind == "adt") { return value_str(value_field(node, "type")) }
+  if (kind == "bin" && node_op(node) == "??") {
+    // `a ?? b` with an unknown left (a host `get`) is circular — the map value
+    // type is exactly what we are learning; use the right side only when it
+    // types concretely (a literal fallback).
+    let right = map_value_expr_type(value_field(node, "right"), var_types, comp, services, functions, ctx)
+    if (right != "" && right.indexOf("Never") < 0) { return right }
+    return ""
+  }
+  return ""
+}
+
+// Map verbs that write a value at arg[1]; each pins the host Map's value type.
+// Inferring from ANY writer (not the literal name `insert`) lets a CAS-only
+// writer pin a concrete V instead of the String default (item 397 / item 402).
+fn is_map_value_writer(method: Str) -> Bool {
+  return method == "insert" || method == "insert_if_absent"
+}
+// The compare-and-set host verb whose bound result is a `bool`.
+fn is_map_cas(acq: Any) -> Bool {
+  return node_kind(acq) == "call" && is_map_cas_verb(value_str(value_field(acq, "method")))
+}
+fn is_map_cas_verb(method: Str) -> Bool { return method == "insert_if_absent" }
+
+// `_map_expr_inserts`: candidate value types from any map value-writing call on
+// `bind` anywhere in an expression.
+fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
+                    functions: List[Any], ctx: Ctx, acc: List[Str]) -> List[Str] {
+  if (value_kind(node) != "record" && value_kind(node) != "list") { return acc }
+  var out = acc
+  if (value_kind(node) == "record" && node_kind(node) == "call") {
+    let target = value_field(node, "target")
+    if (node_kind(target) == "name" && value_str(value_field(target, "id")) == bind
+        && is_map_value_writer(value_str(value_field(node, "method")))) {
+      let args = value_list(value_field(node, "args"))
+      if (args.length() >= 2) {
+        let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx)
+        if (t != "" && t.indexOf("Never") < 0) { out = out.push(t) }
+      }
+    }
+    for (a of value_list(value_field(node, "args"))) {
+      out = map_expr_inserts(a, bind, var_types, comp, services, functions, ctx, out)
+    }
+    return map_expr_inserts(target, bind, var_types, comp, services, functions, ctx, out)
+  }
+  for (child of value_children(node)) {
+    out = map_expr_inserts(child, bind, var_types, comp, services, functions, ctx, out)
+  }
+  return out
+}
+
+// `_map_insert_candidates`: walk one body step for writes on `bind`.
+fn map_insert_candidates(step: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
+                         functions: List[Any], ctx: Ctx, acc: List[Str]) -> List[Str] {
+  var out = acc
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "effect" || kind == "let-effect") {
+    out = map_expr_inserts(value_field(step, "acquire"), bind, var_types, comp, services, functions, ctx, out)
+    out = map_expr_inserts(value_field(step, "undo"), bind, var_types, comp, services, functions, ctx, out)
+    for (nested of value_list(value_field(step, "setup"))) {
+      out = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, out)
+    }
+    return out
+  }
+  if (kind == "let" || kind == "assign") {
+    return map_expr_inserts(value_field(step, "value"), bind, var_types, comp, services, functions, ctx, out)
+  }
+  if (kind == "return") {
+    return map_expr_inserts(value_field(step, "expr"), bind, var_types, comp, services, functions, ctx, out)
+  }
+  if (kind == "if") {
+    for (nested of value_list(value_field(step, "then"))) {
+      out = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, out)
+    }
+    for (nested of value_list(value_field(step, "else"))) {
+      out = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, out)
+    }
+  }
+  return out
+}
+
+// `_map_value_rust_type`: the surface value type of a host Map binding, learned
+// from its write sites across the whole component (activation body + every
+// provide method). "" when no site pins one. A genuinely mixed map cannot be
+// one revl `Map[Str, V]`; the FIRST concrete candidate in document order is
+// deterministic, and a real conflict surfaces loudly in rustc at the write.
+fn map_value_surface_type(comp: Any, bind: Str, services: Any, functions: List[Any], ctx: Ctx) -> Str {
+  var cands = []
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) == "provide") {
+      let svc = value_field(services, value_str(value_field(step, "service")))
+      if (!value_is_null(svc)) {
+        for (method of value_list(value_field(step, "methods"))) {
+          let decl = value_field(value_field(svc, "methods"), value_str(value_field(method, "name")))
+          var vt: Map[Str, Str] = Map.empty()
+          for (mp of value_list(value_field(decl, "params"))) {
+            vt = vt.set(value_str(value_field(mp, "name")), value_str(value_field(mp, "type")))
+          }
+          for (bs of value_list(value_field(method, "body"))) {
+            cands = map_insert_candidates(bs, bind, vt, comp, services, functions, ctx, cands)
+          }
+        }
+      }
+    } else {
+      cands = map_insert_candidates(step, bind, Map.empty(), comp, services, functions, ctx, cands)
+    }
+  }
+  if (cands.length() == 0) { return "" }
+  return cands[0]
+}
+
+// `_component_map_values`: bind -> RUST value type for every host Map binding.
+fn component_map_values(comp: Any, services: Any, functions: List[Any], ctx: Ctx,
+                        tnames: Map[Str, Str]) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) != "let-effect") { continue }
+    let acq = value_field(step, "acquire")
+    if (node_kind(acq) != "host") { continue }
+    if (!value_str(value_field(acq, "fn")).startsWith("Map.")) { continue }
+    let bind = value_str(value_field(step, "bind"))
+    let surface = map_value_surface_type(comp, bind, services, functions, ctx)
+    if (surface == "") { out = out.set(bind, "String") }
+    else { out = out.set(bind, rust_type_t(surface, tnames)) }
+  }
+  return out
+}
+
+// `_host_of`: the Rust type a `let-effect` bind holds. A `spawn` acquisition
+// binds a live-instance handle, a result-declared CAS binds the atomic `bool`
+// result, and a host root binds that object — the Map generically, with the
+// value type learned above (defaulting to the historical `String`).
+fn host_of(comp: Any, bind: Str, map_values: Map[Str, Str]) -> Str {
+  for (s of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(s, "step")) == "let-effect" && value_str(value_field(s, "bind")) == bind) {
+      let acq = value_field(s, "acquire")
+      if (value_str(value_field(acq, "kind")) == "spawn") { return "RevlSpawnHandle" }
+      if (is_map_cas(acq)) { return "bool" }
+      var host = value_str(value_field(acq, "fn")).split(".")[0]
+      if (host == "") { host = "Value" }
+      if (host == "Map") { 
+        var v = map_get(map_values, bind)
+        if (v == "") { v = "String" }
+        return `Map<${v}>`
+      }
+      return host
+    }
+  }
+  return "Value"
+}
+
 fn has_config(comp: Any) -> Bool { return value_list(value_field(comp, "config")).length() > 0 }
 
 // `_references_config`: does this IR subtree read component config (a `config`
@@ -2816,7 +3089,7 @@ fn fr_map(ir: Any) -> Map[Str, Str] {
 // applies to method names; the simple path names them raw (mirrors the two
 // reference sites exactly). `effectful` gives the effectful body renderer +
 // the `self.ctx` field capture.
-fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool) -> List[Str] {
+fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool, map_values: Map[Str, Str]) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   let svc_methods = value_field(value_field(services, srv), "methods")
   var out = []
@@ -2827,6 +3100,11 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     let svc_method = value_field(svc_methods, orig)
     var ps = []
     var vt: Map[Str, Str] = Map.empty()
+    // A host Map binding is registered as a `Map[..]` marker so the renderer
+    // knows its `get`/`remove` keys must be borrowed (FR-4). Params are
+    // registered after, so a param shadowing a bind name wins, as it does in
+    // the reference's dict merge.
+    for (b of map_values.keys()) { vt = vt.set(b, `Map[${map_get(map_values, b)}]`) }
     for (pn of value_list(value_field(method, "params"))) {
       let pname = value_str(pn)
       let ptype = service_param_type(svc_method, pname)
@@ -2927,6 +3205,68 @@ fn revl_realm_helper(components: List[Any]) -> List[Str] {
   return out
 }
 
+// `_emit_step`, the `let-effect` arm: a host acquisition in the ACTIVATION
+// body. `let <b> = Arc::new(<acquire>);` then the bracket inverse registered on
+// the same `ctx.effect` ledger that reverts a provision, so unloading the
+// component provably releases the resource. A `Map.new()` acquisition pins its
+// value type at the constructor so rustc never has to infer it — a binding no
+// provider struct captures, or one whose only typed use is a `get`, would leave
+// `Map<V>` open. Required services are recloned into the closure so the undo
+// owns its own handle.
+//
+// Still DEFERRED here, each REPORTED: a `setup` block, a witnessed-extern
+// acquisition (whose inverse is the extern's DECLARED one, registered
+// transactionally, not this site-spelled bracket), and the result-declared map
+// CAS (whose undo is guarded on the bool the acquire bound).
+fn witnessed_acquire(ir: Any, acq: Any) -> Bool {
+  if (node_kind(acq) != "fn") { return false }
+  let nm = value_str(value_field(acq, "name"))
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "witnessed"
+        && value_str(value_field(ext, "name")) == nm) { return true }
+  }
+  return false
+}
+
+fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
+                        map_values: Map[Str, Str], indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  var out = []
+  let raw_bind = value_str(value_field(step, "bind"))
+  let bind = mangle(raw_bind)
+  let acq_node = value_field(step, "acquire")
+  if (value_list(value_field(step, "setup")).length() > 0) {
+    out = out.push(`${pad}<<DEFER-let-effect-setup:${raw_bind}>>`)
+  }
+  if (witnessed_acquire(ir, acq_node)) {
+    out = out.push(`${pad}<<DEFER-let-effect-witnessed:${raw_bind}>>`)
+    return out
+  }
+  if (is_map_cas(acq_node)) {
+    out = out.push(`${pad}<<DEFER-let-effect-cas:${raw_bind}>>`)
+    return out
+  }
+  var acq_src = render_expr(acq_node, ctx)
+  if (node_kind(acq_node) == "host" && value_str(value_field(acq_node, "fn")) == "Map.new") {
+    var v = map_get(map_values, raw_bind)
+    if (v == "") { v = "String" }
+    acq_src = `Map::<${v}>::new()`
+  }
+  out = out.push(`${pad}let ${bind} = Arc::new(${acq_src});`)
+  let undo_name = `${bind}_undo`
+  out = out.push(`${pad}let ${undo_name} = ${bind}.clone();`)
+  var undoR: Map[Str, Str] = Map.empty()
+  undoR = undoR.set(raw_bind, undo_name)
+  for (req of value_keys(value_field(comp, "requires"))) {
+    out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
+    undoR = undoR.set(req, `${req}_undo`)
+  }
+  let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
+  let label = string_lit(`${value_str(value_field(comp, "name"))}.${raw_bind}.undo`)
+  out = out.push(`${pad}ctx.effect(${label}, move || { ${undox}; Ok(()) })?;`)
+  return out
+}
+
 // `_emit_component` (the SIMPLE provider path): a component with NO isolate /
 // intercept and NO effectful (`effect`/`emit`) method — but it MAY carry config
 // and required services (item 218). The provider struct captures each required
@@ -2944,17 +3284,19 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   let reqs = value_field(comp, "requires")
   let body = value_list(value_field(comp, "body"))
   let cty = config_ty(comp)
+  let functions = value_list(value_field(ir, "functions"))
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`<<DEFER-bind-field:${b}>>`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), compute_list_param_borrows(value_list(value_field(ir, "functions"))), false, false))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), false, false, map_values))
     out = out.push("}")
     out = out.push("")
   }
@@ -2971,7 +3313,11 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
-      out = out.push(`<<DEFER-comp-step:${kind}>>`)
+      if (kind == "let-effect") {
+        out = out.concat(emit_let_effect_step(comp, step, ir, plain_ctx(tables, fr), map_values, 3))
+      } else {
+        out = out.push(`<<DEFER-comp-step:${kind}>>`)
+      }
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")
@@ -3003,6 +3349,8 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   // methods are pure carries no `ctx` field and no `ctx: Arc::new(..)` ctor
   // field (issue 1153).
   let has_eff = component_has_effectful_methods(comp)
+  let functions = value_list(value_field(ir, "functions"))
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
   if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
   if (component_uses_await(comp)) { out = out.push(`<<DEFER-await:${name}>>`) }
@@ -3010,13 +3358,13 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`<<DEFER-bind-field:${b}>>`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), compute_list_param_borrows(value_list(value_field(ir, "functions"))), true, true))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), true, true, map_values))
     out = out.push("}")
     out = out.push("")
   }
@@ -3033,7 +3381,11 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
-      out = out.push(`<<DEFER-comp-step:${kind}>>`)
+      if (kind == "let-effect") {
+        out = out.concat(emit_let_effect_step(comp, step, ir, plain_ctx(tables, fr), map_values, 3))
+      } else {
+        out = out.push(`<<DEFER-comp-step:${kind}>>`)
+      }
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")
