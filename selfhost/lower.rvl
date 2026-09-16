@@ -7685,7 +7685,24 @@ fn tk_rec(fields: List[InitN], env: List[Bind]) -> TInf {
 fn tk_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> TInf {
   let b = tk_infer(base, env)
   if (b.v != "") { return b }
+  // An UNKNOWN base is the one shape the INFER position still walks the update
+  // values under: the reference infers each of them and answers unknown, so a
+  // refusal inside one (a `null`, an infinite `Float` literal, a `~` on a
+  // record) is reached exactly as it is anywhere else. The CHECK position has
+  // no such arm, which is why this is not in the shared per-field walk.
+  if (b.ty == "") {
+    let v = tk_upd_values(upds, 0, env)
+    if (v.v != "") { return v }
+    return tk_ok("")
+  }
   return tk_upd_fields(b.ty, upds, 0, env, false)
+}
+
+fn tk_upd_values(upds: List[InitN], i: Int, env: List[Bind]) -> TInf {
+  if (i >= upds.length()) { return tk_ok("") }
+  let r = tk_infer(upds[i].value, env)
+  if (r.v != "") { return r }
+  return tk_upd_values(upds, i + 1, env)
 }
 
 fn tk_if(cond: Expr, then_: Expr, els: Expr, env: List[Bind]) -> TInf {
