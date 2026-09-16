@@ -2481,6 +2481,64 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
   return out
 }
 
+// ------------------------------------------------------- realms (issue 1153)
+// `_collect_realm_labels`: every distinct realm-label string the program
+// isolates on, sorted. Sorting makes index assignment a pure function of the
+// label SET, so the same source lowers to the same Isolation values on every
+// build. A router resolves its worker realms by label too (item 167); every
+// such realm normally has a provider and is therefore already collected, but
+// the reference registers them explicitly and so does this.
+fn collect_realm_labels(components: List[Any]) -> List[Str] {
+  var seen: Map[Str, Str] = Map.empty()
+  for (comp of components) {
+    let iso = value_field(comp, "isolate")
+    for (key of value_keys(iso)) { seen = seen.set(value_str(value_field(iso, key)), "1") }
+    let routes = value_field(comp, "routes")
+    for (key of value_keys(routes)) {
+      for (r of value_list(value_field(value_field(routes, key), "realms"))) {
+        seen = seen.set(value_str(r), "1")
+      }
+    }
+  }
+  return list_sort(seen.keys())
+}
+
+// `_needs_realm_helper`: the preamble rides along only for a document that
+// actually places something in a realm.
+fn needs_realm_helper(components: List[Any]) -> Bool {
+  for (comp of components) {
+    if (value_keys(value_field(comp, "isolate")).length() > 0) { return true }
+  }
+  return false
+}
+
+// `_revl_realm_helper`: lower each distinct realm label to a STABLE,
+// DETERMINISTIC Isolation from a reserved high region of the u64 scope space.
+// cordis-rs mints framework scope labels from a monotonic counter starting at
+// 1, so every framework label lands in [1, 2^63); tagging realm labels with the
+// top bit puts them provably out of that counter's reach. Distinct labels get
+// distinct indices, so equal strings share a realm and no two realms collide.
+fn revl_realm_helper(components: List[Any]) -> List[Str] {
+  let labels = collect_realm_labels(components)
+  var out = []
+  out = out.push("pub fn _revl_realm(label: &str) -> cordis::Isolation {")
+  out = out.push("    // Top bit reserved for realm labels: disjoint from cordis-rs's")
+  out = out.push("    // monotonic scope counter (starts at 1, +1 each isolate()).")
+  out = out.push("    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;")
+  out = out.push("    let index: u64 = match label {")
+  var i = 0
+  while (i < labels.length()) {
+    out = out.push(`        ${string_lit(labels[i])} => ${num_str(i)},`)
+    i = i + 1
+  }
+  out = out.push("        other => panic!(\"revl: realm label {other:?} missing from compile-time registry\"),")
+  out = out.push("    };")
+  out = out.push("    cordis::Isolation::from_raw(REVL_REALM_TAG | index)")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
 // `_emit_component` (the SIMPLE provider path): a component with NO isolate /
 // intercept and NO effectful (`effect`/`emit`) method — but it MAY carry config
 // and required services (item 218). The provider struct captures each required
@@ -2552,8 +2610,12 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   let reqs = value_field(comp, "requires")
   let body = value_list(value_field(comp, "body"))
   let cty = config_ty(comp)
+  // The reference gates the `ctx` capture on the component having an EFFECTFUL
+  // method, not on being on this path: an isolate-only component whose provide
+  // methods are pure carries no `ctx` field and no `ctx: Arc::new(..)` ctor
+  // field (issue 1153).
+  let has_eff = component_has_effectful_methods(comp)
   var out = emit_config_struct_lines(comp)
-  if (value_keys(value_field(comp, "isolate")).length() > 0) { out = out.push(`<<DEFER-isolate:${name}>>`) }
   if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
   if (component_uses_await(comp)) { out = out.push(`<<DEFER-await:${name}>>`) }
   for (key of value_keys(provs)) {
@@ -2563,7 +2625,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     for (b of binds(comp)) { out = out.push(`<<DEFER-bind-field:${b}>>`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
-    out = out.push("    ctx: Arc<cordis::Context>,")
+    if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
     out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), compute_list_param_borrows(value_list(value_field(ir, "functions"))), true, true))
@@ -2581,7 +2643,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
-      out = out.concat(emit_provide_construction(comp, step, true, 3))
+      out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
       out = out.push(`<<DEFER-comp-step:${kind}>>`)
     }
@@ -2830,14 +2892,22 @@ fn emit_bridge(ir: Any) -> List[Str] {
   out = out.push("}")
   out = out.push("")
 
-  // comp name -> realm-isolated context (subset: no comp isolates, so
-  // only the `_ => ctx.clone()` arm; isolate placements are DEFERRED).
+  // comp name -> realm-isolated context. cordis fixes a fiber's isolation scope
+  // at plug time (its `Inject` gate is evaluated against this context, before
+  // the plugin body runs), so every plug site isolates HERE rather than inside
+  // the plugin body — which is what lets an isolated `requires kv in realm("t")`
+  // reactively link to an isolated provider in the same realm (issue 1153).
   out = out.push("pub fn _revl_isolate_ctx(ctx: &cordis::Context, name: &str) -> cordis::Context {")
   out = out.push("    match name {")
   for (comp of components) {
     let iso = value_field(comp, "isolate")
     if (value_keys(iso).length() > 0) {
-      out = out.push(`<<DEFER-isolate:${value_str(value_field(comp, "name"))}>>`)
+      let snk = snake(value_str(value_field(comp, "name")))
+      var expr = "ctx"
+      for (key of value_keys(iso)) {
+        expr = `${expr}.isolate_with(${string_lit(key)}, _revl_realm(${string_lit(value_str(value_field(iso, key)))}))`
+      }
+      out = out.push(`        "${snk}" => ${expr},`)
     }
   }
   out = out.push("        _ => ctx.clone(),")
@@ -3003,7 +3073,9 @@ pub fn emit_rust_src(ir: Any) -> Str {
     out = out.concat(stdlib_helpers())
     out = out.push("")
   }
-  for (comp of value_list(value_field(ir, "components"))) {
+  let components = value_list(value_field(ir, "components"))
+  if (needs_realm_helper(components)) { out = out.concat(revl_realm_helper(components)) }
+  for (comp of components) {
     out = out.concat(emit_component_auto(comp, services, ir))
   }
   out = out.concat(emit_bridge(ir))
