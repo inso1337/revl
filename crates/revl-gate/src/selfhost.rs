@@ -9641,7 +9641,7 @@ fn rp_mentions(ty: String, names: &[String]) -> bool {
     let mut i = 0i64;
     while (i < ts.revl_length()) {
         let t = (ts)[(i) as usize].clone();
-        if ((t.kind == "ident") && contains(names, &t.text)) {
+        if ((t.kind == "ident") && contains__m2(names, &t.text)) {
             return true;
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
