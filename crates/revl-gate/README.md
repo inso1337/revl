@@ -219,10 +219,11 @@ Two honest limits, both fail-closed:
   blocker is no longer packaging: the native rust emitter IS in this crate (see
   `emit_ir` below). What is missing is a native FRONTEND whose IR byte-agrees
   with the reference — the self-host's `lower_to_ir` is behind the reference's
-  (roadmap item 391), and measured through this crate's own closure it emits the
-  reference's bytes for 10 of the 73 accepted programs in the covered corpus.
-  Handing back the other 63 would be handing a caller target source this crate
-  cannot back, so the arm refuses instead. `py` is blocked one step earlier:
+  (roadmap item 391). It is pinned byte-exact only on the document set
+  `tests/test_selfhost_compile.py` names (`RUST_FUNCTION_DOCS` +
+  `RUST_COMPONENT_DOCS`), which is far narrower than this crate's covered
+  corpus. Handing back an emission from outside that set would be handing a
+  caller target source this crate cannot back, so the arm refuses instead. `py` is blocked one step earlier:
   `selfhost/emit_py.rvl`'s helper externs are `@py`-only, so no py emitter can
   be generated into the crate at all.
 * **The reference type layer.** Still absent, in `admit` and in `admit_into`
@@ -320,7 +321,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:67e7cc342eab62f2"
+    // frontier "selfhost-admit:799d6264c536c400"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
