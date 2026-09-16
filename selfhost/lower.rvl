@@ -7063,8 +7063,58 @@ fn tk_opt_escape(what: Str, target: Str) -> TInf {
     .concat("`Opt[T]`, never silently back out"))
 }
 
+// A type's argument list, split at depth 0 with BRACES and PARENS tracked
+// beside brackets. The annotation engine's `type_args` tracks brackets only,
+// which reads `List[{x: Int, y: Int}]` as a TWO-argument `List` and so made a
+// container of structural records disagree with its nominal element type on
+// arity alone. Nothing about the emitted IR changes: this split is the type
+// layer's own.
+fn tk_split_depth(inner: Str) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  while (i < inner.length()) {
+    let c = inner.charAt(i)
+    if (c == "[" || c == "{" || c == "(") { depth += 1  cur = cur.concat(c) }
+    else { if (c == "]" || c == "}" || c == ")") { depth -= 1  cur = cur.concat(c) }
+    else { if (c == "," && depth == 0) { out = out.push(ty_trim(cur))  cur = "" }
+    else { cur = cur.concat(c) } } }
+    i += 1
+  }
+  return out.push(ty_trim(cur))
+}
+
+fn tk_args(t: Str) -> List[Str] {
+  let b = t.indexOf("[")
+  if (b == 0 - 1) { return [] }
+  let inner = t.slice(b + 1, t.length() - 1)
+  if (inner == "") { return [] }
+  return tk_split_depth(inner)
+}
+
+fn tk_arg1(t: Str) -> Str {
+  let a = tk_args(t)
+  return a.length() == 0 ? "" : a[0]
+}
+
 fn tk_is_struct(t: Str) -> Bool {
   return t.length() >= 2 && t.charAt(0) == "{" && t.charAt(t.length() - 1) == "}"
+}
+
+// `structural_fields(t)[name]`, over the brace-aware split.
+fn tk_struct_field(t: Str, name: Str) -> Str {
+  if (!tk_is_struct(t)) { return "" }
+  let parts = tk_split_depth(t.slice(1, t.length() - 1))
+  var i = 0
+  while (i < parts.length()) {
+    let ci = parts[i].indexOf(":")
+    if (ci != 0 - 1 && ty_trim(parts[i].slice(0, ci)) == name) {
+      return ty_trim(parts[i].slice(ci + 1, parts[i].length()))
+    }
+    i += 1
+  }
+  return ""
 }
 
 fn tk_is_fn_ty(t: Str) -> Bool { return t.length() > 0 && t.charAt(0) == "(" }
@@ -7098,16 +7148,16 @@ fn tk_compatible(expected: Str, actual: Str) -> Bool {
   if (eh == "Float" && ah == "Int") { return true }
   if ((eh == "Int" || eh == "Float") && ah == "Int32") { return true }
   if (eh == "Async" && ah != "Async") {
-    return tk_compatible(type_arg1(expected), actual)
+    return tk_compatible(tk_arg1(expected), actual)
   }
   if (eh == "Opt") {
-    let ei = type_arg1(expected)
+    let ei = tk_arg1(expected)
     if (ei == "") { return true }              // bare `Opt` degrades to wildcard
-    if (ah == "Opt") { return tk_compatible(ei, type_arg1(actual)) }
+    if (ah == "Opt") { return tk_compatible(ei, tk_arg1(actual)) }
     return tk_compatible(ei, actual)           // T -> Opt[T] injection
   }
-  let ea = type_args(expected)
-  let aa = type_args(actual)
+  let ea = tk_args(expected)
+  let aa = tk_args(actual)
   if (eh == ah && ea.length() == aa.length()) {
     var i = 0
     var ok = true
@@ -7123,8 +7173,8 @@ fn tk_compatible(expected: Str, actual: Str) -> Bool {
 // Two structural record shapes unify field-wise: the same field set, each value
 // type compatible.
 fn tk_struct_compat(expected: Str, actual: Str) -> Bool {
-  let ef = split_top_commas(expected.slice(1, expected.length() - 1))
-  let af = split_top_commas(actual.slice(1, actual.length() - 1))
+  let ef = tk_split_depth(expected.slice(1, expected.length() - 1))
+  let af = tk_split_depth(actual.slice(1, actual.length() - 1))
   if (ef.length() != af.length()) { return false }
   var i = 0
   var ok = true
@@ -7134,7 +7184,7 @@ fn tk_struct_compat(expected: Str, actual: Str) -> Bool {
     else {
       let nm = ty_trim(ef[i].slice(0, ci))
       let et = ty_trim(ef[i].slice(ci + 1, ef[i].length()))
-      let at = struct_field(actual, nm)
+      let at = tk_struct_field(actual, nm)
       if (at == "" || !tk_compatible(et, at)) { ok = false }
     }
     i += 1
@@ -7338,7 +7388,25 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   if (tv.v != "") { return tv }
   let a = tk_items(c.args, 0, env, "")
   if (a.v != "") { return a }
-  return tk_ok(infer_call_ty(c, env))
+  return tk_ok(tk_call_result(infer_call_ty(c, env)))
+}
+
+// Two rules the annotation engine has no reason to apply and the checker does.
+//
+//   * ELIMINATION (item 92 §2): calling an async-typed value yields the
+//     UNWRAPPED `T` — the tier-level await is implicit, and no EXPRESSION ever
+//     has type `Async[T]`. Without this a `(Str) -> Async[Str]` callback's
+//     result was refused against a `Str` return in four corpus documents the
+//     reference admits.
+//   * `Any` in a function type's return is the ABSENCE of a claim (item 75(a)
+//     §3.2), not the erased-dynamic type: handing it back would make the
+//     erased-value field rule refuse a call that claims nothing. Unknown, not
+//     `Any`. This walk cannot tell a function-VALUE call from a module-`fn`
+//     one, so the non-claim reading is taken for both — the silent direction.
+fn tk_call_result(t: Str) -> Str {
+  if (parse_head(t) == "Async") { return tk_arg1(t) }
+  if (t == "Any") { return "" }
+  return t
 }
 
 // The callee POSITION. A bare name and a method receiver are not value reads of
@@ -7382,7 +7450,7 @@ fn tk_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> TInf {
   var i = 0
   while (i < upds.length()) {
     let u = upds[i]
-    let fty = structural ? struct_field(b.ty, u.name)
+    let fty = structural ? tk_struct_field(b.ty, u.name)
                          : infer_field(b.ty, u.name, env)
     if (structural && fty == "") {
       return tk_no("TYPE", "record update names `".concat(u.name)
@@ -7856,11 +7924,12 @@ fn fb_params_scope(ps: List[ParamN], i: Int, acc: List[Bind]) -> List[Bind] {
 // type names and the module `fn` signatures). A parameter with no written type
 // contributes nothing, which leaves it on the gradual frontier rather than
 // guessing at it.
-fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind]) -> List[Bind] {
+fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
+                 tps: List[Str]) -> List[Bind] {
   if (i >= ps.length()) { return acc }
-  let ty = taint_strip(ps[i].ty)
+  let ty = mark_tparams(taint_strip(ps[i].ty), tps)
   return fb_params_tys(ps, i + 1,
-                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty))
+                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps)
 }
 
 // One module `fn` located from its `fn` keyword (`pub` already stepped over by
@@ -7893,9 +7962,17 @@ fn fb_span(ts: List[Token], i: Int) -> FbSpan {
   return { ps: ps.ps, ret: ret, lo: body, hi: bend - 1, next: bend, ok: true }
 }
 
-fn fb_function(ts: List[Token], sp: FbSpan, gtys: List[Bind]) -> Verd {
+fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
+  // Inside its own body a fn's type parameters are universally quantified
+  // wildcards (`T` -> `?T`, `mark_tparams`), so a generic signature's return
+  // is not a concrete type the body can be held to. Without the marking
+  // `fn ident(x: T) -> T` refused its own `return x`, and `misuse`'s
+  // `return ident("hello")` drew a T1 naming `T` where the reference names the
+  // UNIFIED `Str` — a refusal with the right verdict and the wrong sentence.
+  let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
   return fb_walk(fb_scan(ts, sp.lo, sp.hi), 0, fb_params_scope(sp.ps, 0, []),
-                 fb_params_tys(sp.ps, 0, gtys), sp.ret).v
+                 fb_params_tys(sp.ps, 0, gtys, tps),
+                 mark_tparams(sp.ret, tps)).v
 }
 
 // The first refusing module `fn` in declaration order. Top-level forms other than
@@ -7934,7 +8011,7 @@ fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind]) -> Verd {
   if (t.text == "fn") {
     let sp = fb_span(ts, i)
     if (!sp.ok) { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
-    let v = fb_function(ts, sp, gtys)
+    let v = fb_function(ts, i, sp, gtys)
     if (v.v != "") { return v }
     return fb_refusal_at(ts, sp.next, gtys)
   }
