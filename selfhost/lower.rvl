@@ -14529,3 +14529,110 @@ test "a destructuring let is read, not refused" {
   let v = admit_src("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }")
   assert v == ""
 }
+
+// ------------------------------------------------ item 130: stream statements
+//
+// The three forms the reader had no case for. Each test below is one half of a
+// pair: the form is read (so a name it BINDS resolves), and reading it does not
+// stop refusing what the reference refuses inside it. The second half is the
+// one that matters here — reading a statement the reader used to skip WIDENS
+// what this gate admits, and the last two of these were no-objections before.
+
+test "a subscription bracket binds its name" {
+  // `await sub.next()` resolved against nothing while the whole run was
+  // skipped, so this drew "`sub` is not a declared requirement of Parked" —
+  // the false rejection five backend fixtures carried.
+  let v = admit_src("""component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}""")
+  assert v == ""
+}
+
+test "an undeclared stream in a subscribe head is refused (G1)" {
+  // the other side of reading the form: the head is an ordinary expression the
+  // reference resolves, and a skipped run resolved nothing in it. This was a
+  // NO-OBJECTION before the branch existed.
+  let v = admit_src("""component C {
+  let sub = subscribe nostream undo sub.close()
+}""")
+  assert v == "G1|`nostream` is not a declared requirement of C"
+}
+
+test "a fan-in operand is resolved even though `merge` is not (G1)" {
+  // `merge` names nothing — the reference parses the fan-in before its
+  // expression grammar runs — so the exemption is the WORD, and the operands
+  // under it stay ordinary heads. Also a no-objection before.
+  let v = admit_src("""component C {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe merge(a, nob) undo sub.close()
+}""")
+  assert v == "G1|`nob` is not a declared requirement of C"
+}
+
+test "an `every … in` body still refuses an undeclared name (G1)" {
+  let v = admit_src("""service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(nope) }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of C"
+}
+
+test "an `on … as` body still refuses an undeclared name (G1)" {
+  let v = admit_src("""event E(key: k) { k: Str }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on E as e in sub { emit sink.write(nope) }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of C"
+}
+
+test "an `every … in` body is not pruned the way a timer body is (A1)" {
+  // the two `every` forms differ on more than their header. A timer body
+  // carries its own in-flight window, so the reference prunes it from the A1
+  // name fence and this gate marks it `inTimer` to match. A `stream-iter` step
+  // is NOT one of the three the reference's prune returns on — it walks the
+  // body — so reading the iteration through the timer branch's blind `{`-scan
+  // would have admitted this.
+  let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(hf(o)) }
+}""")
+  assert v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"
+}
+
+test "the timer body's prune survives the iteration branch" {
+  // the same reach under `every <n><unit>`, which the reference admits and
+  // colours async (item 170). The pair pins the disambiguation, not just the
+  // parse: one token of lookahead decides which of the two answers is right.
+  let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  every 15s { emit sink.write(hf("x")) }
+}""")
+  assert v == ""
+}
+
+test "an unmarked emission inside an iteration body is still G4" {
+  // the body is a setup-mode effect context, so its emission rules are the
+  // ones the statements around it get; the `provide` tail proves the walk
+  // came back out of the block rather than swallowing the rest of the
+  // component with it.
+  let v = admit_src("""service Sink { emission fn write(v: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires sink: Sink provides api: Api {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+  provide api { fn go() { return sink.write("x") } }
+}""")
+  assert v == "G4|call to emission `sink.write` must be marked `emit` (G4)"
+}
