@@ -1256,6 +1256,37 @@ component C provides cache: Cache {
   }
 }
 """),
+    # ---- the transparent alias, across every declaration site the
+    # provide-method type layer reads (docs/design/457) ----------------------
+    # The corpus had no document that spelled `type X = <scalar>` and then used
+    # X in a signature, so nothing held the gate to ERASING it. The reference
+    # does erase it, which makes every position below an ordinary `Int`/`Str`
+    # and the whole component legal; a gate that reads the alias as a type of
+    # its own refuses all of them at once. This is an ACCEPTED program for that
+    # reason — it is the false rejection, written down.
+    ("a transparent alias through a service, a config field and a body", """
+type Slot = Int
+type Label = Str
+
+service Shelf {
+  fn at(i: Slot) -> Label
+  fn width() -> Slot
+}
+
+component Rack provides shelf: Shelf {
+  config { size: Slot = 3 }
+
+  let rows = effect Map.new() undo rows.drop()
+
+  provide shelf {
+    fn at(i: Slot) -> Label {
+      let names: List[Str] = ["a", "b", "c"]
+      return names[i]
+    }
+    fn width() -> Slot { return 3 }
+  }
+}
+"""),
 ]
 
 
