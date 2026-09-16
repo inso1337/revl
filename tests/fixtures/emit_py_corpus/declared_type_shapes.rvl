@@ -1,0 +1,40 @@
+// The DECLARED-TYPE surface, on the ACCEPTING side (docs/design/457-selfhost-
+// type-layer.md slice T1). `selfhost/lower.rvl` now runs
+// `selfhost/types.rvl::check_type_wellformed` over every module `fn` and
+// `extern` signature and every config field, which is a phase that can only go
+// wrong in two directions: it can miss a malformed annotation (the
+// `examples/rejections/t6_bare_generic.rvl` direction, pinned there), or it can
+// refuse a WELLFORMED one. Nothing in the corpus stressed the second direction:
+// a phase that refused, say, every nested type argument or every function-typed
+// parameter would have left the rejection fixtures green and quietly stopped
+// compiling real programs.
+//
+// So every shape the walk recurses through is written here once, all of them
+// legal: nested generic arguments to full arity, a function-typed parameter, a
+// function type nested inside a container, a curried function type (whose
+// RETURN position is the only place the walk carries the async permission
+// forward), and the one v1 position that admits an async function type at all —
+// a module `fn` parameter (item 92). The document compiles and emits like any
+// other, which is the assertion.
+
+type Row = { id: Int, name: Str }
+
+fn depth(rows: Map[Str, List[Opt[Row]]]) -> Opt[Result[List[Int], Str]] {
+  return None
+}
+
+fn takes_fn(f: (Int, Str) -> Bool) -> Bool {
+  return f(1, "a")
+}
+
+fn fn_in_a_container(fs: List[(Int) -> Int]) -> Int {
+  return 0
+}
+
+fn curried(f: (Int) -> (Str) -> Bool) -> Int {
+  return 0
+}
+
+fn async_slot(complete: (List[Str]) -> Async[Str]) -> Int {
+  return 0
+}
