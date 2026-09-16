@@ -106,6 +106,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _boundary_witness import shared_witness_token_reason  # noqa: E402
+
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_py_corpus"
 CORPUS = [
     # function-only documents (slice 1); still byte-exact after the value_*
@@ -571,5 +575,8 @@ def test_named_runtime_and_harness_boundaries(emitted, reference, path, referenc
     actual = emitted["emit_py_src"](ir)
     assert reference_text in expected
     assert reference_text not in actual
+    # A port marker the reference emits too witnesses nothing (item 1136).
+    reason = shared_witness_token_reason(expected, port_marker)
+    assert reason is None, reason
     if port_marker is not None:
         assert port_marker in actual
