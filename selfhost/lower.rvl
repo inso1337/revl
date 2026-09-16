@@ -271,7 +271,13 @@ type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
 // emission); `isEm`/`isAsync` are the declared emission/async properties.
-type MSig = { name: Str, isEm: Bool, caps: List[Str], isAsync: Bool }
+// `ps`/`ret` are the DECLARED signature (docs/design/457, the provide-method
+// slice): the service is the source of truth for a provider's parameter types
+// and its return, so a provide method's body types its unannotated parameters
+// out of this row and a `provide` that never returns is judged against it.
+// `ret` is "" for an operation that declares no return type.
+type MSig = { name: Str, isEm: Bool, caps: List[Str], isAsync: Bool,
+              ps: List[ParamN], ret: Str }
 type SvcD = { name: Str, methods: List[MSig] }
 
 // A body statement. kind: emit | effect | undo | return | expr | skip. The
@@ -304,13 +310,26 @@ type SvcD = { name: Str, methods: List[MSig] }
 // the body into setup instead, so the marker is what carries the same prune.
 // Every OTHER verdict — G1, G4, the G8 audit reach — reads a timer body exactly
 // as it reads the statements around it, which is the reference's rule too.
-type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool }
+// `bindTy` is the ANNOTATION a `let x: T = …` / `var x: T = …` writes, "" when
+// the binding leaves its type to inference. The type layer over a component body
+// reads it (docs/design/457): an annotated local is the one name in such a body
+// whose type is written down rather than resolved through a table this walk does
+// not carry.
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool, bindTy: Str }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
 // the method's own `async fn` modifier — checked for signature parity against
 // the service op it implements (lower.py's `method.async_ != decl.async_`).
-type ProvM   = { name: Str, params: List[Str], body: List[Stmt], isAsync: Bool }
+// `ps` is the method's OWN parameter list, annotations included ("" for an
+// unannotated one); `params` stays the name-only projection the G1 scope reads.
+// `ret` is a restated `-> T`, "" when the method leaves it to the service.
+// `isArrow` marks the `fn m(p) = expr` shorthand, whose single expression IS
+// the result — the reference turns it into a return, so the missing-return rule
+// does not apply to one. `line` is the `fn` keyword's source line, the line the
+// reference's signature diagnostics carry (`method.line`).
+type ProvM   = { name: Str, params: List[Str], body: List[Stmt], isAsync: Bool,
+                 ps: List[ParamN], ret: Str, isArrow: Bool, line: Int }
 type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
 // A declared provision key and the realm it lives in ("" = the shared realm).
 type ProvKey = { key: Str, rlm: Str }
@@ -1062,8 +1081,9 @@ fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
            line: ln }
 }
 
-fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
-  return { name: nm, isEm: em, caps: cs, isAsync: asy }
+fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
+             ps: List[ParamN], ret: Str) -> MSig {
+  return { name: nm, isEm: em, caps: cs, isAsync: asy, ps: ps, ret: ret }
 }
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
@@ -1093,21 +1113,21 @@ fn concat_refs(reqs: List[SvcRef], provs: List[SvcRef], i: Int) -> List[SvcRef] 
 
 fn mkstmt(kind: Str, e: Expr) -> Stmt {
   return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false, line: 0,
-           inTimer: false }
+           inTimer: false, bindTy: "" }
 }
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false, line: 0,
-           inTimer: false }
+           inTimer: false, bindTy: "" }
 }
 
 // A forward `effect`/`emit`/`undo`/`compensate` statement carrying its item-131
 // `await` marker (`aw`). Replaces the free-standing `await` marker statement:
 // the marker belongs to the acquisition/emission it pairs with, not the
 // position after it, so per-statement pairing can read it directly.
-fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
+fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool, ty: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0,
-           inTimer: false }
+           inTimer: false, bindTy: ty }
 }
 
 // A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
@@ -1116,7 +1136,7 @@ fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
   return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target,
-           awaited: false, line: 0, inTimer: false }
+           awaited: false, line: 0, inTimer: false, bindTy: "" }
 }
 
 // An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
@@ -1126,7 +1146,7 @@ fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
 // composes); the post-parse `spawn_form_verdict` reports it.
 fn mkstmt_spawn_unbound(target: Str) -> Stmt {
   return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target,
-           awaited: false, line: 0, inTimer: false }
+           awaited: false, line: 0, inTimer: false, bindTy: "" }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -1171,7 +1191,12 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     var eq = lo + 2
-    if (atk(ts, eq, ":")) { eq = type_at(ts, eq + 1).i }
+    var ann = ""
+    if (atk(ts, eq, ":")) {
+      let ta = type_at(ts, eq + 1)
+      if (ta.ok) { ann = taint_strip(ta.ty) }
+      eq = ta.i
+    }
     if (!atk(ts, eq, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
     let bn = tkc(ts, lo + 1).text
     var j = eq + 1
@@ -1208,11 +1233,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     }
     let r = operand_at(ts, j)
     if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
-    let out: List[Stmt] = [mkstmt_aw(kd, r.e, bn, r.aw)]
+    let out: List[Stmt] = [mkstmt_aw(kd, r.e, bn, r.aw, ann)]
     if (atw(ts, r.i, "undo")) {
       let u = operand_at(ts, r.i + 1)
       if (!is_bad(u.e)) {
-        return mk_srun(out.push(mkstmt_aw("undo", u.e, "", u.aw)), u.i)
+        return mk_srun(out.push(mkstmt_aw("undo", u.e, "", u.aw, "")), u.i)
       }
       return mk_srun(out, hi)
     }
@@ -1235,11 +1260,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   if (t.kind == "kw" && t.text == "emit") {
     let re1 = operand_at(ts, lo + 1)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", re1.aw)]
+    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", re1.aw, "")]
     if (atw(ts, re1.i, "compensate")) {
       let uc = operand_at(ts, re1.i + 1)
       if (!is_bad(uc.e)) {
-        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw)), uc.i)
+        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw, "")), uc.i)
       }
       return mk_srun(oute, hi)
     }
@@ -1254,11 +1279,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   if (t.kind == "kw" && t.text == "await" && atw(ts, lo + 1, "emit")) {
     let re1 = expr_at(ts, lo + 2)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", true)]
+    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", true, "")]
     if (atw(ts, re1.i, "compensate")) {
       let uc = operand_at(ts, re1.i + 1)
       if (!is_bad(uc.e)) {
-        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw)), uc.i)
+        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw, "")), uc.i)
       }
       return mk_srun(oute, hi)
     }
@@ -1316,11 +1341,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
                         || t.text == "compensate")) {
     let rf = operand_at(ts, lo + 1)
     if (is_bad(rf.e)) { return mk_srun([mkstmt("skip", rf.e)], hi) }
-    let out2: List[Stmt] = [mkstmt_aw(t.text, rf.e, "", rf.aw)]
+    let out2: List[Stmt] = [mkstmt_aw(t.text, rf.e, "", rf.aw, "")]
     if (atw(ts, rf.i, "undo")) {
       let u2 = operand_at(ts, rf.i + 1)
       if (!is_bad(u2.e)) {
-        return mk_srun(out2.push(mkstmt_aw("undo", u2.e, "", u2.aw)), u2.i)
+        return mk_srun(out2.push(mkstmt_aw("undo", u2.e, "", u2.aw, "")), u2.i)
       }
       return mk_srun(out2, hi)
     }
@@ -1352,7 +1377,7 @@ fn stamp_lines(ss: List[Stmt], ln: Int) -> List[Stmt] {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited, line: ln,
-                     inTimer: s.inTimer })
+                     inTimer: s.inTimer, bindTy: s.bindTy })
     i += 1
   }
   return out
@@ -1375,7 +1400,7 @@ fn mark_timer(ss: List[Stmt]) -> List[Stmt] {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited,
-                     line: s.line, inTimer: true })
+                     line: s.line, inTimer: true, bindTy: s.bindTy })
     i += 1
   }
   return out
@@ -1861,8 +1886,17 @@ fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MSig]) -> MethsR {
   if (!atw(ts, j, "fn")) { return mk_meths(acc, j, false) }
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
+  // the DECLARED return, read off the same `-> T` slot `ret_at` steps: the
+  // service is the source of truth for a provider's signature, so the type layer
+  // needs the spelling and not only the position past it.
+  var mret = ""
+  if (atk(ts, ps.i, "arrow")) {
+    let tr = type_at(ts, ps.i + 1)
+    if (tr.ok) { mret = taint_strip(tr.ty) }
+  }
   let rti = cache_clause_end(ts, ret_at(ts, ps.i))
-  return p_methods(ts, rti, end, acc.push(mk_msig(nm, em, caps, isAsync)))
+  return p_methods(ts, rti, end,
+                   acc.push(mk_msig(nm, em, caps, isAsync, ps.ps, mret)))
 }
 
 fn p_service(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -1926,6 +1960,15 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
   let nm = tkc(ts, h + 1).text
   let ps = params_at(ts, h + 3)
   let pnames = param_names(ps.ps)
+  // the RESTATED return annotation, if the method writes one. `ret_at` already
+  // steps the slot; this reads what stands in it, which is what the A6 return
+  // rule compares against the service's own.
+  var pret = ""
+  if (atk(ts, ps.i, "arrow")) {
+    let tr = type_at(ts, ps.i + 1)
+    if (tr.ok) { pret = taint_strip(tr.ty) }
+  }
+  let mline = tkc(ts, h).line
   let si = ret_at(ts, ps.i)
   if (atk(ts, si, "=")) {
     let le = line_end(ts, si + 1, end)
@@ -1933,7 +1976,8 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
     let nx = r.i > si + 1 ? r.i : le
     return p_prov_methods(ts, nx, end,
                           acc.push({ name: nm, params: pnames, body: r.ss,
-                                     isAsync: masync }))
+                                     isAsync: masync, ps: ps.ps, ret: pret,
+                                     isArrow: true, line: mline }))
   }
   if (!atk(ts, si, "{")) { return { xs: acc, i: si, ok: false } }
   let bend = close_brace(ts, si)
@@ -1941,7 +1985,8 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
   let bbody = p_stmts(ts, si + 1, bend - 1, [])
   return p_prov_methods(ts, bend, end,
                         acc.push({ name: nm, params: pnames, body: bbody,
-                                   isAsync: masync }))
+                                   isAsync: masync, ps: ps.ps, ret: pret,
+                                   isArrow: false, line: mline }))
 }
 
 // The names bound by a list of `key: Service` pairs (a header row).
@@ -2693,7 +2738,7 @@ fn ac_refuse(a: Ac, tag: Str, m: Str) -> Ac {
 
 fn find_msig(svc: SvcD, nm: Str, i: Int) -> MSig {
   if (i >= svc.methods.length()) {
-    return { name: "", isEm: false, caps: [], isAsync: false }
+    return { name: "", isEm: false, caps: [], isAsync: false, ps: [], ret: "" }
   }
   if (svc.methods[i].name == nm) { return svc.methods[i] }
   return find_msig(svc, nm, i + 1)
