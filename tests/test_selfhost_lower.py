@@ -1272,6 +1272,62 @@ component C provides cache: Cache {
   }
 }
 """),
+    # ---- docs/design/457 T3b: returns on every path, the ADMITTING side ----
+    # The direction this rule may not err in is the false alarm, so each shape
+    # the reference ACCEPTS is here beside the refusal it neighbours. The
+    # termination rule is conservative (JLS 14.21 / rust E0308), and each of
+    # these is a body it must judge terminating.
+    ("a fn with no declared return type need not return",
+     "fn f(n: Int) {\n  let doubled = n * 2\n}\n"),
+    ("an if/else whose arms both return", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else { return 2 }
+}
+"""),
+    # `while (true)` with no `break` targeting it diverges, so the path never
+    # reaches the end of the body (item 379).
+    ("a while(true) with no targeting break", """
+fn f() -> Int {
+  while (true) {
+    return 1
+  }
+}
+"""),
+    # a `break` in a NESTED loop belongs to that loop, so the outer
+    # `while (true)` still diverges.
+    ("a while(true) whose only break targets a nested loop", """
+fn f() -> Int {
+  while (true) {
+    while (true) { break }
+    return 1
+  }
+}
+"""),
+    ("a loop that may run zero times, followed by a return", """
+fn f(xs: List[Int]) -> Int {
+  for (x of xs) {
+    if (x > 0) { return x }
+  }
+  return 0
+}
+"""),
+    # an `else if` chain: `fb_scan` cannot model one, so the whole `fn` is
+    # withheld rather than judged on a truncated body. The reference admits it,
+    # and this is the case that proves the withholding is real.
+    ("an else-if chain whose every arm returns", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else if (!c) { return 2 } else { return 3 }
+}
+"""),
+    # a destructuring binder is the other `fb_scan` bail, and it sits BEFORE
+    # the return here so a reader that dropped the tail would refuse.
+    ("a destructuring binder ahead of the return", """
+type R = { a: Int, b: Int }
+fn f(r: R) -> Int {
+  let { a, b } = r
+  return a + b
+}
+"""),
 ]
 
 
@@ -2342,6 +2398,71 @@ component C requires bus: Bus provides cache: Cache {
   provide cache { fn put(key) { emit bus.broadcast(key) } }
 }
 """, "A6"),
+    # ---- docs/design/457 T3b: returns on every path (T1) -------------------
+    # `_check_returns_on_every_path`, the last obligation `_lower_fns` runs for
+    # a `fn`. Two messages, and which one fires is decided by whether the body
+    # contains a `return` AT ALL — the fixtures are the reference's own
+    # documented pair, and the shapes below are the rest of the rule.
+    ("a declared return whose body never returns",
+     _fixture("t8_missing_return"), "T1"),
+    ("a declared return the trailing bare if can fall past",
+     _fixture("t9_return_path_incomplete"), "T1"),
+    # a bare `if` with no `else` may be skipped, so the path falls through.
+    ("an if with no else", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 }
+}
+""", "T1"),
+    # a `for` may run zero times and so terminates nothing.
+    ("a for loop as the only returning path", """
+fn f(xs: List[Int]) -> Int {
+  for (x of xs) { return x }
+}
+""", "T1"),
+    # a `while` whose condition is not the literal `true` may run zero times.
+    ("a conditional while as the only returning path", """
+fn f(c: Bool) -> Int {
+  while (c) { return 1 }
+}
+""", "T1"),
+    # `while (true)` with a `break` that TARGETS it may leave the loop and fall
+    # through, so it does not terminate the path (item 379).
+    ("a while(true) with a break targeting it", """
+fn f() -> Int {
+  while (true) {
+    if (true) { break }
+    return 1
+  }
+}
+""", "T1"),
+    # an `if`/`else` where only ONE arm returns.
+    ("an if/else with only one returning arm", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else { let n = 2 }
+}
+""", "T1"),
+    # the message quotes the DECLARED return spelling verbatim, arguments and
+    # fn types included, so a renderer that normalised it would show here.
+    ("the refusal quotes a generic return spelling", """
+fn f(n: Int) -> Map[Str, Int] {
+  let doubled = n * 2
+}
+""", "T1"),
+    ("the refusal quotes a fn-type return spelling", """
+fn f(n: Int) -> (Int) -> Int {
+  let doubled = n * 2
+}
+""", "T1"),
+    # the rule is per `fn` in DECLARATION order, and a clean `fn` ahead of the
+    # refusing one must not move the anchor.
+    ("the second fn is the one refused", """
+fn g() -> Int {
+  return 1
+}
+fn f() -> Int {
+  let n = 2
+}
+""", "T1"),
 ]
 
 
@@ -3087,7 +3208,7 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 42. The self-declared async-colour
+# `examples/rejections/`; it now stands at 40. The self-declared async-colour
 # arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
 # binding-discipline slice) moved OUT of the gap into gate/reference agreement,
 # and two slices have moved fixtures IN by making the gate READ a body it used
@@ -3176,10 +3297,13 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t33_arrow_value_arity", "T1"),
         ("t35_arrow_annotation_not_quantified", "T1"),
     ],
-    # return paths and match: returns on every path, unknown/missing match cases.
+    # return paths and match: unknown/missing match cases. The RETURN-PATH half
+    # has LANDED (docs/design/457 T3b): `fb_function` runs
+    # `_check_returns_on_every_path` over the statement tree `fb_scan` already
+    # builds, so `t8_missing_return` and `t9_return_path_incomplete` moved into
+    # REJECTED_PROGRAMS above, where tag AND message are compared. What stays
+    # here needs the variant table and the arm algebra, which is T2d's.
     "return paths and match": [
-        ("t8_missing_return", "T1"),
-        ("t9_return_path_incomplete", "T1"),
         ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
@@ -3334,12 +3458,12 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_41_fixtures():
+def test_the_type_layer_gap_is_exactly_39_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 41, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 39, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 41, "a fixture is listed twice"
+    assert len(set(names)) == 39, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -3365,6 +3489,82 @@ def test_type_layer_gap_is_a_named_selfhost_divergence(admit, family, name, tag)
         f"slice appears to have landed. Flip this fixture — delete its row "
         f"here, delete it from KNOWN_BYPASSES, re-record the census baseline, "
         f"and fold it into the slice's agreement corpus.")
+
+
+# ------------------------------------------ returns on every path: the anchor
+#
+# `_agree` compares the tag and the message; it does not compare the LINE, and
+# the two messages of this rule are anchored at DIFFERENT statements — the
+# never-returns one at the `fn` declaration, the falls-through one at the last
+# statement of the body. A port that spelled both sentences correctly off one
+# anchor would pass every row in REJECTED_PROGRAMS and still report the wrong
+# place, so the anchor is asserted here, against the reference's own line.
+
+_RETURN_PATH_ANCHORS = [
+    ("never returns, anchored at the declaration", _fixture("t8_missing_return")),
+    ("falls through, anchored at the last statement",
+     _fixture("t9_return_path_incomplete")),
+    # the two anchors pull APART here: the declaration is line 2 and the
+    # trailing `if` that falls through is line 5, so an anchor that had
+    # collapsed onto the declaration would show.
+    ("falls through several lines below the declaration", """
+fn f(c: Bool) -> Int {
+  let a = 1
+  let b = 2
+  if (c) { return a + b }
+}
+"""),
+    # and here the last statement is a `while`, not an `if`.
+    ("falls through at a trailing while", """
+fn f(c: Bool) -> Int {
+  let a = 1
+  while (c) { return a }
+}
+"""),
+]
+
+
+@pytest.mark.parametrize("name,src", _RETURN_PATH_ANCHORS,
+                         ids=[n for n, _ in _RETURN_PATH_ANCHORS])
+def test_the_return_path_refusal_is_anchored_where_the_reference_anchors_it(
+        admit_all, name, src):
+    try:
+        compile_source(src, "diff.rvl")
+        pytest.fail(f"corpus bug: the reference admits {name}")
+    except RevlError as error:
+        rows = [row for row in admit_all(src).split("\n") if row]
+        assert len(rows) == 1, f"{name}: expected one refusal, got {rows!r}"
+        line, tag, message = rows[0].split("|", 2)
+        assert tag == "T1"
+        assert message == error.message
+        assert int(line) == error.line, (
+            f"{name}: gate anchored the refusal at line {line}, the reference "
+            f"at line {error.line}")
+
+
+def test_an_unresolved_name_read_outranks_the_return_path_on_the_reference(
+        admit):
+    """A PRECEDENCE divergence this slice introduces, pinned rather than left to
+    be met.
+
+    The reference lowers a fn body statement by statement and only then asks
+    whether the fn returns on every path, so a body that BOTH reads an
+    undeclared name and never returns draws the name refusal. This gate runs the
+    body's binding discipline (which decides the ASSIGNMENT position only, not a
+    name READ — `g1_template_undeclared` and `v2_undeclared_fn_var` are still
+    pinned above for exactly that) and then the return-path rule, so it draws
+    the return-path refusal instead.
+
+    Both refusals are TRUE and the program is refused either way, so this is a
+    419c-style naming divergence and never an admission the reference would not
+    give. It closes with the name-resolution slice, which owns the read position;
+    until then the gate refuses a program it used to wave through, under the
+    other of the two guarantees the program breaks."""
+    src = "fn f() -> Int {\n  nobody\n}\n"
+    ref_tag, ref_msg = _ref(src)
+    assert (ref_tag, ref_msg) == ("G1", "`nobody` is not declared in this function")
+    assert admit(src) == (
+        "T1|`f` is declared to return `Int` but its body never returns a value")
 
 
 # ---------------------------------------------------------------- ambient / #86
