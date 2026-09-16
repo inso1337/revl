@@ -9629,9 +9629,18 @@ fn ir_component(ts: List[Token], i: Int, fname: Str) -> IrCompR {
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
       if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
-        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+        // the declared type is read with `type_at`, not as the bare head ident.
+        // A requirement can be PARAMETERIZED — item 130's required-stream
+        // coeffect `requires feed: Stream[OrderPlaced]` is the one in the
+        // language today — and the reference carries the whole spelling into
+        // `requires`. Reading only the head rendered it `Stream`, one entry
+        // short of the reference on every document that declares one, which no
+        // corpus document did until `emit_py_corpus/streams.rvl`.
+        let rt = type_at(ts, k + 2)
+        let pair = { name: tkc(ts, k).text,
+                     ty: rt.ok ? rt.ty : tkc(ts, k + 2).text }
         if (isReq) { reqs = reqs.push(pair) } else { provs = provs.push(pair) }
-        k += 3
+        k = rt.ok ? rt.i : k + 3
       } else { k += 1 }
     }
     j = k

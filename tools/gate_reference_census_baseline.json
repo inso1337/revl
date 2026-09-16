@@ -58,13 +58,6 @@
    "examples/rejections/t27_anon_record_update_undeclared_field.rvl",
    "examples/rejections/t36_float_literal_range.rvl",
    "examples/rejections/t5_destructure_nonrecord.rvl"
-  ],
-  "false-reject/G1": [
-   "backends/go/testdata/stream_130.rvl",
-   "backends/go/testdata/stream_event_130.rvl",
-   "backends/java/scenarios/stream_130.rvl",
-   "backends/java/scenarios/stream_event_130.rvl",
-   "backends/rust/scenarios/stream.rvl"
   ]
  },
  "corpus_dirs": [
@@ -78,66 +71,6 @@
   "dogfood"
  ],
  "details": {
-  "backends/go/testdata/stream_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`sub` is not a declared requirement of Parked"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/go/testdata/stream_event_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`on` is not a declared requirement of Handler"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/java/scenarios/stream_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`sub` is not a declared requirement of Parked"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/java/scenarios/stream_event_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`on` is not a declared requirement of Handler"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/rust/scenarios/stream.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`sub` is not a declared requirement of Parked"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl": {
    "bucket": "false-admit/T1",
    "gate": {
