@@ -9,6 +9,7 @@ stages co-compile (item 224) and resolves the item-201/206 duplicate-name
 friction.
 """
 
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -284,9 +285,24 @@ def test_the_historical_collision_on_the_real_selfhost_files(tmp_path):
     `selfhost/parser.rvl` declares the `Field(FieldN)` expression case. They do
     not share a composition on this tree, so one two-line root is the whole
     plant — which is also how much it will take for the next `use` edge to
-    reintroduce it."""
+    reintroduce it.
+
+    The record's name is asserted into the COPY rather than read out of the
+    tree, so the plant keeps reproducing the historical collision once the
+    #1144 rename to `TyField` lands and nobody has to notice that this test
+    quietly stopped planting anything."""
     shutil.copytree(SELFHOST, tmp_path / "selfhost")
     shutil.copytree(ROOT / "stdlib", tmp_path / "stdlib")
+    types_rvl = tmp_path / "selfhost" / "types.rvl"
+    source = types_rvl.read_text()
+    planted = re.sub(r"\bTyField\b", "Field", source)
+    types_rvl.write_text(planted)
+    assert "type Field = { name: Str, ty: Str }" in planted, (
+        "the structural-record declaration this plant depends on has been "
+        "reshaped in selfhost/types.rvl; re-derive the plant from it"
+    )
+    # the case half is the shipped one, unedited.
+    assert "| Field(FieldN)" in (tmp_path / "selfhost" / "parser.rvl").read_text()
     probe = tmp_path / "selfhost" / "probe.rvl"
     probe.write_text(
         'use "./types.rvl" { structural_parse }\n'
