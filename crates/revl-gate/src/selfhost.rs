@@ -7945,11 +7945,11 @@ fn fb_walk(steps: Vec<FbStep>, i: i64, scope: Vec<Bind>, tys: Vec<Bind>, ret: St
             return fb_refuse("G6", &fb_reassign_msg(&s.name), s.line, scope.clone(), tys.clone());
         }
         let val = if (s.op == "=") { s.value } else { Expr::Bin(Box::new(BinN { op: s.op.clone(), l: Expr::Var(s.name.clone()), r: s.value.clone(), paren: false })) };
-        let r = tk_infer(val, tys.clone());
+        let r = tk_infer(val.clone(), tys.clone());
         if (r.v != "") {
             return fb_type_refuse(r.v.clone(), s.line, scope.clone(), tys.clone());
         }
-        let lo = tk_low(s.value.clone(), tys.clone());
+        let lo = tk_low(val.clone(), tys.clone());
         if (lo != "") {
             return fb_type_refuse(lo.clone(), s.line, scope.clone(), tys.clone());
         }
