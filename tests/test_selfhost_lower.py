@@ -2599,6 +2599,20 @@ fn f() -> Int {
     # boundary: a component's `config` IS a substitution site, an extern's is
     # NOT — so the extern sees an alias head with no declaration left behind it
     # and calls it opaque.
+    #
+    # The COMPONENT half is pinned here and not as a file under
+    # `examples/rejections/` on purpose. `formal/harness/diff_corpus.py` walks
+    # `examples`, `tck` and `tests` and treats `missed-G4` as FATAL, and the
+    # Lean model's G4 row is the emission-marker and host-acquire pair — it has
+    # no config-is-data obligation and no type-shape facts to build one from —
+    # so a COMPONENT-shaped G4 document anywhere in those trees fails the formal
+    # gate until that row exists. Measured both ways: the document fails the
+    # harness from `examples/rejections/` and from `tests/formal_corpus/`
+    # alike. These rows are STRINGS, so `load_corpus` still carries them into
+    # the gate/reference census and the formal harness never sees them. The
+    # EXTERN half stays a file (`g4_extern_config_alias_opaque.rvl`): it
+    # declares no component, so the harness files it under `no-manifest`
+    # beside `g4_missing_undo.rvl` — named, not fatal.
     ("a component config field aliasing an arrow type", """
 type Cb = (Int) -> Str
 service Ops { fn go() -> Int }

@@ -233,13 +233,24 @@ REJECTIONS = {
     "g4_extern_undo_param_not_in_scope.rvl": "`path` is not declared — the `undo` slot of extern `open_ledger` sees only the implicit `result` binding",
     "g4_extern_compensate_result.rvl": "`result` is not bound in the `compensate` slot of extern `send`",
     # item 378 / issue #1151: a config field's declared type must be data, and
-    # the question is asked AFTER transparent aliases are erased. A component's
-    # config IS a substitution site, so its diagnostic names the erased type; an
-    # extern's is NOT, so the alias head survives into a type table its own
-    # declaration was dropped from and is refused as opaque.
-    "g4_config_alias_arrow.rvl":
-        "config field `on_row` of component `Loader` has type `(Int) -> Str`, "
-        "which reaches an arrow (function) type",
+    # the question is asked AFTER transparent aliases are erased. An extern's
+    # `config` block is NOT one of the sites `_resolve_type_aliases`
+    # substitutes at, but the alias DECLARATION is dropped all the same — so
+    # the alias head survives into a type table with no entry behind it and is
+    # refused as opaque, naming neither the alias target nor a resolution the
+    # reference never performed.
+    #
+    # Its COMPONENT twin — where the field type IS substituted, so the
+    # diagnostic names `(Int) -> Str` and not the alias — is an inline row in
+    # tests/test_selfhost_lower.py's REJECTED_PROGRAMS rather than a file here,
+    # and deliberately so: `formal/harness/diff_corpus.py` walks `examples`,
+    # `tck` and `tests` and treats `missed-G4` as FATAL, so a COMPONENT-shaped
+    # G4 document anywhere in those trees becomes a formal-gate failure until
+    # the Lean model grows a config-is-data row. (An extern declares no
+    # component, so this one lands in the harness's `no-manifest` census beside
+    # `g4_missing_undo.rvl` — named, not fatal.) The oracle rows are strings,
+    # not files, so they reach the gate/reference census through
+    # `load_corpus` and the formal harness never sees them.
     "g4_extern_config_alias_opaque.rvl":
         "config field `on_row` of extern `load_rows` has type `Handler`, "
         "which reaches the opaque type `Handler`",
