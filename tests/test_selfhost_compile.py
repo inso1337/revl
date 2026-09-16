@@ -395,6 +395,16 @@ JAVA_DOCS = [
     # documents compile byte-exact through the native java chain and move up out
     # of JAVA_LOWER_GAP_DOCS.
     "comp_host_map.rvl", "comp_host_map_generic.rvl",
+    # item 391: the realm-placement prelude. `isolate <key> in realm("…")` and
+    # `intercept <key> with { … }` are component HEADER declarations that emit no
+    # activation step; `cir_body` had no arm for either, so the body walk refused
+    # at the first one and the component lost its `body`, its `isolate` and its
+    # `intercept` together. Stepped over in the walk and collected into the two
+    # tables the reference stamps after `body`, these compile byte-exact.
+    "comp_realm_isolate.rvl", "comp_realm_intercept.rvl", "legacy_realms.rvl",
+    "metadata_null.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl", "../erase_realms.rvl",
+    "../realm_conformance/provider_a.rvl", "../../../examples/tenants.rvl",
     "../../../backends/go/scenarios/tagger.rvl",
     "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
     "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
@@ -449,14 +459,10 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
 # branch surface, the native chain agrees, this test fails on the stale entry, and
 # the document moves up into JAVA_DOCS instead of quietly staying out.
 JAVA_LOWER_GAP_DOCS = [
-    # realm placement metadata (isolate / intercept / routes)
-    "comp_realm_isolate.rvl", "comp_realm_intercept.rvl", "legacy_realms.rvl",
-    "../emit_ts_corpus/realm_intercept.rvl", "../erase_realms.rvl",
-    "../realm_conformance/provider_a.rvl", "../../../examples/tenants.rvl",
-    # async coloring
+    # async coloring, `await`, and `spawn`
     "comp_await.rvl", "../emit_ts_corpus/services_async.rvl",
-    # component metadata / branch shapes / map inference
-    "metadata_null.rvl", "component_format.rvl", "component_branches.rvl",
+    # string interpolation in a component body, and branch shapes
+    "component_format.rvl", "component_branches.rvl",
     "map_inference.rvl",
     # whole-program documents that combine several of the above
     "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",

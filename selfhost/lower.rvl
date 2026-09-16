@@ -9726,6 +9726,26 @@ fn cir_body(ts: List[Token], i: Int, end: Int, reqSet: List[Str],
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
     return cir_body(ts, em.i, end, reqSet, provs, sc, hostSc, nacc)
   }
+  // `isolate <key> in realm("<label>")` and `intercept <key> with { … }` are
+  // PRELUDE declarations, not activation steps: the reference records them on
+  // the component (`isolate`/`intercept`) and emits no body step for either, so
+  // the walk steps over them structurally. The multi-realm ROUTING spelling
+  // (`in realms(...)`, item 162) is a different declaration with a different
+  // key (`routes`) and is deliberately NOT matched here — it keeps refusing.
+  if (atw(ts, i, "isolate")) {
+    if (!(atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
+          && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
+          && atk(ts, i + 6, ")"))) { return mk_irres(false, "") }
+    return cir_body(ts, i + 7, end, reqSet, provs, sc, hostSc, acc)
+  }
+  if (atw(ts, i, "intercept")) {
+    var k = i + 1
+    while (k < end && !atk(ts, k, "{")) { k += 1 }
+    if (!atk(ts, k, "{")) { return mk_irres(false, "") }
+    let ce = close_brace(ts, k)
+    if (ce == 0 - 1) { return mk_irres(false, "") }
+    return cir_body(ts, ce, end, reqSet, provs, sc, hostSc, acc)
+  }
   if (atw(ts, i, "every") || atw(ts, i, "after")) {
     let mode = tkc(ts, i).text
     if (!atk(ts, i + 1, "int")) { return mk_irres(false, "") }
@@ -9779,6 +9799,80 @@ fn ir_config_default(ts: List[Token], i: Int) -> CfgDef {
   // a non-literal default is deferred: do not consume it, keep `null`.
   if (dv == "null") { return { js: "null", i: i } }
   return { js: dv, i: r.i }
+}
+
+// A static metadata VALUE (`docs`: the `record_literal` grammar — a scalar, or
+// a flat list of scalars; the grammar admits no nesting). Anything else leaves
+// `ok` false, which withholds the whole `intercept` table rather than stamping a
+// value the reference did not lower.
+fn ir_meta_value(e: Expr) -> IrRes {
+  return match e {
+    IntLit(v)   => mk_irres(true, v),
+    FloatLit(v) => mk_irres(true, v),
+    BoolLit(v)  => mk_irres(true, v),
+    StrLit(v)   => mk_irres(true, jstr(v)),
+    NullLit     => mk_irres(true, "null"),
+    Un(u)       => u.op == "-" ? ir_meta_neg(u.e) : mk_irres(false, ""),
+    Lst(l)      => ir_meta_items(l.items, 0, ""),
+    _           => mk_irres(false, ""),
+  }
+}
+
+fn ir_meta_neg(e: Expr) -> IrRes {
+  return match e {
+    IntLit(v)   => mk_irres(true, "-".concat(v)),
+    FloatLit(v) => mk_irres(true, "-".concat(v)),
+    _           => mk_irres(false, ""),
+  }
+}
+
+fn ir_meta_items(xs: List[Expr], i: Int, acc: Str) -> IrRes {
+  if (i >= xs.length()) { return mk_irres(true, "[".concat(acc).concat("]")) }
+  let v = ir_meta_value(xs[i])
+  if (!v.ok) { return mk_irres(false, "") }
+  return ir_meta_items(xs, i + 1, acc == "" ? v.js : acc.concat(", ").concat(v.js))
+}
+
+fn ir_meta_fields(fs: List[InitN], i: Int, acc: Str) -> IrRes {
+  if (i >= fs.length()) { return mk_irres(true, acc) }
+  let v = ir_meta_value(fs[i].value)
+  if (!v.ok) { return mk_irres(false, "") }
+  let e = jstr(fs[i].name).concat(": ").concat(v.js)
+  return ir_meta_fields(fs, i + 1, acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+// `intercept <key> with { … }` -> `"<key>": {…}` entries, in declaration order.
+// Scanned over the component body the way `ir_config` scans the config block:
+// the clause is a prelude declaration, so its extent is a header fact and not a
+// step the activation walk carries.
+fn ir_intercept(ts: List[Token], lo: Int, hi: Int, acc: Str) -> IrRes {
+  var j = lo
+  while (j < hi && !atw(ts, j, "intercept")) { j += 1 }
+  if (j >= hi) { return mk_irres(true, acc) }
+  let key = tkc(ts, j + 1).text
+  var k = j + 1
+  while (k < hi && !atk(ts, k, "{")) { k += 1 }
+  if (!atk(ts, k, "{")) { return mk_irres(false, "") }
+  let r = expr_at(ts, k)
+  let meta = match r.e { Rec(rc) => ir_meta_fields(rc.fields, 0, ""), _ => mk_irres(false, ""), }
+  if (!meta.ok) { return mk_irres(false, "") }
+  let e = jstr(key).concat(": {").concat(meta.js).concat("}")
+  return ir_intercept(ts, r.i, hi, acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+// `isolate <key> in realm("<label>")` -> `"<key>": "<label>"` entries. The
+// multi-realm routing spelling (`in realms(...)`) declares `routes`, not a pin,
+// and is stepped over rather than collected here.
+fn ir_isolate(ts: List[Token], lo: Int, hi: Int, acc: Str) -> Str {
+  var j = lo
+  while (j < hi && !atw(ts, j, "isolate")) { j += 1 }
+  if (j >= hi) { return acc }
+  if (atw(ts, j + 2, "in") && atw(ts, j + 3, "realm")
+      && atk(ts, j + 4, "(") && atk(ts, j + 5, "string")) {
+    let e = jstr(tkc(ts, j + 1).text).concat(": ").concat(jstr(tkc(ts, j + 5).text))
+    return ir_isolate(ts, j + 6, hi, acc == "" ? e : acc.concat(", ").concat(e))
+  }
+  return ir_isolate(ts, j + 1, hi, acc)
 }
 
 // The `config { field: Type [= <literal>] … }` block -> `[{name, type, default}]`.
@@ -9848,17 +9942,28 @@ fn ir_component(ts: List[Token], i: Int, fname: Str) -> IrCompR {
   let hi = end == 0 - 1 ? j + 1 : end - 1
   let reqSet = bind_names(reqs, 0, [])
   let bodyRes = cir_body(ts, lo, hi, reqSet, provs, [], [], "")
+  let isoJs = ir_isolate(ts, lo, hi, "")
+  let iceptRes = ir_intercept(ts, lo, hi, "")
   var js = "{\"name\": ".concat(jstr(nm))
     .concat(", \"source\": ").concat(jstr(fname))
     .concat(", \"config\": [").concat(ir_config(ts, lo, hi))
     .concat("], \"requires\": {").concat(ir_binds_json(reqs))
     .concat("}, \"provides\": {").concat(ir_binds_json(provs)).concat("}")
-  if (bodyRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  // an `intercept` whose metadata this producer cannot render is a component
+  // fact it would emit WITHOUT — so the body is withheld with it, rather than
+  // handing an emitter a component that silently lost its interception.
+  if (bodyRes.ok && iceptRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  // the realm-placement prelude, in the reference's key order (after `body`):
+  // `isolate` then `intercept` (`src/revl/lower.py::_lower_component`).
+  if (isoJs != "") { js = js.concat(", \"isolate\": {").concat(isoJs).concat("}") }
+  if (iceptRes.ok && iceptRes.js != "") {
+    js = js.concat(", \"intercept\": {").concat(iceptRes.js).concat("}")
+  }
   js = js.concat("}")
   // a body-level stdlib builtin (or tagged ADT) construction is the reference's
   // body-only v3 trigger (`_has_builtin`); now that the body is lowered, the
   // lowered node's presence is the same signal a token scan cannot see.
-  let bodyV3 = bodyRes.ok
+  let bodyV3 = bodyRes.ok && iceptRes.ok
     && (str_has(bodyRes.js, "\"kind\": \"builtin\"") || str_has(bodyRes.js, "\"kind\": \"adt\""))
   let v3 = bodyV3 || comp_has_kw(ts, lo, hi, "if") || comp_has_kw(ts, lo, hi, "fail")
     || comp_has_kw(ts, lo, hi, "every") || comp_has_kw(ts, lo, hi, "after")
