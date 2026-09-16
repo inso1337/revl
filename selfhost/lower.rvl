@@ -3953,6 +3953,152 @@ fn prov_missing_return(pv: Provide, mi: Int, decl: MSig) -> Verd {
       .concat("`, but this body never returns a value")), pm.line)
 }
 
+// ======================= the REQUIRED-SERVICE call's arguments (docs/design/457)
+//
+// `_component_req_call`'s last rule. A call through a requirement handle is held
+// to the service's declared signature, and the wiring half of that — the handle
+// resolves, the operation exists, an emission is marked — is already decided by
+// the Ac walk above. What was never decided is the ARGUMENTS: a `Str` parameter
+// handed an `Int` literal compiled clean and failed (or silently coerced) on the
+// host.
+//
+// The rule runs AFTER the wiring walk, for the reason the provide-method type
+// layer runs after it: a body carrying both a wiring verdict and a type one
+// reports the wiring verdict, which is the under-refusing direction. Inside one
+// statement the order is the reference's own — the expression is typed first
+// (an inner refusal is the reference's first too), then the arguments are
+// judged against the declaration.
+
+fn ct_no_msig() -> MSig {
+  return { name: "", isEm: false, caps: [], isAsync: false, ps: [], ret: "" }
+}
+
+// The service operation `<root>.<op>(…)` resolves to through the component's
+// requirement map, or the empty signature. A spawn-handle provision alias takes
+// the instance path instead and is not a requirement read, exactly as
+// `call_check` separates the two.
+fn ct_req_decl(tg: Expr, cx: Ctx) -> MSig {
+  return match tg {
+    Field(fl) => match fl.target {
+      Var(v)   => cx.reqMap.has(v) && !cx.provAlias.has(v)
+        ? find_msig(svc_of(cx, match cx.reqMap.lookup(v) {
+            Some(sv) => sv, None => "" }), fl.name, 0)
+        : ct_no_msig(),
+      _        => ct_no_msig(),
+    },
+    _         => ct_no_msig(),
+  }
+}
+
+fn ct_req_root(tg: Expr) -> Str {
+  return match tg { Field(fl) => match fl.target { Var(v) => v, _ => "" }, _ => "" }
+}
+
+fn ct_req_op(tg: Expr) -> Str {
+  return match tg { Field(fl) => fl.name, _ => "" }
+}
+
+// One call's arguments against the declared parameter list, positionally. An
+// argument whose own type this walk cannot decide ("" — the gradual frontier)
+// and a parameter the declaration leaves unspelled are both skipped rather than
+// guessed at; an argument that REFUSES is left to the expression walk, which has
+// already reported it.
+fn ct_args(root: Str, meth: Str, decl: MSig, args: List[Expr],
+           env: List[Bind], i: Int) -> Str {
+  if (i >= args.length() || i >= decl.ps.length()) { return "" }
+  let pt = taint_strip(decl.ps[i].ty)
+  let inf = tk_infer(args[i], env)
+  if (inf.v == "" && pt != "" && inf.ty != "" && !tk_compatible(pt, inf.ty)) {
+    return tagged("T1", "`".concat(root).concat(".").concat(meth)
+      .concat("` argument `").concat(decl.ps[i].name).concat("` expects `")
+      .concat(tk_render(pt)).concat("`, got `")
+      .concat(tk_render(inf.ty)).concat("`"))
+  }
+  return ct_args(root, meth, decl, args, env, i + 1)
+}
+
+// The first non-empty of two verdicts, in source order.
+fn ct_first(a: Str, b: Str) -> Str { return a != "" ? a : b }
+
+fn ct_exprs(xs: List[Expr], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let v = ct_scan(xs[i], cx, env)
+  if (v != "") { return v }
+  return ct_exprs(xs, i + 1, cx, env)
+}
+
+fn ct_inits(xs: List[InitN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let v = ct_scan(xs[i].value, cx, env)
+  if (v != "") { return v }
+  return ct_inits(xs, i + 1, cx, env)
+}
+
+fn ct_arms(xs: List[ArmN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let v = ct_scan(xs[i].body, cx, env)
+  if (v != "") { return v }
+  return ct_arms(xs, i + 1, cx, env)
+}
+
+fn ct_parts(xs: List[PartN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  if (xs[i].kind == "expr") {
+    let v = ct_scan(xs[i].e, cx, env)
+    if (v != "") { return v }
+  }
+  return ct_parts(xs, i + 1, cx, env)
+}
+
+// Every requirement call in one expression, INNERMOST first: the reference
+// lowers an argument before it builds the call node around it, so a bad call
+// nested in an argument reports ahead of the call that carries it.
+fn ct_call(c: CallN, cx: Ctx, env: List[Bind]) -> Str {
+  let inner = ct_exprs(c.args, 0, cx, env)
+  if (inner != "") { return inner }
+  let decl = ct_req_decl(c.target, cx)
+  if (decl.name != "" && c.args.length() == decl.ps.length()) {
+    let v = ct_args(ct_req_root(c.target), ct_req_op(c.target), decl, c.args,
+                    env, 0)
+    if (v != "") { return v }
+  }
+  return ct_scan(c.target, cx, env)
+}
+
+fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
+  return match e {
+    IntLit(_)   => "",
+    FloatLit(_) => "",
+    StrLit(_)   => "",
+    BoolLit(_)  => "",
+    NullLit     => "",
+    Var(_)      => "",
+    Hole(_)     => "",
+    Asset(_)    => "",
+    Bad(_)      => "",
+    Bin(b)      => ct_exprs([b.l, b.r], 0, cx, env),
+    Un(u)       => ct_scan(u.e, cx, env),
+    Emit(u)     => ct_scan(u.e, cx, env),
+    Call(c)     => ct_call(c, cx, env),
+    Field(f)    => ct_scan(f.target, cx, env),
+    OptField(f) => ct_scan(f.target, cx, env),
+    OptCall(c)  => ct_first(ct_scan(c.target, cx, env),
+                            ct_exprs(c.args, 0, cx, env)),
+    Index(x)    => ct_exprs([x.target, x.idx], 0, cx, env),
+    If(x)       => ct_exprs([x.cond, x.then_, x.els], 0, cx, env),
+    Rec(r)      => ct_inits(r.fields, 0, cx, env),
+    Lst(l)      => ct_exprs(l.items, 0, cx, env),
+    // an arrow's body is walked under the same environment: its parameters are
+    // names this walk does not type, so they stay on the gradual frontier.
+    Arrow(a)    => ct_scan(a.body, cx, env),
+    Match(m)    => ct_first(ct_scan(m.scrut, cx, env),
+                            ct_arms(m.arms, 0, cx, env)),
+    Templ(t)    => ct_parts(t.parts, 0, cx, env),
+    RecUpd(r)   => ct_first(ct_scan(r.base, cx, env),
+                            ct_inits(r.upds, 0, cx, env)),
+  }
+}
+
 // A config default must FIT the declared field type. The reference decides this
 // at the head of `_lower_component`, before the `provides` clause is resolved and
 // before a single body statement is lowered, so it runs first here too.
@@ -4017,23 +4163,59 @@ fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig) -> Verd {
 // gradual frontier's "": silent, never guessed at. `gtys` is the program-wide
 // declared-type table (the `field <Type>.<name>` rows and the module `fn`
 // signatures) the module-`fn` walk already builds once per admission.
-fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind],
+fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
                     fallback: Int) -> Verd {
   if (i >= body.length()) { return no_verd() }
   let s = body[i]
   // a `skip` carries the parser's failure node and a spawn an inert placeholder;
   // neither is an expression the reference types.
   if (s.kind == "skip" || s.spawnTarget != "") {
-    return mth_type_verdict(body, i + 1, env, fallback)
+    return mth_type_verdict(body, i + 1, env, cx, fallback)
   }
+  let ln = s.line == 0 ? fallback : s.line
   let r = tk_infer(s.e, env)
-  if (r.v != "") { return mk_verd(r.v, s.line == 0 ? fallback : s.line) }
+  if (r.v != "") { return mk_verd(r.v, ln) }
+  // the requirement-call arguments, after the expression's own types
+  let rq = ct_scan(s.e, cx, env)
+  if (rq != "") { return mk_verd(rq, ln) }
   var next = env
   if (s.bind != "") {
-    let bound = s.bindTy != "" ? s.bindTy : r.ty
+    // the type a binding takes: its own annotation first, then the declared
+    // RETURN of the requirement call it binds (`let r = effect s.get()` binds
+    // the service's declared result, which is what the reference writes into
+    // `type_env` for it), then what the value itself infers to.
+    var bound = s.bindTy
+    if (bound == "") { bound = ct_stmt_req_ret(s.e, cx) }
+    if (bound == "") { bound = r.ty }
     if (bound != "") { next = tenv_put(env, s.bind, bound) }
   }
-  return mth_type_verdict(body, i + 1, next, fallback)
+  return mth_type_verdict(body, i + 1, next, cx, fallback)
+}
+
+// The declared RETURN of the requirement call an expression is, or "". An
+// `emit`-marked operand is the same call with the marker in front of it.
+fn ct_stmt_req_ret(e: Expr, cx: Ctx) -> Str {
+  return match e {
+    Call(c) => taint_strip(ct_req_decl(c.target, cx).ret),
+    Emit(u) => ct_stmt_req_ret(u.e, cx),
+    _       => "",
+  }
+}
+
+// The environment one body LEAVES BEHIND: the same binding rule the verdict walk
+// applies, run for its environment rather than its refusal. The activation body's
+// map is what each provide method starts from.
+fn mth_body_tys(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind] {
+  if (i >= body.length()) { return env }
+  let s = body[i]
+  if (s.kind == "skip" || s.spawnTarget != "" || s.bind == "") {
+    return mth_body_tys(body, i + 1, env, cx)
+  }
+  var bound = s.bindTy
+  if (bound == "") { bound = ct_stmt_req_ret(s.e, cx) }
+  if (bound == "") { bound = tk_infer(s.e, env).ty }
+  return mth_body_tys(body, i + 1,
+                      bound == "" ? env : tenv_put(env, s.bind, bound), cx)
 }
 
 // The method's parameters at the types the SERVICE declares, over the
@@ -4945,6 +5127,15 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   if (sa.msg != "") {
     return mk_verd(tagged(sa.tag, sa.msg), body_line(comp.setup, scx, comp.line))
   }
+  // the ACTIVATION body's own type layer, run where the reference runs it: the
+  // setup statements are lowered with the same machinery a provide-method body
+  // is (`_lower_component_setup_stmt`'s `_sweep`), and a requirement call in one
+  // is held to its service signature exactly as a method-body call is. The
+  // environment it leaves behind is what every provide method starts from — the
+  // reference lowers setup first and restores to that map after each method.
+  let setupTv = mth_type_verdict(comp.setup, 0, gtys, scx, comp.line)
+  if (setupTv.v != "") { return setupTv }
+  let setupTys = mth_body_tys(comp.setup, 0, gtys, scx)
   // rule C1 on the component lowering path (`_assert_colour_is_positional`): a
   // self-declared arrow colour in setup is refused as it is anywhere else.
   let setupSda = self_async_body(comp.setup, 0)
@@ -5001,7 +5192,8 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // wiring verdict and a type one reports the wiring verdict, which is the
       // under-refusing direction.
       let mtv = mth_type_verdict(pm.body, 0,
-                                 mth_param_tys(pm, decl, 0, gtys), comp.line)
+                                 mth_param_tys(pm, decl, 0, setupTys), mcx,
+                                 comp.line)
       if (mtv.v != "") { return mtv }
       // the missing-return rule, which the reference raises once the whole body
       // is lowered and so after every statement verdict above.
