@@ -8627,15 +8627,20 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
   let recv = tk_infer(f.target, env).ty
   if (tk_is_host_family(recv)) { return "" }
   if (list_transform_free(f.name) != "") { return "" }
+  let untyped = tk_low_untyped_recv(f.target, env)
   if (!is_builtin_method(f.name)) {
-    if (!tk_low_stdlib_proven(recv)) { return "" }
+    // the reference refuses this for ANY non-host receiver; the gate needs the
+    // receiver decided in one direction or the other, because an undecided one
+    // may be a host object, a `use`d module alias or a required-service handle,
+    // none of which take the builtin table at all.
+    if (!tk_low_stdlib_proven(recv) && !untyped) { return "" }
     // `revl.diagnostics.classify` reads this shape as T1, so the wire's tag is
     // T1 and not the code-less `TYPE` family.
     return tagged("T1", "no builtin method `".concat(f.name)
       .concat("` on values — the stdlib surface is ")
       .concat(tk_stdlib_surface()).concat(" (docs/stdlib-2.0.md)"))
   }
-  if (tk_low_untyped_recv(f.target, env)) {
+  if (untyped) {
     return tagged("HOST-METHOD", "stdlib method `".concat(f.name)
       .concat("` on a value of unknown type — no constructor pins this ")
       .concat("receiver as a Str/List/Int/Int32/Bytes/Map value, so the ")

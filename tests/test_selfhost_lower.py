@@ -324,7 +324,10 @@ def _classify(e: RevlError) -> str:
             or "record update names" in m
             or "record destructuring requires a record" in m
             or "type alias cycle" in m
-            or "`mod` by a literal zero" in m
+            # all four of `_DIVIDES_BY`, not only `mod`: `div_trunc`,
+            # `div_floor` and `div_euclid` draw the identical sentence and were
+            # filed "OUT:" while their sibling was named.
+            or " by a literal zero is undefined" in m
             or "Float literal is infinite" in m
             # docs/design/457 T2b: `builtin_check`'s code-less receiver-family
             # refusals and the lowering-time builtin arity count, plus the
