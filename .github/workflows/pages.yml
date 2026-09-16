@@ -1,15 +1,42 @@
 # Deploy site/ to GitHub Pages (https://inso1337.github.io/revl/).
-# The site is fully static — the artifact is the directory as-is; the wheel
-# and examples.js are committed (regenerate with `python3 site/build.py`
-# when src/revl/ or the example set changes).
+#
+# THE COMPILER WHEEL IS BUILT HERE, AND IS NOT COMMITTED.
+#
+# `site/js/playground.js` boots the compiler under Pyodide from
+# `site/vendor/revl-<version>-py3-none-any.whl`, a wheel that vendors the whole
+# of `src/revl` plus the py tier's top-level modules. It used to be committed
+# and gated post-merge by `.github/workflows/site-wheel.yml`. That gate worked
+# and told the truth; the artifact could not keep up with it. A wheel built for
+# one sha is stale by the time its refresh lands several merges later, so `site
+# wheel drift` was refreshed four times in one day and red again after each.
+# `tools/check_site_wheel.py`'s header records the full weighing, including why
+# a per-PR regeneration is worse here (a 2.5 MB non-deterministic zip is a merge
+# conflict by construction, and this repo lands through a merge queue) and what
+# the committed copy has already cost (49.3 MiB of the repo's 66.0 MiB of packed
+# blob data, over 191 revisions).
+#
+# Building it in this job removes the possibility rather than detecting it: the
+# published playground is built from the sha being published, always, with no
+# step anyone has to remember, no credential, and nothing asked of PR authors.
+# `site/js/examples.js` is regenerated here for the same reason and at the same
+# cost — its committed copy lags `examples/*.rvl` by the same mechanism.
+#
+# The one new way to be wrong is this job silently ceasing to build the wheel,
+# or building one under a name the page does not fetch. `tools/check_site_wheel.py`
+# reads this file for exactly that (and `site-wheel.yml` still runs it post-merge
+# on main and weekly), so deleting the build step below is a red, not a 404.
 name: pages
 
 on:
+  # No `paths:` filter. The deployed artifact is now a function of `src/revl/**`,
+  # `backends/python/*.py`, `pyproject.toml`, the builder and `examples/**` as
+  # well as of `site/**`; a filter listing those is one more thing that can be
+  # silently wrong, and it was a `site/**`-only filter that made the committed
+  # wheel the only thing that ever refreshed the published compiler. The job is
+  # a checkout plus a stdlib zip build, and the `pages` concurrency group below
+  # collapses a burst of merges into one deployment.
   push:
     branches: [main]
-    paths:
-      - "site/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -29,6 +56,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      # No `pip install`: playground/build_wheel.py is stdlib-only and reads
+      # src/revl off the checkout, so this needs no revl install and no backend
+      # toolchain. It MUST stay ahead of the upload step — an upload of a
+      # directory built afterwards publishes the checkout, which has no wheel.
+      - name: build the compiler wheel and examples into site/
+        run: |
+          python3 tools/check_site_wheel.py --write
+          python3 site/gen_examples.py
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5.0.0
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3.0.1
         with:
