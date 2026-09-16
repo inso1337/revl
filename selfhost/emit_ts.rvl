@@ -615,6 +615,9 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   if (method == "checked_mod") { return { text: `revlCheckedMod(${target}, ${args[0]})`, counter: counter } }
   if (method == "to_int") {
     if (recv == "Str") { return { text: `revlParseInt(${target})`, counter: counter } }
+    // reached through `?.`, whose node carries no receiver type: split the Str
+    // parse from the Int32 widen on the payload at run time.
+    if (recv == "?") { return { text: `revlOptToInt(${target})`, counter: counter } }
     return { text: `BigInt(${target})`, counter: counter }
   }
   if (method == "to_int32") { return { text: `revlI32(Number(${target}))`, counter: counter } }
@@ -672,21 +675,6 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   }
   if (method == "to_str") { return { text: `${target}.toString()`, counter: counter } }
   return { text: `<<UNSUPPORTED-BUILTIN:${method}>>`, counter: counter }
-}
-
-// `_int_as_number`-guarded builtin arg positions (`_TS_INT_ARG_BUILTINS`).
-fn optcall_arg_is_int(method: Str, index: Int) -> Bool {
-  if (method == "slice") { return index == 0 || index == 1 }
-  if (method == "charAt") { return index == 0 }
-  if (method == "charCodeAt") { return index == 0 }
-  if (method == "codepoint_at") { return index == 0 }
-  if (method == "repeat") { return index == 0 }
-  return false
-}
-
-fn optcall_result_is_int(method: Str) -> Bool {
-  return method == "length" || method == "indexOf" || method == "charCodeAt"
-      || method == "codepoint_at"
 }
 
 // `_renders_await`: does a RENDERED fragment carry an `await` operator? Item
@@ -1153,30 +1141,32 @@ fn render_builtin_node(node: Any, counter: Int, acx: ACx) -> Rendered {
   return render_builtin(node_method(node), tr.text, argtexts, arg_nodes, value_str(value_field(node, "recv")), c, acx)
 }
 
+// `?.m(..)`: the method is a STDLIB builtin (the checker types an optcall
+// through `builtin_check`), so it is rendered by the same table a plain
+// `.m(..)` goes through. Emitting `payload?.m(..)` put a method JS values do
+// not have on the receiver — `o?.length is not a function`, `o?.to_int`,
+// `o?.to_str`, and eleven more — which the byte-agreement oracle emitted and
+// no test ever ran. The payload is bound by an arrow IIFE (expression
+// position); a nested chain inside an argument gets its own arrow scope, so
+// the inner binding shadows rather than clobbers.
 fn render_optcall(node: Any, counter: Int, acx: ACx) -> Rendered {
   let tr = paren_target(value_field(node, "target"), counter, acx)
   var c = tr.counter
   let method = value_str(value_field(node, "method"))
   let arg_nodes = value_list(value_field(node, "args"))
   var argtexts = []
-  var idx = 0
   for (a of arg_nodes) {
-    if (optcall_arg_is_int(method, idx)) {
-      let r = int_as_number(a, c, acx)
-      argtexts = argtexts.push(r.text)
-      c = r.counter
-    } else {
-      let r = expr(a, c, acx)
-      argtexts = argtexts.push(r.text)
-      c = r.counter
-    }
-    idx += 1
+    let r = expr(a, c, acx)
+    argtexts = argtexts.push(r.text)
+    c = r.counter
   }
-  let call = `${tr.text}?.${ident(method)}(${argtexts.join(", ")})`
-  if (optcall_result_is_int(method)) {
-    return { text: `((v: number | undefined) => v === undefined ? undefined : BigInt(v))(${call})`, counter: c }
-  }
-  return { text: call, counter: c }
+  // "?" is the reference's `_TS_RECV_VIA_OPT`: an optcall node carries no
+  // `recv` tag, so `to_int`'s two rows are told apart at run time instead.
+  // "$revl_opt" is the reference's `_TS_OPT_BIND`. `$` cannot start a revl
+  // identifier, so the bound name cannot collide with a user binding.
+  let b = render_builtin(method, "$revl_opt", argtexts, arg_nodes, "?", c, acx)
+  return { text: `(($revl_opt: any) => $revl_opt === undefined ? undefined : ${b.text})(${tr.text})`,
+           counter: b.counter }
 }
 
 fn member(target: Str, name: Str, optional: Bool) -> Str {
@@ -2876,6 +2866,14 @@ fn revl_index_helper() -> Str {
   return o.join(newline())
 }
 
+fn revl_opt_to_int_helper() -> Str {
+  var o = []
+  o = o.push("function revlOptToInt(v: string | number): bigint | undefined {")
+  o = o.push(`  return typeof v === "string" ? revlParseInt(v) : BigInt(v)`)
+  o = o.push("}")
+  return o.join(newline())
+}
+
 fn revl_parse_int_helper() -> Str {
   var o = []
   o = o.push("function revlParseInt(s: string): bigint | undefined {")
@@ -3096,7 +3094,7 @@ fn uses_bounded_int32(n: Any) -> Bool {
   let k = node_kind(n)
   if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int32") { return true }
   if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int32") { return true }
-  if (k == "builtin" && node_method(n) == "to_int32") { return true }
+  if ((k == "builtin" || k == "optcall") && node_method(n) == "to_int32") { return true }
   for (c of value_children(n)) {
     if (uses_bounded_int32(c)) { return true }
   }
@@ -3124,19 +3122,30 @@ fn is_str_method(m: Str) -> Bool {
 fn uses_str_methods(n: Any) -> Bool {
   if (node_kind(n) == "len") { return true }
   if (node_kind(n) == "field" && value_bool(value_field(n, "sized_length"))) { return true }
-  if (node_kind(n) == "builtin" && is_str_method(node_method(n))) { return true }
+  if ((node_kind(n) == "builtin" || node_kind(n) == "optcall") && is_str_method(node_method(n))) { return true }
   for (c of value_children(n)) {
     if (uses_str_methods(c)) { return true }
   }
   return false
 }
 
+// An `optcall` counts whichever row it is: its node carries no `recv`, so the
+// two are told apart at run time by `revlOptToInt`, which calls this helper.
 fn uses_parse_int(n: Any) -> Bool {
   if (node_kind(n) == "builtin" && node_method(n) == "to_int" && value_str(value_field(n, "recv")) == "Str") {
     return true
   }
+  if (node_kind(n) == "optcall" && node_method(n) == "to_int") { return true }
   for (c of value_children(n)) {
     if (uses_parse_int(c)) { return true }
+  }
+  return false
+}
+
+fn uses_opt_to_int(n: Any) -> Bool {
+  if (node_kind(n) == "optcall" && node_method(n) == "to_int") { return true }
+  for (c of value_children(n)) {
+    if (uses_opt_to_int(c)) { return true }
   }
   return false
 }
@@ -3144,7 +3153,7 @@ fn uses_parse_int(n: Any) -> Bool {
 // `_uses_split`: does this IR call `Str.split` — the only builtin routed
 // through `revlSplit` (the empty-separator code-point path, #549)?
 fn uses_split(n: Any) -> Bool {
-  if (node_kind(n) == "builtin" && node_method(n) == "split") { return true }
+  if ((node_kind(n) == "builtin" || node_kind(n) == "optcall") && node_method(n) == "split") { return true }
   for (c of value_children(n)) {
     if (uses_split(c)) { return true }
   }
@@ -3172,7 +3181,7 @@ fn uses_index(n: Any) -> Bool {
 // ascending canonical Str order)?
 fn uses_str_cmp(n: Any) -> Bool {
   if (node_kind(n) == "bin" && node_operands(n) == "Str" && is_relational(node_op(n))) { return true }
-  if (node_kind(n) == "builtin" && node_method(n) == "keys") { return true }
+  if ((node_kind(n) == "builtin" || node_kind(n) == "optcall") && node_method(n) == "keys") { return true }
   for (c of value_children(n)) {
     if (uses_str_cmp(c)) { return true }
   }
@@ -3200,6 +3209,7 @@ fn revl_helpers(ir: Any) -> List[Str] {
   if (uses_split(ir)) { out = out.push(revl_split_helper()); out = out.push("") }
   if (uses_str_cmp(ir)) { out = out.push(revl_str_cmp_helper()); out = out.push("") }
   if (uses_parse_int(ir)) { out = out.push(revl_parse_int_helper()); out = out.push("") }
+  if (uses_opt_to_int(ir)) { out = out.push(revl_opt_to_int_helper()); out = out.push("") }
   if (uses_index(ir)) { out = out.push(revl_index_helper()); out = out.push("") }
   return out
 }

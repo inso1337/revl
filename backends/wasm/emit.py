@@ -3021,6 +3021,21 @@ class _V3Emitter:
 
     def _declare_local(self, name: str, ty: str | None, where: str) -> None:
         """Record the wasm width of a local. Idempotent; conflicts are fatal."""
+        if ty == "Float":
+            # `_wasm_ty` carries every non-Int revl type as i32 (a pointer or a
+            # 0/1), and a Float VALUE is an f64: `(local.set $l_x (f64.const
+            # 0.5))` into an i32 local is a module that does not validate
+            # ("type mismatch: expected i32, found f64"), which wasmtime
+            # refuses at load. A Float parameter, return, comparison, equality
+            # and `.to_str()` are each refused BY NAME on this tier; the
+            # binding was the one position that emitted instead, so a program
+            # that merely wrote `let x: Float = 0.5` — even without reading it
+            # — got a broken artifact where every sibling position got a
+            # diagnostic. Same refusal, same wording, at the same boundary.
+            raise EmitError(
+                f"{where}: type 'Float' is not lowerable — this tier supports "
+                f"Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+            )
         wasm = _wasm_ty(ty)
         previous = self._local_types.get(name)
         if previous is not None and previous != wasm:

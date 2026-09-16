@@ -589,8 +589,8 @@ class _UsesScan:
 
     __slots__ = (
         "bounded_int", "bounded_int32", "i32_shl", "true_division",
-        "trunc_rem", "float_rem", "float_interp", "opt_to_int", "list_index",
-        "map_index",
+        "trunc_rem", "float_rem", "float_interp", "opt_to_int", "opt_to_str",
+        "list_index", "map_index",
         "builtins",
     )
 
@@ -603,6 +603,7 @@ class _UsesScan:
         self.float_rem = False
         self.float_interp = False
         self.opt_to_int = False
+        self.opt_to_str = False
         self.list_index = False
         self.map_index = False
         self.builtins: set = set()
@@ -657,9 +658,26 @@ def _scan_uses(root) -> _UsesScan:
                     scan.float_interp = True
                 scan.builtins.add(method)
             elif kind == "optcall":
+                # `?.m(..)` reaches the SAME render table a plain `.m(..)` does
+                # (`_render_builtin`), so it pulls in the same preamble. Reading
+                # only `to_int` here left `?.div_trunc()` / `?.div_floor()` /
+                # `?.div_euclid()` rendering `_REVL_I64_MIN` and `?.to_int32()`
+                # rendering `_revl_i32` with neither emitted: a `NameError` at
+                # run time on the tier every other tier is measured against.
                 method = node.get("method")
-                if method == "to_int":
+                if method in ("div_trunc", "div_floor", "div_euclid"):
+                    scan.bounded_int = True
+                elif method == "to_int32":
+                    scan.bounded_int32 = True
+                elif method == "to_int":
                     scan.opt_to_int = True
+                elif method == "to_str":
+                    # An optcall carries no `recv`, so an `Opt[Float]` receiver
+                    # is indistinguishable from an `Opt[Int]` one here and the
+                    # split is made at run time by `_revl_opt_to_str` — which
+                    # needs `_revl_ftoa` beside it.
+                    scan.opt_to_str = True
+                    scan.float_interp = True
                 scan.builtins.add(method)
             elif kind == "interp":
                 if not scan.float_interp:
@@ -1128,6 +1146,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     if method == "to_str":
         if recv == "Float":
             return f"_revl_ftoa({target})"
+        if recv == _RECV_VIA_OPT:
+            # reached through `?.`, whose node carries no receiver type: an
+            # `Opt[Float]` payload has to render through the canonical
+            # ECMAScript spelling too, and `str(3.0)` is `'3.0'` where every
+            # other spelling of the same conversion is `'3'`.
+            return f"_revl_opt_to_str({target})"
         return f"str({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 
@@ -5473,6 +5497,16 @@ def emit(ir: dict) -> str:
                        'so dispatch on the payload."""')
             out.add(0, "    return _revl_str_to_int(v) if isinstance(v, str) else v")
             out.add(0)
+    if _scan.opt_to_str:
+        # `?.to_str()`: same split as `_revl_opt_to_int` above, on the other
+        # two-receiver rendering builtin. `str(3.0)` is `'3.0'`; the canonical
+        # Float spelling every other route to this conversion produces is `'3'`
+        # (docs/strings.md), so an `Opt[Float]` payload takes `_revl_ftoa`.
+        out.add(0, "def _revl_opt_to_str(v):")
+        out.add(0, '    """`?.to_str()`: the node carries no receiver type, '
+                   'so dispatch on the payload."""')
+        out.add(0, "    return _revl_ftoa(v) if isinstance(v, float) else str(v)")
+        out.add(0)
     for checked in _CHECKED_DIVS:
         if checked not in _scan.builtins:
             continue
