@@ -4503,7 +4503,7 @@ def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
 # been since long before the type layer, so the reproducer predates every recent
 # member of the family.
 
-_HO_RUNNING = """service D { fn q(s: Str) -> Int }
+_PC_RUNNING = """service D { fn q(s: Str) -> Int }
 component OldStore provides db: D {
   handoff db: Str
   provide db { fn q(s) { let x = s   return 0 } }
@@ -4513,24 +4513,24 @@ component OldStore provides db: D {
 #: The incoming text: `NewStore` accepts `Int` where the running `OldStore`
 #: exports `Str` (a hand-off drift, anchored at the component line) AND refuses
 #: inline on an undeclared access (anchored at the `provide` statement, later).
-_HO_BOTH = """service D { fn q(s: Str) -> Int }
+_PC_BOTH = """service D { fn q(s: Str) -> Int }
 component NewStore provides db: D {
   handoff db: Int
   provide db { fn q(s) { emit nope.execute(s)   return 0 } }
 }
 """
 
-_HO_BODY_REFUSAL = "G1|`nope` is not a declared requirement of NewStore"
-_HO_DRIFT = ("G2|state hand-off on `db` differs from the running manifest: "
+_PC_BODY_REFUSAL = "G1|`nope` is not a declared requirement of NewStore"
+_PC_DRIFT = ("G2|state hand-off on `db` differs from the running manifest: "
              "`NewStore` accepts `Int`, but `OldStore` exports `Str` — the "
              "successor cannot hold the predecessor's state, and dropping it "
              "on the swap would be residue")
 
 
-def _ho_ambient(admit_ambient, src: str) -> tuple[str, str]:
+def _pc_ambient(admit_ambient, src: str) -> tuple[str, str]:
     kw = {"replacing": ("OldStore",)}
-    return (_gate_ambient(admit_ambient, src, _HO_RUNNING, **kw),
-            _ref_ambient(src, _HO_RUNNING, **kw))
+    return (_gate_ambient(admit_ambient, src, _PC_RUNNING, **kw),
+            _ref_ambient(src, _PC_RUNNING, **kw))
 
 
 def test_a_poisoned_component_contributes_no_handoff_verdict(admit_ambient):
@@ -4541,8 +4541,8 @@ def test_a_poisoned_component_contributes_no_handoff_verdict(admit_ambient):
     Before the poisoned set was threaded into `collect_nonlink` the gate
     answered the `G2` hand-off drift here, which is the issue-#1127
     divergence."""
-    got, ref = _ho_ambient(admit_ambient, _HO_BOTH)
-    assert ref == _HO_BODY_REFUSAL, ref
+    got, ref = _pc_ambient(admit_ambient, _PC_BOTH)
+    assert ref == _PC_BODY_REFUSAL, ref
     assert got == ref, (got, ref)
 
 
@@ -4553,14 +4553,14 @@ def test_the_handoff_verdict_is_genuinely_there_to_be_skipped(admit_ambient):
     was always what both sides name. Repair the BODY instead and the hand-off
     drift is what both sides name, so the verdict the test above suppresses is
     a real one the gate still reports when nothing poisons its component."""
-    compatible = _HO_BOTH.replace("handoff db: Int", "handoff db: Str")
-    got, ref = _ho_ambient(admit_ambient, compatible)
-    assert ref == _HO_BODY_REFUSAL, ref
+    compatible = _PC_BOTH.replace("handoff db: Int", "handoff db: Str")
+    got, ref = _pc_ambient(admit_ambient, compatible)
+    assert ref == _PC_BODY_REFUSAL, ref
     assert got == ref, (got, ref)
 
-    sound_body = _HO_BOTH.replace("emit nope.execute(s)   ", "")
-    got, ref = _ho_ambient(admit_ambient, sound_body)
-    assert ref == _HO_DRIFT, ref
+    sound_body = _PC_BOTH.replace("emit nope.execute(s)   ", "")
+    got, ref = _pc_ambient(admit_ambient, sound_body)
+    assert ref == _PC_DRIFT, ref
     assert got == ref, (got, ref)
 
 
@@ -4584,15 +4584,15 @@ component Bad provides other: C {
 }
 """
     bad_refusal = "G1|`nope` is not a declared requirement of Bad"
-    got, ref = _ho_ambient(admit_ambient, src)
-    assert ref == _HO_DRIFT, ref
+    got, ref = _pc_ambient(admit_ambient, src)
+    assert ref == _PC_DRIFT, ref
     assert got == ref, (got, ref)
 
     # ... and `Bad` is genuinely refused, so the program really does carry two
     # true refusals and the drift won on `(line, seq)` rather than alone.
-    assert _ref_ambient(src, _HO_RUNNING,
+    assert _ref_ambient(src, _PC_RUNNING,
                         replacing=("OldStore",)) != bad_refusal
     compatible = src.replace("handoff db: Int", "handoff db: Str")
-    got, ref = _ho_ambient(admit_ambient, compatible)
+    got, ref = _pc_ambient(admit_ambient, compatible)
     assert ref == bad_refusal, ref
     assert got == ref, (got, ref)
