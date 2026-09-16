@@ -10,7 +10,7 @@ note, not a check.
 
 So this tool owns that content instead. It is the same contract the repo
 already applies to every other generated artifact (`tools/conformance.py
---check-readme`, `tools/check_site_wheel.py`, `tools/build_gate_crate.py
+--check-readme`, `tools/regen_goldens.py --check`, `tools/build_gate_crate.py
 --check`): the committed bytes must equal a fresh generation, and CI fails when
 they do not.
 

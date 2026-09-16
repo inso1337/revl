@@ -291,7 +291,10 @@ def _classify(e: RevlError) -> str:
     # `a2`/`a9`, `use`, the parser-form fixtures and the extern G5s (`deferred`
     # in teardown, a witnessed inverse that reaches an emission) stay "OUT:"
     # until their own slice lands and can refuse them natively.
-    if e.code in ("T1", "T2", "HOST-METHOD"):
+    # `HOST-ARITY` joins the pass-through set with the call-and-signature slice
+    # (docs/design/457 T2b): the gate now counts a host stub verb's arguments
+    # itself, and the code is the reference's own.
+    if e.code in ("T1", "T2", "HOST-METHOD", "HOST-ARITY"):
         return e.code
     if "is not declared in this function" in m:
         return "G1"
@@ -321,8 +324,24 @@ def _classify(e: RevlError) -> str:
             or "record update names" in m
             or "record destructuring requires a record" in m
             or "type alias cycle" in m
-            or "`mod` by a literal zero" in m
-            or "Float literal is infinite" in m):
+            # all four of `_DIVIDES_BY`, not only `mod`: `div_trunc`,
+            # `div_floor` and `div_euclid` draw the identical sentence and were
+            # filed "OUT:" while their sibling was named.
+            or " by a literal zero is undefined" in m
+            or "Float literal is infinite" in m
+            # docs/design/457 T2b: `builtin_check`'s code-less receiver-family
+            # refusals and the lowering-time builtin arity count, plus the
+            # `Map.empty()` arity. Their CODED siblings (the `has no form for`
+            # row miss, the `join` element constraint and every `argument
+            # expects` mismatch) carry T1 and are named by the code arm above;
+            # these three shapes carry none, and the gate spells each one byte
+            # for byte, so leaving them "OUT:" would file an agreement as a tag
+            # mismatch.
+            or ("builtin `" in m and "` needs a " in m
+                and " receiver, got " in m)
+            or ("builtin `" in m and "` takes " in m
+                and " argument(s), " in m)
+            or "takes no arguments, " in m):
         return "TYPE"
     return "OUT:" + m
 
@@ -1287,6 +1306,62 @@ component Rack provides shelf: Shelf {
   }
 }
 """),
+    # ---- docs/design/457 T3b: returns on every path, the ADMITTING side ----
+    # The direction this rule may not err in is the false alarm, so each shape
+    # the reference ACCEPTS is here beside the refusal it neighbours. The
+    # termination rule is conservative (JLS 14.21 / rust E0308), and each of
+    # these is a body it must judge terminating.
+    ("a fn with no declared return type need not return",
+     "fn f(n: Int) {\n  let doubled = n * 2\n}\n"),
+    ("an if/else whose arms both return", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else { return 2 }
+}
+"""),
+    # `while (true)` with no `break` targeting it diverges, so the path never
+    # reaches the end of the body (item 379).
+    ("a while(true) with no targeting break", """
+fn f() -> Int {
+  while (true) {
+    return 1
+  }
+}
+"""),
+    # a `break` in a NESTED loop belongs to that loop, so the outer
+    # `while (true)` still diverges.
+    ("a while(true) whose only break targets a nested loop", """
+fn f() -> Int {
+  while (true) {
+    while (true) { break }
+    return 1
+  }
+}
+"""),
+    ("a loop that may run zero times, followed by a return", """
+fn f(xs: List[Int]) -> Int {
+  for (x of xs) {
+    if (x > 0) { return x }
+  }
+  return 0
+}
+"""),
+    # an `else if` chain: `fb_scan` cannot model one, so the whole `fn` is
+    # withheld rather than judged on a truncated body. The reference admits it,
+    # and this is the case that proves the withholding is real.
+    ("an else-if chain whose every arm returns", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else if (!c) { return 2 } else { return 3 }
+}
+"""),
+    # a destructuring binder is the other `fb_scan` bail, and it sits BEFORE
+    # the return here so a reader that dropped the tail would refuse.
+    ("a destructuring binder ahead of the return", """
+type R = { a: Int, b: Int }
+fn f(r: R) -> Int {
+  let { a, b } = r
+  return a + b
+}
+"""),
 ]
 
 
@@ -1414,6 +1489,28 @@ boot component B2 provides e2: Env2 {
     ("dynamic reserved key: a field read on a json_parse result",
      (ROOT / "backends" / "typescript" / "tests" / "fixtures"
       / "dynamic_reserved_key.rvl").read_text(), "T1"),
+    # ---- calls and signatures (docs/design/457 T2b) ------------------------
+    # The same walk resolves a CALL against a declaration: the signature table's
+    # arity window and per-argument check (monomorphic by `compatible`, generic
+    # by `unify` + `substitute`), the host stub surface, `_BUILTIN_SIG`, and the
+    # four refusals the reference makes while LOWERING a method call rather than
+    # while typing it.
+    ("t10 a call at the wrong arity", _fixture("t10_call_arity"), "T1"),
+    ("t15 a generic fn's result at a call site",
+     _fixture("t15_generic_call_site"), "T1"),
+    ("t25 an explicit [T] list turns the implicit heuristic off",
+     _fixture("t25_explicit_tparam_heuristic_off"), "T1"),
+    ("v2 a Map value's `set` against the map's V",
+     _fixture("v2_map_set_value_mismatch"), "T1"),
+    ("v2 a method a Map value's stdlib surface does not name",
+     _fixture("v2_map_value_unknown_method"), "T1"),
+    ("a literal zero divisor", _fixture("arith_zero_divisor"), "TYPE"),
+    ("t24 a stdlib method on a receiver no constructor pins",
+     _fixture("t24_opaque_receiver_builtin"), "HOST-METHOD"),
+    ("a method the host stub surface does not name",
+     _fixture("host_method_not_on_surface"), "HOST-METHOD"),
+    ("g4 an extern undo slot's argument type",
+     _fixture("g4_extern_undo_wrong_arg_type"), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
@@ -2387,6 +2484,71 @@ component C requires bus: Bus provides cache: Cache {
   provide cache { fn put(key) { emit bus.broadcast(key) } }
 }
 """, "A6"),
+    # ---- docs/design/457 T3b: returns on every path (T1) -------------------
+    # `_check_returns_on_every_path`, the last obligation `_lower_fns` runs for
+    # a `fn`. Two messages, and which one fires is decided by whether the body
+    # contains a `return` AT ALL — the fixtures are the reference's own
+    # documented pair, and the shapes below are the rest of the rule.
+    ("a declared return whose body never returns",
+     _fixture("t8_missing_return"), "T1"),
+    ("a declared return the trailing bare if can fall past",
+     _fixture("t9_return_path_incomplete"), "T1"),
+    # a bare `if` with no `else` may be skipped, so the path falls through.
+    ("an if with no else", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 }
+}
+""", "T1"),
+    # a `for` may run zero times and so terminates nothing.
+    ("a for loop as the only returning path", """
+fn f(xs: List[Int]) -> Int {
+  for (x of xs) { return x }
+}
+""", "T1"),
+    # a `while` whose condition is not the literal `true` may run zero times.
+    ("a conditional while as the only returning path", """
+fn f(c: Bool) -> Int {
+  while (c) { return 1 }
+}
+""", "T1"),
+    # `while (true)` with a `break` that TARGETS it may leave the loop and fall
+    # through, so it does not terminate the path (item 379).
+    ("a while(true) with a break targeting it", """
+fn f() -> Int {
+  while (true) {
+    if (true) { break }
+    return 1
+  }
+}
+""", "T1"),
+    # an `if`/`else` where only ONE arm returns.
+    ("an if/else with only one returning arm", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else { let n = 2 }
+}
+""", "T1"),
+    # the message quotes the DECLARED return spelling verbatim, arguments and
+    # fn types included, so a renderer that normalised it would show here.
+    ("the refusal quotes a generic return spelling", """
+fn f(n: Int) -> Map[Str, Int] {
+  let doubled = n * 2
+}
+""", "T1"),
+    ("the refusal quotes a fn-type return spelling", """
+fn f(n: Int) -> (Int) -> Int {
+  let doubled = n * 2
+}
+""", "T1"),
+    # the rule is per `fn` in DECLARATION order, and a clean `fn` ahead of the
+    # refusing one must not move the anchor.
+    ("the second fn is the one refused", """
+fn g() -> Int {
+  return 1
+}
+fn f() -> Int {
+  let n = 2
+}
+""", "T1"),
 ]
 
 
@@ -3132,7 +3294,7 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 42. The self-declared async-colour
+# `examples/rejections/`; it now stands at 40. The self-declared async-colour
 # arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
 # binding-discipline slice) moved OUT of the gap into gate/reference agreement,
 # and two slices have moved fixtures IN by making the gate READ a body it used
@@ -3183,26 +3345,11 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     "expression typing (T1/T2)": [
         ("t14_optional_chain_on_nonoptional", "T1"),
     ],
-    # calls and signatures: arity, generic call sites, builtin/method receivers,
-    # the literal zero divisor, extern-undo argument typing.
-    "calls and signatures": [
-        ("t10_call_arity", "T1"),
-        ("t15_generic_call_site", "T1"),
-        # the third fixture this gap gained by being READ rather than by moving:
-        # `fn typo[T](xs: List[U])` was refused by the gate's PARSER, which did
-        # not spell a type-parameter list at all, so the census filed it as
-        # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. The
-        # parse now reaches the body and the gate's real state shows: the
-        # reference refuses the argument type in its TYPE layer, and the gate
-        # runs no type layer. Its two neighbours above are the same family.
-        ("t25_explicit_tparam_heuristic_off", "T1"),
-        ("v2_map_set_value_mismatch", "T1"),
-        ("v2_map_value_unknown_method", "T1"),
-        ("arith_zero_divisor", "TYPE"),
-        ("t24_opaque_receiver_builtin", "HOST-METHOD"),
-        ("host_method_not_on_surface", "HOST-METHOD"),
-        ("g4_extern_undo_wrong_arg_type", "T1"),
-    ],
+    # calls and signatures: LANDED whole (docs/design/457 T2b). The signature
+    # table, `unify`/`substitute`, the host stub surface, `_BUILTIN_SIG` and the
+    # four lowering-time method refusals moved all nine of this family's
+    # fixtures into REJECTED_PROGRAMS above, where tag AND message are compared,
+    # so the family has no row left here.
     # arrows and function values: arrow-body checking, function-value flow and
     # arity, arrow annotations. (The self-declared async colour,
     # t34_arrow_self_declared_async, was in this family until the gate learned
@@ -3215,10 +3362,13 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t33_arrow_value_arity", "T1"),
         ("t35_arrow_annotation_not_quantified", "T1"),
     ],
-    # return paths and match: returns on every path, unknown/missing match cases.
+    # return paths and match: unknown/missing match cases. The RETURN-PATH half
+    # has LANDED (docs/design/457 T3b): `fb_function` runs
+    # `_check_returns_on_every_path` over the statement tree `fb_scan` already
+    # builds, so `t8_missing_return` and `t9_return_path_incomplete` moved into
+    # REJECTED_PROGRAMS above, where tag AND message are compared. What stays
+    # here needs the variant table and the arm algebra, which is T2d's.
     "return paths and match": [
-        ("t8_missing_return", "T1"),
-        ("t9_return_path_incomplete", "T1"),
         ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
@@ -3367,18 +3517,20 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_23_fixtures():
+def test_the_type_layer_gap_is_exactly_12_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
-    41 until the fn-body STATEMENT layer (docs/design/457 T3a) closed eleven of
-    the expression rows for the module-`fn` surface (the twelfth document that
-    moved with them, `dynamic_reserved_key`, never had a row here because this
-    pin addresses its fixtures by bare name under `examples/rejections/`), and
-    30 until the provide-method / component slice closed the whole
-    `provide-method and component bodies` family, all seven of it."""
-    assert len(_TYPE_LAYER_CASES) == 23, len(_TYPE_LAYER_CASES)
+    41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
+    two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
+    rows for the module-`fn` surface, the call-and-signature layer (T2b) nine
+    more, and the provide-method / component slice the whole
+    `provide-method and component bodies` family, all seven of it; the twelfth
+    document that moved with T3a, `dynamic_reserved_key`, never had a row here
+    because this pin addresses its fixtures by bare name under
+    `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 12, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 23, "a fixture is listed twice"
+    assert len(set(names)) == 12, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -3404,6 +3556,82 @@ def test_type_layer_gap_is_a_named_selfhost_divergence(admit, family, name, tag)
         f"slice appears to have landed. Flip this fixture — delete its row "
         f"here, delete it from KNOWN_BYPASSES, re-record the census baseline, "
         f"and fold it into the slice's agreement corpus.")
+
+
+# ------------------------------------------ returns on every path: the anchor
+#
+# `_agree` compares the tag and the message; it does not compare the LINE, and
+# the two messages of this rule are anchored at DIFFERENT statements — the
+# never-returns one at the `fn` declaration, the falls-through one at the last
+# statement of the body. A port that spelled both sentences correctly off one
+# anchor would pass every row in REJECTED_PROGRAMS and still report the wrong
+# place, so the anchor is asserted here, against the reference's own line.
+
+_RETURN_PATH_ANCHORS = [
+    ("never returns, anchored at the declaration", _fixture("t8_missing_return")),
+    ("falls through, anchored at the last statement",
+     _fixture("t9_return_path_incomplete")),
+    # the two anchors pull APART here: the declaration is line 2 and the
+    # trailing `if` that falls through is line 5, so an anchor that had
+    # collapsed onto the declaration would show.
+    ("falls through several lines below the declaration", """
+fn f(c: Bool) -> Int {
+  let a = 1
+  let b = 2
+  if (c) { return a + b }
+}
+"""),
+    # and here the last statement is a `while`, not an `if`.
+    ("falls through at a trailing while", """
+fn f(c: Bool) -> Int {
+  let a = 1
+  while (c) { return a }
+}
+"""),
+]
+
+
+@pytest.mark.parametrize("name,src", _RETURN_PATH_ANCHORS,
+                         ids=[n for n, _ in _RETURN_PATH_ANCHORS])
+def test_the_return_path_refusal_is_anchored_where_the_reference_anchors_it(
+        admit_all, name, src):
+    try:
+        compile_source(src, "diff.rvl")
+        pytest.fail(f"corpus bug: the reference admits {name}")
+    except RevlError as error:
+        rows = [row for row in admit_all(src).split("\n") if row]
+        assert len(rows) == 1, f"{name}: expected one refusal, got {rows!r}"
+        line, tag, message = rows[0].split("|", 2)
+        assert tag == "T1"
+        assert message == error.message
+        assert int(line) == error.line, (
+            f"{name}: gate anchored the refusal at line {line}, the reference "
+            f"at line {error.line}")
+
+
+def test_an_unresolved_name_read_outranks_the_return_path_on_the_reference(
+        admit):
+    """A PRECEDENCE divergence this slice introduces, pinned rather than left to
+    be met.
+
+    The reference lowers a fn body statement by statement and only then asks
+    whether the fn returns on every path, so a body that BOTH reads an
+    undeclared name and never returns draws the name refusal. This gate runs the
+    body's binding discipline (which decides the ASSIGNMENT position only, not a
+    name READ — `g1_template_undeclared` and `v2_undeclared_fn_var` are still
+    pinned above for exactly that) and then the return-path rule, so it draws
+    the return-path refusal instead.
+
+    Both refusals are TRUE and the program is refused either way, so this is a
+    419c-style naming divergence and never an admission the reference would not
+    give. It closes with the name-resolution slice, which owns the read position;
+    until then the gate refuses a program it used to wave through, under the
+    other of the two guarantees the program breaks."""
+    src = "fn f() -> Int {\n  nobody\n}\n"
+    ref_tag, ref_msg = _ref(src)
+    assert (ref_tag, ref_msg) == ("G1", "`nobody` is not declared in this function")
+    assert admit(src) == (
+        "T1|`f` is declared to return `Int` but its body never returns a value")
 
 
 # ---------------------------------------------------------------- ambient / #86
@@ -4913,6 +5141,307 @@ def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
     assert _ref_ambient(src, _H_MO_M) == expected
 
 
+# ======================= calls and signatures (docs/design/457 T2b) ==========
+#
+# `_tsb_program` draws a module `fn` whose body CALLS things: module `fn`s at
+# every arity and both genericities, an `extern` that declares no return, the
+# stdlib method table over every receiver family the walk can prove, the host
+# stub surface through its constructor roots and through a bound host value, and
+# `Map.empty()`. It is a DIFFERENTIAL draw, not an expectation table, compared
+# on TAG and MESSAGE.
+#
+# One divergence CLASS survives, pinned below rather than described in a
+# comment: the reference desugars a receiver-first list transform to its free
+# function and then refuses that undeclared NAME, which is the G1 name-read
+# family no slice has built. The gate refuses later, or not at all — an
+# under-refusal. The bound the draw actually holds is absolute.
+
+_TSB_HEAD = """type TsbRow = { h: Str }
+
+fn mono(a: Int, b: Str) -> Int {
+  return a
+}
+
+fn nores(a: Int) {
+  let z = a
+}
+
+fn ident(x: T) -> T {
+  return x
+}
+
+fn pick[T](xs: List[T]) -> T {
+  return xs[0]
+}
+
+extern pure fn opaque(s: Str) = @py { return None }
+
+"""
+
+_TSB_ARGS = ["1", '"s"', "true", "3.5", "[]", "[1]", '["a"]', "None", "a", "b",
+             "c", '{ h: "x" }', "Map.empty()", "0"]
+# never a bare `[` at a receiver head: a statement STARTING with one is a parser
+# refusal in the reference and a "bail" in this reader, which is the parser's
+# surface and not this slice's.
+_TSB_RECV = ["a", "b", "c", '"str"', "Map.empty()", "m", "p", "1", "3.5"]
+_TSB_METH = ["length", "push", "slice", "charAt", "concat", "indexOf", "split",
+             "join", "repeat", "startsWith", "to_int", "to_int32", "to_str",
+             "keys", "set", "lookup", "has", "size", "remove", "mod",
+             "div_trunc", "checked_mod", "putt", "fetch", "map", "field", "str"]
+_TSB_HOSTV = ["new", "drop", "insert", "insert_if_absent", "remove", "get",
+              "open", "close", "query", "run", "nope"]
+_TSB_TYPES = ["Int", "Int32", "Float", "Str", "Bool", "Opt[Int]", "List[Int]",
+              "List[Str]", "Any", "TsbRow", "Map[Str, Int]", "Map[Str, Str]"]
+
+
+def _tsb_args(rng, n):
+    return ", ".join(rng.choice(_TSB_ARGS) for _ in range(n))
+
+
+def _tsb_call(rng, depth=1):
+    k = rng.randrange(8)
+    n = rng.randrange(0, 3)
+    if k == 0:
+        return f"mono({_tsb_args(rng, rng.randrange(0, 4))})"
+    if k == 1:
+        return f"ident({_tsb_args(rng, 1)})"
+    if k == 2:
+        return f"pick({_tsb_args(rng, 1)})"
+    if k == 3:
+        return f"nores({_tsb_args(rng, n)})"
+    if k == 4:
+        return (f"{rng.choice(_TSB_RECV)}.{rng.choice(_TSB_METH)}"
+                f"({_tsb_args(rng, n)})")
+    if k == 5:
+        root = rng.choice(["Map", "Pool", "Job"])
+        return f"{root}.{rng.choice(_TSB_HOSTV)}({_tsb_args(rng, n)})"
+    if k == 6:
+        return f"m.{rng.choice(_TSB_HOSTV)}({_tsb_args(rng, n)})"
+    inner = (_tsb_call(rng, 0) if depth and rng.randrange(3) == 0
+             else _tsb_args(rng, 1))
+    return f"mono({inner}, {_tsb_args(rng, 1)})"
+
+
+def _tsb_stmt(rng):
+    e = _tsb_call(rng)
+    k = rng.randrange(6)
+    tag = rng.randrange(99)
+    if k == 0:
+        return f"let z{tag} = {e}"
+    if k == 1:
+        return f"let z{tag}: {rng.choice(_TSB_TYPES)} = {e}"
+    if k == 2:
+        return f"var w{tag} = {e}"
+    if k == 3:
+        return e
+    if k == 4:
+        return f"if ({e}) {{ let q{tag} = 1 }}"
+    return f"assert {e}"
+
+
+def _tsb_program(rng) -> str:
+    body = "\n  ".join(_tsb_stmt(rng) for _ in range(rng.randrange(1, 4)))
+    return (f"{_TSB_HEAD}fn f(a: Int, b: Str, c: List[Int]) -> "
+            f"{rng.choice(_TSB_TYPES)} {{\n"
+            f'  let m = Map.new()\n  let p = opaque("x")\n'
+            f"  {body}\n  return {rng.choice(_TSB_ARGS)}\n}}\n")
+
+
+# The one family whose EARLIER reference refusal this slice does not build: a
+# receiver-first list transform desugars to a free function and the reference
+# refuses that undeclared NAME. Resolving a name READ needs the whole callable
+# universe, which is still open (`g1_template_undeclared`,
+# `v2_undeclared_fn_var` in TYPE_LAYER_GAP above).
+_TSB_LATER_SLICES = ("is not declared in this function",)
+
+_TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
+
+
+@pytest.mark.parametrize("seed", [5, 17, 31])
+def test_call_and_signature_fuzz_never_refuses_what_the_reference_admits(
+        admit, seed):
+    """THE BOUND, over 400 drawn call-carrying fn bodies per seed.
+
+      * the gate NEVER refuses a program the reference admits — absolute, with
+        no allowance;
+      * where the reference's own refusal is in this slice's vocabulary and
+        outside the family a later slice owns, the gate's verdict is the
+        reference's TAG AND SENTENCE, byte for byte.
+    """
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(400):
+        src = _tsb_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _TSB_TAGS:
+            continue
+        if any(m in ref_msg for m in _TSB_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 350, drawn
+    assert compared >= 150, compared
+
+
+def test_the_stdlib_surface_the_gate_lists_is_the_references_own(ns):
+    """`no builtin method` names the WHOLE stdlib surface, sorted, and the two
+    tables are edited in different files. Held byte-exact so a method added to
+    `_BUILTIN_METHODS` reds here rather than inside a message diff."""
+    from revl.lower import _BUILTIN_METHODS
+    assert ns["tk_stdlib_surface"]() == ", ".join(sorted(_BUILTIN_METHODS))
+
+
+def test_the_host_stub_surface_the_gate_lists_is_the_references_own(ns):
+    """The same, per host family: the verb list the `has no method` refusal
+    quotes, and the declared argument types the arity and argument rules use."""
+    from revl.typecheck import _HOST_FAMILIES
+    for family, verbs in _HOST_FAMILIES.items():
+        assert ns["tk_host_verbs"](family) == sorted(verbs), family
+        for verb, params in verbs.items():
+            assert ns["tk_host_params"](family, verb) == list(params), \
+                f"{family}.{verb}"
+
+
+def test_a_fn_that_declares_no_return_types_its_call_unknown(admit):
+    """A FALSE REJECTION this slice closed, kept as its own case.
+
+    `case_binds` spells a module `fn`'s own name as a function type, and gives a
+    returnless `fn` the return `Unit` — which is the IR's spelling. The
+    reference's signature table records `None` there (no return type, not the
+    unit type), so `assert nores(1)` reads as an UNKNOWN condition and the
+    program is admitted. Reading `Unit` back off the function type refused it,
+    which is the one direction this gate may not err in. The signature table's
+    own `sigr` row is "" and the call types unknown."""
+    src = """fn nores(a: Int) {
+  let z = a
+}
+
+fn f() -> Int {
+  assert nores(1)
+  return 1
+}
+"""
+    assert _ref(src) == ("", "")
+    assert admit(src) == ""
+
+
+def test_the_call_and_signature_layer_reaches_a_module_fn_body(admit):
+    """NON-VACUITY, spelled out: each position the slice opens draws the
+    reference's own sentence, and the probe asserts the reference still spells
+    it that way."""
+    from revl.lower import _BUILTIN_METHODS
+    cases = [
+        # the arity window
+        ("fn g(a: Int) -> Int { return a }\n"
+         "fn f() -> Int { return g(1, 2) }\n",
+         "T1|`g` takes 1 argument(s), 2 given"),
+        # a monomorphic argument
+        ("fn g(a: Int) -> Int { return a }\n"
+         'fn f() -> Int { return g("s") }\n',
+         "T1|argument 1 of `g(...)` expects `Int`, got `Str`"),
+        # a generic call site: unify, then the UNIFIED return
+        ("fn id(x: T) -> T { return x }\n"
+         'fn f() -> Int { return id("s") }\n',
+         "T1|this function's return expects `Int`, got `Str`"),
+        # an explicit [T] list turns the implicit heuristic off, so `U` is an
+        # ordinary undeclared nominal
+        ("fn g[T](xs: List[U]) -> T { return xs[0] }\n"
+         "fn f() -> Int { return g([1]) }\n",
+         "T1|argument 1 of `g(...)` expects `List[U]`, got `List[Int]`"),
+        # the builtin argument specs, through `@elem`
+        ("fn f(m: Map[Str, Int], k: Str) -> Map[Str, Int] "
+         '{ return m.set(k, "one") }\n',
+         "T1|builtin `set` argument expects `Int`, got `Str`"),
+        # a builtin's receiver family
+        ("fn f(s: Str) -> Int { return s.div_trunc(2) }\n",
+         "TYPE|builtin `div_trunc` needs a Int receiver, got `Str`"),
+        # the multi-family row miss
+        ("fn f(b: Bool) -> Str { return b.to_str() }\n",
+         "T1|builtin `to_str` has no form for a `Bool` receiver "
+         "(its receiver families: Float, Int)"),
+        # the host stub surface, reached through a constructor-bound value
+        ('fn f() { let m = Map.new()  m.putt("k", "v") }\n',
+         "HOST-METHOD|`Map` has no method `putt` (its surface: drop, get, "
+         "insert, insert_if_absent, new, remove)"),
+        # the host constructor's own argument count
+        ('fn f() { let p = Pool.open("dsn") }\n',
+         "HOST-ARITY|host builtin `Pool.open` takes 2 arguments, got 1"),
+        # the LOWERING refusals: the surface, the arity, the divisor
+        ("fn f(m: Map[Str, Int], k: Str) -> Int { return m.fetch(k) ?? 0 }\n",
+         "T1|no builtin method `fetch` on values — the stdlib surface is "
+         + ", ".join(sorted(_BUILTIN_METHODS)) + " (docs/stdlib-2.0.md)"),
+        ("fn f(s: Str) -> Str { return s.charAt() }\n",
+         "TYPE|builtin `charAt` takes 1 argument(s), 0 given"),
+        ("fn f(n: Int) -> Int { return n.div_euclid(0) }\n",
+         "TYPE|`div_euclid` by a literal zero is undefined"),
+        # `Map.empty()` takes none
+        ('fn f() -> Map[Str, Int] { return Map.empty("k") }\n',
+         "TYPE|`Map.empty()` takes no arguments, 1 given"),
+    ]
+    for src, expected in cases:
+        ref_tag, ref_msg = _ref(src)
+        assert f"{ref_tag}|{ref_msg}" == expected, f"the probe drifted:\n{src}"
+        assert admit(src) == expected, src
+
+
+def test_a_defaulted_parameter_list_builds_no_signature_row(admit):
+    """A signature carrying a DEFAULT (item 187) gets no row, so the arity
+    window is never counted: a call omitting the default must not be refused
+    short. `params_at` cannot spell such a list, and `sig_walk` gates the row on
+    it spelling the whole one.
+
+    The gate still refuses this program, and the refusal is the PARSER's, not
+    this slice's — `fb_span`/`p_fn` read the same parameter list and neither
+    spells a default, so `fn g(a: Int, b: Str = "s")` never reaches a body. That
+    divergence is older than this slice (the reference admits the program) and
+    is not closed here; what is asserted is that the CALL layer adds nothing to
+    it, which is what the withheld row buys."""
+    src = ('fn g(a: Int, b: Str = "s") -> Int { return a }\n'
+           "fn f() -> Int { return g(1) }\n")
+    assert _ref(src) == ("", "")
+    got = admit(src)
+    assert got.startswith("BAD|"), got
+    assert "argument(s)" not in got, got
+
+
+def test_the_call_layer_stays_silent_where_it_cannot_prove_the_premise(admit):
+    """The companion bound: the shapes this slice must NOT decide, each with the
+    reason it cannot. A refusal appearing here is a false rejection waiting to
+    happen on real code."""
+    quiet = [
+        # a name the body REBINDS: the reference reads a local of function type
+        # first, and typing a function-value call is the arrow slice's (T2c).
+        "fn g(a: Int) -> Int { return a }\n"
+        "fn f() -> Int { let h = g\n  return 1 }\n",
+        # a receiver whose type is merely not inferred HERE — an arrow's result
+        # — is not a receiver PROVABLY without one, so the unpinned-receiver
+        # refusal must not reach it.
+        "fn f() -> Int { let k = (x: Int) => x\n  let v = k(1)\n  return 1 }\n",
+    ]
+    for src in quiet:
+        assert _ref(src) == ("", ""), \
+            f"the probe is not admitted by the reference:\n{src}"
+        assert admit(src) == "", src
+    # A list transform is SUGAR for a free function, and the reference types the
+    # DESUGARED call — so a builtin row must not be consulted for it. The
+    # reference's own refusal here is the undeclared `list_map` NAME, which is
+    # the G1 family no slice has built; what this slice owes is not to invent a
+    # builtin refusal in its place.
+    sugar = "fn f(c: List[Int]) -> List[Str] { return c.map(n => n.to_str()) }\n"
+    assert _ref(sugar)[0] == "G1", _ref(sugar)
+    got = admit(sugar)
+    assert "builtin `" not in got and "stdlib method `" not in got, got
+
+
 # ================================ the fn-body TYPE layer (docs/design/457 T3a)
 #
 # `_typed_fn_body` draws a module `fn` whose signature and body are built out of
@@ -5462,3 +5991,40 @@ def test_an_undeclared_type_name_is_still_decided(admit):
     ref_tag, ref_msg = _ref(src)
     assert ref_tag == "T1" and ref_msg != ""
     assert admit(src).startswith("T1|"), "an undeclared head must still decide"
+
+
+def test_a_bare_return_in_a_provide_method_is_not_typed(admit):
+    """The component-body twin of the module-`fn` rule (`fb_walk`'s `bare` op):
+    a `return` that writes no value is a `return` for a totality question and
+    NOT an expression to type.
+
+    The second case is the one the statement reader makes possible. Its
+    expression grammar does not stop at the end of a line, so `return` alone,
+    followed by a statement that begins with an identifier, would read that next
+    statement as this return's operand and hold the body to ITS type — a refusal
+    the reference never issues, on a program it admits.
+
+    The reference's own bare-return refusal ("`m` returns `Int` but this
+    `return` carries no value") is the totality slice's and is not spelled here;
+    leaving it is a no-objection, the direction this gate may take."""
+    admitted = [
+        # an operation that declares no result: a bare `return` is ordinary
+        "service S { fn put(k: Str) }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn put(k) { return } }\n}\n",
+        # ... and the next line is not the return's operand
+        "service S { fn put(k: Str) }\n"
+        "component C provides s: S {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide s {\n    fn put(k) {\n      return\n"
+        "      store.insert(k, \"v\")\n    }\n  }\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+    # ... while a return that DOES carry a value is still checked against the
+    # service's declared result, so the fence is not a hole.
+    typed = ("service S { fn put(k: Str) -> Int }\n"
+             "component C provides s: S {\n"
+             "  provide s { fn put(k) { return k } }\n}\n")
+    assert admit(typed) == "T1|`put` returns expects `Int`, got `Str`"

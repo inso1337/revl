@@ -1456,7 +1456,7 @@ fn comp_names(ir: Any) -> Str {
 
 // A body-emission result: the lines produced AND the running timer counter (the
 // reference's `self._counter`, threaded here since revl has no method state).
-type Emit = { lines: List[Str], counter: Int }
+type EmitLines = { lines: List[Str], counter: Int }
 
 // `_runtime_ref` / `_IMPORT_ALIAS` (the subset): the in-module name a runtime
 // import is referenced by.
@@ -1757,7 +1757,7 @@ fn setup_step(step: Any, indent: Int) -> List[Str] {
 // `let-effect` (the spawn form — its `spawn` acquire cexpr lands in slice 5, so
 // it is implemented but not yet cross-checked), saga `emit ... compensate`,
 // plain `emit`, and `return`. (`await` stays slice 5.)
-fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> Emit {
+fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let" || kind == "assign") {
     var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`)]
@@ -1843,7 +1843,7 @@ fn method_secret_params(m: Any, specs: Any) -> List[Str] {
 
 // `_method`: one provide-method as a Python `def` (sync only in this slice),
 // threading the shared timer/effect counter across its body steps.
-fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> Emit {
+fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> EmitLines {
   let name = mangle(value_str(value_field(m, "name")))
   var head = `def ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
@@ -1879,7 +1879,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
 // `_provide`: the provision class, its methods, and the runtime-derived
 // revertible provision (yield the disposer, then populate). Threads the counter
 // across its methods (a method-body effect shares the component's counter).
-fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
+fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
   let name = mangle(value_str(value_field(step, "name")))
   let svc = value_str(value_field(step, "service"))
   // item 421 F6: the provided service's method specs, the only place the
@@ -1906,7 +1906,7 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
 
 // `_timer`: a revertible schedule — the firing closure, its handle, and the
 // yielded `.cancel()` inverse.
-fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
+fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
   let mode = value_str(value_field(step, "mode"))
   var sched = "schedule_after"
   if (mode == "every") { sched = "schedule_every" }
@@ -1943,7 +1943,7 @@ fn transactional_scope_kwargs(ext: Any) -> Str {
   return ", scope={'caps': [".concat(parts.join(", ")).concat("]}")
 }
 
-fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> Emit {
+fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> EmitLines {
   let c = counter + 1
   let tmp = `_revl_wit${c}`
   let call_expr = cexpr(value_field(step, "acquire"))
@@ -1978,7 +1978,7 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
   return { lines: out, counter: c }
 }
 
-fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
+fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect") {
     var out = []
@@ -2061,7 +2061,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   return { lines: out, counter: counter }
 }
 
-fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
+fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
   var out = []
   var c = counter
   for (s of steps) {

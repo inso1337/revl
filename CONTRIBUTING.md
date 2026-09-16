@@ -239,7 +239,7 @@ command, in order, reporting each step:
 | backend-ts | `tools/regen_goldens.py --check typescript` (golden drift) |
 | golden drift (all targets) | `tools/regen_goldens.py --check` (CI adds `--strict`: `lint` for the toolchain-free targets, `backend-go` for `go`) |
 | conformance matrix + emit sweep | `tools/conformance.py --check-readme` |
-| site wheel | `tools/check_site_wheel.py` (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
+| site wheel | `tools/check_site_wheel.py` — the playground wheel is NOT committed; `.github/workflows/pages.yml` builds it into the published site, and this checks that contract (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
 | docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
 | formal | `sh formal/scripts/run_gate.sh` (lake build + the axioms gate; loud-skips without lake) |
