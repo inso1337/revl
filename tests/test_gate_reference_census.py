@@ -112,7 +112,7 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # gate deliberately does not run:
 #
 # THE TYPE LAYER (docs/design/457). The bulk of this list is the type-layer
-# gap named executably at slice T0: 45 fixtures over `examples/rejections/`
+# gap named executably at slice T0: 43 fixtures over `examples/rejections/`
 # that the reference refuses in its type checker and `selfhost/lower.rvl`'s
 # `admit_src` admits, because the gate runs no type layer yet. (The
 # self-declared async-colour arrow left this gap once the gate learned to parse
@@ -173,8 +173,11 @@ KNOWN_BYPASSES = {
     "examples/rejections/t33_arrow_value_arity.rvl",
     "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
     # -- return paths and match --
-    "examples/rejections/t8_missing_return.rvl",
-    "examples/rejections/t9_return_path_incomplete.rvl",
+    # The RETURN-PATH half landed with docs/design/457 T3b: `fb_function` runs
+    # `_check_returns_on_every_path` over the statement tree the fn-body walk
+    # already builds, so `t8_missing_return` and `t9_return_path_incomplete`
+    # now refuse with the reference's message AND its line and are struck from
+    # this list. What remains needs the variant table and the arm algebra.
     "examples/rejections/t13_unknown_match_case.rvl",
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --

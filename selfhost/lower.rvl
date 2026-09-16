@@ -7891,6 +7891,10 @@ fn fb_step7(kind: Str, name: Str, mutable: Bool, line: Int, v: Expr,
 }
 fn fb_block(kind: Str, name: Str, line: Int, v: Expr, thenS: List[FbStep],
             elseS: List[FbStep], bodyS: List[FbStep]) -> FbStep {
+  // `value` carries the statement's OWN expression: an `if`/`while` condition
+  // (the Bool checking position the type walk reads) and a `for`'s iterable.
+  // The returns-on-every-path rule below reads the same field back for the one
+  // loop form that terminates a path, a `while` whose condition is `true`.
   return { kind: kind, name: name, mutable: false, line: line, value: v,
            declTy: "", op: "",
            then_: thenS, els: elseS, body: bodyS }
@@ -7959,11 +7963,13 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
   }
   if (t.kind == "kw" && t.text == "return") {
     let r = expr_at(ts, i + 1)
-    // a BARE `return` carries no expression to check ("none"); the reference's
-    // own bare-return-in-a-typed-fn refusal is the totality slice's, not this
-    // one's, so it is stepped over rather than judged.
+    // a BARE `return` carries no expression to CHECK, but it is still a `return`
+    // for the returns-on-every-path rule below, so it keeps that kind and is
+    // marked `bare` in `op` — the type walk steps over it rather than checking
+    // a `null` it never wrote against the declared return.
     if (is_bad(r.e) || r.i <= i + 1) {
-      return { step: fb_step("none", "", false, t.line, NullLit), i: i + 1 }
+      return { step: fb_step7("return", "", false, t.line, NullLit, "", "bare"),
+               i: i + 1 }
     }
     return { step: fb_step7("return", "", false, t.line, r.e, "", ""), i: r.i }
   }
@@ -7973,7 +7979,8 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     return { step: fb_step7("assert", "", false, t.line, r.e, "", ""), i: r.i }
   }
   if (t.kind == "kw" && (t.text == "break" || t.text == "continue")) {
-    return { step: fb_step("none", "", false, t.line, NullLit), i: i + 1 }
+    return { step: fb_step(t.text == "break" ? "break" : "other", "", false,
+                           t.line, NullLit), i: i + 1 }
   }
   if (t.kind == "kw" && t.text == "if") {
     let c = expr_at(ts, i + 1)
@@ -8037,7 +8044,11 @@ fn fb_scan(ts: List[Token], lo: Int, hi: Int) -> List[FbStep] {
     else {
       let so = fb_one(ts, i, hi)
       out = out.push(so.step)
-      if (so.i <= i) { i = hi } else { i = so.i }
+      // a reader that cannot advance abandons the REST of this block, exactly
+      // as a "bail" step does, so it records one: `fb_walk` reads the two
+      // identically (both end the block clean) and the returns-on-every-path
+      // rule below must not mistake an abandoned tail for a complete body.
+      if (so.i <= i) { out = out.push(fb_bail())  i = hi } else { i = so.i }
     }
   }
   return out
@@ -8111,6 +8122,9 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
   if (s.kind == "return") {
+    // a bare `return` writes no value; the reference's own bare-return-in-a-
+    // typed-fn refusal is the totality slice's, not this one's.
+    if (s.op == "bare") { return fb_walk(steps, i + 1, scope, tys, ret) }
     let r = tk_check(s.value, ret, tys, "this function's return")
     if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
     return fb_walk(steps, i + 1, scope, tys, ret)
@@ -8182,11 +8196,18 @@ fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
 // index past the whole declaration. `ok` is false for a signature this reader
 // does not spell — a type-parameter list, a trailer other than `cache pure`, an
 // unbalanced body — and such a `fn` is skipped rather than judged.
+// `name`/`line` are the declaration's own (the anchor `_check_returns_on_every_
+// path` uses). `ret` is the declared return spelling the TYPE walk holds the
+// body to (taint-stripped, so an `Untrusted[Str]` return checks as `Str`), and
+// `retDecl` the spelling as WRITTEN, which is the one the returns-on-every-path
+// sentences quote. Both are "" for a `fn` that declares no return and for one
+// whose annotation this reader cannot spell.
 type FbSpan = { ps: List[ParamN], ret: Str, lo: Int, hi: Int, next: Int,
-                ok: Bool }
+                ok: Bool, name: Str, line: Int, retDecl: Str }
 
 fn fb_no_span() -> FbSpan {
-  return { ps: [], ret: "", lo: 0, hi: 0, next: 0, ok: false }
+  return { ps: [], ret: "", lo: 0, hi: 0, next: 0, ok: false, name: "",
+           line: 0, retDecl: "" }
 }
 
 fn fb_span(ts: List[Token], i: Int) -> FbSpan {
@@ -8194,9 +8215,10 @@ fn fb_span(ts: List[Token], i: Int) -> FbSpan {
   let ps = params_at(ts, i + 3)
   var reti = ps.i
   var ret = ""
+  var retDecl = ""
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
-    if (tr.ok) { ret = taint_strip(tr.ty) }
+    if (tr.ok) { ret = taint_strip(tr.ty)  retDecl = tr.ty }
     reti = tr.i
   }
   if (ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")) { reti += 2 }
@@ -8204,7 +8226,159 @@ fn fb_span(ts: List[Token], i: Int) -> FbSpan {
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return fb_no_span() }
   let body = reti + 1
-  return { ps: ps.ps, ret: ret, lo: body, hi: bend - 1, next: bend, ok: true }
+  return { ps: ps.ps, ret: ret, lo: body, hi: bend - 1, next: bend, ok: true,
+           name: tkc(ts, i + 1).text, line: tkc(ts, i).line, retDecl: retDecl }
+}
+
+// -------------------------------------------- returns on every path (T1/457)
+//
+// `_check_returns_on_every_path` (src/revl/lower.py), the LAST obligation
+// `_lower_fns` runs for a `fn` — after its body — so it sits here, after
+// `fb_walk`, inside the same declaration-order loop. A `fn` with a declared
+// return type must return on every path: python and TypeScript would hand back
+// `None`/`undefined`, while rust refuses with E0308 and javac with "missing
+// return statement", so a program the front end accepts must compile on every
+// tier.
+//
+// The termination rule is the reference's `_definitely_returns`, which is the
+// conservative reading Java (JLS 14.21) and Rust apply:
+//   * a `return` terminates;
+//   * an `if` terminates only when BOTH arms do — a missing or empty `else`
+//     never terminates, which is why no "has an else" flag is needed here: an
+//     absent arm is an empty step list and an empty step list never returns;
+//   * a `for`, and a `while` whose condition is not the literal `true`, may run
+//     zero times and so terminates nothing;
+//   * `while (true)` diverges, and so terminates the path, exactly when its body
+//     has no `break` TARGETING it (item 379) — a `break` inside a nested loop
+//     belongs to that loop and does not let this one fall through.
+//
+// WHERE IT WITHHOLDS, and why each silence is the sound direction. This reader
+// sees fewer statements than the reference's AST walk, and the asymmetry is the
+// whole argument: a `return` it fails to see would turn an admitting body into a
+// refusal, which is the FALSE-REJECTION direction this gate may not err in. So a
+// body carrying any statement `fb_scan` could not model decides nothing at all —
+// one "bail" anywhere in the tree (an `else if` chain, a destructuring binder, an
+// unparsed statement) and the whole `fn` is left to the reference. The same goes
+// for a declared return type that mentions a TRANSPARENT type alias: the
+// reference erases aliases before it spells this message (`_resolve_type_aliases`
+// substitutes `fn.returns` in place), so quoting the written spelling would
+// disagree on the message text even where the verdict agrees. Erasure is the
+// type-spelling slice's (docs/design/457 T1); until it lands, such a `fn` is
+// withheld rather than guessed at.
+
+fn rp_true_cond(e: Expr) -> Bool {
+  return match e { BoolLit(s) => s == "true", _ => false, }
+}
+
+// `_has_return`: a `return` anywhere in the tree, loop bodies included.
+fn rp_has_return(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "return") { return true }
+  if (rp_has_return(s.then_, 0) || rp_has_return(s.els, 0)
+      || rp_has_return(s.body, 0)) { return true }
+  return rp_has_return(steps, i + 1)
+}
+
+// `_loop_has_targeting_break`: a `break` at any depth that is not itself inside
+// a nested `while`/`for`, so `s.body` is deliberately NOT descended.
+fn rp_loop_break(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "break") { return true }
+  if (s.kind == "if"
+      && (rp_loop_break(s.then_, 0) || rp_loop_break(s.els, 0))) { return true }
+  return rp_loop_break(steps, i + 1)
+}
+
+// `_definitely_returns`.
+fn rp_returns(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "return") { return true }
+  if (s.kind == "if" && rp_returns(s.then_, 0) && rp_returns(s.els, 0)) {
+    return true
+  }
+  if (s.kind == "while" && rp_true_cond(s.value)
+      && !rp_loop_break(s.body, 0)) { return true }
+  return rp_returns(steps, i + 1)
+}
+
+// Any statement this reader could not model, at any depth.
+fn rp_has_bail(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "bail") { return true }
+  if (rp_has_bail(s.then_, 0) || rp_has_bail(s.els, 0)
+      || rp_has_bail(s.body, 0)) { return true }
+  return rp_has_bail(steps, i + 1)
+}
+
+// Every TRANSPARENT type alias the text declares. Deliberately OVER-inclusive:
+// a declaration with no top-level `|` and no `{` after the `=` is called an
+// alias here even when it is a single-case variant, because naming one type too
+// many only withholds a verdict while naming one too few would spell an erased
+// message with its pre-erasure text.
+fn rp_aliases(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "type") && tkc(ts, i + 1).kind == "ident") {
+      let end = type_decl_end(ts, i + 1)
+      if (atk(ts, i + 2, "=") && !atk(ts, i + 3, "{")
+          && !has_top_bar(ts, i + 1, end)) {
+        out = union_into(out, [tkc(ts, i + 1).text])
+      }
+      i = end
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+// Whether a type SPELLING names one of `names`, read through the lexer so a
+// head, an argument and a fn-type position are all covered and no substring of
+// a longer identifier ever matches.
+fn rp_mentions(ty: Str, names: List[Str]) -> Bool {
+  if (names.length() == 0) { return false }
+  let ts = lex_src(ty)
+  var i = 0
+  while (i < ts.length()) {
+    let t = ts[i]
+    if (t.kind == "ident" && contains(names, t.text)) { return true }
+    i += 1
+  }
+  return false
+}
+
+fn rp_no_value_msg(name: Str, ret: Str) -> Str {
+  return "`".concat(name).concat("` is declared to return `").concat(ret)
+    .concat("` but its body never returns a value")
+}
+
+fn rp_some_path_msg(name: Str, ret: Str) -> Str {
+  return "`".concat(name).concat("` is declared to return `").concat(ret)
+    .concat("` but control can reach the end of its body without a `return`")
+}
+
+// `decl.body[-1].line` — the reference anchors the incomplete-path refusal at
+// the LAST statement of the body and the never-returns one at the declaration.
+fn rp_last_line(steps: List[FbStep], dflt: Int) -> Int {
+  if (steps.length() == 0) { return dflt }
+  return steps[steps.length() - 1].line
+}
+
+fn rp_refusal(ts: List[Token], sp: FbSpan, steps: List[FbStep]) -> Verd {
+  if (sp.retDecl == "" || sp.name == "") { return no_verd() }
+  if (rp_returns(steps, 0)) { return no_verd() }
+  if (rp_has_bail(steps, 0)) { return no_verd() }
+  if (rp_mentions(sp.retDecl, rp_aliases(ts))) { return no_verd() }
+  if (!rp_has_return(steps, 0)) {
+    return mk_verd(tagged("T1", rp_no_value_msg(sp.name, sp.retDecl)), sp.line)
+  }
+  return mk_verd(tagged("T1", rp_some_path_msg(sp.name, sp.retDecl)),
+                 rp_last_line(steps, sp.line))
 }
 
 fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
@@ -8215,9 +8389,13 @@ fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
   // `return ident("hello")` drew a T1 naming `T` where the reference names the
   // UNIFIED `Str` — a refusal with the right verdict and the wrong sentence.
   let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
-  return fb_walk(fb_scan(ts, sp.lo, sp.hi), 0, fb_params_scope(sp.ps, 0, []),
-                 fb_params_tys(sp.ps, 0, gtys, tps),
-                 mark_tparams(sp.ret, tps)).v
+  let steps = fb_scan(ts, sp.lo, sp.hi)
+  // the body first, then the return question — `_lower_fns`' own order.
+  let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []),
+                  fb_params_tys(sp.ps, 0, gtys, tps),
+                  mark_tparams(sp.ret, tps)).v
+  if (v.v != "") { return v }
+  return rp_refusal(ts, sp, steps)
 }
 
 // The first refusing module `fn` in declaration order. Top-level forms other than

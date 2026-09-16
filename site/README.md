@@ -17,17 +17,27 @@ site/
   js/landing.js     landing-page animations (no libraries)
   js/playground.js  the Pyodide driver + editor
   js/examples.js    generated, preloaded programs
-  vendor/           generated, the compiler wheel
+  vendor/           the compiler wheel (generated, gitignored) and the
+                    cordis-py runtime wheel (committed, external pin)
 ```
 
 ## Run it locally
 
-The playground fetches a wheel and Pyodide's runtime, so serve over HTTP:
+The playground fetches a wheel and Pyodide's runtime, so serve over HTTP. The
+revl wheel is **not committed** — build it first:
 
 ```
+python3 tools/check_site_wheel.py --write   # -> site/vendor/revl-<version>-...whl
 python3 -m http.server 8000 --directory site
 # then open http://localhost:8000/
 ```
+
+That build is stdlib-only and takes about a second; rerun it whenever
+`src/revl/` changes. `.github/workflows/pages.yml` runs the same command before
+it uploads this directory, so the published playground is built from the sha
+being deployed rather than from a committed copy that races the merge queue.
+(`python3 site/build.py` does the same plus `js/examples.js` and the cordis
+wheel, but it needs the `backends/python/setup.sh` clone.)
 
 External fetches: Pyodide from its CDN (cached after first load) and Google
 Fonts. Nothing typed into the playground leaves the page, the compiler runs

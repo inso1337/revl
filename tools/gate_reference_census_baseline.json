@@ -30,8 +30,6 @@
    "examples/rejections/t4_field_arg_type.rvl",
    "examples/rejections/t6_bare_generic.rvl",
    "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
-   "examples/rejections/t8_missing_return.rvl",
-   "examples/rejections/t9_return_path_incomplete.rvl",
    "examples/rejections/v2_map_set_value_mismatch.rvl",
    "examples/rejections/v2_map_value_unknown_method.rvl",
    "examples/rejections/v2_match_nonexhaustive.rvl"
@@ -430,30 +428,6 @@
    },
    "reference": {
     "message": "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t8_missing_return.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`budget` is declared to return `Int` but its body never returns a value",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t9_return_path_incomplete.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`rank` is declared to return `Int` but control can reach the end of its body without a `return`",
     "tag": "T1"
    }
   },
