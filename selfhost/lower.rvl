@@ -7646,11 +7646,10 @@ fn cfg_owner_verdict(os: List[CfgOwner], al: Map[Str, Str], svcs: List[Str],
   var oi = 0
   while (oi < os.length()) {
     let o = os[oi]
-    let sub: Map[Str, Str] = o.erase ? al : Map.empty()
     var fi = 0
     while (fi < o.flds.length()) {
       let f = o.flds[fi]
-      let t = alias_subst(f.fty, sub)
+      let t = o.erase ? alias_subst(f.fty, al) : f.fty
       let r = cfg_walk(f.fname, o.owner, t, t, svcs, decls, [], [])
       if (r != "") { return mk_verd(r, f.line) }
       fi += 1
