@@ -6353,6 +6353,11 @@ fn config_data_refusal(ts: List[Token], pg: Prog) -> Verd {
     var fi = 0
     while (fi < o.flds.length()) {
       let f = o.flds[fi]
+      // `_check_config` asks the WELLFORMED question first and the is-data
+      // question second, per field — so a config field declared `Opt` is the
+      // bare-generic refusal, not the opaque-type one.
+      let wf = wf_site_verd({ ty: f.fty, line: f.line, asyncOk: false })
+      if (wf.v != "") { return wf }
       let r = cfg_walk(f.fname, o.owner, f.fty, f.fty, svcs, decls, [], [])
       if (r != "") { return mk_verd(r, f.line) }
       fi += 1
