@@ -215,9 +215,16 @@ Two honest limits, both fail-closed:
 
 ## What is deliberately absent
 
-* **`compile_to` output.** Exported, and it refuses unconditionally: the
-  self-host emitters still carry `@py`-only helper externs and do not emit to
-  rust. Stage 4's lane.
+* **`compile_to` output.** Exported, and it refuses unconditionally. The
+  blocker is no longer packaging: the native rust emitter IS in this crate (see
+  `emit_ir` below). What is missing is a native FRONTEND whose IR byte-agrees
+  with the reference — the self-host's `lower_to_ir` is behind the reference's
+  (roadmap item 391), and measured through this crate's own closure it emits the
+  reference's bytes for 10 of the 73 accepted programs in the covered corpus.
+  Handing back the other 63 would be handing a caller target source this crate
+  cannot back, so the arm refuses instead. `py` is blocked one step earlier:
+  `selfhost/emit_py.rvl`'s helper externs are `@py`-only, so no py emitter can
+  be generated into the crate at all.
 * **The reference type layer.** Still absent, in `admit` and in `admit_into`
   alike: neither arm issues an admission. That lane is the type layer's, not the
   manifest parameter's.
@@ -246,6 +253,29 @@ Two honest limits, both fail-closed:
   that step needs `compile_to`, which this tier does not have. The pair rules are
   enforced over the registry, and the runtime is real; what is not yet real is the
   path from admitted source to a running body.
+
+## What emits: `emit_ir` (roadmap item 146)
+
+`emit_ir(ir_document, Tier::Rust)` takes a staged interchange IR document as
+JSON TEXT — the shape `revl compile --emit-ir` writes — and returns rust source.
+No Python, no reference compiler, no cordis runtime in the call.
+
+The emitter is `selfhost/emit_rust.rvl`, generated into the same `selfhost`
+module as the gate and called behind `stdlib/json.rvl::json_parse`, which is the
+constructor for the `cordis::Value` its `Any` parameter erases to. It byte-agrees
+with the reference rust backend over that backend's own self-host oracle corpus:
+34 documents, no exclusions, driven through this crate by
+`tests/test_gate_crate_admit.py::test_emit_ir_is_byte_identical_to_the_reference`.
+
+It fails closed on a document above `MAX_SOURCE_BYTES`, on anything
+`revl_gate::ir::check_ir_boundary` refuses (an unknown top-level field, an
+unknown schema revision, a non-object), on `Tier::Py`, and on an abort inside the
+emitter. It is not an admission and never reads `admitted:true`.
+
+What it claims is scoped to what it was measured on: a document the REFERENCE
+frontend produced. It claims nothing about an IR document assembled some other
+way, and — see `compile_to` above — nothing about compiling revl source
+end to end.
 
 ## Host obligations
 
@@ -290,7 +320,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:825cfb6061355661"
+    // frontier "selfhost-admit:67e7cc342eab62f2"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
