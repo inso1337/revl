@@ -232,6 +232,17 @@ REJECTIONS = {
     "g4_extern_undo_self_call.rvl": "extern `open_ledger`'s `undo` cannot call the extern itself",
     "g4_extern_undo_param_not_in_scope.rvl": "`path` is not declared — the `undo` slot of extern `open_ledger` sees only the implicit `result` binding",
     "g4_extern_compensate_result.rvl": "`result` is not bound in the `compensate` slot of extern `send`",
+    # item 378 / issue #1151: a config field's declared type must be data, and
+    # the question is asked AFTER transparent aliases are erased. A component's
+    # config IS a substitution site, so its diagnostic names the erased type; an
+    # extern's is NOT, so the alias head survives into a type table its own
+    # declaration was dropped from and is refused as opaque.
+    "g4_config_alias_arrow.rvl":
+        "config field `on_row` of component `Loader` has type `(Int) -> Str`, "
+        "which reaches an arrow (function) type",
+    "g4_extern_config_alias_opaque.rvl":
+        "config field `on_row` of extern `load_rows` has type `Handler`, "
+        "which reaches the opaque type `Handler`",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
     # item 294 Slice 1: a spawn that widens a parameterized capability (a child
