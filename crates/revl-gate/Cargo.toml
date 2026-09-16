@@ -18,4 +18,14 @@ path = "src/lib.rs"
 # graph-purity" — taken in the open, and item 336's call to change.
 cordis = { package = "cordis-rs", version = "0.6" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` is LOAD-BEARING, not a preference. The native emitter reads
+# the interchange IR through stdlib/value.rvl's `@rs` accessors, which downcast
+# to a `serde_json::Value` and walk a record's fields in the order the map
+# yields them. serde_json's default map is a `BTreeMap`, i.e. SORTED, and the
+# reference emitter walks a Python dict, i.e. INSERTION-ordered — so without
+# this feature `emit_ir` emits a record's members in the wrong order and
+# diverges from the reference on every record-shaped document. Measured on the
+# emit_rust corpus: 10 of 34 documents differ (records, variants, services,
+# config). Every byte-exact emit oracle stays green either way, because those
+# run the emitter under CPython.
+serde_json = { version = "1", features = ["preserve_order"] }
