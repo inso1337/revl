@@ -73,13 +73,3 @@ pub fn note(xs: List[Int]) {
   var total = 0
   for (x of xs) { total += x }
 }
-
-// a transparent alias in the return position: the reference erases it before it
-// spells any refusal about this `fn`, which is why the gate withholds here.
-type Count = Int
-
-pub fn tally(xs: List[Int]) -> Count {
-  var total = 0
-  for (x of xs) { total += x }
-  return total
-}
