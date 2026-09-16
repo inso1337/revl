@@ -7134,6 +7134,21 @@ fn tk_is_struct(t: Str) -> Bool {
 }
 
 // `structural_fields(t)[name]`, over the brace-aware split.
+// Does this base spelling name a record? A structural literal is one by
+// construction; a NOMINAL one is recognised by the `field <Type>.<name>` rows
+// the declaration scan contributes, which only a record type has.
+fn tk_record_base(t: Str, env: List[Bind]) -> Bool {
+  if (tk_is_struct(t)) { return true }
+  if (t == "" || !tk_nominal_name(t)) { return false }
+  let pfx = "field ".concat(t).concat(".")
+  var i = 0
+  while (i < env.length()) {
+    if (env[i].name.slice(0, pfx.length()) == pfx) { return true }
+    i += 1
+  }
+  return false
+}
+
 fn tk_struct_field(t: Str, name: Str) -> Str {
   if (!tk_is_struct(t)) { return "" }
   let parts = tk_split_depth(t.slice(1, t.length() - 1))
@@ -7358,6 +7373,15 @@ fn tk_check_recupd(base: Expr, upds: List[InitN], expected: Str,
 // the INFER position does not.
 fn tk_upd_fields(baseTy: Str, upds: List[InitN], i: Int, env: List[Bind],
                  named: Bool) -> TInf {
+  // The reference reaches the per-field walk only when the base RESOLVES to a
+  // record shape — a structural literal, or a declared record type. On any
+  // other base its two positions part company (the infer position raises
+  // "record update requires a record type", the check position compares the
+  // base against the expectation and says nothing about the fields), and
+  // NEITHER types the update values. Walking them anyway refused
+  // `let b: Float = { a | h = ~{ h: "x" } }` for its `~` where the reference
+  // reports the `Float` the `Bool` base does not fit.
+  if (!tk_record_base(baseTy, env)) { return tk_ok(baseTy) }
   if (i >= upds.length()) { return tk_ok(baseTy) }
   let structural = tk_is_struct(baseTy)
   let u = upds[i]
@@ -7612,14 +7636,20 @@ fn tk_callee(callee: Expr, env: List[Bind]) -> TInf {
   }
 }
 
-// A stdlib method call on a receiver of UNKNOWN type has no type either: the
-// reference cannot pick a form out of `_BUILTIN_SIG` without one — it refuses
-// the call outright, with the HOST-METHOD diagnostic this slice does not spell
-// — so answering with the method's usual result invents a type the reference
-// never had. `~c.to_str()` was refused for a `Str` operand nothing produced.
+// A MULTI-FAMILY stdlib method — one spelled for several receiver families,
+// where `_BUILTIN_SIG` holds a row per family — has no result at all until the
+// receiver picks a row, and the reference returns unknown when the receiver's
+// type is not known. `builtin_ret` here answers a single result per method
+// name, so it invented a `Str` for `c.to_str()` on an unknown `c` and the
+// `~` around it was refused for an operand the reference never produced. The
+// set is exactly the dict-valued rows: `to_str`, `to_int`, `keys`.
+fn tk_multi_family(m: Str) -> Bool {
+  return m == "to_str" || m == "to_int" || m == "keys"
+}
+
 fn tk_unknown_receiver(callee: Expr, env: List[Bind]) -> Bool {
   return match callee {
-    Field(f) => is_builtin_method(f.name) && !is_empty_map_callee(callee)
+    Field(f) => tk_multi_family(f.name) && !is_empty_map_callee(callee)
                 && !tk_host_root(f.target)
                 && tk_infer(f.target, env).ty == "",
     _ => false,
