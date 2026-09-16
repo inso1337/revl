@@ -1185,24 +1185,31 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         return _member(target, node.get("name"), "optional field", optional=True)
 
     if kind == "optcall":
+        # `?.m(..)`: the method is a STDLIB builtin (the checker types an
+        # optcall through `builtin_check`, so there is no host-method row to
+        # reach), and it must be rendered by the same table a plain `.m(..)`
+        # goes through. Emitting `payload?.m(..)` instead put a method JS
+        # values do not have on the receiver — `o?.length is not a function`,
+        # `o?.to_int is not a function`, `o?.to_str is not a function`, and
+        # eleven more — which the byte-agreement oracle emitted and no test
+        # ever ran. (The python tier took the same step for the same reason;
+        # backends/python/emit.py, `_RECV_VIA_OPT`.)
+        #
+        # The payload is bound by an arrow IIFE rather than a `const`, because
+        # this is expression position. A NESTED chain inside an argument gets
+        # its own arrow scope, so the inner binding shadows rather than
+        # clobbers — the collision the python tier had to name its binder
+        # around cannot arise here.
         target_node = node.get("target")
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        method = node.get("method")
         arg_nodes = list(node.get("args") or [])
-        int_args = _TS_INT_ARG_BUILTINS.get(method, ())
-        args = ", ".join(
-            _int_as_number(a, ctx) if index in int_args else _expr(a, ctx)
-            for index, a in enumerate(arg_nodes))
-        call = f"{target}?.{_ident(method, 'optional method')}({args})"
-        if method in _TS_INT_RESULT_BUILTINS:
-            # `?.` short-circuits to `undefined`, and `BigInt(undefined)`
-            # throws — so the Int conversion cannot wrap the whole chain, only
-            # the result when there is one. revl types this `Opt[Int]`.
-            return ("((v: number | undefined) => v === undefined ? undefined : BigInt(v))"
-                    f"({call})")
-        return call
+        args = [_expr(a, ctx) for a in arg_nodes]
+        body = _ts_builtin(node.get("method"), _TS_OPT_BIND, args, arg_nodes,
+                           ctx, _TS_RECV_VIA_OPT)
+        return (f"(({_TS_OPT_BIND}: any) => {_TS_OPT_BIND} === undefined "
+                f"? undefined : {body})({target})")
 
     if kind == "spawn":
         # instance-parametric components (docs/design-v2-instances.md): a spawn
@@ -2825,6 +2832,10 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     if method == "to_int":
         if recv == "Str":
             return f"revlParseInt({target})"
+        if recv == _TS_RECV_VIA_OPT:
+            # reached through `?.`, whose node carries no receiver type: split
+            # the Str parse from the Int32 widen on the payload at run time.
+            return f"revlOptToInt({target})"
         return f"BigInt({target})"
     if method == "to_int32":
         return f"revlI32(Number({target}))"
@@ -3553,13 +3564,16 @@ _TS_CHECKED_DIV = {
     "checked_mod": "revlCheckedMod",
 }
 
-# Builtin methods whose named argument positions revl types `Int` while the JS
-# API takes a `number`, and builtins revl types `Int` while the JS API answers
-# a `number`. `_ts_builtin` spells each conversion out per method; these tables
-# are the same facts in the form the `?.` path needs.
-_TS_INT_ARG_BUILTINS = {"slice": (0, 1), "charAt": (0,), "charCodeAt": (0,),
-                        "codepoint_at": (0,), "repeat": (0,)}
-_TS_INT_RESULT_BUILTINS = {"length", "indexOf", "charCodeAt", "codepoint_at"}
+# The receiver type a builtin reached through `?.` has: an `optcall` IR node
+# carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
+# exactly this reason), so the one lowering that dispatches on it — `to_int`,
+# whose Int32 row widens and whose Str row parses — decides at run time.
+_TS_RECV_VIA_OPT = "?"
+
+# The name the `?.` payload is bound to. `$` cannot start a revl identifier, so
+# it cannot collide with a user binding; the same prefix the match temporaries
+# use.
+_TS_OPT_BIND = "$revl_opt"
 
 # Int is 64-bit two's complement and overflow traps (docs/arithmetic.md).
 # BigInt is arbitrary precision, so this tier imposes the bound the way python
@@ -3791,6 +3805,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_STR_CMP_HELPER, ""])
     if _uses_parse_int(ir):
         out.extend([_REVL_PARSE_INT_HELPER, ""])
+    if _uses_opt_to_int(ir):
+        out.extend([_REVL_OPT_TO_INT_HELPER, ""])
     if _uses_index(ir):
         out.extend([_REVL_INDEX_HELPER, ""])
     if _uses_map_index(ir):
@@ -3865,7 +3881,7 @@ def _uses_split(node) -> bool:
     """Does this IR call `Str.split` — the only builtin routed through
     `revlSplit` (the empty-separator code-point path, #549)?"""
     if isinstance(node, dict):
-        if node.get("kind") == "builtin" and node.get("method") == "split":
+        if node.get("kind") in ("builtin", "optcall") and node.get("method") == "split":
             return True
         return any(_uses_split(v) for v in node.values())
     if isinstance(node, list):
@@ -3883,7 +3899,7 @@ def _uses_bounded_int32(node) -> bool:
         if (node.get("kind") == "un" and node.get("op") == "-"
                 and node.get("operands") == "Int32"):
             return True
-        if node.get("kind") == "builtin" and node.get("method") == "to_int32":
+        if node.get("kind") in ("builtin", "optcall") and node.get("method") == "to_int32":
             return True
         return any(_uses_bounded_int32(v) for v in node.values())
     if isinstance(node, (list, tuple)):
@@ -4085,7 +4101,7 @@ def _uses_str_cmp(node) -> bool:
         if (node.get("kind") == "bin" and node.get("operands") == "Str"
                 and node.get("op") in ("<", ">", "<=", ">=")):
             return True
-        if node.get("kind") == "builtin" and node.get("method") == "keys":
+        if node.get("kind") in ("builtin", "optcall") and node.get("method") == "keys":
             return True
         return any(_uses_str_cmp(v) for v in node.values())
     if isinstance(node, (list, tuple)):
@@ -4101,16 +4117,38 @@ _REVL_PARSE_INT_HELPER = """function revlParseInt(s: string): bigint | undefined
 }"""
 
 
+_REVL_OPT_TO_INT_HELPER = """function revlOptToInt(v: string | number): bigint | undefined {
+  return typeof v === "string" ? revlParseInt(v) : BigInt(v)
+}"""
+
+
 def _uses_parse_int(node) -> bool:
     """Does this IR call `Str.to_int` (the parse form, not the Int32 widen)?
-    Only that form needs `revlParseInt`; the widen lowers to bare `BigInt`."""
+    Only that form needs `revlParseInt`; the widen lowers to bare `BigInt`.
+
+    An `optcall` counts whichever row it is: its node carries no `recv`, so the
+    two are told apart at run time by `revlOptToInt`, which calls this helper."""
     if isinstance(node, dict):
         if (node.get("kind") == "builtin" and node.get("method") == "to_int"
                 and node.get("recv") == "Str"):
             return True
+        if node.get("kind") == "optcall" and node.get("method") == "to_int":
+            return True
         return any(_uses_parse_int(v) for v in node.values())
     if isinstance(node, (list, tuple)):
         return any(_uses_parse_int(v) for v in node)
+    return False
+
+
+def _uses_opt_to_int(node) -> bool:
+    """A `to_int` reached through `?.`, which needs the payload-dispatching
+    wrapper beside `revlParseInt`."""
+    if isinstance(node, dict):
+        if node.get("kind") == "optcall" and node.get("method") == "to_int":
+            return True
+        return any(_uses_opt_to_int(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_opt_to_int(v) for v in node)
     return False
 
 
@@ -4127,7 +4165,8 @@ def _uses_str_methods(node) -> bool:
         # emitted for it too (else `revlLen` is undefined at runtime).
         if node.get("kind") == "field" and node.get("sized_length"):
             return True
-        if node.get("kind") == "builtin" and node.get("method") in _STR_METHOD_NAMES:
+        if (node.get("kind") in ("builtin", "optcall")
+                and node.get("method") in _STR_METHOD_NAMES):
             return True
         return any(_uses_str_methods(v) for v in node.values())
     if isinstance(node, (list, tuple)):

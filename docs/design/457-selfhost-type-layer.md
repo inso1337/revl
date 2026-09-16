@@ -217,7 +217,17 @@ default is checked against the field type (`t3`), and a method-local binding
 may not shadow a component name (`g6_method_local_shadows_component`).
 `unknown service `S` in `requires`/`provides` of C` belongs here too (it is
 the standalone refusal the harness's `cache_layer` candidate gets, and the
-crate's `TYPE_LAYER_GAP` list carries the `provides` twin).
+crate's `TYPE_LAYER_GAP` list carried the `provides` twin).
+
+**That one has LANDED, ahead of T4** — see T4a in section 5, and T4b for
+`a6`, the member half of the same resolve-a-name-against-a-declaration shape. It is the only
+obligation in this section that needs no expression algebra: the component
+header carries a name, and the decision is whether the program declares a
+service by that name. The two exemptions it costs are written into the code:
+a parameterized annotation (`Stream[T]`) is not a service, as the reference
+also has it, and a text carrying a `use` declaration has no knowable service
+set because a module can export a service and this gate does not read modules.
+Both under-refuse, which is the direction the gate is allowed to err in.
 
 `selfhost/checker.rvl` slice two (`check_service_src`) already ports a part of
 this message-for-message (G4 declaration bound, required-service argument
@@ -566,6 +576,87 @@ Oracle: IR and emitted-bytes byte-exactness over every corpus (`test_selfhost_
 lower_ir.py`, `test_selfhost_compile.py`, every `test_selfhost_emit_*.py`),
 `tools/selfhost_differential_survey.py` unchanged. Net negative lines; its
 whole value is that two inference engines can no longer drift.
+
+**T4a. The component header's service-existence rule.** LANDED, out of order:
+it sits in T4's list at 2.4 but depends on nothing T1..T3 build, because it
+resolves a NAME rather than a term. `selfhost/lower.rvl` reads each component
+header's `<key>: <Service>` annotations with their lines (`SvcRef`, requires
+before provides, which is the reference's own order: `Env.__init__` walks
+`comp.requires`, `_lower_component` the provisions), and refuses the first that
+resolves against neither the program's own service declarations nor — on the
+ambient path — the running composition's. The item-346 `!services` block, which
+until now the manifest fold parsed and discarded, is what supplies the second
+set; its `!services` HEADER is the exhaustiveness claim, and a wire that makes
+no claim decides nothing. What it buys, measured: `admit_src` and `admit_into`
+now give DIFFERENT answers about `bench/admission_latency.py::CANDIDATE`, so
+clause 1 of section 6's exit test is met — the rust gate refuses `cache_layer`
+standalone with the reference's own sentence, and lifts that refusal against a
+manifest that declares `Store`. Four corpus documents (`demo/components/*`,
+`examples/ecosystem-consumer/candidates/leaky_tool.rvl`) moved from
+`no-objection-out-of-slice` to `agree-refuse/G1`, and the crate's
+`TYPE_LAYER_GAP` lost its `provides` row to the agreement corpus. What it does
+NOT buy: nothing about requirement RESOLUTION or the `Admitted` arm. The first of
+those is T4b below; the second is still T6 in full.
+
+**T4b. The required-service MEMBER rule (A6).** LANDED, out of order, for the
+same reason T4a was: it resolves a NAME against a held declaration rather than a
+term, so it needs nothing T1..T3 build. `selfhost/lower.rvl`'s `req_call` looks
+the operation up in the service the requirement resolves to and refuses an
+absent one with `` `db.execute` is not a method of service Database `` — at the
+reference's own position, ahead of the arity count and ahead of the G4 emit-marker
+arm, so an operation nothing declares draws A6 and not G4 even under `emit`. It
+fires only where the declaration is HELD (`svc_decl_known`), which is the whole
+soundness argument: `svc_of` answers an EMPTY method list for a service this gate
+has no declaration for, and refusing against that would refuse every call on an
+ambient service.
+
+Two sources are exhaustive enough to be held, and both are exhaustive by
+construction. The text's own `service S { … }`: `p_service` parses every
+operation or fails the whole document, so a parsed `SvcD` is the complete
+surface. And the RUNNING composition's, which is what makes this the
+requirement-RESOLUTION slice the previous entry said was still open: the
+item-346 `:S` row grew an operation list (`:S,get,bump,put`), rendered by
+`revl.manifest.manifest_wire` off the IR's service table, and the fold keeps
+those in `Ctx.ambOps` — deliberately NOT merged into `Ctx.svcs`, because an entry
+there carries the emission/async/capability flags the G4 and A1 arms judge and
+the wire carries operation NAMES only. The comma is the claim: `:S` is the wire
+every producer without an operation table renders and decides no member, `:S,` is
+the empty surface, `:S,a` is exactly `a`. A malformed list refuses the wire by
+name (`MANIFEST`) rather than claiming a shorter surface than the composition
+has, which would refuse calls the reference admits.
+
+What it buys, measured: `a6_method_not_in_service` moved from
+`false-admit/A6` to `agree-refuse/A6` (that census bucket is now EMPTY), and the
+rust gate's manifest arm now gives different answers about two candidates that
+differ only in the operation they call — `bench/inprocess_gate_harness.py::
+_CALLS_MISSING_METHOD` is refused `A6` with the reference's own sentence where
+`al.CANDIDATE` is not. That is clause 3 of section 6's exit test for the
+`calls_missing_method` candidate, and the second of the three things T4a left
+open. What it does NOT buy: argument typing and arity on the same call (both need
+the expression algebra, still T4), the §5 compatibility relation on a
+redeclaration (the block carries operation names, not signatures), and the
+`Admitted` arm — which is now the ONLY thing standing between the rust gate and
+clause 2, and is T6 in full.
+
+**An ordering divergence T4b uncovered, and did not cause.** The A6 refusal is
+INLINE: `body_line` anchors it at the offending statement. The handoff
+compatibility verdict of item 186's wave part 2 is anchored at the COMPONENT
+declaration line, and `pick_min` orders by `(line, seq)`, so the handoff verdict
+outranks any inline body refusal on the same component. The reference does the
+opposite and for a structural reason, not a line one: `_admit_handoff_replacement`
+runs over `live_components`, which `src/revl/lower.py` builds by dropping every
+component whose body lowering raised, so a component with a refusing body
+contributes no handoff verdict at all.
+
+It predates this slice — the same disagreement reproduces with the G1
+undeclared-access refusal, inline-anchored since long before this design — and no
+corpus program had caught it because the whole-component AGGREGATE verdicts (the
+G4 emission reach) tie at the component line and are saved by `seq`. Both
+refusals are true, so it is a 419c naming divergence and never a false admission.
+`test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate` pins it in
+both directions; the fix belongs to the slice that owns `handoff_refusals`, needs
+the poisoned-component set threaded into `collect_nonlink`, and carries its own
+oracle rows.
 
 **T4. Provide-method and component bodies.** `cir_*` typed against the
 service signature (2.4); `unknown service` in `requires`/`provides`; config

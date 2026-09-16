@@ -1,8 +1,5 @@
 {
  "buckets": {
-  "false-admit/A6": [
-   "examples/rejections/a6_method_not_in_service.rvl"
-  ],
   "false-admit/G1": [
    "examples/rejections/g1_template_undeclared.rvl",
    "examples/rejections/v2_undeclared_fn_var.rvl"
@@ -81,18 +78,6 @@
    "reference": {
     "message": "field read `.function` on a value of type `Any` \u2014 an erased value has no known fields",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/a6_method_not_in_service.rvl": {
-   "bucket": "false-admit/A6",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`db.execute` is not a method of service Database",
-    "tag": "A6"
    }
   },
   "examples/rejections/arith_zero_divisor.rvl": {
