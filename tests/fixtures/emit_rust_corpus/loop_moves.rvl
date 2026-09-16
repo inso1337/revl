@@ -88,3 +88,27 @@ pub fn for_iterable_in_while_clones(rows: List[Str], n: Int) -> Int {
   }
   return t
 }
+
+// A test body is a function body, and it gets the same by-value analysis. It
+// is worth stating separately because `cargo check` alone stops at the lib and
+// never compiles `#[cfg(test)]`: a move here is invisible until the gate says
+// `--all-targets`.
+
+test "a reused local in a test body is cloned at each by-value use" {
+  var n = 0
+  let head = n == 0 ? "x" : ""
+  assert own(head).length() == 1
+  assert own(head).length() == 1
+}
+
+test "a loop in a test body repeats its reads too" {
+  var n = 0
+  let head = n == 0 ? "x" : ""
+  var i = 0
+  var t = 0
+  while (i < 2) {
+    t += own(head).length()
+    i += 1
+  }
+  assert t == 2
+}
