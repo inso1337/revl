@@ -2313,6 +2313,75 @@ def test_go_lowers_a_stream_component_that_also_declares_a_record():
     assert "type Foo struct {" in code
 
 
+def test_go_diverts_a_source_only_component_beside_a_top_level_declaration():
+    """The same routing rule, on the stream surface it did not cover.
+
+    `_document_holds_stream` recognised a `subscribe` bracket and a `stream-iter`
+    body step, and nothing else. A component that only ACQUIRES a provider —
+    `let src = effect Stream.source() undo src.close()`, the shape
+    `test_source_only_program_still_emits_on_the_lowered_tiers` already requires
+    this tier to emit — carries neither, so the moment the document also held a
+    top-level declaration it routed to the pure typed-core path and the whole
+    component vanished: no subscription, no `Close` inverse, no diagnostic. A
+    live provider is a live host listener whether or not anything is reading it,
+    so it is diverted like every other stream component."""
+    emit = _tier_emit("go")
+    code = emit.emit(compile_source("""
+    type Foo = { a: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+    }
+    """, "s.rvl"))
+    assert "func LoadC(" in code
+    assert "StreamSource()" in code
+
+
+@pytest.mark.parametrize("tail, named", [
+    ("fn tag(s: Str) -> Str { return s }", "functions"),
+    ('test "t" { assert 1 == 1 }', "tests"),
+])
+def test_go_refuses_a_stream_document_whose_top_level_it_would_drop(tail, named):
+    """The other direction of the same routing decision, and the same rule.
+
+    A stream document is diverted to the live stc-go path so the component is not
+    dropped. That path renders types, externs, services, components and lifecycle
+    tests — it renders no top-level `fn` and no plain `test` block. So the
+    diversion silently dropped whatever the pure path would have emitted, and the
+    document compiled to a module missing a section the author wrote. Refused by
+    name instead: the tier states which section it cannot carry beside a stream
+    rather than answering with a module that is quietly short of one."""
+    emit = _tier_emit("go")
+    src = tail + """
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      await sub.next()
+    }
+    """
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(src, "s.rvl"))
+    message = str(excinfo.value)
+    assert named in message
+    assert "item 130" in message
+
+
+def test_go_still_emits_a_stream_document_whose_top_level_it_can_carry():
+    """The control for the refusal above: a `type` (every typed event declares
+    one) and an `extern` ARE rendered on the live path, so a stream document
+    carrying them still emits."""
+    emit = _tier_emit("go")
+    code = emit.emit(compile_source("""
+    type Foo = { a: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl"))
+    assert "type Foo struct {" in code
+    assert 'sub = StreamSubscribe(src, "error", 0)' in code
+
+
 def test_wasm_still_refuses_a_handler_program():
     emit = _tier_emit("wasm")
     with pytest.raises(emit.EmitError) as excinfo:
