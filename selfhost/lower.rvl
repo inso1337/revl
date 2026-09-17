@@ -6164,6 +6164,246 @@ fn too_deep_msg() -> Str {
   return `expression nesting is deeper than the parser's limit of ${nesting_limit().to_str()} levels`
 }
 
+// ============================ the type-alias DECLARATION (item 1151, #1151)
+//
+// `type X = Y` where `Y` names an existing type is a TRANSPARENT alias, and the
+// reference checks it AT ITS OWN DECLARATION, before it substitutes anything
+// (`lower.py::_resolve_type_aliases`): every alias target goes through
+// `check_type_wellformed` with the permissions of a VALUE position, and the
+// alias graph is then expanded to a fixed point, which is where a CYCLE is
+// refused. Both run ahead of `_validate_declared_types`, so this phase precedes
+// the config-is-data walk below and every phase after it.
+//
+// Why it is here at all. #1151 reads the gate as asking a type question too
+// EARLY — before erasure — and the sweep behind it found the gate asking several
+// (the config-is-data walk, the whole fn-body type layer). The DECLARATION
+// itself is the other half of the same surface and the gate had no phase for it:
+// the question the reference asks at an alias's own declaration was never asked,
+// so a program whose only refusal lives there was admitted with no objection.
+// Four distinct `false-admit` families were measured — an alias target
+// mentioning `Async` (A1), one naming `Approval` (G4), a bare builtin generic
+// (T1), and an alias CYCLE (TYPE), the last of which the census baseline already
+// named (`examples/rejections/t18_type_alias_cycle.rvl`).
+//
+// WHAT IS LEFT OUT, and why each silence is the sound direction. Three arms of
+// `check_type_wellformed` refuse under a verdict this gate does not claim:
+// `Delegate[S]` (out of slice), the two termination markers `Criterion` and
+// `Guard` (L4), and an alias that declares type PARAMETERS (code-less, refused
+// before the target is even read). Each raises UNCONDITIONALLY in the reference,
+// so this reader stops at such a head and issues nothing — the program stays a
+// no-objection against an out-of-slice reference refusal, exactly where it sits
+// today, instead of drawing a refusal under a tag the census would grade.
+
+type AwfD    = { name: Str, target: Str, line: Int }
+type AwfScan = { declared: List[Str], ds: List[AwfD] }
+
+// The reference's `_ALIASABLE_BUILTINS` — `_BUILTIN_NONRECORD` plus the two type
+// algebra wildcards, both of which `is_builtin_type_name` already carries.
+fn awf_aliasable_builtin(name: Str) -> Bool {
+  return is_builtin_type_name(name) || name == "Criterion" || name == "Guard"
+}
+
+// `_alias_target`'s last three lines: a single-case right-hand side is a
+// TRANSPARENT alias target when it is a type APPLICATION (`List[Row]`, a fn
+// type), a BUILTIN head, or another DECLARED type name. A head that is none of
+// those is TypeScript's TS2304 — undeclared — where revl keeps the one-case
+// variant reading, so `type Status = Pending` declares a nominal and is not an
+// alias at all.
+fn awf_is_alias_target(target: Str, declared: List[Str]) -> Bool {
+  if (target == "") { return false }
+  let p = ty_parse(target)
+  if (p.args.length() > 0) { return true }
+  return awf_aliasable_builtin(p.head) || contains(declared, p.head)
+}
+
+// Every type DECLARATION in the file: the names it declares (an `event`
+// contributes one too — the parser appends an ordinary record `TypeDecl` beside
+// the `EventDecl`) and, for each declaration whose right-hand side is one bare
+// type spelling, that spelling with its own declaration line. A record body and
+// a variant right-hand side are real declarations and offer no target. A
+// declaration carrying type PARAMETERS is refused by the reference before its
+// target is read, and that refusal is out of slice, so it offers none either.
+fn awf_scan(ts: List[Token]) -> AwfScan {
+  var declared: List[Str] = []
+  var ds: List[AwfD] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (at_event(ts, i)) {
+      declared = declared.push(tkc(ts, i + 1).text)
+      let e = event_decl_end(ts, i)
+      i = e > i ? e : i + 1
+    } else if (atw(ts, i, "type")) {
+      let nm = tkc(ts, i + 1).text
+      declared = declared.push(nm)
+      var j = i + 2
+      var tparams = false
+      if (atk(ts, j, "[")) { tparams = true  j = skip_brackets(ts, j) }
+      var end = cfg_decl_end(ts, j)
+      if (atk(ts, j, "=")) {
+        end = cfg_decl_end(ts, j + 1)
+        if (!tparams && !atk(ts, j + 1, "{")
+            && !cfg_is_variant_rhs(ts, j + 1, end)) {
+          ds = ds.push({ name: nm, target: type_at(ts, j + 1).ty,
+                         line: tkc(ts, i).line })
+        }
+      }
+      i = end > i ? end : skip_line(ts, i)
+    } else { i += 1 }
+  }
+  return { declared: declared, ds: ds }
+}
+
+// The declarations the reference reads as transparent aliases, in source order.
+fn awf_aliases(sc: AwfScan) -> List[AwfD] {
+  var out: List[AwfD] = []
+  var i = 0
+  while (i < sc.ds.length()) {
+    if (awf_is_alias_target(sc.ds[i].target, sc.declared)) {
+      out = out.push(sc.ds[i])
+    }
+    i += 1
+  }
+  return out
+}
+
+fn awf_no_decl() -> AwfD { return { name: "", target: "", line: 0 } }
+
+fn awf_lookup(als: List[AwfD], name: Str) -> AwfD {
+  var i = 0
+  while (i < als.length()) {
+    if (als[i].name == name) { return als[i] }
+    i += 1
+  }
+  return awf_no_decl()
+}
+
+fn awf_async_value_msg(ty: Str) -> Str {
+  return "`Async[T]` is not a value type (`".concat(ty)
+    .concat("`) — it may only be the return type of a function type, e.g. ")
+    .concat("`(List[Msg]) -> Async[Str]`")
+}
+
+fn awf_async_position_msg(root: Str) -> Str {
+  return "an async function type (`".concat(root)
+    .concat("`) is only supported as a module `fn` parameter in v1, not in ")
+    .concat("this position")
+}
+
+fn awf_approval_msg(ty: Str) -> Str {
+  return "`".concat(ty)
+    .concat("` cannot be written as a type — an `Approval[C]` is produced only ")
+    .concat("by `await approval[C] { ... }` and cannot be stored, returned, or ")
+    .concat("persisted")
+}
+
+fn awf_arity_msg(head: Str, arity: Int, got: Int, ty: Str) -> Str {
+  return "`".concat(head).concat("` takes ").concat(arity.to_str())
+    .concat(" type argument(s), got ").concat(got.to_str()).concat(" (`")
+    .concat(ty).concat("`)")
+}
+
+// `typecheck._GENERIC_ARITY`, -1 for a head it does not arity-check (a user
+// nominal is never arity-checked there either).
+fn awf_generic_arity(h: Str) -> Int {
+  if (h == "Opt" || h == "List") { return 1 }
+  if (h == "Map" || h == "Result") { return 2 }
+  return 0 - 1
+}
+
+// `_check_type_wf` over one spelling, with the permissions an alias target
+// carries: `allow_async` and `allow_delegate` are both false at the root, and
+// the ONLY position that turns `in_fn_return` on is a function type's last
+// argument. `root` stays the alias's whole target through every recursion,
+// because the async-position sentence quotes it rather than the sub-type that
+// tripped it.
+fn awf_ty_verdict(ty: Str, root: Str, inRet: Bool) -> Str {
+  if (ty == "") { return "" }
+  let p = ty_parse(ty)
+  // the heads whose refusal is out of this gate's vocabulary. Each raises
+  // unconditionally in the reference, so the walk STOPS rather than descending
+  // past a refusal that has already happened.
+  if (p.head == "Delegate" || p.head == "Criterion" || p.head == "Guard") {
+    return ""
+  }
+  if (p.head == "Approval") { return tagged("G4", awf_approval_msg(ty)) }
+  if (p.head == "Async") {
+    // `allow_async` is false at every position an alias target reaches, so the
+    // two arms are exactly "not a value type" and "not in this position".
+    if (!inRet) { return tagged("A1", awf_async_value_msg(ty)) }
+    return tagged("A1", awf_async_position_msg(root))
+  }
+  let ar = awf_generic_arity(p.head)
+  if (ar != 0 - 1 && p.args.length() != ar) {
+    return tagged("T1", awf_arity_msg(p.head, ar, p.args.length(), ty))
+  }
+  var i = 0
+  while (i < p.args.length()) {
+    // only the IMMEDIATE function type's return position carries a colour, and
+    // an alias target never has the permission to use it — so the flag decides
+    // which of the two async sentences is spelled, never whether one is.
+    let isRet = p.head == "->" && i == p.args.length() - 1
+    let v = awf_ty_verdict(p.args[i], root, isRet)
+    if (v != "") { return v }
+    i += 1
+  }
+  return ""
+}
+
+fn awf_cycle_msg(stack: List[Str], head: Str) -> Str {
+  let at = stack.indexOf(head)
+  var parts: List[Str] = []
+  var i = at
+  while (i < stack.length()) { parts = parts.push(stack[i])  i += 1 }
+  parts = parts.push(head)
+  return "type alias cycle: ".concat(parts.join(" -> "))
+}
+
+// The reference's `expand`: follow a bare head through the alias table, recurse
+// through a type application's ARGUMENTS under the same stack, and refuse the
+// first head already on it. The refusal is anchored at the declaration of the
+// head the walk came BACK to, which is what `aliases[head].line` names.
+fn awf_expand(als: List[AwfD], ty: Str, stack: List[Str]) -> Verd {
+  let p = ty_parse(ty)
+  if (p.args.length() > 0) {
+    var i = 0
+    while (i < p.args.length()) {
+      let v = awf_expand(als, p.args[i], stack)
+      if (v.v != "") { return v }
+      i += 1
+    }
+    return no_verd()
+  }
+  let d = awf_lookup(als, p.head)
+  if (d.name == "") { return no_verd() }
+  if (contains(stack, p.head)) {
+    return mk_verd(tagged("TYPE", awf_cycle_msg(stack, p.head)), d.line)
+  }
+  return awf_expand(als, d.target, stack.push(p.head))
+}
+
+// The program's type-alias declaration refusal, `no_verd()` when it has none.
+// The two halves run in the reference's own order: EVERY target is checked, in
+// declaration order, before a single expansion runs — so a malformed target
+// always outranks a cycle, even one declared above it.
+fn awf_refusal(ts: List[Token]) -> Verd {
+  let als = awf_aliases(awf_scan(ts))
+  if (als.length() == 0) { return no_verd() }
+  var i = 0
+  while (i < als.length()) {
+    let v = awf_ty_verdict(als[i].target, als[i].target, false)
+    if (v != "") { return mk_verd(v, als[i].line) }
+    i += 1
+  }
+  var k = 0
+  while (k < als.length()) {
+    let c = awf_expand(als, als[k].target, [als[k].name])
+    if (c.v != "") { return c }
+    k += 1
+  }
+  return no_verd()
+}
+
+
 // ================================================ config-is-data (item 378, G4)
 //
 // A config value is injected as STATIC DATA at plug/spawn/load time, so a config
@@ -9713,10 +9953,13 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
-  // alone. Order mirrors `check_and_lower`: config-is-data (raised in
-  // `_validate_declared_types`, the earliest of all), then cache-purity,
-  // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
-  // the component loop.
+  // alone. Order mirrors `check_and_lower`: the type-alias DECLARATION (raised
+  // in `_resolve_type_aliases`, the earliest of all), then config-is-data
+  // (`_validate_declared_types`, the next), then cache-purity, host-acquire in
+  // a reachable fn, then the module-fn A1 twins, all ahead of the component
+  // loop.
+  let awfv = awf_refusal(ts)
+  if (awfv.v != "") { return { done: true, refs: [awfv] } }
   let cfgv = config_data_refusal(ts, pg)
   if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
   // the SHADOWED MODULE CALLABLE (item 391): `_refuse_callable_shadowing` runs
