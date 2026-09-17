@@ -7741,9 +7741,13 @@ fn tk_if(cond: Expr, then_: Expr, els: Expr, env: List[Bind]) -> TInf {
   return tk_ok(join_ty(a.ty, b.ty))
 }
 
+// `p_template` tags an interpolation part `"e"` and a literal one `"t"`; the
+// two walks below tested for `"expr"`, which no part carries, so every
+// `${...}` body went untyped and unlowered — the reference infers and lowers
+// each of them like any other expression.
 fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
   if (i >= parts.length()) { return tk_ok("Str") }
-  if (parts[i].kind == "expr") {
+  if (parts[i].kind == "e") {
     let r = tk_infer(parts[i].e, env)
     if (r.v != "") { return r }
   }
@@ -8626,7 +8630,12 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
   if (tk_is_host_family(root) && tenv_get(env, root) == "") { return "" }
   let recv = tk_infer(f.target, env).ty
   if (tk_is_host_family(recv)) { return "" }
-  if (list_transform_free(f.name) != "") { return "" }
+  // item 383: a receiver-first list transform is SUGAR for its generic free
+  // function, and `_lower_pure_expr` redirects to that call before it reaches
+  // the builtin table — so the next thing the reference resolves is the FREE
+  // NAME, and an undeclared one is an ordinary G1 read at this position.
+  let lt = list_transform_free(f.name)
+  if (lt != "") { return nr_refuse(lt, env) }
   let untyped = tk_low_untyped_recv(f.target, env)
   if (!is_builtin_method(f.name)) {
     // the reference refuses this for ANY non-host receiver; the gate needs the
@@ -8662,8 +8671,109 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
   return ""
 }
 
+// ------------------------------------------------- name resolution (G1, §2.3)
+//
+// `_lower_pure_expr`'s `ExprVar` arm, the last thing the reference does with a
+// name: a READ must land in the fn's `scope` or in `callables`
+// (`_HOST_CALLABLES` u `_BUILTIN_CONSTRUCTORS` u `_DECLASSIFY_BUILTINS` u the
+// module's `fn`s u its `extern`s), else "`x` is not declared in this function".
+//
+// It is a LOWERING refusal and not an inference one — `infer_ast` answers
+// "unknown" for a name it has never seen and raises nothing — so it belongs in
+// this walk beside the method rules, and a statement that both mis-types and
+// mis-names draws the TYPE refusal on both tiers.
+//
+// The callable side is read off the token stream and is deliberately an
+// OVER-approximation: every identifier that follows an `fn` keyword anywhere in
+// the text counts as declared, which covers a module `fn`, an `extern`'s own
+// `fn` and a declaration this reader could not otherwise spell in full. A name
+// too many withholds a refusal; a name too few would refuse a program the
+// reference admits, which this gate may not do.
+//
+// Three exemptions, each because the reference's own answer is not G1:
+//
+//   * a `use` declaration switches the rule off for the WHOLE text — the
+//     imported module's `pub fn`s join `callables` (`program.fn_scopes`) and an
+//     aliased `alias.f(..)` call resolves before the name resolver runs, so the
+//     universe stops being knowable from this text alone;
+//   * a name in the item-384 foreign table (`len`, `print`, `and`, ...) draws
+//     the redirect's own sentence. The token-level scanner that ports those
+//     redirects runs ahead of the parse and is deliberately conservative, so a
+//     spelling it declines to claim is left unrefused here rather than refused
+//     with the wrong message;
+//   * an ADT case name and a declared type name are let through without asking
+//     which shape they are: `_tagged_case` returns ahead of the resolver for a
+//     payload-free case, and distinguishing the rest would trade a withheld
+//     refusal for the risk of a wrong one.
+
+fn nr_bnd(n: Str) -> Str { return "bnd ".concat(n) }
+fn nr_dcl(n: Str) -> Str { return "dclfn ".concat(n) }
+
+// Every `fn <name>` in the stream: the module `fn`s and, through their own `fn`
+// keyword, the `extern`s. A `fn` TOKEN appears nowhere else — a function type is
+// spelled `(P) -> R` — so this is exhaustive by construction, which is the
+// property the rule needs and the signature table (which spells a header in
+// full or not at all) does not have.
+fn nr_fn_names(ts: List[Token], base: List[Bind]) -> List[Bind] {
+  var out = base
+  var i = 0
+  while (i + 1 < ts.length()) {
+    if (atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      out = tenv_put(out, nr_dcl(tkc(ts, i + 1).text), "1")
+    }
+    i += 1
+  }
+  return out
+}
+
+fn nr_has_use(ts: List[Token]) -> Bool {
+  var i = 0
+  while (i < ts.length()) {
+    if (atw(ts, i, "use")) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The program-level rows: the declared callables, and the switch that says the
+// universe is complete enough to refuse against.
+fn nr_binds(ts: List[Token], base: List[Bind]) -> List[Bind] {
+  if (nr_has_use(ts)) { return base }
+  return tenv_put(nr_fn_names(ts, base), "g1 on", "1")
+}
+
+fn nr_builtin_callable(n: Str) -> Bool {
+  return fb_host_root(n) || n == "Some" || n == "None" || n == "Ok"
+      || n == "Err" || n == "endorse"
+}
+
+fn nr_known(n: Str, env: List[Bind]) -> Bool {
+  if (n == "") { return true }
+  if (nr_builtin_callable(n)) { return true }
+  // the binding scope: every parameter, `let`/`var` and loop binder, recorded
+  // whether or not this walk could TYPE it.
+  if (tenv_get(env, nr_bnd(n)) == "1") { return true }
+  if (tenv_get(env, nr_dcl(n)) == "1") { return true }
+  // anything the type table itself knows the name of is something the program
+  // declared: a module `fn` binds its own name to its function type.
+  if (tenv_get(env, n) != "") { return true }
+  if (tenv_get(env, "case ".concat(n)) != "") { return true }
+  if (tenv_get(env, "decl ".concat(n)) == "1") { return true }
+  if (contains(foreign_names(), n)) { return true }
+  // a builtin spec argument (`@elem`, `@member`, `@self`) is not a name read.
+  if (n.slice(0, 1) == "@") { return true }
+  return false
+}
+
+fn nr_refuse(n: Str, env: List[Bind]) -> Str {
+  if (tenv_get(env, "g1 on") != "1") { return "" }
+  if (nr_known(n, env)) { return "" }
+  return tagged("G1", fb_undeclared_msg(n))
+}
+
 fn tk_low(e: Expr, env: List[Bind]) -> Str {
   return match e {
+    Var(n)      => nr_refuse(n, env),
     Bin(b)      => tk_low2(b.l, b.r, env),
     Un(u)       => tk_low(u.e, env),
     Field(f)    => tk_low(f.target, env),
@@ -8723,7 +8833,7 @@ fn tk_low_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> Str {
 
 fn tk_low_parts(ps: List[PartN], i: Int, env: List[Bind]) -> Str {
   if (i >= ps.length()) { return "" }
-  let r = ps[i].kind == "expr" ? tk_low(ps[i].e, env) : ""
+  let r = ps[i].kind == "e" ? tk_low(ps[i].e, env) : ""
   if (r != "") { return r }
   return tk_low_parts(ps, i + 1, env)
 }
@@ -9001,8 +9111,6 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
                                       "`let ".concat(s.name).concat(": ")
                                         .concat(tk_render(s.declTy)).concat("`"))
     if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
-    let lo = tk_low(s.value, tys)
-    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
     let bound = s.declTy == "" ? r.ty : s.declTy
     let tys2 = bound == "" ? tys : tenv_put(tys, s.name, bound)
     // a binding the REFERENCE also has no type for (docs/design/457 T2b): its
@@ -9011,7 +9119,14 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     // merely failed to infer is one the reference may well have.
     let tys3 = bound == "" && tk_def_unknown(s.value, tys)
                  ? tenv_put(tys2, "unk ".concat(s.name), "1") : tys2
-    return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth), tys3, ret)
+    // `_lower_pure_stmt` writes `scope[name]` and `type_env[name]` BEFORE it
+    // lowers the initialiser, so `let x = x` resolves and an annotated
+    // `let g: (Int) -> Int = ...` lowers under its own declared type. The
+    // lowering walk therefore runs on the POST-binding environment.
+    let tysL = tenv_put(tys3, nr_bnd(s.name), "1")
+    let lo = tk_low(s.value, tysL)
+    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+    return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth), tysL, ret)
   }
   if (s.kind == "assign") {
     let held = tenv_get(scope, s.name)
@@ -9069,12 +9184,17 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
   if (s.kind == "if") {
     let c = tk_cond(s.value, tys, "if")
     if (c.v != "") { return fb_type_refuse(c.v, s.line, scope, tys) }
-    let clo = tk_low(s.value, tys)
-    if (clo != "") { return fb_type_refuse(clo, s.line, scope, tys) }
+    // `_lower_pure_stmt` type-checks the condition (`_bool_cond`) FIRST and
+    // then lowers the two arms before it lowers the condition itself, so an
+    // arm's lowering refusal outranks the condition's. `while` and `for` do
+    // the opposite (their controlling expression is lowered ahead of the
+    // body), which is why only this arm reorders.
     let a = fb_walk(s.then_, 0, scope, tys, ret)
     if (a.v.v != "") { return a }
     let b = fb_walk(s.els, 0, scope, tys, ret)
     if (b.v.v != "") { return b }
+    let clo = tk_low(s.value, tys)
+    if (clo != "") { return fb_type_refuse(clo, s.line, scope, tys) }
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
   if (s.kind == "while") {
@@ -9095,8 +9215,9 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     let ilo = tk_low(s.value, tys)
     if (ilo != "") { return fb_type_refuse(ilo, s.line, scope, tys) }
     let elem = parse_head(it.ty) == "List" ? type_arg1(it.ty) : ""
-    let a = fb_walk(s.body, 0, tenv_put(scope, s.name, "let"),
-                    elem == "" ? tys : tenv_put(tys, s.name, elem), ret)
+    let tysB = tenv_put(elem == "" ? tys : tenv_put(tys, s.name, elem),
+                        nr_bnd(s.name), "1")
+    let a = fb_walk(s.body, 0, tenv_put(scope, s.name, "let"), tysB, ret)
     if (a.v.v != "") { return a }
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
@@ -9120,8 +9241,12 @@ fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
                  tps: List[Str]) -> List[Bind] {
   if (i >= ps.length()) { return acc }
   let ty = mark_tparams(taint_strip(ps[i].ty), tps)
+  // the name-resolution row is written for EVERY parameter, including one this
+  // reader cannot type: a parameter is in `scope` on the reference's side
+  // whatever its annotation says.
+  let b = tenv_put(acc, nr_bnd(ps[i].name), "1")
   return fb_params_tys(ps, i + 1,
-                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps)
+                       ty == "" ? b : tenv_put(b, ps[i].name, ty), tps)
 }
 
 // One module `fn` located from its `fn` keyword (`pub` already stepped over by
@@ -9341,7 +9466,7 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // signature rows (docs/design/457 T2b) are a second pass over the same
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
-  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts)))
+  return fb_refusal_at(ts, i, nr_binds(ts, sig_binds(ts, case_binds(ts))))
 }
 
 fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind]) -> Verd {
