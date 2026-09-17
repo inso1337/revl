@@ -1331,6 +1331,45 @@ fn f(r: R) -> Int {
   return a + b
 }
 """),
+    # ---- docs/design/457: what the name-RESOLUTION rule must NOT refuse -----
+    # The accepting twins of the G1 read rows in REJECTED_PROGRAMS. Each names
+    # one member of `callables` or one binder, and a rule that missed any of
+    # them would refuse a program the reference admits.
+    ("every callable universe member read by name", """
+type Shape = Circle | Square
+extern pure fn ext(n: Int) -> Int = @py { return n }
+fn helper(n: Int) -> Int { return n }
+fn f(p: Int) -> Int {
+  let m = Map.new()
+  let s = Some(p)
+  let o = Ok(p)
+  let e = Err("x")
+  let n = None
+  let sh = Circle
+  let q = Square
+  let h = helper(p)
+  let x = ext(p)
+  var t = 0
+  for (v of [1, 2]) { t += v }
+  return h + x + t
+}
+"""),
+    # the reference writes `scope[name]` BEFORE it lowers the initialiser, so a
+    # `let` may mention its own name and still resolve.
+    ("a let whose initialiser mentions its own name", """
+fn f(n: Int) -> Int {
+  let n2 = n
+  return n2
+}
+"""),
+    # the host constructor roots, read through their own verbs.
+    ("a host root used as a constructor receiver", """
+fn f() -> Int {
+  let p = Pool.open("u", 2)
+  let j = Job.new()
+  return 1
+}
+"""),
 ]
 
 
@@ -2324,6 +2363,48 @@ fn f() -> Int {
   return 1
 }
 """, "G1"),
+    # ---- docs/design/457: the name RESOLUTION half of G1 --------------------
+    # `_lower_pure_expr`'s `ExprVar` arm: a READ must land in the fn's `scope`
+    # or in `callables`. Both fixtures were pinned in TYPE_LAYER_GAP below and
+    # have been struck from it.
+    ("an undeclared name read in a return",
+     _fixture("v2_undeclared_fn_var"), "G1"),
+    ("an undeclared name read inside a template",
+     _fixture("g1_template_undeclared"), "G1"),
+    # the callee position is a name read like any other.
+    ("a call to a name nothing declares", """
+fn f() -> Int {
+  return g()
+}
+""", "G1"),
+    # an argument is walked after the callee, which is the reference's order.
+    ("an undeclared name in an argument", """
+fn g(n: Int) -> Int { return n }
+fn f() -> Int {
+  return g(missing)
+}
+""", "G1"),
+    # a `var` binds the name for the rest of its block; the read AFTER the block
+    # is the undeclared one, since a block never leaks a binding outward.
+    ("a read of a name bound only inside a sibling block", """
+fn f(c: Bool) -> Int {
+  if (c) { let inner = 1 }
+  return inner
+}
+""", "G1"),
+    # an ADT case with no payload is a VALUE, not an undeclared name: the
+    # reference's `_tagged_case` arm returns ahead of the resolver.
+    # (the accepting twin lives in ACCEPTED_PROGRAMS.)
+    #
+    # a receiver-first list transform is SUGAR for its free function, so the
+    # next name the reference resolves is that free function's — undeclared
+    # here, exactly as the reference has it.
+    ("a list transform whose free function nothing declares", """
+fn f(xs: List[Int]) -> Int {
+  let ys = xs.map(3)
+  return 1
+}
+""", "G1"),
     # ---- item 391 / issue #106: the shadowed module callable (G6) ----------
     # `_refuse_callable_shadowing`. A body that BINDS a name and CALLS it while
     # a module `fn` or `extern` of that name is in scope has two readings, and
@@ -3286,19 +3367,12 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # The tag beside each fixture is what `_classify` (above) derives from the
 # reference refusal, i.e. the bucket the census now files the false-admit under.
 TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
-    # fn-body binding rules (G1/G6). The ASSIGNMENT half of this family has
-    # LANDED (item 391's binding-discipline slice): the module-`fn` scope walk
-    # and the arrow-body write form moved `v2_let_reassignment`,
-    # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
-    # `g6_closure_mutates_capture` into REJECTED_PROGRAMS above, where tag AND
-    # message are compared, and the callable-shadowing slice has since moved
-    # `shadowed_module_fn_call` there too. What stays pinned here needs what
-    # neither slice builds: resolving a name READ against the whole callable
-    # universe, which is what both G1 rows want.
-    "fn-body binding (G1/G6)": [
-        ("g1_template_undeclared", "G1"),
-        ("v2_undeclared_fn_var", "G1"),
-    ],
+    # fn-body binding rules (G1/G6): LANDED WHOLE. The ASSIGNMENT half went
+    # first (item 391's binding-discipline slice), then the callable-shadowing
+    # slice, and the name-RESOLUTION half (docs/design/457, the G1 read position)
+    # closed the rest: `g1_template_undeclared` and `v2_undeclared_fn_var` are
+    # now in REJECTED_PROGRAMS above, where tag AND message are compared, so
+    # this family has no row left here.
     # expression typing (T1/T2): the operator/field/index/record algebra and the
     # literal-range and `null` refusals. The fn-body STATEMENT layer
     # (docs/design/457 T3a) landed this family: the `lir_*` walk now carries a
@@ -3492,18 +3566,19 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_19_fixtures():
+def test_the_type_layer_gap_is_exactly_17_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
     two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
-    rows for the module-`fn` surface, and the call-and-signature layer (T2b)
-    nine more; the twelfth document that moved with T3a,
-    `dynamic_reserved_key`, never had a row here because this pin addresses its
-    fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
+    rows for the module-`fn` surface, the call-and-signature layer (T2b) nine
+    more, and the name-RESOLUTION rule the last two of the G1/G6 family; the
+    twelfth document that moved with T3a, `dynamic_reserved_key`, never had a
+    row here because this pin addresses its fixtures by bare name under
+    `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 17, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 19, "a fixture is listed twice"
+    assert len(set(names)) == 17, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -3584,27 +3659,47 @@ def test_the_return_path_refusal_is_anchored_where_the_reference_anchors_it(
 
 def test_an_unresolved_name_read_outranks_the_return_path_on_the_reference(
         admit):
-    """A PRECEDENCE divergence this slice introduces, pinned rather than left to
-    be met.
+    """The PRECEDENCE divergence the returns-on-every-path slice introduced, now
+    CLOSED, kept here as the non-vacuity witness.
 
     The reference lowers a fn body statement by statement and only then asks
     whether the fn returns on every path, so a body that BOTH reads an
-    undeclared name and never returns draws the name refusal. This gate runs the
-    body's binding discipline (which decides the ASSIGNMENT position only, not a
-    name READ — `g1_template_undeclared` and `v2_undeclared_fn_var` are still
-    pinned above for exactly that) and then the return-path rule, so it draws
-    the return-path refusal instead.
-
-    Both refusals are TRUE and the program is refused either way, so this is a
-    419c-style naming divergence and never an admission the reference would not
-    give. It closes with the name-resolution slice, which owns the read position;
-    until then the gate refuses a program it used to wave through, under the
-    other of the two guarantees the program breaks."""
+    undeclared name and never returns draws the name refusal. Until the name
+    READ position was built, this gate decided only the ASSIGNMENT half of the
+    binding discipline and drew the return-path refusal instead — true, but the
+    other of the two guarantees the program breaks. The read position now runs
+    inside `fb_walk`, ahead of `rp_refusal`, which is the reference's own
+    order."""
     src = "fn f() -> Int {\n  nobody\n}\n"
     ref_tag, ref_msg = _ref(src)
     assert (ref_tag, ref_msg) == ("G1", "`nobody` is not declared in this function")
-    assert admit(src) == (
-        "T1|`f` is declared to return `Int` but its body never returns a value")
+    assert admit(src) == "G1|`nobody` is not declared in this function"
+
+
+def test_the_name_resolution_rule_stops_at_a_use_declaration(admit):
+    """The declared frontier of the G1 read rule (docs/design/457 §2.3), pinned
+    as a divergence rather than left to be discovered.
+
+    A `use` declaration puts the imported module's `pub fn`s into `callables`
+    (`program.fn_scopes`) and makes an aliased `alias.f(..)` call resolve before
+    the name resolver runs at all. This gate does not read modules, so the
+    callable universe stops being knowable from the text alone and the rule is
+    switched off for the WHOLE text. That under-refuses, which is the direction
+    the gate is allowed to err in.
+
+    The reference cannot be driven on these texts either (it wants `modules=`),
+    so the assertion is on the GATE alone: the withholding is deliberate."""
+    withheld = """use "./other.rvl" as other
+
+fn f() -> Int {
+  return nothing_declares_this
+}
+"""
+    assert admit(withheld) == ""
+    # the same body WITHOUT the `use` is refused, so the row above is the `use`
+    # doing the withholding and not the reader failing to reach the statement.
+    assert admit("fn f() -> Int {\n  return nothing_declares_this\n}\n") == \
+        "G1|`nothing_declares_this` is not declared in this function"
 
 
 # ---------------------------------------------------------------- ambient / #86
@@ -5220,14 +5315,13 @@ def _tsb_program(rng) -> str:
             f"  {body}\n  return {rng.choice(_TSB_ARGS)}\n}}\n")
 
 
-# The one family whose EARLIER reference refusal this slice does not build: a
-# receiver-first list transform desugars to a free function and the reference
-# refuses that undeclared NAME. Resolving a name READ needs the whole callable
-# universe, which is still open (`g1_template_undeclared`,
-# `v2_undeclared_fn_var` in TYPE_LAYER_GAP above).
-_TSB_LATER_SLICES = ("is not declared in this function",)
+# The family this draw once excluded — a receiver-first list transform desugars
+# to a free function and the reference refuses that undeclared NAME — is now
+# BUILT (the G1 read position, docs/design/457). The exclusion list is empty and
+# stays here so the next slice that needs one has the shape to hand.
+_TSB_LATER_SLICES: tuple[str, ...] = ()
 
-_TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
+_TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY", "G1")
 
 
 @pytest.mark.parametrize("seed", [5, 17, 31])
