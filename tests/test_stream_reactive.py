@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -2380,6 +2381,43 @@ def test_go_still_emits_a_stream_document_whose_top_level_it_can_carry():
     """, "s.rvl"))
     assert "type Foo struct {" in code
     assert 'sub = StreamSubscribe(src, "error", 0)' in code
+
+
+@pytest.mark.parametrize("program", [_CONSUMER, _SOURCE_ONLY])
+def test_the_wasm_refusal_names_every_tier_that_lowers_a_stream(program):
+    """wasm's refusal is correct behaviour, not a gap (§4.6, §8: no async host
+    seam, and it skips `advance`). That is precisely why the tier list inside it
+    has to stay true: routing the author somewhere that works is the refusal's
+    only remaining job, and a list that omits a working tier is a wrong answer
+    delivered by a right refusal.
+
+    It read "py, go, rust" long after ts and java had both graduated onto the
+    surface. So the list is checked against the EMITTERS — every tier named must
+    actually emit this program, and every tier that emits it must be named —
+    rather than against a comment that can go stale the same way."""
+    named = {"py": "python", "ts": "typescript", "go": "go",
+             "java": "java", "rust": "rust"}
+    wasm = _tier_emit("wasm")
+    with pytest.raises(wasm.EmitError) as excinfo:
+        wasm.emit(compile_source(program, "s.rvl"))
+    message = str(excinfo.value)
+    # Read the list out of the sentence rather than searching the whole message
+    # for each short name: "awaits" contains "ts", so a substring test would
+    # find the typescript tier in a message that never names it.
+    found = re.search(r"lower the subscription protocol \(([^)]*)\)", message)
+    assert found is not None, message
+    listed = {t.strip() for t in found.group(1).split(",")}
+    lowers = set()
+    for short, tier in named.items():
+        try:
+            _tier_emit(tier).emit(compile_source(program, "s.rvl"))
+        except Exception:  # noqa: BLE001 — any refusal means "does not lower"
+            continue
+        lowers.add(short)
+    assert lowers == set(named), "a tier stopped lowering the stream surface"
+    assert listed == lowers, (
+        f"the wasm refusal names {sorted(listed)}; these tiers lower a stream: "
+        f"{sorted(lowers)}")
 
 
 def test_wasm_still_refuses_a_handler_program():
