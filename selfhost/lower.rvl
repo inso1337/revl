@@ -8583,8 +8583,15 @@ fn tk_low_stdlib_proven(t: Str) -> Bool {
 fn tk_low_untyped_recv(e: Expr, env: List[Bind]) -> Bool {
   let n = match e { Var(v) => v, _ => "", }
   if (n == "") { return false }
-  return tenv_get(env, n) == ""
-      && tenv_get(env, "unk ".concat(n)) == "1"
+  if (tenv_get(env, n) != "") { return false }
+  // A name NOTHING declares is not in the reference's `type_env` either, so
+  // `_expr_static_type` answers the wildcard this refusal tests for — and the
+  // reference raises it at the METHOD node, ahead of lowering the receiver,
+  // which is why it outranks the receiver's own G1. The name-resolution rule
+  // below is what turns "this walk could not type it" into "nothing declares
+  // it", so this arm is only a proof where that rule is switched on.
+  if (nr_refuse(n, env) != "") { return true }
+  return tenv_get(env, "unk ".concat(n)) == "1"
 }
 
 // Whether a `let` initialiser PROVES its binding has no type on either side.
