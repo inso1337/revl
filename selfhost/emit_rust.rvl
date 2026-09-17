@@ -1670,6 +1670,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   }
   if (kind == "builtin") { return render_builtin(node, ctx) }
   if (kind == "interp") { return render_interp(node, ctx) }
+  if (kind == "host") { return render_host(node, ctx) }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
 }
 
@@ -1739,6 +1740,38 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
   if (method == "to_str") { return `(${target}).to_string()` }
   if (method == "length") { return `${target}.revl_length()` }
   return `<<UNSUPPORTED-BUILTIN:${method}>>`
+}
+
+// The `host` component-dialect expression kind: a host-object call
+// (`Pool.open(..)`, `Job.run(..)`) is an associated function on the host type,
+// so `Root.method` becomes `Root::method`. The method name takes the same
+// `_mname` reservation the trait methods take, so a host verb that collides
+// with a smart-pointer method cannot shadow it.
+//
+// A §4.5 `replay(..)` declaration is the one thing this form carries that this
+// tier does not lower: the reference RAISES on it rather than emitting a
+// subscription whose backlog nothing holds. This port has no refusal channel,
+// so it REPORTS — the document diverges loudly instead of quietly claiming a
+// durability the emitted crate does not deliver.
+fn render_host(node: Any, ctx: Ctx) -> Str {
+  if (value_bool(value_field(node, "replay"))) { return "<<DEFER-host-replay>>" }
+  let fname = value_str(value_field(node, "fn"))
+  // `partition(".")`: the root is everything before the FIRST dot, the method
+  // everything after it.
+  let parts = fname.split(".")
+  let root = parts[0]
+  var method = ""
+  var pi = 1
+  while (pi < parts.length()) {
+    if (pi > 1) { method = method.concat(".") }
+    method = method.concat(parts[pi])
+    pi = pi + 1
+  }
+  var rendered = []
+  for (a of value_list(value_field(node, "args"))) {
+    rendered = rendered.push(render_expr(a, ctx))
+  }
+  return `${root}::${mname(method)}(${rendered.join(", ")})`
 }
 
 // The `widen` coercion markers (docs/arithmetic.md): render the conversion the
@@ -2310,6 +2343,15 @@ fn host_pool_lines() -> List[Str] {
 
 fn host_job_lines() -> List[Str] {
   var o = []
+  o = o.push("/// revl host object: a cancellable asynchronous unit of work.")
+  o = o.push("/// Semantics are shared across tiers — backends/python/runtime.py,")
+  o = o.push("/// `.. _pool-job-semantics:`: a job completes after exactly")
+  o = o.push("/// `Job::TICKS` scheduler turns (no timer, so tests stay deterministic),")
+  o = o.push("/// carries a cancellation token, and panics if awaited after")
+  o = o.push("/// cancellation.  `Job::spawn` hands back the handle (the tier-neutral")
+  o = o.push("/// `Job.run` of the other backends); `Job::run` is the async shorthand")
+  o = o.push("/// the emitted `await Job.run(name)` call site uses.")
+  o = o.push("pub struct Job;")
   o = o.push("/// 0 = pending, 1 = done, 2 = cancelled")
   o = o.push("#[derive(Clone)]")
   o = o.push("pub struct JobToken(std::sync::Arc<std::sync::atomic::AtomicU8>);")
@@ -2965,6 +3007,29 @@ fn component_uses_await(comp: Any) -> Bool {
   }
   return false
 }
+// `_subscription_binds` / `_is_stream_next`: the activation binds holding a
+// `subscribe` bracket's subscription, and the `<sub>.next()` call over one.
+// Only a `next` on such a bind is the stream protocol's blocking pull; a `next`
+// on anything else is an ordinary method call the erased arm takes.
+fn is_subscription_bind(comp: Any, name: Str) -> Bool {
+  if (name == "") { return false }
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) == "let-effect"
+        && node_kind(value_field(step, "acquire")) == "subscribe"
+        && value_str(value_field(step, "bind")) == name) { return true }
+  }
+  return false
+}
+
+fn is_stream_next(comp: Any, expr: Any) -> Bool {
+  if (node_kind(expr) != "call") { return false }
+  if (value_str(value_field(expr, "method")) != "next") { return false }
+  let target = value_field(expr, "target")
+  var name = value_str(value_field(target, "id"))
+  if (name == "") { name = value_str(value_field(target, "name")) }
+  return is_subscription_bind(comp, name)
+}
+
 // The capture rename maps: a provide-method reads binds/reqs/config off `self`;
 // an undo closure re-reads pre-cloned `<name>_undo` copies.
 fn method_scope_rename(comp: Any) -> Map[Str, Str] {
@@ -3316,6 +3381,31 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     out = out.push(`${pad}ctx.effect(${string_lit(`${name}.effect`)}, move || { ${undox}; Ok(()) })?;`)
     return out
   }
+  if (kind == "await") {
+    let expr = value_field(step, "expr")
+    let rendered = render_expr(expr, ctx)
+    // item 131: this tier ERASES method async-ness, so a req-target async op or
+    // an async-coloured fn hands back a plain value here, not a future — a
+    // blanket `.await` on it is a rustc error. Only the host async seam
+    // (`Job.run`, which cordis-rs drives as a real future through
+    // `plugin_async`) takes `.await`. The A1 ordering boundary is the statement
+    // position, which both arms keep.
+    if (node_kind(expr) == "host" && value_str(value_field(expr, "fn")) == "Job.run") {
+      out = out.push(`${pad}${rendered}.await;`)
+      return out
+    }
+    // item 130 Slice 3: `await sub.next()` blocks on the item/terminal/cancel
+    // race. `Closed` is an ordinary value the activation carries on from;
+    // `Faulted` is an `Err` that FAILS the activation, so the accumulated
+    // prefix reverts LIFO with the subscription bracket on it. Never caught,
+    // never a silent drop.
+    if (is_stream_next(comp, expr)) {
+      out = out.push(`${pad}${rendered}.map_err(|e| cordis::CordisError::with_message(cordis::ErrorCode::Plugin, e))?;`)
+      return out
+    }
+    out = out.push(`${pad}${rendered};`)
+    return out
+  }
   if (kind == "emit") {
     out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), ctx)};`)
     if (!value_is_null(value_field(step, "compensate"))) {
@@ -3379,11 +3469,21 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.push("}")
     out = out.push("")
   }
+  // An `await` step colours the whole activation: cordis-rs drives the closure
+  // as a real future through `plugin_async`, so the factory and the closure
+  // header both change. The gate is per-COMPONENT — a component with no await
+  // in the same module keeps `plugin_sync` and the blocking closure.
+  var plugin_open = `    cordis::plugin_sync::<${cty}, _>(`
+  var closure_open = "        |ctx, config| {"
+  if (component_uses_await(comp)) {
+    plugin_open = `    cordis::plugin_async::<${cty}, _, _>(`
+    closure_open = "        |ctx, config| async move {"
+  }
   out = out.push(`pub fn ${snk}() -> cordis::PluginHandle {`)
-  out = out.push(`    cordis::plugin_sync::<${cty}, _>(`)
+  out = out.push(plugin_open)
   out = out.push(`        ${string_lit(name)},`)
   out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
-  out = out.push("        |ctx, config| {")
+  out = out.push(closure_open)
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
@@ -3428,7 +3528,6 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
   if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
-  if (component_uses_await(comp)) { out = out.push(`<<DEFER-await:${name}>>`) }
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
@@ -3443,11 +3542,21 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.push("}")
     out = out.push("")
   }
+  // An `await` step colours the whole activation: cordis-rs drives the closure
+  // as a real future through `plugin_async`, so the factory and the closure
+  // header both change. The gate is per-COMPONENT — a component with no await
+  // in the same module keeps `plugin_sync` and the blocking closure.
+  var plugin_open = `    cordis::plugin_sync::<${cty}, _>(`
+  var closure_open = "        |ctx, config| {"
+  if (component_uses_await(comp)) {
+    plugin_open = `    cordis::plugin_async::<${cty}, _, _>(`
+    closure_open = "        |ctx, config| async move {"
+  }
   out = out.push(`pub fn ${snk}() -> cordis::PluginHandle {`)
-  out = out.push(`    cordis::plugin_sync::<${cty}, _>(`)
+  out = out.push(plugin_open)
   out = out.push(`        ${string_lit(name)},`)
   out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
-  out = out.push("        |ctx, config| {")
+  out = out.push(closure_open)
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
