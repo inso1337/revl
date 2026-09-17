@@ -392,20 +392,28 @@ and the manifest rather than from statements:
 One more precision loss is worth naming: the reference resolves an emit
 to the *method* being called and takes that method's declared
 capabilities, while an L0 call head is the receiver root alone. `Iface`
-therefore maps a service to the capabilities its emission methods
-declare, and a key's cone is the union over them. That over-approximates
-reach per statement, so the derived `SpawnsAdmitted` is at least as
-strict as the checker — never looser.
+therefore maps a service to its whole emission declaration — one `Decl`
+per declared capability and one `none` per uncapped emission method, arm
+for arm with `_held_capabilities_pairs` — and a key's cone is the union
+over them, `none` entries included. So the cone is a superset of what any
+one method contributes: it over-approximates reach per statement, and the
+derived `SpawnsAdmitted` is at least as strict as the checker, never
+looser.
 -/
 
 /-! ### The program shape -/
 
-/-- A service's declared emission capabilities: the `(T, P)` pairs
-`_cap_keyed(key, cap_str)` resolves an `emission[...]` clause to, WITH their
-declared tokens. A service whose emission methods name no capability list,
-and an unresolvable one, both map to `[]` — they declare no boundary, which
-`capsOfDecls` reads as the reserved wiring-key element. -/
-abbrev Iface := String → List Cap
+/-- One entry of a service's emission declaration, read exactly as
+`_held_capabilities_pairs` reads it: `some d` for a capability an
+`emission[...]` clause names (the `(T, P)` pair `_cap_keyed` resolves it to,
+WITH its declared token), and `none` for an emission method that names no
+capability list at all — the reference's `if not m.capabilities` arm. -/
+abbrev Decl := Option Cap
+
+/-- A service's emission declaration: one entry per declared capability, one
+`none` per uncapped emission method. A service with no emission method, and an
+unresolvable one, map to `[]`. -/
+abbrev Iface := String → List Decl
 
 /-- The namespace a wiring key is folded under when nothing declares a token
 for it (`lower._WIRE_NS`). A capability token is a dotted identifier list in
@@ -417,23 +425,36 @@ def wireNS : String := "key:"
 capability token. -/
 def wireCap (k : String) : Cap := ⟨wireNS ++ k, []⟩
 
+/-- How one declaration entry is folded, in the capability column: a declared
+capability is itself, and an entry declaring none falls back to the key in the
+reserved namespace (`_wire_cap`). -/
+@[simp] def declCap (k : String) : Decl → Cap
+  | some d => d
+  | none => wireCap k
+
+/-- The same entry in the key column: the key, carrying whatever valuation
+rode in with the declaration. -/
+@[simp] def declBound (k : String) : Decl → Cap
+  | some d => ⟨k, d.params⟩
+  | none => ⟨k, []⟩
+
 /-- **The capability column.** What one wiring key grants, named by what it
 REACHES (`_held_capabilities_pairs` through `_cap_keyed`): the capabilities
-the service behind the key declares. A service that declares none names no
-boundary, so the key names it — in its own namespace, never as a bare
-token. -/
-def capsOfDecls (k : String) : List Cap → List Cap
+the service behind the key declares, entry for entry. A service that declares
+nothing names no boundary, so the key names it — in its own namespace, never
+as a bare token. -/
+def capsOfDecls (k : String) : List Decl → List Cap
   | [] => [wireCap k]
-  | d :: ds => d :: ds
+  | m :: ms => (m :: ms).map (declCap k)
 
 /-- **The bound column.** The same cone spelled by the wiring KEY it was
 reached through, which is the namespace `capKeys` and G6 confinement read.
 Kept deliberately: `derived_confinement_within_ceiling` joins a statement's
 require-key roots to this order, and no declared token appears in a
 statement. -/
-def boundsOfDecls (k : String) : List Cap → List Cap
+def boundsOfDecls (k : String) : List Decl → List Cap
   | [] => [⟨k, []⟩]
-  | d :: ds => (d :: ds).map (fun q => ⟨k, q.params⟩)
+  | m :: ms => (m :: ms).map (declBound k)
 
 /-- Resolve a wiring key to the service it is wired to (the manifest's
 `requires` map). -/
@@ -476,8 +497,8 @@ between the columns, so "both columns see exactly the same crossings" is a
 fact about the definitions rather than a claim in a comment. -/
 
 /-- How a derived element is spelled, given the key it was reached through
-and the cone the service behind that key declares. -/
-abbrev Namer := String → List Cap → List Cap
+and the declaration of the service behind that key. -/
+abbrev Namer := String → List Decl → List Cap
 
 /-- The receiver an emitted expression names, when it names one. -/
 def emitTarget : Expr → Option String
@@ -603,30 +624,34 @@ def KeyNamed (N : Namer) : Prop := ∀ k ds, ∀ x ∈ N k ds, x.token = k
 declared authority is lost. -/
 def TotalNamer (N : Namer) : Prop := ∀ k ds, ∃ x, x ∈ N k ds
 
+theorem declBound_token (k : String) (m : Decl) : (declBound k m).token = k := by
+  cases m <;> rfl
+
 theorem boundsOfDecls_keyNamed : KeyNamed boundsOfDecls := by
-  intro k ds
-  cases ds with
+  intro k ms
+  cases ms with
   | nil =>
     intro x hx
     simp only [boundsOfDecls, List.mem_singleton] at hx
     subst hx; rfl
-  | cons d ds =>
+  | cons m ms =>
     intro x hx
     simp only [boundsOfDecls, List.mem_map] at hx
     obtain ⟨q, _, hq⟩ := hx
     rw [← hq]
+    exact declBound_token k q
 
 theorem boundsOfDecls_total : TotalNamer boundsOfDecls := by
-  intro k ds
-  cases ds with
+  intro k ms
+  cases ms with
   | nil => exact ⟨⟨k, []⟩, by simp [boundsOfDecls]⟩
-  | cons d ds => exact ⟨⟨k, d.params⟩, by simp [boundsOfDecls]⟩
+  | cons m ms => exact ⟨declBound k m, by simp [boundsOfDecls]⟩
 
 theorem capsOfDecls_total : TotalNamer capsOfDecls := by
-  intro k ds
-  cases ds with
+  intro k ms
+  cases ms with
   | nil => exact ⟨wireCap k, by simp [capsOfDecls]⟩
-  | cons d ds => exact ⟨d, by simp [capsOfDecls]⟩
+  | cons m ms => exact ⟨declCap k m, by simp [capsOfDecls]⟩
 
 /-- The reserved namespace is not the unnameable boundary: `*` is one
 character and every element of `key:` is at least five. So a wiring key
@@ -641,18 +666,24 @@ theorem wireCap_token_ne_star (k : String) : (wireCap k).token ≠ "*" := by
   omega
 
 /-- A key's cone is `*`-free as soon as the service behind it declares no
-`*`: the reserved element never is, by `wireCap_token_ne_star`. -/
-theorem capsOfDecls_ne_star {k : String} {ds : List Cap}
-    (h : ∀ d ∈ ds, d.token ≠ "*") : ∀ x ∈ capsOfDecls k ds, x.token ≠ "*" := by
-  cases ds with
+`*`: an undeclared entry falls back to the reserved element, which never is,
+by `wireCap_token_ne_star`. -/
+theorem capsOfDecls_ne_star {k : String} {ms : List Decl}
+    (h : ∀ d : Cap, some d ∈ ms → d.token ≠ "*") :
+    ∀ x ∈ capsOfDecls k ms, x.token ≠ "*" := by
+  cases ms with
   | nil =>
     intro x hx
     simp only [capsOfDecls, List.mem_singleton] at hx
     subst hx
     exact wireCap_token_ne_star k
-  | cons d ds =>
+  | cons m ms =>
     intro x hx
-    exact h x (by simpa [capsOfDecls] using hx)
+    simp only [capsOfDecls, List.mem_map] at hx
+    obtain ⟨o, ho, hox⟩ := hx
+    cases o with
+    | none => rw [← hox]; exact wireCap_token_ne_star k
+    | some d => rw [← hox]; exact h d ho
 
 theorem lookupSvc_mem : ∀ {rs : List (String × String)} {k sv : String},
     lookupSvc rs k = some sv → (k, sv) ∈ rs := by
@@ -831,7 +862,7 @@ theorem derived_held_tokens_are_declared_keys (I : Iface) (c : Comp)
     (∀ k ∈ capKeys (heldBounds I c), k ∈ reqKeys c) ∧
     (∀ k ∈ reqKeys c, k ∈ capKeys (heldBounds I c)) ∧
     (∀ h ∈ heldCaps I c, ∃ kv ∈ c.requires,
-      h ∈ I kv.2 ∨ (I kv.2 = [] ∧ h = wireCap kv.1)) := by
+      some h ∈ I kv.2 ∨ h = wireCap kv.1) := by
   refine ⟨fun k hk => ?_, reqKeys_sub_boundKeys I c, fun h hh => ?_⟩
   · obtain ⟨b, hb, hbt⟩ := List.mem_map.mp hk
     rw [← hbt]
@@ -842,10 +873,14 @@ theorem derived_held_tokens_are_declared_keys (I : Iface) (c : Comp)
     | nil =>
       rw [hd] at hx
       simp only [capsOfDecls, List.mem_singleton] at hx
-      exact Or.inr ⟨rfl, hx⟩
-    | cons d ds =>
+      exact Or.inr hx
+    | cons m ms =>
       rw [hd] at hx
-      exact Or.inl (by simpa [capsOfDecls] using hx)
+      simp only [capsOfDecls, List.mem_map] at hx
+      obtain ⟨o, ho, hox⟩ := hx
+      cases o with
+      | none => exact Or.inr (by rw [← hox]; rfl)
+      | some d => exact Or.inl (by rw [← hox]; exact ho)
 
 /-- **The derived reach is the emit-step surface.** Agreement with
 `_collect_emit_caps_pairs`, which traverses for `step == "emit"` nodes
@@ -993,7 +1028,7 @@ theorem derived_no_star_amplification {I : Iface} {P : Prog} {f d : Nat}
     (hA : SpawnsAdmitted I P (f + d)) {p : Comp} (hp : p ∈ P) {b ch : String}
     (hstart : b ∈ p.spawns) (hdesc : Descends P b ch d)
     (hnam : ∀ s ∈ p.body, NameableEmission p s)
-    (hdecl : ∀ kv ∈ p.requires, ∀ dc ∈ I kv.2, dc.token ≠ "*") :
+    (hdecl : ∀ kv ∈ p.requires, ∀ dc : Cap, some dc ∈ I kv.2 → dc.token ≠ "*") :
     ∀ x ∈ reachIn I P f ch, x.token ≠ "*" := by
   have hns : ∀ h ∈ heldCaps I p, h.token ≠ "*" := by
     intro h hh
@@ -1018,14 +1053,14 @@ wired to an `/etc`-scoped one — plus, for the namespace split,
 services at three scopes, a model service with a `calls` budget and one
 without, and two key-value services declaring DIFFERENT boundaries, which
 is the pair the wiring key cannot tell apart. -/
-def witIface (sv : String) : List Cap :=
-  if sv = "FsTmp" then [⟨"fs.write", [("path", .path ["tmp"])]⟩]
-  else if sv = "FsEtc" then [⟨"fs.write", [("path", .path ["etc"])]⟩]
-  else if sv = "FsJob" then [⟨"fs.write", [("path", .path ["tmp", "job-42"])]⟩]
-  else if sv = "ModelCalls3" then [⟨"model.complete", [("calls", .ceiling 3)]⟩]
-  else if sv = "ModelBare" then [⟨"model.complete", []⟩]
-  else if sv = "KvA" then [⟨"kv.read", []⟩]
-  else if sv = "KvB" then [⟨"kv.write", []⟩]
+def witIface (sv : String) : List Decl :=
+  if sv = "FsTmp" then [some ⟨"fs.write", [("path", .path ["tmp"])]⟩]
+  else if sv = "FsEtc" then [some ⟨"fs.write", [("path", .path ["etc"])]⟩]
+  else if sv = "FsJob" then [some ⟨"fs.write", [("path", .path ["tmp", "job-42"])]⟩]
+  else if sv = "ModelCalls3" then [some ⟨"model.complete", [("calls", .ceiling 3)]⟩]
+  else if sv = "ModelBare" then [some ⟨"model.complete", []⟩]
+  else if sv = "KvA" then [some ⟨"kv.read", []⟩]
+  else if sv = "KvB" then [some ⟨"kv.write", []⟩]
   else []
 
 /-- The capability the witness derives behind the wiring key `fs`: the
@@ -1336,7 +1371,8 @@ theorem capceilings_hypotheses_are_inhabited :
     Resolves wProgGood (wChild "Job" "FsJob") ∧
     (∀ s ∈ (wChild "Job" "FsJob").body,
       NameableEmission (wChild "Job" "FsJob") s) ∧
-    (∀ kv ∈ (wRouter "Job").requires, ∀ dc ∈ witIface kv.2, dc.token ≠ "*") ∧
+    (∀ kv ∈ (wRouter "Job").requires, ∀ dc : Cap, some dc ∈ witIface kv.2 →
+      dc.token ≠ "*") ∧
     Spends 3 [2, 1] ∧ total [2, 1] = 3 ∧ ¬ Spends 3 [2, 2] := by
   have hA : SpawnsAdmitted witIface wProgGood 1 := derivation_non_vacuous.2.2.1
   have hp : wRouter "Job" ∈ wProgGood := by simp [wProgGood]
@@ -1353,8 +1389,8 @@ theorem capceilings_hypotheses_are_inhabited :
     simp only [wChild, List.mem_cons, List.not_mem_nil, or_false] at hs
     subst hs
     exact ⟨"fs", "FsJob", rfl, rfl⟩
-  have hdecl : ∀ kv ∈ (wRouter "Job").requires, ∀ dc ∈ witIface kv.2,
-      dc.token ≠ "*" := by
+  have hdecl : ∀ kv ∈ (wRouter "Job").requires, ∀ dc : Cap,
+      some dc ∈ witIface kv.2 → dc.token ≠ "*" := by
     intro kv hkv dc hdc
     have hkvv : kv = ("fs", "FsTmp") := by simpa [wRouter] using hkv
     subst hkvv

@@ -63,7 +63,8 @@ FOLD_THEOREMS = (
 )
 
 _DECL = re.compile(
-    r"^(?:def|theorem|abbrev|structure|inductive)\s+([A-Za-z_][A-Za-z0-9_']*)",
+    r"^(?:@\[[^\]]*\]\s*)?(?:def|theorem|abbrev|structure|inductive)"
+    r"\s+([A-Za-z_][A-Za-z0-9_']*)",
     re.MULTILINE,
 )
 
@@ -118,8 +119,11 @@ def _gated_names() -> list[str]:
 def test_the_iface_carries_declared_capabilities(decls):
     """A service resolves to `(T, P)` pairs, not to bare valuations. Without
     the token there is nothing for the fold to compare but the key, so this is
-    the shape the whole split rests on."""
-    assert re.search(r"abbrev\s+Iface\s*:=\s*String\s*→\s*List\s+Cap",
+    the shape the whole split rests on. `none` is the reference's
+    "emission method with no capability list" arm, kept as its own entry so a
+    service mixing capped and uncapped methods contributes both."""
+    assert re.search(r"abbrev\s+Decl\s*:=\s*Option\s+Cap", decls["Decl"])
+    assert re.search(r"abbrev\s+Iface\s*:=\s*String\s*→\s*List\s+Decl",
                      decls["Iface"])
 
 
@@ -128,11 +132,14 @@ def test_the_capability_column_names_what_it_reaches(decls):
     `⟨k, ...⟩` in its non-empty branch would re-token them by the wiring key,
     which is exactly the laundering this layer had."""
     body = decls["capsOfDecls"]
-    nonempty = body.split("| d :: ds =>", 1)
+    nonempty = body.split("| m :: ms =>", 1)
     assert len(nonempty) == 2, body
-    assert nonempty[1].strip().startswith("d :: ds")
+    assert nonempty[1].strip().startswith("(m :: ms).map (declCap k)")
     assert "⟨k," not in nonempty[1]
     assert "[wireCap k]" in nonempty[0]
+    # ...and `declCap` hands a declared capability back untouched.
+    assert re.search(r"\|\s*some\s+d\s*=>\s*d\b", decls["declCap"])
+    assert re.search(r"\|\s*none\s*=>\s*wireCap\s+k\b", decls["declCap"])
 
 
 def test_a_key_with_nothing_declared_lands_in_the_reserved_namespace(decls):
@@ -156,9 +163,9 @@ def test_the_reserved_namespace_is_the_reference_s(decls):
 def test_the_bound_column_still_names_the_wiring_key(decls):
     """The key namespace is kept, not deleted: `capKeys` and G6 confinement
     need it, and no declared token appears in a statement."""
-    body = decls["boundsOfDecls"]
-    assert "⟨k, []⟩" in body
-    assert "⟨k, q.params⟩" in body
+    assert "⟨k, []⟩" in decls["boundsOfDecls"]
+    assert "⟨k, d.params⟩" in decls["declBound"]
+    assert "⟨k, []⟩" in decls["declBound"]
 
 
 def test_the_two_columns_run_one_traversal(decls):
@@ -244,8 +251,8 @@ def test_the_witness_spells_one_key_over_two_boundaries(decls):
     assert '("kv", "KvA")' in decls["wKvRouter"]
     assert '("kv", "KvB")' in decls["wKvLeak"]
     table = decls["witIface"]
-    assert '"KvA" then [⟨"kv.read"' in table
-    assert '"KvB" then [⟨"kv.write"' in table
+    assert '"KvA" then [some ⟨"kv.read"' in table
+    assert '"KvB" then [some ⟨"kv.write"' in table
 
 
 def test_the_witness_states_both_verdicts(decls):

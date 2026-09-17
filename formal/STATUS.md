@@ -1085,9 +1085,12 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    capability column (`heldCaps`/`bodyReach`, what `SpawnsAdmitted` and
    every `Lineage` theorem fold over) and `boundsOfDecls` for the key
    column (`heldBounds`/`bodyBounds`, what `capKeys` and G6 confinement
-   read). A key with nothing declared behind it lands in the reserved
-   `key:` namespace (`lower._WIRE_NS`), so a key spelling is never a fold
-   element in the boundary namespace. The `capKeys` bridge stops being an
+   read). `Iface` now carries a service's whole emission declaration, one
+   `Decl` per declared capability and one `none` per emission method that
+   names no capability list, which is `_held_capabilities_pairs` arm for
+   arm. An entry that declares nothing falls back to the key in the
+   reserved `key:` namespace (`lower._WIRE_NS`), so a key spelling is
+   never a bare fold element in the boundary namespace. The `capKeys` bridge stops being an
    assumption: `derived_held_tokens_are_declared_keys` proves the bound
    column's tokens are exactly the component's declared `requires` keys,
    and that no element of the capability column is a bare key.
@@ -1099,7 +1102,9 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
    Running the fold in the key namespace, which this section did before
    issue 1142, made the derived layer a theory about a different language
-   than the one that ships. Five of the nine theorems are re-stated with their `Lineage` (and
+   than the one that ships.
+
+   Five of the nine theorems are re-stated with their `Lineage` (and
    for confinement, `TypedIn (capKeys Γ)`) hypotheses discharged from the
    program text — `derived_attenuation_monotone`,
    `derived_lineage_ceiling_le`,
