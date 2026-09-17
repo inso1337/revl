@@ -50,11 +50,13 @@ what the reference refuses is the defect class this arc exists to prevent.
 The gap turned out not to be "a few missing constructs" but a whole missing
 LAYER, and the crate's surface is shaped by that measurement rather than by the
 design's assumption. `admit_src` decides the composition/guarantee layer
-(G1..G4, A1, PRELUDE, and parse failures as BAD); it does NOT run the
-reference's type layer. Measured: the reference refuses
-`fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }` and
-`fn f() -> { }`; the self-host gate objects to none of them. So the generated
-crate ships NO admission at all:
+(G1..G4, A1, PRELUDE, and parse failures as BAD); of the reference's type layer
+it runs ONE slice, the fn-body statement layer (docs/design/457 T3a), and not
+the rest. Measured: the reference refuses
+`fn f() -> Int { return undefined_name }` and `fn f() -> { }`; the self-host
+gate objects to neither. (It DOES now refuse `fn f() -> Int { return "s" }`,
+which used to head this list: a declared return is a checking position the
+statement layer carries.) So the generated crate ships NO admission at all:
 
 * `Verdict` has no `Admitted` arm and no `is_admitted()`. The non-refusing
   outcome is `NoObjection`, which means "this gate found nothing it can refuse"
@@ -233,9 +235,11 @@ MAX_LEVEL_ITEMS = 1024
 
 # What the native gate actually decides, in one line, stamped into the crate's
 # `COVERED_LAYER`, its README and its provenance so the three cannot disagree.
-# Measured, not assumed: `selfhost/lower.rvl`'s `admit_src` runs no type layer,
-# so `fn f() -> Int { return "s" }` (which the reference refuses) draws no
-# objection from it. That measurement is why the crate ships no admission.
+# Measured, not assumed: `selfhost/lower.rvl`'s `admit_src` runs one SLICE of
+# the type layer and not the rest, so `fn f() -> Int { return undefined_name }`
+# — which the reference refuses by resolving a name READ against the whole
+# callable universe — draws no objection from it. That measurement is why the
+# crate ships no admission.
 COVERED_LAYER = ("composition + guarantee layer (G1..G4, A1, PRELUDE) and "
                  "parse (BAD); NOT the reference type layer")
 
@@ -1655,10 +1659,11 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! The self-host compiler is behind the reference implementation (roadmap item
 //! 391), and the shape of that gap is not "a few missing constructs" — it is a
 //! whole missing LAYER. `admit_src` decides the composition and guarantee layer
-//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not**
-//! run the reference's type layer. Measured, not assumed: the reference refuses
-//! `fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }`
-//! and `fn f() -> { }`; the self-host gate raises no objection to any of them.
+//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`), plus ONE slice
+//! of the reference's type layer — the fn-body statement layer. It does **not**
+//! run the rest of it. Measured, not assumed: the reference refuses
+//! `fn f() -> Int { return undefined_name }` and `fn f() -> { }`; the self-host
+//! gate raises no objection to either.
 //!
 //! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
 //! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
@@ -2882,7 +2887,6 @@ component CacheMiss requires store: Store provides cache: Cache {\n\
         // small: the reference refuses this and the covered layer cannot see it,
         // so the honest answer is to withhold rather than to admit.
         for source in [
-            "fn f() -> Int { return \"s\" }",
             "fn f() -> Int { return undefined_name }",
             "fn f() -> { }",
         ] {
@@ -5051,9 +5055,8 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
 #[test]
 fn type_layer_programs_are_not_refused_here_and_must_not_read_as_admitted() {
     let reference_refuses_all_of_these = [
-        // return type / body type mismatch
-        "fn f() -> Int { return \"s\" }",
-        // an undeclared name in a function body
+        // an undeclared name in a function body: resolving a name READ needs
+        // the whole callable universe, which no slice has built yet
         "fn f() -> Int { return undefined_name }",
         // a return arrow with no return type at all
         "fn f() -> { }",
@@ -5071,6 +5074,14 @@ update the crate docs and this test: {}",
         assert!(verdict.to_json().contains("\"admitted\":false"));
         assert_eq!(verdict.code(), None);
     }
+    // NON-VACUITY, and the record of what left this list: a declared return is
+    // a checking position the fn-body statement layer carries
+    // (docs/design/457 T3a), so a return-type mismatch is an AGREEMENT now —
+    // refused here in the reference's own sentence. What stays above is what is
+    // genuinely still outside the covered layer, not what has not been tried.
+    let refused = admit("fn f() -> Int { return \"s\" }");
+    assert!(refused.is_refused());
+    assert!(refused.to_json().contains("\"admitted\":false"));
 }
 
 /// The half of the type layer this crate DOES decide: a `fn` with a declared
@@ -6171,13 +6182,15 @@ The self-host compiler is behind the reference implementation (roadmap item
 391), and the gap is not "a few missing constructs" — it is a whole missing
 LAYER. `admit_src` decides the composition and guarantee layer (`G1`..`G4`,
 `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not** run the
-reference's type layer. Measured, not assumed: the reference refuses all of
+reference's type layer, of which it runs one slice — the fn-body statement
+layer — and not the rest. Measured, not assumed: the reference refuses both of
 
-    fn f() -> Int { return "s" }
     fn f() -> Int { return undefined_name }
     fn f() -> { }
 
-and the self-host gate raises no objection to any of them.
+and the self-host gate raises no objection to either. A return-type mismatch,
+`fn f() -> Int { return "s" }`, used to head that list; it is refused here now,
+in the reference's own words.
 
 So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
