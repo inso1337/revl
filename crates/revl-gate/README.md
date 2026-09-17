@@ -60,13 +60,15 @@ The self-host compiler is behind the reference implementation (roadmap item
 391), and the gap is not "a few missing constructs" — it is a whole missing
 LAYER. `admit_src` decides the composition and guarantee layer (`G1`..`G4`,
 `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not** run the
-reference's type layer. Measured, not assumed: the reference refuses all of
+reference's type layer, of which it runs one slice — the fn-body statement
+layer — and not the rest. Measured, not assumed: the reference refuses both of
 
-    fn f() -> Int { return "s" }
     fn f() -> Int { return undefined_name }
     fn f() -> { }
 
-and the self-host gate raises no objection to any of them.
+and the self-host gate raises no objection to either. A return-type mismatch,
+`fn f() -> Int { return "s" }`, used to head that list; it is refused here now,
+in the reference's own words.
 
 So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
@@ -215,17 +217,9 @@ Two honest limits, both fail-closed:
 
 ## What is deliberately absent
 
-* **`compile_to` output.** Exported, and it refuses unconditionally. The
-  blocker is no longer packaging: the native rust emitter IS in this crate (see
-  `emit_ir` below). What is missing is a native FRONTEND whose IR byte-agrees
-  with the reference — the self-host's `lower_to_ir` is behind the reference's
-  (roadmap item 391). It is pinned byte-exact only on the document set
-  `tests/test_selfhost_compile.py` names (`RUST_FUNCTION_DOCS` +
-  `RUST_COMPONENT_DOCS`), which is far narrower than this crate's covered
-  corpus. Handing back an emission from outside that set would be handing a
-  caller target source this crate cannot back, so the arm refuses instead. `py` is blocked one step earlier:
-  `selfhost/emit_py.rvl`'s helper externs are `@py`-only, so no py emitter can
-  be generated into the crate at all.
+* **`compile_to` output.** Exported, and it refuses unconditionally: the
+  self-host emitters still carry `@py`-only helper externs and do not emit to
+  rust. Stage 4's lane.
 * **The reference type layer.** Still absent, in `admit` and in `admit_into`
   alike: neither arm issues an admission. That lane is the type layer's, not the
   manifest parameter's.
@@ -254,29 +248,6 @@ Two honest limits, both fail-closed:
   that step needs `compile_to`, which this tier does not have. The pair rules are
   enforced over the registry, and the runtime is real; what is not yet real is the
   path from admitted source to a running body.
-
-## What emits: `emit_ir` (roadmap item 146)
-
-`emit_ir(ir_document, Tier::Rust)` takes a staged interchange IR document as
-JSON TEXT — the shape `revl compile --emit-ir` writes — and returns rust source.
-No Python, no reference compiler, no cordis runtime in the call.
-
-The emitter is `selfhost/emit_rust.rvl`, generated into the same `selfhost`
-module as the gate and called behind `stdlib/json.rvl::json_parse`, which is the
-constructor for the `cordis::Value` its `Any` parameter erases to. It byte-agrees
-with the reference rust backend over that backend's own self-host oracle corpus:
-34 documents, no exclusions, driven through this crate by
-`tests/test_gate_crate_admit.py::test_emit_ir_is_byte_identical_to_the_reference`.
-
-It fails closed on a document above `MAX_SOURCE_BYTES`, on anything
-`revl_gate::ir::check_ir_boundary` refuses (an unknown top-level field, an
-unknown schema revision, a non-object), on `Tier::Py`, and on an abort inside the
-emitter. It is not an admission and never reads `admitted:true`.
-
-What it claims is scoped to what it was measured on: a document the REFERENCE
-frontend produced. It claims nothing about an IR document assembled some other
-way, and — see `compile_to` above — nothing about compiling revl source
-end to end.
 
 ## Host obligations
 
@@ -321,7 +292,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:1967538e6bedd349"
+    // frontier "selfhost-admit:cab6853e7e49bf61"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the

@@ -1165,7 +1165,12 @@ def test_the_manifest_parameter_is_read_rather_than_ignored(manifest_agreement):
 # everywhere. Kept as a live probe so the day the self-host grows the type layer,
 # this test says so and the crate docs can be updated with it.
 TYPE_LAYER_GAP = [
-    ("return type mismatch", 'fn f() -> Int { return "s" }'),
+    # `("return type mismatch", 'fn f() -> Int { return "s" }')` headed this
+    # list until the fn-body STATEMENT layer landed (docs/design/457 T3a): a
+    # declared return is a checking position the walk now carries, so the crate
+    # REFUSES it in the reference's own words and it is an agreement rather than
+    # a gap. `test_the_gap_that_closed_is_an_agreement_now` below holds that,
+    # so this list cannot go vacuous by attrition.
     ("undeclared name in a body", "fn f() -> Int { return undefined_name }"),
     ("return arrow with no type", "fn f() -> { }"),
     # `("unknown service in provides", "component C provides s: S { }")` used to
@@ -1193,6 +1198,21 @@ def test_the_type_layer_gap_never_reads_as_an_admission(consumer, name, source):
         f"{name}: unexpected arm {verdict['verdict']}")
     if verdict["verdict"] == "no_objection":
         assert verdict["code"] is None
+
+
+def test_the_gap_that_closed_is_an_agreement_now(consumer):
+    """The other end of the list above. A return-type mismatch was the crate's
+    worked example of the type-layer gap; the fn-body statement layer
+    (docs/design/457 T3a) closed it, so the crate refuses it with the
+    reference's tag AND sentence — and still issues no admission doing so."""
+    source = 'fn f() -> Int { return "s" }'
+    ref_code, ref_message = _reference(source)
+    assert ref_code == "T1", ref_code
+    verdict = _crate_verdicts(consumer, [source])[0]
+    assert verdict["verdict"] == "refused"
+    assert verdict["admitted"] is False
+    assert verdict["code"] == ref_code
+    assert verdict["message"] == ref_message
 
 
 # --------------------------------------------------------------- fail closed
