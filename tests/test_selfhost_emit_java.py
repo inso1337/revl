@@ -126,7 +126,8 @@ from revl import compile_files  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
-from _boundary_witness import shared_witness_token_reason  # noqa: E402
+from _boundary_witness import (  # noqa: E402
+    assert_boundary_witness, shared_witness_token_reason)
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
@@ -463,3 +464,31 @@ def test_declared_boundary_still_diverges(
     if port_fragment is None and reference_fragment in got:
         pytest.fail(f"{rel} gained its missing block; review and promote the case")
     assert got == want
+
+
+# ---------------------------------------------------------------------------
+# item 130 (issue #81): the stream surface this port does not carry
+# ---------------------------------------------------------------------------
+#
+# The reference emitter lowers the whole `Stream[T]` surface on this tier; the
+# Path B port does not, and `tests/fixtures/selfhost_blind_spots.json` carries
+# that as a named `unported` baseline. The baseline records the GAP. What was
+# never checked is that the port is LOUD about it: the ledger is satisfied by a
+# port that silently emits a module with the subscription missing, which is the
+# section-level silence issue #1123 found for the in-file test section and the
+# worst answer item 130 admits for a stream. So the marker is pinned here,
+# where it runs.
+
+
+def test_the_stream_surface_is_named_not_dropped(emitted, reference):
+    """This port defers the whole non-simple component, so its marker names the
+    COMPONENT rather than the stream step inside it. That is still a refusal by
+    name — the emitted unit says which component it did not carry — and the
+    point of pinning it is that the day the component path grows far enough to
+    render this one, the stream inside it must not slip through silently."""
+    ir = compile_files([str(ROOT / "backends" / "go" / "testdata"
+                            / "stream_event_130.rvl")])
+    want = reference.emit(ir)
+    got = emitted["emit_java_src"](ir)
+    assert_boundary_witness(want, got, "Stream.subscribe(",
+                            "<<DEFER-component-nonsimple:")
