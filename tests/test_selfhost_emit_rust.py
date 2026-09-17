@@ -237,6 +237,15 @@ CORPUS = [
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
+    "comp_await_job.rvl",    # the activation-body `await` step and the
+                             #   `plugin_async` + `|ctx, config| async move {`
+                             #   lowering it forces on BOTH component paths, the
+                             #   host async seam (`Job::run(..).await`) vs the
+                             #   erased awaitable (a required-service call, item
+                             #   131), the `host` component-dialect expression
+                             #   kind, and the `Job` host stub — whose emitted
+                             #   block was missing `pub struct Job;` itself.
+                             #   No document awaited anything before this one.
     "comp_body_steps.rvl",   # the activation-body steps other than `provide`:
                              #   the bare `effect`/`undo` bracket over a required
                              #   service, the fire-and-forget `emit`, and the
