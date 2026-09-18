@@ -1402,10 +1402,14 @@
   },
   "selfhost": {
     "go": {
-      "statements": 1180,
+      "statements": 1190,
       "uncovered": {
         "Context builder used only by emit_go.rvl's own unit tests; emit_src builds the production context directly. This is not an unsupported emitted construct.": {
           "typed_ctx": 9
+        },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_go_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_go_src": 1
         },
         "Generated Python inlines these tiny RVL helpers into emitter call sites; their substituted bodies execute while the retained definitions do not. Any residual named calls occur only in the RVL file's own unit-test functions, which are outside the corpus emitter entry point.": {
           "flags_or": 1,
@@ -1485,11 +1489,15 @@
           "concat_pieces": 8
         }
       },
-      "uncovered_statements": 84
+      "uncovered_statements": 87
     },
     "java": {
-      "statements": 2034,
+      "statements": 2044,
       "uncovered": {
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_java_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_java_src": 1
+        },
         "selfhost/emit_java.rvl::bind_type: The empty Map surface branch cannot occur: component_map_values always supplies at least Str. Remaining record/list/scalar inference requires nonhost let-effect, explicitly excluded by body_step_supported.": {
           "bind_type": 27
         },
@@ -1681,10 +1689,10 @@
           "witnessed_names": 2
         }
       },
-      "uncovered_statements": 182
+      "uncovered_statements": 185
     },
     "py": {
-      "statements": 1992,
+      "statements": 2002,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1696,6 +1704,9 @@
           "body_has_receiver_secret_witness": 2,
           "body_has_secret_param": 2,
           "body_has_timer": 2
+        },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_py_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2
         },
         "Empty interpolation fallback: interp_fstring emits the empty literal for an empty parts list. Empty source strings lower lit instead; both implementations agree on this legacy shape, and strings/float_interp cover nonempty interpolation.": {
           "interp_fstring": 1
@@ -1728,8 +1739,8 @@
         "Module expr_inner residuals: bare Some identity, legacy field.sized_length branch and explicit unsupported-kind marker. Module .length currently lowers kind=len while component .length reaches field.sized_length (both in branches.rvl). Some-call construction is covered separately; no claim that all historical IR shapes are source-reachable.": {
           "expr_inner": 4
         },
-        "Module host-root discovery: emit_py_src imports Job when found; ir_uses_host_root's tests subtree is the retained test-harness boundary. Existing module corpus reaches Map/Pool while component host calls are separately deferred. Job uses the same sorted runtime-import mechanism, not a missing port implementation.": {
-          "emit_py_src": 1,
+        "Module host-root discovery: emit_py_src imports Job when found; ir_uses_host_root's tests subtree is the retained test-harness boundary. Existing module corpus reaches Map/Pool while component host calls are separately deferred. Job uses the same sorted runtime-import mechanism, not a missing port implementation.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+          "emit_py_src": 2,
           "ir_uses_host_root": 1
         },
         "Owned Map.set computed-key order: inplace_stmts emits _revl_key then the assignment when the key is not trivial. Reference _py_inplace_stmts emits the same sequence. in_place.rvl's keys are trivial, but supported map ownership/copy/remove paths are covered; no exclusion of mutation is claimed.": {
@@ -1796,10 +1807,10 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 100
+      "uncovered_statements": 103
     },
     "rust": {
-      "statements": 1992,
+      "statements": 2002,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,
@@ -1838,6 +1849,10 @@
           "provide_methods": 1,
           "pure_method_statements": 2,
           "strip_spaces": 1
+        },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_rust_src": 1
         },
         "Extern deferral boundary: the residual branches detect absent/non-Rust extern bodies and config/runtime extern scaffolding that the self-host pure-v3 module does not emit. Ordinary @rs externs are covered.": {
           "emit_v3_externs": 4,
@@ -1908,10 +1923,10 @@
           "strip_index_clone": 1
         }
       },
-      "uncovered_statements": 143
+      "uncovered_statements": 146
     },
     "ts": {
-      "statements": 2121,
+      "statements": 2132,
       "uncovered": {
         "Async emission-node negative tests: `emission_call_node` returns false for a non-call, a call whose target is not `req`, or a requirement method absent from the component's async operation keys. Async req calls and async arrows exercise its true branch": {
           "emission_call_node": 3
@@ -1923,6 +1938,10 @@
         "Crossing-label fallbacks: `call_method_name` returns `undo` for absent/empty method, fn, host or variable-callee names and unknown call shapes; `crossing_key_name` returns `?` for absent/empty requirement/name/variable identifiers or unknown targets. Lowered acquisition/undo calls carry the names used by the covered Frame bracket and compensation fixtures": {
           "call_method_name": 11,
           "crossing_key_name": 12
+        },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_ts_src` splices that block where the reference emits its vitest drivers. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits a driver section here and this port does not; a corpus document carrying one would therefore turn the byte-agreement oracle red rather than close the gap, which is why no emit_ts_corpus document carries a test section and these statements have no corpus case. Before #1123 the section was skipped in SILENCE - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_ts_src": 2
         },
         "Empty-list conservative fallbacks: `empty_list_ann` uses `any[]` when no element evidence was inferred, and `list_element` returns empty for non-List or malformed List syntax. Typed empty-list bindings and inferred persistent pushes cover the evidence-bearing paths; the frontend rejects unconstrained empty lists": {
           "empty_list_ann": 1,
@@ -1985,11 +2004,14 @@
           "ts_type_v1": 1
         }
       },
-      "uncovered_statements": 93
+      "uncovered_statements": 97
     },
     "wasm": {
-      "statements": 1269,
+      "statements": 1279,
       "uncovered": {
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_wasm_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2
+        },
         "Generated Python substitutes these tiny RVL helper bodies at production call sites; their retained definitions are not called by emit_src. Remaining named calls are confined to the RVL file's own unit tests. This includes the executed preamble/layout logic, not an absent backend feature.": {
           "align4": 1,
           "align8": 1,
@@ -2046,8 +2068,8 @@
         "Remaining guards reject malformed emitted constant text: missing closing parenthesis, empty/sign-only numeral, or nondigit. Valid renderer-produced integer constants satisfy this parser.": {
           "const_numeral": 3
         },
-        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.": {
-          "emit_wasm_src": 1
+        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+          "emit_wasm_src": 2
         },
         "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
           "render_bin": 1
@@ -2080,7 +2102,7 @@
           "rstrip": 1
         }
       },
-      "uncovered_statements": 60
+      "uncovered_statements": 63
     }
   }
 }
