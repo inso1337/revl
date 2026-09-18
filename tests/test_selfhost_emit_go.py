@@ -415,12 +415,19 @@ def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, referen
                                                                 tmp_path):
     """The boundary of the rule above, so it is not read as wider than it is.
 
-    The reference's PURE typed-core path routes PAST the components of a
-    document that also carries top-level declarations and emits ordinary Go for
-    those alone. That drop is the reference's own answer for the document, not a
-    gap in this port, and the two sides agree byte-for-byte over it -- 38
-    documents in the tree are in exactly that state. A marker here would name
-    nothing real and would turn every one of them into a divergence.
+    The rule is to name every `components` entry the port does not carry EXCEPT
+    where naming it would break a byte agreement the reference itself produces.
+    This is that exception: the reference's PURE typed-core path routes PAST the
+    components of a document that also carries top-level declarations and emits
+    ordinary Go for those alone, so both sides drop the same thing and agree
+    byte-for-byte. 38 documents in the tree are in exactly that state, and a
+    marker here would name a gap that is not there and cost every one of them.
+
+    The suppression needs BOTH halves: pure declarations present, and no in-file
+    `test` section. A document with a test section already diverges (this slice
+    defers the whole section), so there is no agreement left to protect there
+    and the marker is free -- which is also what carries the `lifecycle test`
+    documents, whose components the reference keeps.
     """
     path = tmp_path / "incidental.rvl"
     path.write_text("fn f() -> Int { return 1 }\n"
