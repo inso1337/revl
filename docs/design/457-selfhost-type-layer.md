@@ -581,14 +581,78 @@ receiver-first list transform to its free function and then refuses that
 undeclared NAME, which is the G1 name-read family no slice has built. The gate
 refuses later, or not at all, which is the under-refusing direction. ~750 lines.
 
-**T2c. Arrows and function values.** Parser: `ArrowN.tok`/`ptys`/`ret`,
-`HoleN.tok`. Checker: §3.1/3.2 inference, `_check_arrow`,
-`call_function_value`, `refuse_self_declared_async`, the `arrows` map.
-Oracle: checker corpus (the reference's arrow fixtures in
-`tests/test_function_types*.py` are the seed) and `test_selfhost_parser.py`
-for the parser additions. Fixtures: `t17`, `t32`, `t33`, `t35`, `t34`. ~400
-lines. Hardest expression slice; ordered after T2b because it needs the
-signature table.
+**T2c. Arrows and function values. LANDED, in `lower.rvl` and with no parser
+change.** The slice was written expecting `ArrowN` to need a token index and the
+written annotations added to it. It did not: `parser.rvl`'s `ArrowN` has carried
+`params: List[ParamN]` and `ret: Str` since the node existed, which is every
+annotation §3.1 reads. What was missing was a consumer.
+
+`tk_infer` gains an `Arrow` arm that is §3.1 verbatim: each parameter is its
+written annotation or bottom, the body is typed in the enclosing environment with
+the parameters shadowed into the unknown, and the result is the written return
+annotation or, under §3.2's bottom-parameter-independence rule, what the body
+infers to. The arrow ALWAYS types, as a function type with every bottom rendered
+`Any`, which is the whole of what `t33` needs: arity is purely syntactic and
+never in doubt, and throwing the signature away with the one unknown parameter is
+what let `f(1, 2)` compile. §3.2's dependence question is `_free_names` asked as a
+membership test rather than built as a set, over every `Expr` case by name and
+answering "depends" for the two it cannot read, because missing an occurrence
+would let the rule name a result it must not name.
+
+Rule G is the half that needed a decision the file did not already hold. An arrow
+never quantifies, so a name in its annotation resolves to a type parameter of the
+ENCLOSING `fn`, else to a declared type, else to an ordinary opaque nominal. The
+body walk had the marked parameter types but not the LIST they were marked
+against, so `fb_function` now records it beside the environment under a key
+carrying a space. Without it `(x: Q): Q => x` fed an `Int` is admitted (`Q`
+wrongly quantified, `t35`) or `fn idg[T](x: T)`'s own `(v: T): T => v` is refused
+(a false rejection); the list is what tells those two apart.
+
+`call_function_value` lands beside it: a bare-name callee bound LOCALLY to a
+function type is read before the case table and before the signature table, as the
+reference reads `tenv[name]` first, and any other callee expression whose type is
+a function type is read after the method arms. The declaration scan binds every
+module `fn`'s own name to its function type in the same environment the reference's
+body `tenv` does not, so a binding that IS that row is not a function value here
+and goes on to the signature table. `_check_arrow` (the CHECKING position, which
+supplies the parameter types an annotation-free arrow never wrote) and
+`_check_arrow_args` are not ported: both would type an arrow this walk leaves
+untyped, and withholding is the silent direction.
+
+What it buys, measured. `t17_arrow_body_unchecked`, `t32_arrow_value_result_flows`,
+`t33_arrow_value_arity` and `t35_arrow_annotation_not_quantified` moved from
+`false-admit/T1` to `agree-refuse/T1` on tag AND message. `t34` needed nothing: the
+self-declared async colour (rule C1) already had its own scan.
+
+**T2d. Match, record update, optional chaining. PARTLY LANDED: the optional
+chain.** `a?.b` short-circuits on absence, so it requires an optional on the left
+and yields an optional on the right, never double-wrapped. Both halves are ported.
+
+The refusal fires only over a spelling the walk has PROVEN is not an optional: a
+built-in head, a structural record, a function type, or a name the declaration scan
+recorded as a record (its `field <Type>.<name>` rows) or as a variant (its case
+list). The reference runs `_resolve_type_aliases` before it asks, so it sees
+`type MaybeRow = Opt[Row]` already erased; this walk reads the written spelling, and
+a bare name it cannot classify may still be a transparent alias for an `Opt[...]`.
+Refusing one would be a false rejection, so those stay silent.
+
+The result type is named only where the reference names it: `.length` on a sized
+head and a field of a declared nominal record. A structural inner, an `Opt` inner
+and an optional CALL all answer unknown on both sides. That half is not decoration
+— without it a `(): Str => a?.h` arrow body draws no verdict where the reference
+refuses the `Opt[Str]` its body hands back against the `Str` it declared,
+which the T2c fuzz found.
+
+`t14_optional_chain_on_nonoptional` moved from `false-admit/T1` to
+`agree-refuse/T1`. Still T2d's: the arm payload typing and the record-update rules.
+
+The arrow, match and optional-chain slices share one differential fuzz
+(`test_arrow_and_match_fuzz_never_refuses_what_the_reference_admits`, 800 draws per
+seed over three seeds). Over 2400 draws it found ZERO false rejections, and every
+surviving divergence is the gate refusing LATER than the reference because the
+reference's earlier refusal is a G1 name read, the unknown-receiver `HOST-METHOD`
+refusal or the named-record field rule — the three families `_TFB_LATER_SLICES`
+already names.
 
 **T2d. Match, record update, optional chaining.** Arm payload typing from
 the variant table and `Opt`/`Result` args; record-update rules; `?.` rules.
@@ -605,7 +669,9 @@ fixtures of families 1 to 3 of section 1 (via `_fixture`), plus a generator
 those names removed from `KNOWN_BYPASSES`; pin test lines deleted. ~500
 lines. Depends on T2a/T2b.
 
-**T3b. Totality, exhaustiveness, declarations.** `_check_returns_on_every_
+**T3b. Totality, exhaustiveness, declarations.** The RETURN-PATH half and the
+MATCH half have both landed (see T3b(returns) below, and T3b(match) after it);
+what is left of this slice is the declaration rules. `_check_returns_on_every_
 path`, `_check_match_exhaustiveness` and unknown-case, `duplicate function`/
 `duplicate parameter`, `_lower_type_decls` duplicates, alias cycle, wellformed
 declared types at every site, `_refuse_callable_shadowing`, verified
@@ -684,6 +750,35 @@ oracles agreed trivially — the absence, not a divergence. That erasure is
 §2.1 item 1 and belongs to T1's `types.rvl`; the alias case was dropped from
 `return_paths.rvl` rather than half-fixed here, and this paragraph is the record
 that it is known.
+
+**T3b(match). Match exhaustiveness and the unknown arm. LANDED, ahead of the
+rest of T3b.** `_check_match_exhaustiveness` runs inside `_lower_pure_expr` at an
+`ExprMatch`, ahead of the scrutinee and the arms, so it lands in `tk_low` (the
+walk that already carries §4.4 step 6, the refusals the reference makes while
+LOWERING) rather than in the typing walk, at exactly that position. Both of its
+refusals, in the reference's order: an arm naming something the ADT does not
+declare outranks a missing case, because a typo is the better answer than a list
+of everything the arm is not.
+
+Its premise is the scrutinee's static type naming a declared variant. Two things
+make that answerable. The declaration scan already reads a `type X = A | B(T)`
+across its WHOLE span (`decl_cases`, the multi-line read item 391 needed for the
+case table), so it now records the ADT's own case list in declaration order
+beside the per-case rows — a separate row, because a case name declared by two
+ADTs is dropped from the per-case table and the exhaustiveness rule needs the
+declaration's full surface regardless of what else shares a name with it. And the
+lookup is VERBATIM, as the reference's `types.get(type_name)` is: a parameterized
+instance such as `Tree[Int]` resolves to nothing and decides nothing on either
+side. A type this walk cannot infer decides nothing either, which is the silent
+direction: naming a case as missing on a scrutinee whose ADT is a guess would
+refuse a program the reference admits.
+
+What it buys: `v2_match_nonexhaustive` moved from `false-admit/T1` and
+`t13_unknown_match_case` from `false-admit/TYPE`, both to `agree-refuse` on tag
+and message. What it does NOT buy: the arm bodies are still not typed by the
+checking walk (T2d's payload rule), so `tk_low` deliberately does not descend
+into them either — refusing inside an arm would report a refusal the reference
+reaches at an earlier phase and name a divergence rather than close one.
 
 **T3c. One engine.** Delete lower.rvl's private `infer`/`binop_ty`/
 `builtin_ret`/`join_ty`/`infer_field`/`infer_callee`/`operands_of` and the
