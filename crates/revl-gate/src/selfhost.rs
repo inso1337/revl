@@ -6344,10 +6344,233 @@ fn tk_infer(e: Expr, env: Vec<Bind>) -> TInf {
     Expr::Templ(t) => tk_parts(t.parts, 0i64, env.clone()),
     Expr::Match(m) => { let m = *m; tk_ok(infer_match_ty(m, env.clone())) },
     Expr::Hole(h) => tk_ok(h.ty),
-    Expr::OptField(f) => { let f = *f; tk_sub(f.target.clone(), env.clone()) },
-    Expr::OptCall(c) => { let c = *c; tk_sub(c.target.clone(), env.clone()) },
+    Expr::OptField(f) => { let f = *f; tk_optchain(f.target.clone(), &f.name, false, env.clone()) },
+    Expr::OptCall(c) => { let c = *c; tk_optchain(c.target.clone(), &c.name, true, env.clone()) },
+    Expr::Arrow(a) => { let a = *a; tk_arrow(a, env.clone()) },
     _ => tk_ok(String::from("")),
 };
+}
+
+fn tk_arrow(a: ArrowN, env: Vec<Bind>) -> TInf {
+    let inner = tk_arrow_env(a.params.clone(), 0i64, env.clone(), tk_arrow_tps(&env));
+    let indep = (!tk_arrow_depends(a.clone(), &env));
+    if ((a.ret != "") && indep) {
+        let c = tk_check(a.body.clone(), tk_arrow_ann(a.ret.clone(), &tk_arrow_tps(&env)), inner.clone(), "the body of this arrow (from its return annotation)");
+        if (c.v != "") {
+            return c;
+        }
+        return tk_ok(tk_fn_spell(a.clone(), tk_arrow_ann(a.ret.clone(), &tk_arrow_tps(&env))));
+    }
+    let b = tk_infer(a.body.clone(), inner.clone());
+    if (b.v != "") {
+        return b;
+    }
+    let ret = if (a.ret != "") { tk_arrow_ann(a.ret.clone(), &tk_arrow_tps(&env)) } else { if indep { b.ty } else { String::from("") } };
+    return tk_ok(tk_fn_spell(a.clone(), ret));
+}
+
+fn tk_arrow_tps(env: &[Bind]) -> Vec<String> {
+    let raw = tenv_get(env, "arrow tparams");
+    if (raw == "") {
+        return vec![];
+    }
+    return split_top_commas(&raw);
+}
+
+fn tk_arrow_ann(ty: String, tps: &[String]) -> String {
+    return mark_tparams(taint_strip(ty.clone()), tps);
+}
+
+fn tk_arrow_env(ps: Vec<ParamN>, i: i64, env: Vec<Bind>, tps: Vec<String>) -> Vec<Bind> {
+    if (i >= ps.revl_length()) {
+        return env;
+    }
+    let ann = if ((ps)[(i) as usize].ty == "") { String::from("") } else { tk_arrow_ann((ps)[(i) as usize].ty.clone(), &tps) };
+    return tk_arrow_env(ps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), tenv_put(&tenv_put(&env, (ps)[(i) as usize].name.clone(), ann), String::from("unk ").revl_concat(&(ps)[(i) as usize].name), String::from("")), tps.clone());
+}
+
+fn tk_arrow_depends(a: ArrowN, env: &[Bind]) -> bool {
+    let mut unknown: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < a.params.revl_length()) {
+        if ((a.params)[(i) as usize].ty == "") {
+            unknown.push((a.params)[(i) as usize].name.clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (unknown.revl_length() == 0i64) {
+        return false;
+    }
+    return tk_free_hit(a.body.clone(), unknown.clone(), vec![]);
+}
+
+fn tk_free_hit(e: Expr, unknown: Vec<String>, bound: Vec<String>) -> bool {
+    return match e {
+    Expr::Var(n) => (contains(&unknown, &n) && (!contains(&bound, &n))),
+    Expr::Bin(b) => { let b = *b; (tk_free_hit(b.l.clone(), unknown.clone(), bound.clone()) || tk_free_hit(b.r.clone(), unknown.clone(), bound.clone())) },
+    Expr::Un(u) => { let u = *u; tk_free_hit(u.e.clone(), unknown.clone(), bound.clone()) },
+    Expr::Emit(u) => { let u = *u; tk_free_hit(u.e.clone(), unknown.clone(), bound.clone()) },
+    Expr::Call(c) => { let c = *c; (tk_free_hit(c.target.clone(), unknown.clone(), bound.clone()) || tk_free_any(c.args.clone(), 0i64, unknown.clone(), bound.clone())) },
+    Expr::Field(f) => { let f = *f; tk_free_hit(f.target.clone(), unknown.clone(), bound.clone()) },
+    Expr::OptField(f) => { let f = *f; tk_free_hit(f.target.clone(), unknown.clone(), bound.clone()) },
+    Expr::OptCall(c) => { let c = *c; (tk_free_hit(c.target.clone(), unknown.clone(), bound.clone()) || tk_free_any(c.args.clone(), 0i64, unknown.clone(), bound.clone())) },
+    Expr::Index(x) => { let x = *x; (tk_free_hit(x.target.clone(), unknown.clone(), bound.clone()) || tk_free_hit(x.idx.clone(), unknown.clone(), bound.clone())) },
+    Expr::If(f) => { let f = *f; ((tk_free_hit(f.cond.clone(), unknown.clone(), bound.clone()) || tk_free_hit(f.then_.clone(), unknown.clone(), bound.clone())) || tk_free_hit(f.els.clone(), unknown.clone(), bound.clone())) },
+    Expr::Rec(r) => tk_free_inits(r.fields.clone(), 0i64, unknown.clone(), bound.clone()),
+    Expr::RecUpd(r) => { let r = *r; (tk_free_hit(r.base.clone(), unknown.clone(), bound.clone()) || tk_free_inits(r.upds.clone(), 0i64, unknown.clone(), bound.clone())) },
+    Expr::Lst(l) => tk_free_any(l.items, 0i64, unknown.clone(), bound.clone()),
+    Expr::Arrow(ar) => { let ar = *ar; tk_free_hit(ar.body.clone(), unknown.clone(), union_into(bound.clone(), param_names(&ar.params))) },
+    Expr::Match(m) => { let m = *m; (tk_free_hit(m.scrut.clone(), unknown.clone(), bound.clone()) || tk_free_arms(m.arms.clone(), 0i64, unknown.clone(), bound.clone())) },
+    Expr::Templ(t) => tk_free_parts(t.parts, 0i64, unknown.clone(), bound.clone()),
+    Expr::IntLit(v) => false,
+    Expr::FloatLit(v) => false,
+    Expr::StrLit(v) => false,
+    Expr::BoolLit(v) => false,
+    Expr::NullLit => false,
+    Expr::Hole(h) => false,
+    _ => true,
+};
+}
+
+fn tk_free_any(xs: Vec<Expr>, i: i64, unknown: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if tk_free_hit((xs)[(i) as usize].clone(), unknown.clone(), bound.clone()) {
+        return true;
+    }
+    return tk_free_any(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), unknown.clone(), bound.clone());
+}
+
+fn tk_free_inits(xs: Vec<InitN>, i: i64, unknown: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if tk_free_hit((xs)[(i) as usize].value.clone(), unknown.clone(), bound.clone()) {
+        return true;
+    }
+    return tk_free_inits(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), unknown.clone(), bound.clone());
+}
+
+fn tk_free_arms(xs: Vec<ArmN>, i: i64, unknown: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    let inner = if ((xs)[(i) as usize].bind == "") { bound.clone() } else { bound.revl_push((xs)[(i) as usize].bind.clone()) };
+    if tk_free_hit((xs)[(i) as usize].body.clone(), unknown.clone(), inner) {
+        return true;
+    }
+    return tk_free_arms(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), unknown.clone(), bound.clone());
+}
+
+fn tk_free_parts(ps: Vec<PartN>, i: i64, unknown: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= ps.revl_length()) {
+        return false;
+    }
+    if (((ps)[(i) as usize].kind == "expr") && tk_free_hit((ps)[(i) as usize].e.clone(), unknown.clone(), bound.clone())) {
+        return true;
+    }
+    return tk_free_parts(ps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), unknown.clone(), bound.clone());
+}
+
+fn tk_fn_spell(a: ArrowN, ret: String) -> String {
+    let mut pts: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < a.params.revl_length()) {
+        let ann = if ((a.params)[(i) as usize].ty == "") { String::from("") } else { taint_strip((a.params)[(i) as usize].ty.clone()) };
+        pts.push(if (ann == "") { String::from("Any") } else { ann.clone() });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return ((String::from("(").revl_concat(&pts.revl_join(", "))).revl_concat(") -> ")).revl_concat(&if (ret == "") { String::from("Any") } else { ret.clone() });
+}
+
+fn tk_fnval(c: CallN, fnty: String, what: &str, argTys: &[String]) -> TInf {
+    let ps = fn_param_types(&fnty);
+    if (c.args.revl_length() != ps.revl_length()) {
+        return tk_no("T1", &(((((((what.revl_concat(" is a `")).revl_concat(&tk_render(fnty.clone()))).revl_concat("` and takes ")).revl_concat(&((ps.revl_length())).to_string())).revl_concat(" argument(s), ")).revl_concat(&((c.args.revl_length())).to_string())).revl_concat(" given")));
+    }
+    let mut i = 0i64;
+    while ((i < ps.revl_length()) && (i < argTys.revl_length())) {
+        if ((((ps)[(i) as usize] != "") && ((argTys)[(i) as usize] != "")) && (!tk_compatible((ps)[(i) as usize].clone(), (argTys)[(i) as usize].clone()))) {
+            return tk_mismatch(&(((String::from("argument ").revl_concat(&(((i).checked_add(1i64).expect("revl: Int overflow"))).to_string())).revl_concat(" of ")).revl_concat(&what)), (ps)[(i) as usize].clone(), (argTys)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return tk_ok(tk_call_result(function_return_ty(&fnty)));
+}
+
+fn tk_local_fnvalue(c: CallN, env: &[Bind], argTys: &[String]) -> TCall {
+    let n = match c.target.clone() {
+    Expr::Var(v) => v,
+    _ => String::from(""),
+};
+    if (n == "") {
+        return tk_miss();
+    }
+    let t = tenv_get(env, &n);
+    if (!tk_is_fn_ty(&t)) {
+        return tk_miss();
+    }
+    if (sig_declared(env, &n) && (tenv_get(env, &sig_key("sigv", &n)) == t)) {
+        return tk_miss();
+    }
+    return tk_hit(tk_fnval(c.clone(), t.clone(), &((String::from("`").revl_concat(&n)).revl_concat("`")), argTys));
+}
+
+fn tk_other_fnvalue(c: CallN, calleeTy: String, argTys: &[String]) -> TCall {
+    let bare = match c.target.clone() {
+    Expr::Var(v) => true,
+    Expr::Field(f) => { let f = *f; true },
+    _ => false,
+};
+    if bare {
+        return tk_miss();
+    }
+    if (!tk_is_fn_ty(&calleeTy)) {
+        return tk_miss();
+    }
+    return tk_hit(tk_fnval(c.clone(), calleeTy.clone(), "this call's callee", argTys));
+}
+
+fn tk_optchain(target: Expr, member: &str, isCall: bool, env: Vec<Bind>) -> TInf {
+    let t = tk_infer(target.clone(), env.clone());
+    if (t.v != "") {
+        return t;
+    }
+    if (parse_head(t.ty.clone()) != "Opt") {
+        if tk_optchain_decided(t.ty.clone(), &env) {
+            return tk_no("T1", &((String::from("`?.` needs an optional on the left, got `").revl_concat(&tk_render(t.ty.clone()))).revl_concat("`")));
+        }
+        return tk_ok(String::from(""));
+    }
+    if isCall {
+        return tk_ok(String::from(""));
+    }
+    let res = tk_opt_member(tk_arg1(&t.ty), member, &env);
+    if (res == "") {
+        return tk_ok(String::from(""));
+    }
+    return tk_ok(if (parse_head(res.clone()) == "Opt") { res.clone() } else { (String::from("Opt[").revl_concat(&res)).revl_concat("]") });
+}
+
+fn tk_opt_member(inner: String, member: &str, env: &[Bind]) -> String {
+    if (((inner == "") || (inner == "Opt")) || (parse_head(inner.clone()) == "Opt")) {
+        return String::from("");
+    }
+    if ((member == "length") && tk_sized_head(&parse_head(inner.clone()))) {
+        return String::from("Int");
+    }
+    if (tk_is_struct(&inner) || (!tk_record_base(inner.clone(), env))) {
+        return String::from("");
+    }
+    return infer_field(inner.clone(), member, env);
+}
+
+fn tk_optchain_decided(t: String, env: &[Bind]) -> bool {
+    if ((t == "") || tk_wild(&t)) {
+        return false;
+    }
+    return ((((tk_builtin_head(&parse_head(t.clone())) || tk_is_struct(&t)) || tk_is_fn_ty(&t)) || tk_record_base(t.clone(), env)) || (tenv_get(env, &(String::from("cases ").revl_concat(&t))) != ""));
 }
 
 fn tk_sub(e: Expr, env: Vec<Bind>) -> TInf {
@@ -6608,6 +6831,10 @@ fn tk_call(c: CallN, env: Vec<Bind>) -> TInf {
     if (a.v != "") {
         return a.r;
     }
+    let lfv = tk_local_fnvalue(c.clone(), &env, &a.tys);
+    if lfv.hit {
+        return lfv.r;
+    }
     let nmd = tk_named(c.clone(), env.clone(), a.tys.clone());
     if nmd.hit {
         return nmd.r;
@@ -6615,6 +6842,10 @@ fn tk_call(c: CallN, env: Vec<Bind>) -> TInf {
     let mth = tk_method(c.clone(), &env, &a.tys, tv.ty.clone());
     if mth.hit {
         return mth.r;
+    }
+    let ofv = tk_other_fnvalue(c.clone(), tv.ty.clone(), &a.tys);
+    if ofv.hit {
+        return ofv.r;
     }
     if tk_unknown_receiver(c.target.clone(), env.clone()) {
         return tk_ok(String::from(""));
@@ -6640,7 +6871,7 @@ fn tk_callee(callee: Expr, env: Vec<Bind>) -> TInf {
     return match callee.clone() {
     Expr::Var(n) => tk_ok(String::from("")),
     Expr::Field(f) => { let f = *f; tk_infer(f.target, env.clone()) },
-    _ => tk_sub(callee.clone(), env.clone()),
+    _ => tk_infer(callee.clone(), env.clone()),
 };
 }
 
@@ -7634,6 +7865,60 @@ fn tk_low_method(c: CallN, env: Vec<Bind>) -> String {
     return String::from("");
 }
 
+fn tk_match_verdict(m: MatchN, env: Vec<Bind>) -> String {
+    let ty = tk_infer(m.scrut.clone(), env.clone()).ty;
+    if (ty == "") {
+        return String::from("");
+    }
+    let raw = tenv_get(&env, &(String::from("cases ").revl_concat(&ty)));
+    if (raw == "") {
+        return String::from("");
+    }
+    let declared = split_top_commas(&raw);
+    let mut i = 0i64;
+    while (i < m.arms.revl_length()) {
+        let pat = (m.arms)[(i) as usize].pat.clone();
+        if ((pat != "_") && (!contains(&declared, &pat))) {
+            return tagged("TYPE", &((((((String::from("`").revl_concat(&pat)).revl_concat("` is not a case of `")).revl_concat(&ty)).revl_concat("` (cases: ")).revl_concat(&tk_case_list(&declared, 0i64, String::from("")))).revl_concat(")")));
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut wild = false;
+    let mut covered: Vec<String> = vec![];
+    i = 0i64;
+    while (i < m.arms.revl_length()) {
+        if ((m.arms)[(i) as usize].pat == "_") {
+            wild = true;
+        } else {
+            covered.push((m.arms)[(i) as usize].pat.clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if wild {
+        return String::from("");
+    }
+    let mut missing: Vec<String> = vec![];
+    i = 0i64;
+    while (i < declared.revl_length()) {
+        if (!contains(&covered, &(declared)[(i) as usize])) {
+            missing.push((declared)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (missing.revl_length() == 0i64) {
+        return String::from("");
+    }
+    return tagged("T1", &((String::from("non-exhaustive match: missing ").revl_concat(&if (missing.revl_length() == 1i64) { String::from("case ") } else { String::from("cases ") })).revl_concat(&tk_case_list(&missing, 0i64, String::from("")))));
+}
+
+fn tk_case_list(names: &[String], i: i64, acc: String) -> String {
+    if (i >= names.revl_length()) {
+        return acc;
+    }
+    let one = (String::from("`").revl_concat(&(names)[(i) as usize])).revl_concat("`");
+    return tk_case_list(names, (i).checked_add(1i64).expect("revl: Int overflow"), if (acc == "") { one.clone() } else { (acc.revl_concat(", ")).revl_concat(&one) });
+}
+
 fn tk_low(e: Expr, env: Vec<Bind>) -> String {
     return match e {
     Expr::Bin(b) => { let b = *b; tk_low2(b.l.clone(), b.r.clone(), env.clone()) },
@@ -7647,8 +7932,17 @@ fn tk_low(e: Expr, env: Vec<Bind>) -> String {
     Expr::Lst(l) => tk_low_items(l.items, 0i64, env.clone()),
     Expr::If(f) => { let f = *f; tk_low3(f.cond.clone(), f.then_.clone(), f.els.clone(), env.clone()) },
     Expr::Templ(t) => tk_low_parts(t.parts, 0i64, env.clone()),
+    Expr::Match(m) => { let m = *m; tk_low_match(m, env.clone()) },
     _ => String::from(""),
 };
+}
+
+fn tk_low_match(m: MatchN, env: Vec<Bind>) -> String {
+    let own = tk_match_verdict(m.clone(), env.clone());
+    if (own != "") {
+        return own;
+    }
+    return tk_low(m.scrut.clone(), env.clone());
 }
 
 fn tk_low2(a: Expr, b: Expr, env: Vec<Bind>) -> String {
@@ -8239,7 +8533,8 @@ fn rp_refusal(ts: &[Token], sp: FbSpan, steps: &[FbStep]) -> Verd {
 fn fb_function(ts: Vec<Token>, i: i64, sp: FbSpan, gtys: Vec<Bind>) -> Verd {
     let tps = collect_tparams(sp.ps.clone(), sp.ret.clone(), gtys.clone(), explicit_tparams(&ts, i));
     let steps = fb_scan(ts.clone(), sp.lo, sp.hi);
-    let v = fb_walk(steps.clone(), 0i64, fb_params_scope(sp.ps.clone(), 0i64, vec![]), fb_params_tys(sp.ps.clone(), 0i64, gtys.clone(), tps.clone()), mark_tparams(sp.ret.clone(), &tps)).v;
+    let btys = tenv_put(&fb_params_tys(sp.ps.clone(), 0i64, gtys.clone(), tps.clone()), String::from("arrow tparams"), tps.revl_join(","));
+    let v = fb_walk(steps.clone(), 0i64, fb_params_scope(sp.ps.clone(), 0i64, vec![]), btys.clone(), mark_tparams(sp.ret.clone(), &tps)).v;
     if (v.v != "") {
         return v;
     }
@@ -11191,14 +11486,15 @@ fn decl_cases(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseStep {
         if ((bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) || atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "[")) {
             return CaseStep { a: a.clone(), i: if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { lineHi } else { bend } };
         }
-        let fields = rec_field_binds(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), &nm, a.binds.clone());
-        return CaseStep { a: CaseAcc { binds: fields.clone(), amb: a.amb.clone() }, i: bend };
+        let fields = if (tenv_get(&a.binds, &(String::from("cases ").revl_concat(&nm))) == "") { rec_field_binds(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), &nm, a.binds.clone()) } else { tenv_put(&rec_field_binds(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), &nm, a.binds.clone()), String::from("cases ").revl_concat(&nm), String::from("")) };
+        return CaseStep { a: CaseAcc { binds: fields, amb: a.amb.clone() }, i: bend };
     }
     if (!is_variant_rhs(&ts, j, lineHi)) {
         return CaseStep { a: a.clone(), i: lineHi };
     }
     let mut k = j;
     let mut acc = a.clone();
+    let mut names = String::from("");
     while (k < lineHi) {
         if atk(&ts, k, "ident") {
             let cn = tkc(&ts, k).text;
@@ -11213,12 +11509,14 @@ fn decl_cases(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseStep {
                 }
             }
             acc = case_add(acc.clone(), cn.clone(), nm.clone(), payload.clone());
+            names = if (names == "") { cn.clone() } else { (names.revl_concat(",")).revl_concat(&cn) };
             k = nk;
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
     }
-    return CaseStep { a: acc.clone(), i: lineHi };
+    let dup = (tenv_get(&acc.binds, &(String::from("cases ").revl_concat(&nm))) != "");
+    return CaseStep { a: CaseAcc { binds: tenv_put(&acc.binds, String::from("cases ").revl_concat(&nm), if dup { String::from("") } else { names.clone() }), amb: acc.amb.clone() }, i: lineHi };
 }
 
 fn case_binds_walk(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseAcc {
