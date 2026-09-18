@@ -90,13 +90,26 @@ def _run_dash(args) -> int:
     given: a `--live-state` snapshot colors the graph as it stands now; a
     `--trace`/`--timeline` renders a recorded run with no runtime at all."""
     from .. import dash, why_runtime  # noqa: PLC0415
+    from ..__main__ import _composition_document  # noqa: PLC0415 — lazy
 
     def _load_json(path):
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
 
+    # item 439 (issue #118), slice G8e: the third door onto the item-33
+    # boundary policy. `--policy` renders the POLICY-EXCEPTION queue — the
+    # violations a supervisor has to rule on — and a composition document
+    # compiled as a MODULE has an empty audit graph, so the queue printed
+    # "nothing pending: no policy exception to rule on" for a composition whose
+    # synthesized `remote ... through a2a` provider reaches `net.<host>` and is
+    # refused by that same policy under `revl audit --policy`. An empty
+    # decision queue is read as an absence of decisions, so it failed OPEN, and
+    # the dependency-graph pane above it was empty for the same reason.
+    resolved = _composition_document(args, label="dash")
+    if isinstance(resolved, int):
+        return resolved
     try:
-        ir = compile_files(args.files)
+        ir = compile_files(args.files) if resolved is None else resolved
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

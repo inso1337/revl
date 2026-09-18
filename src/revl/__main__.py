@@ -212,7 +212,21 @@ def _run_policy(args) -> int:
                 print("error: policy evaluate needs a POLICY and PROGRAM.rvl "
                       "(or --registry --candidate)", file=sys.stderr)
                 return 2
-            ir = compile_files(args.files)
+            # item 439 (issue #118), slice G8e: a COMPOSITION document
+            # argument. `revl audit --policy` runs this same `policy.evaluate`
+            # over a RESOLVED composition (slice G8c); this verb compiled the
+            # same document as a MODULE, so it read an empty audit graph,
+            # selected no component and printed "clean" with exit 0 for a
+            # composition the gate itself refuses. A dry run of a gate is read
+            # as what the gate would do, so that silence failed OPEN: it is the
+            # ONE positive verdict on this path, and it disagreed with the gate
+            # it previews. A refusal here exits 2 (usage), because 1 already
+            # means "a component would be refused".
+            resolved = _composition_document(args, label="policy evaluate",
+                                             refuse_code=2)
+            if isinstance(resolved, int):
+                return resolved
+            ir = compile_files(args.files) if resolved is None else resolved
             audit = audit_report(ir)
             comps = list(audit.get("boundary") or {})
             for name in comps:
@@ -316,8 +330,23 @@ def _run_simulate(args) -> int:
     # an action a realm rule selects is undecided without `--composition`.
     realms: dict = {}
     if args.composition:
+        # item 439 (issue #118), slice G8e: `--composition` takes the same
+        # COMPOSITION document `revl audit` resolves, and compiling it as a
+        # MODULE produced an empty manifest — so every action a realm-scoped
+        # rule selects was reported undecided, exactly as if the operator had
+        # not passed `--composition` at all. That direction is the refusing
+        # one, so this is a correction rather than a repair: undecided is not a
+        # clean diff, but it is a false statement about a document that DOES
+        # name the realms its rows join. A refusal exits 2, this verb's usage
+        # status, for the same reason `policy evaluate` uses 2.
+        resolved = _composition_document(args, label="simulate policy-diff",
+                                         files=args.composition, refuse_code=2)
+        if isinstance(resolved, int):
+            return resolved
         try:
-            manifest = compile_files(args.composition).get("manifest") or {}
+            document = (compile_files(args.composition)
+                        if resolved is None else resolved)
+            manifest = document.get("manifest") or {}
         except RevlError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
@@ -395,7 +424,9 @@ _RESOLVES_A_COMPOSITION = frozenset({
     "audit", "compile", "version", "test", "query", "erase-report"})
 
 
-def _composition_document(args):
+def _composition_document(args, *, label: str | None = None,
+                          files: list[str] | None = None,
+                          refuse_code: int = 1):
     """A COMPOSITION document argument, for the commands that share the module
     compile step (item 439, issue #118).
 
@@ -439,6 +470,17 @@ def _composition_document(args):
     through here would change the document that decision is made over without
     the review that belongs to it.
 
+    Slice G8e brings the three doors onto the item-33 BOUNDARY POLICY here too,
+    and they do not share that compile step, so the three parameters below say
+    which command is being answered for rather than reading it off
+    `args.command`: `label` is the command as an operator spells it (`policy
+    evaluate`), `files` is the argument list to read when it is not `args.files`
+    (`simulate policy-diff --composition`), and `refuse_code` is the exit status
+    a refusal takes, because 1 already MEANS "a component would be refused" on
+    `policy evaluate` and on `simulate policy-diff`. A layer document handed to
+    either is a usage error, not a policy verdict, so it exits 2 there and stays
+    1 on the shared step, where 1 is what every other refusal already returns.
+
     Returns `None` when no argument declares a composition (the caller falls
     through to the shared module compile), an `int` exit code when the command
     refuses, or the compiled composition document.
@@ -447,13 +489,14 @@ def _composition_document(args):
 
     from .composition import compile_composition  # noqa: PLC0415 — lazy
 
-    command = args.command
-    docs, layers = _wiring_documents(args.files)
+    command = label or args.command
+    paths = list(args.files if files is None else files)
+    docs, layers = _wiring_documents(paths)
 
     def _refuse(message: str, hint: str) -> int:
         print(f"error: {message}", file=sys.stderr)
         print(f"  hint: {hint}", file=sys.stderr)
-        return 1
+        return refuse_code
 
     if layers:
         # A layer is a DELTA over a composition (426 §2.4): its rows are only
@@ -479,8 +522,8 @@ def _composition_document(args):
             f"({names}); a composition document IS the compiled unit, so there "
             f"is no one document to answer over",
             f"run `revl {command}` over one composition document per invocation")
-    if len(args.files) > 1:
-        others = ", ".join(os.path.basename(f) for f in args.files if f not in docs)
+    if len(paths) > 1:
+        others = ", ".join(os.path.basename(f) for f in paths if f not in docs)
         return _refuse(
             f"`revl {command}` was given the composition document `{names}` "
             f"alongside modules ({others}); a composition names the rows it "
@@ -498,14 +541,14 @@ def _composition_document(args):
     # told to trust the code it is enumerating would be answering a different
     # question.
     try:
-        return compile_composition(args.files[0], getattr(args, "root", None),
+        return compile_composition(docs[0], getattr(args, "root", None),
                                    confine=True)
     except RevlError as error:
         if getattr(args, "json_diagnostics", False):
             print(json.dumps(report(error), indent=2))
         else:
             print(f"error: {error}", file=sys.stderr)
-        return 1
+        return refuse_code
 
 
 def _run_audit(args, ir: dict) -> int:
