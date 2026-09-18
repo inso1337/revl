@@ -4723,7 +4723,7 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
     assert got == ref, (name, layout, got, ref)
 
 
-# ---- an OPEN ordering divergence: the handoff verdict vs a body refusal -----
+# ---- a CLOSED ordering divergence: the handoff verdict vs a body refusal ----
 #
 # `_admit_handoff_replacement` runs over `live_components`, which
 # `src/revl/lower.py` builds by DROPPING every component whose body lowering
@@ -4731,21 +4731,21 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
 # component whose body refuses contributes NO handoff verdict at all — the body
 # refusal is the whole answer, whatever line either sits on.
 #
-# `selfhost/lower.rvl`'s `handoff_refusals` walks every component in the text,
-# poisoned or not, and its verdict is anchored at the COMPONENT declaration
-# line. `pick_min` orders by `(line, seq)`, so it beats any INLINE body refusal,
+# `selfhost/lower.rvl`'s `handoff_refusals` used to walk every component in the
+# text, poisoned or not, with its verdict anchored at the COMPONENT declaration
+# line. `pick_min` orders by `(line, seq)`, so it beat any INLINE body refusal,
 # which `body_line` anchors at the offending STATEMENT — a strictly later line.
 #
-# This predates the A6 member rule and is not caused by it: the reproducer below
+# This predates the A6 member rule and was not caused by it: the reproducer below
 # uses the G1 undeclared-access refusal, which has been inline-anchored since
 # long before docs/design/457. A whole-component AGGREGATE verdict (the G4
 # emission-reach one) is anchored at the component line, ties, and is saved by
-# `seq` — which is why no corpus program has caught this.
+# `seq` — which is why no corpus program caught this.
 #
-# Both refusals are TRUE of the program, so this is a 419c naming divergence and
-# never a false admission. Pinned rather than fixed here: the fix belongs to the
-# handoff slice that owns `handoff_refusals`, needs the poisoned-component set
-# threaded into `collect_nonlink`, and carries its own oracle rows.
+# Both refusals are TRUE of the program, so this was a 419c naming divergence and
+# never a false admission. The handoff slice (issue #1127) threaded the poisoned
+# set through `collect_nonlink`, so the pin below is now an AGREEMENT, kept as
+# the regression witness this comment asked the closing slice to leave behind.
 
 _HO_RUNNING = """service D { fn q(s: Str) -> Int }
 service Extra { fn e(s: Str) -> Str }
@@ -4779,25 +4779,16 @@ component NewStore provides db: D requires ex: Extra {
 @pytest.mark.parametrize("label,src", _HO_PAIRS, ids=[n for n, _ in _HO_PAIRS])
 def test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate(
         admit_ambient, label, src):
-    """The divergence, measured in both directions so it cannot drift silently.
+    """The former divergence, measured in both directions so it cannot return.
 
-    The reference names the BODY refusal (the component never reaches the
-    handoff pass); the gate names the handoff drift. Both are true, so this is a
-    naming divergence and not a false alarm — and the gate still REFUSES, which
-    is the property that matters for soundness.
-
-    When the handoff slice threads the poisoned set through, this test flips to
-    an agreement: delete the `!=` arm and assert equality."""
+    The reference names the BODY refusal, because the component never reaches
+    the handoff pass. The gate named the handoff drift until the poisoned set
+    was threaded through `collect_nonlink`; it now names the body refusal too."""
     ref = _ref_ambient(src, _HO_RUNNING, replacing=("OldStore",))
     got = _gate_ambient(admit_ambient, src, _HO_RUNNING, replacing=("OldStore",))
     assert ref.startswith(("G1|", "A6|")), (
         f"the reference must name the body refusal for {label}: {ref!r}")
-    assert got.startswith("G2|state hand-off on `db` differs"), (
-        f"the gate is expected to name the handoff drift for {label}: {got!r}")
-    assert got != ref, (
-        "this pin exists because the two disagree; if they now agree, the "
-        "handoff slice has been fixed - replace this test with an equality "
-        "assertion rather than deleting it")
+    assert got == ref, (label, got, ref)
     # NON-VACUITY: with the handoff made compatible, the two agree on the body
     # refusal, so the divergence is the handoff verdict's ranking and nothing
     # else about these programs.
@@ -5128,6 +5119,124 @@ def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
     expected = "G4|call to emission `bus.publish` must be marked `emit` (G4)"
     assert _gate_ambient(admit_ambient, src, _H_MO_M) == expected
     assert _ref_ambient(src, _H_MO_M) == expected
+
+
+# -- a poisoned component contributes no hand-off verdict (issue #1127) -------
+#
+# `_admit_handoff_replacement` runs over `live_components`, which
+# `src/revl/lower.py` builds by DROPPING every component whose body lowering
+# raised (it appends a `poisoned` header stub instead). So on the reference a
+# component whose body refuses contributes NO hand-off verdict at all: the body
+# refusal is the whole answer, whatever line either sits on.
+#
+# `handoff_refusals` used to walk every component in the text, poisoned or not,
+# and anchored its verdict at the COMPONENT declaration line. `pick_min` orders
+# by `(line, seq)`, so it beat any INLINE body refusal, which `body_line`
+# anchors at the offending STATEMENT — a strictly later line. Both refusals are
+# true of the program, so the divergence was a 419c NAMING one and never a false
+# admission; the fix narrows which of the two true refusals gets named and can
+# only ever remove a hand-off verdict the component loop has already refused
+# over, so it cannot turn a refusal into an admission.
+#
+# A whole-component AGGREGATE verdict (the G4 emission-reach one) is anchored at
+# the component line, tied, and was saved by `seq` — which is why no corpus
+# program caught this. The G1 undeclared access below is inline-anchored and has
+# been since long before the type layer, so the reproducer predates every recent
+# member of the family.
+
+_PC_RUNNING = """service D { fn q(s: Str) -> Int }
+component OldStore provides db: D {
+  handoff db: Str
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+"""
+
+#: The incoming text: `NewStore` accepts `Int` where the running `OldStore`
+#: exports `Str` (a hand-off drift, anchored at the component line) AND refuses
+#: inline on an undeclared access (anchored at the `provide` statement, later).
+_PC_BOTH = """service D { fn q(s: Str) -> Int }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { emit nope.execute(s)   return 0 } }
+}
+"""
+
+_PC_BODY_REFUSAL = "G1|`nope` is not a declared requirement of NewStore"
+_PC_DRIFT = ("G2|state hand-off on `db` differs from the running manifest: "
+             "`NewStore` accepts `Int`, but `OldStore` exports `Str` — the "
+             "successor cannot hold the predecessor's state, and dropping it "
+             "on the swap would be residue")
+
+
+def _pc_ambient(admit_ambient, src: str) -> tuple[str, str]:
+    kw = {"replacing": ("OldStore",)}
+    return (_gate_ambient(admit_ambient, src, _PC_RUNNING, **kw),
+            _ref_ambient(src, _PC_RUNNING, **kw))
+
+
+def test_a_poisoned_component_contributes_no_handoff_verdict(admit_ambient):
+    """Two TRUE refusals in one program, and the gate must name the one
+    `check_and_lower` names: the body refusal, because the reference never
+    reaches the hand-off pass for a component it poisoned.
+
+    Before the poisoned set was threaded into `collect_nonlink` the gate
+    answered the `G2` hand-off drift here, which is the issue-#1127
+    divergence."""
+    got, ref = _pc_ambient(admit_ambient, _PC_BOTH)
+    assert ref == _PC_BODY_REFUSAL, ref
+    assert got == ref, (got, ref)
+
+
+def test_the_handoff_verdict_is_genuinely_there_to_be_skipped(admit_ambient):
+    """NON-VACUITY, both halves.
+
+    Make the hand-off COMPATIBLE and the answer does not move: the body refusal
+    was always what both sides name. Repair the BODY instead and the hand-off
+    drift is what both sides name, so the verdict the test above suppresses is
+    a real one the gate still reports when nothing poisons its component."""
+    compatible = _PC_BOTH.replace("handoff db: Int", "handoff db: Str")
+    got, ref = _pc_ambient(admit_ambient, compatible)
+    assert ref == _PC_BODY_REFUSAL, ref
+    assert got == ref, (got, ref)
+
+    sound_body = _PC_BOTH.replace("emit nope.execute(s)   ", "")
+    got, ref = _pc_ambient(admit_ambient, sound_body)
+    assert ref == _PC_DRIFT, ref
+    assert got == ref, (got, ref)
+
+
+def test_a_sibling_component_still_carries_its_own_handoff_verdict(
+        admit_ambient):
+    """The skip is PER COMPONENT, not per admission — exactly `live_components`,
+    which drops the poisoned entry and keeps the rest.
+
+    `NewStore` drifts on its own key and lowers cleanly, so its hand-off verdict
+    survives; `Bad` refuses in its body, later in the file, and is poisoned. The
+    drift is what both sides name. A skip that fired for the whole admission
+    because SOME component was poisoned would name `Bad`'s `G1` here."""
+    src = """service D { fn q(s: Str) -> Int }
+service C { fn g(k: Str) -> Str }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+component Bad provides other: C {
+  provide other { fn g(k) { emit nope.execute(k)   return k } }
+}
+"""
+    bad_refusal = "G1|`nope` is not a declared requirement of Bad"
+    got, ref = _pc_ambient(admit_ambient, src)
+    assert ref == _PC_DRIFT, ref
+    assert got == ref, (got, ref)
+
+    # ... and `Bad` is genuinely refused, so the program really does carry two
+    # true refusals and the drift won on `(line, seq)` rather than alone.
+    assert _ref_ambient(src, _PC_RUNNING,
+                        replacing=("OldStore",)) != bad_refusal
+    compatible = src.replace("handoff db: Int", "handoff db: Str")
+    got, ref = _pc_ambient(admit_ambient, compatible)
+    assert ref == bad_refusal, ref
+    assert got == ref, (got, ref)
 
 
 # ======================= calls and signatures (docs/design/457 T2b) ==========
