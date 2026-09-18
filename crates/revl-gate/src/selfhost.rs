@@ -16680,6 +16680,76 @@ fn a_destructuring_let_is_read__not_refused() {
 }
 
 #[test]
+fn a_subscribe_handle_is_in_scope_for_the_statements_after_it() {
+    assert!((admit_src(String::from("component Parked {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  await sub.next()\n}")) == ""));
+}
+
+#[test]
+fn a_subscribe_stream_operand_still_has_to_resolve__g1_() {
+    assert!((admit_src(String::from("component Orders {\n  let sub = subscribe nostream undo sub.close()\n}")) == "G1|`nostream` is not a declared requirement of Orders"));
+}
+
+#[test]
+fn merge_is_grammar_in_a_subscribe_head__and_its_operands_are_names() {
+    assert!((admit_src(String::from("component Fanin {\n  let a = effect Stream.source() undo a.close()\n  let b = effect Stream.source() undo b.close()\n  let sub = subscribe merge(a, b) undo sub.close()\n  await sub.next()\n}")) == ""));
+}
+
+#[test]
+fn a_merge_operand_that_resolves_to_nothing_is_refused__g1_() {
+    assert!((admit_src(String::from("component Fanin {\n  let a = effect Stream.source() undo a.close()\n  let sub = subscribe merge(a, nob) undo sub.close()\n}")) == "G1|`nob` is not a declared requirement of Fanin"));
+}
+
+#[test]
+fn merge_without_an_argument_list_is_an_ordinary_undeclared_name__g1_() {
+    assert!((admit_src(String::from("component Fanin {\n  let a = effect Stream.source() undo a.close()\n  let sub = subscribe merge undo sub.close()\n}")) == "G1|`merge` is not a declared requirement of Fanin"));
+}
+
+#[test]
+fn the_subscribe_qualifier_tail_is_stepped_over_to_the_undo() {
+    assert!((admit_src(String::from("component Windowed {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()\n  await sub.next()\n}")) == ""));
+}
+
+#[test]
+fn an_every_in_body_binds_its_item() {
+    assert!((admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent Iterate requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub {\n    emit sink.write(o)\n  }\n}")) == ""));
+}
+
+#[test]
+fn an_every_in_item_is_out_of_scope_after_the_loop__g1_() {
+    assert!((admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent Iterate requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub {\n    emit sink.write(o)\n  }\n  emit sink.write(o)\n}")) == "G1|`o` is not a declared requirement of Iterate"));
+}
+
+#[test]
+fn an_every_in_body_is_still_g1_checked() {
+    assert!((admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent Iterate requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub {\n    emit sink.write(nope)\n  }\n}")) == "G1|`nope` is not a declared requirement of Iterate"));
+}
+
+#[test]
+fn an_every_in_body_is_still_g4_checked() {
+    assert!((admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent Iterate requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub {\n    emit sink.nope(o)\n  }\n}")) == "A6|`sink.nope` is not a method of service Sink"));
+}
+
+#[test]
+fn an_on_as_in_handler_binds_its_item() {
+    assert!((admit_src(String::from("event OrderCreated(key: order_id) { order_id: Str, quantity: Int }\nservice Sink { emission fn write(v: Str) }\ncomponent Handler requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  on OrderCreated as e in sub {\n    emit sink.write(e.order_id)\n  }\n}")) == ""));
+}
+
+#[test]
+fn an_on_as_in_body_is_still_g1_checked() {
+    assert!((admit_src(String::from("event OrderCreated(key: order_id) { order_id: Str, quantity: Int }\nservice Sink { emission fn write(v: Str) }\ncomponent Handler requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  on OrderCreated as e in sub {\n    emit sink.write(nope)\n  }\n}")) == "G1|`nope` is not a declared requirement of Handler"));
+}
+
+#[test]
+fn a_timer_body_is_still_read_as_a_timer__not_as_an_iteration() {
+    assert!((admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent Ticker requires sink: Sink {\n  every 30s {\n    emit sink.write(nope)\n  }\n}")) == "G1|`nope` is not a declared requirement of Ticker"));
+}
+
+#[test]
+fn _on__outside_the__on_ident_as__shape_is_an_ordinary_identifier() {
+    assert!((admit_src(String::from("type Envelope = { on: Str, seq: Int }\nfn describe(on: Str) -> Str { return on }\nfn unwrap(e: Envelope) -> Str {\n  let on = e.on\n  return describe(on)\n}")) == ""));
+}
+
+#[test]
 fn lexes_a_component_header() {
     let toks = lex_src(String::from("component C requires kv: Kv {}"));
     assert!(((toks)[(0i64) as usize].kind == "kw"));
