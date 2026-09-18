@@ -772,6 +772,14 @@ fn test_block_end(ts: List[Token], i: Int) -> Int {
 
 fn contains(xs: List[Str], s: Str) -> Bool { return xs.indexOf(s) != 0 - 1 }
 
+// `a` with every element of `b` appended, in order (`b`'s names win a
+// membership test either way; this list is only ever read through
+// `contains`).
+fn push_all(a: List[Str], b: List[Str], i: Int) -> List[Str] {
+  if (i >= b.length()) { return a }
+  return push_all(a.push(b[i]), b, i + 1)
+}
+
 fn contains_int(xs: List[Int], v: Int) -> Bool {
   var i = 0
   while (i < xs.length()) {
@@ -3948,6 +3956,28 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
 
 // The line for an inline body refusal, with the component line as the fallback
 // for a refusal that is not a plain statement walk (0 from `refusal_line`).
+// The type layer over one provide-method body (docs/design/457 T3a). The TYPE
+// ENVIRONMENT is deliberately EMPTY: a method's names come from the component's
+// requirement handles, its activation locals, its config fields and the service
+// signature, none of which this walk carries, and inventing types for them is
+// how a gate starts refusing programs the reference admits. Over the empty
+// environment `tk_infer` knows only what the literals themselves determine, so
+// what it decides here is the environment-free half of the algebra — `null` in
+// an expression position (T2), a Float literal outside binary64 — and it is
+// silent about everything a name would have had to answer for.
+fn mth_type_verdict(body: List[Stmt], i: Int, fallback: Int) -> Verd {
+  if (i >= body.length()) { return no_verd() }
+  let s = body[i]
+  // a `skip` carries the parser's failure node and a spawn an inert placeholder;
+  // neither is an expression the reference types.
+  if (s.kind == "skip" || s.spawnTarget != "") {
+    return mth_type_verdict(body, i + 1, fallback)
+  }
+  let r = tk_infer(s.e, [])
+  if (r.v != "") { return mk_verd(r.v, s.line == 0 ? fallback : s.line) }
+  return mth_type_verdict(body, i + 1, fallback)
+}
+
 fn body_line(ss: List[Stmt], cx: Ctx, fallback: Int) -> Int {
   let ln = refusal_line(ss, 0, cx, empty_ac())
   if (ln == 0) { return fallback }
@@ -4882,6 +4912,15 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
         if (rb.v != "" && (rl == 0 || rb.line < rl)) { return rb }
         return mk_verd(tagged(a.tag, a.msg), body_line(pm.body, mcx, comp.line))
       }
+      // docs/design/457 T3a, the provide-method half: the reference lowers a
+      // provide-method body with the ordinary fn-body machinery
+      // (`_lower_pure_stmt`), so every expression in one is TYPED exactly as a
+      // module `fn`'s is. It is placed after the body walk above because that
+      // walk is the one that runs in statement order; a body carrying both a
+      // wiring verdict and a type one reports the wiring verdict, which is the
+      // under-refusing direction.
+      let mtv = mth_type_verdict(pm.body, 0, comp.line)
+      if (mtv.v != "") { return mtv }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
       // provide-method arrow may not name its own async colour either.
@@ -7082,10 +7121,20 @@ fn ext_decl_name(ts: List[Token], i: Int) -> Str {
 }
 
 fn ext_slot_verd(ts: List[Token], e: Expr, start: Int, nm: Str, slot: Str,
-                 bound: Bool, declared: List[Str]) -> Verd {
+                 bound: Bool, declared: List[Str], gtys: List[Bind],
+                 retTy: Str) -> Verd {
   let m = ext_expr_verdict(e, nm, slot, bound, declared)
-  if (m == "") { return no_verd() }
-  return mk_verd(tagged("G4", m), tkc(ts, start).line)
+  if (m != "") { return mk_verd(tagged("G4", m), tkc(ts, start).line) }
+  // `_check_inverse_args` (docs/design/457 T2b): the slot runs `check_ast` over
+  // the expression, so its call ARGUMENTS are typed against the declared
+  // signature exactly like any other call site. The slot's whole variable
+  // namespace is `result` — the acquired value — bound only when the extern
+  // declares a return type; the name rules above already refused every other
+  // bare name, so an empty environment is the complete one.
+  let env = bound && retTy != "" ? tenv_put(gtys, "result", retTy) : gtys
+  let r = tk_infer(e, env)
+  if (r.v != "") { return mk_verd(r.v, tkc(ts, start).line) }
+  return no_verd()
 }
 
 // The first verdict one `extern` declaration raises, `no_verd()` when it
@@ -7096,7 +7145,8 @@ fn ext_slot_verd(ts: List[Token], e: Expr, start: Int, nm: Str, slot: Str,
 // `acquire` must declare an inverse, a `pure` may declare neither inverse, an
 // `emission` may not declare `undo`. Each is the reference's FIRST refusal for
 // its declaration, so returning it directly is the fail-fast shape.
-fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str]) -> Verd {
+fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
+                    gtys: List[Bind]) -> Verd {
   let line = tkc(ts, i).line
   let cls = ext_class_at(ts, i + 1)
   if (cls == "") {
@@ -7127,6 +7177,7 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str]) -> Verd {
   // `result` is bound in an inverse slot iff the extern declares a return
   // type: the acquired value the teardown hands back.
   let bound = atk(ts, ps.i, "arrow")
+  let retTy = bound ? taint_strip(type_at(ts, ps.i + 1).ty) : ""
   // `undo`/`compensate` follow the optional `-> T`
   var k = ret_at(ts, ps.i)
   if (cls == "acquire") {
@@ -7145,13 +7196,14 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str]) -> Verd {
     var u = k + 1
     while (atw(ts, u, "idempotent") || atw(ts, u, "pure")) { u += 1 }
     let r = expr_at(ts, u)
-    let v = ext_slot_verd(ts, r.e, u, nm, "undo", bound, declared)
+    let v = ext_slot_verd(ts, r.e, u, nm, "undo", bound, declared, gtys, retTy)
     if (v.v != "") { return v }
     k = r.i
   }
   if (atw(ts, k, "compensate")) {
     let r2 = expr_at(ts, k + 1)
-    return ext_slot_verd(ts, r2.e, k + 1, nm, "compensate", false, declared)
+    return ext_slot_verd(ts, r2.e, k + 1, nm, "compensate", false, declared,
+                         gtys, "")
   }
   return no_verd()
 }
@@ -7167,6 +7219,7 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str]) -> Verd {
 // not scanned (the reference's grammar has no such position).
 fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
   let declared = ext_declared_names(ts, pg)
+  let gtys = sig_binds(ts, case_binds(ts))
   var seen: List[Str] = []
   var d = 0
   var i = 0
@@ -7178,7 +7231,7 @@ fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
     } else if (d == 0 && atw(ts, i, "extern")) {
       let nm = ext_decl_name(ts, i)
       if (nm == "" || !contains(seen, nm)) {
-        let v = ext_decl_verdict(ts, i, declared)
+        let v = ext_decl_verdict(ts, i, declared, gtys)
         if (v.v != "") { return v }
       }
       if (nm != "") { seen = seen.push(nm) }
@@ -7186,6 +7239,1682 @@ fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
     i += 1
   }
   return no_verd()
+}
+
+// ============================= the fn-body TYPE layer (docs/design/457 T3a)
+//
+// The statement walk above carries a binding SCOPE; this is the second
+// environment beside it, the `TEnv`, and the refusing mirror of the private
+// `infer` further down this file. The split of labour is deliberate:
+//
+//   * `infer` stays the non-raising IR-annotation engine. Nothing here feeds a
+//     lowered node, so no emitted byte moves.
+//   * `tk_infer` is `infer_ast` with `filename` set — the same walk, with the
+//     reference's DEFINITE refusals at the positions the reference raises them,
+//     each carrying the reference's own sentence verbatim (tag included, so the
+//     census compares tag AND message rather than only the verdict).
+//
+// The direction of every approximation is fixed: where this walk cannot decide
+// what the reference decides, it stays SILENT. An under-refusal is a
+// no-objection, which the gate is allowed; an over-refusal is a false
+// rejection, which it is not. Three places take that exit by name — a
+// structural record meeting a NOMINAL one (the reference resolves it through
+// the declared-type table this walk does not carry), a function-typed position
+// (arrows are T2c's slice), and the `Float` literal bound at its very edge.
+
+// An expression's type, or the first refusal reached inside it. `v` is the
+// whole "<TAG>|<message>" wire; `ty` "" is the gradual frontier's unknown.
+type TInf = { ty: Str, v: Str }
+
+fn tk_ok(t: Str) -> TInf { return { ty: t, v: "" } }
+fn tk_no(tag: Str, msg: Str) -> TInf { return { ty: "", v: tagged(tag, msg) } }
+
+// `render_type`: the AUTHOR's spelling of a checker-internal type — the implicit
+// type-parameter marker (`?T`) is not something anyone wrote, so diagnostics
+// drop it.
+fn tk_render(t: Str) -> Str {
+  if (t.indexOf("?") == 0 - 1) { return t }
+  var out = ""
+  var i = 0
+  while (i < t.length()) {
+    let c = t.charAt(i)
+    if (c != "?") { out = out.concat(c) }
+    i += 1
+  }
+  return out
+}
+
+// `typecheck.mismatch`, the T1 "these types disagree" refusal.
+fn tk_mismatch(where_: Str, expected: Str, actual: Str) -> TInf {
+  return tk_no("T1", where_.concat(" expects `").concat(tk_render(expected))
+                 .concat("`, got `").concat(tk_render(actual)).concat("`"))
+}
+
+// `typecheck.opt_escape_error`: an `Opt[T]` reached THROUGH as if it were `T`.
+fn tk_opt_escape(what: Str, target: Str) -> TInf {
+  return tk_no("T1", what.concat(" on `").concat(tk_render(target))
+    .concat("`: the optional wrapper has no such member — `T` flows into ")
+    .concat("`Opt[T]`, never silently back out"))
+}
+
+// A type's argument list, split at depth 0 with BRACES and PARENS tracked
+// beside brackets. The annotation engine's `type_args` tracks brackets only,
+// which reads `List[{x: Int, y: Int}]` as a TWO-argument `List` and so made a
+// container of structural records disagree with its nominal element type on
+// arity alone. Nothing about the emitted IR changes: this split is the type
+// layer's own.
+fn tk_split_depth(inner: Str) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  while (i < inner.length()) {
+    let c = inner.charAt(i)
+    if (c == "[" || c == "{" || c == "(") { depth += 1  cur = cur.concat(c) }
+    else { if (c == "]" || c == "}" || c == ")") { depth -= 1  cur = cur.concat(c) }
+    else { if (c == "," && depth == 0) { out = out.push(ty_trim(cur))  cur = "" }
+    else { cur = cur.concat(c) } } }
+    i += 1
+  }
+  return out.push(ty_trim(cur))
+}
+
+fn tk_args(t: Str) -> List[Str] {
+  let b = t.indexOf("[")
+  if (b == 0 - 1) { return [] }
+  let inner = t.slice(b + 1, t.length() - 1)
+  if (inner == "") { return [] }
+  return tk_split_depth(inner)
+}
+
+fn tk_arg1(t: Str) -> Str {
+  let a = tk_args(t)
+  return a.length() == 0 ? "" : a[0]
+}
+
+fn tk_is_struct(t: Str) -> Bool {
+  return t.length() >= 2 && t.charAt(0) == "{" && t.charAt(t.length() - 1) == "}"
+}
+
+// `structural_fields(t)[name]`, over the brace-aware split.
+// Does this base spelling name a record? A structural literal is one by
+// construction; a NOMINAL one is recognised by the `field <Type>.<name>` rows
+// the declaration scan contributes, which only a record type has.
+fn tk_record_base(t: Str, env: List[Bind]) -> Bool {
+  if (tk_is_struct(t)) { return true }
+  if (t == "" || !tk_nominal_name(t)) { return false }
+  let pfx = "field ".concat(t).concat(".")
+  var i = 0
+  while (i < env.length()) {
+    if (env[i].name.slice(0, pfx.length()) == pfx) { return true }
+    i += 1
+  }
+  return false
+}
+
+fn tk_struct_field(t: Str, name: Str) -> Str {
+  if (!tk_is_struct(t)) { return "" }
+  let parts = tk_split_depth(t.slice(1, t.length() - 1))
+  var i = 0
+  while (i < parts.length()) {
+    let ci = parts[i].indexOf(":")
+    if (ci != 0 - 1 && ty_trim(parts[i].slice(0, ci)) == name) {
+      return ty_trim(parts[i].slice(ci + 1, parts[i].length()))
+    }
+    i += 1
+  }
+  return ""
+}
+
+fn tk_is_fn_ty(t: Str) -> Bool { return t.length() > 0 && t.charAt(0) == "(" }
+
+// The built-in type heads: nothing spelled with one is ever a declared record.
+fn tk_builtin_head(h: Str) -> Bool {
+  return h == "Int" || h == "Int32" || h == "Float" || h == "Str"
+    || h == "Bool" || h == "Bytes" || h == "Unit" || h == "List" || h == "Map"
+    || h == "Opt" || h == "Result" || h == "Async" || h == "Value"
+    || h == "Any" || h == "Never"
+}
+
+// A bare, argument-free, non-built-in name — the shape, and the only shape, a
+// declared record type is spelled with.
+fn tk_nominal_name(t: Str) -> Bool {
+  return t != "" && parse_head(t) == t && !tk_is_struct(t) && !tk_is_fn_ty(t)
+    && !tk_builtin_head(t)
+}
+
+// `_is_wildcard`: the spellings that launder in both directions.
+fn tk_wild(t: Str) -> Bool {
+  return t == "" || t == "Any" || t == "Never" || t == "!poison"
+    || t.slice(0, 1) == "?"
+}
+
+// Port of `typecheck.compatible` for the spellings this walk can decide.
+// PERMISSIVE at the three frontiers named at the head of this section: a
+// structural record meeting a nominal one, and either side being a function
+// type, both answer `true` rather than guess.
+fn tk_compatible(expected: Str, actual: Str) -> Bool {
+  if (parse_head(expected) == "Never") { return tk_wild(actual) }
+  if (tk_wild(expected) || tk_wild(actual)) { return true }
+  // `Value` is the stdlib erased-dynamic type: compatible with anything, in
+  // both directions (item 180).
+  if (parse_head(expected) == "Value" || parse_head(actual) == "Value") {
+    return true
+  }
+  if (expected == actual) { return true }
+  let es = tk_is_struct(expected)
+  let as_ = tk_is_struct(actual)
+  if (es && as_) { return tk_struct_compat(expected, actual) }
+  // Exactly one side is structural. The reference resolves a NOMINAL RECORD on
+  // the other side field-wise through the declared-type table, which this walk
+  // does not carry — so that pairing, and only that pairing, stays silent. A
+  // bare name that is not a built-in head is the only shape a declared record
+  // has; everything else (a scalar, a container, a function type) falls through
+  // to the head algebra below, exactly as the reference lets it, so
+  // `let b: Int32 = { h: 1 }` is the definite disagreement it is and
+  // `Opt[{h: Str}]` still reaches the record through its injection rule.
+  if (es || as_) {
+    if (tk_nominal_name(es ? actual : expected)) { return true }
+  }
+  if (tk_is_fn_ty(expected) || tk_is_fn_ty(actual)) { return true }
+  let eh = parse_head(expected)
+  let ah = parse_head(actual)
+  if (eh == "Float" && ah == "Int") { return true }
+  if ((eh == "Int" || eh == "Float") && ah == "Int32") { return true }
+  if (eh == "Async" && ah != "Async") {
+    return tk_compatible(tk_arg1(expected), actual)
+  }
+  if (eh == "Opt") {
+    let ei = tk_arg1(expected)
+    if (ei == "") { return true }              // bare `Opt` degrades to wildcard
+    if (ah == "Opt") { return tk_compatible(ei, tk_arg1(actual)) }
+    return tk_compatible(ei, actual)           // T -> Opt[T] injection
+  }
+  let ea = tk_args(expected)
+  let aa = tk_args(actual)
+  if (eh == ah && ea.length() == aa.length()) {
+    var i = 0
+    var ok = true
+    while (i < ea.length()) {
+      if (!tk_compatible(ea[i], aa[i])) { ok = false }
+      i += 1
+    }
+    return ok
+  }
+  return false
+}
+
+// Two structural record shapes unify field-wise: the same field set, each value
+// type compatible.
+fn tk_struct_compat(expected: Str, actual: Str) -> Bool {
+  let ef = tk_split_depth(expected.slice(1, expected.length() - 1))
+  let af = tk_split_depth(actual.slice(1, actual.length() - 1))
+  if (ef.length() != af.length()) { return false }
+  var i = 0
+  var ok = true
+  while (i < ef.length()) {
+    let ci = ef[i].indexOf(":")
+    if (ci == 0 - 1) { ok = false }
+    else {
+      let nm = ty_trim(ef[i].slice(0, ci))
+      let et = ty_trim(ef[i].slice(ci + 1, ef[i].length()))
+      let at = tk_struct_field(actual, nm)
+      if (at == "" || !tk_compatible(et, at)) { ok = false }
+    }
+    i += 1
+  }
+  return ok
+}
+
+// ------------------------------------------------- the refusing expression walk
+
+fn tk_infer(e: Expr, env: List[Bind]) -> TInf {
+  return match e {
+    IntLit(v)   => tk_ok("Int"),
+    FloatLit(v) => tk_float_lit(v),
+    StrLit(v)   => tk_ok("Str"),
+    BoolLit(v)  => tk_ok("Bool"),
+    // `null` has no type in an expression; absence is `Opt[T]` (syntax-2.0 §2).
+    // It survives only as a config default, which is not an expression position
+    // this walk ever reaches.
+    NullLit     => tk_no("T2", "`null` has no type in revl — absence is `Opt[T]`"),
+    // `None` is the empty optional, `Opt[Any]`, and the reference reads it
+    // BEFORE the environment. The annotation engine leaves it unknown, which
+    // cost every rule downstream of it its operand: `~None`, `!None`,
+    // `assert None` and `let b: Int32 = None` all went unrefused.
+    Var(n)      => tk_ok(n == "None" ? "Opt[Any]"
+                     : (tenv_get(env, n) != "" ? tenv_get(env, n)
+                                               : infer_bare_case(n, env))),
+    Bin(b)      => tk_bin(b, env),
+    Un(u)       => tk_un(u, env),
+    Field(f)    => tk_field(f, env),
+    Index(x)    => tk_index(x.target, x.idx, env),
+    Call(c)     => tk_call(c, env),
+    Rec(r)      => tk_rec(r.fields, env),
+    RecUpd(r)   => tk_recupd(r.base, r.upds, env),
+    Lst(l)      => tk_items(l.items, 0, env, infer_list_ty(l.items, env)),
+    If(f)       => tk_if(f.cond, f.then_, f.els, env),
+    Templ(t)    => tk_parts(t.parts, 0, env),
+    Match(m)    => tk_ok(infer_match_ty(m, env)),
+    Hole(h)     => tk_ok(h.ty),
+    // an optional chain SHORT-CIRCUITS, so its own member rules are T2d's
+    // slice; the target is still walked, because a refusal inside it is one
+    // the reference reaches too.
+    OptField(f) => tk_sub(f.target, env),
+    OptCall(c)  => tk_sub(c.target, env),
+    // out of this slice: an arrow body (T2c), an `emit` operand, an asset, and
+    // a node the parser already refused.
+    _           => tk_ok(""),
+  }
+}
+
+// Walk a sub-expression for its refusal only; the result type is out of slice.
+fn tk_sub(e: Expr, env: List[Bind]) -> TInf {
+  let r = tk_infer(e, env)
+  if (r.v != "") { return r }
+  return tk_ok("")
+}
+
+// `check_ast`: an expression in a CHECKING position. A position with NO
+// expectation is the inference position (the reference's `expected is None`
+// arm), and two shapes are checked STRUCTURALLY rather than by comparing an
+// inferred type — a list elementwise, and a record update through its base.
+// The arms this slice does not port (a record literal against a declared
+// nominal record, an arrow against a function type) fall through to the flat
+// comparison, which is silent wherever `tk_compatible` cannot decide.
+fn tk_check(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
+  if (expected == "") { return tk_infer(e, env) }
+  return match e {
+    RecUpd(r) => tk_check_recupd(r.base, r.upds, expected, env, where_),
+    Lst(l)    => parse_head(expected) == "List"
+                   ? tk_check_list(l.items, 0, expected, env)
+                   : tk_check_flat(e, expected, env, where_),
+    _         => tk_check_flat(e, expected, env, where_),
+  }
+}
+
+fn tk_check_flat(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
+  let r = tk_infer(e, env)
+  if (r.v != "") { return r }
+  if (r.ty == "") { return r }
+  if (!tk_compatible(expected, r.ty)) {
+    return tk_mismatch(where_, expected, r.ty)
+  }
+  return tk_ok(expected)
+}
+
+// Each ELEMENT is checked against the element type, which names the offending
+// item rather than reporting the whole literal's joined type.
+fn tk_check_list(items: List[Expr], i: Int, expected: Str,
+                 env: List[Bind]) -> TInf {
+  if (i >= items.length()) { return tk_ok(expected) }
+  let r = tk_check(items[i], tk_arg1(expected), env,
+                   "element of `".concat(tk_render(expected)).concat("`"))
+  if (r.v != "") { return r }
+  return tk_check_list(items, i + 1, expected, env)
+}
+
+// A record update's result is its BASE's type (docs/records.md §3), so the
+// expectation is checked against that and the updates per field. The
+// "record update requires a record type" refusal the INFER position raises is
+// deliberately absent here, exactly as it is absent in the reference — and the
+// per-field `where` names the base, which the infer position's does not.
+fn tk_check_recupd(base: Expr, upds: List[InitN], expected: Str,
+                   env: List[Bind], where_: Str) -> TInf {
+  let b = tk_infer(base, env)
+  if (b.v != "") { return b }
+  let f = tk_upd_fields(b.ty, upds, 0, env, true)
+  if (f.v != "") { return f }
+  if (b.ty != "" && !tk_compatible(expected, b.ty)) {
+    return tk_mismatch(where_, expected, b.ty)
+  }
+  return tk_ok(b.ty)
+}
+
+// The per-field half of both record-update positions. `named` picks the
+// `where` the reference uses at each: the CHECK position names the base type,
+// the INFER position does not.
+fn tk_upd_fields(baseTy: Str, upds: List[InitN], i: Int, env: List[Bind],
+                 named: Bool) -> TInf {
+  // The reference reaches the per-field walk only when the base RESOLVES to a
+  // record shape — a structural literal, or a declared record type. On any
+  // other base its two positions part company (the infer position raises
+  // "record update requires a record type", the check position compares the
+  // base against the expectation and says nothing about the fields), and
+  // NEITHER types the update values. Walking them anyway refused
+  // `let b: Float = { a | h = ~{ h: "x" } }` for its `~` where the reference
+  // reports the `Float` the `Bool` base does not fit.
+  if (!tk_record_base(baseTy, env)) { return tk_ok(baseTy) }
+  if (i >= upds.length()) { return tk_ok(baseTy) }
+  let structural = tk_is_struct(baseTy)
+  let u = upds[i]
+  let fty = structural ? tk_struct_field(baseTy, u.name)
+                       : infer_field(baseTy, u.name, env)
+  if (structural && fty == "") {
+    return tk_no("TYPE", "record update names `".concat(u.name)
+      .concat("`, which is not a field of `").concat(tk_render(baseTy))
+      .concat("`"))
+  }
+  let where_ = named
+    ? "update of field `".concat(u.name).concat("` of `")
+        .concat(tk_render(baseTy)).concat("`")
+    : "update of field `".concat(u.name).concat("`")
+  let v = tk_check(u.value, fty, env, where_)
+  if (v.v != "") { return v }
+  return tk_upd_fields(baseTy, upds, i + 1, env, named)
+}
+
+// `_bool_cond`: an `if`/`while`/`assert` condition is a checking position for
+// `Bool`. A HOLE in that position takes the expectation as its type and is done
+// (`pin_hole`), so it is not compared.
+fn tk_cond(e: Expr, env: List[Bind], where_: Str) -> TInf {
+  let r = tk_infer(e, env)
+  if (r.v != "") { return r }
+  if (tk_is_hole(e)) { return tk_ok("Bool") }
+  if (r.ty != "" && r.ty != "Bool") {
+    return tk_mismatch("`".concat(where_).concat("` condition"), "Bool", r.ty)
+  }
+  return tk_ok("Bool")
+}
+
+fn tk_is_hole(e: Expr) -> Bool {
+  return match e { Hole(h) => true, _ => false, }
+}
+
+fn tk_bin(b: BinN, env: List[Bind]) -> TInf {
+  let l = tk_infer(b.l, env)
+  if (l.v != "") { return l }
+  let r = tk_infer(b.r, env)
+  if (r.v != "") { return r }
+  return tk_binop(b.op, l.ty, r.ty)
+}
+
+// Port of `_binop_type`'s REFUSING arms. Every operator this slice does not
+// decide falls through to the non-raising `binop_ty`, so the type is the one
+// the annotation engine already agrees on and no new refusal appears.
+fn tk_binop(op: Str, lt: Str, rt: Str) -> TInf {
+  if (op == "==" || op == "!=" || op == "===" || op == "!==") {
+    // `incomparable`, NOT `mismatch`: equality has no expected/actual
+    // direction, so neither side is the position the other must fit.
+    if (lt != "" && rt != ""
+        && !tk_compatible(lt, rt) && !tk_compatible(rt, lt)) {
+      return tk_no("T1", "`".concat(op).concat("` cannot compare `")
+        .concat(tk_render(lt)).concat("` with `").concat(tk_render(rt))
+        .concat("` — the operands have no type in common"))
+    }
+    return tk_ok("Bool")
+  }
+  if (op == "&&" || op == "||") {
+    if (lt != "" && lt != "Bool") {
+      return tk_mismatch("operand of `".concat(op).concat("`"), "Bool", lt)
+    }
+    if (rt != "" && rt != "Bool") {
+      return tk_mismatch("operand of `".concat(op).concat("`"), "Bool", rt)
+    }
+    return tk_ok("Bool")
+  }
+  if (op == "??") {
+    // `a ?? b` supplies a fallback for an ABSENT optional; on a value that is
+    // always present the fallback is dead, and the tiers that model `Opt` as
+    // Option/Optional cannot render it at all.
+    if (parse_head(lt) != "Opt" && !tk_wild(lt)) {
+      return tk_no("T1", "`??` needs an optional on the left, got `"
+                     .concat(tk_render(lt)).concat("`"))
+    }
+    return tk_ok(binop_ty(op, lt, rt))
+  }
+  // The ORDERING family's refusal ("`<` cannot order `X` values") is code-less
+  // in the reference and classifies OUT of the gate's vocabulary, so spelling
+  // it here would trade a no-objection for a tag mismatch. It stays silent
+  // until the classifier names it.
+  if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
+    // Bitwise operators are Int32-only (item 366, docs/arithmetic.md): a bit
+    // pattern is a fixed-width object and Int/Float have no uniform bitwise
+    // meaning across the tiers. Both operands are checked, left first, which is
+    // the order `for t in (lt, rt)` visits them.
+    if (lt != "" && parse_head(lt) != "Int32") { return tk_bitwise_no(op, lt) }
+    if (rt != "" && parse_head(rt) != "Int32") { return tk_bitwise_no(op, rt) }
+    return tk_ok("Int32")
+  }
+  if (op == "+" && (lt == "Str" || rt == "Str")) {
+    // string `+` concatenates two `Str`s; a KNOWN non-Str operand is refused
+    // (issue #549), an unknown one stays on the gradual frontier.
+    if ((lt != "" && lt != "Str") || (rt != "" && rt != "Str")) {
+      return tk_mismatch("operand of string `+`", "Str", lt != "Str" ? lt : rt)
+    }
+    return tk_ok(lt == "Str" && rt == "Str" ? "Str" : "")
+  }
+  if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+    if (lt != "" && !is_numeric(lt)) {
+      return tk_mismatch("operand of `".concat(op).concat("`"), "Int", lt)
+    }
+    if (rt != "" && !is_numeric(rt)) {
+      return tk_mismatch("operand of `".concat(op).concat("`"), "Int", rt)
+    }
+    // TRUE division: Float even on two Ints (docs/arithmetic.md §0).
+    if (op == "/") {
+      return tk_ok(is_numeric(lt) && is_numeric(rt) ? "Float" : "")
+    }
+    // `+ - * %` do not silently mix widths: Int32 widens to Int at value-flow
+    // positions, never inside arithmetic.
+    if ((lt == "Int32" || rt == "Int32") && lt != rt && lt != "" && rt != "") {
+      return tk_no("T1", "`".concat(op).concat("` does not mix `")
+        .concat(tk_render(lt)).concat("` and `").concat(tk_render(rt))
+        .concat("`"))
+    }
+    // `%` stays Int-only: the remainder's zero-divisor FAULT is not uniform
+    // once Int32 is a `number` on ts and an i32 on wasm.
+    if (op == "%" && (lt == "Int32" || rt == "Int32")) {
+      return tk_no("T1", "`%` is Int-only; widen the Int32 operands with "
+        .concat("`.to_int()` first (docs/arithmetic.md)"))
+    }
+    if (lt == "Float" || rt == "Float") { return tk_ok("Float") }
+    if (lt == "Int32" && rt == "Int32") { return tk_ok("Int32") }
+    if (lt == "Int" && rt == "Int") { return tk_ok("Int") }
+    return tk_ok("")
+  }
+  return tk_ok(binop_ty(op, lt, rt))
+}
+
+fn tk_bitwise_no(op: Str, t: Str) -> TInf {
+  return tk_no("T1", "`".concat(op).concat("` requires `Int32` operands, got `")
+                 .concat(tk_render(t)).concat("`"))
+}
+
+fn tk_un(u: UnN, env: List[Bind]) -> TInf {
+  let o = tk_infer(u.e, env)
+  if (o.v != "") { return o }
+  let t = o.ty
+  if (u.op == "!") {
+    if (t != "" && t != "Bool") { return tk_mismatch("operand of `!`", "Bool", t) }
+    return tk_ok("Bool")
+  }
+  if (u.op == "~") {
+    // the UNARY complement's sentence is its own: one operand, so "operand"
+    // rather than the binary family's "operands".
+    if (t != "" && parse_head(t) != "Int32") {
+      return tk_no("T1", "`~` requires an `Int32` operand, got `"
+                     .concat(tk_render(t)).concat("`"))
+    }
+    return tk_ok("Int32")
+  }
+  // unary `-`, the reference's fall-through arm: a numeric operand, and the
+  // result is that operand's own type.
+  if (t != "" && !is_numeric(t)) {
+    return tk_mismatch("operand of unary `-`", "Int", t)
+  }
+  return tk_ok(t)
+}
+
+fn tk_field(f: FieldN, env: List[Bind]) -> TInf {
+  let tgt = tk_infer(f.target, env)
+  if (tgt.v != "") { return tgt }
+  let t = tgt.ty
+  let h = parse_head(t)
+  if (h == "Opt") {
+    return tk_opt_escape("field access `.".concat(f.name).concat("`"), t)
+  }
+  if (f.name == "length" && (h == "Str" || h == "Bytes" || h == "List")) {
+    return tk_ok("Int")
+  }
+  // item 380(2): a field read off an ERASED value (`Any`/`Value`) is the
+  // 279/299 silent-divergence class — py raises `KeyError` on an absent key
+  // and ts yields `undefined`, and neither is a defensible total answer.
+  if (h == "Any" || h == "Value") {
+    return tk_no("T1", "field read `.".concat(f.name)
+      .concat("` on a value of type `").concat(tk_render(t))
+      .concat("` — an erased value has no known fields"))
+  }
+  return tk_ok(infer_field(t, f.name, env))
+}
+
+fn tk_index(target: Expr, idx: Expr, env: List[Bind]) -> TInf {
+  let tgt = tk_infer(target, env)
+  if (tgt.v != "") { return tgt }
+  let ix = tk_infer(idx, env)
+  if (ix.v != "") { return ix }
+  let h = parse_head(tgt.ty)
+  if (h == "Opt") { return tk_opt_escape("index `[...]`", tgt.ty) }
+  // `[...]` indexes a `List`; the specified string surface is `charAt` /
+  // `charCodeAt` / `slice` (docs/stdlib-2.0.md). rust indexes bytes and java
+  // has no operator at all, so `s[0]` is unportable even where py and ts take it.
+  if (h == "Str") {
+    return tk_no("T1",
+      "`Str` has no index operator — `[...]` indexes a `List` only")
+  }
+  if (ix.ty != "" && (h == "List" || h == "Str") && ix.ty != "Int") {
+    return tk_mismatch("index", "Int", ix.ty)
+  }
+  return tk_ok(infer_index(tgt.ty))
+}
+
+// A call: every argument is walked for the refusals inside it. Argument-vs-
+// signature checking is T2b's slice, so the call's own type comes from the
+// annotation engine.
+fn tk_call(c: CallN, env: List[Bind]) -> TInf {
+  // The RECEIVER and the ARGUMENTS are each walked exactly once here and their
+  // types handed on: the resolution arms below need the types, and inferring a
+  // subtree a second time to get them costs a full extra descent per call
+  // level, which compounds with nesting.
+  let tv = tk_callee(c.target, env)
+  if (tv.v != "") { return tv }
+  let a = tk_arg_walk(c.args, 0, env, [])
+  if (a.v != "") { return a.r }
+  // docs/design/457 T2b: a bare-name callee against the signature table, and a
+  // method callee against the host stub surface / `_BUILTIN_SIG`. Both MISS
+  // rather than guess where the premise they need is not proven, and the
+  // annotation engine's best effort below is what answers then.
+  let nmd = tk_named(c, env, a.tys)
+  if (nmd.hit) { return nmd.r }
+  let mth = tk_method(c, env, a.tys, tv.ty)
+  if (mth.hit) { return mth.r }
+  if (tk_unknown_receiver(c.target, env)) { return tk_ok("") }
+  let t = tk_call_result(infer_call_ty(c, env))
+  // A GENERIC callee's declared return is not the call's type: the reference
+  // unifies the type parameters against the actual arguments. `tk_named` does
+  // that unification for a callee it resolves; a result reaching HERE still
+  // mentioning a type parameter came from the annotation engine, which does no
+  // unification, so it is unknown. Reporting the parameter's own name instead
+  // would refuse with the right verdict and the wrong sentence, which the crate
+  // promises never to do.
+  if (collect_tparams_ty(t, env, [], true, []).length() > 0) { return tk_ok("") }
+  return tk_ok(t)
+}
+
+// Two rules the annotation engine has no reason to apply and the checker does.
+//
+//   * ELIMINATION (item 92 §2): calling an async-typed value yields the
+//     UNWRAPPED `T` — the tier-level await is implicit, and no EXPRESSION ever
+//     has type `Async[T]`. Without this a `(Str) -> Async[Str]` callback's
+//     result was refused against a `Str` return in four corpus documents the
+//     reference admits.
+//   * `Any` in a function type's return is the ABSENCE of a claim (item 75(a)
+//     §3.2), not the erased-dynamic type: handing it back would make the
+//     erased-value field rule refuse a call that claims nothing. Unknown, not
+//     `Any`. This walk cannot tell a function-VALUE call from a module-`fn`
+//     one, so the non-claim reading is taken for both — the silent direction.
+fn tk_call_result(t: Str) -> Str {
+  if (parse_head(t) == "Async") { return tk_arg1(t) }
+  if (t == "Any") { return "" }
+  return t
+}
+
+// The callee POSITION. A bare name and a method receiver are not value reads of
+// the same kind: `xs.push(1)` reads no field `push` off `xs`, so a method
+// callee walks its RECEIVER and stops, while every other callee shape is an
+// ordinary expression.
+fn tk_callee(callee: Expr, env: List[Bind]) -> TInf {
+  return match callee {
+    Var(n)   => tk_ok(""),
+    Field(f) => tk_infer(f.target, env),
+    _        => tk_sub(callee, env),
+  }
+}
+
+// A MULTI-FAMILY stdlib method — one spelled for several receiver families,
+// where `_BUILTIN_SIG` holds a row per family — has no result at all until the
+// receiver picks a row, and the reference returns unknown when the receiver's
+// type is not known. `builtin_ret` here answers a single result per method
+// name, so it invented a `Str` for `c.to_str()` on an unknown `c` and the
+// `~` around it was refused for an operand the reference never produced. The
+// set is exactly the dict-valued rows: `to_str`, `to_int`, `keys`.
+fn tk_multi_family(m: Str) -> Bool {
+  return m == "to_str" || m == "to_int" || m == "keys"
+}
+
+fn tk_unknown_receiver(callee: Expr, env: List[Bind]) -> Bool {
+  return match callee {
+    Field(f) => tk_multi_family(f.name) && !is_empty_map_callee(callee)
+                && !tk_host_root(f.target)
+                && tk_infer(f.target, env).ty == "",
+    _ => false,
+  }
+}
+
+fn tk_host_root(e: Expr) -> Bool {
+  return match e { Var(n) => is_host_root(n), _ => false, }
+}
+
+fn tk_items(xs: List[Expr], i: Int, env: List[Bind], ty: Str) -> TInf {
+  if (i >= xs.length()) { return tk_ok(ty) }
+  let r = tk_infer(xs[i], env)
+  if (r.v != "") { return r }
+  return tk_items(xs, i + 1, env, ty)
+}
+
+fn tk_rec(fields: List[InitN], env: List[Bind]) -> TInf {
+  var i = 0
+  while (i < fields.length()) {
+    let r = tk_infer(fields[i].value, env)
+    if (r.v != "") { return r }
+    i += 1
+  }
+  return tk_ok(infer_record_ty(fields, env))
+}
+
+// item 71: an update on a record literal is field-checked against the literal's
+// own STRUCTURAL shape. A NAMED base type needs the declared-type table's field
+// SET to name the fields it does not have, which this walk cannot enumerate, so
+// a named base only draws the value's own refusals and the per-field check where
+// the field resolves.
+fn tk_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> TInf {
+  let b = tk_infer(base, env)
+  if (b.v != "") { return b }
+  // An UNKNOWN base is the one shape the INFER position still walks the update
+  // values under: the reference infers each of them and answers unknown, so a
+  // refusal inside one (a `null`, an infinite `Float` literal, a `~` on a
+  // record) is reached exactly as it is anywhere else. The CHECK position has
+  // no such arm, which is why this is not in the shared per-field walk.
+  if (b.ty == "") {
+    let v = tk_upd_values(upds, 0, env)
+    if (v.v != "") { return v }
+    return tk_ok("")
+  }
+  return tk_upd_fields(b.ty, upds, 0, env, false)
+}
+
+fn tk_upd_values(upds: List[InitN], i: Int, env: List[Bind]) -> TInf {
+  if (i >= upds.length()) { return tk_ok("") }
+  let r = tk_infer(upds[i].value, env)
+  if (r.v != "") { return r }
+  return tk_upd_values(upds, i + 1, env)
+}
+
+fn tk_if(cond: Expr, then_: Expr, els: Expr, env: List[Bind]) -> TInf {
+  let c = tk_infer(cond, env)
+  if (c.v != "") { return c }
+  let a = tk_infer(then_, env)
+  if (a.v != "") { return a }
+  let b = tk_infer(els, env)
+  if (b.v != "") { return b }
+  return tk_ok(join_ty(a.ty, b.ty))
+}
+
+fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
+  if (i >= parts.length()) { return tk_ok("Str") }
+  if (parts[i].kind == "expr") {
+    let r = tk_infer(parts[i].e, env)
+    if (r.v != "") { return r }
+  }
+  return tk_parts(parts, i + 1, env)
+}
+
+// ------------------------------------------------ the Float literal's own range
+//
+// `_reject_float_literal_range` (issue #312): a decimal literal whose exponent
+// leaves the binary64 range folds to IEEE infinity, which revl has no spelling
+// for — every emitter then prints the host's repr as a bare word (py `inf`,
+// rust `inff64`, java `infd`, go `float64(inf)`), an UNBOUND identifier, while
+// TypeScript alone renders `Infinity` and runs.
+//
+// Decided on the literal's DECIMAL EXPONENT rather than by evaluating it (this
+// file has no float parser), and decided conservatively at the edge: binary64's
+// largest finite value is 1.7976931348623157e308, and a literal is called
+// infinite only when its exponent is above 308 or its leading significant
+// digits at 308 are 18 or more. `1.79769313486231580e308` therefore goes
+// unrefused — it is the direction a gate may err in, and the alternative
+// (calling a finite literal infinite) is not.
+fn tk_float_lit(v: Str) -> TInf {
+  if (!tk_float_infinite(v)) { return tk_ok("Float") }
+  return tk_no("TYPE",
+    "Float literal is infinite: it is outside the range of a 64-bit float")
+}
+
+// The significant digits of a decimal literal, leading zeros dropped.
+fn tk_sig_digits(mant: Str) -> Str {
+  var out = ""
+  var i = 0
+  var seen = false
+  while (i < mant.length()) {
+    let c = mant.charAt(i)
+    if (c != "." && c != "_") {
+      if (c != "0") { seen = true }
+      if (seen) { out = out.concat(c) }
+    }
+    i += 1
+  }
+  return out
+}
+
+// The base-10 exponent of the literal's leading significant digit, so that the
+// value is `0.<digits> * 10^(exp + 1)`.
+fn tk_dec_exp(mant: Str, exp: Int) -> Int {
+  let dot = mant.indexOf(".")
+  let intPart = dot == 0 - 1 ? mant : mant.slice(0, dot)
+  var lead = 0
+  while (lead < intPart.length() && intPart.charAt(lead) == "0") { lead += 1 }
+  if (lead < intPart.length()) {
+    return exp + (intPart.length() - lead) - 1
+  }
+  // no integer digit survives: count the fraction's leading zeros instead
+  let frac = dot == 0 - 1 ? "" : mant.slice(dot + 1, mant.length())
+  var z = 0
+  while (z < frac.length() && frac.charAt(z) == "0") { z += 1 }
+  if (z >= frac.length()) { return 0 }        // the literal is zero
+  return exp - z - 1
+}
+
+fn tk_float_infinite(v: Str) -> Bool {
+  let ei = v.indexOf("e")
+  let Ei = v.indexOf("E")
+  let mark = ei != 0 - 1 ? ei : Ei
+  let mant = mark == 0 - 1 ? v : v.slice(0, mark)
+  var exp = 0
+  if (mark != 0 - 1) {
+    let raw = v.slice(mark + 1, v.length())
+    let neg = raw.slice(0, 1) == "-"
+    let body = (neg || raw.slice(0, 1) == "+") ? raw.slice(1, raw.length()) : raw
+    // an exponent field wider than the binary64 range can ever need is
+    // decisive on its own, and parsing it risks the Int range this file is
+    // written to respect.
+    if (body.length() > 6) { return !neg && tk_sig_digits(mant) != "" }
+    let n = tk_digits_value(body)
+    if (n == 0 - 1) { return false }
+    exp = neg ? 0 - n : n
+  }
+  let digits = tk_sig_digits(mant)
+  if (digits == "") { return false }           // the literal is zero
+  let de = tk_dec_exp(mant, exp)
+  if (de > 308) { return true }
+  if (de < 308) { return false }
+  // at the very edge: refuse only when the leading two significant digits are
+  // 18 or more, which is strictly above the largest finite value's 17.
+  let two = digits.length() >= 2 ? digits.slice(0, 2)
+                                 : digits.concat("0")
+  return tk_digits_value(two) >= 18
+}
+
+fn tk_digits_value(d: Str) -> Int {
+  if (d == "") { return 0 - 1 }
+  var n = 0
+  var i = 0
+  while (i < d.length()) {
+    let c = d.charAt(i)
+    let k = "0123456789".indexOf(c)
+    if (k == 0 - 1) { return 0 - 1 }
+    n = n * 10 + k
+    i += 1
+  }
+  return n
+}
+
+// ========================= calls and signatures (docs/design/457 T2b)
+//
+// The expression walk above types every position EXCEPT the one that resolves a
+// name against a declaration: a call. This section adds that resolution, in the
+// reference's own order (`infer_ast`'s `ExprCall` arm, §2.2 of the design):
+//
+//   * a bare-name callee against the SIGNATURE table — the arity window and,
+//     per argument, `compatible` for a monomorphic signature or `unify` +
+//     `substitute` for a generic one, so `ident("hello")` on `fn ident(x: T)
+//     -> T` is a `Str` and not an unknown;
+//   * a `Root.verb(..)` host constructor against `_HOST_ARG_SIG`, whose result
+//     is the FAMILY name — which is what lets a later `m.putt(..)` on the bound
+//     value be checked against the stub surface;
+//   * every other method callee through `builtin_check`: the receiver-family
+//     rows, the `@elem`/`@member`/`@self` argument specs, the bottom learning a
+//     `[]`/`Map.empty()` receiver needs, and the `List[Str]` constraint on
+//     `join`.
+//
+// Step 6 of §4.4 — the refusals the reference makes at LOWERING rather than at
+// inference (`no builtin method`, the builtin arity count, the literal zero
+// divisor, and the unpinned-receiver HOST-METHOD refusal) — is `tk_low` at the
+// end of this section. It is a SECOND walk over the same statement expression,
+// run only after the checking walk is clean, because that is exactly the
+// reference's own order: `_lower_pure_stmt` types the whole statement through
+// `infer_ast`/`check_ast` and only then lowers it.
+//
+// WHERE THIS SECTION STAYS SILENT, and why each silence is the sound direction.
+// The gate may under-refuse and may not over-refuse, so every rule here fires
+// only from PROVEN premises:
+//   * the signature rows are built only for a declaration whose parameter list
+//     this reader can spell in full. A default value (item 187) makes
+//     `params_at` fail, and a signature whose arity window this reader cannot
+//     see would refuse a call the reference admits;
+//   * a name the body REBINDS is not resolved against the module declaration,
+//     because the reference reads a local of function type first;
+//   * the builtin rules need the receiver's type PROVEN a stdlib value, and the
+//     unpinned-receiver refusal needs the receiver PROVABLY untyped — a binding
+//     whose initialiser is a call to a declaration that returns nothing. Between
+//     those two lies everything this walk merely fails to know, and there it
+//     says nothing at all.
+
+// A call-shaped resolution: `hit` false means "this arm does not apply", which
+// is not the same as "it applies and is clean".
+type TCall = { hit: Bool, r: TInf }
+
+fn tk_miss() -> TCall { return { hit: false, r: tk_ok("") } }
+fn tk_hit(r: TInf) -> TCall { return { hit: true, r: r } }
+
+// ----------------------------------------------------- the spelling algebra
+
+// `parse_type`, depth-aware over braces and parens (the split `tk_split_depth`
+// fixes) and with the reference's function-type normalisation.
+fn tkp_head(ty: Str) -> Str {
+  if (ty.startsWith("(")) { return ty_parse(ty).head }
+  let b = ty.indexOf("[")
+  if (b == 0 - 1 || !ty.endsWith("]")) { return ty }
+  return ty.slice(0, b)
+}
+
+fn tkp_args(ty: Str) -> List[Str] {
+  if (ty.startsWith("(")) { return ty_parse(ty).args }
+  let b = ty.indexOf("[")
+  if (b == 0 - 1 || !ty.endsWith("]")) { return [] }
+  return tk_split_depth(ty.slice(b + 1, ty.length() - 1))
+}
+
+// `join`: the common type of two branches. Its callers below hand it two KNOWN,
+// non-wildcard spellings, so "" is unambiguously "there is no common type" and
+// never "unknown".
+fn tk_join(a: Str, b: Str) -> Str {
+  if (tk_compatible(a, b)) { return a }
+  if (tk_compatible(b, a)) { return b }
+  return ""
+}
+
+type TySub = { ok: Bool, sub: List[Bind] }
+
+// `unify`: match a MARKED parameter type against an argument type, growing the
+// substitution. `ok == false` only on a DEFINITE conflict — an unknown on
+// either side passes, which is what keeps a gradual argument silent.
+fn tk_unify(param: Str, actual: Str, sub: List[Bind]) -> TySub {
+  if (param == "" || actual == "") { return { ok: true, sub: sub } }
+  let ph = tkp_head(param)
+  let pa = tkp_args(param)
+  if (pa.length() == 0 && ph.slice(0, 1) == "?") {
+    if (tk_wild(actual)) { return { ok: true, sub: sub } }
+    // item 92 §2: a generic combinator must not smuggle an async colour into an
+    // expression type through a bound `?T`; refuse rather than widen, so
+    // `substitute` can never produce an `Async`.
+    if (tkp_head(actual) == "Async") { return { ok: false, sub: sub } }
+    let prior = tenv_get(sub, ph)
+    if (prior == "") { return { ok: true, sub: tenv_put(sub, ph, actual) } }
+    let w = tk_join(prior, actual)
+    if (w == "") { return { ok: false, sub: sub } }
+    return { ok: true, sub: tenv_put(sub, ph, w) }
+  }
+  let ah = tkp_head(actual)
+  let aa = tkp_args(actual)
+  // `T` -> `Opt[T]` injection, ahead of the head comparison
+  if (ph == "Opt" && pa.length() > 0 && ah != "Opt") {
+    return tk_unify(pa[0], actual, sub)
+  }
+  if (ph == ah && pa.length() == aa.length()) {
+    var cur = sub
+    var ok = true
+    var i = 0
+    while (i < pa.length()) {
+      let r = tk_unify(pa[i], aa[i], cur)
+      if (!r.ok) { ok = false }
+      cur = r.sub
+      i += 1
+    }
+    return { ok: ok, sub: cur }
+  }
+  return { ok: tk_compatible(param, actual), sub: sub }
+}
+
+// `substitute`: apply a unifier. A type parameter it did not bind keeps its
+// marker and so stays a wildcard downstream, exactly as the reference has it.
+fn tk_subst(ty: Str, sub: List[Bind]) -> Str {
+  if (ty == "" || sub.length() == 0) { return ty }
+  let h = tkp_head(ty)
+  let a = tkp_args(ty)
+  if (a.length() == 0) {
+    let b = tenv_get(sub, h)
+    return b == "" ? h : b
+  }
+  var out: List[Str] = []
+  var i = 0
+  while (i < a.length()) { out = out.push(tk_subst(a[i], sub))  i += 1 }
+  return ty_render(h, out)
+}
+
+// ------------------------------------------------------- the signature table
+//
+// `_signature_table` (src/revl/lower.py): one row per module `fn` AND `extern`,
+// with each signature's type parameters MARKED once so the rest of the algebra
+// can tell a universally quantified `T` from a nominal type that merely has a
+// one-letter name. The rows ride in the same `List[Bind]` `case_binds` builds,
+// under keys carrying a space — which no identifier may — so they can never
+// collide with a binding:
+//
+//   "sigp <name>"  "#" then every marked parameter type, each followed by "|"
+//                  ("#" alone is a zero-parameter signature; the marker is what
+//                  distinguishes it from an absent row)
+//   "sigr <name>"  the marked return spelling ("" when the declaration has none)
+//   "sigg <name>"  "1" when the signature has at least one type parameter
+//   "sigv <name>"  the UNMARKED function-type spelling a module `fn` also binds
+//                  its own name to, so a body that rebinds the name can be told
+//                  from one that does not ("" for an extern, which binds none)
+
+fn sig_key(kind: Str, n: Str) -> Str { return kind.concat(" ").concat(n) }
+
+fn sig_declared(env: List[Bind], n: Str) -> Bool {
+  return tenv_get(env, sig_key("sigp", n)) != ""
+}
+
+// The parameter list of a declared signature, in order.
+fn sig_params(env: List[Bind], n: Str) -> List[Str] {
+  let raw = tenv_get(env, sig_key("sigp", n))
+  if (raw == "") { return [] }
+  var out: List[Str] = []
+  var cur = ""
+  var i = 1
+  while (i < raw.length()) {
+    let c = raw.charAt(i)
+    if (c == "|") { out = out.push(cur)  cur = "" } else { cur = cur.concat(c) }
+    i += 1
+  }
+  return out
+}
+
+fn sig_spell(ps: List[ParamN], tps: List[Str]) -> Str {
+  var out = "#"
+  var i = 0
+  while (i < ps.length()) {
+    out = out.concat(mark_tparams(taint_strip(ps[i].ty), tps)).concat("|")
+    i += 1
+  }
+  return out
+}
+
+// One declaration's rows. `raw` is the unmarked function-type spelling for a
+// module `fn` and "" for an extern.
+fn sig_put(acc: List[Bind], name: Str, ps: List[ParamN], ret: Str,
+           tps: List[Str], raw: Str) -> List[Bind] {
+  var out = tenv_put(acc, sig_key("sigp", name), sig_spell(ps, tps))
+  out = tenv_put(out, sig_key("sigr", name), mark_tparams(ret, tps))
+  out = tenv_put(out, sig_key("sigv", name), raw)
+  if (tps.length() > 0) { out = tenv_put(out, sig_key("sigg", name), "1") }
+  return out
+}
+
+// The unmarked `(P, …) -> R` spelling `case_binds` binds a module `fn`'s own
+// name to, rebuilt here so the two can be compared for a rebinding.
+fn sig_raw_fnty(ps: List[ParamN], ret: Str) -> Str {
+  var pts: List[Str] = []
+  var i = 0
+  while (i < ps.length()) { pts = pts.push(taint_strip(ps[i].ty))  i += 1 }
+  return "(".concat(pts.join(", ")).concat(") -> ")
+    .concat(ret == "" ? "Unit" : ret)
+}
+
+// The second pass over the token stream: `case_binds` has to finish first,
+// because the single-uppercase heuristic is switched off by a DECLARED type
+// and a `type` may be written after the `fn` that mentions it.
+pub fn sig_binds(ts: List[Token], base: List[Bind]) -> List[Bind] {
+  return sig_walk(ts, 0, base, base)
+}
+
+fn sig_walk(ts: List[Token], i: Int, decls: List[Bind],
+            acc: List[Bind]) -> List[Bind] {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return sig_walk(ts, i + 1, decls, acc) }
+  if (at_event(ts, i)) { return sig_walk(ts, event_decl_end(ts, i), decls, acc) }
+  if (t.kind != "kw") { return sig_walk(ts, skip_line(ts, i), decls, acc) }
+  if (at_pub_prefix(ts, i)) { return sig_walk(ts, i + 1, decls, acc) }
+  if (t.text == "use") { return sig_walk(ts, skip_line(ts, i), decls, acc) }
+  if (t.text == "type") {
+    return sig_walk(ts, type_decl_end(ts, i + 1), decls, acc)
+  }
+  if (t.text == "test") {
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return sig_walk(ts, e, decls, acc) }
+    return sig_walk(ts, skip_line(ts, i), decls, acc)
+  }
+  if (t.text == "extern") {
+    let h = ext_head(ts, i)
+    let nx = p_extern(ts, i, empty_prog()).i
+    if (!h.ok) { return sig_walk(ts, nx, decls, acc) }
+    let tps = collect_tparams(h.ps, h.ret, decls, [])
+    return sig_walk(ts, nx, decls,
+                    sig_put(acc, h.name, h.ps, h.ret, tps, ""))
+  }
+  if (t.text == "service") {
+    return sig_walk(ts, p_service(ts, i, empty_prog()).i, decls, acc)
+  }
+  if (t.text == "component") {
+    return sig_walk(ts, p_component(ts, i, empty_prog()).i, decls, acc)
+  }
+  if (t.text == "fn") {
+    let ps = params_at(ts, fn_params_i(ts, i))
+    let nx = p_fn(ts, i, empty_prog()).i
+    if (!ps.ok) { return sig_walk(ts, nx, decls, acc) }
+    let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : ""
+    let tps = collect_tparams(ps.ps, ret, decls, explicit_tparams(ts, i))
+    return sig_walk(ts, nx, decls,
+                    sig_put(acc, tkc(ts, i + 1).text, ps.ps, ret, tps,
+                            sig_raw_fnty(ps.ps, ret)))
+  }
+  return sig_walk(ts, skip_line(ts, i), decls, acc)
+}
+
+// One `extern` declaration's header: its name, parameters and declared return,
+// plus the index just past the return type, which is where its inverse slots
+// start. `ok` is false for a header this reader cannot spell in full.
+type ExtH = { ok: Bool, name: Str, ps: List[ParamN], ret: Str, slotI: Int,
+              wit: Bool }
+
+fn ext_no_head() -> ExtH {
+  return { ok: false, name: "", ps: [], ret: "", slotI: 0, wit: false }
+}
+
+fn ext_head(ts: List[Token], i: Int) -> ExtH {
+  var j = i + 1
+  var wit = false
+  while (atw(ts, j, "emission") || atw(ts, j, "acquire") || atw(ts, j, "pure")
+         || atw(ts, j, "async") || ati(ts, j, "witnessed")
+         || ati(ts, j, "deferred") || atk(ts, j, "[") || atk(ts, j, "(")) {
+    if (ati(ts, j, "witnessed")) { wit = true }
+    if (atk(ts, j, "[")) {
+      var k = j + 1
+      while (k < ts.length() && !atk(ts, k, "]")) { k += 1 }
+      j = k + 1
+    } else if (atk(ts, j, "(")) {
+      var k2 = j + 1
+      while (k2 < ts.length() && !atk(ts, k2, ")")) { k2 += 1 }
+      j = k2 + 1
+    } else {
+      j += 1
+    }
+  }
+  if (!atw(ts, j, "fn")) { return ext_no_head() }
+  if (!atk(ts, j + 2, "(")) { return ext_no_head() }
+  let ps = params_at(ts, j + 3)
+  if (!ps.ok) { return ext_no_head() }
+  var reti = ps.i
+  var ret = ""
+  if (atk(ts, reti, "arrow")) {
+    let tr = type_at(ts, reti + 1)
+    if (tr.ok) { ret = taint_strip(tr.ty) }
+    reti = tr.i
+  }
+  return { ok: true, name: tkc(ts, j + 1).text, ps: ps.ps, ret: ret,
+           slotI: reti, wit: wit }
+}
+
+// ------------------------------------------------------ the host stub surface
+
+// `_HOST_ARG_SIG`'s families. `Subscription` is on the surface without being a
+// constructor root, which is why this is its own table and not `is_host_root`.
+fn tk_host_families() -> List[Str] {
+  return ["Job", "Map", "Pool", "Stream", "Subscription"]
+}
+
+fn tk_is_host_family(t: Str) -> Bool {
+  return contains(tk_host_families(), t)
+}
+
+// The verbs of one family, SORTED — the order the surface is listed in.
+fn tk_host_verbs(fam: Str) -> List[Str] {
+  if (fam == "Map") {
+    return ["drop", "get", "insert", "insert_if_absent", "new", "remove"]
+  }
+  if (fam == "Pool") { return ["close", "execute", "open", "query"] }
+  if (fam == "Job") { return ["run"] }
+  if (fam == "Stream") { return ["close", "source"] }
+  if (fam == "Subscription") { return ["close", "next"] }
+  return []
+}
+
+fn tk_host_params(fam: Str, verb: Str) -> List[Str] {
+  if (fam == "Map") {
+    if (verb == "insert" || verb == "insert_if_absent") { return ["Str", "Str"] }
+    if (verb == "remove" || verb == "get") { return ["Str"] }
+    return []
+  }
+  if (fam == "Pool") {
+    if (verb == "open") { return ["Str", "Int"] }
+    if (verb == "query" || verb == "execute") { return ["Str"] }
+    return []
+  }
+  if (fam == "Job" && verb == "run") { return ["Str"] }
+  return []
+}
+
+// `_HOST_RESULT_SIG`: the one host verb that declares a result.
+fn tk_host_result(fam: Str, verb: Str) -> Str {
+  if (fam == "Map" && verb == "insert_if_absent") { return "Bool" }
+  return ""
+}
+
+fn tk_plural(n: Int) -> Str { return n == 1 ? "" : "s" }
+
+// `host_check`: the CONSTRUCTOR form `Root.verb(..)`, checked against its
+// declared argument types. The result is the family name.
+fn tk_host_ctor_check(fam: Str, verb: Str, argTys: List[Str]) -> TInf {
+  let ps = tk_host_params(fam, verb)
+  let dotted = fam.concat(".").concat(verb)
+  if (argTys.length() != ps.length()) {
+    return tk_no("HOST-ARITY",
+      "host builtin `".concat(dotted).concat("` takes ")
+        .concat(ps.length().to_str()).concat(" argument")
+        .concat(tk_plural(ps.length())).concat(", got ")
+        .concat(argTys.length().to_str()))
+  }
+  let m = tk_host_args(ps, argTys, 0, "host builtin `".concat(dotted)
+                                        .concat("` argument"))
+  if (m.v != "") { return m }
+  return tk_ok(fam)
+}
+
+fn tk_host_args(ps: List[Str], argTys: List[Str], i: Int, where_: Str) -> TInf {
+  if (i >= ps.length() || i >= argTys.length()) { return tk_ok("") }
+  if (argTys[i] != "" && !tk_compatible(ps[i], argTys[i])) {
+    return tk_mismatch(where_, ps[i], argTys[i])
+  }
+  return tk_host_args(ps, argTys, i + 1, where_)
+}
+
+// `host_family_check`: a method call on a family-TYPED receiver.
+fn tk_host_family_check(fam: Str, verb: Str, argTys: List[Str]) -> TInf {
+  let verbs = tk_host_verbs(fam)
+  if (!contains(verbs, verb)) {
+    return tk_no("HOST-METHOD",
+      "`".concat(fam).concat("` has no method `").concat(verb)
+        .concat("` (its surface: ").concat(verbs.join(", ")).concat(")"))
+  }
+  let ps = tk_host_params(fam, verb)
+  if (argTys.length() != ps.length()) {
+    return tk_no("HOST-ARITY",
+      "host `".concat(fam).concat(".").concat(verb).concat("` takes ")
+        .concat(ps.length().to_str()).concat(" argument")
+        .concat(tk_plural(ps.length())).concat(", got ")
+        .concat(argTys.length().to_str()))
+  }
+  let m = tk_host_args(ps, argTys, 0,
+                       "host `".concat(fam).concat(".").concat(verb)
+                         .concat("` argument"))
+  if (m.v != "") { return m }
+  return tk_ok(tk_host_result(fam, verb))
+}
+
+// ---------------------------------------------------------- `_BUILTIN_SIG`
+
+// A method spelled for SEVERAL receiver families holds a row per family; the
+// receiver head picks the row.
+fn tk_bsig_multi(m: Str) -> Bool {
+  return m == "to_int" || m == "keys" || m == "to_str"
+}
+
+// The receiver families of a multi-family row, SORTED (the order the refusal
+// lists them in).
+fn tk_bsig_rows(m: Str) -> List[Str] {
+  if (m == "to_int") { return ["Int32", "Str"] }
+  if (m == "keys") { return ["Map", "Value"] }
+  if (m == "to_str") { return ["Float", "Int"] }
+  return []
+}
+
+// The receiver FAMILY one row declares; "" when the receiver picks no row.
+fn tk_bsig_family(m: Str, th: Str) -> Str {
+  if (tk_bsig_multi(m)) { return contains(tk_bsig_rows(m), th) ? th : "" }
+  if (m == "length" || m == "slice" || m == "concat" || m == "indexOf") {
+    return "sized"
+  }
+  if (m == "push" || m == "join") { return "List" }
+  if (m == "charAt" || m == "charCodeAt" || m == "codepoint_at" || m == "split"
+      || m == "repeat" || m == "startsWith" || m == "endsWith"
+      || m == "is_alnum" || m == "is_digit" || m == "is_alpha"
+      || m == "is_space") { return "Str" }
+  if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+      || m == "to_int32" || m == "checked_div_trunc" || m == "checked_div_floor"
+      || m == "checked_div_euclid" || m == "checked_mod") { return "Int" }
+  if (m == "set" || m == "lookup" || m == "has" || m == "size"
+      || m == "remove") { return "Map" }
+  if (m == "field" || m == "str" || m == "list") { return "Value" }
+  return ""
+}
+
+// The argument SPECS of one row. `@elem` is the element/value parameter,
+// `@member` the element for a `List` and `Str` for a `Str`, `@self` the
+// receiver's own type.
+fn tk_bsig_params(m: Str) -> List[Str] {
+  if (m == "push") { return ["@elem"] }
+  if (m == "slice") { return ["Int", "Int"] }
+  if (m == "charAt" || m == "charCodeAt" || m == "codepoint_at"
+      || m == "repeat") { return ["Int"] }
+  if (m == "concat") { return ["@self"] }
+  if (m == "indexOf") { return ["@member"] }
+  if (m == "split" || m == "join" || m == "startsWith"
+      || m == "endsWith") { return ["Str"] }
+  if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+      || m == "checked_div_trunc" || m == "checked_div_floor"
+      || m == "checked_div_euclid" || m == "checked_mod") { return ["Int"] }
+  if (m == "set") { return ["Str", "@elem"] }
+  if (m == "lookup" || m == "has" || m == "remove" || m == "field") {
+    return ["Str"]
+  }
+  return []
+}
+
+// `_BUILTIN_METHODS`: the declared arity, which is the row's parameter count.
+fn tk_builtin_arity(m: Str) -> Int { return tk_bsig_params(m).length() }
+
+fn tk_sized_head(h: Str) -> Bool {
+  return h == "Bytes" || h == "List" || h == "Str"
+}
+
+fn tk_family_pinned(f: Str) -> Bool {
+  return f == "List" || f == "Str" || f == "Int" || f == "Int32" || f == "Map"
+      || f == "Value"
+}
+
+// The element/value parameter of a container receiver.
+fn tk_elem_of(t: Str) -> Str {
+  let h = tkp_head(t)
+  let a = tkp_args(t)
+  if (h == "List" && a.length() > 0) { return a[0] }
+  if (h == "Map" && a.length() == 2) { return a[1] }
+  return ""
+}
+
+// The BOTTOM receiver (`[]`, `Map.empty()`) learns its element type from a
+// concrete argument rather than constraining it: `Never` is one-way, so
+// comparing an honest `[].push("s")` against it would refuse every accumulator.
+fn tk_learn_elem(specs: List[Str], argTys: List[Str], i: Int, th: Str,
+                 acc: Str) -> Str {
+  if (i >= specs.length() || i >= argTys.length()) { return acc }
+  let a = argTys[i]
+  if (a == "" || tk_wild(a)) { return tk_learn_elem(specs, argTys, i + 1, th, acc) }
+  if (specs[i] == "@elem") { return tk_learn_elem(specs, argTys, i + 1, th, a) }
+  if (specs[i] == "@self") {
+    let aa = tkp_args(a)
+    if (tkp_head(a) == th && aa.length() > 0
+        && !tk_wild(aa[aa.length() - 1])) {
+      return tk_learn_elem(specs, argTys, i + 1, th, aa[aa.length() - 1])
+    }
+  }
+  return tk_learn_elem(specs, argTys, i + 1, th, acc)
+}
+
+fn tk_with_elem(t: Str, elem: Str) -> Str {
+  let h = tkp_head(t)
+  if (h == "List") { return "List[".concat(elem).concat("]") }
+  let a = tkp_args(t)
+  if (h == "Map" && a.length() == 2) {
+    return "Map[".concat(a[0]).concat(", ").concat(elem).concat("]")
+  }
+  return t
+}
+
+fn tk_spec_expect(spec: Str, elem: Str, th: Str, self_: Str) -> Str {
+  if (spec == "@elem") { return elem }
+  if (spec == "@self") { return self_ }
+  if (spec == "@member") {
+    if (th == "List") { return elem }
+    if (th == "Str") { return "Str" }
+    return ""
+  }
+  return spec
+}
+
+fn tk_bargs(specs: List[Str], argTys: List[Str], i: Int, elem: Str, th: Str,
+            self_: Str, method: Str) -> TInf {
+  if (i >= specs.length() || i >= argTys.length()) { return tk_ok("") }
+  let want = tk_spec_expect(specs[i], elem, th, self_)
+  if (want != "" && argTys[i] != "" && !tk_compatible(want, argTys[i])) {
+    return tk_mismatch("builtin `".concat(method).concat("` argument"),
+                       want, argTys[i])
+  }
+  return tk_bargs(specs, argTys, i + 1, elem, th, self_, method)
+}
+
+// `builtin_check`: type a stdlib method call. The receiver type is KNOWN at
+// every call site below — the unknown-receiver reading is `tk_low`'s.
+fn tk_builtin_check(method: Str, recv: Str, argTys: List[Str]) -> TInf {
+  if (tk_is_host_family(recv)) {
+    return tk_host_family_check(recv, method, argTys)
+  }
+  let th0 = tkp_head(recv)
+  if (tk_bsig_multi(method) && !contains(tk_bsig_rows(method), th0)) {
+    return tk_no("T1",
+      "builtin `".concat(method).concat("` has no form for a `")
+        .concat(tk_render(recv)).concat("` receiver (its receiver families: ")
+        .concat(tk_bsig_rows(method).join(", ")).concat(")"))
+  }
+  let fam = tk_bsig_family(method, th0)
+  if (fam == "") { return tk_ok("") }
+  if (fam == "sized" && !tk_sized_head(th0)) {
+    return tk_no("TYPE",
+      "builtin `".concat(method)
+        .concat("` needs a Str/Bytes/List receiver, got `")
+        .concat(tk_render(recv)).concat("`"))
+  }
+  if (tk_family_pinned(fam) && th0 != fam) {
+    return tk_no("TYPE",
+      "builtin `".concat(method).concat("` needs a ").concat(fam)
+        .concat(" receiver, got `").concat(tk_render(recv)).concat("`"))
+  }
+  let specs = tk_bsig_params(method)
+  var self_ = recv
+  var elem = tk_elem_of(recv)
+  if (elem == "Never") {
+    let learned = tk_learn_elem(specs, argTys, 0, th0, "")
+    if (learned != "") {
+      elem = learned
+      self_ = tk_with_elem(recv, learned)
+    }
+  }
+  // `join` concatenates STRING elements (docs/stdlib-2.0.md §Str): the family
+  // check above only pins the head to `List`, and `[1, 2].join(",")` diverged
+  // between the tiers rather than refusing on any of them.
+  if (method == "join" && th0 == "List" && elem != "" && !tk_wild(elem)
+      && elem != "Never" && !tk_compatible("Str", elem)) {
+    return tk_no("T1",
+      "builtin `join` needs a `List[Str]` receiver, got `"
+        .concat(tk_render(self_))
+        .concat("` (join concatenates string elements; map to `Str` first, ")
+        .concat("e.g. `xs.map(n => n.to_str()).join(sep)`)"))
+  }
+  let m = tk_bargs(specs, argTys, 0, elem, th0, self_, method)
+  if (m.v != "") { return m }
+  return tk_ok(builtin_ret(method, self_))
+}
+
+// -------------------------------------------------------- the call positions
+
+// One descent per argument, carrying BOTH what the reference's `arg_types`
+// list carries and the first refusal reached inside any of them.
+type TArgs = { v: Str, r: TInf, tys: List[Str] }
+
+fn tk_arg_walk(args: List[Expr], i: Int, env: List[Bind],
+               acc: List[Str]) -> TArgs {
+  if (i >= args.length()) { return { v: "", r: tk_ok(""), tys: acc } }
+  let r = tk_infer(args[i], env)
+  if (r.v != "") { return { v: r.v, r: r, tys: acc } }
+  return tk_arg_walk(args, i + 1, env, acc.push(r.ty))
+}
+
+// A bare-name callee resolved against the signature table. Misses — silently —
+// on a name the body REBINDS (the reference reads a local of function type
+// first), on an ADT case (the case table is read ahead of the signature), and
+// on a declaration whose row was never built.
+fn tk_named(c: CallN, env: List[Bind], argTys: List[Str]) -> TCall {
+  let n = match c.target { Var(v) => v, _ => "", }
+  if (n == "") { return tk_miss() }
+  if (!sig_declared(env, n)) { return tk_miss() }
+  if (tenv_get(env, sig_key("sigv", n)) != tenv_get(env, n)) { return tk_miss() }
+  if (n == "Some" || n == "None" || n == "Ok" || n == "Err") { return tk_miss() }
+  if (tenv_get(env, "case ".concat(n)) != "") { return tk_miss() }
+  let ps = sig_params(env, n)
+  let ret = tenv_get(env, sig_key("sigr", n))
+  if (c.args.length() != ps.length()) {
+    return tk_hit(tk_no("T1",
+      "`".concat(n).concat("` takes ").concat(ps.length().to_str())
+        .concat(" argument(s), ").concat(c.args.length().to_str())
+        .concat(" given")))
+  }
+  if (tenv_get(env, sig_key("sigg", n)) != "1") {
+    let m = tk_mono_args(ps, argTys, 0, n)
+    if (m.v != "") { return tk_hit(m) }
+    return tk_hit(tk_ok(tk_call_result(ret)))
+  }
+  return tk_hit(tk_generic_args(ps, argTys, 0, [], n, ret))
+}
+
+fn tk_mono_args(ps: List[Str], argTys: List[Str], i: Int, n: Str) -> TInf {
+  if (i >= ps.length() || i >= argTys.length()) { return tk_ok("") }
+  if (ps[i] != "" && argTys[i] != "" && !tk_compatible(ps[i], argTys[i])) {
+    return tk_mismatch(tk_arg_where(i, n), ps[i], argTys[i])
+  }
+  return tk_mono_args(ps, argTys, i + 1, n)
+}
+
+fn tk_arg_where(i: Int, n: Str) -> Str {
+  return "argument ".concat((i + 1).to_str()).concat(" of `").concat(n)
+    .concat("(...)`")
+}
+
+// The GENERIC half: instantiate the signature against this call's arguments
+// rather than letting every `T` position pass. The refusal names the parameter
+// with the substitution learned SO FAR applied, which is the reference's own
+// `substitute(p, subst)`.
+fn tk_generic_args(ps: List[Str], argTys: List[Str], i: Int, sub: List[Bind],
+                   n: Str, ret: Str) -> TInf {
+  if (i >= ps.length() || i >= argTys.length()) {
+    return tk_ok(tk_call_result(tk_subst(ret, sub)))
+  }
+  let r = tk_unify(ps[i], argTys[i], sub)
+  if (!r.ok) {
+    return tk_mismatch(tk_arg_where(i, n), tk_subst(ps[i], r.sub), argTys[i])
+  }
+  return tk_generic_args(ps, argTys, i + 1, r.sub, n, ret)
+}
+
+// A METHOD callee: the host constructor form, `Map.empty()`, and every receiver
+// whose type this walk has PROVEN. A receiver it cannot type misses, because
+// `builtin_check`'s family rows would then compare against an unknown.
+fn tk_method(c: CallN, env: List[Bind], argTys: List[Str],
+             recv: Str) -> TCall {
+  let f = match c.target { Field(fd) => fd, _ => tk_no_field(), }
+  if (f.name == "") { return tk_miss() }
+  let root = match f.target { Var(v) => v, _ => "", }
+  // the Map VALUE constructor, read BEFORE the host family: `empty` is not a
+  // host verb and never will be (the namespace disjointness is pinned by test).
+  if (root == "Map" && f.name == "empty" && tenv_get(env, "Map") == "") {
+    if (c.args.length() > 0) {
+      return tk_hit(tk_no("TYPE",
+        "`Map.empty()` takes no arguments, "
+          .concat(c.args.length().to_str()).concat(" given")))
+    }
+    return tk_hit(tk_ok("Map[Str, Never]"))
+  }
+  if (tk_is_host_family(root) && contains(tk_host_verbs(root), f.name)
+      && tenv_get(env, root) == "") {
+    return tk_hit(tk_host_ctor_check(root, f.name, argTys))
+  }
+  // item 383: a receiver-first list transform is SUGAR for its generic free
+  // function, whose result a builtin row cannot express. Typing the desugared
+  // call needs the arrow algebra, which is the next slice's.
+  if (list_transform_free(f.name) != "" && !tk_is_host_family(recv)) {
+    return tk_miss()
+  }
+  if (recv == "" || tk_wild(recv)) { return tk_unknown_recv_check(f.name, argTys) }
+  return tk_hit(tk_builtin_check(f.name, recv, argTys))
+}
+
+// `builtin_check` with target_type None. The reference skips exactly the rules
+// that need the receiver — the family pins, and the `@elem`/`@member`/`@self`
+// specs, which all resolve to "no expectation" — and still checks every
+// argument whose spec is a LITERAL type. Getting this half wrong is what made
+// `p.set(true)` draw the unpinned-receiver refusal where the reference has an
+// earlier argument mismatch: the same program, refused by both, named
+// differently.
+//
+// A MULTI-family row picks no row without a receiver and decides nothing, which
+// is the reference's `sig.get(None)` miss.
+fn tk_unknown_recv_check(method: Str, argTys: List[Str]) -> TCall {
+  if (tk_bsig_multi(method)) { return tk_miss() }
+  if (tk_bsig_family(method, "") == "") { return tk_miss() }
+  let m = tk_bargs(tk_bsig_params(method), argTys, 0, "", "", "", method)
+  if (m.v != "") { return tk_hit(m) }
+  // the row's RESULT, with the receiver-dependent spellings unresolved:
+  // `@self`/`@elem` are unknown and `Opt[@elem]` is the reference's
+  // `Opt[Never]`, which is what a `lookup` on an untyped receiver flows on.
+  return tk_hit(tk_ok(method == "lookup" ? "Opt[Never]"
+                                         : builtin_ret(method, "")))
+}
+
+fn tk_no_field() -> FieldN { return { target: NullLit, name: "" } }
+
+// ------------------------------------------ §4.4 step 6: the LOWERING refusals
+//
+// `_lower_pure_expr`'s method branch. These are NOT inference refusals: the
+// reference types the whole statement first and reaches them only while
+// lowering it, so `tk_low` is a second walk run after the checking walk is
+// clean, in the same pre-order the lowering descends in.
+//
+// Every rule needs the receiver's type decided in one direction or the other.
+// A receiver this walk has PROVEN a stdlib value takes the surface, arity and
+// zero-divisor rules; a receiver PROVABLY untyped — a binding whose initialiser
+// calls a declaration that returns nothing — takes the unpinned-receiver
+// refusal. In between the walk merely does not know, and says nothing.
+
+fn tk_low_stdlib_proven(t: Str) -> Bool {
+  if (t == "" || tk_wild(t) || tk_is_host_family(t)) { return false }
+  let h = tkp_head(t)
+  return h == "Str" || h == "List" || h == "Int" || h == "Int32" || h == "Bytes"
+      || h == "Map" || h == "Float" || h == "Bool" || h == "Value"
+}
+
+// A receiver the REFERENCE also has no type for: a name bound to a call on a
+// declared, monomorphic signature that declares no return. Nothing else is
+// claimed, because a type this walk merely failed to infer is one the reference
+// may well have.
+fn tk_low_untyped_recv(e: Expr, env: List[Bind]) -> Bool {
+  let n = match e { Var(v) => v, _ => "", }
+  if (n == "") { return false }
+  return tenv_get(env, n) == ""
+      && tenv_get(env, "unk ".concat(n)) == "1"
+}
+
+// Whether a `let` initialiser PROVES its binding has no type on either side.
+fn tk_def_unknown(e: Expr, env: List[Bind]) -> Bool {
+  let c = match e { Call(cn) => cn, _ => tk_no_call(), }
+  let n = match c.target { Var(v) => v, _ => "", }
+  if (n == "") { return false }
+  return sig_declared(env, n)
+      && tenv_get(env, sig_key("sigv", n)) == tenv_get(env, n)
+      && tenv_get(env, sig_key("sigg", n)) != "1"
+      && tenv_get(env, sig_key("sigr", n)) == ""
+      && tenv_get(env, "case ".concat(n)) == ""
+}
+
+fn tk_no_call() -> CallN { return { target: NullLit, args: [] } }
+
+// `_BUILTIN_METHODS`, sorted — the surface the refusal lists. Held byte-exact
+// against the reference by `tests/test_selfhost_lower.py`.
+fn tk_stdlib_surface() -> Str {
+  return "charAt, charCodeAt, checked_div_euclid, checked_div_floor, "
+    .concat("checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, ")
+    .concat("div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, ")
+    .concat("is_alpha, is_digit, is_space, join, keys, length, list, lookup, ")
+    .concat("mod, push, remove, repeat, set, size, slice, split, startsWith, ")
+    .concat("str, to_int, to_int32, to_str")
+}
+
+fn tk_divides_by(m: Str) -> Bool {
+  return m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+}
+
+fn tk_is_zero_lit(e: Expr) -> Bool {
+  return match e { IntLit(v) => v == "0", _ => false, }
+}
+
+fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
+  let f = match c.target { Field(fd) => fd, _ => tk_no_field(), }
+  if (f.name == "") { return "" }
+  if (is_empty_map_callee(c.target)) { return "" }
+  let root = match f.target { Var(v) => v, _ => "", }
+  // a HOST receiver keeps its methods verbatim: the stub surface judged them at
+  // inference, and the builtin table is not theirs.
+  if (tk_is_host_family(root) && tenv_get(env, root) == "") { return "" }
+  let recv = tk_infer(f.target, env).ty
+  if (tk_is_host_family(recv)) { return "" }
+  if (list_transform_free(f.name) != "") { return "" }
+  let untyped = tk_low_untyped_recv(f.target, env)
+  if (!is_builtin_method(f.name)) {
+    // the reference refuses this for ANY non-host receiver; the gate needs the
+    // receiver decided in one direction or the other, because an undecided one
+    // may be a host object, a `use`d module alias or a required-service handle,
+    // none of which take the builtin table at all.
+    if (!tk_low_stdlib_proven(recv) && !untyped) { return "" }
+    // `revl.diagnostics.classify` reads this shape as T1, so the wire's tag is
+    // T1 and not the code-less `TYPE` family.
+    return tagged("T1", "no builtin method `".concat(f.name)
+      .concat("` on values — the stdlib surface is ")
+      .concat(tk_stdlib_surface()).concat(" (docs/stdlib-2.0.md)"))
+  }
+  if (untyped) {
+    return tagged("HOST-METHOD", "stdlib method `".concat(f.name)
+      .concat("` on a value of unknown type — no constructor pins this ")
+      .concat("receiver as a Str/List/Int/Int32/Bytes/Map value, so the ")
+      .concat("checker ")
+      .concat("refuses to lower the call as the builtin"))
+  }
+  if (!tk_low_stdlib_proven(recv)) { return "" }
+  let arity = tk_builtin_arity(f.name)
+  if (c.args.length() != arity) {
+    return tagged("TYPE", "builtin `".concat(f.name).concat("` takes ")
+      .concat(arity.to_str()).concat(" argument(s), ")
+      .concat(c.args.length().to_str()).concat(" given"))
+  }
+  if (tk_divides_by(f.name) && c.args.length() > 0
+      && tk_is_zero_lit(c.args[0])) {
+    return tagged("TYPE", "`".concat(f.name)
+      .concat("` by a literal zero is undefined"))
+  }
+  return ""
+}
+
+fn tk_low(e: Expr, env: List[Bind]) -> Str {
+  return match e {
+    Bin(b)      => tk_low2(b.l, b.r, env),
+    Un(u)       => tk_low(u.e, env),
+    Field(f)    => tk_low(f.target, env),
+    OptField(f) => tk_low(f.target, env),
+    Index(x)    => tk_low2(x.target, x.idx, env),
+    Call(c)     => tk_low_call(c, env),
+    Rec(r)      => tk_low_inits(r.fields, 0, env),
+    RecUpd(r)   => tk_low_recupd(r.base, r.upds, env),
+    Lst(l)      => tk_low_items(l.items, 0, env),
+    If(f)       => tk_low3(f.cond, f.then_, f.els, env),
+    Templ(t)    => tk_low_parts(t.parts, 0, env),
+    _           => "",
+  }
+}
+
+fn tk_low2(a: Expr, b: Expr, env: List[Bind]) -> Str {
+  let l = tk_low(a, env)
+  if (l != "") { return l }
+  return tk_low(b, env)
+}
+
+fn tk_low3(a: Expr, b: Expr, c: Expr, env: List[Bind]) -> Str {
+  let l = tk_low2(a, b, env)
+  if (l != "") { return l }
+  return tk_low(c, env)
+}
+
+// The node's own refusal FIRST: the reference raises before it lowers the
+// receiver and the arguments.
+fn tk_low_call(c: CallN, env: List[Bind]) -> Str {
+  let own = tk_low_method(c, env)
+  if (own != "") { return own }
+  let t = tk_low(c.target, env)
+  if (t != "") { return t }
+  return tk_low_items(c.args, 0, env)
+}
+
+fn tk_low_items(xs: List[Expr], i: Int, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = tk_low(xs[i], env)
+  if (r != "") { return r }
+  return tk_low_items(xs, i + 1, env)
+}
+
+fn tk_low_inits(xs: List[InitN], i: Int, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = tk_low(xs[i].value, env)
+  if (r != "") { return r }
+  return tk_low_inits(xs, i + 1, env)
+}
+
+fn tk_low_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> Str {
+  let b = tk_low(base, env)
+  if (b != "") { return b }
+  return tk_low_inits(upds, 0, env)
+}
+
+fn tk_low_parts(ps: List[PartN], i: Int, env: List[Bind]) -> Str {
+  if (i >= ps.length()) { return "" }
+  let r = ps[i].kind == "expr" ? tk_low(ps[i].e, env) : ""
+  if (r != "") { return r }
+  return tk_low_parts(ps, i + 1, env)
 }
 
 // ======================================= the fn-body binding discipline (G1/G6)
@@ -7232,20 +8961,36 @@ fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
 // The statement view this walk runs over — the `own_scan` shape, plus what the
 // binding rules need and the ownership marks do not: the `let`/`var` split, the
 // diagnostic line, and a "bail" kind for the forms above.
+// docs/design/457 T3a: the step also carries what the TYPE layer needs and the
+// binding rules do not — the written annotation at a `let`, the compound
+// operator at an assignment, and (unlike the provenance-only reader this grew
+// out of) the statement's own EXPRESSION, which used to be read for its span
+// and then thrown away.
 type FbStep = { kind: Str, name: Str, mutable: Bool, line: Int, value: Expr,
+                declTy: Str, op: Str,
                 then_: List[FbStep], els: List[FbStep], body: List[FbStep] }
 type FbStepR = { step: FbStep, i: Int }
-// A walk result: the refusal (empty when the scope is clean) and the scope the
-// following statement in the SAME block sees.
-type FbR = { v: Verd, scope: List[Bind] }
+// A walk result: the refusal (empty when the scope is clean), the binding scope
+// and the TYPE environment the following statement in the SAME block sees.
+type FbR = { v: Verd, scope: List[Bind], tys: List[Bind] }
 
 fn fb_step(kind: Str, name: Str, mutable: Bool, line: Int, v: Expr) -> FbStep {
+  return fb_step7(kind, name, mutable, line, v, "", "")
+}
+fn fb_step7(kind: Str, name: Str, mutable: Bool, line: Int, v: Expr,
+            declTy: Str, op: Str) -> FbStep {
   return { kind: kind, name: name, mutable: mutable, line: line, value: v,
+           declTy: declTy, op: op,
            then_: [], els: [], body: [] }
 }
-fn fb_block(kind: Str, name: Str, line: Int, thenS: List[FbStep],
+fn fb_block(kind: Str, name: Str, line: Int, v: Expr, thenS: List[FbStep],
             elseS: List[FbStep], bodyS: List[FbStep]) -> FbStep {
-  return { kind: kind, name: name, mutable: false, line: line, value: NullLit,
+  // `value` carries the statement's OWN expression: an `if`/`while` condition
+  // (the Bool checking position the type walk reads) and a `for`'s iterable.
+  // The returns-on-every-path rule below reads the same field back for the one
+  // loop form that terminates a path, a `while` whose condition is `true`.
+  return { kind: kind, name: name, mutable: false, line: line, value: v,
+           declTy: "", op: "",
            then_: thenS, els: elseS, body: bodyS }
 }
 fn fb_bail() -> FbStep { return fb_step("bail", "", false, 0, NullLit) }
@@ -7297,25 +9042,39 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     }
     let name = tkc(ts, i + 1).text
     var j = i + 2
-    if (atk(ts, j, ":")) { let tr = type_at(ts, j + 1)  j = tr.i }
+    var dty = ""
+    if (atk(ts, j, ":")) {
+      let tr = type_at(ts, j + 1)
+      if (tr.ok) { dty = taint_strip(tr.ty) }
+      j = tr.i
+    }
     if (!atk(ts, j, "=")) { return { step: fb_bail(), i: hi } }
     let r = lir_rhs(ts, j + 1, [])
     if (!r.ok) { return { step: fb_bail(), i: hi } }
     let ve = expr_at(ts, j + 1)
-    return { step: fb_step("let", name, t.text == "var", t.line, ve.e), i: r.i }
+    return { step: fb_step7("let", name, t.text == "var", t.line, ve.e, dty, ""),
+             i: r.i }
   }
   if (t.kind == "kw" && t.text == "return") {
     let r = expr_at(ts, i + 1)
-    let ni = (is_bad(r.e) || r.i <= i + 1) ? i + 1 : r.i
-    return { step: fb_step("other", "", false, t.line, NullLit), i: ni }
+    // a BARE `return` carries no expression to CHECK, but it is still a `return`
+    // for the returns-on-every-path rule below, so it keeps that kind and is
+    // marked `bare` in `op` — the type walk steps over it rather than checking
+    // a `null` it never wrote against the declared return.
+    if (is_bad(r.e) || r.i <= i + 1) {
+      return { step: fb_step7("return", "", false, t.line, NullLit, "", "bare"),
+               i: i + 1 }
+    }
+    return { step: fb_step7("return", "", false, t.line, r.e, "", ""), i: r.i }
   }
   if (t.kind == "kw" && t.text == "assert") {
     let r = expr_at(ts, i + 1)
     if (is_bad(r.e) || r.i <= i + 1) { return { step: fb_bail(), i: hi } }
-    return { step: fb_step("other", "", false, t.line, NullLit), i: r.i }
+    return { step: fb_step7("assert", "", false, t.line, r.e, "", ""), i: r.i }
   }
   if (t.kind == "kw" && (t.text == "break" || t.text == "continue")) {
-    return { step: fb_step("other", "", false, t.line, NullLit), i: i + 1 }
+    return { step: fb_step(t.text == "break" ? "break" : "other", "", false,
+                           t.line, NullLit), i: i + 1 }
   }
   if (t.kind == "kw" && t.text == "if") {
     let c = expr_at(ts, i + 1)
@@ -7331,14 +9090,14 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
       let eend = close_brace(ts, tend + 1)
       if (eend != 0 - 1) { elseS = fb_scan(ts, tend + 2, eend - 1)  nexti = eend }
     }
-    return { step: fb_block("if", "", t.line, thenS, elseS, []), i: nexti }
+    return { step: fb_block("if", "", t.line, c.e, thenS, elseS, []), i: nexti }
   }
   if (t.kind == "kw" && t.text == "while") {
     let c = expr_at(ts, i + 1)
     if (is_bad(c.e) || !atk(ts, c.i, "{")) { return { step: fb_bail(), i: hi } }
     let bend = close_brace(ts, c.i)
     if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
-    return { step: fb_block("while", "", t.line, [], [],
+    return { step: fb_block("while", "", t.line, c.e, [], [],
                             fb_scan(ts, c.i + 1, bend - 1)), i: bend }
   }
   if (t.kind == "kw" && t.text == "for") {
@@ -7350,23 +9109,25 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     }
     let bend = close_brace(ts, it.i + 1)
     if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
-    return { step: fb_block("for", bind, t.line, [], [],
+    return { step: fb_block("for", bind, t.line, it.e, [], [],
                             fb_scan(ts, it.i + 2, bend - 1)), i: bend }
   }
   if (t.kind == "ident" && atk(ts, i + 1, "=")) {
     let r = expr_at(ts, i + 2)
     if (is_bad(r.e) || r.i <= i + 2) { return { step: fb_bail(), i: hi } }
-    return { step: fb_step("assign", t.text, false, t.line, NullLit), i: r.i }
+    return { step: fb_step7("assign", t.text, false, t.line, r.e, "", "="),
+             i: r.i }
   }
   if (t.kind == "ident" && is_compound_op(ts, tkc(ts, i + 1).kind)
       && atk(ts, i + 2, "=")) {
     let r = expr_at(ts, i + 3)
     if (is_bad(r.e) || r.i <= i + 3) { return { step: fb_bail(), i: hi } }
-    return { step: fb_step("assign", t.text, false, t.line, NullLit), i: r.i }
+    return { step: fb_step7("assign", t.text, false, t.line, r.e, "",
+                            tkc(ts, i + 1).kind), i: r.i }
   }
   let r = expr_at(ts, i)
   if (is_bad(r.e) || r.i <= i) { return { step: fb_bail(), i: hi } }
-  return { step: fb_step("other", "", false, t.line, NullLit), i: r.i }
+  return { step: fb_step7("expr", "", false, t.line, r.e, "", ""), i: r.i }
 }
 
 fn fb_scan(ts: List[Token], lo: Int, hi: Int) -> List[FbStep] {
@@ -7377,62 +9138,158 @@ fn fb_scan(ts: List[Token], lo: Int, hi: Int) -> List[FbStep] {
     else {
       let so = fb_one(ts, i, hi)
       out = out.push(so.step)
-      if (so.i <= i) { i = hi } else { i = so.i }
+      // a reader that cannot advance abandons the REST of this block, exactly
+      // as a "bail" step does, so it records one: `fb_walk` reads the two
+      // identically (both end the block clean) and the returns-on-every-path
+      // rule below must not mistake an abandoned tail for a complete body.
+      if (so.i <= i) { out = out.push(fb_bail())  i = hi } else { i = so.i }
     }
   }
   return out
 }
 
-fn fb_clean(scope: List[Bind]) -> FbR { return { v: no_verd(), scope: scope } }
-fn fb_refuse(tag: Str, msg: Str, line: Int, scope: List[Bind]) -> FbR {
-  return { v: mk_verd(tagged(tag, msg), line), scope: scope }
+fn fb_clean(scope: List[Bind], tys: List[Bind]) -> FbR {
+  return { v: no_verd(), scope: scope, tys: tys }
+}
+fn fb_refuse(tag: Str, msg: Str, line: Int, scope: List[Bind],
+             tys: List[Bind]) -> FbR {
+  return { v: mk_verd(tagged(tag, msg), line), scope: scope, tys: tys }
+}
+// A type-layer refusal already carries its own "<TAG>|<msg>" wire; only the
+// anchoring line is the statement's.
+fn fb_type_refuse(v: Str, line: Int, scope: List[Bind], tys: List[Bind]) -> FbR {
+  return { v: mk_verd(v, line), scope: scope, tys: tys }
 }
 
 // The walk. A "bail" ends THIS block with no verdict: an unmodelled statement may
 // bind a name, so nothing after it in the same scope can be judged — but a block
 // never leaks a binding outward, so an enclosing scope carries on unaffected.
-fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind]) -> FbR {
-  if (i >= steps.length()) { return fb_clean(scope) }
+//
+// docs/design/457 T3a: the walk now threads a second environment beside the
+// binding scope — `tys`, the statement layer's `TEnv` — and consults the type
+// algebra at each position `_lower_pure_stmt` does. The two run in the
+// reference's own per-statement ORDER: a `let`'s redeclaration guard fires
+// before its initialiser is typed, an assignment's two scope guards before its
+// right-hand side, and a `for`'s binding guard before its iterable. `ret` is
+// the declared return type (""" when the signature writes none), which is the
+// checking position every `return` in the body reports against.
+fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
+           ret: Str) -> FbR {
+  if (i >= steps.length()) { return fb_clean(scope, tys) }
   let s = steps[i]
-  if (s.kind == "bail") { return fb_clean(scope) }
+  if (s.kind == "bail") { return fb_clean(scope, tys) }
   if (s.kind == "let") {
     if (tenv_get(scope, s.name) != "") {
-      return fb_refuse("G6", fb_already_msg(s.name), s.line, scope)
+      return fb_refuse("G6", fb_already_msg(s.name), s.line, scope, tys)
     }
     let birth = s.mutable ? "var" : (fb_host_value(s.value, scope) ? "host" : "let")
-    return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth))
+    // a WRITTEN annotation is the checking position for the initialiser and the
+    // type the name takes; without one the name takes the inferred type.
+    let r = s.declTy == "" ? tk_infer(s.value, tys)
+                           : tk_check(s.value, s.declTy, tys,
+                                      "`let ".concat(s.name).concat(": ")
+                                        .concat(tk_render(s.declTy)).concat("`"))
+    if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
+    let lo = tk_low(s.value, tys)
+    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+    let bound = s.declTy == "" ? r.ty : s.declTy
+    let tys2 = bound == "" ? tys : tenv_put(tys, s.name, bound)
+    // a binding the REFERENCE also has no type for (docs/design/457 T2b): its
+    // initialiser calls a declaration that returns nothing. That is the one
+    // receiver the unpinned-stdlib-method refusal may fire on; a type this walk
+    // merely failed to infer is one the reference may well have.
+    let tys3 = bound == "" && tk_def_unknown(s.value, tys)
+                 ? tenv_put(tys2, "unk ".concat(s.name), "1") : tys2
+    return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth), tys3, ret)
   }
   if (s.kind == "assign") {
     let held = tenv_get(scope, s.name)
     if (held == "") {
-      return fb_refuse("G1", fb_undeclared_msg(s.name), s.line, scope)
+      return fb_refuse("G1", fb_undeclared_msg(s.name), s.line, scope, tys)
     }
     if (held == "let") {
-      return fb_refuse("G6", fb_reassign_msg(s.name), s.line, scope)
+      return fb_refuse("G6", fb_reassign_msg(s.name), s.line, scope, tys)
     }
-    return fb_walk(steps, i + 1, scope)
+    // `x op= e` desugars to `x = x op e` before the value is typed, exactly as
+    // `_lower_pure_stmt` composes it, so a mixed-width compound assignment is
+    // the same refusal the spelled-out form draws. The declared-vs-inferred
+    // comparison at an assignment is NOT made here: it is the one position the
+    // reference widens a bottom at (`widen_bottom`), and an approximation of
+    // that rule refuses accumulator code the reference admits.
+    // issue #1157: the rust emitter MOVES a once-read binding whose initialiser
+    // is an untyped ternary, so `s.value` read again below borrowed after the
+    // move and the regenerated crate did not compile. The annotation is what
+    // keeps the initialiser typed, and the lowering pass reads `val` — a
+    // desugared compound carries the same expression under a `Var` and a
+    // literal operator, so the two walks reach exactly the same method calls.
+    let val: Expr = s.op == "=" ? s.value
+                                : Bin({ op: s.op, l: Var(s.name), r: s.value,
+                                        paren: false })
+    let r = tk_infer(val, tys)
+    if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
+    let lo = tk_low(val, tys)
+    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+    return fb_walk(steps, i + 1, scope, tys, ret)
+  }
+  if (s.kind == "return") {
+    // a bare `return` writes no value; the reference's own bare-return-in-a-
+    // typed-fn refusal is the totality slice's, not this one's.
+    if (s.op == "bare") { return fb_walk(steps, i + 1, scope, tys, ret) }
+    let r = tk_check(s.value, ret, tys, "this function's return")
+    if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
+    let lo = tk_low(s.value, tys)
+    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+    return fb_walk(steps, i + 1, scope, tys, ret)
+  }
+  if (s.kind == "expr") {
+    let r = tk_infer(s.value, tys)
+    if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
+    let lo = tk_low(s.value, tys)
+    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+    return fb_walk(steps, i + 1, scope, tys, ret)
+  }
+  if (s.kind == "assert") {
+    let r = tk_cond(s.value, tys, "assert")
+    if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
+    let lo = tk_low(s.value, tys)
+    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+    return fb_walk(steps, i + 1, scope, tys, ret)
   }
   if (s.kind == "if") {
-    let a = fb_walk(s.then_, 0, scope)
+    let c = tk_cond(s.value, tys, "if")
+    if (c.v != "") { return fb_type_refuse(c.v, s.line, scope, tys) }
+    let clo = tk_low(s.value, tys)
+    if (clo != "") { return fb_type_refuse(clo, s.line, scope, tys) }
+    let a = fb_walk(s.then_, 0, scope, tys, ret)
     if (a.v.v != "") { return a }
-    let b = fb_walk(s.els, 0, scope)
+    let b = fb_walk(s.els, 0, scope, tys, ret)
     if (b.v.v != "") { return b }
-    return fb_walk(steps, i + 1, scope)
+    return fb_walk(steps, i + 1, scope, tys, ret)
   }
   if (s.kind == "while") {
-    let a = fb_walk(s.body, 0, scope)
+    let c = tk_cond(s.value, tys, "while")
+    if (c.v != "") { return fb_type_refuse(c.v, s.line, scope, tys) }
+    let clo = tk_low(s.value, tys)
+    if (clo != "") { return fb_type_refuse(clo, s.line, scope, tys) }
+    let a = fb_walk(s.body, 0, scope, tys, ret)
     if (a.v.v != "") { return a }
-    return fb_walk(steps, i + 1, scope)
+    return fb_walk(steps, i + 1, scope, tys, ret)
   }
   if (s.kind == "for") {
     if (tenv_get(scope, s.name) != "") {
-      return fb_refuse("G6", fb_already_msg(s.name), s.line, scope)
+      return fb_refuse("G6", fb_already_msg(s.name), s.line, scope, tys)
     }
-    let a = fb_walk(s.body, 0, tenv_put(scope, s.name, "let"))
+    let it = tk_infer(s.value, tys)
+    if (it.v != "") { return fb_type_refuse(it.v, s.line, scope, tys) }
+    let ilo = tk_low(s.value, tys)
+    if (ilo != "") { return fb_type_refuse(ilo, s.line, scope, tys) }
+    let elem = parse_head(it.ty) == "List" ? type_arg1(it.ty) : ""
+    let a = fb_walk(s.body, 0, tenv_put(scope, s.name, "let"),
+                    elem == "" ? tys : tenv_put(tys, s.name, elem), ret)
     if (a.v.v != "") { return a }
-    return fb_walk(steps, i + 1, scope)
+    return fb_walk(steps, i + 1, scope, tys, ret)
   }
-  return fb_walk(steps, i + 1, scope)
+  return fb_walk(steps, i + 1, scope, tys, ret)
 }
 
 // Every parameter, recorded NOT mutable — the reference's `scope[param] = False`,
@@ -7442,30 +9299,225 @@ fn fb_params_scope(ps: List[ParamN], i: Int, acc: List[Bind]) -> List[Bind] {
   return fb_params_scope(ps, i + 1, tenv_put(acc, ps[i].name, "let"))
 }
 
+// The TYPE half of the same seed (docs/design/457 T3a): every parameter at its
+// DECLARED type, over the program-wide table `case_binds` already builds for the
+// lowering (the case/payload rows, the `field <Type>.<name>` rows, the declared
+// type names and the module `fn` signatures). A parameter with no written type
+// contributes nothing, which leaves it on the gradual frontier rather than
+// guessing at it.
+fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
+                 tps: List[Str]) -> List[Bind] {
+  if (i >= ps.length()) { return acc }
+  let ty = mark_tparams(taint_strip(ps[i].ty), tps)
+  return fb_params_tys(ps, i + 1,
+                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps)
+}
+
 // One module `fn` located from its `fn` keyword (`pub` already stepped over by
 // the caller, as `fns_walk` does): its parameters, its statement span, and the
 // index past the whole declaration. `ok` is false for a signature this reader
 // does not spell — a type-parameter list, a trailer other than `cache pure`, an
 // unbalanced body — and such a `fn` is skipped rather than judged.
-type FbSpan = { ps: List[ParamN], lo: Int, hi: Int, next: Int, ok: Bool }
+// `name`/`line` are the declaration's own (the anchor `_check_returns_on_every_
+// path` uses). `ret` is the declared return spelling the TYPE walk holds the
+// body to (taint-stripped, so an `Untrusted[Str]` return checks as `Str`), and
+// `retDecl` the spelling as WRITTEN, which is the one the returns-on-every-path
+// sentences quote. Both are "" for a `fn` that declares no return and for one
+// whose annotation this reader cannot spell.
+type FbSpan = { ps: List[ParamN], ret: Str, lo: Int, hi: Int, next: Int,
+                ok: Bool, name: Str, line: Int, retDecl: Str }
 
-fn fb_no_span() -> FbSpan { return { ps: [], lo: 0, hi: 0, next: 0, ok: false } }
+fn fb_no_span() -> FbSpan {
+  return { ps: [], ret: "", lo: 0, hi: 0, next: 0, ok: false, name: "",
+           line: 0, retDecl: "" }
+}
 
 fn fb_span(ts: List[Token], i: Int) -> FbSpan {
   if (!atk(ts, i + 2, "(")) { return fb_no_span() }
   let ps = params_at(ts, i + 3)
   var reti = ps.i
-  if (atk(ts, ps.i, "arrow")) { let tr = type_at(ts, ps.i + 1)  reti = tr.i }
+  var ret = ""
+  var retDecl = ""
+  if (atk(ts, ps.i, "arrow")) {
+    let tr = type_at(ts, ps.i + 1)
+    if (tr.ok) { ret = taint_strip(tr.ty)  retDecl = tr.ty }
+    reti = tr.i
+  }
   if (ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")) { reti += 2 }
   if (!atk(ts, reti, "{")) { return fb_no_span() }
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return fb_no_span() }
   let body = reti + 1
-  return { ps: ps.ps, lo: body, hi: bend - 1, next: bend, ok: true }
+  return { ps: ps.ps, ret: ret, lo: body, hi: bend - 1, next: bend, ok: true,
+           name: tkc(ts, i + 1).text, line: tkc(ts, i).line, retDecl: retDecl }
 }
 
-fn fb_function(ts: List[Token], sp: FbSpan) -> Verd {
-  return fb_walk(fb_scan(ts, sp.lo, sp.hi), 0, fb_params_scope(sp.ps, 0, [])).v
+// -------------------------------------------- returns on every path (T1/457)
+//
+// `_check_returns_on_every_path` (src/revl/lower.py), the LAST obligation
+// `_lower_fns` runs for a `fn` — after its body — so it sits here, after
+// `fb_walk`, inside the same declaration-order loop. A `fn` with a declared
+// return type must return on every path: python and TypeScript would hand back
+// `None`/`undefined`, while rust refuses with E0308 and javac with "missing
+// return statement", so a program the front end accepts must compile on every
+// tier.
+//
+// The termination rule is the reference's `_definitely_returns`, which is the
+// conservative reading Java (JLS 14.21) and Rust apply:
+//   * a `return` terminates;
+//   * an `if` terminates only when BOTH arms do — a missing or empty `else`
+//     never terminates, which is why no "has an else" flag is needed here: an
+//     absent arm is an empty step list and an empty step list never returns;
+//   * a `for`, and a `while` whose condition is not the literal `true`, may run
+//     zero times and so terminates nothing;
+//   * `while (true)` diverges, and so terminates the path, exactly when its body
+//     has no `break` TARGETING it (item 379) — a `break` inside a nested loop
+//     belongs to that loop and does not let this one fall through.
+//
+// WHERE IT WITHHOLDS, and why each silence is the sound direction. This reader
+// sees fewer statements than the reference's AST walk, and the asymmetry is the
+// whole argument: a `return` it fails to see would turn an admitting body into a
+// refusal, which is the FALSE-REJECTION direction this gate may not err in. So a
+// body carrying any statement `fb_scan` could not model decides nothing at all —
+// one "bail" anywhere in the tree (an `else if` chain, a destructuring binder, an
+// unparsed statement) and the whole `fn` is left to the reference. The same goes
+// for a declared return type that mentions a TRANSPARENT type alias: the
+// reference erases aliases before it spells this message (`_resolve_type_aliases`
+// substitutes `fn.returns` in place), so quoting the written spelling would
+// disagree on the message text even where the verdict agrees. Erasure is the
+// type-spelling slice's (docs/design/457 T1); until it lands, such a `fn` is
+// withheld rather than guessed at.
+
+fn rp_true_cond(e: Expr) -> Bool {
+  return match e { BoolLit(s) => s == "true", _ => false, }
+}
+
+// `_has_return`: a `return` anywhere in the tree, loop bodies included.
+fn rp_has_return(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "return") { return true }
+  if (rp_has_return(s.then_, 0) || rp_has_return(s.els, 0)
+      || rp_has_return(s.body, 0)) { return true }
+  return rp_has_return(steps, i + 1)
+}
+
+// `_loop_has_targeting_break`: a `break` at any depth that is not itself inside
+// a nested `while`/`for`, so `s.body` is deliberately NOT descended.
+fn rp_loop_break(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "break") { return true }
+  if (s.kind == "if"
+      && (rp_loop_break(s.then_, 0) || rp_loop_break(s.els, 0))) { return true }
+  return rp_loop_break(steps, i + 1)
+}
+
+// `_definitely_returns`.
+fn rp_returns(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "return") { return true }
+  if (s.kind == "if" && rp_returns(s.then_, 0) && rp_returns(s.els, 0)) {
+    return true
+  }
+  if (s.kind == "while" && rp_true_cond(s.value)
+      && !rp_loop_break(s.body, 0)) { return true }
+  return rp_returns(steps, i + 1)
+}
+
+// Any statement this reader could not model, at any depth.
+fn rp_has_bail(steps: List[FbStep], i: Int) -> Bool {
+  if (i >= steps.length()) { return false }
+  let s = steps[i]
+  if (s.kind == "bail") { return true }
+  if (rp_has_bail(s.then_, 0) || rp_has_bail(s.els, 0)
+      || rp_has_bail(s.body, 0)) { return true }
+  return rp_has_bail(steps, i + 1)
+}
+
+// Every TRANSPARENT type alias the text declares. Deliberately OVER-inclusive:
+// a declaration with no top-level `|` and no `{` after the `=` is called an
+// alias here even when it is a single-case variant, because naming one type too
+// many only withholds a verdict while naming one too few would spell an erased
+// message with its pre-erasure text.
+fn rp_aliases(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "type") && tkc(ts, i + 1).kind == "ident") {
+      let end = type_decl_end(ts, i + 1)
+      if (atk(ts, i + 2, "=") && !atk(ts, i + 3, "{")
+          && !has_top_bar(ts, i + 1, end)) {
+        out = union_into(out, [tkc(ts, i + 1).text])
+      }
+      i = end
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+// Whether a type SPELLING names one of `names`, read through the lexer so a
+// head, an argument and a fn-type position are all covered and no substring of
+// a longer identifier ever matches.
+fn rp_mentions(ty: Str, names: List[Str]) -> Bool {
+  if (names.length() == 0) { return false }
+  let ts = lex_src(ty)
+  var i = 0
+  while (i < ts.length()) {
+    let t = ts[i]
+    if (t.kind == "ident" && contains(names, t.text)) { return true }
+    i += 1
+  }
+  return false
+}
+
+fn rp_no_value_msg(name: Str, ret: Str) -> Str {
+  return "`".concat(name).concat("` is declared to return `").concat(ret)
+    .concat("` but its body never returns a value")
+}
+
+fn rp_some_path_msg(name: Str, ret: Str) -> Str {
+  return "`".concat(name).concat("` is declared to return `").concat(ret)
+    .concat("` but control can reach the end of its body without a `return`")
+}
+
+// `decl.body[-1].line` — the reference anchors the incomplete-path refusal at
+// the LAST statement of the body and the never-returns one at the declaration.
+fn rp_last_line(steps: List[FbStep], dflt: Int) -> Int {
+  if (steps.length() == 0) { return dflt }
+  return steps[steps.length() - 1].line
+}
+
+fn rp_refusal(ts: List[Token], sp: FbSpan, steps: List[FbStep]) -> Verd {
+  if (sp.retDecl == "" || sp.name == "") { return no_verd() }
+  if (rp_returns(steps, 0)) { return no_verd() }
+  if (rp_has_bail(steps, 0)) { return no_verd() }
+  if (rp_mentions(sp.retDecl, rp_aliases(ts))) { return no_verd() }
+  if (!rp_has_return(steps, 0)) {
+    return mk_verd(tagged("T1", rp_no_value_msg(sp.name, sp.retDecl)), sp.line)
+  }
+  return mk_verd(tagged("T1", rp_some_path_msg(sp.name, sp.retDecl)),
+                 rp_last_line(steps, sp.line))
+}
+
+fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
+  // Inside its own body a fn's type parameters are universally quantified
+  // wildcards (`T` -> `?T`, `mark_tparams`), so a generic signature's return
+  // is not a concrete type the body can be held to. Without the marking
+  // `fn ident(x: T) -> T` refused its own `return x`, and `misuse`'s
+  // `return ident("hello")` drew a T1 naming `T` where the reference names the
+  // UNIFIED `Str` — a refusal with the right verdict and the wrong sentence.
+  let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
+  let steps = fb_scan(ts, sp.lo, sp.hi)
+  // the body first, then the return question — `_lower_fns`' own order.
+  let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []),
+                  fb_params_tys(sp.ps, 0, gtys, tps),
+                  mark_tparams(sp.ret, tps)).v
+  if (v.v != "") { return v }
+  return rp_refusal(ts, sp, steps)
 }
 
 // The first refusing module `fn` in declaration order. Top-level forms other than
@@ -7473,30 +9525,45 @@ fn fb_function(ts: List[Token], sp: FbSpan) -> Verd {
 // in a component is a provide method, not a module function, and the component
 // body has its own (already mirrored) scope rules.
 fn fb_refusal(ts: List[Token], i: Int) -> Verd {
+  // the program-wide type table, built ONCE for the whole walk (it reads the
+  // entire token stream, so recomputing it per `fn` would be quadratic). The
+  // signature rows (docs/design/457 T2b) are a second pass over the same
+  // stream, because the type-parameter marking a signature carries depends on
+  // the DECLARED type names, which a `type` written after the `fn` still joins.
+  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts)))
+}
+
+fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind]) -> Verd {
   if (i >= ts.length() || atk(ts, i, "eof")) { return no_verd() }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fb_refusal(ts, i + 1) }
-  if (at_event(ts, i)) { return fb_refusal(ts, event_decl_end(ts, i)) }
-  if (t.kind != "kw") { return fb_refusal(ts, skip_line(ts, i)) }
-  if (at_pub_prefix(ts, i)) { return fb_refusal(ts, i + 1) }
-  if (t.text == "type") { return fb_refusal(ts, type_decl_end(ts, i + 1)) }
-  if (t.text == "use") { return fb_refusal(ts, skip_line(ts, i)) }
+  if (at_boot(ts, i)) { return fb_refusal_at(ts, i + 1, gtys) }
+  if (at_event(ts, i)) { return fb_refusal_at(ts, event_decl_end(ts, i), gtys) }
+  if (t.kind != "kw") { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
+  if (at_pub_prefix(ts, i)) { return fb_refusal_at(ts, i + 1, gtys) }
+  if (t.text == "type") { return fb_refusal_at(ts, type_decl_end(ts, i + 1), gtys) }
+  if (t.text == "use") { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fb_refusal(ts, e) }
-    return fb_refusal(ts, skip_line(ts, i))
+    if (e != 0 - 1) { return fb_refusal_at(ts, e, gtys) }
+    return fb_refusal_at(ts, skip_line(ts, i), gtys)
   }
-  if (t.text == "extern") { return fb_refusal(ts, p_extern(ts, i, empty_prog()).i) }
-  if (t.text == "service") { return fb_refusal(ts, p_service(ts, i, empty_prog()).i) }
-  if (t.text == "component") { return fb_refusal(ts, p_component(ts, i, empty_prog()).i) }
+  if (t.text == "extern") {
+    return fb_refusal_at(ts, p_extern(ts, i, empty_prog()).i, gtys)
+  }
+  if (t.text == "service") {
+    return fb_refusal_at(ts, p_service(ts, i, empty_prog()).i, gtys)
+  }
+  if (t.text == "component") {
+    return fb_refusal_at(ts, p_component(ts, i, empty_prog()).i, gtys)
+  }
   if (t.text == "fn") {
     let sp = fb_span(ts, i)
-    if (!sp.ok) { return fb_refusal(ts, skip_line(ts, i)) }
-    let v = fb_function(ts, sp)
+    if (!sp.ok) { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
+    let v = fb_function(ts, i, sp, gtys)
     if (v.v != "") { return v }
-    return fb_refusal(ts, sp.next)
+    return fb_refusal_at(ts, sp.next, gtys)
   }
-  return fb_refusal(ts, skip_line(ts, i))
+  return fb_refusal_at(ts, skip_line(ts, i), gtys)
 }
 
 // --------------------------------------- the shadowed module callable (G6/391)
@@ -9502,7 +11569,7 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 // A component-dialect pure value expression -> an IR node. `sc` is the lexical
 // scope (names visible as `{"kind": "name", "id": …}`); `reqSet` the required-
 // service roots.
-fn cir_expr(e: Expr, sc: List[Str], reqSet: List[Str]) -> IrRes {
+fn cir_expr(e: Expr, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
   return match e {
     IntLit(v)   => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
     FloatLit(v) => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
@@ -9511,29 +11578,29 @@ fn cir_expr(e: Expr, sc: List[Str], reqSet: List[Str]) -> IrRes {
     Var(n)      => contains(sc, n)
       ? mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
       : mk_irres(false, ""),
-    Bin(b)      => cir_bin(b, sc, reqSet),
-    Un(u)       => cir_un(u, sc, reqSet),
-    If(f)       => cir_if_expr(f, sc, reqSet),
-    Field(f)    => cir_field(f, sc, reqSet),
-    Call(c)     => cir_call(c.target, c.args, sc, reqSet),
+    Bin(b)      => cir_bin(b, sc, hostSc, reqSet),
+    Un(u)       => cir_un(u, sc, hostSc, reqSet),
+    If(f)       => cir_if_expr(f, sc, hostSc, reqSet),
+    Field(f)    => cir_field(f, sc, hostSc, reqSet),
+    Call(c)     => cir_call(c.target, c.args, sc, hostSc, reqSet),
     // `emit <call>` in value/return position is a plain observation of the
     // emission: the reference (`_lower_component_pure_expr` EmitExpr) strips the
     // marker and lowers the inner call, so the IR node is just that call.
-    Emit(u)     => cir_expr(u.e, sc, reqSet),
+    Emit(u)     => cir_expr(u.e, sc, hostSc, reqSet),
     _           => mk_irres(false, ""),
   }
 }
 
-fn cir_args(args: List[Expr], i: Int, sc: List[Str], reqSet: List[Str], acc: Str) -> IrRes {
+fn cir_args(args: List[Expr], i: Int, sc: List[Str], hostSc: List[Str], reqSet: List[Str], acc: Str) -> IrRes {
   if (i >= args.length()) { return mk_irres(true, acc) }
-  let e = cir_expr(args[i], sc, reqSet)
+  let e = cir_expr(args[i], sc, hostSc, reqSet)
   if (!e.ok) { return mk_irres(false, "") }
   let nacc = acc == "" ? e.js : acc.concat(", ").concat(e.js)
-  return cir_args(args, i + 1, sc, reqSet, nacc)
+  return cir_args(args, i + 1, sc, hostSc, reqSet, nacc)
 }
 
-fn cir_reqcall(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let a = cir_args(args, 0, sc, reqSet, "")
+fn cir_reqcall(root: Str, meth: Str, args: List[Expr], sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true,
     "{\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": "
@@ -9545,8 +11612,8 @@ fn cir_reqcall(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: Li
 // `recv` tag; the covered component surface never spells one, so the receiver
 // type is unknown here and it is emitted as `null` (byte-exact where `recv` is
 // unread, honest where it would be — no corpus component reaches it).
-fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let a = cir_args(args, 0, sc, reqSet, "")
+fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
   if (!a.ok) { return mk_irres(false, "") }
   var s = "{\"kind\": \"builtin\", \"method\": ".concat(jstr(meth))
     .concat(", \"target\": {\"kind\": \"name\", \"id\": ").concat(jstr(root)).concat("}")
@@ -9555,50 +11622,86 @@ fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: Li
   return mk_irres(true, s.concat("}"))
 }
 
-fn cir_call(tg: Expr, args: List[Expr], sc: List[Str], reqSet: List[Str]) -> IrRes {
+fn cir_call(tg: Expr, args: List[Expr], sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
   return match tg {
     Field(fl) => match fl.target {
       Var(root) => contains(reqSet, root)
-        ? cir_reqcall(root, fl.name, args, sc, reqSet)
-        : (contains(sc, root) && is_builtin_method(fl.name)
-            ? cir_builtin(root, fl.name, args, sc, reqSet)
-            : mk_irres(false, "")),
+        ? cir_reqcall(root, fl.name, args, sc, hostSc, reqSet)
+        // Host provenance is read BEFORE the stdlib builtin table, exactly as
+        // the reference reads it (`src/revl/lower.py::_lower_postfix`): `remove`
+        // is spelled by both surfaces, and on a host-acquired receiver it is the
+        // host verb, dispatched by receiver KIND and not by name.
+        : (contains(hostSc, root)
+            ? cir_hostverb(root, fl.name, args, sc, hostSc, reqSet)
+            : (is_host_root(root)
+                ? cir_hostacq(root, fl.name, args, sc, hostSc, reqSet)
+                : (contains(sc, root) && is_builtin_method(fl.name)
+                    ? cir_builtin(root, fl.name, args, sc, hostSc, reqSet)
+                    : mk_irres(false, "")))),
       _ => mk_irres(false, ""),
     },
     _ => mk_irres(false, ""),
   }
 }
 
-fn cir_field(f: FieldN, sc: List[Str], reqSet: List[Str]) -> IrRes {
+// `Map.new()` / `Pool.open(…)` — a HOST ACQUISITION. The reference lowers an
+// upper-cased callable head in a component position to `{kind:"host", fn:
+// "<Root>.<verb>", args}` (`_lower_postfix`); `Map.empty()` is the Map VALUE
+// constructor rather than an acquisition and lowers to a `maplit`, so it is
+// stepped aside here instead of being given a host node it is not.
+fn cir_hostacq(root: Str, meth: Str, args: List[Expr], sc: List[Str],
+               hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  if (root == "Map" && meth == "empty") { return mk_irres(false, "") }
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"host\", \"fn\": "
+    .concat(jstr(root.concat(".").concat(meth)))
+    .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+// A verb called on a name bound to a host acquisition (`store.insert(k, v)`
+// where `let store = effect Map.new() …`). The host object's verb surface stays
+// verbatim, so the node is a plain `call` on the name — never a `builtin`.
+fn cir_hostverb(root: Str, meth: Str, args: List[Expr], sc: List[Str],
+                hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true,
+    "{\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": "
+      .concat(jstr(root)).concat("}, \"method\": ").concat(jstr(meth))
+      .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+fn cir_field(f: FieldN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
   let isConfig = match f.target { Var(n) => n == "config", _ => false, }
   if (isConfig) {
     return mk_irres(true, "{\"kind\": \"config\", \"field\": ".concat(jstr(f.name)).concat("}"))
   }
-  let t = cir_expr(f.target, sc, reqSet)
+  let t = cir_expr(f.target, sc, hostSc, reqSet)
   if (!t.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"field\", \"target\": ".concat(t.js)
     .concat(", \"name\": ").concat(jstr(f.name)).concat("}"))
 }
 
-fn cir_bin(b: BinN, sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let l = cir_expr(b.l, sc, reqSet)
-  let r = cir_expr(b.r, sc, reqSet)
+fn cir_bin(b: BinN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let l = cir_expr(b.l, sc, hostSc, reqSet)
+  let r = cir_expr(b.r, sc, hostSc, reqSet)
   if (!l.ok || !r.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"bin\", \"op\": ".concat(jstr(b.op))
     .concat(", \"left\": ").concat(l.js).concat(", \"right\": ").concat(r.js).concat("}"))
 }
 
-fn cir_un(u: UnN, sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let o = cir_expr(u.e, sc, reqSet)
+fn cir_un(u: UnN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let o = cir_expr(u.e, sc, hostSc, reqSet)
   if (!o.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"un\", \"op\": ".concat(jstr(u.op))
     .concat(", \"operand\": ").concat(o.js).concat("}"))
 }
 
-fn cir_if_expr(f: IfN, sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let c = cir_expr(f.cond, sc, reqSet)
-  let t = cir_expr(f.then_, sc, reqSet)
-  let e = cir_expr(f.els, sc, reqSet)
+fn cir_if_expr(f: IfN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let c = cir_expr(f.cond, sc, hostSc, reqSet)
+  let t = cir_expr(f.then_, sc, hostSc, reqSet)
+  let e = cir_expr(f.els, sc, hostSc, reqSet)
   if (!c.ok || !t.ok || !e.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"if\", \"cond\": ".concat(c.js)
     .concat(", \"then\": ").concat(t.js).concat(", \"else\": ").concat(e.js).concat("}"))
@@ -9610,21 +11713,21 @@ type StepR = { ok: Bool, js: Str, i: Int }
 // `if (<cond>) { <guard> } [else { <guard> }]` -> the component guard step. The
 // then/else bodies hold only `fail` and nested `if` (a component `if` is an
 // L-Raise decision, not general control flow). `else` is present only when spelled.
-fn cir_if_step(ts: List[Token], i: Int, reqSet: List[Str], sc: List[Str]) -> StepR {
+fn cir_if_step(ts: List[Token], i: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str]) -> StepR {
   let c = expr_at(ts, i + 1)
   if (is_bad(c.e)) { return { ok: false, js: "", i: i } }
-  let ce = cir_expr(c.e, sc, reqSet)
+  let ce = cir_expr(c.e, sc, hostSc, reqSet)
   if (!ce.ok || !atk(ts, c.i, "{")) { return { ok: false, js: "", i: i } }
   let tend = close_brace(ts, c.i)
   if (tend == 0 - 1) { return { ok: false, js: "", i: i } }
-  let thenR = cir_guard_stmts(ts, c.i + 1, tend - 1, reqSet, sc, "")
+  let thenR = cir_guard_stmts(ts, c.i + 1, tend - 1, reqSet, sc, hostSc, "")
   if (!thenR.ok) { return { ok: false, js: "", i: i } }
   var js = "{\"step\": \"if\", \"cond\": ".concat(ce.js).concat(", \"then\": [").concat(thenR.js).concat("]")
   var nexti = tend
   if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
     let eend = close_brace(ts, tend + 1)
     if (eend == 0 - 1) { return { ok: false, js: "", i: i } }
-    let elseR = cir_guard_stmts(ts, tend + 2, eend - 1, reqSet, sc, "")
+    let elseR = cir_guard_stmts(ts, tend + 2, eend - 1, reqSet, sc, hostSc, "")
     if (!elseR.ok) { return { ok: false, js: "", i: i } }
     js = js.concat(", \"else\": [").concat(elseR.js).concat("]")
     nexti = eend
@@ -9633,49 +11736,49 @@ fn cir_if_step(ts: List[Token], i: Int, reqSet: List[Str], sc: List[Str]) -> Ste
 }
 
 // The `fail`/nested-`if` guard steps of a component `if`.
-fn cir_guard_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], acc: Str) -> IrRes {
+fn cir_guard_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
   if (atw(ts, lo, "fail")) {
     let r = expr_at(ts, lo + 1)
     if (is_bad(r.e)) { return mk_irres(false, "") }
-    let m = cir_expr(r.e, sc, reqSet)
+    let m = cir_expr(r.e, sc, hostSc, reqSet)
     if (!m.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"fail\", \"message\": ".concat(m.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_guard_stmts(ts, r.i, hi, reqSet, sc, nacc)
+    return cir_guard_stmts(ts, r.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "if")) {
-    let g = cir_if_step(ts, lo, reqSet, sc)
+    let g = cir_if_step(ts, lo, reqSet, sc, hostSc)
     if (!g.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? g.js : acc.concat(", ").concat(g.js)
-    return cir_guard_stmts(ts, g.i, hi, reqSet, sc, nacc)
+    return cir_guard_stmts(ts, g.i, hi, reqSet, sc, hostSc, nacc)
   }
   return mk_irres(false, "")
 }
 
 // A run of `emit <expr>` steps (a timer body). `compensate` is permitted but
 // absent from the covered timer corpus.
-fn cir_emit_steps(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], acc: Str) -> IrRes {
+fn cir_emit_steps(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
   if (!atw(ts, lo, "emit")) { return mk_irres(false, "") }
-  let em = cir_emit_step(ts, lo, reqSet, sc)
+  let em = cir_emit_step(ts, lo, reqSet, sc, hostSc)
   if (!em.ok) { return mk_irres(false, "") }
   let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-  return cir_emit_steps(ts, em.i, hi, reqSet, sc, nacc)
+  return cir_emit_steps(ts, em.i, hi, reqSet, sc, hostSc, nacc)
 }
 
 // One `emit <expr> [compensate <expr>]` step.
-fn cir_emit_step(ts: List[Token], lo: Int, reqSet: List[Str], sc: List[Str]) -> StepR {
+fn cir_emit_step(ts: List[Token], lo: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str]) -> StepR {
   let r = expr_at(ts, lo + 1)
   if (is_bad(r.e)) { return { ok: false, js: "", i: lo } }
-  let ee = cir_expr(r.e, sc, reqSet)
+  let ee = cir_expr(r.e, sc, hostSc, reqSet)
   if (!ee.ok) { return { ok: false, js: "", i: lo } }
   var step = "{\"step\": \"emit\", \"expr\": ".concat(ee.js)
   var nx = r.i
   if (atw(ts, r.i, "compensate")) {
     let cmp = expr_at(ts, r.i + 1)
     if (is_bad(cmp.e)) { return { ok: false, js: "", i: lo } }
-    let ce = cir_expr(cmp.e, sc, reqSet)
+    let ce = cir_expr(cmp.e, sc, hostSc, reqSet)
     if (!ce.ok) { return { ok: false, js: "", i: lo } }
     step = step.concat(", \"compensate\": ").concat(ce.js)
     nx = cmp.i
@@ -9685,43 +11788,43 @@ fn cir_emit_step(ts: List[Token], lo: Int, reqSet: List[Str], sc: List[Str]) -> 
 
 // A provide-method's body steps (`effect`/`emit`/`return`/`let`). Scope `sc`
 // starts as the method's params and grows with each `let`.
-fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], acc: Str) -> IrRes {
+fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
-  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, acc) }
+  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, hostSc, acc) }
   if (atw(ts, lo, "effect")) {
     if (atw(ts, lo + 1, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, lo + 1)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
-    let ae = cir_expr(acq.e, sc, reqSet)
+    let ae = cir_expr(acq.e, sc, hostSc, reqSet)
     if (!ae.ok) { return mk_irres(false, "") }
     if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
-    let ue = cir_expr(und.e, sc, reqSet)
+    let ue = cir_expr(und.e, sc, hostSc, reqSet)
     if (!ue.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, und.i, hi, reqSet, sc, nacc)
+    return cir_method_stmts(ts, und.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "emit")) {
-    let em = cir_emit_step(ts, lo, reqSet, sc)
+    let em = cir_emit_step(ts, lo, reqSet, sc, hostSc)
     if (!em.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-    return cir_method_stmts(ts, em.i, hi, reqSet, sc, nacc)
+    return cir_method_stmts(ts, em.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "return")) {
     let r = expr_at(ts, lo + 1)
     if (is_bad(r.e) || r.i <= lo + 1) {
       let step0 = "{\"step\": \"return\", \"expr\": null}"
       let nacc0 = acc == "" ? step0 : acc.concat(", ").concat(step0)
-      return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, nacc0)
+      return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, hostSc, nacc0)
     }
-    let ve = cir_expr(r.e, sc, reqSet)
+    let ve = cir_expr(r.e, sc, hostSc, reqSet)
     if (!ve.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"return\", \"expr\": ".concat(ve.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, reqSet, sc, nacc)
+    return cir_method_stmts(ts, r.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "let") || atw(ts, lo, "var")) {
     let mutable = atw(ts, lo, "var")
@@ -9731,12 +11834,12 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: Li
     if (!atk(ts, j, "=")) { return mk_irres(false, "") }
     let r = expr_at(ts, j + 1)
     if (is_bad(r.e) || r.i <= j + 1) { return mk_irres(false, "") }
-    let ve = cir_expr(r.e, sc, reqSet)
+    let ve = cir_expr(r.e, sc, hostSc, reqSet)
     if (!ve.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"let\", \"name\": ".concat(jstr(name)).concat(", \"value\": ")
       .concat(ve.js).concat(", \"mutable\": ").concat(mutable ? "true" : "false").concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, reqSet, sc.push(name), nacc)
+    return cir_method_stmts(ts, r.i, hi, reqSet, sc.push(name), hostSc, nacc)
   }
   return mk_irres(false, "")
 }
@@ -9744,7 +11847,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: Li
 // A `provide <key> { … }` method table -> `[{name, params, body}]`. Method
 // params are the surface names (typed by the service, not carried here); the
 // shorthand `= expr` becomes a single `return`.
-fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], acc: Str) -> IrRes {
+fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
   if (atw(ts, i, "async")) { return mk_irres(false, "") }
   if (!atw(ts, i, "fn")) { return mk_irres(false, "") }
@@ -9757,22 +11860,22 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], acc: S
   if (atk(ts, h, "=")) {
     let r = expr_at(ts, h + 1)
     if (is_bad(r.e)) { return mk_irres(false, "") }
-    let be = cir_expr(r.e, pnames, reqSet)
+    let be = cir_expr(r.e, pnames, hostSc, reqSet)
     if (!be.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(be.js).concat("}]}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, r.i, end, reqSet, nacc)
+    return cir_prov_methods(ts, r.i, end, reqSet, sc, hostSc, nacc)
   }
   if (atk(ts, h, "{")) {
     let bend = close_brace(ts, h)
     if (bend == 0 - 1) { return mk_irres(false, "") }
-    let br = cir_method_stmts(ts, h + 1, bend - 1, reqSet, pnames, "")
+    let br = cir_method_stmts(ts, h + 1, bend - 1, reqSet, push_all(sc, pnames, 0), hostSc, "")
     if (!br.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [").concat(br.js).concat("]}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, bend, end, reqSet, nacc)
+    return cir_prov_methods(ts, bend, end, reqSet, sc, hostSc, nacc)
   }
   return mk_irres(false, "")
 }
@@ -9781,81 +11884,107 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], acc: S
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
 fn cir_body(ts: List[Token], i: Int, end: Int, reqSet: List[Str],
-            provs: List[Bind], sc: List[Str], acc: Str) -> IrRes {
+            provs: List[Bind], sc: List[Str], hostSc: List[Str],
+            acc: Str) -> IrRes {
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
   if (atw(ts, i, "config") && atk(ts, i + 1, "{")) {
     let ce = close_brace(ts, i + 1)
     if (ce == 0 - 1) { return mk_irres(false, "") }
-    return cir_body(ts, ce, end, reqSet, provs, sc, acc)
+    return cir_body(ts, ce, end, reqSet, provs, sc, hostSc, acc)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
     if (!atk(ts, i + 2, "{")) { return mk_irres(false, "") }
     let pend = close_brace(ts, i + 2)
     if (pend == 0 - 1) { return mk_irres(false, "") }
-    let ms = cir_prov_methods(ts, i + 3, pend - 1, reqSet, "")
+    let ms = cir_prov_methods(ts, i + 3, pend - 1, reqSet, sc, hostSc, "")
     if (!ms.ok) { return mk_irres(false, "") }
     let svc = bind_lookup(provs, key, 0)
     let step = "{\"step\": \"provide\", \"name\": ".concat(jstr(key))
       .concat(", \"service\": ").concat(jstr(svc))
       .concat(", \"methods\": [").concat(ms.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, pend, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, pend, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "let") && atk(ts, i + 2, "=") && atw(ts, i + 3, "effect")) {
     let name = tkc(ts, i + 1).text
     if (atw(ts, i + 4, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, i + 4)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
-    let ae = cir_expr(acq.e, sc, reqSet)
+    let ae = cir_expr(acq.e, sc, hostSc, reqSet)
     if (!ae.ok) { return mk_irres(false, "") }
     if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
     let sc2 = sc.push(name)
+    // host provenance (the reference's `env.host_locals`): a bind whose
+    // acquisition lowered to a host node keeps the host verb surface, so every
+    // later `name.<verb>(…)` is a `call` and not a stdlib builtin.
+    let hostSc2 = starts_with(ae.js, "{\"kind\": \"host\"")
+      ? hostSc.push(name) : hostSc
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
-    let ue = cir_expr(und.e, sc2, reqSet)
+    let ue = cir_expr(und.e, sc2, hostSc2, reqSet)
     if (!ue.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
       .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, und.i, end, reqSet, provs, sc2, nacc)
+    return cir_body(ts, und.i, end, reqSet, provs, sc2, hostSc2, nacc)
   }
   if (atw(ts, i, "effect")) {
     if (atw(ts, i + 1, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, i + 1)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
-    let ae = cir_expr(acq.e, sc, reqSet)
+    let ae = cir_expr(acq.e, sc, hostSc, reqSet)
     if (!ae.ok) { return mk_irres(false, "") }
     if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
-    let ue = cir_expr(und.e, sc, reqSet)
+    let ue = cir_expr(und.e, sc, hostSc, reqSet)
     if (!ue.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, und.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, und.i, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "if")) {
-    let g = cir_if_step(ts, i, reqSet, sc)
+    let g = cir_if_step(ts, i, reqSet, sc, hostSc)
     if (!g.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? g.js : acc.concat(", ").concat(g.js)
-    return cir_body(ts, g.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, g.i, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "fail")) {
     let r = expr_at(ts, i + 1)
     if (is_bad(r.e)) { return mk_irres(false, "") }
-    let m = cir_expr(r.e, sc, reqSet)
+    let m = cir_expr(r.e, sc, hostSc, reqSet)
     if (!m.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"fail\", \"message\": ".concat(m.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, r.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, r.i, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "emit")) {
-    let em = cir_emit_step(ts, i, reqSet, sc)
+    let em = cir_emit_step(ts, i, reqSet, sc, hostSc)
     if (!em.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-    return cir_body(ts, em.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, em.i, end, reqSet, provs, sc, hostSc, nacc)
+  }
+  // `isolate <key> in realm("<label>")` and `intercept <key> with { … }` are
+  // PRELUDE declarations, not activation steps: the reference records them on
+  // the component (`isolate`/`intercept`) and emits no body step for either, so
+  // the walk steps over them structurally. The multi-realm ROUTING spelling
+  // (`in realms(...)`, item 162) is a different declaration with a different
+  // key (`routes`) and is deliberately NOT matched here — it keeps refusing.
+  if (atw(ts, i, "isolate")) {
+    if (!(atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
+          && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
+          && atk(ts, i + 6, ")"))) { return mk_irres(false, "") }
+    return cir_body(ts, i + 7, end, reqSet, provs, sc, hostSc, acc)
+  }
+  if (atw(ts, i, "intercept")) {
+    var k = i + 1
+    while (k < end && !atk(ts, k, "{")) { k += 1 }
+    if (!atk(ts, k, "{")) { return mk_irres(false, "") }
+    let ce = close_brace(ts, k)
+    if (ce == 0 - 1) { return mk_irres(false, "") }
+    return cir_body(ts, ce, end, reqSet, provs, sc, hostSc, acc)
   }
   if (atw(ts, i, "every") || atw(ts, i, "after")) {
     let mode = tkc(ts, i).text
@@ -9867,13 +11996,13 @@ fn cir_body(ts: List[Token], i: Int, end: Int, reqSet: List[Str],
     if (!atk(ts, i + 3, "{")) { return mk_irres(false, "") }
     let bend = close_brace(ts, i + 3)
     if (bend == 0 - 1) { return mk_irres(false, "") }
-    let bodyR = cir_emit_steps(ts, i + 4, bend - 1, reqSet, sc, "")
+    let bodyR = cir_emit_steps(ts, i + 4, bend - 1, reqSet, sc, hostSc, "")
     if (!bodyR.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"timer\", \"mode\": ".concat(jstr(mode))
       .concat(", \"interval_ms\": ").concat(ims)
       .concat(", \"body\": [").concat(bodyR.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, bend, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, bend, end, reqSet, provs, sc, hostSc, nacc)
   }
   return mk_irres(false, "")
 }
@@ -9910,6 +12039,80 @@ fn ir_config_default(ts: List[Token], i: Int) -> CfgDef {
   // a non-literal default is deferred: do not consume it, keep `null`.
   if (dv == "null") { return { js: "null", i: i } }
   return { js: dv, i: r.i }
+}
+
+// A static metadata VALUE (`docs`: the `record_literal` grammar — a scalar, or
+// a flat list of scalars; the grammar admits no nesting). Anything else leaves
+// `ok` false, which withholds the whole `intercept` table rather than stamping a
+// value the reference did not lower.
+fn ir_meta_value(e: Expr) -> IrRes {
+  return match e {
+    IntLit(v)   => mk_irres(true, v),
+    FloatLit(v) => mk_irres(true, v),
+    BoolLit(v)  => mk_irres(true, v),
+    StrLit(v)   => mk_irres(true, jstr(v)),
+    NullLit     => mk_irres(true, "null"),
+    Un(u)       => u.op == "-" ? ir_meta_neg(u.e) : mk_irres(false, ""),
+    Lst(l)      => ir_meta_items(l.items, 0, ""),
+    _           => mk_irres(false, ""),
+  }
+}
+
+fn ir_meta_neg(e: Expr) -> IrRes {
+  return match e {
+    IntLit(v)   => mk_irres(true, "-".concat(v)),
+    FloatLit(v) => mk_irres(true, "-".concat(v)),
+    _           => mk_irres(false, ""),
+  }
+}
+
+fn ir_meta_items(xs: List[Expr], i: Int, acc: Str) -> IrRes {
+  if (i >= xs.length()) { return mk_irres(true, "[".concat(acc).concat("]")) }
+  let v = ir_meta_value(xs[i])
+  if (!v.ok) { return mk_irres(false, "") }
+  return ir_meta_items(xs, i + 1, acc == "" ? v.js : acc.concat(", ").concat(v.js))
+}
+
+fn ir_meta_fields(fs: List[InitN], i: Int, acc: Str) -> IrRes {
+  if (i >= fs.length()) { return mk_irres(true, acc) }
+  let v = ir_meta_value(fs[i].value)
+  if (!v.ok) { return mk_irres(false, "") }
+  let e = jstr(fs[i].name).concat(": ").concat(v.js)
+  return ir_meta_fields(fs, i + 1, acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+// `intercept <key> with { … }` -> `"<key>": {…}` entries, in declaration order.
+// Scanned over the component body the way `ir_config` scans the config block:
+// the clause is a prelude declaration, so its extent is a header fact and not a
+// step the activation walk carries.
+fn ir_intercept(ts: List[Token], lo: Int, hi: Int, acc: Str) -> IrRes {
+  var j = lo
+  while (j < hi && !atw(ts, j, "intercept")) { j += 1 }
+  if (j >= hi) { return mk_irres(true, acc) }
+  let key = tkc(ts, j + 1).text
+  var k = j + 1
+  while (k < hi && !atk(ts, k, "{")) { k += 1 }
+  if (!atk(ts, k, "{")) { return mk_irres(false, "") }
+  let r = expr_at(ts, k)
+  let meta = match r.e { Rec(rc) => ir_meta_fields(rc.fields, 0, ""), _ => mk_irres(false, ""), }
+  if (!meta.ok) { return mk_irres(false, "") }
+  let e = jstr(key).concat(": {").concat(meta.js).concat("}")
+  return ir_intercept(ts, r.i, hi, acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+// `isolate <key> in realm("<label>")` -> `"<key>": "<label>"` entries. The
+// multi-realm routing spelling (`in realms(...)`) declares `routes`, not a pin,
+// and is stepped over rather than collected here.
+fn ir_isolate(ts: List[Token], lo: Int, hi: Int, acc: Str) -> Str {
+  var j = lo
+  while (j < hi && !atw(ts, j, "isolate")) { j += 1 }
+  if (j >= hi) { return acc }
+  if (atw(ts, j + 2, "in") && atw(ts, j + 3, "realm")
+      && atk(ts, j + 4, "(") && atk(ts, j + 5, "string")) {
+    let e = jstr(tkc(ts, j + 1).text).concat(": ").concat(jstr(tkc(ts, j + 5).text))
+    return ir_isolate(ts, j + 6, hi, acc == "" ? e : acc.concat(", ").concat(e))
+  }
+  return ir_isolate(ts, j + 1, hi, acc)
 }
 
 // The `config { field: Type [= <literal>] … }` block -> `[{name, type, default}]`.
@@ -9987,18 +12190,29 @@ fn ir_component(ts: List[Token], i: Int, fname: Str) -> IrCompR {
   let lo = j + 1
   let hi = end == 0 - 1 ? j + 1 : end - 1
   let reqSet = bind_names(reqs, 0, [])
-  let bodyRes = cir_body(ts, lo, hi, reqSet, provs, [], "")
+  let bodyRes = cir_body(ts, lo, hi, reqSet, provs, [], [], "")
+  let isoJs = ir_isolate(ts, lo, hi, "")
+  let iceptRes = ir_intercept(ts, lo, hi, "")
   var js = "{\"name\": ".concat(jstr(nm))
     .concat(", \"source\": ").concat(jstr(fname))
     .concat(", \"config\": [").concat(ir_config(ts, lo, hi))
     .concat("], \"requires\": {").concat(ir_binds_json(reqs))
     .concat("}, \"provides\": {").concat(ir_binds_json(provs)).concat("}")
-  if (bodyRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  // an `intercept` whose metadata this producer cannot render is a component
+  // fact it would emit WITHOUT — so the body is withheld with it, rather than
+  // handing an emitter a component that silently lost its interception.
+  if (bodyRes.ok && iceptRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  // the realm-placement prelude, in the reference's key order (after `body`):
+  // `isolate` then `intercept` (`src/revl/lower.py::_lower_component`).
+  if (isoJs != "") { js = js.concat(", \"isolate\": {").concat(isoJs).concat("}") }
+  if (iceptRes.ok && iceptRes.js != "") {
+    js = js.concat(", \"intercept\": {").concat(iceptRes.js).concat("}")
+  }
   js = js.concat("}")
   // a body-level stdlib builtin (or tagged ADT) construction is the reference's
   // body-only v3 trigger (`_has_builtin`); now that the body is lowered, the
   // lowered node's presence is the same signal a token scan cannot see.
-  let bodyV3 = bodyRes.ok
+  let bodyV3 = bodyRes.ok && iceptRes.ok
     && (str_has(bodyRes.js, "\"kind\": \"builtin\"") || str_has(bodyRes.js, "\"kind\": \"adt\""))
   let v3 = bodyV3 || comp_has_kw(ts, lo, hi, "if") || comp_has_kw(ts, lo, hi, "fail")
     || comp_has_kw(ts, lo, hi, "every") || comp_has_kw(ts, lo, hi, "after")

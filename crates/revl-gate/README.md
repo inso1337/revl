@@ -60,13 +60,15 @@ The self-host compiler is behind the reference implementation (roadmap item
 391), and the gap is not "a few missing constructs" — it is a whole missing
 LAYER. `admit_src` decides the composition and guarantee layer (`G1`..`G4`,
 `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not** run the
-reference's type layer. Measured, not assumed: the reference refuses all of
+reference's type layer, of which it runs one slice — the fn-body statement
+layer — and not the rest. Measured, not assumed: the reference refuses both of
 
-    fn f() -> Int { return "s" }
     fn f() -> Int { return undefined_name }
     fn f() -> { }
 
-and the self-host gate raises no objection to any of them.
+and the self-host gate raises no objection to either. A return-type mismatch,
+`fn f() -> Int { return "s" }`, used to head that list; it is refused here now,
+in the reference's own words.
 
 So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
@@ -290,7 +292,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:3716d512ef599cb2"
+    // frontier "selfhost-admit:a7abfd875c3cbab9"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
