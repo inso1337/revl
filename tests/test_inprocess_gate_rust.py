@@ -447,17 +447,22 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
       That last clause is what makes the agreement mean something: a rust gate
       that ignored its manifest argument would agree with the standalone gate,
       not with `admit_into`.
-    * **STILL OPEN - requirement resolution.** py's `admit_into` RESOLVES
-      `cache_layer`'s `requires store: Store` against the running `Kv` provider
-      and ADMITS it, while the self-host fold - which checks disjointness,
-      acyclicity and route realms and never resolves a requirement - can only
-      decline to object. That is the self-host TYPE LAYER, its own roadmap lane,
-      and this test keeps the distance visible instead of papering over it.
+    * **CLOSED - requirement resolution.** The running composition's service
+      block now carries each service's OPERATIONS, so the fold resolves
+      `requires store: Store` against the running declaration:
+      `calls_missing_method` calls an operation the running `Store` does not
+      declare and is REFUSED `A6` with the reference's own sentence, while its
+      twin `cache_layer` - the same shape calling an operation `Store` does
+      declare - is not. Telling those two apart is the resolution; a gate
+      reading only the wire's service NAMES answers the same thing about both.
+    * **STILL OPEN - issuing the admission.** py's `admit_into` ADMITS
+      `cache_layer`; the rust `Verdict` has no `Admitted` arm at all, so the
+      most it can say is a no-objection. That is docs/design/457 T6, and this
+      test keeps the distance visible instead of papering over it.
 
-    Neither half may be made to lie: the manifest arm is a refusal arm, so it
-    reports `"admitted": false` on both. When the type layer lands, the open
-    half becomes an agreement and this test should be TIGHTENED (the rust arm
-    must then land on the reference's `G3`/`T*` tag with its why-trace) - never
+    No half may be made to lie: the manifest arm is a refusal arm, so it
+    reports `"admitted": false` throughout. When the `Admitted` arm lands, the
+    open half becomes an agreement and this test should be TIGHTENED - never
     deleted, and never relaxed into a tautology.
     """
     import inprocess_gate_harness as py_harness  # noqa: PLC0415
@@ -470,10 +475,11 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
 
     into_arms = {c["name"]: c for c in report["candidates"]
                  if c["into"] is not None}
-    assert set(into_arms) == {"cache_layer", "ambient_provision_conflict"}, (
-        "the manifest arm's batch changed - one candidate must price the open "
-        "requires-resolution half and one must close the ambient half: "
-        f"{sorted(into_arms)}")
+    assert set(into_arms) == {"cache_layer", "calls_missing_method",
+                              "ambient_provision_conflict"}, (
+        "the manifest arm's batch changed - one candidate must close the ambient "
+        "half, one must close the requires-resolution half, and one must price "
+        f"the open admission half: {sorted(into_arms)}")
 
     # ---------------------------------------------------------- the closed half
     ambient = into_arms["ambient_provision_conflict"]
@@ -504,32 +510,77 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
         "the rust manifest why-trace is not the reference's, verbatim:\n"
         f"  rust: {ambient['into']['message']!r}\n  py:   {py_message!r}")
 
-    # ---------------------------------------------------------- the open half
+    # ------------------------------------------------- the half that has closed
+    # The STANDALONE question about `cache_layer` is now answered, and answered
+    # in the reference's own words: `selfhost/lower.rvl` resolves a component's
+    # `requires`/`provides` annotations against its service table
+    # (docs/design/457 §2.4), so a candidate naming a service its own text does
+    # not declare is REFUSED rather than waved through. This used to be a
+    # conditional clause - "if it became a refusal, it must carry the reference's
+    # tag" - and is now a positive claim, which is the tightening the issue asks
+    # for.
     cache_layer = into_arms["cache_layer"]
     standalone_admitted, _ = _py_verdict(cache_layer["source"])
     assert standalone_admitted is False, (
         "py must refuse this candidate standalone - if that changed, the "
         "contrast this half draws no longer exists")
+    ref_tag, ref_message = _py_reference(cache_layer["source"])
+    assert cache_layer["verdict"] == "refused", (
+        "the rust gate must refuse this candidate standalone: it requires a "
+        "service its own text never declares, which is the reference's own "
+        f"first refusal (got {cache_layer['verdict']})")
+    assert cache_layer["code"] == ref_tag, (
+        f"tag drift: rust {cache_layer['code']!r} != py {ref_tag!r}")
+    assert cache_layer["message"] == ref_message, (
+        "the rust standalone why-trace is not the reference's, verbatim:\n"
+        f"  rust: {cache_layer['message']!r}\n  py:   {ref_message!r}")
+
+    # ------------------------------ the OTHER half that has closed: resolution
+    # The running service block now carries each service's operations, so the
+    # fold resolves `requires store: Store` against the running DECLARATION and
+    # not only against its name. `calls_missing_method` is the evidence: the same
+    # shape as `cache_layer`, calling an operation the running `Store` does not
+    # declare, refused `A6` in the reference's own words. A gate reading only the
+    # wire's service names could not tell the two candidates apart.
+    missing = into_arms["calls_missing_method"]
+    miss_tag, miss_message = _py_manifest_reference(missing["source"], base)
+    assert miss_tag == "A6", (
+        f"the py manifest gate must refuse this A6, not {miss_tag!r} - it is the "
+        "resolution leg this half closes")
+    assert py_gate.admit_into(missing["source"], base).admitted is False, (
+        "the public `revl.gate.admit_into` verb must refuse it too")
+    assert missing["into"]["verdict"] == "refused", (
+        "the rust manifest arm must REFUSE a call to an operation the running "
+        f"service does not declare (got {missing['into']['verdict']})")
+    assert missing["into"]["code"] == miss_tag, (
+        f"tag drift: rust {missing['into']['code']!r} != py {miss_tag!r}")
+    assert missing["into"]["message"] == miss_message, (
+        "the rust resolution why-trace is not the reference's, verbatim:\n"
+        f"  rust: {missing['into']['message']!r}\n  py:   {miss_message!r}")
+    assert '"admitted":false' in missing["into"]["wire"]
+
+    # ---------------------------------------------------------- the open half
+    # What is STILL open is only the last step: py's `admit_into` ISSUES an
+    # admission for `cache_layer`, and the rust `Verdict` has no `Admitted` arm
+    # to issue one with. Closing that is docs/design/457 T6.
     public = py_gate.admit_into(cache_layer["source"], base)
     assert public.admitted is True, (
         "the py gate must still ADMIT this candidate INTO the running "
         "composition by resolving its `requires` against the live provider; "
-        "that resolution is what rust still cannot do")
+        "issuing that admission is what rust still cannot do")
     assert cache_layer["into"]["verdict"] == "no_objection", (
-        "rust cannot resolve a requires against the running composition, so the "
-        "only honest answer is a no-objection - if this became a refusal, the "
-        "self-host may have gained the layer (then tighten this test); if it "
-        f"became anything else, that is a defect ({cache_layer['into']['verdict']})")
+        "rust has no admission arm on the VERDICT surface, so the only honest "
+        "answer on the manifest arm is a no-objection - if this became a "
+        "refusal, that is a false alarm and a defect "
+        f"({cache_layer['into']['verdict']})")
+    # ... and the contrast with `calls_missing_method` above is what makes the
+    # no-objection a RESOLVED one rather than an unasked question: the same
+    # shape, the same manifest, two different verdicts.
     assert cache_layer["into"]["code"] is None, (
         "a no-objection must carry no code")
     assert '"admitted":false' in cache_layer["into"]["wire"], (
         "the still-open half may never read as an admission either")
     assert '"admitted":false' in cache_layer["wire"]
-    if cache_layer["verdict"] == "refused":
-        # It may legitimately become a refusal if the self-host gains the
-        # standalone requires-resolution check - that is an improvement, but it
-        # must then carry the reference's own tag.
-        assert cache_layer["code"] == _py_reference(cache_layer["source"])[0]
 
 
 # ------------------------------------------------- the two harnesses' bytes
@@ -545,6 +596,7 @@ def test_the_shared_candidates_are_the_py_harness_bytes(report):
     expected = {
         "standalone_twin": py_harness._STANDALONE_TWIN,
         "cache_layer": py_harness.al.CANDIDATE,
+        "calls_missing_method": py_harness._CALLS_MISSING_METHOD,
         "incomplete_provide": py_harness._INCOMPLETE_PROVIDE,
         "syntax_error": py_harness._SYNTAX_ERROR,
         "hole_draft": py_harness._HOLE_DRAFT,

@@ -277,7 +277,10 @@ fn uses_bounded_int(n: Any) -> Bool {
   let k = node_kind(n)
   if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int") { return true }
   if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int") { return true }
-  if (k == "builtin" && is_div_method(value_str(value_field(n, "method")))) { return true }
+  // `?.div_trunc(..)` is an `optcall` node, not a `builtin` one, and it goes
+  // through the very same render table, so it pulls in the very same helper.
+  if ((k == "builtin" || k == "optcall")
+      && is_div_method(value_str(value_field(n, "method")))) { return true }
   for (c of value_children(n)) {
     if (uses_bounded_int(c)) { return true }
   }
@@ -288,7 +291,8 @@ fn uses_bounded_int32(n: Any) -> Bool {
   let k = node_kind(n)
   if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int32") { return true }
   if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int32") { return true }
-  if (k == "builtin" && value_str(value_field(n, "method")) == "to_int32") { return true }
+  if ((k == "builtin" || k == "optcall")
+      && value_str(value_field(n, "method")) == "to_int32") { return true }
   for (c of value_children(n)) {
     if (uses_bounded_int32(c)) { return true }
   }
@@ -344,6 +348,19 @@ fn uses_opt_to_int(n: Any) -> Bool {
   }
   for (c of value_children(n)) {
     if (uses_opt_to_int(c)) { return true }
+  }
+  return false
+}
+
+// `_uses_opt_to_str`: the same split on the other two-receiver rendering
+// builtin. `str(3.0)` is `"3.0"`, where the canonical spelling every other
+// route to this conversion produces is `"3"` (docs/strings.md).
+fn uses_opt_to_str(n: Any) -> Bool {
+  if (node_kind(n) == "optcall" && value_str(value_field(n, "method")) == "to_str") {
+    return true
+  }
+  for (c of value_children(n)) {
+    if (uses_opt_to_str(c)) { return true }
   }
   return false
 }
@@ -533,6 +550,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
     // python's `3.0`/`1e+30`, which diverges from every other tier). The tag
     // is attached by `lower.rvl` solely for a Float receiver (item 548).
     if (recv == "Float") { return `_revl_ftoa(${target})` }
+    if (recv == "?") { return `_revl_opt_to_str(${target})` }
     return `str(${target})`
   }
   return `<<UNSUPPORTED-BUILTIN:${method}>>`
@@ -1377,6 +1395,15 @@ fn opt_to_int_block() -> List[Str] {
   return o
 }
 
+fn opt_to_str_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_opt_to_str(v):")
+  o = o.push("    \"\"\"`?.to_str()`: the node carries no receiver type, so dispatch on the payload.\"\"\"")
+  o = o.push("    return _revl_ftoa(v) if isinstance(v, float) else str(v)")
+  o = o.push("")
+  return o
+}
+
 fn div_block() -> List[Str] {
   var o = []
   o = o.push("import math as _revl_math")
@@ -1429,7 +1456,7 @@ fn comp_names(ir: Any) -> Str {
 
 // A body-emission result: the lines produced AND the running timer counter (the
 // reference's `self._counter`, threaded here since revl has no method state).
-type Emit = { lines: List[Str], counter: Int }
+type EmitLines = { lines: List[Str], counter: Int }
 
 // `_runtime_ref` / `_IMPORT_ALIAS` (the subset): the in-module name a runtime
 // import is referenced by.
@@ -1730,7 +1757,7 @@ fn setup_step(step: Any, indent: Int) -> List[Str] {
 // `let-effect` (the spawn form — its `spawn` acquire cexpr lands in slice 5, so
 // it is implemented but not yet cross-checked), saga `emit ... compensate`,
 // plain `emit`, and `return`. (`await` stays slice 5.)
-fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> Emit {
+fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let" || kind == "assign") {
     var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`)]
@@ -1816,7 +1843,7 @@ fn method_secret_params(m: Any, specs: Any) -> List[Str] {
 
 // `_method`: one provide-method as a Python `def` (sync only in this slice),
 // threading the shared timer/effect counter across its body steps.
-fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> Emit {
+fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> EmitLines {
   let name = mangle(value_str(value_field(m, "name")))
   var head = `def ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
@@ -1852,7 +1879,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
 // `_provide`: the provision class, its methods, and the runtime-derived
 // revertible provision (yield the disposer, then populate). Threads the counter
 // across its methods (a method-body effect shares the component's counter).
-fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
+fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
   let name = mangle(value_str(value_field(step, "name")))
   let svc = value_str(value_field(step, "service"))
   // item 421 F6: the provided service's method specs, the only place the
@@ -1879,7 +1906,7 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
 
 // `_timer`: a revertible schedule — the firing closure, its handle, and the
 // yielded `.cancel()` inverse.
-fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
+fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
   let mode = value_str(value_field(step, "mode"))
   var sched = "schedule_after"
   if (mode == "every") { sched = "schedule_every" }
@@ -1916,7 +1943,7 @@ fn transactional_scope_kwargs(ext: Any) -> Str {
   return ", scope={'caps': [".concat(parts.join(", ")).concat("]}")
 }
 
-fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> Emit {
+fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> EmitLines {
   let c = counter + 1
   let tmp = `_revl_wit${c}`
   let call_expr = cexpr(value_field(step, "acquire"))
@@ -1951,7 +1978,7 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
   return { lines: out, counter: c }
 }
 
-fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
+fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect") {
     var out = []
@@ -2034,7 +2061,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   return { lines: out, counter: counter }
 }
 
-fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
+fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
   var out = []
   var c = counter
   for (s of steps) {
@@ -2514,6 +2541,11 @@ fn uses_float_interp(n: Any) -> Bool {
   if (node_kind(n) == "builtin"
       && value_str(value_field(n, "method")) == "to_str"
       && value_str(value_field(n, "recv")) == "Float") { return true }
+  // An optcall carries no `recv`, so an `Opt[Float]` receiver cannot be told
+  // from an `Opt[Int]` one here: the split is made at run time by
+  // `_revl_opt_to_str`, which needs `_revl_ftoa` beside it.
+  if (node_kind(n) == "optcall"
+      && value_str(value_field(n, "method")) == "to_str") { return true }
   for (c of value_children(n)) { if (uses_float_interp(c)) { return true } }
   return false
 }
@@ -2818,6 +2850,41 @@ fn inline_pure_fns(ir: Any) -> Any {
 // PRIVATE decls no longer leak (item 228), but the merge still flattens both
 // modules' PUBLIC decls by bare name, so the two emitter entrypoints must differ
 // (roadmap item 230 — enables the fully-native `compile.rvl`).
+// ------------------------------------------ the deferred in-file test section
+// In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+// every self-host emitter slice. The reference emits a driver section for it;
+// this port does not. Emitting NOTHING made that divergence SILENT, which is
+// the one failure mode the marker convention exists to prevent: a deferred
+// family that answers with a named `<<UNSUPPORTED-...>>` marker is loud in the
+// emitted bytes and is pinned by a boundary test, while a section the port
+// simply skips is invisible to the byte oracle (no corpus document on any tier
+// carries a test section) and is counted as mirrored by
+// tools/selfhost_coverage.py. Measured across all six self-host emitters while
+// closing issue #1123: every one of them dropped the section in silence.
+//
+// Markers, not emission: porting the drivers is the separate, larger half.
+//
+// The marker names the IR SECTION and the test's name, and deliberately does
+// NOT read the per-test lifecycle discriminant to tell a `lifecycle test` from
+// a plain one. `tools/selfhost_coverage.py` reads "this tier ports construct X"
+// straight off the boolean-flag read spelling in the self-host source, so
+// branching on that flag here would claim a port of the lifecycle-driver arm
+// this slice does not have, and would move that tier/construct pair out of the
+// ledger's `unported` baseline on the strength of a marker. A marker is a
+// refusal, not an implementation; it says only what it knows. (That scan is
+// over the raw file text, comments included, so naming the spelling in prose
+// registers it too, which is why this note does not.)
+fn deferred_test_markers(ir: Any) -> List[Str] {
+  var out = []
+  for (t of value_list(value_field(ir, "tests"))) {
+    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
+  }
+  for (t of value_list(value_field(ir, "fault_tests"))) {
+    out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
+  }
+  return out
+}
+
 pub fn emit_py_src(source_ir: Any) -> Str {
   let ir = inline_pure_fns(source_ir)
   var out = []
@@ -2910,6 +2977,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     out = out.concat(str_to_int_block())
     if (uses_opt_to_int(ir)) { out = out.concat(opt_to_int_block()) }
   }
+  if (uses_opt_to_str(ir)) { out = out.concat(opt_to_str_block()) }
   // The total division forms, in the reference's `_CHECKED_DIVS` order.
   for (checked of ["checked_div_trunc", "checked_div_floor",
                    "checked_div_euclid", "checked_mod"]) {
@@ -2959,6 +3027,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     pairs = pairs.push(`${py_repr(nm)}: ${nm}`)
   }
   out = out.push("COMPONENTS = {".concat(pairs.join(", ")).concat("}"))
+  // The deferred in-file test section: one named marker per test instead of
+  // silence (issue #1123).
+  let test_markers = deferred_test_markers(ir)
+  if (test_markers.length() > 0) { out = out.concat(test_markers) }
   return out.join(newline()).concat(newline())
 }
 

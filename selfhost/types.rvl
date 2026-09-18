@@ -169,20 +169,17 @@ pub fn format_type(head: Str, args: List[Str]) -> Str {
 
 // A field of a structural record type. `ty == ""` is the reference's None
 // (an unknown field type), which format_structural renders as `Any`.
-//
-// Named `TyField`, not `Field`: `selfhost/parser.rvl` declares an ADT CASE
-// called `Field` (a field-access expression node), and once lower.rvl `use`s
-// both files they are compiled into ONE namespace. A record type and an ADT
-// case constructor with the same name merge without a diagnostic and the
-// record wins, which turned every `Field(...)` expression node the gate builds
-// into a call to a two-field record constructor — 415 of the 761 census
-// programs faulted with `Field() takes no arguments`. Item 228 disambiguates a
-// private TYPE per file; a case constructor is a value, and it does not.
-type TyField = { name: Str, ty: Str }
+// `pub` because `structural_parse`/`format_structural` are the checker's
+// record algebra (docs/design/457 T2a) and a consumer has to be able to spell
+// the element type of the list they exchange. It is `RecField` and not `Field`
+// on purpose: item 228 keeps two modules' private TYPES apart, but a type name
+// that meets an imported module's ADT CASE name of the same spelling merges
+// (issue #1145), and both `checker.rvl` and `lower.rvl` carry `Expr::Field`.
+pub type RecField = { name: Str, ty: Str }
 
 // The parse of a structural record spelling. `is_rec == false` is the
 // reference's None ("not a structural record type at all").
-type StructParse = { is_rec: Bool, fields: List[TyField] }
+type StructParse = { is_rec: Bool, fields: List[RecField] }
 
 pub fn structural_parse(name: Str) -> StructParse {
   if (name == "") { return { is_rec: false, fields: [] } }
@@ -192,7 +189,7 @@ pub fn structural_parse(name: Str) -> StructParse {
   }
   let inner = trim(s.slice(1, s.length() - 1))
   if (inner == "") { return { is_rec: true, fields: [] } }
-  var fields: List[TyField] = []
+  var fields: List[RecField] = []
   let parts = split_top_ty(inner)
   var i = 0
   while (i < parts.length()) {
@@ -211,7 +208,7 @@ pub fn structural_parse(name: Str) -> StructParse {
 
 // Canonical spelling of a structural record type, fields sorted, an unknown
 // field type rendered `Any`. Port of typecheck.format_structural.
-pub fn format_structural(fields: List[TyField]) -> Str {
+pub fn format_structural(fields: List[RecField]) -> Str {
   var keys: List[Str] = []
   var i = 0
   while (i < fields.length()) { keys = keys.push(fields[i].name); i += 1 }
@@ -228,7 +225,7 @@ pub fn format_structural(fields: List[TyField]) -> Str {
   return "{".concat(body.join(", ")).concat("}")
 }
 
-fn field_ty(fields: List[TyField], name: Str) -> Str {
+fn field_ty(fields: List[RecField], name: Str) -> Str {
   var i = 0
   while (i < fields.length()) {
     if (fields[i].name == name) { return fields[i].ty }
@@ -544,7 +541,7 @@ pub fn compatible(expected: Str, actual: Str) -> Bool {
 
 // Two record shapes unify field-wise: same field set, each value type
 // compatible (the reference's `set(e)==set(a)` then per-field `compatible`).
-fn struct_compatible(ef: List[TyField], af: List[TyField]) -> Bool {
+fn struct_compatible(ef: List[RecField], af: List[RecField]) -> Bool {
   if (ef.length() != af.length()) { return false }
   var i = 0
   while (i < ef.length()) {
@@ -559,7 +556,7 @@ fn struct_compatible(ef: List[TyField], af: List[TyField]) -> Bool {
   return true
 }
 
-fn has_field(fields: List[TyField], name: Str) -> Bool {
+fn has_field(fields: List[RecField], name: Str) -> Bool {
   var i = 0
   while (i < fields.length()) {
     if (fields[i].name == name) { return true }

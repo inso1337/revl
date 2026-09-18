@@ -153,8 +153,8 @@
         "Only the Float interpolation arm remains: it sets needs_ftoa and formats through revlFtoa, whose scaffold is explicitly deferred. Expression-free templates and non-Float typed interpolation are now covered.": {
           "_go_v3_interp": 5
         },
-        "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior.": {
-          "_go_v3_optchain": 19
+        "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior. The count rose by one for the line that binds the payload's surface type before rendering the builtin against it: `_go_v3_builtin` picks revlStrLen vs revlListLen (and four more rows) off the receiver type, and the synthetic node carried none, so an `Opt[Str]?.length()` emitted a List helper over a string and the package did not build. It cannot become a corpus case: selfhost/emit_go.rvl ports no optional chaining at all, so a fixture spelling `?.` could not hold byte agreement. tests/test_458_conversion_dispatch.py executes it on the tier instead.": {
+          "_go_v3_optchain": 20
         },
         "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py. Issue #721's Float half adds five statements to the same deferred preamble block: the `math` import and the `revlF` identity helper that keeps a Float literal out of Go's CONSTANT world (a constant fold has no signed zero and no infinity), plus the `math.Mod` arm for `%` on Float, which Go does not define on float64 at all. No PLACEMENT corpus document carries a Float, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl excludes placement entirely; the reference half is executed on all six tiers by tests/test_458_float_division_and_remainder.py.": {
           "_bridge_decode_expr": 16,
@@ -258,6 +258,9 @@
         "The non-boxing Result[T, E] match discriminator (item 434(d), #114): `_go_v3_match_result` renders the `.Ok` if/else for a v3 Result match, the sibling of `_go_v3_match_opt`. The go v3 module byte-agreement corpus has no Result-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
           "_go_v3_match_result": 61
         },
+        "backends/go/emit.py::_refuse_fault_tests: every statement is on the refusal path. A `fault_tests` section is rejected by name on this tier (docs/fault-tests.md section 6), and the byte-agreement corpus is documents the reference EMITS, so no corpus document can carry one. Pinned by tests/test_fault_tests.py::test_other_tiers_refuse_the_section_by_name.": {
+          "_refuse_fault_tests": 2
+        },
         "declared out of every self-host slice: realm placements, routers, spawn/instances. The two lines the item 421 F5 stage-2 seam hook adds -- `if _SECRET_MODE:` installing `bridge.SecretScrub` -- sit inside that slice: the hook is only built when the composition declares `Secret[T]`, and no placement corpus document is a secret-mode composition, so the generated seam funnel is never asked to redact a secret value.": {
           "_emit_placement": 18
         },
@@ -280,7 +283,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 3091
+      "uncovered_statements": 3092
     },
     "java": {
       "statements": 2587,
@@ -824,7 +827,7 @@
       "statements": 3563,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
-          "_emit_step": 138,
+          "_emit_step": 92,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 2
         },
@@ -837,15 +840,15 @@
           "_bridge_ret_deser": 6,
           "_bridge_ret_ser": 7,
           "_bridge_serde_ok": 1,
-          "_emit_bridge": 9,
+          "_emit_bridge": 4,
           "_result_ok_err": 2,
           "_result_to_json": 1,
           "_split_result": 12
         },
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
           "_emit_component": 5,
-          "_emit_component_new": 27,
-          "_emit_components": 8,
+          "_emit_component_new": 23,
+          "_emit_components": 7,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
@@ -871,14 +874,13 @@
           "_rust_extern_config_bind": 9
         },
         "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs.": {
-          "_component_map_values": 5,
-          "_emit_host_stubs": 7,
-          "_emit_host_stubs.walk": 1,
-          "_host_of": 12,
-          "_map_expr_inserts": 20,
-          "_map_insert_candidates": 15,
-          "_map_value_expr_type": 71,
-          "_map_value_rust_type": 18
+          "_component_map_values": 1,
+          "_emit_host_stubs": 5,
+          "_host_of": 4,
+          "_map_expr_inserts": 3,
+          "_map_insert_candidates": 7,
+          "_map_value_expr_type": 67,
+          "_map_value_rust_type": 2
         },
         "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions.": {
           "_emit_v3_lifecycle_tests": 81,
@@ -890,7 +892,6 @@
           "_result_to_json_funneled": 1
         },
         "Ownership and string-view alternatives: residuals are the computed/non-atomic argument refusal, unknown or function-typed clone safety nets, positional char-view threading, and undo recloning branches. The corpus covers ordinary borrowed strings, owned calls, escaping callbacks, computed receivers, and safe string self-append.": {
-          "_acquire_moved_locals": 5,
           "_borrow_str_arg": 1,
           "_by_value_arg": 4,
           "_by_value_field_clone": 2,
@@ -899,7 +900,6 @@
           "_compute_char_views": 12,
           "_compute_char_views.threaded_index": 4,
           "_free_fn_call": 2,
-          "_method_undo_clones": 1,
           "_str_params_indexed.walk": 3,
           "_undo_reclone_locals": 1,
           "_v3_self_append_inplace": 19
@@ -920,11 +920,10 @@
           "_v3_stmt": 5
         },
         "Realm routing and child instances require intercept JSON metadata, deterministic realm identities, router structs, spawn handles, and runtime child configuration. The self-host emitter explicitly defers isolate/intercept/routes/spawn.": {
-          "_collect_realm_labels": 8,
+          "_collect_realm_labels": 2,
           "_emit_router_struct": 16,
           "_intercept_json_lit": 18,
           "_intercept_json_type": 34,
-          "_revl_realm_helper": 7,
           "_revl_spawn_handle": 1,
           "_uses_spawn": 1,
           "_v3_instance_get": 8,
@@ -966,7 +965,7 @@
         "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered.": {
           "_arg_ref_name": 2,
           "_config_default_lit": 1,
-          "_default_for_rust_type": 12,
+          "_default_for_rust_type": 11,
           "_escape_format_braces": 1,
           "_finite_float": 1,
           "_ident": 1,
@@ -985,9 +984,8 @@
           "emit": 3
         },
         "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction.": {
-          "_body_has_compensation": 3,
-          "_body_has_witnessed": 3,
-          "_component_has_effectful_methods": 1,
+          "_body_has_compensation": 2,
+          "_body_has_witnessed": 2,
           "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
           "_emit_activation_compensation": 13,
@@ -998,16 +996,14 @@
           "_emit_teardown_begin": 3,
           "_emit_teardown_commit": 2,
           "_emit_witnessed_step": 26,
-          "_is_map_cas": 1,
-          "_method_bodies_have_compensation": 2,
-          "_method_bodies_have_witnessed": 2,
+          "_method_bodies_have_compensation": 1,
+          "_method_bodies_have_witnessed": 1,
           "_method_body_lines": 40,
-          "_method_body_pure_new": 1,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
         "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read \u2014 `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 \u00a74.5 adds two statements: the `replay(\u2026)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_render_expr": 69
+          "_render_expr": 59
         },
         "backends/rust/emit.py::_borrow_list_arg: item 437d borrow of a read-only list parameter into a `&[T]` slot. The already-lowered-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual statement is the List-index place-borrow arm (`&xs[i]` via _v3_strip_index_clone), which no byte-agreement corpus document passes into a borrowed `&[T]` argument, the same shape left uncovered on _v3_strip_index_clone itself.": {
           "_borrow_list_arg": 1
@@ -1185,11 +1181,6 @@
           "_V3Emitter._helper_str_concat_n": 18,
           "_V3Emitter._interp_expr": 20
         },
-        "Extern @wasm body lookup/emission and comments for missing bodies are explicitly deferred by the module oracle; source-defined functions do not exercise raw-WAT extern handling.": {
-          "_V3Emitter._unsupported_comments": 2,
-          "_emit_extern_func": 17,
-          "_extern_wasm_body": 2
-        },
         "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float.": {
           "_f64_literal": 1,
           "_finite_float": 3,
@@ -1211,7 +1202,7 @@
           "_V3Emitter._bin_expr": 20
         },
         "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission.": {
-          "_V3Emitter.emit": 13
+          "_V3Emitter.emit": 12
         },
         "Remaining branches add src/ for standalone imports or translate invalid ownerless/session-commit emissions to EmitError. In-process successful pure documents take neither exceptional path.": {
           "_refuse_deferred_emissions": 10
@@ -1224,7 +1215,7 @@
           "_V3Emitter._emit_stmts": 14
         },
         "Remaining branches merge equivalent async/sync polymorphic externs and rewrite call names after colour erasure; extern emission is outside the WASM module corpus.": {
-          "_dedup_colour_erased_poly_externs": 14,
+          "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6
         },
         "Remaining branches resolve deferred inline arrows or reject unknown/non-callable callees and argument-count/type mismatches; direct declared calls are covered. Item 459 F6 adds one statement here: before raising the generic unknown-callee error, the arm asks `_refuse_bodyless_extern` whether the name is a DECLARED extern with no `@wasm` body, so a portability limit is no longer spelled as a typo. It is on the same refusal path as the rest of this entry and is uncovered for the same reason.": {
@@ -1293,9 +1284,6 @@
         "Remaining raise rejects len on a non-List/non-Str receiver; canonical frontend len nodes carry supported collection types.": {
           "_V3Emitter._len_expr": 1
         },
-        "Remaining raise rejects rebinding one emitted local name at incompatible WASM widths; valid typed source locals retain their declared width.": {
-          "_V3Emitter._declare_local": 1
-        },
         "Remaining raises explicitly reject fault-injection or lifecycle test harnesses unsupported by the WASM backend.": {
           "_refuse_fault_tests": 2,
           "_refuse_lifecycle_tests": 2
@@ -1332,6 +1320,9 @@
         "Remaining traversal/raise detects unresolved holes, including service signatures; successful compiled source documents contain no holes.": {
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1
+        },
+        "Rendering a @wasm-bodied extern as a real `(func $name \u2026)` is outside the module oracle's subset; source-defined functions do not exercise raw-WAT extern handling. The NAMING of a bodyless extern is no longer deferred: tests/fixtures/emit_wasm_corpus/externs.rvl reaches `_unsupported_comments` and `_extern_wasm_body` (issue 1130).": {
+          "_emit_extern_func": 17
         },
         "Residual declarations allocate locals for deferred match bindings/scrutinees and inline arrows; test_mode appends its success result. The empty non-Unit body fallback is a defensive path: frontend return checking rejects such functions. Empty Unit source is covered and emits nop, not unreachable.": {
           "_V3Emitter._emit_function": 6
@@ -1398,20 +1389,27 @@
           "_V3Emitter._helper_str_join": 1,
           "_V3Emitter._helper_str_split": 1
         },
+        "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot \u2014 the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead.": {
+          "_V3Emitter._declare_local": 2
+        },
         "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
           "_ComponentEmitter._provide_routed": 18,
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1544
+      "uncovered_statements": 1545
     }
   },
   "selfhost": {
     "go": {
-      "statements": 1180,
+      "statements": 1190,
       "uncovered": {
         "Context builder used only by emit_go.rvl's own unit tests; emit_src builds the production context directly. This is not an unsupported emitted construct.": {
           "typed_ctx": 9
+        },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_go_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_go_src": 1
         },
         "Generated Python inlines these tiny RVL helpers into emitter call sites; their substituted bodies execute while the retained definitions do not. Any residual named calls occur only in the RVL file's own unit-test functions, which are outside the corpus emitter entry point.": {
           "flags_or": 1,
@@ -1491,11 +1489,15 @@
           "concat_pieces": 8
         }
       },
-      "uncovered_statements": 84
+      "uncovered_statements": 87
     },
     "java": {
-      "statements": 2034,
+      "statements": 2044,
       "uncovered": {
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_java_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_java_src": 1
+        },
         "selfhost/emit_java.rvl::bind_type: The empty Map surface branch cannot occur: component_map_values always supplies at least Str. Remaining record/list/scalar inference requires nonhost let-effect, explicitly excluded by body_step_supported.": {
           "bind_type": 27
         },
@@ -1687,10 +1689,10 @@
           "witnessed_names": 2
         }
       },
-      "uncovered_statements": 182
+      "uncovered_statements": 185
     },
     "py": {
-      "statements": 1992,
+      "statements": 2002,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1702,6 +1704,9 @@
           "body_has_receiver_secret_witness": 2,
           "body_has_secret_param": 2,
           "body_has_timer": 2
+        },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_py_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2
         },
         "Empty interpolation fallback: interp_fstring emits the empty literal for an empty parts list. Empty source strings lower lit instead; both implementations agree on this legacy shape, and strings/float_interp cover nonempty interpolation.": {
           "interp_fstring": 1
@@ -1734,8 +1739,8 @@
         "Module expr_inner residuals: bare Some identity, legacy field.sized_length branch and explicit unsupported-kind marker. Module .length currently lowers kind=len while component .length reaches field.sized_length (both in branches.rvl). Some-call construction is covered separately; no claim that all historical IR shapes are source-reachable.": {
           "expr_inner": 4
         },
-        "Module host-root discovery: emit_py_src imports Job when found; ir_uses_host_root's tests subtree is the retained test-harness boundary. Existing module corpus reaches Map/Pool while component host calls are separately deferred. Job uses the same sorted runtime-import mechanism, not a missing port implementation.": {
-          "emit_py_src": 1,
+        "Module host-root discovery: emit_py_src imports Job when found; ir_uses_host_root's tests subtree is the retained test-harness boundary. Existing module corpus reaches Map/Pool while component host calls are separately deferred. Job uses the same sorted runtime-import mechanism, not a missing port implementation.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+          "emit_py_src": 2,
           "ir_uses_host_root": 1
         },
         "Owned Map.set computed-key order: inplace_stmts emits _revl_key then the assignment when the key is not trivial. Reference _py_inplace_stmts emits the same sequence. in_place.rvl's keys are trivial, but supported map ownership/copy/remove paths are covered; no exclusion of mutation is claimed.": {
@@ -1802,10 +1807,10 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 100
+      "uncovered_statements": 103
     },
     "rust": {
-      "statements": 1992,
+      "statements": 2002,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,
@@ -1816,12 +1821,12 @@
           "bridge_arg_ser": 1,
           "bridge_ret_deser": 1,
           "bridge_ret_ser": 1,
-          "emit_bridge": 5
+          "emit_bridge": 4
         },
         "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming.": {
           "checked_method": 5,
-          "default_for_rust_type": 12,
-          "emit_host_stubs": 1,
+          "default_for_rust_type": 11,
+          "emit_host_stubs": 5,
           "ind": 1,
           "is_addsubmul": 1,
           "is_builtin_ctor": 1,
@@ -1833,27 +1838,44 @@
           "set_vts": 1
         },
         "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered.": {
-          "binds": 1,
           "config_default_lit": 1,
-          "emit_component": 2,
-          "emit_component_new": 5,
-          "emit_provide_construction": 1,
+          "emit_component": 1,
+          "emit_component_new": 2,
           "has_extra_linebreak": 1,
           "is_extra_linebreak": 3,
           "method_body_lines": 5,
-          "method_has_effectful_steps": 1,
-          "method_scope_rename": 1,
-          "method_undo_clones": 1,
-          "method_undo_rename": 1,
           "mname": 1,
           "provide_let_type": 1,
           "provide_methods": 1,
           "pure_method_statements": 2,
           "strip_spaces": 1
         },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_rust_src": 1
+        },
         "Extern deferral boundary: the residual branches detect absent/non-Rust extern bodies and config/runtime extern scaffolding that the self-host pure-v3 module does not emit. Ordinary @rs externs are covered.": {
           "emit_v3_externs": 4,
           "extern_body_defer": 2
+        },
+        "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153).": {
+          "by_value_reuse": 2,
+          "component_map_values": 3,
+          "emit_comp_step": 5,
+          "emit_let_effect_step": 8,
+          "host_of": 6,
+          "map_insert_candidates": 8,
+          "map_value_expr_type": 75,
+          "map_value_surface_type": 1,
+          "steps_use_timer": 3,
+          "uses_stream_event": 1,
+          "uses_timer": 1,
+          "witnessed_acquire": 5
+        },
+        "Host-object blocks no corpus document acquires: the corpus declares a host `Map`, so the Pool and Job literal line lists (and the CAS verb test that selects `insert_if_absent`) are emitted by a branch the corpus never takes. Each is a verbatim transcription of the reference's own literal list, so there is nothing for a second implementation to get wrong beyond the gate on which block rides along, which the Map case does exercise (issue 1153).": {
+          "host_job_lines": 86,
+          "host_pool_lines": 129,
+          "is_map_cas_verb": 1
         },
         "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one \u2014 no rust corpus document negates an Int32.": {
           "borrow_str_arg": 1,
@@ -1866,8 +1888,8 @@
           "render_bin": 1,
           "render_builtin": 2,
           "render_call": 1,
-          "render_component_call": 3,
-          "render_inner": 5,
+          "render_component_call": 1,
+          "render_inner": 4,
           "render_interp": 2,
           "render_un": 2,
           "render_var": 2,
@@ -1891,6 +1913,9 @@
           "split_fn_ret": 2,
           "v3_infer_type": 3
         },
+        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
+          "collect_realm_labels": 3
+        },
         "selfhost/emit_rust.rvl::borrow_list_arg: the self-host mirror of the reference _borrow_list_arg (item 437d) list-slice borrow. As on the reference tier the already-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual is the List-index place-borrow arm (`&xs[i]` via strip_index_clone), which no corpus document reaches, matching strip_index_clone.": {
           "borrow_list_arg": 1
         },
@@ -1898,10 +1923,10 @@
           "strip_index_clone": 1
         }
       },
-      "uncovered_statements": 143
+      "uncovered_statements": 146
     },
     "ts": {
-      "statements": 2121,
+      "statements": 2132,
       "uncovered": {
         "Async emission-node negative tests: `emission_call_node` returns false for a non-call, a call whose target is not `req`, or a requirement method absent from the component's async operation keys. Async req calls and async arrows exercise its true branch": {
           "emission_call_node": 3
@@ -1913,6 +1938,10 @@
         "Crossing-label fallbacks: `call_method_name` returns `undo` for absent/empty method, fn, host or variable-callee names and unknown call shapes; `crossing_key_name` returns `?` for absent/empty requirement/name/variable identifiers or unknown targets. Lowered acquisition/undo calls carry the names used by the covered Frame bracket and compensation fixtures": {
           "call_method_name": 11,
           "crossing_key_name": 12
+        },
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_ts_src` splices that block where the reference emits its vitest drivers. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits a driver section here and this port does not; a corpus document carrying one would therefore turn the byte-agreement oracle red rather than close the gap, which is why no emit_ts_corpus document carries a test section and these statements have no corpus case. Before #1123 the section was skipped in SILENCE - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2,
+          "emit_ts_src": 2
         },
         "Empty-list conservative fallbacks: `empty_list_ann` uses `any[]` when no element evidence was inferred, and `list_element` returns empty for non-List or malformed List syntax. Typed empty-list bindings and inferred persistent pushes cover the evidence-bearing paths; the frontend rejects unconstrained empty lists": {
           "empty_list_ann": 1,
@@ -1961,14 +1990,13 @@
           "render_un": 1,
           "v3_stmt": 1
         },
-        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx`, `renders_await`, and `optcall_result_is_int` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
+        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx` and `renders_await` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
           "expected_instance_get": 1,
           "expected_missing_adt": 1,
           "expected_ok_adt": 1,
           "expected_result_type": 1,
           "ind": 1,
           "indentation_is_two_spaces": 1,
-          "optcall_result_is_int": 1,
           "renders_await": 1,
           "sync_acx": 1
         },
@@ -1976,11 +2004,14 @@
           "ts_type_v1": 1
         }
       },
-      "uncovered_statements": 94
+      "uncovered_statements": 97
     },
     "wasm": {
-      "statements": 1269,
+      "statements": 1279,
       "uncovered": {
+        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_wasm_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+          "deferred_test_markers": 2
+        },
         "Generated Python substitutes these tiny RVL helper bodies at production call sites; their retained definitions are not called by emit_src. Remaining named calls are confined to the RVL file's own unit tests. This includes the executed preamble/layout logic, not an absent backend feature.": {
           "align4": 1,
           "align8": 1,
@@ -2037,8 +2068,8 @@
         "Remaining guards reject malformed emitted constant text: missing closing parenthesis, empty/sign-only numeral, or nondigit. Valid renderer-produced integer constants satisfy this parser.": {
           "const_numeral": 3
         },
-        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.": {
-          "emit_wasm_src": 1
+        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+          "emit_wasm_src": 2
         },
         "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
           "render_bin": 1
@@ -2071,7 +2102,7 @@
           "rstrip": 1
         }
       },
-      "uncovered_statements": 60
+      "uncovered_statements": 63
     }
   }
 }

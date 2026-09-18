@@ -1,63 +1,69 @@
-# The committed playground/site wheel must match a fresh build of `src/revl`.
+# The published playground's compiler wheel must actually be built by the deploy.
 #
-# WHY THIS IS A SEPARATE WORKFLOW, ON MAIN ONLY (issue #252).
+# WHAT THIS JOB USED TO BE, AND WHY IT CHANGED (issues #252, #547).
 #
-# `site/vendor/revl-2.0.0-py3-none-any.whl` and its playground twin vendor the
-# WHOLE of `src/revl`, so any change to a bundled module makes them stale. That
-# is why `tools/check_site_wheel.py` is deliberately NOT a per-PR gate: as one,
-# it reddened CI on every source change, which is an outage class rather than a
-# defect — the wheel is a deploy artifact, and a PR that edits `parser.py` is
-# not wrong for not having rebuilt it. Roadmap 110c moved the check to merge and
-# release time (`make pre-merge`, and `tools/affected_tests.py` selects the
-# `site-wheel` gate whenever `src/revl/**.py` changes).
+# `site/vendor/revl-2.0.0-py3-none-any.whl` and its playground twin were
+# COMMITTED, and this workflow checked them against a fresh build on every push
+# to main. That was the right gate for the arrangement it was given: the wheel
+# vendors the whole of `src/revl`, every other generated artifact here has
+# automatic drift detection, and this one had none — so it was made the owner
+# that cannot forget, off the per-PR path, failing loudly rather than opening a
+# `GITHUB_TOKEN` PR that `ci.yml` would never run.
 #
-# In practice nobody runs it. Agents run targeted tests and open a PR, CI runs
-# the matrix, the pipeline merges on green — so the merge-time step has no owner
-# and the wheel rots between deliberate regenerations. It was found stale three
-# times in one day, each time by an agent who happened to run `pre-merge` for an
-# unrelated reason. Every other generated artifact in this repo has automatic
-# drift detection (`crates/revl-gate` and `crates/revl-gate-wasm` drift gates,
-# `tools/regen_goldens.py --check`, `tools/conformance.py --check-readme`); the
-# wheel was the only one with none.
+# The gate did its job. The artifact could not keep up with it. A wheel built
+# against one sha is stale by the time its refresh lands several merges later,
+# so the refresh always races the queue: #1095, #1103, #1115 and #1133 were each
+# correct when written and red again within hours. There is no schedule of
+# refreshes that closes that window, because the window is the queue.
 #
-# This job gives it an owner that cannot forget, WITHOUT putting it back on the
-# per-PR critical path: it runs after the merge, on main, where the tree is the
-# thing that actually ships to Pages. A PR is unaffected — this workflow has no
-# `pull_request` trigger at all, so it contributes no check name to a PR and
-# nothing here can become a required check by accident.
+# The fix was to stop committing a file that is a pure function of the tree.
+# `.github/workflows/pages.yml` now builds the wheel into the artifact it
+# publishes, so the deployed playground is built from the sha being deployed.
+# Drift is not detected faster; it is made impossible, which is strictly
+# stronger than the check it retires. `tools/check_site_wheel.py`'s header
+# carries the full weighing — why a per-PR regeneration is worse here (a 2.5 MB
+# non-deterministic zip conflicts by construction, and this repo lands through a
+# merge queue, so the loser is an ejected PR), why a bot commit needs a standing
+# credential this repo should not maintain, and what the committed copy had
+# already cost (49.3 MiB of the repo's 66.0 MiB of packed blob data, 191
+# revisions).
 #
-# WHY IT FAILS RATHER THAN OPENING A PR. The other half of issue #252's option 2
-# was "regenerate and open a PR". It does not work with the default token: a
-# pull request opened by `GITHUB_TOKEN` does not trigger `ci.yml`, so the bot's
-# PR would arrive with none of the 13 required checks and could not be merged
-# under branch protection until a human pushed to it — an owner that cannot
-# forget, producing work that cannot land. Making it work needs a PAT or a
-# GitHub App with write access to the default branch, which is a standing
-# credential to maintain for an artifact whose fix is one command. So: detect
-# loudly, and let the orchestrator run that command. A red main is exactly the
-# signal this issue says was missing, and it is the same contract every other
-# generated artifact here is already held to.
+# WHAT THIS JOB CHECKS NOW. Building at deploy time introduces exactly one new
+# way to be wrong, and it is a silent one: the deploy could stop building the
+# wheel, or build it under a name the page does not fetch, and the published
+# playground would 404 with nothing in the tree noticing. So this workflow keeps
+# its trigger, its schedule and its teeth, and runs the same tool against that
+# contract instead:
 #
-# THE FIX when this job is red:
+#   1. `pages.yml` runs a builder BEFORE it uploads `site/`.
+#   2. A fresh build is named what `site/js/playground.js` and
+#      `playground/app.js` fetch (a `pyproject.toml` version bump renames it).
+#   3. The build's member set equals `git ls-files` of the trees it vendors,
+#      asked of git rather than of the builder, so an empty or half-populated
+#      zip is a red rather than a clean upload.
 #
-#     python3 tools/check_site_wheel.py --write   # rebuilds both vendor copies
-#     git commit -am "Refresh the committed playground/site wheel"
+# THE FIX when this job is red is in its output and in the tool's header; it is
+# a wiring defect in `pages.yml` or a rename, not an artifact to regenerate.
+# There is no longer anything to commit.
 #
-# (`python3 site/build.py` does the same thing plus the site's examples.js.)
-name: site wheel drift
+# `site/vendor/cordis-*.whl` is NOT in scope and is still committed: its source
+# is the pinned `backends/python/setup.sh` clone, absent from this tree, so it
+# cannot be built at deploy time. It is gated by
+# `tests/test_cordis_wheel_records_its_source_revision_1029.py`.
+name: site wheel
 
 on:
-  # Every push to main. No `paths:` filter on purpose: the wheel's inputs are
-  # all of `src/revl/**`, plus `pyproject.toml`'s version, the builder and the
-  # checker — a filter listing them is one more thing that can be silently
+  # Every push to main. No `paths:` filter on purpose: the contract spans
+  # pages.yml, the builder, pyproject's version and the two pages that fetch the
+  # wheel by name — a filter listing them is one more thing that can be silently
   # wrong, and the job is a stdlib-only zip build measured in seconds against a
   # 13-job matrix that runs on the same event.
   push:
     branches: [main]
-  # Backstop and manual handle: a weekly run catches drift that landed while
+  # Backstop and manual handle: a weekly run catches a break that landed while
   # this workflow was disabled or its run was lost, and `gh workflow run "site
-  # wheel drift"` answers "is the wheel current?" before a release without
-  # running the rest of the gate.
+  # wheel"` answers "will the next deploy publish a working playground?" before
+  # a release without running the rest of the gate.
   schedule:
     - cron: "40 6 * * 1"
   workflow_dispatch:
@@ -76,22 +82,31 @@ jobs:
       # No `pip install`: playground/build_wheel.py is stdlib-only and reads
       # src/revl off the checkout, so this needs no revl install and no
       # backend toolchain.
-      - name: committed wheel matches a fresh build
+      - name: the deploy builds the wheel the playground fetches
         run: python3 tools/check_site_wheel.py
       - name: how to fix
         if: failure()
         run: |
           {
-            echo "### The committed playground/site wheel is stale"
+            echo "### The published playground will not boot"
             echo
-            echo 'Regenerate it and open a PR:'
+            echo "The wheel is built by the Pages deploy, not committed, so"
+            echo "there is nothing to regenerate here. One of three things is"
+            echo "wrong; the job log above says which:"
+            echo
+            echo "1. \`.github/workflows/pages.yml\` no longer builds the wheel"
+            echo "   before \`upload-pages-artifact\`. Restore that step."
+            echo "2. \`pyproject.toml\`'s version moved, so the wheel is named"
+            echo "   something \`site/js/playground.js\` and \`playground/app.js\`"
+            echo "   do not fetch. Update the \`WHEEL\` constant in both."
+            echo "3. The build no longer vendors what the commit tracks."
+            echo
+            echo "Reproduce locally with:"
             echo
             echo '```sh'
-            echo 'python3 tools/check_site_wheel.py --write'
-            echo 'git commit -am "Refresh the committed playground/site wheel"'
+            echo 'python3 tools/check_site_wheel.py'
             echo '```'
             echo
-            echo "Until then the published playground at"
-            echo "<https://inso1337.github.io/revl/> runs an older compiler"
-            echo "than main. See the job log above for the drifted modules."
+            echo "Until it is fixed the published playground at"
+            echo "<https://inso1337.github.io/revl/> is broken or stale."
           } >> "$GITHUB_STEP_SUMMARY"
