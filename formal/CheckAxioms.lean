@@ -131,7 +131,9 @@ import RevL
 -- the statement fragment instead of taken as given -- the capKeys bridge
 -- and the emit-step surface as lemmas, the unnameable receivers named,
 -- the five affected guarantees re-stated over `SpawnsAdmitted`, and the
--- three derived non-vacuity witnesses.
+-- four derived non-vacuity witnesses (issue 1142: the capability column
+-- and the wiring-key column are separate namespaces, and the witness
+-- that separates them is `same_key_different_boundary_refused`).
 #print axioms RevL.CapCeilings.derived_held_tokens_are_declared_keys
 #print axioms RevL.CapCeilings.derived_reach_is_emit_surface
 #print axioms RevL.CapCeilings.unnameable_receiver_is_star
@@ -142,6 +144,7 @@ import RevL
 #print axioms RevL.CapCeilings.derived_confinement_within_ceiling
 #print axioms RevL.CapCeilings.derived_no_star_amplification
 #print axioms RevL.CapCeilings.derivation_non_vacuous
+#print axioms RevL.CapCeilings.same_key_different_boundary_refused
 #print axioms RevL.CapCeilings.derivation_refuses_unnameable
 #print axioms RevL.CapCeilings.derived_ceiling_check_not_subsumed
 -- G9 (items 249/256/329): untrusted data gains no authority — the label is

@@ -142,6 +142,7 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.derived_confinement_within_ceiling \
   RevL.CapCeilings.derived_no_star_amplification \
   RevL.CapCeilings.derivation_non_vacuous \
+  RevL.CapCeilings.same_key_different_boundary_refused \
   RevL.CapCeilings.derivation_refuses_unnameable \
   RevL.CapCeilings.derived_ceiling_check_not_subsumed \
   RevL.G9.origin_persists_or_is_declassified \

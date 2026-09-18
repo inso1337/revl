@@ -159,17 +159,18 @@ Three summary readings of that map:
 | `RevL.CapCeilings.no_star_amplification` | item 66 — the host boundary | **proved** | `propext` | `*` is covered only by `*`, so it is never manufactured |
 | `RevL.CapCeilings.parameter_widening_refused` | item 294 — non-vacuity | **proved** | `propext` | tracks `examples/rejections/g4_spawn_widens_parameter.rvl` |
 | `RevL.CapCeilings.ceiling_check_not_subsumed` | item 260 — non-vacuity | **proved** | `propext` | the resource fold is ceiling-blind; the budget check is not |
-| `RevL.CapCeilings.derived_held_tokens_are_declared_keys` | TODO 2(a) — the `capKeys` bridge | **proved** | `propext, Quot.sound` | derived held tokens are exactly the declared wiring keys |
-| `RevL.CapCeilings.derived_reach_is_emit_surface` | TODO 2(a) — `_collect_emit_caps_pairs` | **proved** | `propext, Quot.sound` | only `emit` contributes; an `emit` contributes its key's cone |
-| `RevL.CapCeilings.unnameable_receiver_is_star` | TODO 2(a) — the named residue | **proved** | `propext` | handle / head-less receivers derive exactly `[*]` |
+| `RevL.CapCeilings.derived_held_tokens_are_declared_keys` | TODO 2(a) — the `capKeys` bridge, split by namespace | **proved** | `propext, Quot.sound` | the BOUND column's tokens are exactly the declared wiring keys; every element of the CAPABILITY column is a declared capability, or that key in the reserved `key:` namespace — never a bare key |
+| `RevL.CapCeilings.derived_reach_is_emit_surface` | TODO 2(a) — `_collect_emit_caps_pairs` | **proved** | `propext, Quot.sound` | only `emit` contributes; an `emit` contributes the cone the service behind its key declares |
+| `RevL.CapCeilings.unnameable_receiver_is_star` | TODO 2(a) — the named residue | **proved** | `propext` | handle / head-less receivers derive exactly `[*]`, in both columns |
 | `RevL.CapCeilings.derived_lineage` | TODO 2(a) — text to `Lineage` | **proved** | `propext` | an admitted activation spawn edge is a lineage edge |
 | `RevL.CapCeilings.derived_attenuation_monotone` | TODO 2(a) — items 66/294 | **proved** | `propext, Quot.sound` | `attenuation_monotone` over derived sets; the closure carries the subtree |
 | `RevL.CapCeilings.derived_lineage_ceiling_le` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | `lineage_ceiling_le` with its `Lineage` hypothesis discharged |
 | `RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | the end-to-end budget claim, rooted in a component shape |
-| `RevL.CapCeilings.derived_confinement_within_ceiling` | TODO 2(a) + G6 | **proved** | `propext, Quot.sound` | `TypedIn (capKeys Γ)` discharged from `TypedIn (reqKeys c)` |
-| `RevL.CapCeilings.derived_no_star_amplification` | TODO 2(a) — item 66 | **proved** | `propext, Quot.sound` | the `*`-free side condition is itself derived |
+| `RevL.CapCeilings.derived_confinement_within_ceiling` | TODO 2(a) + G6 | **proved** | `propext, Quot.sound` | `TypedIn (capKeys Γ)` discharged from `TypedIn (reqKeys c)`; clause (a) reads the key namespace (`heldBounds`), clause (b) the declared one (`heldCaps`) |
+| `RevL.CapCeilings.derived_no_star_amplification` | TODO 2(a) — item 66 | **proved** | `propext, Classical.choice, Quot.sound` | the `*`-free side condition is itself derived, now from the declared cones; a reserved `key:` element is never `*` |
 | `RevL.CapCeilings.derivation_non_vacuous` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | derived sets carry valuations; `g4_spawn_widens_parameter` refused from the text |
-| `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into the held key |
+| `RevL.CapCeilings.same_key_different_boundary_refused` | TODO 2(a) — the namespace split | **proved** | `propext, Classical.choice, Quot.sound` | one `requires` key over two different declared boundaries: the bound column derives the same list on both sides and attenuates, the capability column refuses the edge |
+| `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into a held element |
 | `RevL.CapCeilings.derived_ceiling_check_not_subsumed` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | both relations still load-bearing once the sets are derived |
 | `RevL.G9.origin_persists_or_is_declassified` | G9 (item 249) — the core lemma | **proved** | `propext` | an origin survives a flow, or a declassifier on that path cleared it |
 | `RevL.G9.no_authority_from_untrusted` | G9 — untrusted data gains no authority | **proved** | `propext` | a `Trusted[T]` sink admits a tainted value only after an explicit declassification of that origin |
@@ -1070,15 +1071,40 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    (a) ~~*theorem side*~~ — **done**. `held` and `reach` are now
    FUNCTIONS of a component shape, not given lists:
    `stmtCaps`/`bodyReach` track `_collect_emit_caps_pairs` (emit steps
-   only; a `req` receiver resolves to its wiring key's cone through
-   `_cap_keyed`, anything else to `*`), `heldCaps` tracks
-   `_held_capabilities_pairs`, `reachIn` tracks `_spawn_surface_closure`
-   as a fuel-indexed unfolding, and `SpawnsAdmitted` tracks
-   `_check_spawn_attenuation` over activation-body spawns only
-   (`_activation_spawn_sites`). The `capKeys` bridge stops being an
-   assumption: `derived_held_tokens_are_declared_keys` proves the derived
-   held set's tokens are exactly the component's declared `requires`
-   keys. Five of the nine theorems are re-stated with their `Lineage` (and
+   only; a `req` receiver resolves through `_cap_keyed` to the
+   capabilities the service behind the key DECLARES, anything else to
+   `*`), `heldCaps` tracks `_held_capabilities_pairs`, `reachIn` tracks
+   `_spawn_surface_closure` as a fuel-indexed unfolding, and
+   `SpawnsAdmitted` tracks `_check_spawn_attenuation` over
+   activation-body spawns only (`_activation_spawn_sites`).
+
+   A crossing has TWO names here, as it does in the harness (issue 1132)
+   and in `lower.py`: the declared boundary the `emission[...]` clause
+   names, and the local wiring key it was reached through. Both are
+   derived, by one traversal under two `Namer`s — `capsOfDecls` for the
+   capability column (`heldCaps`/`bodyReach`, what `SpawnsAdmitted` and
+   every `Lineage` theorem fold over) and `boundsOfDecls` for the key
+   column (`heldBounds`/`bodyBounds`, what `capKeys` and G6 confinement
+   read). `Iface` now carries a service's whole emission declaration, one
+   `Decl` per declared capability and one `none` per emission method that
+   names no capability list, which is `_held_capabilities_pairs` arm for
+   arm. An entry that declares nothing falls back to the key in the
+   reserved `key:` namespace (`lower._WIRE_NS`), so a key spelling is
+   never a bare fold element in the boundary namespace. The `capKeys` bridge stops being an
+   assumption: `derived_held_tokens_are_declared_keys` proves the bound
+   column's tokens are exactly the component's declared `requires` keys,
+   and that no element of the capability column is a bare key.
+   `same_key_different_boundary_refused` is why the split is not
+   cosmetic: a parent wired `kv: KvA` spawning a child wired `kv: KvB`
+   derives the SAME bound list on both sides — the fold over it
+   attenuates and admits the edge — while the capability column refuses
+   it, which is what the reference does under G4
+   (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
+   Running the fold in the key namespace, which this section did before
+   issue 1142, made the derived layer a theory about a different language
+   than the one that ships.
+
+   Five of the nine theorems are re-stated with their `Lineage` (and
    for confinement, `TypedIn (capKeys Γ)`) hypotheses discharged from the
    program text — `derived_attenuation_monotone`,
    `derived_lineage_ceiling_le`,
@@ -1102,6 +1128,11 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    `derived_no_star_amplification` and on half of
    `derived_confinement_within_ceiling`, and
    `derivation_refuses_unnameable` is the concrete price of dropping it.
+   `derived_no_star_amplification` no longer needs a side condition on
+   the wiring keys themselves: a key with nothing declared behind it is
+   folded in the reserved namespace, which `wireCap_token_ne_star` shows
+   is never `*`; what it needs instead is that no service behind a
+   declared key declares `*`.
    One precision loss: an L0 call head is the receiver ROOT, so a key's
    cone unions over the service's emission methods where the reference
    picks the method being called — the derived gate is therefore at least
