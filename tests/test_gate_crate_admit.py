@@ -1144,8 +1144,13 @@ TYPE_LAYER_GAP = [
     # REFUSES it in the reference's own words and it is an agreement rather than
     # a gap. `test_the_gap_that_closed_is_an_agreement_now` below holds that,
     # so this list cannot go vacuous by attrition.
-    ("undeclared name in a body", "fn f() -> Int { return undefined_name }"),
     ("return arrow with no type", "fn f() -> { }"),
+    # `("undeclared name in a body", "fn f() -> Int { return undefined_name }")`
+    # headed this list until the name-RESOLUTION rule landed
+    # (docs/design/457 §2.3): a name READ is resolved against the fn's scope and
+    # the callable universe, so the crate REFUSES it under G1 in the reference's
+    # own words. `test_the_read_gap_that_closed_is_an_agreement_now` below holds
+    # that.
     # `("unknown service in provides", "component C provides s: S { }")` used to
     # sit here. It left when the gate learned the component header's
     # service-existence rule (docs/design/457 §2.4): the crate now REFUSES it in
@@ -1186,6 +1191,31 @@ def test_the_gap_that_closed_is_an_agreement_now(consumer):
     assert verdict["admitted"] is False
     assert verdict["code"] == ref_code
     assert verdict["message"] == ref_message
+
+
+def test_the_read_gap_that_closed_is_an_agreement_now(consumer):
+    """The undeclared name READ, which headed the list above until the
+    name-resolution rule (docs/design/457 §2.3) built the callable universe.
+    The crate refuses it under the reference's own tag and sentence, and still
+    issues no admission doing so — and a program that reads only DECLARED names
+    is not refused, which is the direction the rule may not err in."""
+    source = "fn f() -> Int { return undefined_name }"
+    ref_code, ref_message = _reference(source)
+    assert ref_code == "G1", ref_code
+    verdict = _crate_verdicts(consumer, [source])[0]
+    assert verdict["verdict"] == "refused"
+    assert verdict["admitted"] is False
+    assert verdict["code"] == ref_code
+    assert verdict["message"] == ref_message
+    declared = ("type Shape = Circle | Square\n"
+                "fn g(n: Int) -> Int { return n }\n"
+                "fn f(p: Int) -> Int {\n"
+                "  let m = Map.new()\n"
+                "  let s = Circle\n"
+                "  return g(p)\n"
+                "}\n")
+    assert _reference(declared)[0] == ""
+    assert _crate_verdicts(consumer, [declared])[0]["verdict"] != "refused"
 
 
 # --------------------------------------------------------------- fail closed
