@@ -246,6 +246,17 @@ CORPUS = [
                              #   kind, and the `Job` host stub — whose emitted
                              #   block was missing `pub struct Job;` itself.
                              #   No document awaited anything before this one.
+    "comp_stream.rvl",       # the `Stream[T]` surface (item 130): the ~950-line
+                             #   stream host runtime, the `subscribe` acquisition
+                             #   with its policy/buffer operands, the `merge`
+                             #   fan-in, the `filter`/`map`/`take` derived chain,
+                             #   the blocking `await sub.next()`, and the
+                             #   `every .. in` loop. No document subscribed to a
+                             #   stream before this one, so all three were
+                             #   measured vacuously at once. The typed-event
+                             #   handler stays out: its contract line renders the
+                             #   derived schema through python `json.dumps`
+                             #   defaults, still REPORTED by the port.
     "comp_timer.rvl",       # the activation-body `timer` step (item 57): both
                              #   modes (`revl_schedule_every` / `_after`), the
                              #   per-timer required-service clone the `move`

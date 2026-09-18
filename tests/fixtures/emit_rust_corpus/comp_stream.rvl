@@ -1,0 +1,88 @@
+// The `Stream[T]` surface (issue 1153, item 130): the subscription bracket, the
+// blocking `next`, and the `every .. in` iteration this tier lowers as a plain
+// loop over the cancel-channel pull.
+//
+// No corpus document subscribed to a stream before this one, so the whole
+// surface was measured VACUOUSLY three times over: the port emitted
+// `<<DEFER-stream-host>>` in place of the ~950-line stream host runtime,
+// `<<UNSUPPORTED-EXPR:subscribe>>` for every acquisition, and
+// `<<DEFER-comp-step:stream-iter>>` for every loop -- and the oracle agreed,
+// because nothing it compiled ever opened a stream.
+//
+// The shapes this document forces:
+//
+//   * the stream host runtime itself, and the R1 live-resource slot a provider
+//     and a subscription each take;
+//   * `subscribe <src>` with its default policy/buffer, and the explicit
+//     `policy drop_oldest buffer 2` form;
+//   * the `merge(a, b)` fan-in, which BORROWS its sources because each is a
+//     live activation bind the component still needs for its own `undo`;
+//   * the derived-stream combinator chain `filter(..).map(..).take(n)`, left to
+//     right, whose links all unwind off the ONE bracket the subscribe registers;
+//   * the blocking `await <sub>.next()` -- the erased-awaitable arm that maps
+//     and propagates a `Faulted` terminal rather than awaiting a future;
+//   * `every o in sub { .. }`: the `Closed` terminal that ends the loop BEFORE
+//     the body, the uncaught `Faulted` that fails the activation so the prefix
+//     reverts LIFO with the subscription bracket on it, and the discard that
+//     keeps a body which never reads the item off the unused-binding lint.
+//
+// The typed-event handler (`on <Event> as e in <sub>`) is deliberately NOT here:
+// its contract line renders the event's derived JSON schema through Python's
+// `json.dumps` default separators, and the port carries no dual-tier host
+// formatter for that, so it is still REPORTED rather than emitted.
+service Sink {
+  emission fn write(v: Str)
+}
+
+// The core guarantee: a sync resource, then a subscription bracket. Unloading
+// the owner runs the inverses LIFO, so `close` runs before the pool's and no
+// listener outlives the owner.
+component Consumer {
+  let pool = effect Pool.open("orders", 2) undo pool.close()
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+}
+
+// A blocking `next`: the activation occupies its thread in the item / terminal /
+// cancel race until the provider emits.
+component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}
+
+// `merge`: two sources fanned into one DERIVED stream owned by the subscription,
+// so multi-source teardown rides the one bracket the subscribe registers.
+component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let b = effect Stream.source() undo b.close()
+  let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}
+
+// An explicit backpressure policy and a bounded buffer, so the two operands the
+// subscribe call carries are not both measured on their defaults.
+component Bounded {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src policy drop_oldest buffer 2 undo sub.close()
+  await sub.next()
+}
+
+// The iteration form: a plain loop over the blocking `next`.
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+
+// The derived-stream combinator chain, left to right.
+component Chain requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.filter(x => x != "skip").map(x => x + "!").take(2)
+              undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
