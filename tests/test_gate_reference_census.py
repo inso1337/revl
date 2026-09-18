@@ -163,13 +163,13 @@ KNOWN_BYPASSES = {
     "examples/rejections/t33_arrow_value_arity.rvl",
     "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
     # -- return paths and match --
-    # The RETURN-PATH half landed with docs/design/457 T3b: `fb_function` runs
-    # `_check_returns_on_every_path` over the statement tree the fn-body walk
-    # already builds, so `t8_missing_return` and `t9_return_path_incomplete`
-    # now refuse with the reference's message AND its line and are struck from
-    # this list. What remains needs the variant table and the arm algebra.
-    "examples/rejections/t13_unknown_match_case.rvl",
-    "examples/rejections/v2_match_nonexhaustive.rvl",
+    # CLOSED WHOLE. The RETURN-PATH half landed with docs/design/457 T3b
+    # (`fb_function` runs `_check_returns_on_every_path` over the statement tree
+    # the fn-body walk already builds), and the MATCH half with the
+    # exhaustiveness rule: the declaration scan records each ADT's own case list
+    # and the lowering walk asks `_check_match_exhaustiveness`'s two questions
+    # where `_lower_pure_expr` asks them. All four fixtures now refuse with the
+    # reference's own tag and sentence and are struck from this list.
     # -- declarations --
     "examples/rejections/t18_type_alias_cycle.rvl",
     "examples/rejections/t6_bare_generic.rvl",
