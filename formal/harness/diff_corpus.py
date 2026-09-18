@@ -17,7 +17,13 @@ Pipeline (formal/STATUS.md, "differential oracle"):
        (`w.task.run` reads the child's `task` provision), emission externs
        and the transitively-emitting named functions;
      - a component's activation emit-step surface, the capabilities its
-       `requires` bindings grant it, and its activation-body spawn edges.
+       `requires` bindings grant it, and its activation-body spawn edges;
+     - a config field's declared TYPE, decomposed into the nodes it
+       reaches and each node's data classification. That one is not
+       about a crossing at all: the G4 guarantee also forbids a config
+       field whose type can carry a live callable or a capability (item
+       378), and with no type-shape fact the model could not see such a
+       refusal at all (issue 1161).
 
    That is what lets the shaped model see a provider exceeding its
    declaration and a spawn widening a child's authority, not just a missing
@@ -88,6 +94,18 @@ from revl.diagnostics import classify
 from revl.errors import RevlError
 from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
 from revl.typecheck import parse_type  # the shipped type-head splitter
+# The config-is-data tables (item 378), imported rather than restated: the
+# classification a `CN` node carries is the SHIPPED checker's, so the harness
+# cannot drift from it by spelling a head into the wrong bucket.
+from revl.typecheck import (
+    _CONFIG_DATA_CONTAINERS,
+    _CONFIG_DATA_SCALARS,
+    _CONFIG_ERASED,
+    FN_HEAD,
+    _is_type_expression,
+    structural_fields,
+)
+from revl.taint import strip_qualifiers  # the shipped qualifier normalization
 from revl.wal import WAL_GUARANTEE, WAL_VERSION
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
@@ -977,6 +995,172 @@ def _host_acquire_facts(comp, fns: dict) -> list[tuple[str, str]]:
     return out
 
 
+# ---------------------------------------------------------------- config-data
+#
+# The THIRD rule under the G4 guarantee, and the first that is not about a
+# crossing at all. `g4OK` (the marker rule) and `hostAcquireOK` (the acquire
+# rule) both judge something a body DOES; config-is-data (item 378,
+# `typecheck.check_config_field_is_data`) judges a config field's declared
+# TYPE — a config value is injected as static data at plug/spawn/load time, so
+# its type must be built, transitively, out of data. An arrow field is a live
+# callable invoked past every authority fold; a `service` field is a capability
+# handed over with no wiring at all.
+#
+# The model had no type-shape facts, so a refusal of this class was invisible
+# to it and reported as `missed-G4` — fatal — wherever a fixture for it was
+# placed (issue 1161). The export now decomposes a config field's declared type
+# the way `Z`/`Y` decompose a capability: the SHIPPED tables and the shipped
+# splitter classify each node the type reaches, and the JUDGMENT — that every
+# reached node is a data form — is stated on both verdict sides.
+#
+# The classification is an ALLOWLIST on both sides, matching the checker's own
+# discipline (`_walk_config_type` refuses a head that is not *provably* data
+# rather than denying two known-bad ones). A form neither side has heard of is
+# therefore refused, which is the SAFE direction: the model can only become
+# stricter than the checker, never blind to one of its refusals.
+CONFIG_DATA_FORMS = frozenset(
+    {"scalar", "container", "record", "variant", "struct", "tparam"})
+
+
+def config_type_defs(prog) -> dict[str, dict]:
+    """The lightweight type table `check_config_field_is_data` resolves nominal
+    heads through — `lower._check_config`'s own construction, clause for
+    clause, so a record/ADT/alias resolves here exactly as it does there."""
+    out: dict[str, dict] = {}
+    for decl in prog.type_decls:
+        if decl.fields:
+            out.setdefault(
+                decl.name,
+                {"kind": "record", "params": list(decl.params or ()),
+                 "fields": {f.name: f.type for f in decl.fields}})
+        else:
+            out.setdefault(
+                decl.name,
+                {"kind": "variant", "params": list(decl.params or ()),
+                 "cases": [{"name": c.name, "payload": c.payload}
+                           for c in decl.cases]})
+    return out
+
+
+def config_shape(type_name: str | None, *, service_names: set[str],
+                 type_defs: dict, visited: frozenset = frozenset(),
+                 tparams: frozenset = frozenset(),
+                 out: "list[tuple[str, str]] | None" = None
+                 ) -> list[tuple[str, str]]:
+    """Every node `type_name` reaches, as `(form, spelling)` in walk order.
+
+    A transcription of `typecheck._walk_config_type` with one difference: the
+    checker RAISES at the first offender, and this walk records it and carries
+    on with its siblings. The two are equivalent for the verdict — "some node
+    is not a data form" is exactly "the checker's descent raises somewhere" —
+    and recording all of them makes the fact set independent of the order the
+    descent happens to take.
+
+    An offender is never descended into, which the checker does not do either
+    (it has already raised), so the walk terminates on the same `visited`
+    guard the checker uses for a recursive type."""
+    if out is None:
+        out = []
+    # `taint.extract_and_normalize` runs before the checker and STRIPS every
+    # `Secret[T]`/`Untrusted[T]`/`Trusted[T]`/`Retained[T, p]` qualifier off a
+    # declared type in place, so `check_config_field_is_data` is handed the
+    # bare type and `config { api_key: Secret[Str] }` is a `Str` field by the
+    # time it is judged. This export parses the corpus and does NOT run the
+    # taint pass, so it applies that ONE normalization with the shipped
+    # function — idempotent, and byte-identical on a type carrying no
+    # qualifier. Without it, every `Secret[T]` config field in the tree would
+    # read as an opaque head and the model would refuse three files revl
+    # accepts.
+    type_name = strip_qualifiers(type_name)
+    if not type_name:
+        return out
+    type_name = type_name.strip()
+
+    def walk(target, *, visited=visited, tparams=tparams):
+        config_shape(target, service_names=service_names, type_defs=type_defs,
+                     visited=visited, tparams=tparams, out=out)
+
+    sfields = structural_fields(type_name)
+    if sfields is not None:
+        out.append(("struct", type_name))
+        for ftype in sfields.values():
+            walk(ftype)
+        return out
+    head, args = parse_type(type_name)
+    if head == FN_HEAD:
+        out.append(("arrow", type_name))
+        return out
+    if head in service_names:
+        out.append(("service", type_name))
+        return out
+    if head in tparams:
+        out.append(("tparam", type_name))
+        return out
+    if head in _CONFIG_DATA_CONTAINERS:
+        out.append(("container", type_name))
+        for arg in args:
+            walk(arg)
+        return out
+    if head in _CONFIG_DATA_SCALARS:
+        out.append(("scalar", type_name))
+        for arg in args:
+            walk(arg)
+        return out
+    info = type_defs.get(head or "")
+    if info is None:
+        # Nothing here proves the field is data. The checker splits the
+        # diagnostic between an erased head (`Any`/`Value`/`Never`, each a
+        # `compatible` wildcard in some direction) and any other unresolvable
+        # one; both refuse, and the two forms are kept apart so the fact says
+        # WHICH shape reopened the hole.
+        out.append(("erased" if head in _CONFIG_ERASED else "opaque",
+                    type_name))
+        return out
+    out.append((info.get("kind") or "variant", type_name))
+    if head not in visited:
+        child_visited = visited | {head}
+        child_tparams = frozenset(info.get("params") or ())
+        if info.get("kind") == "record":
+            for ftype in (info.get("fields") or {}).values():
+                walk(ftype, visited=child_visited, tparams=child_tparams)
+        else:
+            for case in info.get("cases") or []:
+                payload = case.get("payload")
+                if payload is not None:
+                    walk(payload, visited=child_visited, tparams=child_tparams)
+                    continue
+                name = case.get("name")
+                if _is_type_expression(name, type_defs, child_tparams):
+                    walk(name, visited=child_visited, tparams=child_tparams)
+    # A user generic head carries data in its type arguments too; walked with
+    # the OUTER type-parameter scope, since they are written at this use site.
+    for arg in args:
+        walk(arg)
+    return out
+
+
+def config_rows(prog, rel: str) -> list[str]:
+    """`CF` (a config field is declared) + `CN` (one node its type reaches)
+    for every config field in the file — a component's and an extern's, the
+    two `lower._check_config` is called for."""
+    svc_names = {svc.name for svc in prog.services}
+    tdefs = config_type_defs(prog)
+    owners = [("component", c.name, c.config) for c in prog.components]
+    owners += [("extern", e.name, e.config or ()) for e in prog.externs]
+    rows: list[str] = []
+    for kind, owner, fields in owners:
+        for cfg in fields:
+            rows.append("\t".join(
+                ["CF", rel, kind, owner, cfg.name, cfg.type or "-"]))
+            nodes = config_shape(cfg.type, service_names=svc_names,
+                                 type_defs=tdefs)
+            for i, (form, spelling) in enumerate(nodes):
+                rows.append("\t".join(
+                    ["CN", rel, kind, owner, cfg.name, str(i), form,
+                     spelling]))
+    return rows
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
     tsv: list[str] = []
@@ -1051,6 +1235,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             tsv.append("\t".join([
                 "FN", rel, fn.name, ",".join(fn_calls[fn.name]),
                 "star" if star_fns.get(fn.name) else "plain"]))
+
+        # config-is-data facts (CF/CN), file-wide: the declared config fields
+        # and, decomposed by the shipped tables, the type nodes each one
+        # reaches. An extern's config is judged at the same bar as a
+        # component's, so both owners ship rows (issue 1161).
+        tsv.extend(config_rows(prog, rel))
 
         ff: dict = {"components": {}}
         for c in prog.components:
@@ -2052,7 +2242,9 @@ class Verdicts(NamedTuple):
     `confinements` C rows (G6: a reconstructed statement's reach surface is
     within its component's declared context), `g8surface` S8 rows (G8: a
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
-    rows (G5: an effect's teardown registration count)."""
+    rows (G5: an effect's teardown registration count), `configs` CD rows
+    (G4 config-is-data: a config field's declared type is built out of
+    data)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2063,13 +2255,14 @@ class Verdicts(NamedTuple):
     confinements: dict[tuple[str, str, str], str]
     g8surface: dict[tuple[str, str, str], object]
     g5reg: dict[tuple[str, str, str], object]
+    configs: dict[tuple[str, str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
                 + len(self.dispositions) + len(self.recoveries)
                 + len(self.confinements) + len(self.g8surface)
-                + len(self.g5reg))
+                + len(self.g5reg) + len(self.configs))
 
 
 def _cols(field: str) -> list[str]:
@@ -2090,6 +2283,7 @@ def parse_verdicts(text: str) -> Verdicts:
     confinements: dict[tuple[str, str, str], str] = {}
     g8surface: dict[tuple[str, str, str], object] = {}
     g5reg: dict[tuple[str, str, str], object] = {}
+    configs: dict[tuple[str, str, str, str], str] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -2145,10 +2339,14 @@ def parse_verdicts(text: str) -> Verdicts:
             body = parts[4].split("=", 1)[1]
             g5reg[(parts[1], parts[2], parts[3])] = (
                 "n/a" if body == "n/a" else int(body))
+        elif parts[0] == "CD" and len(parts) == 6:
+            # G4 config-is-data: (file, owner kind, owner, field) -> ok|fail.
+            configs[(parts[1], parts[2], parts[3], parts[4])] = \
+                parts[5].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+                    recoveries, confinements, g8surface, g5reg, configs)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -2202,7 +2400,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     declaration is an upper bound — the method's reached emission tokens
     must be within its declared bound (plain => none; any => free; scoped
     => the declared entries). W rows are PER-SPAWN-EDGE attenuation
-    (item 66/294). X rows carry a parse refusal through."""
+    (item 66/294). CD rows are PER-CONFIG-FIELD config-is-data: every node
+    the field's declared type reaches must be a data form (item 378).
+    X rows carry a parse refusal through."""
     rows = [r.split("\t") for r in tsv]
     mrows = [r for r in rows if r and r[0] == "M" and len(r) == 7]
     xrows = [r for r in rows if r and r[0] == "X" and len(r) == 3]
@@ -2217,6 +2417,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     irows = [r for r in rows if r and r[0] == "I" and len(r) == 7]
     exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
     fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
+    cfrows = [r for r in rows if r and r[0] == "CF" and len(r) == 6]
+    cnrows = [r for r in rows if r and r[0] == "CN" and len(r) == 8]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -2441,8 +2643,61 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                 g5reg[(rel, compn, index)] = n
                 _G5_REGS[(rel, compn, index)] = n
 
+    # CD verdicts (G4 config-is-data, issue 1161). The rule is the ALLOWLIST
+    # and nothing else: a config field is data iff every node its declared type
+    # reaches is a data form. The decomposition is the exporter's (the shipped
+    # tables did the classifying); the judgment is stated here and, separately,
+    # in `Oracle.configDataOK`.
+    config_nodes: dict[tuple[str, str, str, str], list[str]] = {}
+    for r in cnrows:
+        config_nodes.setdefault((r[1], r[2], r[3], r[4]), []).append(r[6])
+    configs: dict[tuple[str, str, str, str], str] = {}
+    for r in cfrows:
+        key = (r[1], r[2], r[3], r[4])
+        forms = config_nodes.get(key, [])
+        configs[key] = ("ok" if all(f in CONFIG_DATA_FORMS for f in forms)
+                        else "fail")
+        _CONFIG_FIELDS[key] = (configs[key], tuple(forms))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+                    recoveries, confinements, g8surface, g5reg, configs)
+
+
+#: What the REFERENCE decided for each config field, for the CD row's
+#: non-vacuity ratchet: (verdict, the forms its type reached). Filled by
+#: `reference_from_tsv`, read by `config_coverage`. Evidence that the row
+#: BITES, not a claim either side makes — so it is kept beside the compared
+#: verdict rather than inside it, the same way `_CONFINEMENTS` is.
+_CONFIG_FIELDS: dict = {}
+
+
+def config_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `CD` row (G4 config-is-data, 1161).
+
+    Every config field in the corpus belongs to a file somebody wrote to
+    compile, so a row that only ever said `ok` would agree over nothing — the
+    same vacuity `attenuation_coverage` and `confinement_coverage` guard. This
+    states, and enforces, that the corpus exercises BOTH verdicts, and that the
+    admitting side is not trivial either: an `ok` over an empty node list would
+    certify nothing about the walk."""
+    findings: list[str] = []
+    if not _CONFIG_FIELDS:
+        return ["config coverage: no CD rows at all — the row is vacuous"]
+    admitted = [k for k, (v, _f) in _CONFIG_FIELDS.items() if v == "ok"]
+    refused = [k for k, (v, _f) in _CONFIG_FIELDS.items() if v == "fail"]
+    nonempty = [k for k, (v, f) in _CONFIG_FIELDS.items() if v == "ok" and f]
+    if not refused:
+        findings.append("config coverage: NO refused config field — the CD "
+                        "row would agree vacuously")
+    if not nonempty:
+        findings.append("config coverage: NO admitted config field whose type "
+                        "reaches a node — the walk is never exercised")
+    if not findings:
+        forms = sorted({f for _v, fs in _CONFIG_FIELDS.values() for f in fs})
+        print(f"config coverage: {len(_CONFIG_FIELDS)} config fields, "
+              f"{len(admitted)} data / {len(refused)} refused; "
+              f"forms={','.join(forms)}")
+    return findings
 
 
 # The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
@@ -2475,13 +2730,19 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         align[key] = align.get(key, 0) + 1
         samples.setdefault(key, []).append(rel)
 
-    # The model covers BOTH G4 rules now. The MARKER rule — a classified
+    # The model covers ALL THREE G4 rules now. The MARKER rule — a classified
     # statement's marker presence against the interface's declared emission,
     # over crossings resolved to a (service, method) — is `Oracle.g4OK`. The
     # ACQUIRE rule — a HOST acquire verb (`Pool.open`) legal only as the
     # acquisition of an `effect … undo …` bracket, where its release is
     # registered — is `Oracle.hostAcquireOK` over the `HA` position facts
-    # (issue 334). So a G4 refusal is fatal in EVERY category again: there is
+    # (issue 334). The CONFIG-IS-DATA rule — a config field's declared type
+    # must be built, transitively, out of data, so it can carry neither a live
+    # callable nor a capability (item 378) — is `Oracle.configDataOK` over the
+    # `CN` type-shape facts (issue 1161); it is the one G4 rule that judges a
+    # declaration rather than a body, which is why it needed facts of a new
+    # kind rather than a case in an existing rule.
+    # So a G4 refusal is fatal in EVERY category again: there is
     # no out-of-fragment exemption. The two G4-coded refusals the model still
     # cannot see — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` —
     # never reach this loop: one is refused at PARSE and one declares no
@@ -2500,11 +2761,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
         prov_rows = [(k, x) for k, x in v.providers.items() if k[0] == rel]
         spawn_rows = [(k, x) for k, x in v.spawns.items() if k[0] == rel]
+        # The CD row is the third rule under the G4 guarantee (issue 1161), so
+        # it joins the two crossing rules in BOTH directions: it can clear a
+        # G4 refusal the model would otherwise have missed, and a CD failure
+        # over a file the checker accepts is `formal-strict` like any other.
+        cfg_rows = [(k, x) for k, x in v.configs.items() if k[0] == rel]
+        g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows
         vrow = v.files.get(rel, ("ok", "ok", "ok"))
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows)
-        raw_found = any(x == "fail"
-                        for _, x in comp_rows + prov_rows + spawn_rows)
+            x == "ok" for _, x in g4_rows)
+        raw_found = any(x == "fail" for _, x in g4_rows)
         code, category = checker_code(rel)
         if code == "accept":
             # `formal-strict`: the checker ACCEPTS the file but the shaped
@@ -2602,7 +2868,8 @@ def main() -> int:
             ("recovery", ref.recoveries, formal.recoveries),
             ("confinement", ref.confinements, formal.confinements),
             ("g8_surface", ref.g8surface, formal.g8surface),
-            ("g5_registration", ref.g5reg, formal.g5reg)):
+            ("g5_registration", ref.g5reg, formal.g5reg),
+            ("config_data", ref.configs, formal.configs)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2619,7 +2886,8 @@ def main() -> int:
         f"{len(ref.recoveries)} recoveries + "
         f"{len(ref.confinements)} confinements + "
         f"{len(ref.g8surface)} surfaces + "
-        f"{len(ref.g5reg)} teardowns) — "
+        f"{len(ref.g5reg)} teardowns + "
+        f"{len(ref.configs)} config fields) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
@@ -2627,6 +2895,7 @@ def main() -> int:
     mismatches.extend(attenuation_coverage())
     mismatches.extend(confinement_coverage())
     mismatches.extend(prog_coverage())
+    mismatches.extend(config_coverage())
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:
