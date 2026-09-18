@@ -2595,6 +2595,119 @@ fn f(x: Int) -> Int {
   return x
 }
 """, "TYPE"),
+
+    # ---- a match arm that names no case of the scrutinee's ADT (TYPE) -------
+    # `_check_match_exhaustiveness`'s FIRST arm, run by `_lower_pure_expr` on
+    # every match it lowers. Code-less, so before this slice the gate raised no
+    # objection and the census filed `t13_unknown_match_case` as a false-admit;
+    # it was pinned in TYPE_LAYER_GAP below and has been struck from it. The
+    # MISSING-case half of the same check keeps its row there.
+    ("a match arm naming no case", _fixture("t13_unknown_match_case"), "TYPE"),
+    # a catch-all covers the MISSING cases, never a misspelled one: the unknown
+    # name is refused with `_` present.
+    ("an unknown arm beside a catch-all", """
+type Status = Active | Retired
+
+fn code(s: Status) -> Int {
+  return match s {
+    Bogus => 1,
+    _ => 0,
+  }
+}
+""", "TYPE"),
+    # a lowercase arm is not a binding pattern either (syntax-2.0 3.3), so it
+    # draws the same refusal a misspelled case name does.
+    ("a lowercase arm is not a binding pattern", """
+type Status = Active | Retired
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    other => 2,
+  }
+}
+""", "TYPE"),
+    # the case list quoted in the message is the DECLARATION's order, payloads
+    # included, and a payload-carrying case is named without its payload.
+    ("the quoted case list keeps declaration order", """
+type Tree = Leaf | Node(Int)
+
+fn f(t: Tree) -> Int {
+  return match t {
+    Leaf => 0,
+    Node(v) => v,
+    Twig => 1,
+  }
+}
+""", "TYPE"),
+    # the scrutinee's type comes from the type environment, not only from a
+    # parameter annotation: a `let` with a written type reaches the same rule.
+    ("a let-bound scrutinee carries its declared type", """
+type Status = Active | Retired
+
+fn code() -> Int {
+  let s: Status = Active
+  return match s {
+    Nope => 1,
+    _ => 0,
+  }
+}
+""", "TYPE"),
+    # a match nested inside another expression is reached by the same walk, at
+    # the position the reference lowers it.
+    ("a match nested in a call argument", """
+type Status = Active | Retired
+
+fn g(n: Int) -> Int {
+  return n
+}
+
+fn code(s: Status) -> Int {
+  return g(match s { Bogus => 1, _ => 0, })
+}
+""", "TYPE"),
+    # a variant written over several lines is read whole: a case below the
+    # first line is still a declared case.
+    ("a multi-line variant declaration", """
+type S =
+  Red
+  | Green
+  | Blue
+
+fn f(s: S) -> Int {
+  return match s {
+    Red => 1,
+    Purple => 2,
+    _ => 0,
+  }
+}
+""", "TYPE"),
+    # the rule is per `fn` in declaration order: a clean match ahead of the
+    # refusing one does not move the anchor.
+    ("the second fn holds the unknown arm", """
+type S = A | B
+
+fn g(s: S) -> Int {
+  return match s { A => 1, _ => 0, }
+}
+
+fn f(s: S) -> Int {
+  return match s { Zz => 1, _ => 0, }
+}
+""", "TYPE"),
+    # a case name declared by ANOTHER type is not a case of this one.
+    ("a case name borrowed from another ADT", """
+type S = A | B
+type T = B | C
+
+fn f(s: S) -> Int {
+  return match s {
+    A => 1,
+    C => 2,
+    _ => 0,
+  }
+}
+""", "TYPE"),
 ]
 
 
@@ -3408,14 +3521,16 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t33_arrow_value_arity", "T1"),
         ("t35_arrow_annotation_not_quantified", "T1"),
     ],
-    # return paths and match: unknown/missing match cases. The RETURN-PATH half
-    # has LANDED (docs/design/457 T3b): `fb_function` runs
+    # return paths and match: missing match cases. The RETURN-PATH half has
+    # LANDED (docs/design/457 T3b): `fb_function` runs
     # `_check_returns_on_every_path` over the statement tree `fb_scan` already
     # builds, so `t8_missing_return` and `t9_return_path_incomplete` moved into
-    # REJECTED_PROGRAMS above, where tag AND message are compared. What stays
-    # here needs the variant table and the arm algebra, which is T2d's.
+    # REJECTED_PROGRAMS above, where tag AND message are compared. The
+    # UNKNOWN-case half has since moved `t13_unknown_match_case` there too, on
+    # the variant table `variant_rows` builds beside the signature rows. What
+    # stays here is the MISSING-case half, which needs the arm algebra to decide
+    # what a catch-all covers.
     "return paths and match": [
-        ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
     # declarations: bare generics and non-record destructuring. The ALIAS CYCLE
@@ -3572,18 +3687,19 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_18_fixtures():
+def test_the_type_layer_gap_is_exactly_17_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
     two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
     rows for the module-`fn` surface, the call-and-signature layer (T2b) nine
-    more, and the transparent-alias cycle one; the twelfth document that moved
-    with T3a, `dynamic_reserved_key`, never had a row here because this pin
-    addresses its fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 18, len(_TYPE_LAYER_CASES)
+    more, the transparent-alias cycle one and the unknown-match-case rule one;
+    the twelfth document that moved with T3a, `dynamic_reserved_key`, never had
+    a row here because this pin addresses its fixtures by bare name under
+    `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 17, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 19, "a fixture is listed twice"
+    assert len(set(names)) == 17, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
