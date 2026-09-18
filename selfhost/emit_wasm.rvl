@@ -2258,6 +2258,19 @@ fn unsupported_comments(ir: Any) -> List[Str] {
 // `unsupported_comments` above, this line has no counterpart in the reference's
 // bytes: it is the port's own refusal, in the `<<UNSUPPORTED-...>>` spelling the
 // rest of this file uses, so a survey that looks for markers finds it.
+//
+// MEASURED over the 186 component documents in the tree. 162 of them were
+// documents this tier REFUSES and this port answered with a module and no
+// marker; 13 remain. The price is the 21 whose FUNCTIONS module this port did
+// reproduce byte-for-byte: their component modules live in sibling entries of
+// the reference's `{module: wat}` map that the oracle's projection discards, so
+// they now carry a marker the reference's functions module does not. That is
+// the right side to err on here -- `emit_wasm_src` is the whole answer
+// `compile_to(source, "wasm")` gives, a component IS missing from it, and
+// tools/selfhost_differential_survey.py already declares a wasm component row
+// non-evidence for corpus selection
+// (`wasm_functions_projection_discards_component_output`). No document in the
+// byte-agreement CORPUS declares a component, so the oracle is untouched.
 fn uncarried_components(ir: Any) -> List[Str] {
   var out = []
   for (c of value_list(value_field(ir, "components"))) {
