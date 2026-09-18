@@ -1452,6 +1452,33 @@ boot component B2 provides e2: Env2 {
     ("t29 field read on an erased Any", _fixture("t29_field_read_on_any"), "T1"),
     ("t36 a Float literal outside binary64",
      _fixture("t36_float_literal_range"), "TYPE"),
+    # ---- arrows and function values (docs/design/457 T2c) -----------------
+    # item 75(a) §3.1/§3.2: an arrow in inference position types its parameters
+    # from its own annotations (bottom where it wrote none) and its result from
+    # the written return or, when the body cannot depend on a bottom parameter,
+    # from the body. It ALWAYS types, as a function type, because arity is
+    # purely syntactic and never in doubt. A call through such a value is held
+    # to that arity exactly and to the parameter types it does spell.
+    ("t17 an arrow body is an ordinary expression and is checked like one",
+     _fixture("t17_arrow_body_unchecked"), "T1"),
+    ("t32 a result produced by an arrow value flowing where it cannot go",
+     _fixture("t32_arrow_value_result_flows"), "T1"),
+    ("t33 a call through an arrow value at the wrong arity",
+     _fixture("t33_arrow_value_arity"), "T1"),
+    ("t35 an arrow annotation is not a fresh type parameter",
+     _fixture("t35_arrow_annotation_not_quantified"), "T1"),
+    ("an argument supplied to a zero-parameter arrow value",
+     "fn demo() -> Str {\n  let f = () => \"s\"\n  return f(1)\n}\n", "T1"),
+    ("an annotated arrow parameter at a call through the value",
+     "fn demo() -> Int {\n  let f = (x: Int) => x + 1\n"
+     "  return f(\"s\")\n}\n", "T1"),
+    ("a free variable captured into an arrow body keeps its type",
+     "type ARow = { h: Str }\n\nfn demo(o: Opt[ARow]) -> Int {\n"
+     "  let g = () => o.h\n  return 1\n}\n", "T1"),
+    ("an arrow annotation inside a non-generic fn is an opaque nominal",
+     "fn ident[T](x: T) -> T {\n  return x\n}\n\n"
+     "fn demo(n: Int) -> Int {\n  let f = (v: T): T => v\n"
+     "  return ident(f(n))\n}\n", "T1"),
     # ---- match exhaustiveness (docs/design/457 T3b, the match half) -------
     # `_check_match_exhaustiveness`, which `_lower_pure_expr` runs at an
     # `ExprMatch` before it lowers the scrutinee or the arms. Both of its
@@ -3356,18 +3383,16 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # four lowering-time method refusals moved all nine of this family's
     # fixtures into REJECTED_PROGRAMS above, where tag AND message are compared,
     # so the family has no row left here.
-    # arrows and function values: arrow-body checking, function-value flow and
-    # arity, arrow annotations. (The self-declared async colour,
-    # t34_arrow_self_declared_async, was in this family until the gate learned
-    # to parse an arrow's written return annotation and refuse a self-declared
-    # `Async[…]` colour — rule C1 — so it now AGREES with the reference and has
-    # left this gap; see agree-refuse/A1 in the census.)
-    "arrows and function values": [
-        ("t17_arrow_body_unchecked", "T1"),
-        ("t32_arrow_value_result_flows", "T1"),
-        ("t33_arrow_value_arity", "T1"),
-        ("t35_arrow_annotation_not_quantified", "T1"),
-    ],
+    # arrows and function values: CLOSED WHOLE (docs/design/457 T2c). An arrow
+    # in inference position now types its parameters from its own annotations
+    # (bottom where it wrote none) and its result from the written return or,
+    # under §3.2, from the body; a call through such a value is held to its
+    # arity and to the parameter types it spells. All four fixtures are in
+    # REJECTED_PROGRAMS above, where tag AND message are compared, so this
+    # family has no row left here. (The self-declared async colour,
+    # t34_arrow_self_declared_async, left it earlier, when the gate learned to
+    # parse an arrow's written return annotation and refuse a self-declared
+    # `Async[…]` colour — rule C1; see agree-refuse/A1 in the census.)
     # return paths and match: CLOSED WHOLE. The RETURN-PATH half landed with
     # docs/design/457 T3b (`fb_function` runs `_check_returns_on_every_path`
     # over the statement tree `fb_scan` already builds), and the MATCH half
@@ -5660,7 +5685,137 @@ def test_the_type_layer_stays_silent_where_it_cannot_decide(admit):
         "  m = m.set(\"k\", 1)\n  return m\n}\n",
         # a `Float` literal at the very edge of binary64 is finite
         "fn f() -> Float {\n  return 1.7976931348623157e308\n}\n",
+        # item 75(a) §3.2: a body that mentions a BOTTOM parameter shapes a
+        # result that is not sound to name, so the arrow's result stays bottom
+        # and every consumer of it is silent
+        "fn demo() -> Int {\n  let f = (x) => x + 1\n  return f(1)\n}\n",
+        "fn demo() -> Int {\n  let f = (x) => [x]\n  return 1\n}\n",
+        # an arrow in ARGUMENT position is typed by the checking position
+        # (`_check_arrow`), which this walk does not run
+        "fn apply(g: (Int) -> Int, n: Int) -> Int {\n  return g(n)\n}\n\n"
+        "fn demo() -> Int {\n  return apply(x => x + 1, 2)\n}\n",
+        # an arrow applied in place is a call through a function value
+        "fn demo() -> Str {\n  return ((x: Int) => \"s\")(1)\n}\n",
+        # rule G in the direction that must NOT refuse: a name in an arrow
+        # annotation resolves to a type parameter of the ENCLOSING `fn` when it
+        # has one, and a type parameter is a wildcard inside its own body
+        "fn idg[T](x: T) -> T {\n  let f = (v: T): T => v\n"
+        "  return f(x)\n}\n",
+        # `?.` on an optional, which is the whole point of the operator
+        "type ORow = { name: Str }\n\nfn f(o: Opt[ORow]) -> Opt[Str] {\n"
+        "  return o?.name\n}\n",
+        # ... and through a transparent alias, which the reference erases
+        # before it asks and this walk reads as written
+        "type MaybeStr = Opt[Str]\n\nfn f(o: MaybeStr) -> Opt[Int] {\n"
+        "  return o?.length\n}\n",
+        # a match with a catch-all arm, over a built-in scrutinee, and over a
+        # user variant with payload arms: each covered, none refused
+        "type MSt = A | B | C\n\nfn f(s: MSt) -> Int {\n"
+        "  return match s {\n    A => 1,\n    _ => 0,\n  }\n}\n",
+        "fn f(o: Opt[Int]) -> Int {\n  return match o {\n"
+        "    Some(v) => v,\n  }\n}\n",
+        "type MPay = L(Str) | R(Int)\n\nfn f(s: MPay) -> Int {\n"
+        "  return match s {\n    L(t) => t.length(),\n    R(n) => n,\n  }\n}\n",
     ]
     for src in admitted:
         assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
         assert admit(src) == "", src
+
+
+# ============ arrows, optional chains and match (docs/design/457 T2c / T2d)
+#
+# `_t2c_program` draws a module `fn` whose body binds an ARROW and then consumes
+# it: a call through the value at every arity, its result flowed into a declared
+# signature, an optional chain on a parameter, and a `match` over a user variant
+# covered, under-covered or misspelled. The arrow's parameters are annotated,
+# bare, or annotated with a name that is not a declared type — the three cases
+# item 75(a) §3.1 and rule G separate — and its return annotation likewise.
+#
+# Differential, like `_typed_fn_body`: the reference is ground truth on every
+# draw and the two are compared on TAG and MESSAGE. The same two claims hold,
+# and the same exemption list applies — every surviving divergence is the gate
+# refusing LATER than the reference because the reference's earlier refusal
+# belongs to a family named in `_TFB_LATER_SLICES` (a G1 name read, the
+# unknown-receiver HOST-METHOD refusal, the named-record field rule) or carries
+# a tag outside `_TFB_TAGS`.
+
+_T2C_HEAD = ("type TcRow = { h: Str, name: Str }\n"
+             "type TcSt = TcA | TcB | TcC\n\n"
+             "fn tc_int(n: Int) -> Int {\n  return n\n}\n\n"
+             "fn tc_str(s: Str) -> Str {\n  return s\n}\n\n")
+_T2C_TYPES = ["Int", "Str", "Bool", "Float", "Opt[Int]", "Opt[TcRow]",
+              "List[Int]", "TcRow", "TcSt", "Any"]
+_T2C_BODY = ["1", '"s"', "true", "3.5", "a", "b", "a.h", "a.name", "x",
+             "x + 1", 'x.concat("s")', "[]", "[1]", "{ h: 1 }", "a?.h",
+             "b?.length", "y", "tc_int(1)", "x(1)"]
+# "" twice: a BARE parameter is the interesting half of §3.2 and is drawn twice
+# as often as any one annotation.
+_T2C_ANN = ["", "", "Int", "Str", "Q", "TcRow"]
+_T2C_RET = ["", "", ": Int", ": Str", ": Q"]
+_T2C_ARGS = ["1", '"s"', "a", "true"]
+_T2C_TAILS = [
+    "return f({args})",
+    "return tc_int(f({args}))",
+    "return tc_str(f({args}))",
+    "return a?.{mem}",
+    "return match s {{\n    TcA => 1,\n  }}",
+    "return match s {{\n    TcA => 1,\n    TcB => 2,\n    TcC => 3,\n  }}",
+    "return match s {{\n    TcA => 1,\n    TcQ => 2,\n  }}",
+    "return match s {{\n    TcA => 1,\n    _ => 0,\n  }}",
+    "let g = f\n  return g({args})",
+]
+
+
+def _t2c_arrow(rng) -> str:
+    names = ["x", "y"][:rng.randrange(0, 3)]
+    params = ", ".join(
+        name if not ann else f"{name}: {ann}"
+        for name, ann in ((n, rng.choice(_T2C_ANN)) for n in names))
+    return (f"({params}){rng.choice(_T2C_RET)} => "
+            f"{rng.choice(_T2C_BODY)}")
+
+
+def _t2c_program(rng) -> str:
+    args = ", ".join(rng.choice(_T2C_ARGS)
+                     for _ in range(rng.randrange(0, 3)))
+    tail = rng.choice(_T2C_TAILS).format(
+        args=args, mem=rng.choice(["h", "name", "length"]))
+    return (_T2C_HEAD
+            + f"fn f2(a: {rng.choice(_T2C_TYPES)}, "
+              f"b: {rng.choice(_T2C_TYPES)}, s: TcSt) -> "
+              f"{rng.choice(['Int', 'Str', 'Opt[Str]', 'Bool'])} {{\n"
+            + f"  let f = {_t2c_arrow(rng)}\n  {tail}\n}}\n")
+
+
+@pytest.mark.parametrize("seed", [11, 23, 97])
+def test_arrow_and_match_fuzz_never_refuses_what_the_reference_admits(admit,
+                                                                     seed):
+    """THE BOUND for T2c/T2d, over 800 drawn programs per seed.
+
+      * the gate NEVER refuses a program the reference admits. Absolute;
+      * where both sides' minimum refusal is in this slice's vocabulary
+        (`_TFB_TAGS`) and outside the families a later slice owns
+        (`_TFB_LATER_SLICES`), the gate's verdict is the reference's TAG AND
+        SENTENCE, byte for byte."""
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(800):
+        src = _t2c_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _TFB_TAGS:
+            continue
+        if any(m in ref_msg for m in _TFB_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 750, drawn
+    assert compared >= 100, compared

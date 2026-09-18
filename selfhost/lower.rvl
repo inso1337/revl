@@ -7321,8 +7321,8 @@ fn tk_infer(e: Expr, env: List[Bind]) -> TInf {
     // be an optional for the short-circuit to have anything to short-circuit
     // on. The target is walked either way, because a refusal inside it is one
     // the reference reaches too.
-    OptField(f) => tk_optchain(f.target, f.name, env),
-    OptCall(c)  => tk_optchain(c.target, c.name, env),
+    OptField(f) => tk_optchain(f.target, f.name, false, env),
+    OptCall(c)  => tk_optchain(c.target, c.name, true, env),
     Arrow(a)    => tk_arrow(a, env),
     // out of this slice: an `emit` operand, an asset, and a node the parser
     // already refused.
@@ -7560,16 +7560,37 @@ fn tk_other_fnvalue(c: CallN, calleeTy: Str, argTys: List[Str]) -> TCall {
 // cannot render — rust `Option` and java `Optional` have no `?.` on a plain
 // value — which is why the reference refuses rather than erasing it.
 //
-// The result type stays UNKNOWN: naming it needs the member rules on the right,
-// which are T2d's. Only the left operand is decided here.
-fn tk_optchain(target: Expr, member: Str, env: List[Bind]) -> TInf {
+// The result is the member's type in an `Opt[...]`, never double-wrapped — the
+// wrapper is what keeps the inner type from escaping. It is named only where
+// the reference names it: `.length` on a sized head, and a field of a DECLARED
+// nominal record. A structural inner, an `Opt` inner and an optional CALL all
+// answer unknown on both sides (`builtin_check` on the inner receiver is the
+// builtin table's, asked at a position this walk does not reach), and the
+// missing-field refusal inside the wrapper is the named-record field rule a
+// later slice owns.
+fn tk_optchain(target: Expr, member: Str, isCall: Bool,
+               env: List[Bind]) -> TInf {
   let t = tk_infer(target, env)
   if (t.v != "") { return t }
-  if (parse_head(t.ty) != "Opt" && tk_optchain_decided(t.ty, env)) {
-    return tk_no("T1", "`?.` needs an optional on the left, got `"
-      .concat(tk_render(t.ty)).concat("`"))
+  if (parse_head(t.ty) != "Opt") {
+    if (tk_optchain_decided(t.ty, env)) {
+      return tk_no("T1", "`?.` needs an optional on the left, got `"
+        .concat(tk_render(t.ty)).concat("`"))
+    }
+    return tk_ok("")
   }
-  return tk_ok("")
+  if (isCall) { return tk_ok("") }
+  let res = tk_opt_member(tk_arg1(t.ty), member, env)
+  if (res == "") { return tk_ok("") }
+  return tk_ok(parse_head(res) == "Opt" ? res
+                                        : "Opt[".concat(res).concat("]"))
+}
+
+fn tk_opt_member(inner: Str, member: Str, env: List[Bind]) -> Str {
+  if (inner == "" || inner == "Opt" || parse_head(inner) == "Opt") { return "" }
+  if (member == "length" && tk_sized_head(parse_head(inner))) { return "Int" }
+  if (tk_is_struct(inner) || !tk_record_base(inner, env)) { return "" }
+  return infer_field(inner, member, env)
 }
 
 // Whether a spelling PROVES its value is not an optional. The reference has run
