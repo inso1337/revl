@@ -9798,6 +9798,12 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
                             : no_verd()
     if (usv.v != "") {
       refs = refs.push(usv)
+      // the header obligation is raised INSIDE `_lower_component` (`Env.__init__`
+      // over `requires`, the `provides` loop right after it), so the reference
+      // catches it in the component loop's own `except` and appends the
+      // `poisoned` header stub — exactly as it does for a body refusal. This arm
+      // poisons for the same reason the three below it do (issue #1127).
+      poisoned = poisoned.push(comp.name)
     } else if (comp.refuse != "") {
       refs = refs.push(mk_verd(comp.refuse, comp.line))
       poisoned = poisoned.push(comp.name)

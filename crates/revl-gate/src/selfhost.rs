@@ -8622,6 +8622,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
         let usv = if svcsDecidable { unknown_svc_at(comp.clone(), &sNames, &ambSvcs, 0i64) } else { no_verd() };
         if (usv.v != "") {
             refs.push(usv.clone());
+            poisoned.push(comp.name.clone());
         } else {
             if (comp.refuse != "") {
                 refs.push(mk_verd(comp.refuse.clone(), comp.line));

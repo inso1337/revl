@@ -4707,7 +4707,7 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
     assert got == ref, (name, layout, got, ref)
 
 
-# ---- an OPEN ordering divergence: the handoff verdict vs a body refusal -----
+# ---- a CLOSED ordering divergence: the handoff verdict vs a body refusal ----
 #
 # `_admit_handoff_replacement` runs over `live_components`, which
 # `src/revl/lower.py` builds by DROPPING every component whose body lowering
@@ -4715,21 +4715,21 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
 # component whose body refuses contributes NO handoff verdict at all — the body
 # refusal is the whole answer, whatever line either sits on.
 #
-# `selfhost/lower.rvl`'s `handoff_refusals` walks every component in the text,
-# poisoned or not, and its verdict is anchored at the COMPONENT declaration
-# line. `pick_min` orders by `(line, seq)`, so it beats any INLINE body refusal,
+# `selfhost/lower.rvl`'s `handoff_refusals` used to walk every component in the
+# text, poisoned or not, with its verdict anchored at the COMPONENT declaration
+# line. `pick_min` orders by `(line, seq)`, so it beat any INLINE body refusal,
 # which `body_line` anchors at the offending STATEMENT — a strictly later line.
 #
-# This predates the A6 member rule and is not caused by it: the reproducer below
+# This predates the A6 member rule and was not caused by it: the reproducer below
 # uses the G1 undeclared-access refusal, which has been inline-anchored since
 # long before docs/design/457. A whole-component AGGREGATE verdict (the G4
 # emission-reach one) is anchored at the component line, ties, and is saved by
-# `seq` — which is why no corpus program has caught this.
+# `seq` — which is why no corpus program caught this.
 #
-# Both refusals are TRUE of the program, so this is a 419c naming divergence and
-# never a false admission. Pinned rather than fixed here: the fix belongs to the
-# handoff slice that owns `handoff_refusals`, needs the poisoned-component set
-# threaded into `collect_nonlink`, and carries its own oracle rows.
+# Both refusals are TRUE of the program, so this was a 419c naming divergence and
+# never a false admission. The handoff slice (issue #1127) threaded the poisoned
+# set through `collect_nonlink`, so the pin below is now an AGREEMENT, kept as
+# the regression witness this comment asked the closing slice to leave behind.
 
 _HO_RUNNING = """service D { fn q(s: Str) -> Int }
 service Extra { fn e(s: Str) -> Str }
@@ -4763,25 +4763,16 @@ component NewStore provides db: D requires ex: Extra {
 @pytest.mark.parametrize("label,src", _HO_PAIRS, ids=[n for n, _ in _HO_PAIRS])
 def test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate(
         admit_ambient, label, src):
-    """The divergence, measured in both directions so it cannot drift silently.
+    """The former divergence, measured in both directions so it cannot return.
 
-    The reference names the BODY refusal (the component never reaches the
-    handoff pass); the gate names the handoff drift. Both are true, so this is a
-    naming divergence and not a false alarm — and the gate still REFUSES, which
-    is the property that matters for soundness.
-
-    When the handoff slice threads the poisoned set through, this test flips to
-    an agreement: delete the `!=` arm and assert equality."""
+    The reference names the BODY refusal, because the component never reaches
+    the handoff pass. The gate named the handoff drift until the poisoned set
+    was threaded through `collect_nonlink`; it now names the body refusal too."""
     ref = _ref_ambient(src, _HO_RUNNING, replacing=("OldStore",))
     got = _gate_ambient(admit_ambient, src, _HO_RUNNING, replacing=("OldStore",))
     assert ref.startswith(("G1|", "A6|")), (
         f"the reference must name the body refusal for {label}: {ref!r}")
-    assert got.startswith("G2|state hand-off on `db` differs"), (
-        f"the gate is expected to name the handoff drift for {label}: {got!r}")
-    assert got != ref, (
-        "this pin exists because the two disagree; if they now agree, the "
-        "handoff slice has been fixed - replace this test with an equality "
-        "assertion rather than deleting it")
+    assert got == ref, (label, got, ref)
     # NON-VACUITY: with the handoff made compatible, the two agree on the body
     # refusal, so the divergence is the handoff verdict's ranking and nothing
     # else about these programs.
