@@ -102,6 +102,7 @@ from revl.parser import (
     LetEffect,
     Parser,
     ProvideStmt,
+    RouteStmt,
     SpawnExpr,
 )
 
@@ -812,9 +813,15 @@ def _isolate_map(comp) -> dict[str, str]:
 
     `isolate <key> in realms(...)` (the multi-realm ROUTE, item 162) is a
     different construct and is NOT folded in here: a routed key resolves
-    per-realm at each leg rather than pinning one realm. No corpus file uses
-    one today; if one appears its route legs are simply not modeled, and the
-    key falls back to the shared realm."""
+    per-realm at each leg rather than pinning one realm, which the model's
+    one-realm-per-key `LComponent.realm` cannot express. Its legs are not
+    modeled: the routed REQUIREMENT is elided from the V row's manifest on
+    both sides (`Oracle.toLComponent`, `reference_from_tsv`) rather than
+    mis-spelled into the shared realm, where it would read as the
+    component's own provision (a phantom G3 self-provision), and the route
+    is carried only as the A9 installation fact (`PR`).
+    `tests/formal_corpus/a9_routes_installs_key.rvl` is the corpus file that
+    uses one."""
     out: dict[str, str] = {}
     for stmt in comp.body:
         if isinstance(stmt, IsolateStmt):
@@ -1054,6 +1061,13 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
 
         ff: dict = {"components": {}}
         for c in prog.components:
+            # A routed requirement (`isolate k in realms(...)`, item 162) is
+            # exported as a `PR` fact below. M stays the faithful manifest;
+            # it is the V-row MODEL on both sides that elides a routed
+            # requirement (`Oracle.toLComponent`, `reference_from_tsv`),
+            # because the linker resolves it per leg and never through the
+            # single-realm table.
+            routed = [stmt.key for stmt in c.body if isinstance(stmt, RouteStmt)]
             requires = [(local, svc) for local, svc, _line in c.requires]
             provides = [key for key, _svc, _line in c.provides]
             require_map = dict(requires)
@@ -1082,6 +1096,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     tsv.append("\t".join(["PB", rel, c.name, stmt.key]))
+            # PR: one row per `isolate k in realms(...)` bind (issue #1172).
+            # The converse of A9 exempts a routed key from needing a block,
+            # so the exemption is exported as DATA off the `RouteStmt` the
+            # checker records into `routes`, never inferred here.
+            for key in routed:
+                tsv.append("\t".join(["PR", rel, c.name, key]))
 
             # require-held capability facts (K): the boundaries a requires
             # binding hands this component — the structured valuations of the
@@ -2061,7 +2081,8 @@ class Verdicts(NamedTuple):
     within its component's declared context), `g8surface` S8 rows (G8: a
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
     rows (G5: an effect's teardown registration count), `a9` A9 rows (every
-    installed provide block's key is declared in the `provides` clause)."""
+    installed provide block's key is declared in the `provides` clause, and
+    every declared key is installed by a block or a `realms(...)` route)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2157,7 +2178,8 @@ def parse_verdicts(text: str) -> Verdicts:
             g5reg[(parts[1], parts[2], parts[3])] = (
                 "n/a" if body == "n/a" else int(body))
         elif parts[0] == "A9" and len(parts) == 4:
-            # A9 provide-block declaration: (file, comp) -> ok|fail.
+            # A9 provide-block declaration, both directions: (file, comp) ->
+            # ok|fail.
             a9[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
@@ -2232,6 +2254,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
     fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
     pbrows = [r for r in rows if r and r[0] == "PB" and len(r) == 4]
+    prrows = [r for r in rows if r and r[0] == "PR" and len(r) == 4]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -2245,6 +2268,13 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         key = (r[1], r[2], r[3])
         mode, ents = bounds_by_file.get(key, ("plain", set()))
         bounds_by_file[key] = (mode, ents | {r[4]})
+
+    # Routed requirements (`PR` rows, item 162 binds) are resolved by the
+    # linker per leg, never through the single-realm table; the V-row model
+    # elides them from `requires` exactly as `Oracle.toLComponent` does.
+    routed_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in prrows:
+        routed_by_comp.setdefault((r[1], r[2]), []).append(r[3])
 
     def _realms(row: list[str]) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -2260,7 +2290,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         # (`lower._link`'s `templates` exclusion), so they take no part in
         # the static G2/G3 table.
         fm = [r for r in mrows if r[1] == rel and r[6] != "template"]
-        shaped = [([k for k in r[3].split(",") if k],
+        shaped = [([k for k in r[3].split(",")
+                    if k and k not in routed_by_comp.get((rel, r[2]), [])],
                    [k for k in r[4].split(",") if k], _realms(r)) for r in fm]
         prov_slots = [s for _rq, pv, rl in shaped for s in _slots(pv, rl)]
         need_slots = [s for rq, _pv, rl in shaped for s in _slots(rq, rl)]
@@ -2456,12 +2487,14 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                 g5reg[(rel, compn, index)] = n
                 _G5_REGS[(rel, compn, index)] = n
 
-    # A9 rows (issue 1167): every installed provide BLOCK's key is declared
-    # in the `provides` CLAUSE. The clause comes off the M row and the blocks
-    # off the PB rows — the two facts the exporter reads off two different
-    # AST nodes — so this is membership between two lists, recomputed here
-    # without the Lean side's `Installed` structure. One row per component
-    # that installs a block: a block-less component would agree vacuously.
+    # A9 rows (issues 1167 / #1172), both directions: every installed provide
+    # BLOCK's key is declared in the `provides` CLAUSE, and every declared
+    # key is installed by a block or by a `realms(...)` route. The clause
+    # comes off the M row, the blocks off the PB rows and the routes off the
+    # PR rows — three facts the exporter reads off three different AST nodes
+    # — so this is membership between lists, recomputed here without the
+    # Lean side's `Installed` structure. One row per component that declares
+    # or installs anything: a component with neither would agree vacuously.
     _A9_ROWS.clear()
     provides_by_comp: dict[tuple[str, str], list[str]] = {}
     for r in mrows:
@@ -2470,55 +2503,77 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     for r in pbrows:
         blocks_by_comp.setdefault((r[1], r[2]), []).append(r[3])
     a9: dict[tuple[str, str], str] = {}
-    for key, blocks in blocks_by_comp.items():
+    for key in sorted(set(provides_by_comp) | set(blocks_by_comp)):
         declared = provides_by_comp.get(key, [])
+        blocks = blocks_by_comp.get(key, [])
+        routed = routed_by_comp.get(key, [])
+        if not declared and not blocks:
+            continue
         undeclared = [k for k in blocks if k not in declared]
-        a9[key] = "ok" if not undeclared else "fail"
-        _A9_ROWS[key] = (not undeclared, len(blocks))
+        uninstalled = [k for k in declared if k not in blocks and k not in routed]
+        a9[key] = "ok" if not (undeclared or uninstalled) else "fail"
+        _A9_ROWS[key] = (not undeclared, not uninstalled, len(blocks), len(routed))
 
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9)
 
 
 #: What the REFERENCE computed for each A9 row, for the non-vacuity ratchet:
-#: (every block declared, block count). Filled by `reference_from_tsv`; read
-#: by `a9_coverage`. Evidence the row BITES, not a claim either side makes.
+#: (every block declared, every declared key installed, block count, routed
+#: count). Filled by `reference_from_tsv`; read by `a9_coverage`. Evidence the
+#: row BITES, not a claim either side makes.
 _A9_ROWS: dict = {}
 
 
 def a9_coverage() -> list[str]:
-    """The non-vacuity ratchet for the `A9` row (issue 1167).
+    """The non-vacuity ratchet for the `A9` row (issues 1167 / #1172).
 
     Same discipline as `confinement_coverage`: a row every corpus component
-    satisfies certifies nothing. So the corpus must carry BOTH verdicts on
-    the reference's own computation:
+    satisfies certifies nothing. So the corpus must carry every verdict the
+    rule can give, on the reference's own computation:
 
-      * some component installs at least one block and every block key is
-        declared — an admitted provider, the `ok` that is a real check;
+      * some component installs at least one block and is admitted — the
+        `ok` that is a real check in direction 1;
       * some component installs a block whose key the clause never declared
-        — the refused shape (`examples/rejections/a9_provide_key_not_declared.rvl`),
-        the `fail` without which `a9B` would be a constant `true` over the
-        corpus and the differential would prove nothing.
+        — the refused shape of direction 1
+        (`examples/rejections/a9_provide_key_not_declared.rvl`);
+      * some component declares a key that no block and no route installs,
+        with every block it does install declared — the refused shape of
+        direction 2 ALONE (`examples/rejections/a9_provides_without_block.rvl`);
+      * some component is admitted with a ROUTED key — the exemption
+        exercised (`tests/formal_corpus/a9_routes_installs_key.rvl`), without
+        which the `PR` fact could be dropped and nothing would move.
 
     Returns findings, which the caller treats as gate failures.
     """
-    admitted = refused = None
-    for key, (declared, n_blocks) in _A9_ROWS.items():
-        if declared and n_blocks > 0:
+    admitted = undeclared = uninstalled = routed = None
+    for key, (blocks_ok, declared_ok, n_blocks, n_routed) in _A9_ROWS.items():
+        ok = blocks_ok and declared_ok
+        if ok and n_blocks > 0:
             admitted = admitted or key
-        if not declared:
-            refused = refused or key
+        if not blocks_ok:
+            undeclared = undeclared or key
+        # Direction 2 ALONE: the first fixture fails both directions (its
+        # `skin1` is declared and uninstalled too) and must not stand in for
+        # the shape whose only defect is a declared key nothing installs.
+        if blocks_ok and not declared_ok:
+            uninstalled = uninstalled or key
+        if ok and n_routed > 0:
+            routed = routed or key
     findings: list[str] = []
     for label, witness in (
             ("a component installing a block under a declared key", admitted),
             ("a component installing a block the clause never declared",
-             refused)):
+             undeclared),
+            ("a component declaring a key nothing installs", uninstalled),
+            ("a component admitted with a routed key and no block", routed)):
         if witness is None:
             findings.append(f"a9 coverage: NO witness of {label} — "
                             "the A9 row would agree vacuously")
     if not findings:
-        print(f"a9 coverage: {len(_A9_ROWS)} installing components; "
-              f"admitted={admitted} refused={refused}")
+        print(f"a9 coverage: {len(_A9_ROWS)} declaring/installing components; "
+              f"admitted={admitted} undeclared={undeclared} "
+              f"uninstalled={uninstalled} routed={routed}")
     return findings
 
 
@@ -2528,9 +2583,9 @@ def a9_coverage() -> list[str]:
 # and the "the model agrees with the checker" claim would be false.
 # `formal-strict` — the model refusing what the checker accepts — stays
 # informational: it is the safe direction and names fragment gaps.
-# `missed-A9` (issue 1167) is the same direction for the provide-block rule:
-# the checker refuses an undeclared block key and the model's A9 row says
-# `ok`.
+# `missed-A9` (issues 1167 / #1172) is the same direction for the
+# provide-block rule: the checker refuses an undeclared block key or a
+# declared key nothing installs, and the model's A9 row says `ok`.
 FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9")
 
 
@@ -2598,9 +2653,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             manifest_fail = vrow[0] == "fail" or vrow[2] == "fail"
             record(f"agree-{code}" if manifest_fail else f"missed-{code}", rel)
         elif code == "A9":
-            # The A9 row is the model's `a9B` over the component's installed
-            # blocks (issue 1167): a checker A9 refusal the row does not see
-            # is the model being weaker than what revl enforces, and fatal.
+            # The A9 row is the model's `a9B` over the component's clause,
+            # installed blocks and routes (issues 1167 / #1172): a checker A9
+            # refusal the row does not see is the model being weaker than
+            # what revl enforces, and fatal.
             a9_fail = any(x == "fail" for _, x in a9_rows)
             record("agree-A9" if a9_fail else "missed-A9", rel)
         else:
@@ -2711,7 +2767,7 @@ def main() -> int:
         f"{len(ref.confinements)} confinements + "
         f"{len(ref.g8surface)} surfaces + "
         f"{len(ref.g5reg)} teardowns + "
-        f"{len(ref.a9)} provide-block components) — "
+        f"{len(ref.a9)} provide-clause components) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))

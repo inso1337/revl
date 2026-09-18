@@ -220,7 +220,14 @@ python3 scripts/axioms_gate.py \
   RevL.A9.installed_slots_nodup \
   RevL.A9.a9_not_vacuous \
   RevL.A9.a9_rules_are_distinct \
-  RevL.A9.a9_row_not_vacuous < .axioms.out
+  RevL.A9.a9_row_not_vacuous \
+  RevL.A9.blocksDeclaredB_iff \
+  RevL.A9.declaredInstalledB_iff \
+  RevL.A9.declared_uninstalled_refused \
+  RevL.A9.unrouted_needs_a_block \
+  RevL.A9.routed_installs_without_block \
+  RevL.A9.a9_converse_not_vacuous \
+  RevL.A9.a9_directions_are_distinct < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate

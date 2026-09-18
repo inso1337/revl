@@ -299,3 +299,14 @@ import RevL
 #print axioms RevL.A9.a9_not_vacuous
 #print axioms RevL.A9.a9_rules_are_distinct
 #print axioms RevL.A9.a9_row_not_vacuous
+
+-- Issue #1172 (PR #1184): the converse of A9. Every declared key is
+-- installed by a block or by a `realms(...)` route; `A9OK` is now both
+-- directions and the oracle's A9 row decides both.
+#print axioms RevL.A9.blocksDeclaredB_iff
+#print axioms RevL.A9.declaredInstalledB_iff
+#print axioms RevL.A9.declared_uninstalled_refused
+#print axioms RevL.A9.unrouted_needs_a_block
+#print axioms RevL.A9.routed_installs_without_block
+#print axioms RevL.A9.a9_converse_not_vacuous
+#print axioms RevL.A9.a9_directions_are_distinct
