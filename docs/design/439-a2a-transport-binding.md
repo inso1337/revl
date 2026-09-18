@@ -558,6 +558,67 @@ them, and neither note contradicts the other.
   `::test_revl_compile_refuses_two_composition_documents`. The controls, green
   on both trees: `::test_revl_compile_over_a_module_is_unchanged` and
   `::test_revl_goal_audit_over_a_composition_is_deliberately_untouched`.
+- **The three BOUNDARY-POLICY doors resolve a composition too (CLOSED, slice
+  G8e).** G8c and G8d closed one compile step. The item-33 boundary policy has
+  three more doors, none of them on that step, and each compiled its `.rvl`
+  arguments as MODULES: `revl policy evaluate` (item 290, the dry run of the
+  same `policy.evaluate` the gate calls), `revl dash --policy` (item 63, the
+  policy-exception queue a supervisor rules on) and `revl simulate policy-diff
+  --composition` (item 468, the realms a realm-scoped rule decides by).
+  **Which way each one failed.** `revl policy evaluate` printed `gate verdict:
+  clean: every selected component clears its thresholds` and exited 0 for the
+  same composition, with the same policy, that `revl audit --policy` refuses
+  with a named violation naming `RemoteAgentProvider` and `net.agent_example`.
+  That is fail-OPEN, and it is a harder failure than G8c's empty surface on two
+  counts: the verdict is POSITIVE rather than absent, and it contradicts the
+  gate it exists to preview, breaking item 290's own "one comparison site"
+  claim for exactly the document class 439 adds. `revl dash --policy` rendered
+  an empty pending-decisions queue ("nothing pending, no policy exception to
+  rule on") for the same composition, and an empty decision queue is read as
+  an absence of decisions, so it failed OPEN as well; its dependency-graph pane
+  was empty for the same reason. `revl simulate policy-diff` resolved NO realms
+  out of the composition document the operator handed `--composition`, so every
+  action a realm-scoped rule selects stayed undecided, exactly as if the flag
+  had been omitted: the refusing direction, so a correction rather than a
+  repair, but a false statement about a document that DOES name its rows'
+  realms.
+  All three now go through `_composition_document` (`src/revl/__main__.py`),
+  the door G8c built, and refuse the same three shapes by name. The refusal
+  EXIT STATUS differs by verb and deliberately: on `policy evaluate` and on
+  `simulate policy-diff`, 1 already means "a component would be refused", so a
+  document the command could not read exits 2, their usage status, and cannot
+  be read as a policy verdict; `dash` uses the 1 it already returns for an
+  input it cannot read. Admission is G8c's: whole-composition, `confine=True`,
+  no `--trust-host-code`, and each verb gained the same `--root`.
+  Exit tests, all in `tests/test_439_a2a_transport.py`:
+  `::test_revl_policy_evaluate_over_a_composition_refuses_the_a2a_crossing`,
+  `::test_revl_policy_evaluate_agrees_with_the_gate_it_previews` (the
+  disagreement itself, pinned in both directions: a denying policy refuses on
+  both doors and a permissive one clears on both),
+  `::test_revl_dash_over_a_composition_queues_the_policy_exception` and
+  `::test_revl_simulate_policy_diff_resolves_the_rows_realms` (undecided
+  without the document, NEWLY DENIED with it). Negative exit tests:
+  `::test_revl_policy_evaluate_refuses_a_layer_document`,
+  `::test_revl_policy_evaluate_refuses_a_composition_beside_modules`,
+  `::test_revl_policy_evaluate_refuses_two_composition_documents`,
+  `::test_revl_dash_refuses_a_layer_document` and
+  `::test_revl_simulate_policy_diff_refuses_a_layer_document`. The controls,
+  green on both trees: `::test_revl_policy_evaluate_over_a_module_is_unchanged`
+  and `::test_revl_dash_over_a_module_is_unchanged`, each run WITHOUT the
+  `--root` this slice adds, so the control is an invocation the predecessor
+  tree can also run.
+  **What this slice does NOT claim.** Other commands still compile a
+  composition document as a module and answer from the empty result. Measured
+  over the same fixture: `revl plan` prints `ADMISSIBLE` with nothing running
+  and nothing resulting, and `revl contract export` writes a contract whose
+  consumer is `null` with an empty `requires`. (`revl quarantine` also compiles
+  it as a module but answers `DEFER` with its reason, which is neither empty nor
+  a claim.) Those verbs read their own documents (an admission basis, a
+  consumer contract, a wasm candidate) rather than the G8 audit graph this
+  binding's guarantee table is stated over, and a composition document is item
+  426's surface. They are named here so the next reader does not have to
+  rediscover them, not claimed as 439's.
+
 - **`@py` tier only.** As with the canonical wire, an `emission` method emits a
   synchronous ts function and a network round trip is not synchronous, so a ts
   body would be `await` inside a non-`async` function. The remote row must not
@@ -672,10 +733,33 @@ question.
    has nothing to walk: a file `Part` is refused on the ts tier (item 5 above),
    so the only argument a ts crossing is ever made with is a `Str`.
 
-Item 439 is NOT closed by this note. Items 1 and 3 are what stand between the
-binding as landed and the protocol as specified, and neither waits on effort
-here: 1 waits on item 130's `Stream[T]`, 3 on a durable task id that item 130's
-replay has to decide first.
+**Re-verified 2026-09-18: item 1 is not waiting, it was DECIDED AGAINST, and
+that moves item 3 with it.** This note said items 1 and 3 stand between the
+binding as landed and the protocol as specified, with 1 waiting on item 130's
+`Stream[T]`. Item 130 has since answered, and the answer is a refusal, not a
+delay: `docs/design/130-stream-reactive-types.md` §6c states "Provider-side
+`provides <k>: Stream[T]` is NOT part of this: a `provide` block answers method
+calls, and a stream provider pushes items over time. It is refused by name
+rather than admitted as a capability the wiring graph would report as
+satisfiable and no program could satisfy", and the refusal is shipped, by name,
+at `src/revl/parser.py` (`a component cannot provide a stream`). A `through
+a2a` row SYNTHESIZES a provider, so T2's surface, the four ops reachable as
+one stream-shaped operation, is exactly the shape 130 refuses. T2 is
+therefore not a slice waiting on a dependency; it is a shape the language has
+decided against, and reopening it is a 130 decision about the provider side
+rather than a 439 slice. Item 3 (`tasks/resubscribe` after our own crash) is
+scoped INSIDE T2 and moves with it: T1 registers no listener at all (the
+consumer drives `_poll`), and §4.5's durable cursor must be a string LITERAL
+while an A2A task id is minted by the peer at run time, which is 130's question
+before it is this item's. Items 2 (push, an inbound PROVISION routed through
+item 457), 4 (`DataPart`, the tagged encoding of item 424 slice C1), 5 (a file
+`Part` on the coloured `@ts` tier, the async crossing) and 6 (gRPC, refused
+under any `a2a` label and owed its own `through` name) each remain owned
+elsewhere, exactly as written above.
+
+What is left in THIS note is therefore a record of decisions, not a backlog:
+every open item names the other item that owns it, and none of the six waits on
+effort against this binding.
 
 ## Files
 
