@@ -5533,9 +5533,15 @@ _TFB_LATER_SLICES = (
     "record update requires a record type",
     # the ordering family: `<`/`>` on an unorderable operand is code-less too.
     "cannot order `",
-    # the NAMED record's field-existence rule, which needs the declared field
-    # SET the statement layer's environment does not enumerate.
+    # the NAMED record's field rules, which need the declared field SET the
+    # statement layer's environment does not enumerate: the field-existence
+    # read, and the two literal/annotation completeness sentences T2a names in
+    # `_classify` above. `selfhost/lower.rvl` spells none of the three, so a
+    # program whose reference minimum is one of them is refused LATER by the
+    # gate (an under-refusal over some other true objection in the same body).
     "has no field `",
+    "record literal for `",
+    ", but the record has ",
 )
 
 
