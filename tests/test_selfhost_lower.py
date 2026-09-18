@@ -1452,6 +1452,26 @@ boot component B2 provides e2: Env2 {
     ("t29 field read on an erased Any", _fixture("t29_field_read_on_any"), "T1"),
     ("t36 a Float literal outside binary64",
      _fixture("t36_float_literal_range"), "TYPE"),
+    # ---- optional chaining (docs/design/457 T2d) --------------------------
+    # `a?.b` short-circuits on ABSENCE, so it requires an optional on the left.
+    # On a value that is always present the short-circuit is dead syntax the
+    # strict tiers cannot render at all (rust `Option` and java `Optional` have
+    # no `?.` on a plain value), which is why the reference refuses instead of
+    # erasing it. The member rules on the RIGHT of the chain are still out of
+    # slice; only the left operand is decided.
+    ("t14 an optional chain on a value that is always present",
+     _fixture("t14_optional_chain_on_nonoptional"), "T1"),
+    ("an optional chain on a Str",
+     "fn f(s: Str) -> Int {\n  return s?.length\n}\n", "T1"),
+    ("an optional chain on a List",
+     "fn f(xs: List[Int]) -> Int {\n  return xs?.length\n}\n", "T1"),
+    ("an optional CALL on a value that is always present",
+     "fn f(s: Str) -> Str {\n  return s?.concat(\"x\")\n}\n", "T1"),
+    ("an optional chain on a declared variant",
+     "type TState = Idle | Busy\n\n"
+     "fn f(t: TState) -> Int {\n  return t?.length\n}\n", "T1"),
+    ("an optional chain on a structural record literal",
+     "fn f() -> Int {\n  let r = { h: 1 }\n  return r?.h\n}\n", "T1"),
     # the same erased-`Any` field read reached through a backend fixture rather
     # than a rejection fixture — the one census entry of this family with no
     # `examples/rejections/` name.
@@ -3308,12 +3328,9 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # `dynamic_reserved_key` moved into REJECTED_PROGRAMS above, where tag AND
     # message are compared, and left this list.
     #
-    # What stays needs the optional-chaining rules the expression slice did not
-    # build: `?.` on a non-optional is decided from the target's type at the
-    # CHAIN, which is T2d's.
-    "expression typing (T1/T2)": [
-        ("t14_optional_chain_on_nonoptional", "T1"),
-    ],
+    # CLOSED for the module-`fn` surface: the optional-chain rule (T2d) landed
+    # too, so `t14_optional_chain_on_nonoptional` moved into REJECTED_PROGRAMS
+    # above and this family has no row left here.
     # calls and signatures: LANDED whole (docs/design/457 T2b). The signature
     # table, `unify`/`substitute`, the host stub surface, `_BUILTIN_SIG` and the
     # four lowering-time method refusals moved all nine of this family's

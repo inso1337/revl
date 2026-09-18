@@ -143,12 +143,12 @@ KNOWN_BYPASSES = {
     # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
     # `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
     # reference's own sentence and have been struck from this list. What remains
-    # is the optional-chain rule (T2d) and the provide-method BODY, whose type
-    # environment — requirement handles, activation locals, config fields, the
-    # service signature — is the component slice's to build; the gate walks one
-    # over the empty environment today, which decides `null` and the `Float`
-    # literal bound and stays silent about every rule a name would answer for.
-    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
+    # is the provide-method BODY, whose type environment — requirement handles,
+    # activation locals, config fields, the service signature — is the component
+    # slice's to build; the gate walks one over the empty environment today,
+    # which decides `null` and the `Float` literal bound and stays silent about
+    # every rule a name would answer for. The optional-chain rule (T2d) has
+    # since landed and `t14_optional_chain_on_nonoptional` is struck from here.
     "examples/rejections/t30_field_read_on_any_provide_method.rvl",
     # -- calls and signatures --
     # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
