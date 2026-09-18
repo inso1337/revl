@@ -1154,9 +1154,18 @@ fn mkstmt_spawn_unbound(target: Str) -> Stmt {
 // `bind` carries the subscription handle exactly as any `let` does — that is
 // what puts `sub` in the G1 scope so a later `sub.next()` / `undo sub.close()`
 // resolves.
-fn mkstmt_sub(e: Expr, bn: Str) -> Stmt {
+//
+// `fanin` is the reference's `_at_stream_merge` shape — the ident `merge`
+// followed by `(`, and nothing else. It puts `merge` in scope for THIS
+// statement so the fan-in head resolves and its operands are still walked
+// (`subscribe merge(a, nob)` keeps refusing `nob`, and a nested
+// `merge(merge(a, b), c)` resolves too). Conditioning it on the shape rather
+// than on the position is the whole point: `subscribe merge` with no argument
+// list is an ordinary bare name the reference refuses as undeclared, and
+// binding `merge` unconditionally on a subscribe head admitted it.
+fn mkstmt_sub(e: Expr, bn: Str, fanin: Bool) -> Stmt {
   return { kind: "subscribe", e: e, bind: bn, spawnTarget: "", awaited: false,
-           line: 0, inTimer: false, scopeAdd: [] }
+           line: 0, inTimer: false, scopeAdd: fanin ? ["merge"] : [] }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -1259,7 +1268,9 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     if (kd == "expr" && t.text == "let" && atw(ts, j, "subscribe")) {
       let rs = expr_at(ts, j + 1)
       if (is_bad(rs.e)) { return mk_srun([mkstmt("skip", rs.e)], hi) }
-      let outs: List[Stmt] = [mkstmt_sub(rs.e, bn)]
+      let fanin = tkc(ts, j + 1).kind == "ident" && tkc(ts, j + 1).text == "merge"
+                  && atk(ts, j + 2, "(")
+      let outs: List[Stmt] = [mkstmt_sub(rs.e, bn, fanin)]
       var k = rs.i
       while (k < hi && !atw(ts, k, "undo")) { k += 1 }
       if (k < hi) {
@@ -2912,13 +2923,12 @@ fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
   // the statement's OWN scope additions: an iteration item (item 130 Slices
   // 4/5), in scope for the body statements and nowhere else, and — on a
-  // `subscribe` head — `merge`, which is grammar the reference parses in that
-  // one position (`_at_stream_merge`) rather than a callable a program may
+  // `subscribe merge(…)` head — `merge`, which is grammar the reference parses
+  // in that one shape (`_at_stream_merge`) rather than a callable a program may
   // declare. Both are per-statement precisely so neither widens the
   // component-wide G1 scope `stmt_binds` builds.
   let bcx = s.scopeAdd.length() > 0 ? ctx_bind(cx, s.scopeAdd) : cx
-  let mcx = s.kind == "subscribe" ? ctx_bind(bcx, ["merge"]) : bcx
-  let scx = ctx_acq(mcx, stmt_acq_where(s.kind))
+  let scx = ctx_acq(bcx, stmt_acq_where(s.kind))
   let root = acq_root_of(s)
   return root.hit ? walk_exprs(root.args, 0, marked, scx, a)
                   : walk_expr(s.e, marked, scx, a)
