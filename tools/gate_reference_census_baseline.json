@@ -1,9 +1,5 @@
 {
  "buckets": {
-  "false-admit/G1": [
-   "examples/rejections/g1_template_undeclared.rvl",
-   "examples/rejections/v2_undeclared_fn_var.rvl"
-  ],
   "false-admit/G4": [
    "examples/rejections/g4_spawn_widens_budget.rvl",
    "examples/rejections/g4_spawn_widens_parameter.rvl"
@@ -106,18 +102,6 @@
    "reference": {
     "message": "",
     "tag": ""
-   }
-  },
-  "examples/rejections/g1_template_undeclared.rvl": {
-   "bucket": "false-admit/G1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`nobody` is not declared in this function",
-    "tag": "G1"
    }
   },
   "examples/rejections/g4_spawn_widens_budget.rvl": {
@@ -346,18 +330,6 @@
    "reference": {
     "message": "non-exhaustive match: missing case `Invalid`",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/v2_undeclared_fn_var.rvl": {
-   "bucket": "false-admit/G1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`missing` is not declared in this function",
-    "tag": "G1"
    }
   }
  },
