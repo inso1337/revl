@@ -44,7 +44,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files  # noqa: E402
 import revl.parser as refparser  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
-from revl.typecheck import CASES_KEY, infer_ast  # noqa: E402
+from revl.typecheck import CASES_KEY, check_ast, infer_ast  # noqa: E402
 
 
 # ---------------------------------------------------------------- harness
@@ -94,8 +94,11 @@ def check_src(ns):
 # Mirrored by base_env() in selfhost/checker.rvl. Keep the two in lockstep.
 # `m` is Int32 — the one operand type the bitwise operators accept (item 366);
 # without it the positive bitwise path (`m & m` -> Int32) could not be exercised.
+# `opt`/`xs` are slice T2a's: the optional-escape refusals (a field read and an
+# index THROUGH an `Opt`) and the `??` rule need an optional in scope, and the
+# index rules need a `List`. The fuzz generators do not draw either name.
 ENV = {"x": "Int", "y": "Int", "f": "Float", "s": "Str", "flag": "Bool",
-       "m": "Int32"}
+       "m": "Int32", "opt": "Opt[Str]", "xs": "List[Int]"}
 
 
 def _ref_parse(src: str):
@@ -157,6 +160,32 @@ ACCEPTED = [
     "m & m | m", "m << m >> m", "(m & m) | (m ^ m)", "~m & m", "m & ~m",
     "m & q", "q & m", "q & q", "~q",
     "m == m", "m != m",  # equality over Int32 (compatible), not ordering
+    # ---- slice T2a ----------------------------------------------------------
+    # Int32 IS numeric (typecheck._NUMERIC), so two Int32 operands add, and the
+    # WIDTH MIX below — not the operand family — is what refuses `m + x`.
+    "m + m", "m - m", "m * m", "m / m", "-m", "m + m * m",
+    # index: a List indexes to its element; the target and the index are each
+    # walked first
+    "xs[0]", "xs[x]", "xs[q]", "q[0]", "q[s]", "xs.length", "xs[0] + 1",
+    # ternary: the branches join, and a disagreement is named
+    "flag ? 1 : 2", "flag ? x : f", "flag ? q : 1", "q ? 1 : 2", "flag ? s : s",
+    # lists: the elements join, and an element whose type is unknown leaves the
+    # accumulator unset rather than poisoning it
+    "[1, 2]", "[]", "[s, s]", "[q, y]", "[1, 2.5]", "[[1], [2]]", "[xs]",
+    # records: an anonymous literal infers a sorted structural shape, and a
+    # repeated field name keeps the LAST value under one key
+    '{ a: 1, b: s }', '{ b: s, a: 1 }', '{ a: s, a: 1 }', '{ a: q }',
+    '{ a: 1 }.a', '{ }',
+    # record update on a structural base (item 71)
+    '{ { h: s } | h = s }', '{ { h: s, a: 1 } | a = 2 }', '{ q | h = 1 }',
+    # `&& || ??` joined the binop rules with `_binop_type`
+    "flag && flag", "flag || flag", "flag && q", "opt ?? s", "opt ?? q",
+    "q ?? s",
+    # the optional's own members are not reachable, but `.length` on the Str
+    # inside is reachable through the `??` fallback
+    '(opt ?? "") .length',
+    # Float literals inside binary64
+    "1e308", "1.7976931348623157e308", "0.0", "1e-400",
 ]
 
 REJECTED = [
@@ -182,6 +211,24 @@ REJECTED = [
     "f & f", "s & s", "flag & flag", "x | y", "x ^ y",
     "m << x", "x << m", "m >> y", "x << 1",
     "~x", "~f", "~s", "~flag", "~1", "~y",
+    # ---- slice T2a ----------------------------------------------------------
+    # the Int32 WIDTH MIX and the Int-only `%` (docs/arithmetic.md)
+    "m + x", "x + m", "m - y", "m * x", "m % m", "x % m", "m % x",
+    # `Str` is not indexable, and an index must be an Int
+    "s[0]", "s[x]", "xs[s]", "xs[flag]", "xs[2.5]",
+    # a field read and an index THROUGH an optional (the opt escape)
+    "opt.length", "opt[0]", "opt.anything",
+    # disagreeing ternary branches
+    "flag ? 1 : s", "flag ? s : flag", "flag ? xs : s",
+    # an unknown field of an anonymous record literal (item 71)
+    '{ a: 1 }.b', '{ a: 1 }.length', '{ }.a',
+    # record update: an unknown field, a wrong replacement type, a non-record
+    '{ { h: s } | missing = s }', '{ { h: s } | h = 5 }', '{ x | h = 5 }',
+    '{ s | h = 5 }', '{ xs | h = 5 }',
+    # `&&`/`||` want Bool and `??` wants an optional on the left
+    "x && flag", "flag || s", "x ?? 1", "s ?? s", "xs ?? xs",
+    # a Float literal outside binary64 folds to IEEE infinity (issue #312)
+    "1e999", "2e400", "1.5e310", "1e999 + 1.0", "123456789e400",
 ]
 
 
@@ -1215,3 +1262,379 @@ def test_generated_prog_exprs_agree(infer_prog, seed):
         prog = rng.choice(FUZZ_PROGS)
         ctors = FUZZ_CTORS[FUZZ_PROGS.index(prog)]
         _agree_prog(infer_prog, prog, _gen3(rng, ctors, rng.randint(1, 3)))
+
+
+# ================================================================= slice T2a
+#
+# THE MESSAGE, not just the verdict (docs/design/457 §2, slice T2a).
+#
+# Slices one to three compared a VERDICT: "refuse" against `RevlError`. The
+# type layer's obligation is stronger, and it is what `crates/revl-gate`'s
+# consumers act on: the self-host must spell the reference's diagnostic BYTE
+# FOR BYTE, under the tag `tests/test_selfhost_lower.py::_classify` derives
+# from it. The comparison unit is fixed at `"<TAG>|<message>"` — the same one
+# the lowering oracle and `tools/gate_reference_census.py` use, and the
+# classifier is IMPORTED rather than copied so the two cannot drift apart.
+#
+# In this slice: the operator rules (`_binop_type` in full, including the five
+# dedicated T1 messages, `&& || ??` and the Int32 width/remainder rules), the
+# field rules (the opt escape, `.length`, the erased `Any`/`Value` read, the
+# unknown field of a structural or nominal record), index, ternary, lists,
+# record literals and record updates, and the Float literal range. Calls and
+# signatures (T2b), arrows (T2c) and match/optional-chaining (T2d) keep the
+# verdict-only comparison above.
+#
+# WHAT THIS SLICE DOES NOT REACH, stated so the next one does not rediscover
+# it: `selfhost/lower.rvl`'s `admit_src` runs no fn-body type walk, so none of
+# these refusals reaches the gate yet and no census document changes bucket.
+# The fixtures below are pinned at EXPRESSION level — the expression the
+# reference refuses, in the environment its own signature declares — which is
+# exactly the algebra T3a's statement layer consumes.
+
+from test_selfhost_lower import _classify  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def verdict_env(ns):
+    """`(prog, env, expr, expected, where) -> "" | "<TAG>|<message>"`.
+
+    `env` is `name: Type` entries separated by `;` (a revl string literal has
+    no `\n` escape, item 183); `expected` empty is the inference position."""
+    return ns["check_env_verdict"]
+
+
+def _ref_verdict(prog: str, env: str, expr: str, expected: str,
+                 where: str) -> str:
+    """The reference's own verdict for the same question, in the same wire."""
+    tenv = dict(ENV)
+    for part in env.split(";"):
+        if ":" in part:
+            name, ty = part.split(":", 1)
+            tenv[name.strip()] = ty.strip()
+    try:
+        program = refparser.Parser(prog, "diff.rvl").parse()
+        _resolve_type_aliases(program, "diff.rvl")
+        _validate_declared_types(program, "diff.rvl")
+        types = _lower_type_decls(program, "diff.rvl")
+        types[CASES_KEY] = _case_table(types)
+    except RevlError:
+        return "(table)"
+    try:
+        node = _ref_parse(expr)
+    except RevlError:
+        return "(bad)"
+    try:
+        if expected:
+            check_ast(node, expected, tenv, types, "diff.rvl", where)
+        else:
+            infer_ast(node, tenv, types, filename="diff.rvl")
+    except RevlError as exc:
+        return f"{_classify(exc)}|{exc.message}"
+    return ""
+
+
+def _agree_msg(verdict_env, prog, env, expr, expected="", where="") -> None:
+    want = _ref_verdict(prog, env, expr, expected, where)
+    got = verdict_env(prog, env, expr, expected, where)
+    assert got == want, (f"{expr!r} (env {env!r}, expected {expected!r}): "
+                         f"\n  selfhost {got!r}\n  reference {want!r}")
+
+
+# ---------------------------------------------------------------- corpus
+#
+# One row per rule of design §2.2 that this slice owns, ACCEPTED rows
+# included: a rule that never fires is not pinned by a refusal.
+
+ROW = "type Row = { name: Str, age: Int }"
+OPTROW = "type Row = { name: Str }"
+
+MESSAGE_CORPUS = [
+    # (prog, env, expr, expected, where)
+    # -- literals ----------------------------------------------------------
+    ("", "", "null", "", ""),
+    ("", "", "1 + null", "", ""),
+    ("", "", "1e999", "", ""),
+    ("", "", "-1e999", "", ""),
+    ("", "", "1e308", "", ""),
+    ("", "", "1.7976931348623157e308", "", ""),
+    # -- equality / ordering ------------------------------------------------
+    ("", "", "x == s", "", ""),
+    ("", "", "s == x", "", ""),
+    (ROW, "r: Row", "r == x", "", ""),
+    ("", "", "flag < 1", "", ""),
+    ("", "", "opt < opt", "", ""),
+    ("", "", "xs > xs", "", ""),
+    ("", "", "s < s", "", ""),
+    # -- boolean and nullish -------------------------------------------------
+    ("", "", "x && flag", "", ""),
+    ("", "", "flag || s", "", ""),
+    ("", "", "x ?? 1", "", ""),
+    ("", "", "opt ?? s", "", ""),
+    ("", "", "q ?? s", "", ""),
+    # -- bitwise -------------------------------------------------------------
+    ("", "", "f | f", "", ""),
+    ("", "", "x & y", "", ""),
+    ("", "", "m << x", "", ""),
+    ("", "", "~x", "", ""),
+    ("", "", "~s", "", ""),
+    ("", "", "~m", "", ""),
+    # -- arithmetic ----------------------------------------------------------
+    ("", "", "s + 1", "", ""),
+    ("", "", "1 + s", "", ""),
+    ("", "", "x + flag", "", ""),
+    ("", "", "m + x", "", ""),
+    ("", "", "x - m", "", ""),
+    ("", "", "m % m", "", ""),
+    ("", "", "x % m", "", ""),
+    ("", "", "-s", "", ""),
+    ("", "", "!x", "", ""),
+    # -- fields --------------------------------------------------------------
+    (OPTROW, "o: Opt[Row]", "o.name", "", ""),
+    ("", "", "opt.length", "", ""),
+    ("", "", "v.kind", "", "") if False else ("", "v: Any", "v.kind", "", ""),
+    ("", "v: Value", "v.kind", "", ""),
+    ("", "v: Any", "v.a.b", "", ""),
+    (ROW, "r: Row", "r.nope", "", ""),
+    (ROW, "r: Row", "r.name", "", ""),
+    ("", "", "{ a: 1 }.b", "", ""),
+    ("", "", "{ }.b", "", ""),
+    ("", "", "s.length", "", ""),
+    ("", "", "xs.length", "", ""),
+    # -- index ---------------------------------------------------------------
+    ("", "", "s[0]", "", ""),
+    ("", "", "opt[0]", "", ""),
+    ("", "", "xs[s]", "", ""),
+    ("", "", "xs[0]", "", ""),
+    ("", "", "q[s]", "", ""),
+    # -- ternary -------------------------------------------------------------
+    ("", "", "flag ? 1 : s", "", ""),
+    ("", "", "flag ? xs : opt", "", ""),
+    ("", "", "flag ? 1 : 2.5", "", ""),
+    ("", "", "(x == s) ? 1 : 2", "", ""),
+    # -- lists ---------------------------------------------------------------
+    ("", "", "[1, s]", "", ""),
+    ("", "", "[1, null]", "", ""),
+    ("", "", "[q, y]", "", ""),
+    # -- record literals and updates ----------------------------------------
+    ("", "", "{ a: 1, b: s }", "", ""),
+    ("", "", "{ a: s, a: 1 }", "", ""),
+    ("", "a: {h: Str}", "{ a | h = 5 }", "", ""),
+    ("", "a: {h: Str}", '{ a | missing = "y" }', "", ""),
+    ("", "", "{ x | h = 5 }", "", ""),
+    ("", "", "{ opt | h = 5 }", "", ""),
+    (ROW, "r: Row", "{ r | nope = 1 }", "", ""),
+    (ROW, "r: Row", "{ r | age = s }", "", ""),
+    (ROW, "r: Row", "{ r | age = 2 }", "", ""),
+    # -- check position: the `where` string is part of the message -----------
+    ("", "n: Int", "n", "Int32", "this function's return"),
+    ("", "n: Int", "n", "Int", "this function's return"),
+    ("", "", "s", "Int", "`let v: Int`"),
+    ("", "", "s", "Int", "argument 1 of `f(...)`"),
+    ("", "", "[s]", "List[Int]", "this function's return"),
+    ("", "", "flag ? s : s", "Int", "this function's return"),
+    (ROW, "", "{ name: s, age: x }", "Row", "this function's return"),
+    (ROW, "", "{ name: s }", "Row", "this function's return"),
+    (ROW, "", "{ name: s, age: x, nope: 1 }", "Row", "this function's return"),
+    (ROW, "", "{ name: x, age: x }", "Row", "this function's return"),
+    (ROW, "", "{ name: s, age: x }", "Opt[Row]", "this function's return"),
+    (ROW, "", "[{ name: s, age: x }]", "List[Row]", "this function's return"),
+    (ROW, "r: Row", "{ r | age = s }", "Row", "this function's return"),
+    (ROW, "r: Row", "r", "Str", "this function's return"),
+    (ROW, "b: {name: Str, age: Int}", "b", "Row", "this function's return"),
+    (ROW, "b: {name: Str}", "b", "Row", "this function's return"),
+    (ROW, "b: {name: Int, age: Int}", "b", "Row", "this function's return"),
+]
+
+
+@pytest.mark.parametrize("case", MESSAGE_CORPUS,
+                         ids=lambda c: f"{c[2]}|{c[3]}")
+def test_message_corpus_agrees(verdict_env, case):
+    """Tag AND message, byte for byte, against `RevlError.message`."""
+    _agree_msg(verdict_env, *case)
+
+
+def test_the_message_corpus_exercises_both_directions():
+    """A corpus of refusals only would not pin the rules that must stay
+    silent, and one of acceptances only would pin no message at all."""
+    refusals = sum(1 for c in MESSAGE_CORPUS if _ref_verdict(*c))
+    assert refusals >= 40, f"only {refusals} refusing rows"
+    assert len(MESSAGE_CORPUS) - refusals >= 12, "too few accepting rows"
+
+
+# ------------------------------------------- the type-layer gap fixtures
+#
+# The twelve `examples/rejections` documents this slice's algebra decides
+# (design §1's "expression typing (T1/T2)" family, plus the two erased-`Any`
+# reads). For each one the reference's refusal of the WHOLE DOCUMENT is
+# compared against the self-host's verdict for the single expression that
+# draws it, in the environment the fixture's own signature declares.
+#
+# These documents still sit in `false-admit/T1` / `T2` / `TYPE` in
+# `tools/gate_reference_census.py`, and they stay there until T3a gives
+# `admit_src` a typed statement walk to carry these verdicts through — see
+# TYPE_LAYER_GAP in tests/test_selfhost_lower.py, whose rows are deliberately
+# NOT deleted by this slice. What is closed here is the algebra; what is open
+# is its reach.
+
+FIXTURES = ROOT / "examples" / "rejections"
+
+TYPE_LAYER_EXPRESSIONS = [
+    # (fixture path relative to the repo root, prog, env, expr, expected, where)
+    ("examples/rejections/t2_null_in_expression.rvl",
+     "", "", "null", "", ""),
+    ("examples/rejections/t11_field_through_opt.rvl",
+     "type Row = { name: Str }", "o: Opt[Row]", "o.name", "", ""),
+    ("examples/rejections/t12_str_index.rvl",
+     "", "s: Str", "s[0]", "", ""),
+    ("examples/rejections/t21_int32_narrow_implicit.rvl",
+     "", "n: Int", "n", "Int32", "this function's return"),
+    ("examples/rejections/t22_int32_width_mix.rvl",
+     "", "a: Int32; b: Int", "a + b", "", ""),
+    ("examples/rejections/t23_int32_remainder.rvl",
+     "", "a: Int32; b: Int32", "a % b", "", ""),
+    ("examples/rejections/t26_anon_record_update_wrong_type.rvl",
+     "", "a: {h: Str}", "{ a | h = 5 }", "", ""),
+    ("examples/rejections/t27_anon_record_update_undeclared_field.rvl",
+     "", "a: {h: Str}", '{ a | missing = "y" }', "", ""),
+    ("examples/rejections/t28_bitwise_non_int32.rvl",
+     "", "a: Float; b: Float", "a | b", "", ""),
+    ("examples/rejections/t29_field_read_on_any.rvl",
+     "", "v: Any", "v.kind", "", ""),
+    ("examples/rejections/t36_float_literal_range.rvl",
+     "", "", "1e999", "", ""),
+    ("backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
+     "", "tc: Any", "tc.function.name", "", ""),
+]
+
+
+@pytest.mark.parametrize("case", TYPE_LAYER_EXPRESSIONS,
+                         ids=lambda c: Path(c[0]).stem)
+def test_type_layer_fixture_expressions_agree(verdict_env, case):
+    from revl.compiler import compile_source
+    path, prog, env, expr, expected, where = case
+    source = (ROOT / path).read_text()
+    try:
+        compile_source(source, "diff.rvl")
+        pytest.fail(f"{path}: the reference no longer refuses this fixture")
+    except RevlError as exc:
+        want = f"{_classify(exc)}|{exc.message}"
+    got = verdict_env(prog, env, expr, expected, where)
+    assert got == want, (f"{path}:\n  selfhost  {got!r}\n"
+                         f"  reference {want!r}")
+
+
+def test_every_type_layer_expression_fixture_is_named_once():
+    seen = [c[0] for c in TYPE_LAYER_EXPRESSIONS]
+    assert len(seen) == len(set(seen)) == 12
+
+
+# ---------------------------------------------------------------- fuzz
+
+T2A_ATOMS = ["1", "0", "7", "2.5", "x", "y", "f", "s", "flag", "m", "q",
+             "opt", "xs", "true", "false", "[1, 2]", "[]", "[s]", "{ h: s }",
+             "{ a: 1, b: 2.5 }", "Some(1)", "None"]
+T2A_BINOPS = ["+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=",
+              "&&", "||", "??", "&", "|", "^", "<<", ">>"]
+T2A_FIELDS = ["h", "a", "b", "name", "length", "missing"]
+T2A_PROGS = ["", ROW, "type S = Idle | Busy",
+             "type Row = { name: Str }\ntype Box = Wrap(Row) | Empty"]
+# Deliberately NOT drawn: an expected type whose nominal head the program does
+# not declare. The reference reports that as `T-UNRESOLVED` with an
+# `unresolved_nominal_reason`, which needs the declared-type resolution
+# types.rvl leaves out of the spelling algebra — and `_validate_declared_types`
+# refuses an undeclared annotation before any body is typed, so no real
+# check position can reach it.
+T2A_EXPECTED = ["", "Int", "Float", "Str", "Bool", "Int32", "Opt[Str]",
+                "List[Int]", "List[Str]", "Any", "Never", "{h: Str}",
+                "{a: Int, b: Float}", "Map[Str, Int]"]
+T2A_WHERE = ["this function's return", "`let v: T`", "argument 1 of `f(...)`",
+             "element of `List[Int]`"]
+
+
+def _gen_t2a(rng: random.Random, depth: int) -> str:
+    if depth <= 0:
+        return rng.choice(T2A_ATOMS)
+    roll = rng.randrange(8)
+    sub = lambda: _gen_t2a(rng, depth - 1)  # noqa: E731
+    if roll == 0:
+        return f"({sub()} {rng.choice(T2A_BINOPS)} {sub()})"
+    if roll == 1:
+        return f"{rng.choice(['!', '~', '-'])}{sub()}"
+    if roll == 2:
+        return f"{sub()}.{rng.choice(T2A_FIELDS)}"
+    if roll == 3:
+        return f"{sub()}[{sub()}]"
+    if roll == 4:
+        return f"({sub()} ? {sub()} : {sub()})"
+    if roll == 5:
+        return f"[{sub()}, {sub()}]"
+    if roll == 6:
+        return (f"{{ {rng.choice(T2A_FIELDS)}: {sub()}, "
+                f"{rng.choice(T2A_FIELDS)}: {sub()} }}")
+    return f"{{ {sub()} | {rng.choice(T2A_FIELDS)} = {sub()} }}"
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_generated_expressions_agree_on_the_message(verdict_env, seed):
+    """Random expressions over every kind this slice owns, compared on tag AND
+    message. Nothing here is a fixed oracle: the two checkers are each other's,
+    including on the inputs the generator makes ill-typed by accident, where
+    agreeing on WHICH refusal fires FIRST is as much the property under test as
+    agreeing that one does."""
+    rng = random.Random(9000 + seed)
+    for _ in range(50):
+        _agree_msg(verdict_env, rng.choice(T2A_PROGS), "",
+                   _gen_t2a(rng, rng.randint(1, 3)))
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_generated_check_positions_agree_on_the_message(verdict_env, seed):
+    """The same draw in CHECK position, where the expectation and the `where`
+    string are part of the answer."""
+    rng = random.Random(7000 + seed)
+    for _ in range(50):
+        _agree_msg(verdict_env, rng.choice(T2A_PROGS), "",
+                   _gen_t2a(rng, rng.randint(1, 3)),
+                   rng.choice(T2A_EXPECTED), rng.choice(T2A_WHERE))
+
+
+# `List[Row]` is deliberately NOT here: the descent reaches the record against
+# `Row` only through the element rule, which `compatible` refuses on the head
+# before the reason is sought, so the reference reports a plain T1 there too.
+@pytest.mark.parametrize("expected", ["Row", "S", "Opt[S]", "Opt[Opt[Row]]"])
+def test_an_undeclared_nominal_expectation_is_the_one_bounded_divergence(
+        verdict_env, expected):
+    """The single place this slice knowingly differs, pinned rather than
+    described.
+
+    A record literal meeting a nominal head the compilation does not declare is
+    not a mismatch the checker made — it is a comparison it never made. The
+    reference says so with `unresolved_nominal_reason`, which needs the
+    declared-type resolution `types.rvl` leaves out of the spelling algebra
+    (design §3.1, "NOT in this slice"), so the self-host reports the mismatch
+    without that clause. The divergence is bounded exactly here: the message is
+    the reference's up to the `;`, and the tag differs only because a
+    T-UNRESOLVED carries no type-layer marker.
+
+    Nothing real reaches it — `_validate_declared_types` refuses an undeclared
+    annotation before any body is typed — which is why this is a pin and not a
+    bug, and why the T2a fuzz above does not draw one. A slice that ports the
+    resolution deletes this test and adds the rows to the corpus."""
+    where = "`let v: T`"
+    want = _ref_verdict("", "", "{ h: s }", expected, where)
+    got = verdict_env("", "", "{ h: s }", expected, where)
+    assert "has no declaration in this compilation" in want
+    assert got == "T1|" + want.split("|", 1)[1].split(";")[0]
+
+
+def test_checker_in_file_tests_pass(ns):
+    """`selfhost/checker.rvl`'s own `test` blocks, run under the python
+    backend. Nothing ran them before this slice, which is how an assertion
+    contradicting the file's own REJECTED corpus (`s + 1`, refused since issue
+    #549) survived in it."""
+    tests = ns.get("REVL_TESTS")
+    assert tests and len(tests) >= 30, \
+        "expected the file's test blocks in REVL_TESTS"
+    for entry in tests:
+        fn = entry[-1] if isinstance(entry, tuple) else entry
+        fn()
