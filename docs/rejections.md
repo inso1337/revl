@@ -149,7 +149,7 @@ the same code (`import cycle:`, v2_use_cycle.rvl).
 ## G4 — inverse or emit
 
 Every mutation carries an inverse, or admits irreversibility with `emit`.
-Four distinct programs violate it, all in `examples/rejections/`.
+Five distinct shapes violate it, all in `examples/rejections/`.
 
 **A bare acquisition** — `effect` without `undo` where the callee is not
 pure (g4_missing_undo.rvl):
@@ -185,6 +185,57 @@ component Auditor requires db: Database {
 ```
 call to emission `db.execute` must be marked `emit` (G4)
 ```
+
+**A crossing nested in an `emit`'s arguments** — one `emit` marks one
+boundary crossing. The marker covers the head call it is written on, and the
+head's arguments are judged in the position the `emit` itself sits in, so an
+emission evaluated to build an argument draws the refusal it would draw one
+statement earlier (g4_nested_unmarked_emission.rvl):
+
+```revl reject G4
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+
+component C requires a: A, b: B {
+  emit a.send(b.fetch())
+}
+```
+
+```
+call to emission `b.fetch` must be marked `emit` (G4)
+```
+
+Marking the inner crossing where it stands is refused too. `compensate`
+binds per `emit`, and every per-step check reads the step's head, so a
+crossing marked inside an argument list would have no step of its own
+(g4_nested_emit_expression.rvl, `emit a.send(emit b.fetch())`):
+
+```
+`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)
+```
+
+The fix is to hoist the inner crossing into its own `emit`. A provide method
+binds its value with `let r = emit …`; an activation body has no value
+binding (an `emit` step there discards its result), so a pair whose result
+flows from one crossing into the next lives in a provide method:
+
+```revl
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+service Relay { emission fn once() -> Int }
+
+component C requires a: A, b: B provides relay: Relay {
+  provide relay {
+    fn once() {
+      let r = emit b.fetch()
+      return emit a.send(r)
+    }
+  }
+}
+```
+
+A plain (non-emission) call in argument position needs no marker and is
+admitted as before.
 
 **A provider that exceeds a plain declaration** — a service declaration is
 an *upper bound* on its providers' effects, because consumers bind to the

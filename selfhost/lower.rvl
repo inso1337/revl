@@ -2663,6 +2663,12 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // `acqWhere` is the position phrase the host-acquire refusal reports for the
 // statement currently being walked (`stmt_acq_where`), the gate's stand-in for
 // `env._expr_mode`.
+// `emitPos` is where the walk stands relative to an `emit` marker (issue
+// #1175, one marker per crossing): "head" while walking the marked expression
+// down to its head call, "head-bare" the same under a teardown slot (the
+// head's arguments then admit bare emissions, as the slot does), "args" inside
+// a marked head's argument list, "" elsewhere. The reference keeps this as
+// `env._emit_arg_mode` / `env._in_emit_args` around `_emit_head_args`.
 // `ambOps` is the RUNNING composition's declared operations, service name ->
 // operation names, off the item-346 `!services` block (`:S,op,op`). It is the
 // second exhaustive service declaration this gate can hold (see
@@ -2678,7 +2684,7 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, List[Str]],
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
-             localArrows: Map[Str, ArrowN], acqWhere: Str }
+             localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -2779,8 +2785,72 @@ fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
   let scx = ctx_acq(cx, stmt_acq_where(s.kind))
   let root = acq_root_of(s)
-  return root.hit ? walk_exprs(root.args, 0, marked, scx, a)
-                  : walk_expr(s.e, marked, scx, a)
+  if (root.hit) { return walk_exprs(root.args, 0, marked, scx, a) }
+  // an `emit` step's marker covers its head call alone (issue #1175); a
+  // compensate slot is a teardown region and stays marked throughout
+  return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, a)
+}
+
+// ---- one `emit` marker per crossing (issue #1175) --------------------------
+//
+// The reference lowers an emit head's ARGUMENTS in the mode the `emit` sits in
+// (`_emit_head_args`): a call evaluated to build the argument is judged as it
+// would be one statement earlier, so an unmarked emission there draws the G4
+// marker refusal and a plain call is admitted as before; a marker written
+// inside the argument list is refused outright (`_refuse_nested_emit`). Here
+// the walk carries the same three positions in `Ctx.emitPos`.
+
+// The same context at a position relative to an `emit` marker.
+fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           // leaving a marked head for its argument list leaves the `emit`
+           // expression position too: the reference's arguments lower in
+           // "setup" there, whose host-acquire phrase is "this position"
+           acqWhere: pos == "args" && cx.emitPos == "head" ? "this position"
+                                                            : cx.acqWhere,
+           emitPos: pos }
+}
+
+// Whether a marked head's arguments admit a bare emission: never under a
+// body statement, always under a teardown slot; elsewhere the position's own.
+fn args_marked(marked: Bool, cx: Ctx) -> Bool {
+  if (cx.emitPos == "head") { return false }
+  if (cx.emitPos == "head-bare") { return true }
+  return marked
+}
+
+// The context a call's arguments walk in: past a marked head they are the
+// head's argument list, where a nested `emit` is refused.
+fn ctx_args(cx: Ctx) -> Ctx {
+  if (cx.emitPos == "head" || cx.emitPos == "head-bare") {
+    return ctx_emit_pos(cx, "args")
+  }
+  return cx
+}
+
+// Walk a call's arguments (every call path below goes through here, as every
+// argument list in the reference goes through `_emit_head_args`).
+fn walk_args(args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  return walk_exprs(args, 0, args_marked(marked, cx), ctx_args(cx), a)
+}
+
+// The position an `emit` EXPRESSION's own head walks in: under a marked head
+// it inherits that head's (a marker directly under a marker), otherwise the
+// current position's admission decides whether its arguments are bare.
+fn emit_head_pos(marked: Bool, cx: Ctx) -> Str {
+  if (cx.emitPos == "head" || cx.emitPos == "head-bare") { return cx.emitPos }
+  return marked ? "head-bare" : "head"
+}
+
+fn nested_emit_msg() -> Str {
+  return "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
 }
 
 fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
@@ -2842,11 +2912,13 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
     Bad(_)     => a,
     Bin(b)     => walk_expr(b.r, marked, cx, walk_expr(b.l, marked, cx, a)),
     Un(u)      => walk_expr(u.e, marked, cx, a),
-    Emit(u)    => walk_expr(u.e, true, cx, a),
+    Emit(u)    => cx.emitPos == "args"
+                    ? ac_refuse(a, "G4", nested_emit_msg())
+                    : walk_expr(u.e, true, ctx_emit_pos(cx, emit_head_pos(marked, cx)), a),
     Call(c)    => call_check(c.target, c.args, marked, cx, a),
     Field(f)   => field_check(f.target, marked, cx, a),
     OptField(f) => field_check(f.target, marked, cx, a),
-    OptCall(c) => walk_exprs(c.args, 0, marked, cx, walk_expr(c.target, marked, cx, a)),
+    OptCall(c) => walk_args(c.args, marked, cx, walk_expr(c.target, marked, cx, a)),
     Index(x)   => walk_expr(x.idx, marked, cx, walk_expr(x.target, marked, cx, a)),
     If(x)      => walk_expr(x.els, marked, cx,
                            walk_expr(x.then_, marked, cx,
@@ -2877,10 +2949,10 @@ fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
       // read off a spawn handle. If `h` is a known handle it is the instance
       // path (checked like a `req` emission); otherwise it is walked as a value.
       Field(inner) => handle_call(inner, fl.name, args, tg, marked, cx, a),
-      _           => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+      _           => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
     },
     Var(n) => fn_call(n, args, marked, cx, a),
-    _      => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+    _      => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
   }
 }
 
@@ -2898,8 +2970,8 @@ fn handle_call(inner: FieldN, op: Str, args: List[Expr], tg: Expr,
   return match inner.target {
     Var(h) => cx.handles.has(h)
       ? handle_emit(h, inner.name, op, args, marked, cx, a)
-      : walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
-    _ => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+      : walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
+    _ => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
   }
 }
 
@@ -2915,7 +2987,7 @@ fn alias_call(v: Str, op: Str, args: List[Expr], tg: Expr, marked: Bool,
   let ref = match cx.provAlias.lookup(v) { Some(r) => r, None => "" }
   let cut = ref.indexOf("#")
   if (cut == 0 - 1) {
-    return walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a))
+    return walk_args(args, marked, cx, walk_expr(tg, marked, cx, a))
   }
   return handle_emit(ref.slice(0, cut), ref.slice(cut + 1, ref.length()), op,
                      args, marked, cx, a)
@@ -2947,7 +3019,7 @@ fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
                                        .concat(op)]),
            avals: na.avals }
   }
-  return walk_exprs(args, 0, marked, cx, na)
+  return walk_args(args, marked, cx, na)
 }
 
 // ------------------------------------------------------- host acquire verbs
@@ -3108,7 +3180,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
     }
     if (!head_declared(cx, root)) { return g1_refuse(cx, root, a) }
     // a host object or a local receiver, not a requirement — unchecked here
-    return walk_exprs(args, 0, marked, cx, a)
+    return walk_args(args, marked, cx, a)
   }
   let svcName = match cx.reqMap.lookup(root) { Some(v) => v, None => "" }
   let decl = find_msig(svc_of(cx, svcName), meth, 0)
@@ -3135,7 +3207,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
       return ac_refuse(a, "A6", not_a_method_msg(root.concat(".").concat(meth),
                                                  svcName))
     }
-    return walk_exprs(args, 0, marked, cx, a)
+    return walk_args(args, marked, cx, a)
   }
   if (decl.isEm && !marked) {
     return ac_refuse(a, "G4", "call to emission `".concat(root).concat(".")
@@ -3163,7 +3235,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
            aops: union_into(na.aops, [root.concat(".").concat(meth)]),
            avals: na.avals }
   }
-  return walk_exprs(args, 0, marked, cx, na)
+  return walk_args(args, marked, cx, na)
 }
 
 // The `<handle>#<key>` a provision-read ARGUMENT names, else "". A direct read
@@ -3244,7 +3316,7 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps,
            areach: union_into(na.areach, [name]), aops: na.aops, avals: na.avals }
   }
-  return walk_exprs(args, 0, marked, cx, na)
+  return walk_args(args, marked, cx, na)
 }
 
 // A bare `Var` in VALUE position (never a call/access head — those are routed
@@ -3305,7 +3377,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -3319,7 +3391,7 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: where }
+           acqWhere: where, emitPos: cx.emitPos }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -3331,7 +3403,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -3345,7 +3417,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere }
+           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -3359,7 +3431,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -3529,7 +3601,7 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position" }
+           acqWhere: "this position", emitPos: "" }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -3543,7 +3615,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The RUNNING composition's operation table, off the item-346 service block's
@@ -3564,7 +3636,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, List[Str]]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -3588,7 +3660,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position" }
+           acqWhere: "this position", emitPos: "" }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -15403,6 +15475,17 @@ test "plain provider reaching an emission is refused (G4), exact wording" {
 
 test "unmarked emission is refused (G4)" {
   assert admit_src("""service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute("x") undo db.execute("y") }""") == "G4|call to emission `db.execute` must be marked `emit` (G4)"
+}
+
+// issue #1175: one `emit` marker per crossing. The marker covers the head
+// call; an emission evaluated to build the head's argument is judged in the
+// position the `emit` sits in, a marker written there is refused, and a plain
+// call there is admitted as before.
+test "an emission in an emit head's arguments needs its own marker (G4)" {
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(b.fetch()) }""") == "G4|call to emission `b.fetch` must be marked `emit` (G4)"
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(emit b.fetch()) }""") == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service X { fn plain() -> Str } component C requires a: A, x: X { emit a.send(x.plain()) }""") == ""
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } service K { emission fn f() -> Str } component C requires a: A, b: B provides k: K { provide k { fn f() { let r = emit b.fetch() return emit a.send(r) } } }""") == ""
 }
 
 // ---- config-is-data (item 378, G4): byte-exact parity with the reference's

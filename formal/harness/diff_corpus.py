@@ -784,7 +784,10 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
     """Collect (receiver-root, method, marker-context) call facts.
 
     ctx is 'emit' for the HEAD call an emit marks, 'emitarg' for a call
-    evaluated inside that head's argument list, 'plain' everywhere else — including
+    evaluated inside that head's argument list (judged as a plain position:
+    one marker covers one crossing, issue #1175), 'emitnested' for the head
+    of an `emit` EXPRESSION written inside that argument list (refused
+    outright: the marker admits one crossing), 'plain' everywhere else — including
     under `effect ... undo ...`: the g4_unmarked_emission fixture shows the
     checker refuses an emission call whose pairing is an inverse, because a
     boundary crossing cannot be reverted by pairing. Only `emit` legalizes
@@ -796,22 +799,26 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
             # The marker JUDGES the head call (`_lower_emit_step` asks
             # `_is_emission_call` of the lowered expression's own node) and
-            # ADMITS the region under it: `_expr_mode` is "emit" for the whole
-            # marked expression, so a call evaluated to build an argument is
-            # neither demanded a marker (an unmarked `b.fetch()` emission
-            # inside `emit a.send(...)` compiles) nor refused for lacking an
-            # emission to mark (`ranking.strategy()` inside NotesConsole's
-            # `emit webui.add_entry(...)` compiles). Handing `emit` to the
-            # whole subtree made the model refuse the second (#1169 F2);
-            # handing it `plain` would make it refuse the first. `emitarg`
-            # is that region: the rule admits it whatever the method
-            # declares. Whether the marker should be per-site is #1175, the
-            # checker's question; the model follows the checker.
+            # covers that call alone (issue #1175): the head's arguments
+            # lower in the mode the `emit` sits in (`lower._emit_head_args`),
+            # so a call evaluated to build an argument is judged as a plain
+            # position is. An unmarked `b.fetch()` emission inside
+            # `emit a.send(...)` is refused for its missing marker, and
+            # `ranking.strategy()` inside NotesConsole's `emit
+            # webui.add_entry(...)` compiles because `Ranker` declares it
+            # plain (#1169 F2 handed `emit` to the whole subtree and refused
+            # it). `emitarg` names that position in the U row so the fact
+            # stays readable; the rule judges it exactly as `plain`.
+            # A marker written inside another marker's argument list is the
+            # shape `lower._refuse_nested_emit` refuses before it judges the
+            # inner call: its head is recorded as `emitnested`, a violation
+            # whatever the method declares.
+            head_ctx = "emitnested" if ctx == "emitarg" else "emit"
             expr = getattr(node, "expr", None)
             if isinstance(expr, ExprCall):
                 route = _route(expr.callee)
                 if route is not None:
-                    out.append((*route, "emit"))
+                    out.append((*route, head_ctx))
                 for a in expr.args:
                     walk_calls(a, out, "emitarg")
             else:
@@ -1297,9 +1304,11 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                     if meth not in services.get(svc, {}):
                         continue  # unknown method: the checker's business
                     em = services[svc][meth]
-                    # `emitarg` is admitted either way: the region under an
-                    # emit head is the checker's `_expr_mode == "emit"`.
-                    bad = ctx != "emitarg" and (ctx == "emit") != em
+                    # `emitarg` is judged as `plain` is: the marker covers the
+                    # head call alone (issue #1175), so an emission evaluated
+                    # inside the head's argument list needs its own marker,
+                    # and a marker written there (`emitnested`) is refused.
+                    bad = ctx == "emitnested" or (ctx == "emit") != em
                     calls.append((root, svc, meth, ctx))
                     tsv.append(
                         "\t".join(["U", rel, c.name, ctx, root, svc, meth]))
@@ -2327,12 +2336,14 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         rel, compn = r[1], r[2]
         ems = ems_by_file.get(rel, set())
         # U row: [U, file, comp, ctx, root, svc, meth]. A call inside an emit
-        # head's argument list (`emitarg`) is admitted whatever the method
-        # declares: the checker's marker admits the whole region it covers
-        # (`_expr_mode == "emit"`) and judges the head alone (#1169 F2).
+        # head's argument list (`emitarg`) is judged as a plain one: the
+        # checker's marker covers the head call alone (issue #1175), so only
+        # the `emit` context legalizes an emission, and a marker written
+        # inside the argument list (`emitnested`) is a violation outright.
         raw = any(
-            u[2] == compn and u[3] != "emitarg"
-            and ((u[3] == "emit") != ((u[5], u[6]) in ems))
+            u[2] == compn
+            and (u[3] == "emitnested"
+                 or ((u[3] == "emit") != ((u[5], u[6]) in ems)))
             for u in urows if u[1] == rel
         )
         # HA row: [HA, file, comp, verb, position]. The same G4 guarantee over

@@ -257,6 +257,11 @@ REJECTIONS = {
     # unmarked crossing is refused, not silently lowered (and no longer a
     # `KeyError` in `_is_emission_call`).
     "g4_unmarked_handle_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
+    # issue #1175: one `emit` marker per crossing. The marker covers the head
+    # call; an emission evaluated to build the head's argument is judged in
+    # the position the `emit` sits in, and a marker written there is refused.
+    "g4_nested_unmarked_emission.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
+    "g4_nested_emit_expression.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
     # --- the indirection cluster ------------------------------------------
     # One shape recurs across all of these: an obligation is carried through an
     # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function
