@@ -7323,10 +7323,235 @@ fn tk_infer(e: Expr, env: List[Bind]) -> TInf {
     // the reference reaches too.
     OptField(f) => tk_optchain(f.target, f.name, env),
     OptCall(c)  => tk_optchain(c.target, c.name, env),
-    // out of this slice: an arrow body (T2c), an `emit` operand, an asset, and
-    // a node the parser already refused.
+    Arrow(a)    => tk_arrow(a, env),
+    // out of this slice: an `emit` operand, an asset, and a node the parser
+    // already refused.
     _           => tk_ok(""),
   }
+}
+
+// ---------------------------------------------------- arrows (457 T2c) ------
+//
+// item 75(a) §3.1: an arrow in INFERENCE position has no expected type to read
+// its parameters off, so each parameter is its written annotation or BOTTOM,
+// and the result is the written return annotation or, when the body cannot
+// depend on a bottom parameter (§3.2), what the body infers to. An arrow ALWAYS
+// types, as a function type with every bottom rendered `Any`: arity is purely
+// syntactic and never in doubt, and throwing the whole signature away with the
+// one unknown parameter is what let `let f = (x) => "s"` pass its `Str` into an
+// `Int` position and `f(1, 2)` compile in silence.
+//
+// The body is typed either way. It is an ordinary expression over the enclosing
+// scope — a free variable keeps its type, a parameter shadows into the unknown
+// — and skipping it is what let a refusal inside a lambda hide.
+//
+// NOT ported here, and both silences are the under-refusing direction: the
+// CHECKING position (`_check_arrow`, which supplies the parameter types an
+// annotation-free arrow never wrote and checks the body against the expected
+// return), and the self-declared async colour, which `self_async_expr` already
+// refuses for every arrow the gate walks.
+fn tk_arrow(a: ArrowN, env: List[Bind]) -> TInf {
+  let inner = tk_arrow_env(a.params, 0, env, tk_arrow_tps(env))
+  let indep = !tk_arrow_depends(a, env)
+  if (a.ret != "" && indep) {
+    // the annotation is a claim about the body, so check it — but only where
+    // the body cannot mention a bottom parameter, under which the body's type
+    // is `Any`-infected and the check could only pass vacuously or misfire.
+    let c = tk_check(a.body, tk_arrow_ann(a.ret, tk_arrow_tps(env)), inner,
+                     "the body of this arrow (from its return annotation)")
+    if (c.v != "") { return c }
+    return tk_ok(tk_fn_spell(a, tk_arrow_ann(a.ret, tk_arrow_tps(env))))
+  }
+  let b = tk_infer(a.body, inner)
+  if (b.v != "") { return b }
+  // §3.2: a result inferred from a body typed under unknown parameters is not
+  // sound — `[x]` infers `List[Never]` and `{ a: x }` infers `{a: Any}`, both
+  // half-solved types that look known and are not. So the result stays bottom
+  // whenever a bottom parameter occurs free in the body.
+  let ret = a.ret != "" ? tk_arrow_ann(a.ret, tk_arrow_tps(env))
+                        : (indep ? b.ty : "")
+  return tk_ok(tk_fn_spell(a, ret))
+}
+
+// The ENCLOSING `fn`'s type parameters, recorded by `fb_function` beside the
+// body environment. An arrow NEVER quantifies (item 75(a) rule G): a name in its
+// annotation resolves to a type parameter of the enclosing `fn`, else to a
+// declared type, else to an ordinary opaque nominal that unifies with nothing.
+// Reading the enclosing list is what tells those two apart, and getting it
+// wrong in the quantifying direction would admit `(x: Q): Q => x` fed an `Int`.
+fn tk_arrow_tps(env: List[Bind]) -> List[Str] {
+  let raw = tenv_get(env, "arrow tparams")
+  if (raw == "") { return [] }
+  return split_top_commas(raw)
+}
+
+fn tk_arrow_ann(ty: Str, tps: List[Str]) -> Str {
+  return mark_tparams(taint_strip(ty), tps)
+}
+
+// A parameter shadows into the unknown unless the author annotated it. The
+// shadow is a binding of the EMPTY type, which `tenv_get` answers last-wins, so
+// an outer name of the same spelling is hidden rather than read through; the
+// `unk` row the statement layer sets for a provably-untyped binding is cleared
+// the same way.
+fn tk_arrow_env(ps: List[ParamN], i: Int, env: List[Bind],
+                tps: List[Str]) -> List[Bind] {
+  if (i >= ps.length()) { return env }
+  let ann = ps[i].ty == "" ? "" : tk_arrow_ann(ps[i].ty, tps)
+  return tk_arrow_env(ps, i + 1,
+                      tenv_put(tenv_put(env, ps[i].name, ann),
+                               "unk ".concat(ps[i].name), ""), tps)
+}
+
+// `arrow_depends_on_unknown_param` (item 75(a) §3.2): does a BOTTOM parameter
+// occur free in the body? Syntactic, decidable, and deliberately conservative —
+// it refuses to name a result a parameter of unknown type could have shaped.
+fn tk_arrow_depends(a: ArrowN, env: List[Bind]) -> Bool {
+  var unknown: List[Str] = []
+  var i = 0
+  while (i < a.params.length()) {
+    if (a.params[i].ty == "") { unknown = unknown.push(a.params[i].name) }
+    i += 1
+  }
+  if (unknown.length() == 0) { return false }
+  return tk_free_hit(a.body, unknown, [])
+}
+
+// `_free_names`, asked as a membership question rather than built as a set. The
+// reference recurses over dataclass FIELDS so a node it has never heard of is
+// still descended into; this walk names every case and answers TRUE for the two
+// it cannot read (a parse failure, an asset path), because missing an
+// occurrence would let §3.2 name a result it must not name.
+fn tk_free_hit(e: Expr, unknown: List[Str], bound: List[Str]) -> Bool {
+  return match e {
+    Var(n)      => contains(unknown, n) && !contains(bound, n),
+    Bin(b)      => tk_free_hit(b.l, unknown, bound) || tk_free_hit(b.r, unknown, bound),
+    Un(u)       => tk_free_hit(u.e, unknown, bound),
+    Emit(u)     => tk_free_hit(u.e, unknown, bound),
+    Call(c)     => tk_free_hit(c.target, unknown, bound)
+                     || tk_free_any(c.args, 0, unknown, bound),
+    Field(f)    => tk_free_hit(f.target, unknown, bound),
+    OptField(f) => tk_free_hit(f.target, unknown, bound),
+    OptCall(c)  => tk_free_hit(c.target, unknown, bound)
+                     || tk_free_any(c.args, 0, unknown, bound),
+    Index(x)    => tk_free_hit(x.target, unknown, bound)
+                     || tk_free_hit(x.idx, unknown, bound),
+    If(f)       => tk_free_hit(f.cond, unknown, bound)
+                     || tk_free_hit(f.then_, unknown, bound)
+                     || tk_free_hit(f.els, unknown, bound),
+    Rec(r)      => tk_free_inits(r.fields, 0, unknown, bound),
+    RecUpd(r)   => tk_free_hit(r.base, unknown, bound)
+                     || tk_free_inits(r.upds, 0, unknown, bound),
+    Lst(l)      => tk_free_any(l.items, 0, unknown, bound),
+    Arrow(ar)   => tk_free_hit(ar.body, unknown,
+                               union_into(bound, param_names(ar.params))),
+    Match(m)    => tk_free_hit(m.scrut, unknown, bound)
+                     || tk_free_arms(m.arms, 0, unknown, bound),
+    Templ(t)    => tk_free_parts(t.parts, 0, unknown, bound),
+    IntLit(v)   => false,
+    FloatLit(v) => false,
+    StrLit(v)   => false,
+    BoolLit(v)  => false,
+    NullLit     => false,
+    Hole(h)     => false,
+    _           => true,
+  }
+}
+
+fn tk_free_any(xs: List[Expr], i: Int, unknown: List[Str],
+               bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (tk_free_hit(xs[i], unknown, bound)) { return true }
+  return tk_free_any(xs, i + 1, unknown, bound)
+}
+
+fn tk_free_inits(xs: List[InitN], i: Int, unknown: List[Str],
+                 bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (tk_free_hit(xs[i].value, unknown, bound)) { return true }
+  return tk_free_inits(xs, i + 1, unknown, bound)
+}
+
+fn tk_free_arms(xs: List[ArmN], i: Int, unknown: List[Str],
+                bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  let inner = xs[i].bind == "" ? bound : bound.push(xs[i].bind)
+  if (tk_free_hit(xs[i].body, unknown, inner)) { return true }
+  return tk_free_arms(xs, i + 1, unknown, bound)
+}
+
+fn tk_free_parts(ps: List[PartN], i: Int, unknown: List[Str],
+                 bound: List[Str]) -> Bool {
+  if (i >= ps.length()) { return false }
+  if (ps[i].kind == "expr" && tk_free_hit(ps[i].e, unknown, bound)) { return true }
+  return tk_free_parts(ps, i + 1, unknown, bound)
+}
+
+// `_resolve_arrow`'s function type: every unknown component renders `Any`.
+fn tk_fn_spell(a: ArrowN, ret: Str) -> Str {
+  var pts: List[Str] = []
+  var i = 0
+  while (i < a.params.length()) {
+    let ann = a.params[i].ty == "" ? "" : taint_strip(a.params[i].ty)
+    pts = pts.push(ann == "" ? "Any" : ann)
+    i += 1
+  }
+  return "(".concat(pts.join(", ")).concat(") -> ")
+    .concat(ret == "" ? "Any" : ret)
+}
+
+// `call_function_value`: a call through a value of function type — a `let`-bound
+// arrow, a function-typed parameter, a field read into a `let`. Arity is exact
+// (revl has no default, optional or variadic parameters) and is checked even
+// when nothing about the parameter types is known, which is the whole of t33.
+//
+// `_check_arrow_args` — the checking position an ARROW argument gets here — is
+// not ported: it types an arrow the enclosing walk left untyped, and withholding
+// that is the silent direction.
+fn tk_fnval(c: CallN, fnty: Str, what: Str, argTys: List[Str]) -> TInf {
+  let ps = fn_param_types(fnty)
+  if (c.args.length() != ps.length()) {
+    return tk_no("T1", what.concat(" is a `").concat(tk_render(fnty))
+      .concat("` and takes ").concat(ps.length().to_str())
+      .concat(" argument(s), ").concat(c.args.length().to_str())
+      .concat(" given"))
+  }
+  var i = 0
+  while (i < ps.length() && i < argTys.length()) {
+    if (ps[i] != "" && argTys[i] != "" && !tk_compatible(ps[i], argTys[i])) {
+      return tk_mismatch("argument ".concat((i + 1).to_str()).concat(" of ")
+                           .concat(what), ps[i], argTys[i])
+    }
+    i += 1
+  }
+  return tk_ok(tk_call_result(function_return_ty(fnty)))
+}
+
+// A BARE-NAME callee bound locally to a function type. The reference reads
+// `tenv[name]` before the case table and before the signature table, so a local
+// of function type shadows a same-named module `fn`. The declaration scan binds
+// every module `fn`'s own name to its function type in this same environment,
+// which the reference's body `tenv` does not — so a binding that IS that row is
+// not a function value here and goes on to the signature table.
+fn tk_local_fnvalue(c: CallN, env: List[Bind], argTys: List[Str]) -> TCall {
+  let n = match c.target { Var(v) => v, _ => "", }
+  if (n == "") { return tk_miss() }
+  let t = tenv_get(env, n)
+  if (!tk_is_fn_ty(t)) { return tk_miss() }
+  if (sig_declared(env, n) && tenv_get(env, sig_key("sigv", n)) == t) {
+    return tk_miss()
+  }
+  return tk_hit(tk_fnval(c, t, "`".concat(n).concat("`"), argTys))
+}
+
+// Any OTHER callee expression whose type is a function type: an arrow applied in
+// place, a function value read out of a chain. Last, because a bare name and a
+// method receiver are decided above.
+fn tk_other_fnvalue(c: CallN, calleeTy: Str, argTys: List[Str]) -> TCall {
+  let bare = match c.target { Var(v) => true, Field(f) => true, _ => false, }
+  if (bare) { return tk_miss() }
+  if (!tk_is_fn_ty(calleeTy)) { return tk_miss() }
+  return tk_hit(tk_fnval(c, calleeTy, "this call's callee", argTys))
 }
 
 // `a?.b` short-circuits on absence, so it REQUIRES an optional on the left and
@@ -7657,10 +7882,16 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // method callee against the host stub surface / `_BUILTIN_SIG`. Both MISS
   // rather than guess where the premise they need is not proven, and the
   // annotation engine's best effort below is what answers then.
+  // a LOCAL of function type shadows everything else, which is the reference's
+  // own first question at a bare-name callee.
+  let lfv = tk_local_fnvalue(c, env, a.tys)
+  if (lfv.hit) { return lfv.r }
   let nmd = tk_named(c, env, a.tys)
   if (nmd.hit) { return nmd.r }
   let mth = tk_method(c, env, a.tys, tv.ty)
   if (mth.hit) { return mth.r }
+  let ofv = tk_other_fnvalue(c, tv.ty, a.tys)
+  if (ofv.hit) { return ofv.r }
   if (tk_unknown_receiver(c.target, env)) { return tk_ok("") }
   let t = tk_call_result(infer_call_ty(c, env))
   // A GENERIC callee's declared return is not the call's type: the reference
@@ -7700,7 +7931,9 @@ fn tk_callee(callee: Expr, env: List[Bind]) -> TInf {
   return match callee {
     Var(n)   => tk_ok(""),
     Field(f) => tk_infer(f.target, env),
-    _        => tk_sub(callee, env),
+    // the callee's OWN type, which `tk_other_fnvalue` reads back: an arrow
+    // applied in place is a call through a function value.
+    _        => tk_infer(callee, env),
   }
 }
 
@@ -9434,9 +9667,14 @@ fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
   // UNIFIED `Str` — a refusal with the right verdict and the wrong sentence.
   let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
   let steps = fb_scan(ts, sp.lo, sp.hi)
+  // the list itself, beside the environment: an ARROW annotation never
+  // quantifies (item 75(a) rule G), so it is marked against the ENCLOSING
+  // `fn`'s parameters and against nothing else. The key carries a space, which
+  // no identifier may, so it can never collide with a binding.
+  let btys = tenv_put(fb_params_tys(sp.ps, 0, gtys, tps), "arrow tparams",
+                      tps.join(","))
   // the body first, then the return question — `_lower_fns`' own order.
-  let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []),
-                  fb_params_tys(sp.ps, 0, gtys, tps),
+  let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []), btys,
                   mark_tparams(sp.ret, tps)).v
   if (v.v != "") { return v }
   return rp_refusal(ts, sp, steps)
