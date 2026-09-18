@@ -3341,9 +3341,13 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
-    # declarations: alias cycles, bare generics, non-record destructuring.
+    # declarations: bare generics, non-record destructuring. The ALIAS-CYCLE
+    # half has landed (#1151): `awf_refusal` runs the reference's own
+    # `_resolve_type_aliases` obligations — every alias target through
+    # `check_type_wellformed`, then the fixed-point expansion that finds a cycle
+    # — so `t18_type_alias_cycle` moved into REJECTED_PROGRAMS above, where tag
+    # AND message are compared, and its line is pinned there too.
     "declarations": [
-        ("t18_type_alias_cycle", "TYPE"),
         ("t6_bare_generic", "T1"),
         ("t5_destructure_nonrecord", "TYPE"),
     ],

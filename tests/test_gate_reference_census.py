@@ -171,7 +171,10 @@ KNOWN_BYPASSES = {
     "examples/rejections/t13_unknown_match_case.rvl",
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --
-    "examples/rejections/t18_type_alias_cycle.rvl",
+    # The ALIAS-CYCLE fixture is struck (#1151): the gate now runs the
+    # reference's own type-alias declaration obligations ahead of every other
+    # phase, so `t18_type_alias_cycle.rvl` refuses with the reference's tag,
+    # message AND line.
     "examples/rejections/t6_bare_generic.rvl",
     "examples/rejections/t5_destructure_nonrecord.rvl",
     # -- provide-method and component bodies --
