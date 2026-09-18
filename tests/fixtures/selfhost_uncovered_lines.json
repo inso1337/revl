@@ -1402,7 +1402,7 @@
   },
   "selfhost": {
     "go": {
-      "statements": 1199,
+      "statements": 1198,
       "uncovered": {
         "Context builder used only by emit_go.rvl's own unit tests; emit_src builds the production context directly. This is not an unsupported emitted construct.": {
           "typed_ctx": 9
@@ -1415,9 +1415,9 @@
           "is_scalar": 1,
           "json_tag": 1
         },
-        "Item 130 / issue #81: the loop that names each `components` entry this pure typed-core port does not carry, and the `has_top_level` guard that decides when naming it is right. No emit_go_corpus document declares a component, and one that did could not close this: a components-only document is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED rather than cover these lines, and a document that also carries top-level declarations reaches only the guard's suppressing arm, where the reference routes past its own components too. Both arms are pinned instead by tests/test_selfhost_emit_go.py: test_a_components_only_document_names_every_component over stream_130.rvl, and test_an_incidental_component_on_the_pure_path_is_not_marked for the suppressing arm.": {
-          "has_top_level": 7,
-          "uncarried_components": 6
+        "Item 130 / issue #81: the loop that names each `components` entry this pure typed-core port does not carry, and the `carries_pure_declarations` guard that suppresses it exactly where naming it would break a byte agreement the reference itself produces. No emit_go_corpus document declares a component, and one that did could not close this: a components-only document is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED rather than cover these lines, and a document that also carries pure declarations reaches only the suppressing arm, where the reference routes past its own components too. Both arms are pinned instead by tests/test_selfhost_emit_go.py: test_a_components_only_document_names_every_component over stream_130.rvl, and test_an_incidental_component_on_the_pure_path_is_not_marked for the suppressing arm.": {
+          "carries_pure_declarations": 5,
+          "uncarried_components": 7
         },
         "Only Float operands remain; they request revlFtoa, absent from the explicitly deferred Float-interpolation scaffold. Expression-free templates and non-Float typed interpolation are now exercised.": {
           "render_interp": 3
@@ -1489,7 +1489,7 @@
           "concat_pieces": 8
         }
       },
-      "uncovered_statements": 97
+      "uncovered_statements": 96
     },
     "java": {
       "statements": 2034,
