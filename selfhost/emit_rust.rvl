@@ -4717,6 +4717,53 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     out = out.push(`${pad}ctx.effect(${string_lit(`${name}.timer.undo`)}, move || { revl_cancel(_revl_timer_${n}); Ok(()) })?;`)
     return out
   }
+  if (kind == "stream-iter") {
+    // item 130 Slice 4: `every <x> in <sub> { .. }` on this blocking tier is a
+    // plain `loop` over the cancel-channel `next`, the SAME shape the go tier
+    // lowers. It adds NO runtime primitive — `next` is the Slice 1/3 protocol
+    // this tier already ships. Each turn:
+    //
+    //   * `next` parks in the item/terminal/cancel race. A `Closed` terminal —
+    //     an orderly provider close, OR the owner's own teardown tripping the
+    //     cancel signal — is an ordinary value that ENDS the loop. It is not an
+    //     item and never enters the body: running the effectful body on a
+    //     terminal would be silent-data invention;
+    //   * a `Faulted` terminal is `Err(reason)`; `map_err(..)?` propagates it,
+    //     UNCAUGHT. The activation fails, so the accumulated prefix reverts LIFO
+    //     with the subscription bracket on it and the stream closes — "a failed
+    //     handler does not leave a subscription active", delivered by not
+    //     catching anything.
+    //
+    // Slice 5's typed-event handler (`on <Event> as <e> in <sub>`) is THIS loop
+    // with a contract gate between the terminal test and the body. The contract
+    // is constructed from the event's derived JSON schema rendered through
+    // Python's `json.dumps` DEFAULT separators, which is host formatting this
+    // port carries no dual-tier extern for, so that variant is REPORTED rather
+    // than emitted with a schema string that is not the reference's.
+    let subject = render_expr(value_field(step, "subject"), ctx)
+    let bind = mangle(value_str(value_field(step, "bind")))
+    let body = value_list(value_field(step, "body"))
+    if (body.length() == 0) { return [`${pad}<<DEFER-stream-iter-empty:${name}>>`] }
+    if (!value_is_null(value_field(step, "event"))) {
+      return [`${pad}<<DEFER-stream-event-contract:${name}>>`]
+    }
+    out = out.push(`${pad}loop {`)
+    out = out.push(`${pad}    match ${subject}.next().map_err(|e| cordis::CordisError::with_message(cordis::ErrorCode::Plugin, e))? {`)
+    // a `Closed` terminal ends the loop BEFORE the body: it is a terminal, not
+    // an item (the go tier's `IsStreamClosed(..) { break }`).
+    out = out.push(`${pad}        StreamNext::Closed => break,`)
+    out = out.push(`${pad}        StreamNext::Item(${bind}) => {`)
+    // a body that does not read the item must not trip an unused-binding lint
+    // on this tier; the go tier makes the same discard.
+    out = out.push(`${pad}            let _ = &${bind};`)
+    for (nested of body) {
+      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 3, tbase))
+    }
+    out = out.push(`${pad}        }`)
+    out = out.push(`${pad}    }`)
+    out = out.push(`${pad}}`)
+    return out
+  }
   if (kind == "emit") {
     out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), ctx)};`)
     if (!value_is_null(value_field(step, "compensate"))) {
