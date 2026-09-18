@@ -222,6 +222,20 @@ REJECTIONS = {
     "host_method_not_on_surface.rvl": "`Map` has no method `putt`",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
+    # item 130: the three stream STATEMENT forms are ordinary name-resolution
+    # positions. The self-hosted gate could not read any of them, and a form a
+    # gate cannot read is a form it cannot decide: the skipped `subscribe` run
+    # dropped the handle (five corpus documents falsely refused) AND dropped the
+    # stream operand with it, so the first two of these drew no objection at all
+    # while the reference refused them. The third is the block scope the
+    # iteration item keeps — the reference restores `env.locals` after the body,
+    # so the item is gone once the loop ends.
+    "g1_subscribe_undeclared_source.rvl":
+        "`nostream` is not a declared requirement of Orders",
+    "g1_subscribe_merge_undeclared.rvl":
+        "`nob` is not a declared requirement of Fanin",
+    "g1_stream_item_out_of_scope.rvl":
+        "`o` is not a declared requirement of Iterate",
     "t1_service_arg_type.rvl": "`db.query` argument `sql` expects `Str`, got `Int`",
     "t2_null_in_expression.rvl": "`null` has no type in revl",
     "g2_provision_conflict.rvl": "provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (G2)",

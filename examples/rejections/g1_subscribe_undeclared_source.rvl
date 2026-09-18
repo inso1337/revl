@@ -1,0 +1,17 @@
+// REJECTED — G1: the stream a `subscribe` names is an ordinary head and must
+// resolve. `nostream` is neither a local, a required key, nor a callable.
+//
+// This fixture is the SAFE-DIRECTION half of a divergence that hid an unsafe
+// one. `subscribe` is a keyword, so the self-hosted gate's expression grammar
+// stopped dead on it: the whole `let` run became a skip. A skipped run binds no
+// handle, which falsely refused five documents of this repo's corpus — and a
+// skipped run resolves no heads either, so THIS program raised no objection at
+// all while the reference refused it (item 130 Slice 1).
+//
+// expected error:
+//   `nostream` is not a declared requirement of Orders
+
+component Orders {
+  let sub = subscribe nostream undo sub.close()
+  await sub.next()
+}

@@ -1,0 +1,25 @@
+// REJECTED — G1: the item an `every <x> in <sub>` iteration binds names ONE
+// delivered item and is in scope for the body alone. The reference saves and
+// restores `env.locals` around the body (`_lower_stream_iter_step`), so a read
+// after the loop resolves against nothing — there is no last item once the
+// terminal arrived.
+//
+// This is the control on the direction the self-hosted gate's stream-iteration
+// reader errs in. Binding the item is what stops the body refusing its own
+// `o`; binding it COMPONENT-WIDE, the way a setup `let` is bound, would admit
+// this program instead. The item rides a per-statement scope for exactly that
+// reason.
+//
+// expected error:
+//   `o` is not a declared requirement of Iterate
+
+service Sink { emission fn write(v: Str) }
+
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+  emit sink.write(o)
+}
