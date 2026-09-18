@@ -158,10 +158,13 @@ KNOWN_BYPASSES = {
     # a method call. All nine of this family's fixtures now refuse with the
     # reference's own tag and sentence and are struck from this list.
     # -- arrows and function values --
-    "examples/rejections/t17_arrow_body_unchecked.rvl",
-    "examples/rejections/t32_arrow_value_result_flows.rvl",
-    "examples/rejections/t33_arrow_value_arity.rvl",
-    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
+    # CLOSED WHOLE by docs/design/457 T2c: item 75(a) §3.1/§3.2 inference (an
+    # arrow always types, as a function type with every bottom rendered `Any`),
+    # rule G (an arrow annotation never quantifies — it resolves against the
+    # ENCLOSING `fn`'s type parameters and nothing else), and
+    # `call_function_value`'s exact arity and per-argument check. All four
+    # fixtures now refuse with the reference's own sentence and are struck from
+    # this list.
     # -- return paths and match --
     # CLOSED WHOLE. The RETURN-PATH half landed with docs/design/457 T3b
     # (`fb_function` runs `_check_returns_on_every_path` over the statement tree
