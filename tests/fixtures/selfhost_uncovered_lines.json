@@ -1402,7 +1402,7 @@
   },
   "selfhost": {
     "go": {
-      "statements": 1180,
+      "statements": 1199,
       "uncovered": {
         "Context builder used only by emit_go.rvl's own unit tests; emit_src builds the production context directly. This is not an unsupported emitted construct.": {
           "typed_ctx": 9
@@ -1414,6 +1414,10 @@
           "is_eq_op": 1,
           "is_scalar": 1,
           "json_tag": 1
+        },
+        "Item 130 / issue #81: the loop that names each `components` entry this pure typed-core port does not carry, and the `has_top_level` guard that decides when naming it is right. No emit_go_corpus document declares a component, and one that did could not close this: a components-only document is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED rather than cover these lines, and a document that also carries top-level declarations reaches only the guard's suppressing arm, where the reference routes past its own components too. Both arms are pinned instead by tests/test_selfhost_emit_go.py: test_a_components_only_document_names_every_component over stream_130.rvl, and test_an_incidental_component_on_the_pure_path_is_not_marked for the suppressing arm.": {
+          "has_top_level": 7,
+          "uncarried_components": 6
         },
         "Only Float operands remain; they request revlFtoa, absent from the explicitly deferred Float-interpolation scaffold. Expression-free templates and non-Float typed interpolation are now exercised.": {
           "render_interp": 3
@@ -1485,7 +1489,7 @@
           "concat_pieces": 8
         }
       },
-      "uncovered_statements": 84
+      "uncovered_statements": 97
     },
     "java": {
       "statements": 2034,
@@ -1988,7 +1992,7 @@
       "uncovered_statements": 93
     },
     "wasm": {
-      "statements": 1269,
+      "statements": 1276,
       "uncovered": {
         "Generated Python substitutes these tiny RVL helper bodies at production call sites; their retained definitions are not called by emit_src. Remaining named calls are confined to the RVL file's own unit tests. This includes the executed preamble/layout logic, not an absent backend feature.": {
           "align4": 1,
@@ -2003,6 +2007,9 @@
           "no_loop": 1,
           "printable": 1,
           "wty": 3
+        },
+        "Item 130 \u00a74.6 / issue #81: the loop that names each `components` entry this module-only port does not carry. No emit_wasm_corpus document declares a component, and one that did could not join that corpus: the reference answers a component document with a SEPARATE module per component in its `{module: wat}` map, or refuses the document by name (a stream component is refused on this tier because a subscription suspends a fiber and this tier awaits only `Job.run(name)`), and neither is byte-comparable against the functions module this port emits. Pinned instead by tests/test_selfhost_emit_wasm.py: test_a_stream_document_the_reference_refuses_is_refused_by_name_here_too over backends/go/testdata/stream_130.rvl, and test_the_component_marker_is_text_only_the_port_emits.": {
+          "uncarried_components": 1
         },
         "Only non-generic and unrecognized-generic negative layout lookups remain. Valid tagged declarations resolve their layouts; bare Some covers the empty-expected-type return.": {
           "tagged_layout": 2
@@ -2046,8 +2053,8 @@
         "Remaining guards reject malformed emitted constant text: missing closing parenthesis, empty/sign-only numeral, or nondigit. Valid renderer-produced integer constants satisfy this parser.": {
           "const_numeral": 3
         },
-        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.": {
-          "emit_wasm_src": 1
+        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle. The second statement is the splice that pushes the item-130 component markers into the module; no emit_wasm_corpus document declares a component, so the loop body never runs.": {
+          "emit_wasm_src": 2
         },
         "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
           "render_bin": 1
@@ -2080,7 +2087,7 @@
           "rstrip": 1
         }
       },
-      "uncovered_statements": 60
+      "uncovered_statements": 62
     }
   }
 }
