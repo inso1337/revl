@@ -1652,6 +1652,41 @@ fn uncarried_components(ir: Any) -> List[Str] {
 // the banner + package, the conditional import block, the feature preambles in
 // the reference's fixed order (revlDiv, then the overflow trio, then the Int32
 // block), then the free functions — joined, right-stripped, one trailing `\n`.
+// ------------------------------------------ the deferred in-file test section
+// In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+// every self-host emitter slice. The reference emits a driver section for it;
+// this port does not. Emitting NOTHING made that divergence SILENT, which is
+// the one failure mode the marker convention exists to prevent: a deferred
+// family that answers with a named `<<UNSUPPORTED-...>>` marker is loud in the
+// emitted bytes and is pinned by a boundary test, while a section the port
+// simply skips is invisible to the byte oracle (no corpus document on any tier
+// carries a test section) and is counted as mirrored by
+// tools/selfhost_coverage.py. Measured across all six self-host emitters while
+// closing issue #1123: every one of them dropped the section in silence.
+//
+// Markers, not emission: porting the drivers is the separate, larger half.
+//
+// The marker names the IR SECTION and the test's name, and deliberately does
+// NOT read the per-test lifecycle discriminant to tell a `lifecycle test` from
+// a plain one. `tools/selfhost_coverage.py` reads "this tier ports construct X"
+// straight off the boolean-flag read spelling in the self-host source, so
+// branching on that flag here would claim a port of the lifecycle-driver arm
+// this slice does not have, and would move that tier/construct pair out of the
+// ledger's `unported` baseline on the strength of a marker. A marker is a
+// refusal, not an implementation; it says only what it knows. (That scan is
+// over the raw file text, comments included, so naming the spelling in prose
+// registers it too, which is why this note does not.)
+fn deferred_test_markers(ir: Any) -> List[Str] {
+  var out = []
+  for (t of value_list(value_field(ir, "tests"))) {
+    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
+  }
+  for (t of value_list(value_field(ir, "fault_tests"))) {
+    out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
+  }
+  return out
+}
+
 pub fn emit_go_src(ir: Any) -> Str {
   let types = value_field(ir, "types")
   let tables = build_type_tables(types)
@@ -1735,6 +1770,10 @@ pub fn emit_go_src(ir: Any) -> Str {
   out = out.concat(fnlines)
   // What this file did not carry, named — never dropped on the floor.
   out = out.concat(uncarried_components(ir))
+  // The deferred in-file test section: one named marker per test instead of
+  // silence (issue #1123).
+  let test_markers = deferred_test_markers(ir)
+  if (test_markers.length() > 0) { out = out.concat(test_markers) }
   return rstrip(out.join(newline())).concat(newline())
 }
 
