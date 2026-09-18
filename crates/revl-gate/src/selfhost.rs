@@ -7809,9 +7809,120 @@ fn tk_low_method(c: CallN, env: Vec<Bind>) -> String {
     return String::from("");
 }
 
+fn tk_case_list(names: &[String], i: i64, acc: String) -> String {
+    if (i >= names.revl_length()) {
+        return acc;
+    }
+    let one = (String::from("`").revl_concat(&(names)[(i) as usize])).revl_concat("`");
+    return tk_case_list(names, (i).checked_add(1i64).expect("revl: Int overflow"), if (acc == "") { one.clone() } else { (acc.revl_concat(", ")).revl_concat(&one) });
+}
+
+fn variant_case_names(ts: Vec<Token>, kw: i64, hi: i64) -> Vec<String> {
+    let mut j = (kw).checked_add(2i64).expect("revl: Int overflow");
+    if atk(&ts, j.clone(), "[") {
+        return vec![];
+    }
+    if (!atk(&ts, j.clone(), "=")) {
+        return vec![];
+    }
+    j = (j).checked_add(1i64).expect("revl: Int overflow");
+    if (j >= hi) {
+        return vec![];
+    }
+    if atk(&ts, j.clone(), "{") {
+        return vec![];
+    }
+    let mut out: Vec<String> = vec![];
+    let mut k = j.clone();
+    let mut payloaded = false;
+    while (k < hi) {
+        if (!atk(&ts, k.clone(), "ident")) {
+            return vec![];
+        }
+        let cn = tkc(&ts, k.clone()).text;
+        if (!is_upper_name(&cn)) {
+            return vec![];
+        }
+        out.push(cn.clone());
+        let mut n = (k).checked_add(1i64).expect("revl: Int overflow");
+        if atk(&ts, n.clone(), "(") {
+            let tr = type_at(ts.clone(), (n).checked_add(1i64).expect("revl: Int overflow"));
+            if ((!tr.ok) || (!atk(&ts, tr.i, ")"))) {
+                return vec![];
+            }
+            n = (tr.i).checked_add(1i64).expect("revl: Int overflow");
+            payloaded = true;
+        }
+        if (n >= hi) {
+            k = n.clone();
+        } else {
+            if (!atk(&ts, n.clone(), "|")) {
+                return vec![];
+            }
+            k = (n).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    if ((out.revl_length() == 1i64) && (!payloaded)) {
+        return vec![];
+    }
+    return out;
+}
+
+fn variant_rows(ts: Vec<Token>, base: Vec<Bind>) -> Vec<Bind> {
+    let mut out = base;
+    let mut seen: Vec<String> = vec![];
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        if atw(&ts, i, "type") {
+            let hi = type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+            let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+            if contains(&seen, &nm) {
+                out = tenv_put(&out, String::from("vc ").revl_concat(&nm), String::from(""));
+            } else {
+                let cs = variant_case_names(ts.clone(), i, hi);
+                if (cs.revl_length() > 0i64) {
+                    out = tenv_put(&out, String::from("vc ").revl_concat(&nm), (String::from("|").revl_concat(&cs.revl_join("|"))).revl_concat("|"));
+                    out = tenv_put(&out, String::from("vcr ").revl_concat(&nm), tk_case_list(&cs, 0i64, String::from("")));
+                }
+            }
+            seen.push(nm.clone());
+            i = hi;
+        } else {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn tk_arm_case_verd(arms: &[ArmN], i: i64, st: &str, mem: &str, env: &[Bind]) -> String {
+    if (i >= arms.revl_length()) {
+        return String::from("");
+    }
+    let p = (arms)[(i) as usize].pat.clone();
+    if (((p != "") && (p != "_")) && (mem.revl_index_of(&(String::from("|").revl_concat(&p)).revl_concat("|")) == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
+        return tagged("TYPE", &((((((String::from("`").revl_concat(&p)).revl_concat("` is not a case of `")).revl_concat(&st)).revl_concat("` (cases: ")).revl_concat(&tenv_get(env, &(String::from("vcr ").revl_concat(&st))))).revl_concat(")")));
+    }
+    return tk_arm_case_verd(arms, (i).checked_add(1i64).expect("revl: Int overflow"), st, mem, env);
+}
+
+fn tk_low_match(m: MatchN, env: Vec<Bind>) -> String {
+    let st = tk_infer(m.scrut.clone(), env.clone()).ty;
+    if (st != "") {
+        let mem = tenv_get(&env, &(String::from("vc ").revl_concat(&st)));
+        if (mem != "") {
+            let v = tk_arm_case_verd(&m.arms, 0i64, &st, &mem, &env);
+            if (v != "") {
+                return v;
+            }
+        }
+    }
+    return tk_low(m.scrut.clone(), env.clone());
+}
+
 fn tk_low(e: Expr, env: Vec<Bind>) -> String {
     return match e {
     Expr::Bin(b) => { let b = *b; tk_low2(b.l.clone(), b.r.clone(), env.clone()) },
+    Expr::Match(m) => { let m = *m; tk_low_match(m, env.clone()) },
     Expr::Un(u) => { let u = *u; tk_low(u.e, env.clone()) },
     Expr::Field(f) => { let f = *f; tk_low(f.target.clone(), env.clone()) },
     Expr::OptField(f) => { let f = *f; tk_low(f.target.clone(), env.clone()) },
@@ -8422,7 +8533,7 @@ fn fb_function(ts: Vec<Token>, i: i64, sp: FbSpan, gtys: Vec<Bind>) -> Verd {
 }
 
 fn fb_refusal(ts: Vec<Token>, i: i64) -> Verd {
-    return fb_refusal_at(ts.clone(), i, sig_binds(ts.clone(), case_binds(ts.clone())));
+    return fb_refusal_at(ts.clone(), i, variant_rows(ts.clone(), sig_binds(ts.clone(), case_binds(ts.clone()))));
 }
 
 fn fb_refusal_at(ts: Vec<Token>, i: i64, gtys: Vec<Bind>) -> Verd {
@@ -16837,6 +16948,36 @@ fn a_cycle_through_a_type_application_is_left_undecided() {
     assert!((admit_src(applied.clone()) == ""));
     let suffixed = String::from("type A = B? type B = A fn f(x: Int) -> Int { return x }");
     assert!((admit_src(suffixed.clone()) == ""));
+}
+
+#[test]
+fn a_match_arm_naming_no_case_of_the_scrutinee_s_adt_is_refused() {
+    assert!((admit_src(String::from("type Status = Active | Retired fn code(s: Status) -> Int { return match s { Active => 1, Retired => 2, Pending => 3, } }")) == "TYPE|`Pending` is not a case of `Status` (cases: `Active`, `Retired`)"));
+}
+
+#[test]
+fn a_catch_all_covers_the_missing_cases__never_a_misspelled_one() {
+    assert!((admit_src(String::from("type Status = Active | Retired fn code(s: Status) -> Int { return match s { Bogus => 1, _ => 0, } }")) == "TYPE|`Bogus` is not a case of `Status` (cases: `Active`, `Retired`)"));
+    assert!((admit_src(String::from("type Status = Active | Retired fn code(s: Status) -> Int { return match s { Active => 1, _ => 0, } }")) == ""));
+}
+
+#[test]
+fn the_built_in_opt_and_result_scrutinees_take_no_case_verdict() {
+    assert!((admit_src(String::from("fn f(m: Map[Str, Int], k: Str) -> Int { let hit = m.lookup(k)  return match hit { Some(v) => v, None => 0, } }")) == ""));
+}
+
+#[test]
+fn a_variant_the_reader_will_not_claim_takes_no_case_verdict() {
+    let bare = String::from("type S = Pending fn f(s: S) -> Int { return match s { Zz => 1, _ => 0, } }");
+    assert!((admit_src(bare.clone()) == ""));
+    let twice = String::from("type S = A | B type S = C | D fn f(s: S) -> Int { return match s { Zz => 1, _ => 0, } }");
+    assert!((admit_src(twice.clone()) == ""));
+}
+
+#[test]
+fn a_match_through_a_transparent_alias_of_a_variant_takes_no_case_verdict() {
+    let aliased = String::from("type V = Red | Blue type A = V fn f(a: A) -> Int { return match a { Bogus => 1, _ => 0, } }");
+    assert!((admit_src(aliased.clone()) == ""));
 }
 
 #[test]

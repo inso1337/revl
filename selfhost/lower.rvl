@@ -8881,9 +8881,144 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
   return ""
 }
 
+// ------------------------------------- a match arm that names no case (TYPE)
+//
+// `_check_match_exhaustiveness`'s FIRST arm, which `_lower_pure_expr` runs on
+// every `ExprMatch` it lowers: a pattern that is neither `_` nor one of the
+// scrutinee ADT's declared cases has no meaning on any tier — javac emits a
+// `case` label for a constant that does not exist and the rust emitter raises
+// `EmitError`, while python and TypeScript silently never take the arm, which
+// is the portability bug revl exists to refuse.
+//
+// It is a LOWERING refusal, not an inference one: `infer_ast` types a `match`
+// without asking the question, so this belongs in this walk and not in
+// `tk_infer`, and a statement that both mis-types and mis-names draws the type
+// refusal — which is the reference's order too (`check_ast` before
+// `_lower_pure_expr`).
+//
+// The MISSING-case half of the same check (`non-exhaustive match: missing case
+// …`, the reference's coded `T1`) is deliberately not here: it needs the arm
+// algebra to decide what a catch-all covers, and it is the other half of the
+// census's `return paths and match` family.
+//
+// The case table is `variant_rows`, built once per program beside the signature
+// rows. A type it records no row for takes no verdict — which is every
+// parameterised declaration, every declaration made twice, and the one bare
+// name (`type S = Other`) a token scan cannot tell from an alias.
+
+fn tk_case_list(names: List[Str], i: Int, acc: Str) -> Str {
+  if (i >= names.length()) { return acc }
+  let one = "`".concat(names[i]).concat("`")
+  return tk_case_list(names, i + 1,
+                      acc == "" ? one : acc.concat(", ").concat(one))
+}
+
+// The declared cases of the `type` declaration whose keyword is at `kw`, or []
+// when this reader will not claim the declaration is a variant.
+fn variant_case_names(ts: List[Token], kw: Int, hi: Int) -> List[Str] {
+  var j = kw + 2
+  if (atk(ts, j, "[")) { return [] }
+  if (!atk(ts, j, "=")) { return [] }
+  j += 1
+  if (j >= hi) { return [] }
+  if (atk(ts, j, "{")) { return [] }
+  var out: List[Str] = []
+  var k = j
+  var payloaded = false
+  while (k < hi) {
+    if (!atk(ts, k, "ident")) { return [] }
+    let cn = tkc(ts, k).text
+    if (!is_upper_name(cn)) { return [] }
+    out = out.push(cn)
+    var n = k + 1
+    if (atk(ts, n, "(")) {
+      let tr = type_at(ts, n + 1)
+      if (!tr.ok || !atk(ts, tr.i, ")")) { return [] }
+      n = tr.i + 1
+      payloaded = true
+    }
+    if (n >= hi) {
+      k = n
+    } else {
+      if (!atk(ts, n, "|")) { return [] }
+      k = n + 1
+    }
+  }
+  // ONE bare name is `type S = Other`, which is a variant only when `Other`
+  // names no declared type and no aliasable builtin — the alias question, and
+  // not one this table answers. A single PAYLOAD-carrying case is never an
+  // alias (`_alias_target` returns None on a payload), so it stays.
+  if (out.length() == 1 && !payloaded) { return [] }
+  return out
+}
+
+// Two rows per unambiguous variant, keyed by a space-carrying name no
+// identifier can collide with:
+//
+//   "vc <Name>"  -> "|A|B|C|"    membership, exact (no case name holds a `|`)
+//   "vcr <Name>" -> "`A`, `B`"   the rendered list the diagnostic quotes
+//
+// A name declared twice records the EMPTY membership row, which switches the
+// verdict off for it: `tenv_get` reads the last row written.
+fn variant_rows(ts: List[Token], base: List[Bind]) -> List[Bind] {
+  var out = base
+  var seen: List[Str] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "type")) {
+      let hi = type_decl_end(ts, i + 1)
+      let nm = tkc(ts, i + 1).text
+      if (contains(seen, nm)) {
+        out = tenv_put(out, "vc ".concat(nm), "")
+      } else {
+        let cs = variant_case_names(ts, i, hi)
+        if (cs.length() > 0) {
+          out = tenv_put(out, "vc ".concat(nm),
+                         "|".concat(cs.join("|")).concat("|"))
+          out = tenv_put(out, "vcr ".concat(nm), tk_case_list(cs, 0, ""))
+        }
+      }
+      seen = seen.push(nm)
+      i = hi
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+fn tk_arm_case_verd(arms: List[ArmN], i: Int, st: Str, mem: Str,
+                    env: List[Bind]) -> Str {
+  if (i >= arms.length()) { return "" }
+  let p = arms[i].pat
+  if (p != "" && p != "_"
+      && mem.indexOf("|".concat(p).concat("|")) == 0 - 1) {
+    return tagged("TYPE", "`".concat(p).concat("` is not a case of `")
+      .concat(st).concat("` (cases: ")
+      .concat(tenv_get(env, "vcr ".concat(st))).concat(")"))
+  }
+  return tk_arm_case_verd(arms, i + 1, st, mem, env)
+}
+
+fn tk_low_match(m: MatchN, env: List[Bind]) -> Str {
+  let st = tk_infer(m.scrut, env).ty
+  if (st != "") {
+    let mem = tenv_get(env, "vc ".concat(st))
+    if (mem != "") {
+      let v = tk_arm_case_verd(m.arms, 0, st, mem, env)
+      if (v != "") { return v }
+    }
+  }
+  // the reference lowers the SCRUTINEE next, then each arm body under the arm's
+  // binding. The arm bodies are T2d's slice — this walk carries no per-arm
+  // environment — so only the scrutinee is descended into here.
+  return tk_low(m.scrut, env)
+}
+
 fn tk_low(e: Expr, env: List[Bind]) -> Str {
   return match e {
     Bin(b)      => tk_low2(b.l, b.r, env),
+    Match(m)    => tk_low_match(m, env),
     Un(u)       => tk_low(u.e, env),
     Field(f)    => tk_low(f.target, env),
     OptField(f) => tk_low(f.target, env),
@@ -9560,7 +9695,7 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // signature rows (docs/design/457 T2b) are a second pass over the same
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
-  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts)))
+  return fb_refusal_at(ts, i, variant_rows(ts, sig_binds(ts, case_binds(ts))))
 }
 
 fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind]) -> Verd {
@@ -17281,4 +17416,49 @@ test "a cycle through a type APPLICATION is left undecided" {
   assert admit_src(applied) == ""
   let suffixed = "type A = B? type B = A fn f(x: Int) -> Int { return x }"
   assert admit_src(suffixed) == ""
+}
+
+// ---------------------------- a match arm that names no case of the scrutinee
+// (`_check_match_exhaustiveness`'s first arm, run while the match is LOWERED)
+
+test "a match arm naming no case of the scrutinee's ADT is refused" {
+  assert admit_src("type Status = Active | Retired fn code(s: Status) -> Int { return match s { Active => 1, Retired => 2, Pending => 3, } }")
+    == "TYPE|`Pending` is not a case of `Status` (cases: `Active`, `Retired`)"
+}
+
+test "a catch-all covers the MISSING cases, never a misspelled one" {
+  assert admit_src("type Status = Active | Retired fn code(s: Status) -> Int { return match s { Bogus => 1, _ => 0, } }")
+    == "TYPE|`Bogus` is not a case of `Status` (cases: `Active`, `Retired`)"
+  assert admit_src("type Status = Active | Retired fn code(s: Status) -> Int { return match s { Active => 1, _ => 0, } }")
+    == ""
+}
+
+test "the built-in Opt and Result scrutinees take no case verdict" {
+  // `types` has no entry for `Opt[Int]` / `Result[Int, Str]`, so the reference
+  // returns before the arm loop and the payload comes from the type ARGUMENTS
+  // instead. The gate records a row only for a `type` declaration, so it
+  // reaches the same answer by construction.
+  assert admit_src("fn f(m: Map[Str, Int], k: Str) -> Int { let hit = m.lookup(k)  return match hit { Some(v) => v, None => 0, } }")
+    == ""
+}
+
+test "a variant the reader will not claim takes no case verdict" {
+  // `type S = Pending` is a one-case variant to the reference and an ALIAS to
+  // the same token shape, so `variant_case_names` records nothing for it and
+  // the match below is a no-objection rather than a refusal. The reference
+  // refuses it, which makes this an under-refusal and not a false rejection.
+  let bare = "type S = Pending fn f(s: S) -> Int { return match s { Zz => 1, _ => 0, } }"
+  assert admit_src(bare) == ""
+  // ... and a name declared twice: the reference's type table keeps one entry,
+  // and which one is a question a token scan should not answer.
+  let twice = "type S = A | B type S = C | D fn f(s: S) -> Int { return match s { Zz => 1, _ => 0, } }"
+  assert admit_src(twice) == ""
+}
+
+test "a match through a transparent ALIAS of a variant takes no case verdict" {
+  // the reference ERASES `A` to `V` before the checker runs, so the arm is
+  // judged against `V`'s cases; this walk types the scrutinee at the written
+  // `A`, for which there is no row. Under-refusal, the allowed direction.
+  let aliased = "type V = Red | Blue type A = V fn f(a: A) -> Int { return match a { Bogus => 1, _ => 0, } }"
+  assert admit_src(aliased) == ""
 }

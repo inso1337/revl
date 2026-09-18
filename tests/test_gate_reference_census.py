@@ -167,8 +167,10 @@ KNOWN_BYPASSES = {
     # `_check_returns_on_every_path` over the statement tree the fn-body walk
     # already builds, so `t8_missing_return` and `t9_return_path_incomplete`
     # now refuse with the reference's message AND its line and are struck from
-    # this list. What remains needs the variant table and the arm algebra.
-    "examples/rejections/t13_unknown_match_case.rvl",
+    # this list, and the UNKNOWN-case half has since taken
+    # `t13_unknown_match_case` the same way (the variant table `variant_rows`
+    # builds beside the signature rows). What remains is the MISSING-case half,
+    # which needs the arm algebra to decide what a catch-all covers.
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --
     # The transparent-alias CYCLE landed with `_resolve_type_aliases`, the

@@ -25,7 +25,6 @@
    "examples/rejections/v2_match_nonexhaustive.rvl"
   ],
   "false-admit/TYPE": [
-   "examples/rejections/t13_unknown_match_case.rvl",
    "examples/rejections/t5_destructure_nonrecord.rvl"
   ],
   "false-reject/G1": [
@@ -141,18 +140,6 @@
    "reference": {
     "message": "`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` \u2014 a spawn may narrow a child's capabilities, never widen them",
     "tag": "G4"
-   }
-  },
-  "examples/rejections/t13_unknown_match_case.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Pending` is not a case of `Status` (cases: `Active`, `Retired`)",
-    "tag": "TYPE"
    }
   },
   "examples/rejections/t14_optional_chain_on_nonoptional.rvl": {
