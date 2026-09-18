@@ -1588,6 +1588,59 @@ fn overflow32_preamble() -> List[Str] {
   return o
 }
 
+// ----------------------------------------------- the uncarried component tier
+// A `component` belongs to the go LIVE tier (the v1/v2 stc-go path in the
+// reference's `emit`), which this slice does not mirror — see WHAT IT DEFERS
+// above. What follows is about SAYING SO, not about carrying it.
+//
+// The reference has two document-level answers, and which one it gives decides
+// whether dropping a component here is agreement or silence:
+//
+//   * the PURE typed-core path routes PAST the components of a document that
+//     ALSO carries top-level declarations, and emits ordinary Go for those
+//     declarations alone. This slice mirrors that path, so a component dropped
+//     there is the reference's own answer for the document, not a gap in the
+//     port, and marking it would turn 38 measured byte agreements into
+//     divergences that name nothing real.
+//   * a document whose components are ALL it declares never reaches the pure
+//     path. The reference answers it with a whole stc-go module; this slice has
+//     none of that, and used to answer with its three-line banner and nothing
+//     else — 144 bytes against the reference's 40502 on
+//     backends/go/testdata/stream_130.rvl, with no marker anywhere in the
+//     output. A refusal that is silent is indistinguishable from a lowering
+//     that is missing, which is the one direction the byte-agreement oracle
+//     exists to rule out.
+//
+// So each component of such a document gets ONE marker naming it, in document
+// order — the same total-dispatch convention every expression- and step-level
+// arm in this file already uses.
+//
+// `has_top_level` is the half of the reference's routing predicate this file
+// can state without branching on a component STEP. The other half (item 130's
+// stream diversion, and a `lifecycle test`) reads the `subscribe`,
+// `stream-iter` and `lifecycle` discriminants, and tools/selfhost_coverage.py
+// takes a port's construct table straight off those spellings: reading one here
+// would move it out of the blind-spot ledger's `unported` baseline and claim a
+// port of the stream lowering this slice does not have. A marker is a refusal,
+// not an implementation. What that leaves silent is recorded with the tests.
+fn has_top_level(ir: Any) -> Bool {
+  if (value_list(value_field(ir, "functions")).length() > 0) { return true }
+  if (value_keys(value_field(ir, "types")).length() > 0) { return true }
+  if (value_list(value_field(ir, "externs")).length() > 0) { return true }
+  return value_list(value_field(ir, "tests")).length() > 0
+}
+
+fn uncarried_components(ir: Any) -> List[Str] {
+  let comps = value_list(value_field(ir, "components"))
+  if (comps.length() == 0) { return [] }
+  if (has_top_level(ir)) { return [] }
+  var out = []
+  for (c of comps) {
+    out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
+  }
+  return out
+}
+
 // The document assembly for a FUNCTION-ONLY v3 document (`_emit_v3_go`, subset):
 // the banner + package, the conditional import block, the feature preambles in
 // the reference's fixed order (revlDiv, then the overflow trio, then the Int32
@@ -1673,6 +1726,8 @@ pub fn emit_go_src(ir: Any) -> Str {
   // The reference's section order: types, then externs, then the free functions.
   if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
   out = out.concat(fnlines)
+  // What this file did not carry, named — never dropped on the floor.
+  out = out.concat(uncarried_components(ir))
   return rstrip(out.join(newline())).concat(newline())
 }
 
