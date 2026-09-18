@@ -246,6 +246,14 @@ CORPUS = [
                              #   kind, and the `Job` host stub — whose emitted
                              #   block was missing `pub struct Job;` itself.
                              #   No document awaited anything before this one.
+    "comp_timer.rvl",       # the activation-body `timer` step (item 57): both
+                             #   modes (`revl_schedule_every` / `_after`), the
+                             #   per-timer required-service clone the `move`
+                             #   firing closure needs, the derived cancellation
+                             #   on the same `ctx.effect` ledger, the
+                             #   per-COMPONENT counter, and the `uses_timer` gate
+                             #   on the clock/scheduler preamble. No document
+                             #   armed a timer before this one.
     "comp_body_steps.rvl",   # the activation-body steps other than `provide`:
                              #   the bare `effect`/`undo` bracket over a required
                              #   service, the fire-and-forget `emit`, and the
