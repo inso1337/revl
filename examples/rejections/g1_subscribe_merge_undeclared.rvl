@@ -7,11 +7,14 @@
 // `merge(` shape the reference's `_at_stream_merge` accepts, for that statement
 // only, and it never reaches the operands.
 //
+// As in `g1_subscribe_undeclared_source.rvl`, the handle is never read back:
+// the verdict under test is the one about the operand, not a second one the
+// gate might draw about `sub`.
+//
 // expected error:
 //   `nob` is not a declared requirement of Fanin
 
 component Fanin {
   let a = effect Stream.source() undo a.close()
   let sub = subscribe merge(a, nob) undo sub.close()
-  await sub.next()
 }

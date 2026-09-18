@@ -8,10 +8,14 @@
 // skipped run resolves no heads either, so THIS program raised no objection at
 // all while the reference refused it (item 130 Slice 1).
 //
+// The handle is deliberately never read back after the bracket: a later
+// `sub.next()` would have drawn the gate's OWN wrong refusal (`sub` undeclared)
+// and hidden the silence behind a message mismatch. Nothing here names `sub`
+// twice, so the only verdict on offer is the one about `nostream`.
+//
 // expected error:
 //   `nostream` is not a declared requirement of Orders
 
 component Orders {
   let sub = subscribe nostream undo sub.close()
-  await sub.next()
 }
