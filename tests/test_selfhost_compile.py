@@ -386,6 +386,28 @@ JAVA_DOCS = [
     "../emit_ts_corpus/components_mixed.rvl",
     "../emit_wasm_corpus/constfold.rvl", "../emit_wasm_corpus/listmem.rvl",
     "../../../examples/ecosystem-consumer-js/candidates/double_tool.rvl",
+    # item 391: a component that ACQUIRES a host root (`let m = effect Map.new()
+    # undo m.drop()`) and calls its verbs. `selfhost/lower.rvl` refused the
+    # acquisition — an upper-cased callable head resolved as neither a required
+    # service nor a scoped name — and a refused step drops the WHOLE component
+    # `body` key, so the native chain emitted a body-less component. With the
+    # `host` node and its host-provenance verb dispatch lowered, these five
+    # documents compile byte-exact through the native java chain and move up out
+    # of JAVA_LOWER_GAP_DOCS.
+    "comp_host_map.rvl", "comp_host_map_generic.rvl",
+    # item 391: the realm-placement prelude. `isolate <key> in realm("…")` and
+    # `intercept <key> with { … }` are component HEADER declarations that emit no
+    # activation step; `cir_body` had no arm for either, so the body walk refused
+    # at the first one and the component lost its `body`, its `isolate` and its
+    # `intercept` together. Stepped over in the walk and collected into the two
+    # tables the reference stamps after `body`, these compile byte-exact.
+    "comp_realm_isolate.rvl", "comp_realm_intercept.rvl", "legacy_realms.rvl",
+    "metadata_null.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl", "../erase_realms.rvl",
+    "../realm_conformance/provider_a.rvl", "../../../examples/tenants.rvl",
+    "../../../backends/go/scenarios/tagger.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
 ]
 WASM_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "builtins.rvl",
@@ -437,22 +459,13 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
 # branch surface, the native chain agrees, this test fails on the stale entry, and
 # the document moves up into JAVA_DOCS instead of quietly staying out.
 JAVA_LOWER_GAP_DOCS = [
-    # realm placement metadata (isolate / intercept / routes)
-    "comp_realm_isolate.rvl", "comp_realm_intercept.rvl", "legacy_realms.rvl",
-    "../emit_ts_corpus/realm_intercept.rvl", "../erase_realms.rvl",
-    "../realm_conformance/provider_a.rvl", "../../../examples/tenants.rvl",
-    # async coloring
+    # async coloring, `await`, and `spawn`
     "comp_await.rvl", "../emit_ts_corpus/services_async.rvl",
-    # host roots acquired in a component (Map/Pool/Job)
-    "comp_host_map.rvl", "comp_host_map_generic.rvl",
-    # component metadata / branch shapes / map inference
-    "metadata_null.rvl", "component_format.rvl", "component_branches.rvl",
+    # string interpolation in a component body, and branch shapes
+    "component_format.rvl", "component_branches.rvl",
     "map_inference.rvl",
     # whole-program documents that combine several of the above
-    "../../../backends/go/scenarios/tagger.rvl",
-    "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
     "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
-    "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
     "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
 ]
 
