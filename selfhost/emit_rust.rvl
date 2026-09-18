@@ -2482,6 +2482,193 @@ fn uses_timer(components: List[Any]) -> Bool {
   return false
 }
 
+// `_lifecycle_uses_advance` / `_tests_use_advance`: a lifecycle test that
+// drives the clock coeffect (an `advance` step) needs `revl_clock_advance` /
+// `revl_clock_reset` from the same preamble even when no loaded component arms
+// a timer, so the preamble keys off this as well as `uses_timer` (item 112).
+fn tests_use_advance(ir: Any) -> Bool {
+  for (t of value_list(value_field(ir, "tests"))) {
+    if (value_bool(value_field(t, "lifecycle"))) {
+      for (s of value_list(value_field(t, "body"))) {
+        if (value_str(value_field(s, "step")) == "advance") { return true }
+      }
+    }
+  }
+  return false
+}
+
+// `_revl_timer_preamble`: the clock coeffect + timer scheduler (item 57), the
+// rust mirror of backends/python/runtime.py's Clock/TimerHandle. A literal
+// block, deterministic tick-for-tick: time moves only on `revl_clock_advance`,
+// arming takes a slot in the SAME R1 live-resource counter a Pool or a Map
+// takes, and cancel (or a spent `after`) returns it, so a leaked `every` timer
+// surfaces through the residue accounting an `assert no_residue` performs.
+fn revl_timer_preamble() -> List[Str] {
+  var o = []
+  o = o.push("/// clock coeffect + timer scheduler (item 57, docs/time-coeffect.md):")
+  o = o.push("/// the rust mirror of backends/python/runtime.py's Clock/TimerHandle.")
+  o = o.push("struct RevlTimer {")
+  o = o.push("    serial: u64,")
+  o = o.push("    mode: &'static str, // \"every\" | \"after\"")
+  o = o.push("    interval_ms: i64,")
+  o = o.push("    body: std::rc::Rc<dyn Fn()>,")
+  o = o.push("    status: &'static str, // \"live\" | \"cancelled\" | \"done\"")
+  o = o.push("    next_at: i64,")
+  o = o.push("    fired: u64,")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("#[derive(Default)]")
+  o = o.push("struct RevlClock {")
+  o = o.push("    now: i64,")
+  o = o.push("    serial: u64,")
+  o = o.push("    timers: Vec<RevlTimer>,")
+  o = o.push("    firings: Vec<(u64, i64)>, // (timer serial, fired-at ms) in fire order")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("thread_local! {")
+  o = o.push("    static REVL_CLOCK: std::cell::RefCell<RevlClock> =")
+  o = o.push("        std::cell::RefCell::new(RevlClock::default());")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("fn revl_schedule(mode: &'static str, interval_ms: i64,")
+  o = o.push("                 body: std::rc::Rc<dyn Fn()>) -> u64 {")
+  o = o.push("    REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));")
+  o = o.push("    REVL_CLOCK.with(|c| {")
+  o = o.push("        let mut clock = c.borrow_mut();")
+  o = o.push("        clock.serial += 1;")
+  o = o.push("        let serial = clock.serial;")
+  o = o.push("        let next_at = clock.now + interval_ms;")
+  o = o.push("        clock.timers.push(RevlTimer {")
+  o = o.push("            serial, mode, interval_ms, body,")
+  o = o.push("            status: \"live\", next_at, fired: 0,")
+  o = o.push("        });")
+  o = o.push("        serial")
+  o = o.push("    })")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Arm a periodic timer against the clock coeffect (`every`).")
+  o = o.push("fn revl_schedule_every(interval_ms: i64, body: impl Fn() + 'static) -> u64 {")
+  o = o.push("    revl_schedule(\"every\", interval_ms, std::rc::Rc::new(body))")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Arm a one-shot delayed timer against the clock coeffect (`after`).")
+  o = o.push("fn revl_schedule_after(interval_ms: i64, body: impl Fn() + 'static) -> u64 {")
+  o = o.push("    revl_schedule(\"after\", interval_ms, std::rc::Rc::new(body))")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// The schedule's inverse — idempotent, a no-op once the timer is spent.")
+  o = o.push("/// Running it on teardown returns the live-resource slot arming took, so")
+  o = o.push("/// the schedule leaves no residue.")
+  o = o.push("fn revl_cancel(serial: u64) -> bool {")
+  o = o.push("    let released = REVL_CLOCK.with(|c| {")
+  o = o.push("        let mut clock = c.borrow_mut();")
+  o = o.push("        if let Some(t) = clock.timers.iter_mut().find(|t| t.serial == serial) {")
+  o = o.push("            if t.status == \"live\" {")
+  o = o.push("                t.status = \"cancelled\";")
+  o = o.push("                return true;")
+  o = o.push("            }")
+  o = o.push("        }")
+  o = o.push("        false")
+  o = o.push("    });")
+  o = o.push("    if released {")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));")
+  o = o.push("    }")
+  o = o.push("    released")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Advance logical time by `ms`, firing every timer that comes due —")
+  o = o.push("/// earliest first, ties broken by arm order — and re-arming `every`")
+  o = o.push("/// timers across the whole span. Returns the number of firings.")
+  o = o.push("pub fn revl_clock_advance(ms: i64) -> usize {")
+  o = o.push("    let target = REVL_CLOCK.with(|c| c.borrow().now) + ms;")
+  o = o.push("    let mut count = 0usize;")
+  o = o.push("    loop {")
+  o = o.push("        // pick the earliest-due live timer, advance the clock to it, and")
+  o = o.push("        // extract its body — all under one borrow that is dropped before")
+  o = o.push("        // the body runs (the body is emissions-only and never re-enters).")
+  o = o.push("        let step = REVL_CLOCK.with(|c| {")
+  o = o.push("            let mut clock = c.borrow_mut();")
+  o = o.push("            let mut pick: Option<usize> = None;")
+  o = o.push("            for i in 0..clock.timers.len() {")
+  o = o.push("                let t = &clock.timers[i];")
+  o = o.push("                if t.status != \"live\" || t.next_at > target {")
+  o = o.push("                    continue;")
+  o = o.push("                }")
+  o = o.push("                match pick {")
+  o = o.push("                    None => pick = Some(i),")
+  o = o.push("                    Some(j) => {")
+  o = o.push("                        let tj = &clock.timers[j];")
+  o = o.push("                        if t.next_at < tj.next_at")
+  o = o.push("                            || (t.next_at == tj.next_at && t.serial < tj.serial)")
+  o = o.push("                        {")
+  o = o.push("                            pick = Some(i);")
+  o = o.push("                        }")
+  o = o.push("                    }")
+  o = o.push("                }")
+  o = o.push("            }")
+  o = o.push("            let i = pick?;")
+  o = o.push("            clock.now = clock.timers[i].next_at;")
+  o = o.push("            if clock.timers[i].mode == \"every\" {")
+  o = o.push("                let iv = clock.timers[i].interval_ms;")
+  o = o.push("                clock.timers[i].next_at += iv;")
+  o = o.push("            }")
+  o = o.push("            clock.timers[i].fired += 1;")
+  o = o.push("            let serial = clock.timers[i].serial;")
+  o = o.push("            let now = clock.now;")
+  o = o.push("            clock.firings.push((serial, now));")
+  o = o.push("            let body = clock.timers[i].body.clone();")
+  o = o.push("            let mode = clock.timers[i].mode;")
+  o = o.push("            Some((i, body, mode))")
+  o = o.push("        });")
+  o = o.push("        let (i, body, mode) = match step {")
+  o = o.push("            Some(v) => v,")
+  o = o.push("            None => break,")
+  o = o.push("        };")
+  o = o.push("        body();")
+  o = o.push("        if mode == \"after\" {")
+  o = o.push("            // a one-shot is spent once it fires; release through the same")
+  o = o.push("            // slot-return path cancel uses so the residue trace stays")
+  o = o.push("            // balanced and teardown's own revl_cancel is a clean no-op.")
+  o = o.push("            REVL_CLOCK.with(|c| c.borrow_mut().timers[i].status = \"done\");")
+  o = o.push("            REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));")
+  o = o.push("        }")
+  o = o.push("        count += 1;")
+  o = o.push("    }")
+  o = o.push("    REVL_CLOCK.with(|c| c.borrow_mut().now = target);")
+  o = o.push("    count")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Current logical time in ms.")
+  o = o.push("pub fn revl_clock_now() -> i64 {")
+  o = o.push("    REVL_CLOCK.with(|c| c.borrow().now)")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Live timers — a teardown that abandons one leaves this > 0 (the")
+  o = o.push("/// countable no-orphaned-interval proof).")
+  o = o.push("pub fn revl_clock_pending() -> usize {")
+  o = o.push("    REVL_CLOCK.with(|c| c.borrow().timers.iter()")
+  o = o.push("        .filter(|t| t.status == \"live\").count())")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// The recorded firing log: (timer serial, fired-at ms) in fire order.")
+  o = o.push("pub fn revl_clock_firings() -> Vec<(u64, i64)> {")
+  o = o.push("    REVL_CLOCK.with(|c| c.borrow().firings.clone())")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Return the clock to time zero with no timers (call between scenarios).")
+  o = o.push("pub fn revl_clock_reset() {")
+  o = o.push("    REVL_CLOCK.with(|c| {")
+  o = o.push("        let mut clock = c.borrow_mut();")
+  o = o.push("        clock.now = 0;")
+  o = o.push("        clock.serial = 0;")
+  o = o.push("        clock.timers.clear();")
+  o = o.push("        clock.firings.clear();")
+  o = o.push("    });")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
 // `_uses_stream_event`: an `on <Event> as .. in <sub>` handler is the only
 // thing that needs the typed-event contract, and the contract traces through
 // the stream host runtime. A plain `every .. in` program carries no `event`.
@@ -3353,10 +3540,34 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
 //   * `fail` — the activation's own refusal;
 //   * `if` — a conditional whose arms are themselves steps.
 //
-// `timer`, `await`, `stream-iter` and a `setup` block stay DEFERRED, each with
-// a marker, because each needs a runtime preamble this port does not assemble.
+//   * `timer` — a revertible schedule (item 57), armed on the clock coeffect
+//     and cancelled through the same `ctx.effect` ledger.
+//
+// `stream-iter` and a `setup` block stay DEFERRED, each with a marker, because
+// each needs a runtime block this port does not assemble (the `Stream[T]` host
+// runtime, and the setup-step family).
+//
+// `tbase` is the number of timers this component has already armed BEFORE this
+// step, in emission order (nested `if` arms included). The reference carries the
+// same number as a mutable per-component counter on its env; a pure walk cannot,
+// so the callers thread it and `count_timers` supplies the increments. The name
+// it mints (`_revl_timer_<n>`, `<req>_t<n>`) is `tbase + 1`, and it restarts at
+// 1 for the next component.
+fn count_timers(steps: List[Any]) -> Int {
+  var n = 0
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "timer") { n = n + 1 }
+    if (k == "if") {
+      n = n + count_timers(value_list(value_field(s, "then")))
+      n = n + count_timers(value_list(value_field(s, "else")))
+    }
+  }
+  return n
+}
+
 fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
-                  map_values: Map[Str, Str], indent: Int) -> List[Str] {
+                  map_values: Map[Str, Str], indent: Int, tbase: Int) -> List[Str] {
   let pad = ind(indent)
   let kind = value_str(value_field(step, "step"))
   let name = value_str(value_field(comp, "name"))
@@ -3406,6 +3617,45 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     out = out.push(`${pad}${rendered};`)
     return out
   }
+  if (kind == "timer") {
+    // A `timer` step (item 57, docs/time-coeffect.md): a revertible schedule.
+    // Arming is the acquire, cancellation its derived inverse — registered
+    // through the SAME `ctx.effect` ledger that reverts a Pool or a provision,
+    // so unloading the component provably cancels the timer and leaves no
+    // orphaned interval. The firing closure holds the body's emissions, each
+    // lowered through the path a top-level emission takes, so G4/G8 reach is
+    // audited. Time advances only on `revl_clock_advance`, so a firing is a
+    // deterministic timeline step, never a wall-clock race.
+    var schedule = "revl_schedule_after"
+    if (value_str(value_field(step, "mode")) == "every") { schedule = "revl_schedule_every" }
+    let interval = value_int(value_field(step, "interval_ms"))
+    let n = tbase + 1
+    // Clone each required service the firing body may capture, under a
+    // per-timer name, so the `move` closure owns its own handle and a second
+    // timer (or a later step) can still use the original (no E0382). Mirrors
+    // how `effect`/`let-effect` clone reqs into their undo closures.
+    var tR: Map[Str, Str] = Map.empty()
+    for (req of value_keys(value_field(comp, "requires"))) {
+      out = out.push(`${pad}let ${req}_t${n} = ${req}.clone();`)
+      tR = tR.set(req, `${req}_t${n}`)
+    }
+    out = out.push(`${pad}let _revl_timer_${n} = ${schedule}(${interval}, move || {`)
+    let tctx = set_rn(ctx, tR)
+    for (em of value_list(value_field(step, "body"))) {
+      // lowerer invariant: a timer body carries emissions only. The reference
+      // RAISES on anything else; this port has no refusal channel, so it
+      // REPORTS — the document diverges loudly rather than dropping a step.
+      if (value_str(value_field(em, "step")) != "emit") {
+        out = out.push(`${pad}    <<DEFER-timer-body:${value_str(value_field(em, "step"))}>>`)
+      } else {
+        out = out.push(`${pad}    let _ = ${render_expr(value_field(em, "expr"), tctx)};`)
+      }
+    }
+    out = out.push(`${pad}});`)
+    // the derived inverse: cancellation, yielded into the disposer stack.
+    out = out.push(`${pad}ctx.effect(${string_lit(`${name}.timer.undo`)}, move || { revl_cancel(_revl_timer_${n}); Ok(()) })?;`)
+    return out
+  }
   if (kind == "emit") {
     out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), ctx)};`)
     if (!value_is_null(value_field(step, "compensate"))) {
@@ -3420,14 +3670,17 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   }
   if (kind == "if") {
     out = out.push(`${pad}if ${render_expr(value_field(step, "cond"), ctx)} {`)
+    var tb = tbase
     for (nested of value_list(value_field(step, "then"))) {
-      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1))
+      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb))
+      tb = tb + count_timers([nested])
     }
     let alt = value_list(value_field(step, "else"))
     if (alt.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (nested of alt) {
-        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1))
+        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb))
+        tb = tb + count_timers([nested])
       }
     }
     out = out.push(`${pad}}`)
@@ -3487,12 +3740,14 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
+  var tb = 0
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb))
+      tb = tb + count_timers([step])
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")
@@ -3560,12 +3815,14 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
+  var tb = 0
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb))
+      tb = tb + count_timers([step])
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")
@@ -3989,6 +4246,9 @@ pub fn emit_rust_src(ir: Any) -> Str {
   let services = value_field(ir, "services")
   out = out.concat(emit_service_traits(services, tables.tn))
   out = out.concat(emit_host_stubs(ir))
+  if (uses_timer(value_list(value_field(ir, "components"))) || tests_use_advance(ir)) {
+    out = out.concat(revl_timer_preamble())
+  }
   if (contains_stdlib(functions) || contains_stdlib(types) || contains_stdlib(externs)) {
     out = out.concat(stdlib_helpers())
     out = out.push("")
