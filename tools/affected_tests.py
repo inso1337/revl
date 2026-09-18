@@ -680,6 +680,7 @@ def select(changed, root) -> dict:
             gates.add("formal")
             pytest_nodes.add("tests/test_formal_attenuation_namespace.py")
             pytest_nodes.add("tests/test_formal_derived_namespace.py")
+            pytest_nodes.add("tests/test_formal_a9_row.py")
             reasons.append(f"{f} (formal gate)")
             continue
 

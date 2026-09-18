@@ -286,3 +286,16 @@ import RevL
 #print axioms RevL.G9.g9_context_hypotheses_are_inhabited
 #print axioms RevL.R4.r4_side_conditions_are_inhabited
 #print axioms RevL.A8.a8_hypotheses_are_inhabited
+
+-- Issue 1167: A9, every provide block is a declared slot. The installed
+-- block keys are modelled beside `LComponent` (no L0 edit); `a9B` is what
+-- the differential oracle's `A9` row decides.
+#print axioms RevL.A9.a9B_iff
+#print axioms RevL.A9.noDoubleInstallB_iff
+#print axioms RevL.A9.installed_block_is_slot
+#print axioms RevL.A9.undeclared_block_is_no_slot
+#print axioms RevL.A9.installed_block_uniquely_provided
+#print axioms RevL.A9.installed_slots_nodup
+#print axioms RevL.A9.a9_not_vacuous
+#print axioms RevL.A9.a9_rules_are_distinct
+#print axioms RevL.A9.a9_row_not_vacuous
