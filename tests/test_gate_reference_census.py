@@ -171,7 +171,9 @@ KNOWN_BYPASSES = {
     "examples/rejections/t13_unknown_match_case.rvl",
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --
-    "examples/rejections/t18_type_alias_cycle.rvl",
+    # The transparent-alias CYCLE landed with `_resolve_type_aliases`, the
+    # reference's first semantic phase: `t18_type_alias_cycle` now refuses with
+    # the reference's chain and line and is struck from this list.
     "examples/rejections/t6_bare_generic.rvl",
     "examples/rejections/t5_destructure_nonrecord.rvl",
     # -- provide-method and component bodies --

@@ -26,7 +26,6 @@
   ],
   "false-admit/TYPE": [
    "examples/rejections/t13_unknown_match_case.rvl",
-   "examples/rejections/t18_type_alias_cycle.rvl",
    "examples/rejections/t5_destructure_nonrecord.rvl"
   ],
   "false-reject/G1": [
@@ -190,18 +189,6 @@
    "reference": {
     "message": "field access `.name` on `Opt[Row]`: the optional wrapper has no such member \u2014 `T` flows into `Opt[T]`, never silently back out",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/t18_type_alias_cycle.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "type alias cycle: Handle -> Ref -> Handle",
-    "tag": "TYPE"
    }
   },
   "examples/rejections/t1_service_arg_type.rvl": {
