@@ -1,0 +1,33 @@
+// ACCEPTED — A9, the routes exemption (issue #1172): a declared `provides`
+// key must be installed by the body, and the one form that installs it
+// WITHOUT a `provide <key> { … }` block is the multi-realm bind
+// `isolate <key> in realms(...)`. This is stdlib/router.rvl's shape (three
+// backends, one Router), carried in the formal corpus so the differential
+// harness exercises the exemption: `RoundRobin` declares `provides worker`,
+// installs no block, and is admitted because the route installs the key
+// (the IR's `routes`; a block here would be refused, item 449).
+//
+// `formal/harness/diff_corpus.py` exports the route as a `PR` fact row and
+// `RevL.A9.routed_installs_without_block` is the theorem; `a9_coverage`
+// requires this witness so the exemption cannot agree vacuously.
+
+service Worker {
+  fn call(request: Str) -> Str
+}
+
+component PoolWorker1 provides worker: Worker {
+  isolate worker in realm("w1")
+  provide worker { fn call(request) = "w1:" + request }
+}
+component PoolWorker2 provides worker: Worker {
+  isolate worker in realm("w2")
+  provide worker { fn call(request) = "w2:" + request }
+}
+component PoolWorker3 provides worker: Worker {
+  isolate worker in realm("w3")
+  provide worker { fn call(request) = "w3:" + request }
+}
+
+component RoundRobin requires worker: Worker provides worker: Worker {
+  isolate worker in realms("w1", "w2", "w3") strategy(round_robin)
+}
