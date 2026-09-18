@@ -41,6 +41,7 @@ pub struct Stmt {
     awaited: bool,
     line: i64,
     inTimer: bool,
+    scopeAdd: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1469,23 +1470,27 @@ fn concat_refs(reqs: Vec<SvcRef>, provs: Vec<SvcRef>, i: i64) -> Vec<SvcRef> {
 }
 
 fn mkstmt(kind: String, e: Expr) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: String::from(""), spawnTarget: String::from(""), awaited: false, line: 0i64, inTimer: false };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: String::from(""), spawnTarget: String::from(""), awaited: false, line: 0i64, inTimer: false, scopeAdd: vec![] };
 }
 
 fn mkstmtb(kind: String, e: Expr, bind: String) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: false, line: 0i64, inTimer: false };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: false, line: 0i64, inTimer: false, scopeAdd: vec![] };
 }
 
 fn mkstmt_aw(kind: String, e: Expr, bind: String, aw: bool) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: aw, line: 0i64, inTimer: false };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: aw, line: 0i64, inTimer: false, scopeAdd: vec![] };
 }
 
 fn mkstmt_spawn(bn: String, target: String) -> Stmt {
-    return Stmt { kind: String::from("effect"), e: int_lit0(), bind: bn.clone(), spawnTarget: target.clone(), awaited: false, line: 0i64, inTimer: false };
+    return Stmt { kind: String::from("effect"), e: int_lit0(), bind: bn.clone(), spawnTarget: target.clone(), awaited: false, line: 0i64, inTimer: false, scopeAdd: vec![] };
 }
 
 fn mkstmt_spawn_unbound(target: String) -> Stmt {
-    return Stmt { kind: String::from("spawn_unbound"), e: int_lit0(), bind: String::from(""), spawnTarget: target.clone(), awaited: false, line: 0i64, inTimer: false };
+    return Stmt { kind: String::from("spawn_unbound"), e: int_lit0(), bind: String::from(""), spawnTarget: target.clone(), awaited: false, line: 0i64, inTimer: false, scopeAdd: vec![] };
+}
+
+fn mkstmt_sub(e: Expr, bn: String, fanin: bool) -> Stmt {
+    return Stmt { kind: String::from("subscribe"), e: e.clone(), bind: bn.clone(), spawnTarget: String::from(""), awaited: false, line: 0i64, inTimer: false, scopeAdd: if fanin { vec![String::from("merge")] } else { vec![] } };
 }
 
 fn int_lit0() -> Expr {
@@ -1545,6 +1550,25 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
                 return mk_srun(vec![sp.clone()], hi);
             }
             return mk_srun(vec![sp.clone()], sk);
+        }
+        if (((kd == "expr") && (t.text == "let")) && atw(&ts, j.clone(), "subscribe")) {
+            let rs = expr_at(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
+            if is_bad(rs.e.clone()) {
+                return mk_srun(vec![mkstmt(String::from("skip"), rs.e.clone())], hi);
+            }
+            let fanin = (((tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).kind == "ident") && (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text == "merge")) && atk(&ts, (j).checked_add(2i64).expect("revl: Int overflow"), "("));
+            let outs = vec![mkstmt_sub(rs.e.clone(), bn.clone(), fanin)];
+            let mut k = rs.i;
+            while ((k < hi) && (!atw(&ts, k, "undo"))) {
+                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if (k < hi) {
+                let us = operand_at(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"));
+                if (!is_bad(us.e.clone())) {
+                    return mk_srun(outs.revl_push(mkstmt_aw(String::from("undo"), us.e.clone(), String::from(""), us.aw)), us.i);
+                }
+            }
+            return mk_srun(outs.clone(), hi);
         }
         let r = operand_at(ts.clone(), j.clone());
         if is_bad(r.e.clone()) {
@@ -1622,6 +1646,32 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
         }
         return mk_srun(vec![mkstmt_spawn_unbound(tgt.clone())], sk);
     }
+    if ((((t.kind == "kw") && (t.text == "every")) && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (lo).checked_add(2i64).expect("revl: Int overflow"), "in")) {
+        let itm = tkc(&ts, (lo).checked_add(1i64).expect("revl: Int overflow")).text;
+        let mut ib = (lo).checked_add(3i64).expect("revl: Int overflow");
+        while ((ib < hi) && (!atk(&ts, ib.clone(), "{"))) {
+            ib = (ib).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (ib < hi) {
+            let iend = close_brace(&ts, ib.clone());
+            if (iend != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return mk_srun(mark_iter(&p_stmts(ts.clone(), (ib).checked_add(1i64).expect("revl: Int overflow"), (iend).checked_sub(1i64).expect("revl: Int overflow"), vec![]), itm.clone()), iend);
+            }
+        }
+    }
+    if (((((t.kind == "ident") && (t.text == "on")) && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (lo).checked_add(2i64).expect("revl: Int overflow"), "as")) && atk(&ts, (lo).checked_add(3i64).expect("revl: Int overflow"), "ident")) {
+        let eitm = tkc(&ts, (lo).checked_add(3i64).expect("revl: Int overflow")).text;
+        let mut eb = (lo).checked_add(4i64).expect("revl: Int overflow");
+        while ((eb < hi) && (!atk(&ts, eb.clone(), "{"))) {
+            eb = (eb).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (eb < hi) {
+            let eend = close_brace(&ts, eb.clone());
+            if (eend != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return mk_srun(mark_iter(&p_stmts(ts.clone(), (eb).checked_add(1i64).expect("revl: Int overflow"), (eend).checked_sub(1i64).expect("revl: Int overflow"), vec![]), eitm.clone()), eend);
+            }
+        }
+    }
     if ((t.kind == "kw") && ((t.text == "every") || (t.text == "after"))) {
         let mut b = (lo).checked_add(1i64).expect("revl: Int overflow");
         while ((b < hi) && (!atk(&ts, b.clone(), "{"))) {
@@ -1671,7 +1721,7 @@ fn stamp_lines(ss: &[Stmt], ln: i64) -> Vec<Stmt> {
     let mut i = 0i64;
     while (i < ss.revl_length()) {
         let s = (ss)[(i) as usize].clone();
-        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: ln, inTimer: s.inTimer });
+        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: ln, inTimer: s.inTimer, scopeAdd: s.scopeAdd.clone() });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -1682,7 +1732,18 @@ fn mark_timer(ss: &[Stmt]) -> Vec<Stmt> {
     let mut i = 0i64;
     while (i < ss.revl_length()) {
         let s = (ss)[(i) as usize].clone();
-        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: s.line, inTimer: true });
+        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: s.line, inTimer: true, scopeAdd: s.scopeAdd.clone() });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn mark_iter(ss: &[Stmt], item: String) -> Vec<Stmt> {
+    let mut out: Vec<Stmt> = vec![];
+    let mut i = 0i64;
+    while (i < ss.revl_length()) {
+        let s = (ss)[(i) as usize].clone();
+        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: s.line, inTimer: s.inTimer, scopeAdd: union_into(s.scopeAdd.clone(), vec![item]) });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -2701,7 +2762,8 @@ fn not_a_method_msg(what: &str, svcName: &str) -> String {
 
 fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
     let marked = ((s.kind == "emit") || (s.kind == "compensate"));
-    let scx = ctx_acq(cx.clone(), stmt_acq_where(&s.kind));
+    let bcx = if (s.scopeAdd.revl_length() > 0i64) { ctx_bind(cx.clone(), s.scopeAdd.clone()) } else { cx.clone() };
+    let scx = ctx_acq(bcx, stmt_acq_where(&s.kind));
     let root_ = acq_root_of(s.clone());
     return if root_.hit { walk_exprs(&root_.args, 0i64, marked.clone(), scx.clone(), a.clone()) } else { walk_expr(s.e.clone(), marked.clone(), scx.clone(), a.clone()) };
 }
