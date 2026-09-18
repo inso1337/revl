@@ -71,6 +71,10 @@ and the parser- and statement-form fixtures (`t19_union_type`,
 `v2_dynamic_realm`, `v2_fail_in_pure_fn`, `g6_impure_statement`,
 `v2_extern_acquire_no_undo`). Item 391's per-feature port list owns those.
 
+Of that table, the return-path pair (`t8_missing_return`,
+`t9_return_path_incomplete`) has since LANDED — see T3b(returns) in section 5 —
+so "return paths and match" now stands at its match half alone.
+
 Why the census does not show this today: `tools/gate_reference_census.py`
 buckets a false admission as `false-admit/<tag>` only when
 `tests/test_selfhost_lower.py::_classify` names the reference refusal with a
@@ -526,13 +530,56 @@ extended with fields/index/records. Fixtures flipped: `t2`, `t11`, `t12`,
 `t21`, `t22`, `t23`, `t28`, `t26`, `t27`, `t36` (flipped in the pin test only;
 they reach `admit_src` at T3a). ~500 lines.
 
-**T2b. Calls and signatures.** `FnSig` table with marked tparams, arity
-window and defaults, monomorphic and generic call typing, ADT case calls,
-`builtin_check` with bottom learning and per-receiver rows, host families,
-`Map.empty`, list-transform desugar. Oracle: checker corpus with a program
-prefix (`infer_prog_expr` already takes one) per shape; fuzz over
-signatures. Fixtures: `t10`, `t15`, `v2_map_set_value_mismatch`, `t24`,
-`host_method_not_on_surface`, `g4_extern_undo_wrong_arg_type`. ~600 lines.
+**T2b. Calls and signatures. LANDED, in `lower.rvl` rather than
+`checker.rvl`.** The obligation is expression typing, but the nine documents it
+owns are measured through `admit_src`, and T3a had already built the refusing
+expression walk there — so the slice extends that engine instead of starting a
+second one. What it adds: a signature table for every module `fn` AND `extern`,
+built in a second pass over the token stream (the single-uppercase heuristic is
+switched off by a DECLARED type, and a `type` may be written after the `fn` that
+mentions it), with each signature's type parameters marked once; the arity
+window; `compatible` per argument for a monomorphic signature and
+`unify`/`substitute` for a generic one; the host stub surface at both its
+positions (`Root.verb(..)` as a constructor, whose result is the FAMILY, and a
+method on a family-typed receiver); `builtin_check` with its receiver-family
+rows, `@elem`/`@member`/`@self` specs, bottom learning and the `List[Str]`
+constraint on `join`; and §4.4 step 6, the four refusals the reference makes
+while LOWERING a method call rather than while typing it, as a second walk over
+the same statement expression run only after the checking walk is clean.
+
+Its premises are proven or it says nothing. A signature row is built only for a
+parameter list this reader can spell in full, so a default value (item 187)
+withholds the arity window rather than counting a call short. A name the body
+rebinds is not resolved against the module declaration, because the reference
+reads a local of function type first. The builtin surface, arity and
+zero-divisor rules need the receiver PROVEN a stdlib value; the
+unpinned-receiver refusal needs it PROVABLY untyped, which a binding whose
+initialiser calls a declaration that returns nothing is and a type this walk
+merely failed to infer is not.
+
+What it buys, measured. All nine documents moved from `false-admit` to
+`agree-refuse` on tag AND message: `t10_call_arity`, `t15_generic_call_site`,
+`t25_explicit_tparam_heuristic_off`, `v2_map_set_value_mismatch`,
+`v2_map_value_unknown_method`, `g4_extern_undo_wrong_arg_type` (the extern
+inverse slot runs `check_ast` over its expression, so its call arguments are
+typed like any other call site), `arith_zero_divisor`, `t24_opaque_receiver_
+builtin` and `host_method_not_on_surface`. `false-admit/T1` 20 -> 14,
+`false-admit/HOST-METHOD` 2 -> 0, `false-admit/TYPE` 4 -> 3; nothing entered a
+false-admit bucket and `false-reject` is unchanged. Over 1500 drawn
+call-carrying fn bodies, both gates run on the SAME inputs, agreement went 117
+-> 1488 and message mismatches 811 -> 0.
+
+A FALSE REJECTION it closed on the way. `case_binds` spells a module `fn`'s own
+name as a function type and gives a returnless `fn` the return `Unit`, which is
+the IR's spelling; the reference's signature table records `None` there, so
+`assert nores(1)` reads as an unknown condition and is ADMITTED. Reading `Unit`
+back off the function type refused it. The signature table's own return row is
+empty and the call types unknown.
+
+One divergence CLASS is left, pinned as a test: the reference desugars a
+receiver-first list transform to its free function and then refuses that
+undeclared NAME, which is the G1 name-read family no slice has built. The gate
+refuses later, or not at all, which is the under-refusing direction. ~750 lines.
 
 **T2c. Arrows and function values.** Parser: `ArrowN.tok`/`ptys`/`ret`,
 `HoleN.tok`. Checker: §3.1/3.2 inference, `_check_arrow`,
@@ -568,6 +615,75 @@ reference's message. Oracle: lower corpus; fixtures `t8`, `t9`, `t13`,
 `g6_closure_mutates_capture`. ~400 lines. Independent of T3a except for the
 shared channel; can be dispatched in parallel with it if T3a's channel lands
 first as a tiny preparatory PR.
+
+**T3b(returns). Returns on every path. LANDED, ahead of T3a and without its
+channel.** The return rule needs no channel and no expression algebra: it is a
+property of the STATEMENT TREE and the declared return spelling, and
+`selfhost/lower.rvl` has read that tree since item 391's binding-discipline
+slice (`fb_scan` builds `FbStep` with `if`/`while`/`for` arms and bodies for the
+scope walk). So `fb_function` now runs `_check_returns_on_every_path` after
+`fb_walk`, per `fn` in declaration order, which is exactly where `_lower_fns`
+runs it — after the body, ahead of the next declaration. Both sentences, both
+anchors: the never-returns one at the declaration line, the falls-through one at
+`decl.body[-1].line`. `_definitely_returns` ports verbatim, `while (true)`
+divergence included with item 379's targeting-`break` rule, and an `if` with no
+`else` needs no flag because an absent arm is an empty step list and an empty
+step list never returns.
+
+What it withholds, and why each silence is the sound direction. This reader sees
+fewer statements than the reference's AST walk and the asymmetry is the whole
+argument: a `return` it fails to see turns an admitting body into a refusal,
+which is the false-rejection direction this gate may not err in. So one "bail"
+anywhere in the tree — an `else if` chain, a destructuring binder, any statement
+`fb_one` cannot model — leaves the whole `fn` to the reference; `fb_scan` now
+records its cursor-stall truncation as a bail for the same reason, which is
+behaviour-preserving for `fb_walk` (both end a block clean). A declared return
+that mentions a transparent type alias is withheld too: `_resolve_type_aliases`
+substitutes `fn.returns` in place before the message is spelled, so quoting the
+written spelling would disagree on the text even where the verdict agrees. The
+alias detector deliberately over-includes, because naming one type too many
+withholds a verdict while naming one too few spells an erased message wrong.
+
+What it buys, measured. `t8_missing_return` and `t9_return_path_incomplete`
+moved from `false-admit/T1` to `agree-refuse/T1` (message AND line), leaving that
+census bucket at 29 over the baselined corpus. Over the `--all` sweep five
+further programs moved the same way, every one of them a model-written
+`bench/results` artifact, so the rule earns its keep outside the fixture
+directory. In the 400-draw fuzz at seed 7 the same change moved five programs OUT
+of a false-admit bucket and none into one, and no program anywhere moved toward
+`false-reject`: `agree-admit` is unchanged at 431.
+
+An ORDERING divergence it introduces, named rather than met. The reference lowers
+a body statement by statement and asks the return question LAST, so a body that
+both breaks an earlier rule and never returns draws the earlier refusal. This
+gate does not run the expression algebra and decides only the assignment position
+of the binding discipline, so on such a body it draws the return-path refusal
+instead. Both refusals are true and the program is refused either way, so this is
+a 419c-style naming divergence and never an admission the reference would not
+give — and it is strictly better than what it replaced, which was a no-objection.
+It shows only under the fuzz (three `tag-mismatch/G1->T1`, two `msg-mismatch/T1`,
+each from a mutant that both corrupts a name and loses its `return`), never on
+the baselined corpus, and it closes as the name-resolution and expression slices
+land. `test_an_unresolved_name_read_outranks_the_return_path_on_the_reference`
+pins it.
+
+What it does NOT buy: nothing about match exhaustiveness, unknown cases, alias
+cycles, duplicate declarations or declared-type wellformedness — the rest of T3b
+is untouched, and the four `no builtin method` / `non-exhaustive match` families
+still need the tables T2b and T2d build. It also does not close the T3a
+statement channel: this rule is the one obligation of the fn loop that can be
+decided from the tree alone, which is why it could land first.
+
+A gap it MEASURED on the way past, not caused and not fixed. The first corpus
+document to declare a transparent type alias (`type Count = Int`) showed that
+`selfhost/lower.rvl`'s `lower_to_ir` does not erase aliases at declaration sites:
+it emits `"returns": "Count"` where the reference, having run
+`_resolve_type_aliases`, emits `"returns": "Int"`. No corpus document under
+`tests/fixtures/emit_py_corpus/` had ever declared one, so both differential
+oracles agreed trivially — the absence, not a divergence. That erasure is
+§2.1 item 1 and belongs to T1's `types.rvl`; the alias case was dropped from
+`return_paths.rvl` rather than half-fixed here, and this paragraph is the record
+that it is known.
 
 **T3c. One engine.** Delete lower.rvl's private `infer`/`binop_ty`/
 `builtin_ret`/`join_ty`/`infer_field`/`infer_callee`/`operands_of` and the

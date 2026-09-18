@@ -37,10 +37,11 @@
 //! The self-host compiler is behind the reference implementation (roadmap item
 //! 391), and the shape of that gap is not "a few missing constructs" — it is a
 //! whole missing LAYER. `admit_src` decides the composition and guarantee layer
-//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not**
-//! run the reference's type layer. Measured, not assumed: the reference refuses
-//! `fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }`
-//! and `fn f() -> { }`; the self-host gate raises no objection to any of them.
+//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`), plus ONE slice
+//! of the reference's type layer — the fn-body statement layer. It does **not**
+//! run the rest of it. Measured, not assumed: the reference refuses
+//! `fn f() -> Int { return undefined_name }` and `fn f() -> { }`; the self-host
+//! gate raises no objection to either.
 //!
 //! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
 //! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
@@ -1178,7 +1179,6 @@ component CacheMiss requires store: Store provides cache: Cache {\n\
         // small: the reference refuses this and the covered layer cannot see it,
         // so the honest answer is to withhold rather than to admit.
         for source in [
-            "fn f() -> Int { return \"s\" }",
             "fn f() -> Int { return undefined_name }",
             "fn f() -> { }",
         ] {
