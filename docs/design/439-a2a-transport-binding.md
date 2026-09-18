@@ -673,12 +673,26 @@ question.
    observed exactly once. Negative exit test: recovery that starts a SECOND task
    for the same crossing, or that reports a terminal state it never observed.
 4. **The rest of the `Part` surface.** A `FilePart` with inline bytes LANDED. A
-   `DataPart` is refused because arbitrary structured JSON needs the tagged half
-   of the canonical encoding, which is item 424 slice C1's to build; a file reply
-   that carries only a `uri` is a fault today, because following it would be a
-   SECOND crossing with a reach of its own (`src/revl/synthesize.py:702`). NOT
-   decided: whether that second crossing is ever worth a reach, and what a
-   `DataPart`'s schema would be checked against. Exit test for either: the new
+   `DataPart` is refused; a file reply that carries only a `uri` is a fault
+   today, because following it would be a SECOND crossing with a reach of its
+   own (`src/revl/synthesize.py:702`). NOT decided: whether that second crossing
+   is ever worth a reach, and what a `DataPart`'s schema would be checked
+   against.
+   **The `DataPart` BLOCKER as this note first wrote it is stale, and the item
+   stays open for a better reason (re-verified 2026-09-18).** It said the
+   refusal waits on "the tagged half of the canonical encoding, which is item
+   424 slice C1's to build". C1 landed on 2026-09-06 (`revl export client --lang
+   ts`, merged 49ebe666) and the py placement bridge already carries the tagged
+   codec itself, `_encode_value` / `_decode_value` over `{"$kind", "$value"}`
+   (`backends/python/bridge.py`), which is what a synthesized `@py` body would
+   reach for. So the missing piece is not a codec. It is that an A2A `DataPart`
+   carries arbitrary JSON authored by a peer that has never heard of revl's
+   `{"$kind", "$value"}` convention, so there is nothing for that codec to be
+   the inverse OF: the decoder resolves `$kind` against the emitted module's own
+   case classes, and a peer's `data` object names none of them. Whatever closes
+   this has to say what a peer's structured JSON is CHECKED against before it
+   becomes a revl value, which is the "NOT decided" half above and is a
+   boundary-schema question rather than an encoding one. Exit test for either: the new
    shape is admitted only with a declared reach (the fetch) or a declared encoding
    (the `DataPart`), and every value it produces is `Untrusted`. Negative exit
    test: a `uri` reply followed silently, or a `DataPart` flattened onto a text
