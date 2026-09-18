@@ -17150,3 +17150,147 @@ test "a destructuring let is read, not refused" {
   let v = admit_src("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }")
   assert v == ""
 }
+
+// ---- item 130: the three stream STATEMENT forms ---------------------------
+//
+// `subscribe` is a keyword and `on` is a CONTEXTUAL one, so the expression
+// grammar could read neither: the run became a `skip`, and a skipped run
+// neither binds nor resolves. Both halves of that showed up — five corpus
+// documents falsely refused because the subscription handle never entered the
+// G1 scope, and the stream operand silently unchecked because the same skip
+// swallowed it. Each form is pinned here in both directions.
+
+test "a subscribe handle is in scope for the statements after it" {
+  assert admit_src("""component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}""") == ""
+}
+
+test "a subscribe stream operand still has to resolve (G1)" {
+  assert admit_src("""component Orders {
+  let sub = subscribe nostream undo sub.close()
+}""") == "G1|`nostream` is not a declared requirement of Orders"
+}
+
+test "merge is grammar in a subscribe head, and its operands are names" {
+  assert admit_src("""component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let b = effect Stream.source() undo b.close()
+  let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}""") == ""
+}
+
+test "a merge operand that resolves to nothing is refused (G1)" {
+  assert admit_src("""component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe merge(a, nob) undo sub.close()
+}""") == "G1|`nob` is not a declared requirement of Fanin"
+}
+
+test "merge without an argument list is an ordinary undeclared name (G1)" {
+  assert admit_src("""component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe merge undo sub.close()
+}""") == "G1|`merge` is not a declared requirement of Fanin"
+}
+
+test "the subscribe qualifier tail is stepped over to the undo" {
+  assert admit_src("""component Windowed {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
+  await sub.next()
+}""") == ""
+}
+
+test "an every-in body binds its item" {
+  assert admit_src("""service Sink { emission fn write(v: Str) }
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}""") == ""
+}
+
+test "an every-in item is out of scope after the loop (G1)" {
+  assert admit_src("""service Sink { emission fn write(v: Str) }
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+  emit sink.write(o)
+}""") == "G1|`o` is not a declared requirement of Iterate"
+}
+
+test "an every-in body is still G1-checked" {
+  assert admit_src("""service Sink { emission fn write(v: Str) }
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(nope)
+  }
+}""") == "G1|`nope` is not a declared requirement of Iterate"
+}
+
+test "an every-in body is still G4-checked" {
+  assert admit_src("""service Sink { emission fn write(v: Str) }
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.nope(o)
+  }
+}""") == "A6|`sink.nope` is not a method of service Sink"
+}
+
+test "an on-as-in handler binds its item" {
+  assert admit_src("""event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Sink { emission fn write(v: Str) }
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit sink.write(e.order_id)
+  }
+}""") == ""
+}
+
+test "an on-as-in body is still G1-checked" {
+  assert admit_src("""event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Sink { emission fn write(v: Str) }
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit sink.write(nope)
+  }
+}""") == "G1|`nope` is not a declared requirement of Handler"
+}
+
+test "a timer body is still read as a timer, not as an iteration" {
+  assert admit_src("""service Sink { emission fn write(v: Str) }
+component Ticker requires sink: Sink {
+  every 30s {
+    emit sink.write(nope)
+  }
+}""") == "G1|`nope` is not a declared requirement of Ticker"
+}
+
+test "`on` outside the `on IDENT as` shape is an ordinary identifier" {
+  // the contextual-keyword control (the same discipline `event` carries): the
+  // handler head is recognised only as `on IDENT as IDENT`, so a field, a
+  // parameter and a local spelled `on` keep parsing as names.
+  assert admit_src("""type Envelope = { on: Str, seq: Int }
+fn describe(on: Str) -> Str { return on }
+fn unwrap(e: Envelope) -> Str {
+  let on = e.on
+  return describe(on)
+}""") == ""
+}
