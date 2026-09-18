@@ -565,8 +565,19 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     # still refuses.
     ("backends/go/scenarios/advance.rvl", "store = Map.new()",
      "<<UNSUPPORTED-CEXPR:host>>"),
+    # item 130 (issue #81): a stream document reaches this port at TWO
+    # boundaries, and the row below covered only the first. The `subscribe`
+    # acquisition is one; the `every … in` loop the reference lowers as a
+    # `while True` around `Stream.is_closed(…)` is the other, and it answers
+    # with a body-step marker of its own. Both are pinned because a ledger
+    # entry is satisfied by a port that emits the acquisition's marker and
+    # then drops the loop with nothing in its place — the section-level
+    # silence issue #1123 found, and the worst answer item 130 admits for a
+    # stream.
     ("backends/go/testdata/stream_130.rvl", "Pool, Stream",
      "<<UNSUPPORTED-CEXPR:subscribe>>"),
+    ("backends/go/testdata/stream_130.rvl", "Stream.is_closed(",
+     "<<UNSUPPORTED-BODYSTEP:stream-iter>>"),
 ])
 def test_named_runtime_and_harness_boundaries(emitted, reference, path, reference_text, port_marker):
     """Pin specific deferred paths, not a blanket allowance for different bytes."""
