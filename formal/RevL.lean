@@ -26,3 +26,4 @@ import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.G4_ClassifiedInverseOrEmit
 import RevL.Theorems.G5_ClassifiedTeardownPure
 import RevL.Theorems.G8_ClassifiedBoundary
+import RevL.Theorems.A9_ProvideKeyDeclared
