@@ -2085,3 +2085,272 @@ def test_revl_goal_audit_over_a_composition_is_deliberately_untouched(tmp_path,
     _group(tmp_path)
     assert _cli(["goal", "audit", str(tmp_path / "base.rvl")]) == 0
     assert "no goal service" in capsys.readouterr().out
+
+
+# ===================== the item-33 BOUNDARY POLICY over a COMPOSITION document
+# Item 439 (issue #118), slice G8e. G8c put `revl audit` on the composition
+# door and G8d put the rest of its shared compile step there. The item-33
+# boundary policy has THREE more doors, and none of them is on that step:
+#
+#   * `revl policy evaluate` (item 290) — the DRY RUN of the same
+#     `policy.evaluate` the gate calls, one comparison site by construction;
+#   * `revl dash --policy` (item 63) — the policy-exception queue a supervisor
+#     rules on;
+#   * `revl simulate policy-diff --composition` (item 468) — the realms a
+#     realm-scoped rule decides by.
+#
+# Each compiled its `.rvl` arguments as MODULES, so each read an empty audit
+# graph for a composition document and answered from it.
+#
+# WHICH WAY EACH ONE FAILED. `policy evaluate` printed "gate verdict: clean —
+# every selected component clears its thresholds" and exited 0 for the very
+# composition `revl audit --policy` refuses with a named violation: a POSITIVE
+# verdict, on the preview of a gate, disagreeing with the gate it previews.
+# That is fail-OPEN, and it is worse than G8c's empty surface, because an empty
+# surface at least renders nothing while this one asserts cleanliness.
+# `dash --policy` printed "nothing pending — no widening to ack, no policy
+# exception to rule on" for the same composition: an empty decision queue is
+# read as an absence of decisions, so it failed OPEN too. `simulate
+# policy-diff --composition` resolved NO realms out of the document the
+# operator handed it, so every action a realm-scoped rule selects stayed
+# undecided — the refusing direction, and so a correction rather than a repair,
+# but still a false statement about a document that DOES name its rows' realms.
+
+DENY_NET = "component * may not reach net*\n"
+ALLOW_NET = "component * may reach net*\n"
+
+REALM_ROW = """
+composition Net {
+  use "services.rvl"
+  remote @agent provides agent: Agent
+    in realm("tenant_a")
+    at host("agent.example:8443")
+    through a2a
+}
+"""
+
+
+def _policy_file(tmp_path, name: str, text: str) -> str:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def _evaluate(tmp_path, policy: str, *files: str) -> int:
+    """`revl policy evaluate POLICY FILES...` with the project root pinned."""
+    return _cli(["policy", "evaluate", policy,
+                 *[str(tmp_path / f) for f in files], "--root", str(tmp_path)])
+
+
+def _dash(tmp_path, *files: str, policy: str | None = None,
+          as_json: bool = True) -> int:
+    argv = ["dash", *[str(tmp_path / f) for f in files], "--root", str(tmp_path)]
+    if policy is not None:
+        argv += ["--policy", policy]
+    if as_json:
+        argv.append("--json")
+    return _cli(argv)
+
+
+# ------------------------------------------------------- `revl policy evaluate`
+
+def test_revl_policy_evaluate_over_a_composition_refuses_the_a2a_crossing(
+        tmp_path, capsys):
+    """THE EXIT TEST for the dry run. The synthesized `remote ... through a2a`
+    provider reaches `net.agent_example`, a deny rule names it, and the dry run
+    now reports the component that would be refused.
+
+    Before this slice the same invocation printed `clean` and exited 0.
+    """
+    write(tmp_path, services=AGENT, base=WITHDRAW)
+    policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    assert _evaluate(tmp_path, policy, "base.rvl") == 1
+    out = capsys.readouterr().out
+    assert "RemoteAgentProvider" in out
+    assert "would be REFUSED" in out
+    assert "gate verdict: REFUSED" in out
+
+
+def test_revl_policy_evaluate_agrees_with_the_gate_it_previews(tmp_path,
+                                                               capsys):
+    """The invariant item 290 states — the dry run and the gate run the SAME
+    `policy.evaluate`, one comparison site — held for a module and was FALSE
+    for a composition document. It is the disagreement, not the exit status
+    alone, that made the silence fail open: an operator previewing a gate reads
+    the preview as what the gate will do.
+
+    Both directions are pinned, so a door that resolved the document but
+    answered from a different graph would still be caught.
+    """
+    write(tmp_path, services=AGENT, base=WITHDRAW)
+    deny = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    allow = _policy_file(tmp_path, "allow.policy", ALLOW_NET)
+    for policy, verdict in ((deny, 1), (allow, 0)):
+        assert _cli(["audit", str(tmp_path / "base.rvl"), "--root",
+                     str(tmp_path), "--policy", policy]) == verdict
+        capsys.readouterr()
+        assert _evaluate(tmp_path, policy, "base.rvl") == verdict
+        capsys.readouterr()
+
+
+def test_revl_policy_evaluate_refuses_a_layer_document(tmp_path, capsys):
+    """A layer is a DELTA (426 §2.4): no composition of its own, and compiled
+    as a module the same empty graph. Refused by name.
+
+    The status is 2, not 1, and deliberately: on this verb 1 already MEANS "a
+    component would be refused", so returning 1 for a document it could not
+    read would be indistinguishable from a policy verdict it never reached.
+    """
+    write(tmp_path, services=AGENT, base=LAYER_BASE, swap=LAYER)
+    policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    assert _evaluate(tmp_path, policy, "swap.rvl") == 2
+    err = capsys.readouterr().err
+    assert "`revl policy evaluate`" in err
+    assert "swap.rvl" in err
+    assert "layer" in err and "DELTA" in err
+
+
+def test_revl_policy_evaluate_refuses_a_composition_beside_modules(tmp_path,
+                                                                   capsys):
+    """A composition names the rows it compiles, so evaluating it beside
+    hand-listed modules would report on a program neither describes."""
+    write(tmp_path, services=AGENT, base=WITHDRAW, module=MODULE)
+    policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    assert _evaluate(tmp_path, policy, "base.rvl", "module.rvl") == 2
+    err = capsys.readouterr().err
+    assert "`revl policy evaluate`" in err
+    assert "base.rvl" in err and "module.rvl" in err
+
+
+def test_revl_policy_evaluate_refuses_two_composition_documents(tmp_path,
+                                                                capsys):
+    """A composition document IS the evaluated unit."""
+    write(tmp_path, services=AGENT, base=WITHDRAW,
+          other=WITHDRAW.replace("composition Net", "composition Other"))
+    policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    assert _evaluate(tmp_path, policy, "base.rvl", "other.rvl") == 2
+    assert "2 composition documents" in capsys.readouterr().err
+
+
+def test_revl_policy_evaluate_over_a_module_is_unchanged(tmp_path, capsys):
+    """THE CONTROL, green on both trees: a MODULE argument still compiles as a
+    module, and the verb still reports its reaching component. The composition
+    door is an added branch, not a change to the path every other invocation
+    takes."""
+    write(tmp_path, module=MODULE)
+    policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    assert _evaluate(tmp_path, policy, "module.rvl") == 1
+    out = capsys.readouterr().out
+    assert "LocalSvc" in out
+    assert "would be REFUSED" in out
+
+
+# ----------------------------------------------------------- `revl dash --policy`
+
+def test_revl_dash_over_a_composition_queues_the_policy_exception(tmp_path,
+                                                                  capsys):
+    """THE EXIT TEST for the supervisor's queue: the violation the synthesized
+    provider raises is a pending decision with its why-trace attached.
+
+    Before this slice the queue was empty and the pane said there was nothing
+    to rule on.
+    """
+    write(tmp_path, services=AGENT, base=WITHDRAW)
+    policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    assert _dash(tmp_path, "base.rvl", policy=policy) == 0
+    snapshot = json.loads(capsys.readouterr().out)
+    exception, = snapshot["decisions"]["policy"]
+    assert exception["component"] == "RemoteAgentProvider"
+    assert exception["token"] == "net.agent_example"
+    assert exception["why"]["steps"][0]["detail"].endswith("`remote_agent_ask`")
+
+
+def test_revl_dash_refuses_a_layer_document(tmp_path, capsys):
+    """The same three shapes refuse here, with `dash`'s own nonzero status."""
+    write(tmp_path, services=AGENT, base=LAYER_BASE, swap=LAYER)
+    assert _dash(tmp_path, "swap.rvl") == 1
+    err = capsys.readouterr().err
+    assert "`revl dash`" in err
+    assert "layer" in err and "DELTA" in err
+
+
+def test_revl_dash_over_a_module_is_unchanged(tmp_path, capsys):
+    """THE CONTROL, green on both trees."""
+    write(tmp_path, module=MODULE)
+    policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
+    assert _dash(tmp_path, "module.rvl", policy=policy) == 0
+    snapshot = json.loads(capsys.readouterr().out)
+    exception, = snapshot["decisions"]["policy"]
+    assert exception["component"] == "LocalSvc"
+
+
+# ------------------------------------------ `revl simulate policy-diff`
+
+def _wal(tmp_path, component: str, token: str) -> str:
+    """One WAL holding one recorded emission for `component`, written by the py
+    in-process driver — the same builder `test_468_policy_diff.py` uses."""
+    sys.path.insert(0, str(ROOT / "backends" / "python"))
+    import replay  # noqa: PLC0415 — the py backend runtime, not a revl module
+
+    path = str(tmp_path / "run.wal")
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    timeline = replay.Timeline(component)
+    step = replay.Step(0, replay.KIND_EMISSION, "agent.ask", None,
+                       {"phase": "activation"}, detail=None)
+    step.scope = {"caps": [token]}
+    timeline.steps.append(step)
+    wal.append_timeline(timeline)
+    wal.commit_activation(components=[component])
+    wal.close()
+    return path
+
+
+def _policy_diff(tmp_path, old: str, new: str, history: str,
+                 *composition: str) -> int:
+    argv = ["simulate", "policy-diff", old, new, "--history", history]
+    for doc in composition:
+        argv += ["--composition", str(tmp_path / doc)]
+    return _cli([*argv, "--root", str(tmp_path)])
+
+
+def test_revl_simulate_policy_diff_resolves_the_rows_realms(tmp_path, capsys):
+    """THE EXIT TEST for the realm resolution: a `remote ... through a2a` row
+    isolated into `realm("tenant_a")` is the realm a realm-scoped rule decides
+    the recorded crossing by, and the composition document is the only place
+    that fact lives.
+
+    Without `--composition` the crossing is UNDECIDED and the verb exits 1,
+    which is the honest answer and stays. Handed the composition document it
+    used to give the SAME answer — the operator supplied the fact and the
+    command dropped it. Now the rule decides.
+    """
+    write(tmp_path, services=AGENT, base=REALM_ROW)
+    history = _wal(tmp_path, "RemoteAgentProvider", "net.agent_example")
+    old = _policy_file(tmp_path, "loose.policy",
+                       "realm tenant_a may reach net.agent_example\n")
+    new = _policy_file(tmp_path, "tight.policy",
+                       "realm tenant_a may not reach net.agent_example\n")
+
+    assert _policy_diff(tmp_path, old, new, history) == 1
+    assert "UNDECIDED" in capsys.readouterr().out
+
+    assert _policy_diff(tmp_path, old, new, history, "base.rvl") == 0
+    out = capsys.readouterr().out
+    assert "NEWLY DENIED:" in out
+    assert "RemoteAgentProvider net.agent_example" in out
+    assert "0 undecided" in out
+
+
+def test_revl_simulate_policy_diff_refuses_a_layer_document(tmp_path, capsys):
+    """`--composition` takes the same document the other doors take, so it
+    refuses the same three shapes, with this verb's usage status."""
+    write(tmp_path, services=AGENT, base=LAYER_BASE, swap=LAYER)
+    history = _wal(tmp_path, "RemoteAgentProvider", "net.agent_example")
+    old = _policy_file(tmp_path, "loose.policy",
+                       "realm tenant_a may reach net.agent_example\n")
+    new = _policy_file(tmp_path, "tight.policy",
+                       "realm tenant_a may not reach net.agent_example\n")
+    assert _policy_diff(tmp_path, old, new, history, "swap.rvl") == 2
+    err = capsys.readouterr().err
+    assert "`revl simulate policy-diff`" in err
+    assert "layer" in err and "DELTA" in err
