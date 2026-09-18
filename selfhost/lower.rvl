@@ -304,7 +304,15 @@ type SvcD = { name: Str, methods: List[MSig] }
 // the body into setup instead, so the marker is what carries the same prune.
 // Every OTHER verdict — G1, G4, the G8 audit reach — reads a timer body exactly
 // as it reads the statements around it, which is the reference's rule too.
-type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool }
+// `scopeAdd` are names declared for THIS statement only — the item bind of an
+// `every <x> in <sub>` / `on <E> as <x> in <sub>` body (item 130 Slices 4/5).
+// `bind` is the wrong field for them: `stmt_binds` collects `bind` into the
+// component-wide G1 scope, and the reference saves and restores `env.locals`
+// around an iteration body so the item is NOT in scope after the loop
+// (`_lower_stream_iter_step`). A per-statement list keeps the block scope the
+// reference has, so `emit sink.write(o)` AFTER the loop stays the G1 refusal
+// the reference raises. Empty on every other statement.
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool, scopeAdd: List[Str] }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
@@ -1101,12 +1109,12 @@ fn concat_refs(reqs: List[SvcRef], provs: List[SvcRef], i: Int) -> List[SvcRef] 
 
 fn mkstmt(kind: Str, e: Expr) -> Stmt {
   return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false, line: 0,
-           inTimer: false }
+           inTimer: false, scopeAdd: [] }
 }
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false, line: 0,
-           inTimer: false }
+           inTimer: false, scopeAdd: [] }
 }
 
 // A forward `effect`/`emit`/`undo`/`compensate` statement carrying its item-131
@@ -1115,7 +1123,7 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 // position after it, so per-statement pairing can read it directly.
 fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0,
-           inTimer: false }
+           inTimer: false, scopeAdd: [] }
 }
 
 // A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
@@ -1124,7 +1132,7 @@ fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
   return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target,
-           awaited: false, line: 0, inTimer: false }
+           awaited: false, line: 0, inTimer: false, scopeAdd: [] }
 }
 
 // An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
@@ -1134,7 +1142,21 @@ fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
 // composes); the post-parse `spawn_form_verdict` reports it.
 fn mkstmt_spawn_unbound(target: Str) -> Stmt {
   return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target,
-           awaited: false, line: 0, inTimer: false }
+           awaited: false, line: 0, inTimer: false, scopeAdd: [] }
+}
+
+// A `let <x> = subscribe <stream> …` head (item 130). Its own kind, because
+// none of the existing ones judge it right: it is not an `effect` bracket (the
+// G4 host-acquire exemption and the A1 effect-composition rules are the
+// reference's `_admit_effect_async`, which a `let-effect` carrying
+// `subscribe: true` does not reach), and it is not a plain `expr` (its head may
+// spell the Slice 3 fan-in `merge(a, b)`, which is grammar, not a callable).
+// `bind` carries the subscription handle exactly as any `let` does — that is
+// what puts `sub` in the G1 scope so a later `sub.next()` / `undo sub.close()`
+// resolves.
+fn mkstmt_sub(e: Expr, bn: Str) -> Stmt {
+  return { kind: "subscribe", e: e, bind: bn, spawnTarget: "", awaited: false,
+           line: 0, inTimer: false, scopeAdd: [] }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -1213,6 +1235,44 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
         return mk_srun([sp], hi)
       }
       return mk_srun([sp], sk)
+    }
+    // item 130: `let <x> = subscribe <stream>[.<chain>] [quals] undo <close>`
+    // (parser.py's `subscribe_form`). `subscribe` is a KEYWORD, so the
+    // expression grammar stopped dead on it: the run became a `skip`, the
+    // handle `<x>` never entered the G1 scope, and every later read of it —
+    // `await sub.next()`, the very `undo sub.close()` the form requires — was
+    // refused as an undeclared requirement. That was five documents of this
+    // repo's own corpus falsely rejected.
+    //
+    // The same skip was silently dropping the STREAM operand, so
+    // `subscribe nostream` and `subscribe merge(a, nob)` — both plain G1
+    // refusals in the reference — drew no objection at all. Reading the operand
+    // here is what decides them: a false rejection in this direction was hiding
+    // a bypass in the other.
+    //
+    // Only `let`, never `var`: the reference takes this production on the
+    // immutable bind alone (`if not mutable and self.at("kw", "subscribe")`).
+    // The qualifier tail (`policy P`, `buffer N`, `drain <dur>`, `replay(…)`)
+    // is skipped STRUCTURALLY to the `undo`, the same way the spawn `with { … }`
+    // block above is: none of it resolves a name, and validating it is the
+    // parser's job, not this gate's.
+    if (kd == "expr" && t.text == "let" && atw(ts, j, "subscribe")) {
+      let rs = expr_at(ts, j + 1)
+      if (is_bad(rs.e)) { return mk_srun([mkstmt("skip", rs.e)], hi) }
+      let outs: List[Stmt] = [mkstmt_sub(rs.e, bn)]
+      var k = rs.i
+      while (k < hi && !atw(ts, k, "undo")) { k += 1 }
+      if (k < hi) {
+        let us = operand_at(ts, k + 1)
+        if (!is_bad(us.e)) {
+          return mk_srun(outs.push(mkstmt_aw("undo", us.e, "", us.aw)), us.i)
+        }
+      }
+      // no `undo` on this run: the reference refuses the form outright
+      // (rule 3.2), and a multi-line spelling puts the `undo` on the next line
+      // where the ordinary teardown branch reads it against the now-bound
+      // handle. Either way the rest of this line holds no resolvable head.
+      return mk_srun(outs, hi)
     }
     let r = operand_at(ts, j)
     if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
@@ -1310,6 +1370,55 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   // answer as clean. `close_brace` bounds the body; a malformed header or an
   // unclosed brace still falls through to the old skip, since there is nothing
   // to read out.
+  // item 130 Slice 4: `every <x> in <sub> { … }` — the stream-ITERATION form,
+  // told apart from the `every <n><unit>` timer by one token of lookahead, the
+  // reference's own disambiguation (`_at_stream_iter`): the iteration's bind is
+  // an IDENT followed by `in`, the timer's delay is a NUMBER.
+  //
+  // Before this the form fell into the timer branch below, which reads the body
+  // out but knows nothing of an item bind — so `every o in sub { emit s.write(o) }`
+  // refused its own `o` as an undeclared requirement, and the body was marked
+  // `inTimer`, suppressing the two A1 rules the reference DOES run over a
+  // `stream-iter` step. `mark_iter` carries the bind and leaves `inTimer` alone.
+  //
+  // The subject is a bare subscription name by grammar (`_iteration_subject`)
+  // and the reference decides it with a lifecycle refusal of its own ("needs a
+  // live subscription"), which is outside this gate's slice, so it is stepped
+  // over rather than resolved.
+  if (t.kind == "kw" && t.text == "every" && atk(ts, lo + 1, "ident")
+      && atw(ts, lo + 2, "in")) {
+    let itm = tkc(ts, lo + 1).text
+    var ib = lo + 3
+    while (ib < hi && !atk(ts, ib, "{")) { ib += 1 }
+    if (ib < hi) {
+      let iend = close_brace(ts, ib)
+      if (iend != 0 - 1) {
+        return mk_srun(mark_iter(p_stmts(ts, ib + 1, iend - 1, []), itm), iend)
+      }
+    }
+  }
+  // item 130 Slice 5: `on <Event> as <x> [in <sub>] { … }` — the typed-event
+  // handler. `on` is a CONTEXTUAL keyword in the reference (`_at_event_handler`
+  // requires the shape `on IDENT as`), so it is not in the lexer's table and
+  // reached this reader as an ordinary identifier: the run parsed as the bare
+  // value `on` and drew "`on` is not a declared requirement of <C>", a false
+  // rejection of two corpus documents, with the whole handler body unread
+  // behind it. §6 says the form DESUGARS to `every … in`, so it is read as the
+  // same iteration here — one reader, one scope rule. The `in <sub>` clause is
+  // optional (§6b): without it the source is the component's own
+  // `requires <k>: Stream[<Event>]` coeffect.
+  if (t.kind == "ident" && t.text == "on" && atk(ts, lo + 1, "ident")
+      && atw(ts, lo + 2, "as") && atk(ts, lo + 3, "ident")) {
+    let eitm = tkc(ts, lo + 3).text
+    var eb = lo + 4
+    while (eb < hi && !atk(ts, eb, "{")) { eb += 1 }
+    if (eb < hi) {
+      let eend = close_brace(ts, eb)
+      if (eend != 0 - 1) {
+        return mk_srun(mark_iter(p_stmts(ts, eb + 1, eend - 1, []), eitm), eend)
+      }
+    }
+  }
   if (t.kind == "kw" && (t.text == "every" || t.text == "after")) {
     var b = lo + 1
     while (b < hi && !atk(ts, b, "{")) { b += 1 }
@@ -1360,7 +1469,7 @@ fn stamp_lines(ss: List[Stmt], ln: Int) -> List[Stmt] {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited, line: ln,
-                     inTimer: s.inTimer })
+                     inTimer: s.inTimer, scopeAdd: s.scopeAdd })
     i += 1
   }
   return out
@@ -1383,7 +1492,31 @@ fn mark_timer(ss: List[Stmt]) -> List[Stmt] {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited,
-                     line: s.line, inTimer: true })
+                     line: s.line, inTimer: true, scopeAdd: s.scopeAdd })
+    i += 1
+  }
+  return out
+}
+
+// Stamp an ITERATION ITEM bind on every statement read out of an
+// `every <x> in <sub> { … }` / `on <E> as <x> [in <sub>] { … }` body (item 130
+// Slices 4/5). Unlike `mark_timer` this does NOT set `inTimer`: the reference
+// keeps a `stream-iter` step in the walk both A1 surfaces see — it runs
+// `_admit_emit_async` over every body emission (`_lower_stream_iter_step`) and
+// `_async_reached_outside_provide` prunes only `provide`/`timer`/`await` steps,
+// so a stream-iteration body is judged exactly as the statements around it are.
+// The item bind rides `scopeAdd` rather than `bind` because the reference
+// saves and restores `env.locals` around the body, so the item is out of scope
+// again after the loop.
+fn mark_iter(ss: List[Stmt], item: Str) -> List[Stmt] {
+  var out: List[Stmt] = []
+  var i = 0
+  while (i < ss.length()) {
+    let s = ss[i]
+    out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
+                     spawnTarget: s.spawnTarget, awaited: s.awaited,
+                     line: s.line, inTimer: s.inTimer,
+                     scopeAdd: union_into(s.scopeAdd, [item]) })
     i += 1
   }
   return out
@@ -2777,7 +2910,15 @@ fn not_a_method_msg(what: Str, svcName: Str) -> Str {
 // statement's reach the same way `walk_stmts` accumulates it.
 fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
-  let scx = ctx_acq(cx, stmt_acq_where(s.kind))
+  // the statement's OWN scope additions: an iteration item (item 130 Slices
+  // 4/5), in scope for the body statements and nowhere else, and — on a
+  // `subscribe` head — `merge`, which is grammar the reference parses in that
+  // one position (`_at_stream_merge`) rather than a callable a program may
+  // declare. Both are per-statement precisely so neither widens the
+  // component-wide G1 scope `stmt_binds` builds.
+  let bcx = s.scopeAdd.length() > 0 ? ctx_bind(cx, s.scopeAdd) : cx
+  let mcx = s.kind == "subscribe" ? ctx_bind(bcx, ["merge"]) : bcx
+  let scx = ctx_acq(mcx, stmt_acq_where(s.kind))
   let root = acq_root_of(s)
   return root.hit ? walk_exprs(root.args, 0, marked, scx, a)
                   : walk_expr(s.e, marked, scx, a)
