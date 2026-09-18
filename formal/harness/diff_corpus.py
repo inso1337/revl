@@ -783,7 +783,8 @@ def collect_spawns(node, handles: dict, rows: list) -> None:
 def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
     """Collect (receiver-root, method, marker-context) call facts.
 
-    ctx is 'emit' under an emit marker, 'plain' everywhere else — including
+    ctx is 'emit' for the HEAD call an emit marks, 'emitarg' for a call
+    evaluated inside that head's argument list, 'plain' everywhere else — including
     under `effect ... undo ...`: the g4_unmarked_emission fixture shows the
     checker refuses an emission call whose pairing is an inverse, because a
     boundary crossing cannot be reverted by pairing. Only `emit` legalizes
@@ -793,19 +794,26 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
         return
     if isinstance(node, (EmitStmt, EmitExpr)):
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
-            # The marker judges the HEAD call: `_lower_emit_step` asks
-            # `_is_emission_call` of the lowered expression's own node, and a
-            # call evaluated to produce one of its ARGUMENTS is a plain call
-            # (`emit webui.add_entry(..., { strategy: ranking.strategy() })`
-            # is accepted with `Ranker.strategy` plain). Handing `emit` to the
-            # whole subtree made the model refuse it (#1169 F2).
+            # The marker JUDGES the head call (`_lower_emit_step` asks
+            # `_is_emission_call` of the lowered expression's own node) and
+            # ADMITS the region under it: `_expr_mode` is "emit" for the whole
+            # marked expression, so a call evaluated to build an argument is
+            # neither demanded a marker (an unmarked `b.fetch()` emission
+            # inside `emit a.send(...)` compiles) nor refused for lacking an
+            # emission to mark (`ranking.strategy()` inside NotesConsole's
+            # `emit webui.add_entry(...)` compiles). Handing `emit` to the
+            # whole subtree made the model refuse the second (#1169 F2);
+            # handing it `plain` would make it refuse the first. `emitarg`
+            # is that region: the rule admits it whatever the method
+            # declares. Whether the marker should be per-site is #1175, the
+            # checker's question; the model follows the checker.
             expr = getattr(node, "expr", None)
             if isinstance(expr, ExprCall):
                 route = _route(expr.callee)
                 if route is not None:
                     out.append((*route, "emit"))
                 for a in expr.args:
-                    walk_calls(a, out, "plain")
+                    walk_calls(a, out, "emitarg")
             else:
                 walk_calls(expr, out, "emit")
             for f in dataclasses.fields(node):
@@ -1289,7 +1297,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                     if meth not in services.get(svc, {}):
                         continue  # unknown method: the checker's business
                     em = services[svc][meth]
-                    bad = (ctx == "emit") != em
+                    # `emitarg` is admitted either way: the region under an
+                    # emit head is the checker's `_expr_mode == "emit"`.
+                    bad = ctx != "emitarg" and (ctx == "emit") != em
                     calls.append((root, svc, meth, ctx))
                     tsv.append(
                         "\t".join(["U", rel, c.name, ctx, root, svc, meth]))
@@ -2316,9 +2326,13 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     for r in mrows:
         rel, compn = r[1], r[2]
         ems = ems_by_file.get(rel, set())
-        # U row: [U, file, comp, ctx, root, svc, meth]
+        # U row: [U, file, comp, ctx, root, svc, meth]. A call inside an emit
+        # head's argument list (`emitarg`) is admitted whatever the method
+        # declares: the checker's marker admits the whole region it covers
+        # (`_expr_mode == "emit"`) and judges the head alone (#1169 F2).
         raw = any(
-            u[2] == compn and ((u[3] == "emit") != ((u[5], u[6]) in ems))
+            u[2] == compn and u[3] != "emitarg"
+            and ((u[3] == "emit") != ((u[5], u[6]) in ems))
             for u in urows if u[1] == rel
         )
         # HA row: [HA, file, comp, verb, position]. The same G4 guarantee over
