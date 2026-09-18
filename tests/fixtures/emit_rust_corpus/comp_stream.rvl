@@ -25,11 +25,13 @@
 //     the body, the uncaught `Faulted` that fails the activation so the prefix
 //     reverts LIFO with the subscription bracket on it, and the discard that
 //     keeps a body which never reads the item off the unused-binding lint.
-//
-// The typed-event handler (`on <Event> as e in <sub>`) is deliberately NOT here:
-// its contract line renders the event's derived JSON schema through Python's
-// `json.dumps` default separators, and the port carries no dual-tier host
-// formatter for that, so it is still REPORTED rather than emitted.
+//   * the typed-event handler `on <Event> as e in <sub>`: the same loop with ONE
+//     gate between the terminal test and the body, so a `Closed` still ends the
+//     loop UNVALIDATED; the contract line whose schema string is python
+//     `json.dumps` of the derived schema, DEFAULT separators and all; and the
+//     decode that lets the body read `e.<field>` as a typed access.
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+
 service Sink {
   emission fn write(v: Str)
 }
@@ -74,6 +76,16 @@ component Iterate requires sink: Sink {
   let sub = subscribe src undo sub.close()
   every o in sub {
     emit sink.write(o)
+  }
+}
+
+// The typed-event form: the same loop with the derived-schema validation and
+// the bounded dedup window `Stream::contract` carries.
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit sink.write(e.order_id)
   }
 }
 
