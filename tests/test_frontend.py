@@ -379,6 +379,12 @@ REJECTIONS = {
     # A9 bounds the *key* against the clause). Dedicated code A9 (A1-A8 are all
     # occupied in the amendment table), with a hint naming both fixes.
     "a9_provide_key_not_declared.rvl": "`skin` is not declared in the `provides` clause of S (A9)",
+    # issue #1172: the converse of A9. A key the clause declares that no block
+    # installs used to link as the provider of that key and leave every
+    # consumer PENDING (R2) at run time; the one form that installs a declared
+    # key without a block, `isolate <key> in realms(...)`, is exempt by syntax.
+    "a9_provides_without_block.rvl":
+        "`skin` is declared in the `provides` clause of S but no `provide skin { … }` block installs it (A9)",
     "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
     "g1_unknown_upper_host.rvl":
         "`StreamB` is not a declared requirement of C",

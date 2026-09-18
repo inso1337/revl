@@ -184,6 +184,12 @@ def _classify(e: RevlError) -> str:
     # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
     if "(G3)" in m:
         return "G3"
+    # A9, both halves: a provide block keyed outside the `provides` clause
+    # (item 153) and its converse, a declared key no block installs (issue
+    # #1172). Both spell the code in the message, and the gate mirrors both
+    # byte for byte.
+    if "(A9)" in m:
+        return "A9"
     # The realm PRELUDE rule (an `isolate`/`intercept` after an effect/emit/
     # await/provide) sets no code either; its message is unambiguous. Slice 3
     # mirrors it, so it is an in-slice tag rather than OUT.
@@ -1345,6 +1351,31 @@ type R = { a: Int, b: Int }
 fn f(r: R) -> Int {
   let { a, b } = r
   return a + b
+}
+"""),
+    # ---- A9's converse, the admitting twins (issue #1172) -------------------
+    # The reproducer with the block it was missing.
+    ("a9 twin: every declared key has its block", """
+service Skin { fn name() -> Str }
+component S provides skin: Skin {
+  let x = effect Map.new() undo x.drop()
+  provide skin { fn name() = "x" }
+}
+component User requires skin: Skin provides out: Skin {
+  provide out { fn name() = skin.name() }
+}
+"""),
+    # The one exempt shape, by its own syntax: a routes-only Router declares
+    # `provides s` and installs it through `isolate s in realms(...)` (the
+    # routing proxy the driver realizes; a block for it is refused, item 449).
+    ("a9 twin: a routes-only router installs its key without a block", """
+service S { fn go() -> Int }
+component W provides s: S {
+  isolate s in realm("r1")
+  provide s { fn go() = 1 }
+}
+component R requires s: S provides s: S {
+  isolate s in realms("r1")
 }
 """),
 ]
@@ -2534,6 +2565,31 @@ fn f() -> Int {
   let n = 2
 }
 """, "T1"),
+    # ---- A9, both halves ----------------------------------------------------
+    # The `provides` clause and the `provide` blocks name the same keys. The
+    # direct half (item 153) is a block keyed outside the clause; the converse
+    # (issue #1172) is a declared key no block installs, which used to link as
+    # a provider and leave every consumer PENDING (R2) at run time. Both are
+    # the checked-in fixtures, verbatim, and compare tag AND message.
+    ("a9 a provide block keyed outside the clause",
+     _fixture("a9_provide_key_not_declared"), "A9"),
+    ("a9 a declared key with no provide block",
+     _fixture("a9_provides_without_block"), "A9"),
+    ("a9 the converse names the first uninstalled key in clause order", """
+service Skin { fn name() -> Str }
+component S provides a: Skin, b: Skin {
+  provide a { fn name() = "x" }
+}
+""", "A9"),
+    # a body refusal outranks the converse: the reference skips the converse
+    # for a body that recovered past a refused statement, and the gate reports
+    # that statement's refusal as the component's one verdict.
+    ("a9 a body refusal outranks the converse", """
+service Skin { fn name() -> Str }
+component S provides skin: Skin {
+  emit db.name()
+}
+""", "G1"),
 ]
 
 

@@ -311,7 +311,9 @@ type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, li
 // the method's own `async fn` modifier — checked for signature parity against
 // the service op it implements (lower.py's `method.async_ != decl.async_`).
 type ProvM   = { name: Str, params: List[Str], body: List[Stmt], isAsync: Bool }
-type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
+// `line` is the `provide` token's line, the anchor of the reference's block-level
+// A9 refusal (`_lower_provide`'s `stmt.line`).
+type Provide = { key: Str, svcName: Str, methods: List[ProvM], line: Int }
 // A declared provision key and the realm it lives in ("" = the shared realm).
 type ProvKey = { key: Str, rlm: Str }
 // `iso` carries the component's `isolate <key> in realm("<label>")` bindings:
@@ -1174,6 +1176,62 @@ fn operand_at(ts: List[Token], k: Int) -> AwOperand {
 type SRun = { ss: List[Stmt], i: Int }
 
 fn mk_srun(ss: List[Stmt], i: Int) -> SRun { return { ss: ss, i: i } }
+
+// `if (<cond>) { … } [else if (<cond>) { … }]* [else { … }]` in an ACTIVATION
+// body — the guard (lower.py's `_lower_component_if`: a pure condition and arms
+// of `fail`, or nested guards; the reference binds nothing inside one). Read
+// STRUCTURALLY, across lines, by `p_comp_body` alone: a provide-method or fn
+// body reads its `if` through its own scoped walk, and a flat read of an arm's
+// `let` there would collide with a sibling binding (`mth_rebind`).
+//
+// Before this the component reader had no case for the keyword: it fell
+// through to `expr_at`, which reads only the single-line if-EXPRESSION, skipped
+// to the end of the line, and the `}` closing a multi-line then-arm then ended
+// the WHOLE component walk — every statement and `provide` block below such a
+// guard went unread. The A9 converse (issue #1172) reads the blocks a body
+// installs, so that under-read surfaced as a false refusal of two backend
+// corpus fixtures. The condition is walked as an expression (G1/purity, what
+// the one-line path already walked); the arms' statements are read out inline.
+//
+// One chain, from its `if` keyword at `lo` to just past its last arm. A chain
+// the reader cannot follow (a bad condition, a missing or unbalanced brace)
+// yields a `skip` and the line-end fallback `hi`, as any unreadable statement.
+fn p_guard_chain(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> SRun {
+  let c = expr_at(ts, lo + 1)
+  if (is_bad(c.e) || !atk(ts, c.i, "{")) {
+    return mk_srun(acc.push(mkstmt("skip", c.e)), hi)
+  }
+  let bend = close_brace(ts, c.i)
+  if (bend == 0 - 1) { return mk_srun(acc.push(mkstmt("skip", c.e)), hi) }
+  let withThen = p_guard_stmts(ts, c.i + 1, bend - 1,
+                               acc.push(mkstmt("expr", c.e)))
+  if (atw(ts, bend, "else")) {
+    if (atw(ts, bend + 1, "if") && atk(ts, bend + 2, "(")) {
+      return p_guard_chain(ts, bend + 1, hi, withThen)
+    }
+    if (atk(ts, bend + 1, "{")) {
+      let eend = close_brace(ts, bend + 1)
+      if (eend != 0 - 1) {
+        return mk_srun(p_guard_stmts(ts, bend + 2, eend - 1, withThen), eend)
+      }
+    }
+  }
+  return mk_srun(withThen, bend)
+}
+
+// The statements of one guard arm: a nested guard recurses, anything else is
+// one statement run per line, as `p_stmts` reads it.
+fn p_guard_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
+  if (lo >= hi || atk(ts, lo, "}")) { return acc }
+  let le = line_end(ts, lo, hi)
+  if (atw(ts, lo, "if") && atk(ts, lo + 1, "(")) {
+    let g = p_guard_chain(ts, lo, le, acc)
+    return p_guard_stmts(ts, g.i > lo ? g.i : le, hi, g.ss)
+  }
+  let r = p_stmt_run(ts, lo, le)
+  return p_guard_stmts(ts, r.i > lo ? r.i : le, hi,
+                       append_stmts(acc, stamp_lines(r.ss, tkc(ts, lo).line)))
+}
 
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
@@ -2194,7 +2252,8 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     return p_comp_body(ts, pend, end, provh, reqh, cname,
                        provs.push({ key: key,
                                     svcName: bind_lookup(provh, key, 0),
-                                    methods: ms.xs }),
+                                    methods: ms.xs,
+                                    line: tkc(ts, i).line }),
                        setup, iso, rts, icept, hoff, true)
   }
   // `isolate <key> in realm("<label>")` — the realm dimension G2/G3 read, the
@@ -2266,7 +2325,11 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     // the reference refuses at parse time and this gate is silent on, exactly
     // as it is silent on every other unparsable annotation.
     let hty = atk(ts, i + 2, ":") ? type_at(ts, i + 3).ty : ""
-    return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+    // advance past the annotation STRUCTURALLY (item 168): a line-based skip
+    // swallows a single-line body's trailing statements and `provide` blocks,
+    // and the A9 converse (issue #1172) reads the blocks a body installs.
+    let hnx = hty == "" ? skip_line(ts, i) : type_at(ts, i + 3).i
+    return p_comp_body(ts, hnx, end, provh, reqh, cname, provs,
                        setup, iso, rts, icept, { name: key, ty: hty }, action)
   }
   // `intercept <key> with { ... }` supplies metadata, not a realm; the prelude
@@ -2311,6 +2374,15 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       return p_comp_body(ts, ce, end, provh, reqh, cname, provs, setup, iso,
                          rts, icept, hoff, action)
     }
+  }
+  // an activation-body guard, read structurally across its arms (see
+  // `p_guard_chain`); like any setup statement it is an action.
+  if (atw(ts, i, "if") && atk(ts, i + 1, "(")) {
+    let gle = line_end(ts, i, end)
+    let g = p_guard_chain(ts, i, gle, [])
+    return p_comp_body(ts, g.i > i ? g.i : gle, end, provh, reqh, cname, provs,
+                       append_stmts(setup, stamp_lines(g.ss, tkc(ts, i).line)),
+                       iso, rts, icept, hoff, true)
   }
   // component setup: a statement run (item 168: ended at a structural boundary,
   // not only a newline) — G4/A1/G1 gate setup too, and the statement makes this
@@ -4609,6 +4681,53 @@ fn unknown_svc_at(comp: CompD, names: List[Str], amb: List[Str],
   return unknown_svc_at(comp, names, amb, i + 1)
 }
 
+// ------------------------------------------------- A9: clause and blocks agree
+//
+// The `provides` clause and the `provide` blocks name the same keys, in both
+// directions, in the reference's own words:
+//   * the DIRECT half (item 153, `_lower_provide`'s first refusal): a block
+//     keyed outside the clause. Anchored at the block's line, and decided
+//     ahead of every method check of that block, exactly where the reference
+//     raises it.
+//   * the CONVERSE (issue #1172, `_lower_component` after its body walk): a
+//     declared key no form in the body installs. Two forms install one: a
+//     `provide <key> { … }` block, and the multi-realm bind `isolate <key> in
+//     realms(...)` (`routes`), whose component is realized as a routing proxy
+//     at load and never plugged (the routes-only Router, docs/router.md).
+//     Anchored at the key's clause line, and decided only for a component whose
+//     body drew no verdict: the reference skips it for a body that recovered
+//     past a refused statement, and the gate's one-refusal-per-component
+//     recovery reports that statement's refusal instead.
+fn block_key_undeclared_msg(key: Str, cname: Str) -> Str {
+  return "`".concat(key).concat("` is not declared in the `provides` clause of ")
+    .concat(cname).concat(" (A9)")
+}
+
+fn uninstalled_provision_msg(key: Str, cname: Str) -> Str {
+  return "`".concat(key).concat("` is declared in the `provides` clause of ")
+    .concat(cname).concat(" but no `provide ").concat(key)
+    .concat(" { … }` block installs it (A9)")
+}
+
+fn prov_installed(provs: List[Provide], key: Str, i: Int) -> Bool {
+  if (i >= provs.length()) { return false }
+  if (provs[i].key == key) { return true }
+  return prov_installed(provs, key, i + 1)
+}
+
+// The first declared `provides` key (clause order, which is `svcRefs` order
+// for the `provides` rows) that neither a block nor a route installs.
+fn uninstalled_provision_at(comp: CompD, i: Int) -> Verd {
+  if (i >= comp.svcRefs.length()) { return no_verd() }
+  let r = comp.svcRefs[i]
+  if (r.clause == "provides" && !prov_installed(comp.provs, r.key, 0)
+      && !routes_has(comp.routes, r.key, 0)) {
+    return mk_verd(tagged("A9", uninstalled_provision_msg(r.key, comp.name)),
+                   r.line)
+  }
+  return uninstalled_provision_at(comp, i + 1)
+}
+
 // The program's own declared service names.
 fn svc_names(svcs: List[SvcD], i: Int, acc: List[Str]) -> List[Str] {
   if (i >= svcs.length()) { return acc }
@@ -4704,6 +4823,13 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
+    // A9, the direct half: a block keyed outside the `provides` clause.
+    // `svcName` is the clause lookup, empty exactly when the key is undeclared;
+    // the reference refuses before it checks a single method of the block.
+    if (pv.svcName == "") {
+      return mk_verd(tagged("A9", block_key_undeclared_msg(pv.key, comp.name)),
+                     pv.line)
+    }
     let dsvc = svc_of(cx, pv.svcName)
     var mi = 0
     while (mi < pv.methods.length()) {
@@ -9818,6 +9944,17 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
         if (v.v != "") {
           refs = refs.push(v)
           poisoned = poisoned.push(comp.name)
+        } else {
+          // A9's converse (issue #1172) runs after the body walk in the
+          // reference and only when no statement refused, so it follows a
+          // clean `check_component` here. It RAISES inside `_lower_component`,
+          // so the reference's component loop catches it and appends the
+          // `poisoned` header stub, exactly as for the arms above.
+          let uv = uninstalled_provision_at(comp, 0)
+          if (uv.v != "") {
+            refs = refs.push(uv)
+            poisoned = poisoned.push(comp.name)
+          }
         }
       }
     }
@@ -9921,9 +10058,10 @@ fn fmt_all(rs: List[Verd]) -> Str {
   return out
 }
 
-// The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "G6" | "A1" |
+// The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "G6" | "A1" | "A9" |
 // "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "BAD") — the coarse
-// oracle. "G6" is the fn-body binding discipline (item 391).
+// oracle. "G6" is the fn-body binding discipline (item 391); "A9" is the
+// clause/blocks agreement, both halves.
 pub fn admit_tag(src: Str) -> Str {
   let v = admit_src(src)
   if (v == "") { return "" }
@@ -15892,6 +16030,34 @@ test "an undeclared service in requires is refused by name" {
 test "an undeclared service in provides is refused by name" {
   assert admit_src("component C provides s: S { }")
     == "G1|unknown service `S` in `provides` of C"
+}
+
+// A9, both halves (item 153 and issue #1172): the `provides` clause and the
+// `provide` blocks name the same keys.
+
+test "a provide block keyed outside the clause is refused (A9)" {
+  assert admit_src("service S { fn go() -> Int } component C provides s1: S { provide s { fn go() = 1 } }")
+    == "A9|`s` is not declared in the `provides` clause of C (A9)"
+}
+
+test "a declared provides key with no provide block is refused (A9 converse)" {
+  assert admit_src("service S { fn go() -> Int } component C provides s: S { }")
+    == "A9|`s` is declared in the `provides` clause of C but no `provide s { … }` block installs it (A9)"
+}
+
+test "the converse names the first uninstalled key in clause order" {
+  assert admit_src("service S { fn go() -> Int } component C provides a: S, b: S { provide a { fn go() = 1 } }")
+    == "A9|`b` is declared in the `provides` clause of C but no `provide b { … }` block installs it (A9)"
+}
+
+test "a routes-only router installs its declared key without a block" {
+  assert admit_src("service S { fn go() -> Int } component W provides s: S { isolate s in realm(\"r1\") provide s { fn go() = 1 } } component R requires s: S provides s: S { isolate s in realms(\"r1\") }")
+    == ""
+}
+
+test "a body refusal outranks the converse" {
+  assert admit_src("service S { fn go() -> Int } component C provides s: S { emit db.go() }")
+    == "G1|`db` is not a declared requirement of C"
 }
 
 // The reference walks `comp.requires` in `Env.__init__`, before it reaches the
