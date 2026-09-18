@@ -382,6 +382,87 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
     assert_boundary_witness(want, got, "*testing.T", None)
 
 
+STREAM_130 = ROOT / "backends" / "go" / "testdata" / "stream_130.rvl"
+
+
+def test_a_components_only_document_names_every_component(emitted, reference):
+    """item 130 / issue #81: a stream document must not come back as a banner.
+
+    `backends/go/testdata/stream_130.rvl` is six components and a service and
+    nothing else, so the reference never routes it to the pure typed-core path
+    this file mirrors: it answers with a whole stc-go module, 40502 bytes of it.
+    This port answered with its three-line banner -- 144 bytes, no marker
+    anywhere -- and a reader of those bytes could not tell a tier that refuses
+    the stream surface from one whose lowering is missing. Each component is
+    now named, in document order, so the port's answer states which.
+
+    The witness token is the marker: `<<UNSUPPORTED-COMPONENT:` is text only the
+    port emits (the reference emits no `<<...>>` marker at all for this
+    document), so this case cannot pass for an unrelated reason -- the defect
+    item 1136 found five times over.
+    """
+    ir = compile_files([str(STREAM_130)])
+    names = [component["name"] for component in ir["components"]]
+    assert names == ["Consumer", "Parked", "Fanin", "Windowed", "Iterate", "Chain"]
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert [line for line in got.splitlines() if line.startswith("<<")] == [
+        f"<<UNSUPPORTED-COMPONENT:{name}>>" for name in names
+    ], "one marker per components entry, in document order"
+    assert_boundary_witness(want, got, "stc-go", "<<UNSUPPORTED-COMPONENT:Consumer>>")
+
+
+def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, reference,
+                                                                tmp_path):
+    """The boundary of the rule above, so it is not read as wider than it is.
+
+    The reference's PURE typed-core path routes PAST the components of a
+    document that also carries top-level declarations and emits ordinary Go for
+    those alone. That drop is the reference's own answer for the document, not a
+    gap in this port, and the two sides agree byte-for-byte over it -- 38
+    documents in the tree are in exactly that state. A marker here would name
+    nothing real and would turn every one of them into a divergence.
+    """
+    path = tmp_path / "incidental.rvl"
+    path.write_text("fn f() -> Int { return 1 }\n"
+                    "service S { fn g() -> Int }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-COMPONENT" not in got
+    assert got == want
+
+
+def test_the_stream_diversion_with_top_level_declarations_stays_silent(emitted,
+                                                                       reference):
+    """The recorded residual of the rule, kept visible rather than in prose.
+
+    `has_top_level` is the half of the reference's routing predicate this port
+    can state without branching on a component STEP. The other half is item
+    130's stream diversion: a document that holds a stream is sent to the live
+    stc-go path even when it carries top-level declarations, which a typed-event
+    program always does (the event's record declaration is what puts a `types`
+    entry in the document). Mirroring it would mean reading the `subscribe` /
+    `stream-iter` discriminants, and tools/selfhost_coverage.py takes a port's
+    construct table straight off those spellings -- reading one here would move
+    `subscribe=<true>` and `step=stream-iter` out of the go tier's `unported`
+    baseline in tests/fixtures/selfhost_blind_spots.json and claim a port of the
+    stream lowering this slice does not have.
+
+    Three documents in the tree are in that state; this is the go one. When a
+    later slice closes it, this test fails -- delete it, and say so.
+    """
+    ir = compile_files([str(ROOT / "backends" / "go" / "testdata"
+                            / "stream_event_130.rvl")])
+    assert ir["components"] and ir["types"], (
+        "the residual is the stream document that ALSO declares a type"
+    )
+    got = emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-COMPONENT" not in got, (
+        "the stream diversion is carried now: delete this test and widen "
+        "`has_top_level`'s comment in selfhost/emit_go.rvl"
+    )
+
+
 def test_record_update_is_a_reference_refusal(reference, tmp_path):
     path = tmp_path / "record_update.rvl"
     path.write_text("type R = { x: Int }\nfn f(r: R) -> R { return {r | x = 2} }")
