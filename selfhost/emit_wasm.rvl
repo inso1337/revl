@@ -2215,6 +2215,29 @@ fn type_comments(rectypes: Any) -> List[Str] {
   return out
 }
 
+// `_unsupported_comments`: the reference's one loud line about the externs this
+// tier cannot carry. An extern DECLARED in the document with no `@wasm` body is
+// not emitted here and is not callable here, and the reference names it rather
+// than dropping it on the floor. The content of this line is itself a REFUSAL,
+// so a port that stayed silent would turn a stated refusal into silence, which
+// is the one direction the byte-agreement oracle exists to rule out. Bodyless
+// externs are listed in document order, comma-joined, exactly as the reference
+// builds the sentence.
+fn extern_has_wasm_body(ext: Any) -> Bool {
+  return value_kind(value_field(value_field(ext, "bodies"), "wasm")) == "str"
+}
+
+fn unsupported_comments(ir: Any) -> List[Str] {
+  var names = []
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (!extern_has_wasm_body(ext)) {
+      names = names.push(value_str(value_field(ext, "name")))
+    }
+  }
+  if (names.length() == 0) { return [] }
+  return [`  ;; unsupported on this tier: externs ${names.join(", ")} (no @wasm body)`]
+}
+
 // ------------------------------------------------- item 432(b): the dead sweep
 // The reference emits the whole helper preamble and then drops every function
 // no export can reach (`prune_unreachable_funcs`). The preamble here is one
@@ -2304,9 +2327,12 @@ fn prune_preamble(pre: Str, rendered: Str) -> Str {
 // The document assembly for a FUNCTION-ONLY v3 document (`emit` -> `_emit_v3` ->
 // `_V3Emitter.emit`, subset): banner, `(module`, the exported memory, the pooled
 // string `data` segments, the hp global at the 8-aligned heap start, the helper
-// preamble, the record/variant layout comments, then each function block blank-
-// line separated, then `)`; joined with newlines and closed with one trailing
-// newline. No extern/test blocks in-subset, so those reference sections are empty.
+// preamble, the record/variant layout comments, the unsupported-externs line,
+// then each function block blank-line separated, then `)`; joined with newlines
+// and closed with one trailing newline. A `@wasm`-bodied extern and a `test`
+// block are out of subset, so those two reference sections stay empty; a
+// BODYLESS extern is in, because the reference's answer to one is a comment
+// rather than a function (`unsupported_comments`).
 // ------------------------------------------ the deferred in-file test section
 // In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
 // every self-host emitter slice. The reference emits a driver section for it;
@@ -2383,6 +2409,7 @@ pub fn emit_wasm_src(ir: Any) -> Str {
   let pruned = prune_preamble(helper_preamble(), blocks.join(newline()))
   if (pruned != "") { lines = lines.push(pruned) }
   for (c of type_comments(rectypes)) { lines = lines.push(c) }
+  for (c of unsupported_comments(ir)) { lines = lines.push(c) }
   if (functions.length() > 0) { lines = lines.push("") }
   for (b of blocks) {
     lines = lines.push(b)

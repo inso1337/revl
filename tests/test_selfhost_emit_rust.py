@@ -221,6 +221,30 @@ CORPUS = [
     # method is dispatched instead of the smart-pointer method. Byte-identical
     # across the reference and the self-host emitter.
     "smart_ptr_methods.rvl",
+    # issue 1153 — the host-object and realm-placement corners. Neither shape
+    # had a corpus document, so `#1149`'s 34/34 byte-agreement measurement was
+    # VACUOUS on both: `emit_host_stubs` returned `[]` and the oracle agreed,
+    # because nothing it compiled ever declared a host object, and the realm
+    # placement match only ever emitted its `_ => ctx.clone()` fallthrough. An
+    # oracle catches divergence, not absence (the same family as #1148's
+    # transparent alias and #275's missing externs section).
+    "comp_host_map.rvl",     # `let cache = effect Map.new() undo cache.drop()`:
+                             #   the R1 live-resource counter, the `Map<V>` host
+                             #   runtime, the `Arc<Map<V>>` provider field, the
+                             #   `let-effect` acquisition prelude and its
+                             #   `ctx.effect` inverse, and the host-Map call
+                             #   convention (`get`/`remove` borrow the key)
+    "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
+                             #   `_revl_realm` label-registry preamble and the
+                             #   `ctx.isolate_with(..)` placement arm
+    "comp_body_steps.rvl",   # the activation-body steps other than `provide`:
+                             #   the bare `effect`/`undo` bracket over a required
+                             #   service, the fire-and-forget `emit`, and the
+                             #   `if`/`else` guard whose arms `fail`. Before this
+                             #   document every one of those arms emitted a
+                             #   `<<DEFER-comp-step>>` marker and the oracle
+                             #   agreed, because no corpus document had a
+                             #   component body step that was not a provision.
 ]
 
 

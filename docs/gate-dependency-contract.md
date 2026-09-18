@@ -276,16 +276,22 @@ redeclaration on the compatibility relation the type layer decides, so a
 redeclaration is withheld here while a fresh interface is admitted.
 
 The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
-header followed by one `:S` row per declared service, which `revl.manifest_wire`
-renders from a compiled composition. The header is the load-bearing half. A wire
-without it CLAIMS NOTHING about the running services, so the set is unknown
-rather than empty and any declared service is withheld, exactly as before the
-block existed: silence is never read as "declares nothing". Two things the block
-does not buy. A redeclaration stays withheld, because the block carries the
-service name and not its shape. And a wire carrying a WITHDRAWAL row (`-C`, the
-replacement wave) is declined outright: the fold decides a withdrawal in full,
-and re-deriving which provisions survive it on this side would be a second
-implementation of that reasoning.
+header followed by one `:S,op,op` row per declared service, carrying its name
+and the operations it declares, which `revl.manifest_wire` renders from a
+compiled composition. The header is the load-bearing half. A wire without it
+CLAIMS NOTHING about the running services, so the set is unknown rather than
+empty and any declared service is withheld, exactly as before the block existed:
+silence is never read as "declares nothing". The operation list is the same claim
+one level down, and it is what lets the fold resolve a candidate's call through
+`requires k: S` against the RUNNING declaration and refuse a call to an operation
+that service does not declare; a `:S` row with no list says nothing about the
+surface and decides no member. Two things the block does not buy. A
+redeclaration stays withheld, because the block carries the service's operation
+names and not their signatures, and the compatibility relation is decided on
+those. And a wire carrying a WITHDRAWAL row (`-C`, the replacement wave) is
+declined outright: the fold decides a withdrawal in full, and re-deriving which
+provisions survive it on this side would be a second implementation of that
+reasoning.
 
 Two obligations for a consumer of an admission, both from the ASYMMETRIC clause:
 an admission is a compile-time judgment scoped to `gate_version().frontier` and

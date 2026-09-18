@@ -964,6 +964,20 @@ fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
   return rendered.concat(".clone()")
 }
 
+// `_by_value_reuse`: the clone for a position that moves ONLY on reuse — a
+// host/builtin method argument. The reference clones a binding the body READS
+// AGAIN (`ctx.multi_use`), and `multi_use` is populated in exactly one place:
+// the free-function pass. A component's `_V3Ctx` is a fresh object, so at the
+// component surface — the only surface this port calls it from — `multi_use` is
+// empty, the Copy test is unreachable, and the only live arm is the borrowed
+// `&str` param safety net.
+fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let name = ref_name(arg_node)
+  if (name == "") { return rendered }
+  if (ctx.bp.has(name)) { return rendered.concat(".to_string()") }
+  return rendered
+}
+
 fn str_readonly_arg_builtin(method: Str) -> Bool {
   return method == "concat" || method == "indexOf" || method == "split" || method == "join" || method == "startsWith" || method == "endsWith"
 }
@@ -1380,10 +1394,11 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
 }
 
 // The component-form call `target.method(args)` (no `callee`): a service call
-// through a `req`, or a receiver-expression method call. Host-Map receivers
-// (`get`/`remove` key-borrow, `insert` no-clone) are DEFERRED — the covered
-// subset declares no host `Map` binding, so `recv_ty` never starts with `Map[`
-// and every argument takes the by-value service-call clone.
+// through a `req`, or a receiver-expression method call. A host-Map receiver
+// (`recv_ty` starting `Map[`) takes the FR-4 convention instead of the
+// service-call clone: `get`/`remove` BORROW the key, so a component that reads
+// then writes the same key keeps owning it, and every other verb moves its
+// value in under the reuse rule (issue 1153).
 fn render_component_call(node: Any, ctx: Ctx) -> Str {
   let target = value_field(node, "target")
   let method = mangle(mname(value_str(value_field(node, "method"))))
@@ -1395,12 +1410,26 @@ fn render_component_call(node: Any, ctx: Ctx) -> Str {
   if (tkind == "req") { tname = value_str(value_field(target, "name")) }
   else { tname = ref_name(target) }
   let recv_ty = map_get(ctx.vt, tname)
-  if (recv_ty.startsWith("Map[")) { return `<<DEFER-host-map-call:${method}>>` }
+  let raw_method = value_str(value_field(node, "method"))
   var bv = []
   var i = 0
-  while (i < arg_nodes.length()) {
-    bv = bv.push(by_value_arg(arg_nodes[i], arg_exprs[i], ctx))
-    i = i + 1
+  if (recv_ty.startsWith("Map[") && (raw_method == "get" || raw_method == "remove")) {
+    while (i < arg_exprs.length()) {
+      if (i == 0) { bv = bv.push(`&${arg_exprs[0]}`) } else { bv = bv.push(arg_exprs[i]) }
+      i = i + 1
+    }
+  } else {
+    if (recv_ty.startsWith("Map[")) {
+      while (i < arg_nodes.length()) {
+        bv = bv.push(by_value_reuse(arg_nodes[i], arg_exprs[i], ctx))
+        i = i + 1
+      }
+    } else {
+      while (i < arg_nodes.length()) {
+        bv = bv.push(by_value_arg(arg_nodes[i], arg_exprs[i], ctx))
+        i = i + 1
+      }
+    }
   }
   var recv = ""
   if (tkind == "req") {
@@ -2052,11 +2081,399 @@ fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
   return out
 }
 
-// `_emit_host_stubs`: DEFERRED. The reference emits `Map`/`Pool`/`Job` stubs and
-// an R1 live-resource counter only when the document USES a `host` object (or a
-// lifecycle test / timer). The covered subset declares none, so this is [] —
-// exactly what the reference returns for a host-object-free document.
-fn emit_host_stubs(ir: Any) -> List[Str] { return [] }
+// ------------------------------------------------- host objects (issue 1153)
+// `_emit_host_stubs`: the minimal revl host runtime for the objects THIS
+// document uses. `Map` is a real `String -> V` map, `Pool` a bounded connection
+// pool over a deterministic in-memory database, `Job` a cancellable future.
+// None of them panic with `todo!()`; Pool/Job semantics are normative and
+// shared across tiers (backends/python/runtime.py, `.. _pool-job-semantics:`).
+//
+// Until issue 1153 this returned `[]` with the note that "the covered subset
+// declares none" — true only because no corpus document declared a host
+// object, so the byte oracle agreed VACUOUSLY on the whole surface. The stream
+// host runtime is the one block still DEFERRED, and it is REPORTED: a document
+// that reaches it fires a `<<DEFER-stream-host>>` marker rather than silently
+// emitting a crate with no stream runtime in it.
+//
+// Each block below is a verbatim transcription of the reference's literal line
+// list; the only computed part is which blocks ride along.
+fn host_counter_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// R1 live-resource counter (lifecycle `assert no_residue`).")
+  o = o.push("/// Thread-local because `cargo test` runs tests on parallel")
+  o = o.push("/// threads: each test must observe only its own acquisitions.")
+  o = o.push("thread_local! {")
+  o = o.push("    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {")
+  o = o.push("        std::cell::Cell::new(0)")
+  o = o.push("    };")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+fn host_map_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// revl host object: a small thread-safe map with String keys.")
+  o = o.push("/// The value type is generic — each site's `Map.new()` pins `V`")
+  o = o.push("/// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).")
+  o = o.push("pub struct Map<V> {")
+  o = o.push("    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,")
+  o = o.push("}")
+  o = o.push("impl<V> Map<V> {")
+  o = o.push("    pub fn new() -> Self {")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));")
+  o = o.push("        Self {")
+  o = o.push("            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    pub fn drop_(&self) {")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));")
+  o = o.push("        self.inner.lock().unwrap().clear();")
+  o = o.push("    }")
+  o = o.push("    pub fn insert(&self, key: String, value: V) {")
+  o = o.push("        self.inner.lock().unwrap().insert(key, value);")
+  o = o.push("    }")
+  o = o.push("    // The atomic compare-and-set (item 397). ONE `lock()` spans the")
+  o = o.push("    // membership test AND the insert via the entry API, so no thread")
+  o = o.push("    // can witness the probe and the write as separable steps. Returns")
+  o = o.push("    // whether it inserted; a `false` (key present) leaves the existing")
+  o = o.push("    // value untouched. Under N concurrent callers, exactly one `true`.")
+  o = o.push("    pub fn insert_if_absent(&self, key: String, value: V) -> bool {")
+  o = o.push("        use std::collections::hash_map::Entry;")
+  o = o.push("        match self.inner.lock().unwrap().entry(key) {")
+  o = o.push("            Entry::Occupied(_) => false,")
+  o = o.push("            Entry::Vacant(e) => { e.insert(value); true }")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    pub fn remove(&self, key: &String) {")
+  o = o.push("        self.inner.lock().unwrap().remove(key);")
+  o = o.push("    }")
+  o = o.push("    // Iteration surface (docs/stdlib-2.0.md §Map): the checker")
+  o = o.push("    // promises `size()`/`keys()` on a host `Map.new()` receiver, and")
+  o = o.push("    // emit lowers both as method calls on this object. `size` is the")
+  o = o.push("    // entry count; `keys` yields the keys in ascending canonical Str")
+  o = o.push("    // order — Rust's `String: Ord` is byte-wise over UTF-8, which is")
+  o = o.push("    // exactly code-point order, so a plain sort is canonical. Both are")
+  o = o.push("    // read-only queries, no host trace.")
+  o = o.push("    pub fn size(&self) -> i64 {")
+  o = o.push("        self.inner.lock().unwrap().len() as i64")
+  o = o.push("    }")
+  o = o.push("    pub fn keys(&self) -> Vec<String> {")
+  o = o.push("        let mut ks: Vec<String> =")
+  o = o.push("            self.inner.lock().unwrap().keys().cloned().collect();")
+  o = o.push("        ks.sort();")
+  o = o.push("        ks")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("impl<V: Clone> Map<V> {")
+  o = o.push("    // The key is borrowed, not moved: a component that reads then")
+  o = o.push("    // writes the same key (the session ledger) keeps owning it.")
+  o = o.push("    pub fn get(&self, key: &String) -> Option<V> {")
+  o = o.push("        self.inner.lock().unwrap().get(key).cloned()")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+fn host_pool_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// revl host object: a bounded connection pool over a deterministic")
+  o = o.push("/// in-memory database (no driver dependency).  Semantics are shared")
+  o = o.push("/// across tiers — backends/python/runtime.py, `.. _pool-job-semantics:`:")
+  o = o.push("/// `size` connections numbered 1..size, acquire/release accounting,")
+  o = o.push("/// statements borrow a connection for their duration, `close` releases")
+  o = o.push("/// everything, and exhaustion / use-after-close panic.")
+  o = o.push("pub struct Pool {")
+  o = o.push("    url: String,")
+  o = o.push("    size: i64,")
+  o = o.push("    state: std::sync::Mutex<PoolState>,")
+  o = o.push("}")
+  o = o.push("struct PoolState {")
+  o = o.push("    idle: Vec<i64>,")
+  o = o.push("    in_use: Vec<i64>,")
+  o = o.push("    closed: bool,")
+  o = o.push("}")
+  o = o.push("impl Pool {")
+  o = o.push("    pub fn open(url: String, size: i64) -> Self {")
+  o = o.push("        if size < 1 {")
+  o = o.push("            panic!(\"pool size must be an integer >= 1 (got {})\", size);")
+  o = o.push("        }")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));")
+  o = o.push("        Self {")
+  o = o.push("            url,")
+  o = o.push("            size,")
+  o = o.push("            state: std::sync::Mutex::new(PoolState {")
+  o = o.push("                idle: (1..=size).collect(),")
+  o = o.push("                in_use: Vec::new(),")
+  o = o.push("                closed: false,")
+  o = o.push("            }),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    pub fn url(&self) -> String {")
+  o = o.push("        self.url.clone()")
+  o = o.push("    }")
+  o = o.push("    pub fn capacity(&self) -> i64 {")
+  o = o.push("        if self.state.lock().unwrap().closed { 0i64 } else { self.size }")
+  o = o.push("    }")
+  o = o.push("    pub fn in_use(&self) -> i64 {")
+  o = o.push("        self.state.lock().unwrap().in_use.len() as i64")
+  o = o.push("    }")
+  o = o.push("    pub fn available(&self) -> i64 {")
+  o = o.push("        self.state.lock().unwrap().idle.len() as i64")
+  o = o.push("    }")
+  o = o.push("    // NB: never panic while the guard is held — a panic under the")
+  o = o.push("    // lock poisons the Mutex, and every later call would then fail")
+  o = o.push("    // with a PoisonError instead of the intended message (which is")
+  o = o.push("    // not what the other tiers do: there the pool stays usable).")
+  o = o.push("    fn borrow_conn(&self, op: &str) -> i64 {")
+  o = o.push("        let outcome = {")
+  o = o.push("            let mut state = self.state.lock().unwrap();")
+  o = o.push("            if state.closed {")
+  o = o.push("                Err(format!(\"pool.{} after close/drop — use-after-free\", op))")
+  o = o.push("            } else if state.idle.is_empty() {")
+  o = o.push("                Err(format!(")
+  o = o.push("                    \"pool.{} exhausted (size={}, in_use={})\",")
+  o = o.push("                    op,")
+  o = o.push("                    self.size,")
+  o = o.push("                    state.in_use.len()")
+  o = o.push("                ))")
+  o = o.push("            } else {")
+  o = o.push("                let conn = state.idle.remove(0);")
+  o = o.push("                state.in_use.push(conn);")
+  o = o.push("                Ok(conn)")
+  o = o.push("            }")
+  o = o.push("        };")
+  o = o.push("        match outcome {")
+  o = o.push("            Ok(conn) => conn,")
+  o = o.push("            Err(message) => panic!(\"{}\", message),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    fn give_back(&self, conn: i64) {")
+  o = o.push("        let mut state = self.state.lock().unwrap();")
+  o = o.push("        if let Some(pos) = state.in_use.iter().position(|c| *c == conn) {")
+  o = o.push("            state.in_use.remove(pos);")
+  o = o.push("        }")
+  o = o.push("        state.idle.push(conn);")
+  o = o.push("        state.idle.sort_unstable();")
+  o = o.push("    }")
+  o = o.push("    pub fn acquire(&self) -> i64 {")
+  o = o.push("        self.borrow_conn(\"acquire\")")
+  o = o.push("    }")
+  o = o.push("    pub fn release(&self, conn: i64) {")
+  o = o.push("        let outcome = {")
+  o = o.push("            let state = self.state.lock().unwrap();")
+  o = o.push("            if state.closed {")
+  o = o.push("                Err(String::from(\"pool.release after close/drop — use-after-free\"))")
+  o = o.push("            } else if !state.in_use.contains(&conn) {")
+  o = o.push("                Err(format!(\"pool.release conn={} is not checked out\", conn))")
+  o = o.push("            } else {")
+  o = o.push("                Ok(())")
+  o = o.push("            }")
+  o = o.push("        };")
+  o = o.push("        if let Err(message) = outcome {")
+  o = o.push("            panic!(\"{}\", message);")
+  o = o.push("        }")
+  o = o.push("        self.give_back(conn);")
+  o = o.push("    }")
+  o = o.push("    pub fn close(&self) {")
+  o = o.push("        let already_closed = {")
+  o = o.push("            let mut state = self.state.lock().unwrap();")
+  o = o.push("            if state.closed {")
+  o = o.push("                true")
+  o = o.push("            } else {")
+  o = o.push("                state.in_use.clear();")
+  o = o.push("                state.idle.clear();")
+  o = o.push("                state.closed = true;")
+  o = o.push("                false")
+  o = o.push("            }")
+  o = o.push("        };")
+  o = o.push("        if already_closed {")
+  o = o.push("            panic!(\"pool.close after close/drop — use-after-free\");")
+  o = o.push("        }")
+  o = o.push("        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));")
+  o = o.push("    }")
+  o = o.push("    pub fn query(&self, _sql: String) -> Vec<Value> {")
+  o = o.push("        let conn = self.borrow_conn(\"query\");")
+  o = o.push("        self.give_back(conn);")
+  o = o.push("        Vec::new()")
+  o = o.push("    }")
+  o = o.push("    pub fn execute(&self, _sql: String) -> i64 {")
+  o = o.push("        let conn = self.borrow_conn(\"execute\");")
+  o = o.push("        self.give_back(conn);")
+  o = o.push("        1i64")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+fn host_job_lines() -> List[Str] {
+  var o = []
+  o = o.push("/// 0 = pending, 1 = done, 2 = cancelled")
+  o = o.push("#[derive(Clone)]")
+  o = o.push("pub struct JobToken(std::sync::Arc<std::sync::atomic::AtomicU8>);")
+  o = o.push("impl JobToken {")
+  o = o.push("    /// pending -> cancelled (true); a no-op returning false otherwise.")
+  o = o.push("    pub fn cancel(&self) -> bool {")
+  o = o.push("        self.0")
+  o = o.push("            .compare_exchange(")
+  o = o.push("                0u8,")
+  o = o.push("                2u8,")
+  o = o.push("                std::sync::atomic::Ordering::SeqCst,")
+  o = o.push("                std::sync::atomic::Ordering::SeqCst,")
+  o = o.push("            )")
+  o = o.push("            .is_ok()")
+  o = o.push("    }")
+  o = o.push("    pub fn state(&self) -> &'static str {")
+  o = o.push("        match self.0.load(std::sync::atomic::Ordering::SeqCst) {")
+  o = o.push("            1u8 => \"done\",")
+  o = o.push("            2u8 => \"cancelled\",")
+  o = o.push("            _ => \"pending\",")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("pub struct JobHandle {")
+  o = o.push("    name: String,")
+  o = o.push("    remaining: u32,")
+  o = o.push("    state: std::sync::Arc<std::sync::atomic::AtomicU8>,")
+  o = o.push("}")
+  o = o.push("impl JobHandle {")
+  o = o.push("    pub fn name(&self) -> String {")
+  o = o.push("        self.name.clone()")
+  o = o.push("    }")
+  o = o.push("    pub fn token(&self) -> JobToken {")
+  o = o.push("        JobToken(self.state.clone())")
+  o = o.push("    }")
+  o = o.push("    pub fn state(&self) -> &'static str {")
+  o = o.push("        self.token().state()")
+  o = o.push("    }")
+  o = o.push("    pub fn cancel(&self) -> bool {")
+  o = o.push("        self.token().cancel()")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("impl std::future::Future for JobHandle {")
+  o = o.push("    type Output = String;")
+  o = o.push("    fn poll(")
+  o = o.push("        self: std::pin::Pin<&mut Self>,")
+  o = o.push("        cx: &mut std::task::Context<'_>,")
+  o = o.push("    ) -> std::task::Poll<String> {")
+  o = o.push("        let this = self.get_mut();")
+  o = o.push("        match this.state.load(std::sync::atomic::Ordering::SeqCst) {")
+  o = o.push("            1u8 => return std::task::Poll::Ready(this.name.clone()),")
+  o = o.push("            2u8 => panic!(\"job \\\"{}\\\" cancelled\", this.name),")
+  o = o.push("            _ => {}")
+  o = o.push("        }")
+  o = o.push("        if this.remaining == 0u32 {")
+  o = o.push("            this.state")
+  o = o.push("                .store(1u8, std::sync::atomic::Ordering::SeqCst);")
+  o = o.push("            return std::task::Poll::Ready(this.name.clone());")
+  o = o.push("        }")
+  o = o.push("        this.remaining -= 1u32;")
+  o = o.push("        cx.waker().wake_by_ref();")
+  o = o.push("        std::task::Poll::Pending")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("impl Job {")
+  o = o.push("    /// scheduler turns of simulated work (same number on every tier)")
+  o = o.push("    pub const TICKS: u32 = 5u32;")
+  o = o.push("    /// Schedule a cancellable job.  The handle is the future; take")
+  o = o.push("    /// `handle.token()` first if you need to cancel it from elsewhere.")
+  o = o.push("    pub fn spawn(name: String) -> JobHandle {")
+  o = o.push("        JobHandle {")
+  o = o.push("            name,")
+  o = o.push("            remaining: Self::TICKS,")
+  o = o.push("            state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0u8)),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    /// Run a job to completion — the `await Job.run(name)` form emitted")
+  o = o.push("    /// code uses.  On this path a divert cancels by dropping the future;")
+  o = o.push("    /// use `spawn` when the host needs an explicit cancellation token.")
+  o = o.push("    pub async fn run(name: String) -> String {")
+  o = o.push("        Self::spawn(name).await")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// Which host roots this document uses: the `fn` prefix of every `host` node
+// anywhere in the components/functions/tests/types subtrees.
+fn collect_host_roots(node: Any, acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    if (value_str(value_field(node, "kind")) == "host") {
+      m = m.set(value_str(value_field(node, "fn")).split(".")[0], "1")
+    }
+  }
+  for (child of value_children(node)) { m = collect_host_roots(child, m) }
+  return m
+}
+
+fn host_roots_used(ir: Any) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  m = collect_host_roots(value_field(ir, "components"), m)
+  m = collect_host_roots(value_field(ir, "functions"), m)
+  m = collect_host_roots(value_field(ir, "tests"), m)
+  m = collect_host_roots(value_field(ir, "types"), m)
+  return m
+}
+
+// `_uses_timer`: a timer takes a live-resource slot on arming (its schedule /
+// cancel pair joins the same R1 accounting), so it pulls the counter in even
+// with no host object. Nested `if` arms count.
+fn steps_use_timer(steps: List[Any]) -> Bool {
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "timer") { return true }
+    if (k == "if") {
+      if (steps_use_timer(value_list(value_field(s, "then")))) { return true }
+      if (steps_use_timer(value_list(value_field(s, "else")))) { return true }
+    }
+  }
+  return false
+}
+fn uses_timer(components: List[Any]) -> Bool {
+  for (c of components) {
+    if (steps_use_timer(value_list(value_field(c, "body")))) { return true }
+  }
+  return false
+}
+
+// `_uses_stream_event`: an `on <Event> as .. in <sub>` handler is the only
+// thing that needs the typed-event contract, and the contract traces through
+// the stream host runtime. A plain `every .. in` program carries no `event`.
+fn uses_stream_event(ir: Any) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    for (step of value_list(value_field(comp, "body"))) {
+      if (value_str(value_field(step, "step")) == "stream-iter"
+          && !value_is_null(value_field(step, "event"))) { return true }
+    }
+  }
+  return false
+}
+
+fn emit_host_stubs(ir: Any) -> List[Str] {
+  let used = host_roots_used(ir)
+  var lifecycle = false
+  for (t of value_list(value_field(ir, "tests"))) {
+    if (value_bool(value_field(t, "lifecycle"))) { lifecycle = true }
+  }
+  let timer = uses_timer(value_list(value_field(ir, "components")))
+  var out = []
+  if (used.has("Map") || used.has("Pool") || used.has("Stream") || lifecycle || timer) {
+    out = out.concat(host_counter_lines())
+  }
+  if (used.has("Map")) { out = out.concat(host_map_lines()) }
+  if (used.has("Pool")) { out = out.concat(host_pool_lines()) }
+  if (used.has("Job")) { out = out.concat(host_job_lines()) }
+  // The `Stream[T]` runtime (item 130) is the one host block not ported: it is
+  // ~750 lines of literal Rust plus a second typed-event block. REPORTED, so a
+  // document that reaches it diverges loudly instead of quietly emitting a
+  // crate with no stream runtime.
+  if (used.has("Stream") || uses_stream_event(ir)) { out = out.push("<<DEFER-stream-host>>") }
+  return out
+}
 
 // The provide-step methods for a provision `key` (`_provision_methods`): the
 // `provide` body step whose `name` matches, else `[]`.
@@ -2123,10 +2540,7 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
 }
 
 // ------------------------------------------------------------ config (item 218)
-// `_binds`: the `let-effect` bind names (host acquisitions). Host bindings
-// themselves are DEFERRED; this only reports their names so a component that
-// declares one surfaces a `<<DEFER-bind-field>>` marker rather than silently
-// dropping a struct field.
+// `_binds`: the `let-effect` bind names (host acquisitions), document order.
 fn binds(comp: Any) -> List[Str] {
   var out = []
   for (s of value_list(value_field(comp, "body"))) {
@@ -2134,6 +2548,264 @@ fn binds(comp: Any) -> List[Str] {
   }
   return out
 }
+// ------------------------------------------ FR-4 host Map value type (1153)
+// The host `Map` is generic over its value type, and the frontend types a map
+// by that parameter — every `store.insert(k, v)` names it — so the emitter
+// carries it into the `Map<V>` it emits: a provider-struct field becomes
+// `Arc<Map<Vec<Msg>>>` and the acquisition `Map::<Vec<Msg>>::new()`. This is a
+// tiny oracle over the shapes an `insert` value takes in practice; anything it
+// cannot prove stays "" and the emitter falls back to `String`, the historical
+// surface, so a String-valued map keeps emitting byte-identically.
+//
+// A bare renderer context over the document's type tables: what the inference
+// below needs (`rbf`, for a record literal's nominal type) and what the
+// activation-body steps render against.
+// The context an ACTIVATION-BODY step renders against. The reference reaches
+// this point with `var_types` still holding the last provide method's table,
+// whose load-bearing half is the host-Map bind markers — what tells the
+// renderer a `get`/`remove` key is borrowed. Those are seeded here explicitly
+// rather than left to the order the reference happens to run in.
+fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, Str]) -> Ctx {
+  var c = plain_ctx(tables, fr)
+  for (b of map_values.keys()) { c = set_vt(c, b, `Map[${map_get(map_values, b)}]`) }
+  return c
+}
+
+fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
+  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
+}
+
+// `_map_value_expr_type`: best-effort SURFACE type of an expression. "" is the
+// reference's `None`.
+fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services: Any,
+                       functions: List[Any], ctx: Ctx) -> Str {
+  if (value_kind(node) != "record") { return "" }
+  let kind = node_kind(node)
+  if (kind == "name" || kind == "var") {
+    var nm = value_str(value_field(node, "id"))
+    if (nm == "") { nm = value_str(value_field(node, "name")) }
+    return map_get(var_types, nm)
+  }
+  if (kind == "lit") {
+    let k = value_kind(value_field(node, "value"))
+    if (k == "bool") { return "Bool" }
+    if (k == "int") { return "Int" }
+    if (k == "float") { return "Float" }
+    if (k == "str") { return "Str" }
+    return ""
+  }
+  if (kind == "format" || kind == "interp") { return "Str" }
+  if (kind == "list") {
+    let items = value_list(value_field(node, "items"))
+    if (items.length() == 0) { return "" }
+    let first = map_value_expr_type(items[0], var_types, comp, services, functions, ctx)
+    if (first == "") { return "" }
+    return `List[${first}]`
+  }
+  if (kind == "builtin") {
+    let method = value_str(value_field(node, "method"))
+    let args = value_list(value_field(node, "args"))
+    // `push` returns the receiver list extended by its argument, so the result
+    // element type is the argument's even when the receiver is untyped.
+    if (method == "push" && args.length() > 0) {
+      let elem = map_value_expr_type(args[0], var_types, comp, services, functions, ctx)
+      if (elem != "") { return `List[${elem}]` }
+    }
+    if (method == "length" || method == "charCodeAt" || method == "codepoint_at"
+        || method == "indexOf" || method == "to_int") { return "Int" }
+    if (method == "charAt" || method == "join" || method == "repeat"
+        || method == "to_str" || method == "slice") { return "Str" }
+    if (method == "split") { return "List[Str]" }
+    if (method == "concat") {
+      return map_value_expr_type(value_field(node, "target"), var_types, comp, services, functions, ctx)
+    }
+    return ""
+  }
+  if (kind == "fn") {
+    let nm = value_str(value_field(node, "name"))
+    for (f of functions) {
+      if (value_str(value_field(f, "name")) == nm) {
+        let r = value_field(f, "returns")
+        if (value_is_null(r)) { return "" }
+        return value_str(r)
+      }
+    }
+    return ""
+  }
+  if (kind == "call") {
+    let target = value_field(node, "target")
+    if (node_kind(target) == "req") {
+      let svc = map_get(reqs_map(comp), value_str(value_field(target, "name")))
+      if (svc != "" && !value_is_null(value_field(services, svc))) {
+        let decl = value_field(value_field(value_field(services, svc), "methods"),
+                               value_str(value_field(node, "method")))
+        let r = value_field(decl, "returns")
+        if (value_is_null(r)) { return "" }
+        return value_str(r)
+      }
+    }
+    return ""
+  }
+  if (kind == "record") {
+    var names = []
+    for (f of value_list(value_field(node, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+    let tn = record_type_for_fields(ctx, names)
+    // the reference RAISES on no-unique-match and treats that as "unknown"
+    if (tn.startsWith("<<")) { return "" }
+    return tn
+  }
+  // a lowered ADT construction carries its type on the node
+  if (kind == "adt") { return value_str(value_field(node, "type")) }
+  if (kind == "bin" && node_op(node) == "??") {
+    // `a ?? b` with an unknown left (a host `get`) is circular — the map value
+    // type is exactly what we are learning; use the right side only when it
+    // types concretely (a literal fallback).
+    let right = map_value_expr_type(value_field(node, "right"), var_types, comp, services, functions, ctx)
+    if (right != "" && right.indexOf("Never") < 0) { return right }
+    return ""
+  }
+  return ""
+}
+
+// Map verbs that write a value at arg[1]; each pins the host Map's value type.
+// Inferring from ANY writer (not the literal name `insert`) lets a CAS-only
+// writer pin a concrete V instead of the String default (item 397 / item 402).
+fn is_map_value_writer(method: Str) -> Bool {
+  return method == "insert" || method == "insert_if_absent"
+}
+// The compare-and-set host verb whose bound result is a `bool`.
+fn is_map_cas(acq: Any) -> Bool {
+  return node_kind(acq) == "call" && is_map_cas_verb(value_str(value_field(acq, "method")))
+}
+fn is_map_cas_verb(method: Str) -> Bool { return method == "insert_if_absent" }
+
+// `_map_expr_inserts`: candidate value types from any map value-writing call on
+// `bind` anywhere in an expression.
+fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
+                    functions: List[Any], ctx: Ctx, acc: List[Str]) -> List[Str] {
+  if (value_kind(node) != "record" && value_kind(node) != "list") { return acc }
+  var out = acc
+  if (value_kind(node) == "record" && node_kind(node) == "call") {
+    let target = value_field(node, "target")
+    if (node_kind(target) == "name" && value_str(value_field(target, "id")) == bind
+        && is_map_value_writer(value_str(value_field(node, "method")))) {
+      let args = value_list(value_field(node, "args"))
+      if (args.length() >= 2) {
+        let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx)
+        if (t != "" && t.indexOf("Never") < 0) { out = out.push(t) }
+      }
+    }
+    for (a of value_list(value_field(node, "args"))) {
+      out = map_expr_inserts(a, bind, var_types, comp, services, functions, ctx, out)
+    }
+    return map_expr_inserts(target, bind, var_types, comp, services, functions, ctx, out)
+  }
+  for (child of value_children(node)) {
+    out = map_expr_inserts(child, bind, var_types, comp, services, functions, ctx, out)
+  }
+  return out
+}
+
+// `_map_insert_candidates`: walk one body step for writes on `bind`.
+fn map_insert_candidates(step: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
+                         functions: List[Any], ctx: Ctx, acc: List[Str]) -> List[Str] {
+  var out = acc
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "effect" || kind == "let-effect") {
+    out = map_expr_inserts(value_field(step, "acquire"), bind, var_types, comp, services, functions, ctx, out)
+    out = map_expr_inserts(value_field(step, "undo"), bind, var_types, comp, services, functions, ctx, out)
+    for (nested of value_list(value_field(step, "setup"))) {
+      out = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, out)
+    }
+    return out
+  }
+  if (kind == "let" || kind == "assign") {
+    return map_expr_inserts(value_field(step, "value"), bind, var_types, comp, services, functions, ctx, out)
+  }
+  if (kind == "return") {
+    return map_expr_inserts(value_field(step, "expr"), bind, var_types, comp, services, functions, ctx, out)
+  }
+  if (kind == "if") {
+    for (nested of value_list(value_field(step, "then"))) {
+      out = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, out)
+    }
+    for (nested of value_list(value_field(step, "else"))) {
+      out = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, out)
+    }
+  }
+  return out
+}
+
+// `_map_value_rust_type`: the surface value type of a host Map binding, learned
+// from its write sites across the whole component (activation body + every
+// provide method). "" when no site pins one. A genuinely mixed map cannot be
+// one revl `Map[Str, V]`; the FIRST concrete candidate in document order is
+// deterministic, and a real conflict surfaces loudly in rustc at the write.
+fn map_value_surface_type(comp: Any, bind: Str, services: Any, functions: List[Any], ctx: Ctx) -> Str {
+  var cands = []
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) == "provide") {
+      let svc = value_field(services, value_str(value_field(step, "service")))
+      if (!value_is_null(svc)) {
+        for (method of value_list(value_field(step, "methods"))) {
+          let decl = value_field(value_field(svc, "methods"), value_str(value_field(method, "name")))
+          var vt: Map[Str, Str] = Map.empty()
+          for (mp of value_list(value_field(decl, "params"))) {
+            vt = vt.set(value_str(value_field(mp, "name")), value_str(value_field(mp, "type")))
+          }
+          for (bs of value_list(value_field(method, "body"))) {
+            cands = map_insert_candidates(bs, bind, vt, comp, services, functions, ctx, cands)
+          }
+        }
+      }
+    } else {
+      cands = map_insert_candidates(step, bind, Map.empty(), comp, services, functions, ctx, cands)
+    }
+  }
+  if (cands.length() == 0) { return "" }
+  return cands[0]
+}
+
+// `_component_map_values`: bind -> RUST value type for every host Map binding.
+fn component_map_values(comp: Any, services: Any, functions: List[Any], ctx: Ctx,
+                        tnames: Map[Str, Str]) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) != "let-effect") { continue }
+    let acq = value_field(step, "acquire")
+    if (node_kind(acq) != "host") { continue }
+    if (!value_str(value_field(acq, "fn")).startsWith("Map.")) { continue }
+    let bind = value_str(value_field(step, "bind"))
+    let surface = map_value_surface_type(comp, bind, services, functions, ctx)
+    if (surface == "") { out = out.set(bind, "String") }
+    else { out = out.set(bind, rust_type_t(surface, tnames)) }
+  }
+  return out
+}
+
+// `_host_of`: the Rust type a `let-effect` bind holds. A `spawn` acquisition
+// binds a live-instance handle, a result-declared CAS binds the atomic `bool`
+// result, and a host root binds that object — the Map generically, with the
+// value type learned above (defaulting to the historical `String`).
+fn host_of(comp: Any, bind: Str, map_values: Map[Str, Str]) -> Str {
+  for (s of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(s, "step")) == "let-effect" && value_str(value_field(s, "bind")) == bind) {
+      let acq = value_field(s, "acquire")
+      if (value_str(value_field(acq, "kind")) == "spawn") { return "RevlSpawnHandle" }
+      if (is_map_cas(acq)) { return "bool" }
+      var host = value_str(value_field(acq, "fn")).split(".")[0]
+      if (host == "") { host = "Value" }
+      if (host == "Map") { 
+        var v = map_get(map_values, bind)
+        if (v == "") { v = "String" }
+        return `Map<${v}>`
+      }
+      return host
+    }
+  }
+  return "Value"
+}
+
 fn has_config(comp: Any) -> Bool { return value_list(value_field(comp, "config")).length() > 0 }
 
 // `_references_config`: does this IR subtree read component config (a `config`
@@ -2428,7 +3100,7 @@ fn fr_map(ir: Any) -> Map[Str, Str] {
 // applies to method names; the simple path names them raw (mirrors the two
 // reference sites exactly). `effectful` gives the effectful body renderer +
 // the `self.ctx` field capture.
-fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool) -> List[Str] {
+fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool, map_values: Map[Str, Str]) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   let svc_methods = value_field(value_field(services, srv), "methods")
   var out = []
@@ -2439,6 +3111,11 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     let svc_method = value_field(svc_methods, orig)
     var ps = []
     var vt: Map[Str, Str] = Map.empty()
+    // A host Map binding is registered as a `Map[..]` marker so the renderer
+    // knows its `get`/`remove` keys must be borrowed (FR-4). Params are
+    // registered after, so a param shadowing a bind name wins, as it does in
+    // the reference's dict merge.
+    for (b of map_values.keys()) { vt = vt.set(b, `Map[${map_get(map_values, b)}]`) }
     for (pn of value_list(value_field(method, "params"))) {
       let pname = value_str(pn)
       let ptype = service_param_type(svc_method, pname)
@@ -2481,6 +3158,194 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
   return out
 }
 
+// ------------------------------------------------------- realms (issue 1153)
+// `_collect_realm_labels`: every distinct realm-label string the program
+// isolates on, sorted. Sorting makes index assignment a pure function of the
+// label SET, so the same source lowers to the same Isolation values on every
+// build. A router resolves its worker realms by label too (item 167); every
+// such realm normally has a provider and is therefore already collected, but
+// the reference registers them explicitly and so does this.
+fn collect_realm_labels(components: List[Any]) -> List[Str] {
+  var seen: Map[Str, Str] = Map.empty()
+  for (comp of components) {
+    let iso = value_field(comp, "isolate")
+    for (key of value_keys(iso)) { seen = seen.set(value_str(value_field(iso, key)), "1") }
+    let routes = value_field(comp, "routes")
+    for (key of value_keys(routes)) {
+      for (r of value_list(value_field(value_field(routes, key), "realms"))) {
+        seen = seen.set(value_str(r), "1")
+      }
+    }
+  }
+  return list_sort(seen.keys())
+}
+
+// `_needs_realm_helper`: the preamble rides along only for a document that
+// actually places something in a realm.
+fn needs_realm_helper(components: List[Any]) -> Bool {
+  for (comp of components) {
+    if (value_keys(value_field(comp, "isolate")).length() > 0) { return true }
+  }
+  return false
+}
+
+// `_revl_realm_helper`: lower each distinct realm label to a STABLE,
+// DETERMINISTIC Isolation from a reserved high region of the u64 scope space.
+// cordis-rs mints framework scope labels from a monotonic counter starting at
+// 1, so every framework label lands in [1, 2^63); tagging realm labels with the
+// top bit puts them provably out of that counter's reach. Distinct labels get
+// distinct indices, so equal strings share a realm and no two realms collide.
+fn revl_realm_helper(components: List[Any]) -> List[Str] {
+  let labels = collect_realm_labels(components)
+  var out = []
+  out = out.push("pub fn _revl_realm(label: &str) -> cordis::Isolation {")
+  out = out.push("    // Top bit reserved for realm labels: disjoint from cordis-rs's")
+  out = out.push("    // monotonic scope counter (starts at 1, +1 each isolate()).")
+  out = out.push("    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;")
+  out = out.push("    let index: u64 = match label {")
+  var i = 0
+  while (i < labels.length()) {
+    out = out.push(`        ${string_lit(labels[i])} => ${num_str(i)},`)
+    i = i + 1
+  }
+  out = out.push("        other => panic!(\"revl: realm label {other:?} missing from compile-time registry\"),")
+  out = out.push("    };")
+  out = out.push("    cordis::Isolation::from_raw(REVL_REALM_TAG | index)")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
+// `_emit_step`, the `let-effect` arm: a host acquisition in the ACTIVATION
+// body. `let <b> = Arc::new(<acquire>);` then the bracket inverse registered on
+// the same `ctx.effect` ledger that reverts a provision, so unloading the
+// component provably releases the resource. A `Map.new()` acquisition pins its
+// value type at the constructor so rustc never has to infer it — a binding no
+// provider struct captures, or one whose only typed use is a `get`, would leave
+// `Map<V>` open. Required services are recloned into the closure so the undo
+// owns its own handle.
+//
+// Still DEFERRED here, each REPORTED: a `setup` block, a witnessed-extern
+// acquisition (whose inverse is the extern's DECLARED one, registered
+// transactionally, not this site-spelled bracket), and the result-declared map
+// CAS (whose undo is guarded on the bool the acquire bound).
+fn witnessed_acquire(ir: Any, acq: Any) -> Bool {
+  if (node_kind(acq) != "fn") { return false }
+  let nm = value_str(value_field(acq, "name"))
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "witnessed"
+        && value_str(value_field(ext, "name")) == nm) { return true }
+  }
+  return false
+}
+
+fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
+                        map_values: Map[Str, Str], indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  var out = []
+  let raw_bind = value_str(value_field(step, "bind"))
+  let bind = mangle(raw_bind)
+  let acq_node = value_field(step, "acquire")
+  if (value_list(value_field(step, "setup")).length() > 0) {
+    out = out.push(`${pad}<<DEFER-let-effect-setup:${raw_bind}>>`)
+  }
+  if (witnessed_acquire(ir, acq_node)) {
+    out = out.push(`${pad}<<DEFER-let-effect-witnessed:${raw_bind}>>`)
+    return out
+  }
+  if (is_map_cas(acq_node)) {
+    out = out.push(`${pad}<<DEFER-let-effect-cas:${raw_bind}>>`)
+    return out
+  }
+  var acq_src = render_expr(acq_node, ctx)
+  if (node_kind(acq_node) == "host" && value_str(value_field(acq_node, "fn")) == "Map.new") {
+    var v = map_get(map_values, raw_bind)
+    if (v == "") { v = "String" }
+    acq_src = `Map::<${v}>::new()`
+  }
+  out = out.push(`${pad}let ${bind} = Arc::new(${acq_src});`)
+  let undo_name = `${bind}_undo`
+  out = out.push(`${pad}let ${undo_name} = ${bind}.clone();`)
+  var undoR: Map[Str, Str] = Map.empty()
+  undoR = undoR.set(raw_bind, undo_name)
+  for (req of value_keys(value_field(comp, "requires"))) {
+    out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
+    undoR = undoR.set(req, `${req}_undo`)
+  }
+  let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
+  let label = string_lit(`${value_str(value_field(comp, "name"))}.${raw_bind}.undo`)
+  out = out.push(`${pad}ctx.effect(${label}, move || { ${undox}; Ok(()) })?;`)
+  return out
+}
+
+// `_emit_step`, the remaining ACTIVATION-BODY arms this port lowers.
+//
+//   * `effect` — a bare bracket: the acquisition runs for its side effect and
+//     the site-spelled inverse is registered on the ctx.effect ledger, with
+//     each required service recloned so the move closure owns its own handle;
+//   * `emit` — a fire-and-forget emission (a `compensate` clause is DEFERRED:
+//     it registers onto the two-phase teardown accumulator, not the bracket);
+//   * `fail` — the activation's own refusal;
+//   * `if` — a conditional whose arms are themselves steps.
+//
+// `timer`, `await`, `stream-iter` and a `setup` block stay DEFERRED, each with
+// a marker, because each needs a runtime preamble this port does not assemble.
+fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
+                  map_values: Map[Str, Str], indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  let kind = value_str(value_field(step, "step"))
+  let name = value_str(value_field(comp, "name"))
+  var out = []
+  if (kind == "let-effect") { return emit_let_effect_step(comp, step, ir, ctx, map_values, indent) }
+  if (kind == "effect") {
+    if (value_list(value_field(step, "setup")).length() > 0) {
+      out = out.push(`${pad}<<DEFER-effect-setup:${name}>>`)
+    }
+    if (witnessed_acquire(ir, value_field(step, "acquire"))) {
+      out = out.push(`${pad}<<DEFER-effect-witnessed:${name}>>`)
+      return out
+    }
+    let acq_src = render_expr(value_field(step, "acquire"), ctx)
+    var undoR: Map[Str, Str] = Map.empty()
+    for (req of value_keys(value_field(comp, "requires"))) {
+      out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
+      undoR = undoR.set(req, `${req}_undo`)
+    }
+    let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
+    out = out.push(`${pad}let _ = ${acq_src};`)
+    out = out.push(`${pad}ctx.effect(${string_lit(`${name}.effect`)}, move || { ${undox}; Ok(()) })?;`)
+    return out
+  }
+  if (kind == "emit") {
+    out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), ctx)};`)
+    if (!value_is_null(value_field(step, "compensate"))) {
+      out = out.push(`${pad}<<DEFER-emit-compensate:${name}>>`)
+    }
+    return out
+  }
+  if (kind == "fail") {
+    let msg = render_expr(value_field(step, "message"), ctx)
+    out = out.push(`${pad}return Err(cordis::CordisError::with_message(cordis::ErrorCode::Plugin, ${msg}));`)
+    return out
+  }
+  if (kind == "if") {
+    out = out.push(`${pad}if ${render_expr(value_field(step, "cond"), ctx)} {`)
+    for (nested of value_list(value_field(step, "then"))) {
+      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1))
+    }
+    let alt = value_list(value_field(step, "else"))
+    if (alt.length() > 0) {
+      out = out.push(`${pad}} else {`)
+      for (nested of alt) {
+        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1))
+      }
+    }
+    out = out.push(`${pad}}`)
+    return out
+  }
+  return [`<<DEFER-comp-step:${kind}>>`]
+}
+
 // `_emit_component` (the SIMPLE provider path): a component with NO isolate /
 // intercept and NO effectful (`effect`/`emit`) method — but it MAY carry config
 // and required services (item 218). The provider struct captures each required
@@ -2498,17 +3363,19 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   let reqs = value_field(comp, "requires")
   let body = value_list(value_field(comp, "body"))
   let cty = config_ty(comp)
+  let functions = value_list(value_field(ir, "functions"))
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`<<DEFER-bind-field:${b}>>`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), compute_list_param_borrows(value_list(value_field(ir, "functions"))), false, false))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), false, false, map_values))
     out = out.push("}")
     out = out.push("")
   }
@@ -2525,7 +3392,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
-      out = out.push(`<<DEFER-comp-step:${kind}>>`)
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3))
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")
@@ -2552,21 +3419,27 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   let reqs = value_field(comp, "requires")
   let body = value_list(value_field(comp, "body"))
   let cty = config_ty(comp)
+  // The reference gates the `ctx` capture on the component having an EFFECTFUL
+  // method, not on being on this path: an isolate-only component whose provide
+  // methods are pure carries no `ctx` field and no `ctx: Arc::new(..)` ctor
+  // field (issue 1153).
+  let has_eff = component_has_effectful_methods(comp)
+  let functions = value_list(value_field(ir, "functions"))
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
-  if (value_keys(value_field(comp, "isolate")).length() > 0) { out = out.push(`<<DEFER-isolate:${name}>>`) }
   if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
   if (component_uses_await(comp)) { out = out.push(`<<DEFER-await:${name}>>`) }
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`<<DEFER-bind-field:${b}>>`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
-    out = out.push("    ctx: Arc<cordis::Context>,")
+    if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), compute_list_param_borrows(value_list(value_field(ir, "functions"))), true, true))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), true, true, map_values))
     out = out.push("}")
     out = out.push("")
   }
@@ -2581,9 +3454,9 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
-      out = out.concat(emit_provide_construction(comp, step, true, 3))
+      out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
-      out = out.push(`<<DEFER-comp-step:${kind}>>`)
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3))
     }
   }
   out = out.push("            Ok(cordis::PluginOutput::none())")
@@ -2830,14 +3703,22 @@ fn emit_bridge(ir: Any) -> List[Str] {
   out = out.push("}")
   out = out.push("")
 
-  // comp name -> realm-isolated context (subset: no comp isolates, so
-  // only the `_ => ctx.clone()` arm; isolate placements are DEFERRED).
+  // comp name -> realm-isolated context. cordis fixes a fiber's isolation scope
+  // at plug time (its `Inject` gate is evaluated against this context, before
+  // the plugin body runs), so every plug site isolates HERE rather than inside
+  // the plugin body — which is what lets an isolated `requires kv in realm("t")`
+  // reactively link to an isolated provider in the same realm (issue 1153).
   out = out.push("pub fn _revl_isolate_ctx(ctx: &cordis::Context, name: &str) -> cordis::Context {")
   out = out.push("    match name {")
   for (comp of components) {
     let iso = value_field(comp, "isolate")
     if (value_keys(iso).length() > 0) {
-      out = out.push(`<<DEFER-isolate:${value_str(value_field(comp, "name"))}>>`)
+      let snk = snake(value_str(value_field(comp, "name")))
+      var expr = "ctx"
+      for (key of value_keys(iso)) {
+        expr = `${expr}.isolate_with(${string_lit(key)}, _revl_realm(${string_lit(value_str(value_field(iso, key)))}))`
+      }
+      out = out.push(`        "${snk}" => ${expr},`)
     }
   }
   out = out.push("        _ => ctx.clone(),")
@@ -3038,7 +3919,9 @@ pub fn emit_rust_src(ir: Any) -> Str {
     out = out.concat(stdlib_helpers())
     out = out.push("")
   }
-  for (comp of value_list(value_field(ir, "components"))) {
+  let components = value_list(value_field(ir, "components"))
+  if (needs_realm_helper(components)) { out = out.concat(revl_realm_helper(components)) }
+  for (comp of components) {
     out = out.concat(emit_component_auto(comp, services, ir))
   }
   out = out.concat(emit_bridge(ir))

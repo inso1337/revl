@@ -52,8 +52,9 @@
 //!   business and not this gate's. Withheld.
 //!
 //! So the certifier needs the running composition's service NAMES, and the
-//! item-186 row wire carries them: a `!services` header followed by one `:S`
-//! row per declared service (`revl.manifest.manifest_wire`). The HEADER is the
+//! item-186 row wire carries them: a `!services` header followed by one
+//! `:S,op,op` row per declared service (`revl.manifest.manifest_wire`), whose
+//! operation names this surface reads but does not use. The HEADER is the
 //! load-bearing half. A wire without it does not claim to enumerate anything, so
 //! the running service set is UNKNOWN rather than empty and a candidate that
 //! declares a service is withheld exactly as it was before the block existed.
@@ -174,7 +175,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
 /// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
 /// bounds the admissions, and a consumer caching an admission compares THIS
 /// before trusting it against a gate built from another tree.
-pub(crate) const SURFACE_ID: &str = "admission-interface:20b3545763da1eca";
+pub(crate) const SURFACE_ID: &str = "admission-interface:a7abfd875c3cbab9";
 
 /// The tail every certificate carries, so the two halves of the basis line
 /// cannot drift apart.
@@ -430,7 +431,9 @@ pub(crate) fn certify(source: &str) -> Option<String> {
 /// REDECLARE a service the composition already declares. That is the only
 /// interaction the reference has between an interface-only candidate and a
 /// running manifest, and it is the one the item-186 service block
-/// (`!services` + `:S` rows) exists to make answerable.
+/// (`!services` + `:S,op,op` rows) exists to make answerable. The operations a
+/// row carries are the FOLD's business (the member rule of docs/design/457 T4b);
+/// this surface decides redeclaration, which is decided by name.
 ///
 /// A wire with no service block does not say what the composition declares, so
 /// the set is UNKNOWN: any declared service is withheld, which is exactly the
@@ -492,8 +495,8 @@ struct Running<'a> {
 ///
 /// The accountable kinds are the provision (`C/k/r`), the requirement in its
 /// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`), the
-/// handoff (`C=k:T`) and the service block (`!services`, `:S`). Everything else
-/// declines the wire, which is a withheld admission and
+/// handoff (`C=k:T`) and the service block (`!services`, `:S` or `:S,op,op`).
+/// Everything else declines the wire, which is a withheld admission and
 /// not a refusal: a `!halted` header, and — deliberately, even
 /// though the fold has a full answer for it — a WITHDRAWAL row (`-C`). A
 /// withdrawal changes which provisions survive and can strand a running
@@ -547,10 +550,28 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
             services = Some(Vec::new());
             continue;
         }
-        if let Some(name) = row.strip_prefix(':') {
+        if let Some(spec) = row.strip_prefix(':') {
+            // `:S` or `:S,op,op` — the name, and optionally the operations the
+            // running service declares. THIS surface reads only the name: the
+            // one obligation it has is that the candidate redeclares no running
+            // service, and that is decided by name. The operations are read to
+            // VALIDATE them, so a garbled row declines the whole wire here
+            // exactly as it refuses it in the fold, rather than one reader
+            // admitting on a row the other cannot parse.
+            let (name, ops) = match spec.split_once(',') {
+                Some((name, ops)) => (name, Some(ops)),
+                None => (spec, None),
+            };
             let claimed = services.as_mut()?;
             if !is_wire_name(name) || claimed.contains(&name) {
                 return None;
+            }
+            if let Some(ops) = ops {
+                // `:S,` is the EMPTY operation claim and is well formed; any
+                // other list is a comma-separated run of wire names.
+                if !ops.is_empty() && ops.split(',').any(|op| !is_wire_name(op)) {
+                    return None;
+                }
             }
             claimed.push(name);
             continue;

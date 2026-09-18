@@ -342,10 +342,22 @@ def test_float_in_value_positions_is_refused_not_mis_emitted():
     with pytest.raises(emitter.EmitError, match="list element: type 'Float' is not lowerable"):
         emitter.emit(ir)
     # fuzz_wasm_af371f9d: a match over `Err(-3.4)` — a `Float` variant payload.
-    # Refuse at the constructed payload, not by emitting an f64 into the cell.
+    # Refuse rather than emit an f64 into the cell. The SITE moved earlier than
+    # it used to be: the arm's payload BINDING is a Float local, and a Float
+    # local is refused by `_declare_local` (an f64 into an i32 local is a module
+    # that does not validate), which runs before the constructed payload is
+    # checked. Same refusal, same wording, one step sooner — so this asserts the
+    # wording both sites share rather than pinning whichever fires first.
     ir = compile_files([str(ROOT / "examples" / "regressions" / "fuzz_wasm_af371f9d.rvl")])
-    with pytest.raises(emitter.EmitError, match="payload of .*: type 'Float' is not lowerable"):
+    with pytest.raises(emitter.EmitError, match="type 'Float' is not lowerable"):
         emitter.emit(ir)
+    # and the payload site itself is still there, reached where no binding
+    # precedes it (a wildcard arm binds nothing).
+    with pytest.raises(emitter.EmitError,
+                       match="payload of .*: type 'Float' is not lowerable"):
+        emitter.emit(compile_source(
+            "pub fn probe() -> Int { return match Err(1.5) { Ok(_) => 0, Err(_) => 1 } }\n"
+            'test "t" { assert probe() == 1 }\n'))
 
 
 def test_float_adt_variant_payload_with_match_is_refused():

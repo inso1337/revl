@@ -461,9 +461,27 @@ The Opt result composes exactly like every other Opt: `s.to_int() ?? 0`,
 one-liner over its native parse (`int()` under an ASCII/range gate on py,
 a regex-guarded `BigInt` on ts, `str::parse::<i64>().ok()` on rust,
 `Long.parseLong` under an ASCII gate on java, a hand-rolled unsigned
-accumulator on go and wasm — the wasm helper is the one that needs care,
-since `Int.MIN`'s magnitude is 2^63 and every larger magnitude must be
-`None`).
+accumulator on go and wasm — the two hand-rolled helpers are the ones that
+need care, since `Int.MIN`'s magnitude is 2^63 and every larger magnitude must
+be `None`).
+
+**The hand-rolled accumulators check the bound BEFORE the step, not after it.**
+`n = n*10 + d` is unsigned 64-bit arithmetic and it wraps, so a post-step
+`n > lim` test can be passed by a magnitude that wrapped back under the limit:
+at `n == 2^63` the next `n*10` is exactly `5*2^64` and comes back 0. go tested
+after, and `"18446744073709551616".to_int()` answered `Some(0)` where every
+other tier answers `None` (issue #721, docs/contract-errata.md). The correct
+guard is `n > (lim-d)/10` before the accumulate, which admits `n*10+d` exactly
+when that value is at most `lim` — and `lim` is `2^63` for a negative sign (so
+`Int.MIN` parses) and `2^63 - 1` for a positive one.
+
+Reached through `?.`, the parse is the one builtin whose two receiver families
+cannot be told apart at emit time: an `optcall` node carries no `recv`, so a
+tier that lowers `?.` splits the `Str` parse from the `Int32` widen on the
+PAYLOAD at run time (`_revl_opt_to_int` on py, `revlOptToInt` on ts). A `?.m()`
+is the same builtin as a `.m()` and must be rendered by the same table; ts and
+go emitted it as a host method call instead, and both got it wrong for the
+conversions (issue #721).
 
 ## Crypto primitives — `stdlib/crypto.rvl` (item 272)
 

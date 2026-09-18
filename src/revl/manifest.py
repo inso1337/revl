@@ -16,6 +16,7 @@ rows joined by ``;``, the kind of each row set by its leading marker
     !services header:      the `:S` rows below ENUMERATE the running
                            composition's service declarations, exhaustively
     :S        service:     the running composition declares service S
+    :S,a,b    service:     ... and its operations are exactly `a` and `b`
 
 `manifest_wire(ir)` renders `IR(M)` — the manifest of an already-compiled
 composition `M` — into exactly that wire, so a differential oracle can construct
@@ -65,20 +66,43 @@ def _components(ir: dict) -> list[dict]:
     return comps or []
 
 
-def _declared_services(ir: dict) -> list[str] | None:
-    """The running composition's service names in declaration order, or ``None``
-    when `ir` is not a whole compiled IR and the set is therefore UNKNOWN.
+def _declared_services(ir: dict) -> list[tuple[str, list[str]]] | None:
+    """The running composition's services in declaration order as
+    ``(name, operation names)`` pairs, or ``None`` when `ir` is not a whole
+    compiled IR and the set is therefore UNKNOWN.
 
     A manifest DICT (the ``ir["manifest"]`` half on its own) carries components
     and no services, and an absent service table is not an empty one: returning
     ``None`` for it is what keeps the wire from claiming a composition declares
-    no services when all that happened is that nobody asked."""
+    no services when all that happened is that nobody asked.
+
+    The operation names are the second half of the same claim, and the reason a
+    candidate's ``store.get(key)`` can be resolved against the RUNNING `Store`
+    rather than only against its name (docs/design/457 T4b). They are rendered
+    for every service a known table holds, including one that declares none —
+    ``:S,`` is the empty surface, which is a claim, while a bare ``:S`` is the
+    absence of one."""
     if not isinstance(ir, dict) or "manifest" not in ir:
         return None
     services = ir.get("services")
     if not isinstance(services, dict):
         return None
-    return list(services)
+    return [(name, _operations(entry)) for name, entry in services.items()]
+
+
+def _operations(entry: object) -> list[str]:
+    """One service's declared operation names, in declaration order. An entry
+    with no readable ``methods`` table renders as the empty surface: the IR's
+    service table always carries one, and a service with no operation is a
+    legal (if idle) declaration."""
+    if not isinstance(entry, dict):
+        return []
+    methods = entry.get("methods")
+    if isinstance(methods, dict):
+        return list(methods)
+    if isinstance(methods, list):
+        return [m.get("name", "") for m in methods if isinstance(m, dict)]
+    return []
 
 
 def _route_rows(name: str, entry: dict) -> list[str]:
@@ -202,6 +226,7 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
     services = _declared_services(ir)
     if services is not None:
         rows.append(SERVICES_HEADER)
-        rows.extend(f"{SERVICE_MARKER}{name}" for name in services)
+        rows.extend(f"{SERVICE_MARKER}{name}," + ",".join(ops)
+                    for name, ops in services)
     rows.extend(f"-{name}" for name in replacing)
     return ";".join(rows)
