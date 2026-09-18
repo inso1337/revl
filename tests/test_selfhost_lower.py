@@ -318,7 +318,12 @@ def _classify(e: RevlError) -> str:
         return "A6"
     if ("no builtin method" in m
             or "non-exhaustive match" in m
-            or "type argument(s), got" in m):
+            or "type argument(s), got" in m
+            # the unknown-field read, structural (item 71) and nominal alike.
+            # Code-less in the reference, but `revl.diagnostics.classify`
+            # already files it as a type mismatch, so it carries the T1 the
+            # design's §4.3 vocabulary gives it (slice T2a).
+            or "has no field" in m):
         return "T1"
     if ("is not a case of" in m
             or "record update names" in m
@@ -341,7 +346,18 @@ def _classify(e: RevlError) -> str:
                 and " receiver, got " in m)
             or ("builtin `" in m and "` takes " in m
                 and " argument(s), " in m)
-            or "takes no arguments, " in m):
+            or "takes no arguments, " in m
+            # slice T2a's three remaining code-less expression refusals, named
+            # in the design's §4.3 TYPE list. Each is a zero-hit marker over the
+            # whole census corpus today (no program in the tree draws one), so
+            # naming them moves no document between buckets; they exist so the
+            # checker oracle can compare a TAG as well as a message when the
+            # statement layer (T3a) starts carrying these to `admit_src`.
+            or "cannot order" in m
+            or "ternary branches disagree" in m
+            or "record update requires" in m
+            or "record literal for `" in m
+            or "but the record has " in m):
         return "TYPE"
     return "OUT:" + m
 
@@ -5517,9 +5533,15 @@ _TFB_LATER_SLICES = (
     "record update requires a record type",
     # the ordering family: `<`/`>` on an unorderable operand is code-less too.
     "cannot order `",
-    # the NAMED record's field-existence rule, which needs the declared field
-    # SET the statement layer's environment does not enumerate.
+    # the NAMED record's field rules, which need the declared field SET the
+    # statement layer's environment does not enumerate: the field-existence
+    # read, and the two literal/annotation completeness sentences T2a names in
+    # `_classify` above. `selfhost/lower.rvl` spells none of the three, so a
+    # program whose reference minimum is one of them is refused LATER by the
+    # gate (an under-refusal over some other true objection in the same body).
     "has no field `",
+    "record literal for `",
+    ", but the record has ",
 )
 
 
