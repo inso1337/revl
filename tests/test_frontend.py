@@ -244,6 +244,16 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    # item 378: the third rule under G4, and the only one that judges a
+    # DECLARED TYPE rather than a crossing. A config value is injected as
+    # static data, so an arrow field would be a live callable the body invokes
+    # past every authority fold. Reached THROUGH a record here — the type as
+    # written says nothing, and the offence only exists once the declaration is
+    # resolved and descended into. Its accepted twin is the same file with
+    # `tail` dropped from `Hooks`.
+    "g4_config_record_arrow.rvl":
+        "config field `hooks` of component `Loader` has type `Hooks`, which "
+        "reaches an arrow (function) type; a config field must be static data",
     # item 260: the BUDGET half of attenuation. Stripping the ceilings makes
     # both sides the same bare `net`, so only the dedicated ceiling check sees
     # it. Its accepted twin is `examples/budget_attenuation.rvl`; the pair is

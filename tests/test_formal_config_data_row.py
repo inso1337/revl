@@ -45,12 +45,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-#: The reproducer the issue names, and the whole point of it: a config-is-data
-#: rejection fixture that lives as a FILE. PR #1156 had to carry its four
-#: shapes as inline strings in `REJECTED_PROGRAMS` instead, which the census
-#: measures and the formal harness never walks.
-FIXTURE = "examples/rejections/g4_config_alias_arrow.rvl"
-FIXTURE_FIELD = (FIXTURE, "component", "Loader", "on_row")
+#: The reproducer, and the whole point of the issue: a config-is-data rejection
+#: fixture that lives as a FILE. PR #1156 had to carry its shapes as inline
+#: strings in `REJECTED_PROGRAMS` instead, which the gate/reference census
+#: measures and the formal harness never walks, because the missing row made a
+#: refusal of this class fatal wherever the file was put.
+FIXTURE = "examples/rejections/g4_config_record_arrow.rvl"
+FIXTURE_FIELD = (FIXTURE, "component", "Loader", "hooks")
 
 #: Every form `config_shape` can label a node with. The first group is data;
 #: the second is what the walk refuses on. `Oracle.configDataForms` is the
@@ -159,19 +160,20 @@ def test_the_shipped_checker_refuses_the_fixture():
         compile_source((ROOT / FIXTURE).read_text(encoding="utf-8"), FIXTURE)
     info = classify(excinfo.value)
     assert (info["code"], info["category"]) == ("G4", "config-data")
-    assert "reaches an arrow (function) type" in str(excinfo.value)
+    assert "has type `Hooks`, which reaches an arrow (function) type" \
+        in str(excinfo.value)
 
 
 def test_the_fixture_carries_no_other_refusal():
     """Non-vacuity for the fixture itself: the config field is the ONLY thing
-    wrong with it. Swap the offending alias for a scalar and the file
-    compiles, so the refusal above is attributable to the alias and not to
-    whichever other rule happened to fire first."""
+    wrong with it. Drop the arrow field from `Hooks` and the file compiles, so
+    the refusal above is attributable to that field and not to whichever other
+    rule happened to fire first."""
     from revl.compiler import compile_source
 
     text = (ROOT / FIXTURE).read_text(encoding="utf-8")
-    assert "on_row: Handler" in text
-    compile_source(text.replace("on_row: Handler", "on_row: Str"), FIXTURE)
+    assert ", tail: (Str) -> Str" in text
+    compile_source(text.replace(", tail: (Str) -> Str", ""), FIXTURE)
 
 
 def test_the_model_derives_the_fixture_refusal(verdicts):
@@ -180,13 +182,15 @@ def test_the_model_derives_the_fixture_refusal(verdicts):
     assert verdicts.configs[FIXTURE_FIELD] == "fail"
 
 
-def test_the_fixture_offends_through_the_alias(tsv):
-    """...and it is derived through the alias indirection rather than because
-    the type was written as an arrow. The nodes `Handler` reaches are the
-    alias itself (a data form) and then the arrow it stands for."""
+def test_the_fixture_offends_through_an_indirection(tsv):
+    """...and it is derived by DESCENDING, not by reading the spelling. The
+    field is written `Hooks`, which is a data form; the arrow is one level
+    down, behind a record field, next to a scalar sibling that is fine. A row
+    that judged the written head would admit this file."""
     nodes = [(r[6], r[7]) for r in _rows(tsv, "CN", FIXTURE)
-             if r[4] == "on_row"]
-    assert nodes == [("variant", "Handler"), ("arrow", "(Str) -> Str")]
+             if r[4] == "hooks"]
+    assert nodes == [("record", "Hooks"), ("scalar", "Str"),
+                     ("arrow", "(Str) -> Str")]
 
 
 def test_the_fixture_has_no_crossing_to_blame(verdicts):
@@ -441,7 +445,7 @@ def test_the_cd_row_is_compared_and_counted(harness, verdicts):
     `Verdicts.configs` is in the tuple, in `total()`, and comes back out of
     `parse_verdicts` in the shape the Lean side writes it."""
     assert "configs" in harness.Verdicts._fields
-    text = "\t".join(["CD", FIXTURE, "component", "Loader", "on_row",
+    text = "\t".join(["CD", FIXTURE, "component", "Loader", "hooks",
                       "data=fail"]) + "\n"
     assert harness.parse_verdicts(text).configs[FIXTURE_FIELD] == "fail"
     assert verdicts.total() == sum(
