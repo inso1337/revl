@@ -5822,6 +5822,19 @@ _NR_LATER_SLICES = (
     "has no field `",
     # the ordering family, code-less in the reference
     "cannot order `",
+    # the ADT CONSTRUCTOR's payload rule (`typecheck.py`, `_case_call`): the
+    # signature layer (docs/design/457 T2b) builds module-`fn` and host
+    # signatures, and a case constructor's is not one of them. The reference
+    # raises it while typing the call, which is ahead of the lowering walk this
+    # slice runs in, so the gate reports a LATER refusal instead.
+    "payload expects",
+    # a callable NAME read as a VALUE. `nr_helper` and `nr_ext` resolve here —
+    # that is this slice's whole claim — but neither the signature rows nor the
+    # `fn`-token scan gives such a read a function TYPE, so a refusal that
+    # SPELLS one (`got `(Str) -> Str``) is one the type layer could not reach.
+    # Owned by the signature slice, which decides what a name's type is; matched
+    # on the arrow because that is the only thing the missing type appears as.
+    ") -> ",
 )
 
 _NR_TAGS = ("G1", "T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
@@ -5869,7 +5882,13 @@ def test_name_resolution_fuzz_agrees_on_tag_and_message(admit, seed):
 def test_the_name_resolution_rule_reaches_every_lowered_position(admit):
     """Each position the lowering walk descends through, as a named case. A
     reader that stopped short of one of these would leave the family half
-    built, and the fuzz above would only report it as a rate."""
+    built, and the fuzz above would only report it as a rate.
+
+    Every row asserts the REFERENCE first, so a body whose reference refusal is
+    some other rule cannot pass as a witness for this one. The interpolation row
+    is a `let` and not a `return` for exactly that reason: a `Str` template in a
+    `-> Int` fn draws the return-type mismatch, which the reference raises while
+    TYPING the statement and so ahead of the name it would otherwise resolve."""
     head = "type NrRow = { h: Str }\n\nfn g(n: Int) -> Int { return n }\n\n"
     bodies = [
         "  return zz",
@@ -5877,7 +5896,7 @@ def test_the_name_resolution_rule_reaches_every_lowered_position(admit):
         "  return g(zz)",
         "  return zz.h",
         "  return zz[0]",
-        '  return `a${zz}b`',
+        '  let t = `a${zz}b`  return 1',
         "  return (a > 0 ? zz : 1)",
         "  let xs = [zz]  return 1",
         "  let r = { h: zz }  return 1",
@@ -5891,8 +5910,45 @@ def test_the_name_resolution_rule_reaches_every_lowered_position(admit):
     ]
     for body in bodies:
         src = f"{head}fn f(a: Int) -> Int {{\n{body}\n}}\n"
+        assert _ref(src) == ("G1", "`zz` is not declared in this function"), src
         assert admit(src) == "G1|`zz` is not declared in this function", src
         _agree(admit, src)
+
+
+def test_an_adt_case_resolves_by_its_payload_and_its_position(admit):
+    """The ADT-case half of the read rule, which the differential fuzz above
+    found and this pins by name.
+
+    The reference's `ExprVar` arm lets a case name stand as a VALUE only where
+    `_tagged_case` reports no payload and an ADT that is neither `Result` nor
+    `Opt`; anything else falls through to `callables`, which no case name joins.
+    The CALL position is looser — `_lower_pure_expr`'s `ExprCall` arm builds an
+    `adt` node for any unshadowed case — so the same name is declared as a
+    constructor and undeclared as a value."""
+    head = "type NrShape = NrCircle | NrSquare(Int)\n\n"
+    refused = [
+        "  let x = NrSquare\n  return 1",
+        "  let x = NrSquare.h\n  return 1",
+        "  return (true ? 1 : NrSquare)",
+    ]
+    for body in refused:
+        src = f"{head}fn f() -> Int {{\n{body}\n}}\n"
+        assert _ref(src) == ("G1",
+                             "`NrSquare` is not declared in this function"), src
+        assert admit(src) == "G1|`NrSquare` is not declared in this function", src
+    admitted = [
+        # the NULLARY case as a value, and the payload-carrying one CALLED
+        f"{head}fn f() -> NrShape {{\n  return NrCircle\n}}\n",
+        f"{head}fn f() -> NrShape {{\n  return NrSquare(1)\n}}\n",
+        # `Ok`/`Err` are `Result` cases, so neither stands bare as a value —
+        # but both are in `_BUILTIN_CONSTRUCTORS`, which is why they resolve
+        "fn f() -> Int {\n  let x = Ok\n  let y = Ok(1)\n  return 1\n}\n",
+        # a parameter SHADOWS a case of the same spelling (issue #320)
+        "type S = A | B(Int)\n\nfn f(B: Int) -> Int {\n  return B\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
 
 
 def test_the_name_resolution_rule_stays_silent_where_it_cannot_decide(admit):
