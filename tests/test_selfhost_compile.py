@@ -596,6 +596,20 @@ NATIVE_GATE_GAPS: dict[str, str] = {
     # The `witnessed.rvl` false refusal (`BAD|expected fn after extern`) is CLOSED
     # — the gate admits it, and its `lower_to_ir` externs section was already
     # byte-exact (tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP is empty).
+    #
+    # `selfhost/lower.rvl` does not put a `subscribe` acquisition's bind into the
+    # component scope it resolves call heads against (`call_head_declared` reads
+    # `cx.scopeNames`), so the later `sub.next()` reads as an undeclared access
+    # and draws the shared G1 diagnostic. The REFERENCE admits the document; it
+    # is the self-host frontend that refuses, and it refuses the tree's existing
+    # stream scenario `backends/rust/scenarios/stream.rvl` with the identical
+    # verdict. So this is a pre-existing lower.rvl gap that the first stream
+    # document in the emit corpus makes visible, not one this document
+    # introduces, and it is the frontend lane's to close (item 391), not the
+    # emitter's: the rust emit oracle holds this same document byte-exact
+    # against the reference, stream runtime and all (issue 1153).
+    "emit_rust_corpus/comp_stream.rvl":
+        "G1|`sub` is not a declared requirement of Parked",
 }
 
 
