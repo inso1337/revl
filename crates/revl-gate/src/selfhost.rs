@@ -9075,7 +9075,7 @@ fn closure_assign_scan(ts: &[Token]) -> Verd {
     return no_verd();
 }
 
-fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
+fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
     let base = ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone())), amb_ops_map(&ambOps, 0i64, std::collections::HashMap::new()));
     let gtys = sig_binds(ts.clone(), case_binds(ts.clone()));
     let cfgv = config_data_refusal(ts.clone(), pg.clone());
@@ -9107,6 +9107,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<Stri
         return NoLink { done: true, refs: vec![mf.clone()] };
     }
     let mut refs: Vec<Verd> = vec![];
+    let mut poisoned: Vec<String> = vec![];
     let cnames = comp_names(pg.comps.clone(), 0i64, vec![]);
     let sNames = svc_names(pg.svcs.clone(), 0i64, vec![]);
     let svcsDecidable = (ambSvcsKnown && (!has_use_decl(&ts)));
@@ -9116,24 +9117,29 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<Stri
         let usv = if svcsDecidable { unknown_svc_at(comp.clone(), &sNames, &ambSvcs, 0i64) } else { no_verd() };
         if (usv.v != "") {
             refs.push(usv.clone());
+            poisoned.push(comp.name.clone());
         } else {
             if (comp.refuse != "") {
                 refs.push(mk_verd(comp.refuse.clone(), comp.line));
+                poisoned.push(comp.name.clone());
             } else {
                 let sf = spawn_form_comp(comp.clone(), &cnames);
                 if (sf != "") {
                     refs.push(mk_verd(sf.clone(), comp.line));
+                    poisoned.push(comp.name.clone());
                 } else {
                     let cx = ctx_for(base.clone(), comp.clone());
                     let v = check_component(comp.clone(), cx.clone(), &gtys);
                     if (v.v != "") {
                         refs.push(v.clone());
+                        poisoned.push(comp.name.clone());
                     }
                 }
             }
         }
         ci = (ci).checked_add(1i64).expect("revl: Int overflow");
     }
+    refs = append_verds(refs.clone(), handoff_refusals(&pg.comps, &hands, &poisoned, 0i64));
     refs = append_verds(refs.clone(), wrefs.clone());
     let sv = check_spawn(pg.clone(), base.clone());
     if (sv.v != "") {
@@ -9147,7 +9153,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<Stri
 }
 
 fn collect_refusals(ts: Vec<Token>, pg: Prog) -> Vec<Verd> {
-    let nl = collect_nonlink(ts.clone(), pg.clone(), vec![], vec![], true, vec![]);
+    let nl = collect_nonlink(ts.clone(), pg.clone(), vec![], vec![], vec![], true, vec![]);
     if nl.done {
         return nl.refs;
     }
@@ -9551,20 +9557,23 @@ fn handoff_drift_msg(key: &str, newName: &str, accepted: &str, oldName: &str, ex
     return ((((((((((String::from("state hand-off on `").revl_concat(&key)).revl_concat("` differs from the running manifest: `")).revl_concat(&newName)).revl_concat("` accepts `")).revl_concat(&accepted)).revl_concat("`, but `")).revl_concat(&oldName)).revl_concat("` exports `")).revl_concat(&exported)).revl_concat("` — the successor cannot hold the predecessor's state, and ")).revl_concat("dropping it on the swap would be residue");
 }
 
-fn handoff_refusals(comps: &[CompD], hands: &[MHand], i: i64) -> Vec<Verd> {
+fn handoff_refusals(comps: &[CompD], hands: &[MHand], poisoned: &[String], i: i64) -> Vec<Verd> {
     if (i >= comps.revl_length()) {
         return vec![];
     }
     let c = (comps)[(i) as usize].clone();
     if (c.hoff.name == "") {
-        return handoff_refusals(comps, hands, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    if contains(poisoned, &c.name) {
+        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     let old = find_mhand(hands, &c.hoff.name, 0i64, MHand { comp: String::from(""), key: String::from(""), ty: String::from("") });
     if (old.comp == "") {
-        return handoff_refusals(comps, hands, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     if ho_compatible(c.hoff.ty.clone(), old.ty.clone()) {
-        return handoff_refusals(comps, hands, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     return vec![mk_verd(tagged("G2", &handoff_drift_msg(&c.hoff.name, &c.name, &c.hoff.ty, &old.comp, &old.ty)), c.line)];
 }
@@ -9600,7 +9609,7 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let keptRoutes = keep_routes(man.routes.clone(), drop.clone(), 0i64, vec![]);
     let keptNames = keep_names(man.mnames.clone(), drop.clone(), 0i64, vec![]);
     let lost = lost_provs(split_provs(man.provs.clone(), drop.clone(), true, 0i64, vec![]), live_provs(live.clone(), 0i64, keptProvs.clone()), 0i64, vec![]);
-    let nl = collect_nonlink(ts.clone(), pg.clone(), append_verds(handoff_refusals(&pg.comps, &man.hands, 0i64), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64)), man.svcs.clone(), manifest_svcs_known(man.clone()), man.svcOps.clone());
+    let nl = collect_nonlink(ts.clone(), pg.clone(), man.hands.clone(), withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64), man.svcs.clone(), manifest_svcs_known(man.clone()), man.svcOps.clone());
     if nl.done {
         return pick_min(&nl.refs);
     }
