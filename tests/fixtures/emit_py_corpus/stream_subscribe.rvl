@@ -1,0 +1,79 @@
+// item 130 Slices 3/4/5: the three STATEMENT forms a stream program is spelled
+// with — the `subscribe` bracket, the `every … in` iteration, and the
+// `on … as … in` typed-event handler.
+//
+// This document exists because the self-hosted gate could not READ any of them.
+// `subscribe` is a keyword, so its `let` run parsed as a bad expression and was
+// skipped: the handle never entered the G1 scope, and `await sub.next()` — the
+// very `undo sub.close()` the form requires — was refused as an undeclared
+// requirement. `every <x> in <sub>` fell into the `every <n><unit>` timer
+// branch, which reads a body out but knows nothing of an item bind, so the body
+// refused its own item. `on` is a contextual keyword the lexer does not carry,
+// so the handler head parsed as the bare value `on` and was refused by that
+// name, with the whole body unread behind it.
+//
+// Five fixtures under `backends/*/testdata` and `backends/*/scenarios` already
+// held these shapes and did not stop it: they are TIER goldens, and a gate that
+// refuses a program a tier emits correctly reds nothing. The corpus document is
+// what puts the shapes in front of the gate/reference census on every run.
+//
+// The skip cut both ways, which is the part worth keeping in view: a run that
+// resolves no heads raises no objection either, so `subscribe nostream` and
+// `subscribe merge(a, nob)` — plain G1 refusals in the reference — were
+// admitted in silence. Their fixtures are
+// `examples/rejections/g1_subscribe_undeclared_source.rvl` and
+// `examples/rejections/g1_subscribe_merge_undeclared.rvl`; the block scope the
+// iteration item keeps is `examples/rejections/g1_stream_item_out_of_scope.rvl`.
+
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+
+service Sink { emission fn write(v: Str) }
+
+// The bracket alone: the handle is bound and read back by its own inverse.
+component Consumer {
+  let pool = effect Pool.open("orders", 2) undo pool.close()
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+}
+
+// The handle read FORWARD, which is what the dropped bind refused.
+component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}
+
+// Slice 3: `merge(a, b)` is grammar in the subscribe head, not a callable, so
+// the head resolves while its operands stay ordinary declared names.
+component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let b = effect Stream.source() undo b.close()
+  let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}
+
+// The qualifier tail between the stream operand and the required `undo`.
+component Windowed {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
+  await sub.next()
+}
+
+// Slice 2 + Slice 4: a combinator chain over two lines, then the iteration.
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.filter(x => x != "skip").map(x => x + "!").take(2)
+              undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+
+// Slice 5: the typed-event handler, whose item carries the event's record type.
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit sink.write(e.order_id)
+  }
+}
