@@ -4629,6 +4629,217 @@ fn has_use_decl(ts: List[Token]) -> Bool {
   return false
 }
 
+// ============================ transparent type ALIASES: the cycle among them
+//
+// `lower.py::_resolve_type_aliases` is the reference's FIRST semantic phase —
+// it runs ahead of `_validate_declared_types`, and so ahead of every fail-fast
+// phase `collect_nonlink` already carries. It erases each transparent alias by
+// substituting its target at every declaration site, and an alias whose
+// expansion re-enters itself has no substitution to make:
+//
+//   type alias cycle: Handle -> Ref -> Handle
+//
+// anchored at the declaration of the name the expansion re-entered, NOT at the
+// declaration it started from.
+//
+// This reads the CYCLE and nothing else. The erasure itself moves emitted
+// bytes rather than verdicts and is a separate concern.
+//
+// The reader is deliberately narrow, because everything it cannot decide has
+// to stay a no-objection:
+//
+//   * only a `type X = Y` whose right-hand side is ONE identifier takes part. A
+//     type APPLICATION (`type X = List[Y]`, `type X = Y?`, a function type) is
+//     an alias to the reference as well and its ARGUMENTS are expanded, so a
+//     cycle can run through one; this reader stops there instead, which
+//     withholds a refusal rather than risking one.
+//   * a right-hand side that is alias-shaped but not modelled here switches the
+//     whole phase off. The reference calls `check_type_wellformed` on every
+//     alias TARGET before it expands anything, so a malformed target anywhere
+//     in the file is the diagnostic the program actually draws — measured:
+//     `type A = B` + `type B = A` + `type C = Opt` reports the bare `Opt`'s
+//     arity, not the cycle, even though the cycle is declared first.
+//   * a `use` declaration switches it off too: an imported type joins the
+//     declared set, so alias-or-not stops being knowable from this text alone.
+
+type AliasD = { name: Str, target: Str, line: Int }
+type AliasScan = { ds: List[AliasD], ok: Bool }
+type AliasRhs = { kind: Str, target: Str }
+
+// The builtin heads a bare `type X = Y` may name with nothing further to
+// answer for. `_ALIASABLE_BUILTINS` also holds `List`/`Map`/`Opt`/`Result` and
+// the two termination markers `Criterion`/`Guard`, but a BARE spelling of any
+// of those is refused in the same loop that collects the aliases — for its
+// arity, or for being position-restricted — so those six turn the phase off
+// (`alias_undecidable_head`) instead of joining this list.
+fn alias_plain_builtin(n: Str) -> Bool {
+  return n == "Str" || n == "Int" || n == "Int32" || n == "Bool"
+      || n == "Float" || n == "Bytes" || n == "Unit" || n == "Any"
+      || n == "Never"
+}
+
+fn alias_undecidable_head(n: Str) -> Bool {
+  return n == "List" || n == "Map" || n == "Opt" || n == "Result"
+      || n == "Criterion" || n == "Guard"
+}
+
+// Every `type` declaration's name, in source order — the reference's
+// `{d.name for d in program.type_decls}`, which is the set a right-hand side
+// has to name for the declaration to be an alias at all.
+//
+// An `event` name is NOT here. The reference appends an ordinary record
+// `TypeDecl` beside an `EventDecl` for the TYPE TABLE, but the alias classifier
+// reads the declaration list, and `type A = Tick` over an `event Tick` is
+// admitted — measured against the reference before this reader was written.
+fn alias_decl_names(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "type")) {
+      out = out.push(tkc(ts, i + 1).text)
+      i = type_decl_end(ts, i + 1)
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+// Classify a `type X = <rhs>` right-hand side spanning `[lo, hi)`:
+//
+//   "none"  — `_alias_target` answers None: a record body, or a real variant
+//             (a `|` alternation or a payload), or a bare name that names no
+//             declared type and no builtin (`type Status = Pending` is a
+//             one-case variant, which is TypeScript's reading of TS2304 too);
+//   "alias" — a bare identifier naming a declared type or a plain builtin;
+//   "bail"  — alias-shaped to the reference but not modelled here.
+fn alias_rhs(ts: List[Token], lo: Int, hi: Int,
+             declared: List[Str]) -> AliasRhs {
+  if (lo >= hi) { return { kind: "bail", target: "" } }
+  if (atk(ts, lo, "{")) { return { kind: "none", target: "" } }
+  if (is_variant_rhs(ts, lo, hi)) { return { kind: "none", target: "" } }
+  if (!atk(ts, lo, "ident") || lo + 1 < hi) {
+    return { kind: "bail", target: "" }
+  }
+  let n = tkc(ts, lo).text
+  if (contains(declared, n) || alias_plain_builtin(n)) {
+    return { kind: "alias", target: n }
+  }
+  if (alias_undecidable_head(n)) { return { kind: "bail", target: "" } }
+  return { kind: "none", target: "" }
+}
+
+// The alias table in the reference's own insertion order: a name's FIRST alias
+// declaration fixes its position and its LAST one fixes its target and line
+// (`aliases[decl.name] = decl` over a dict). A redeclaration that is not
+// alias-shaped leaves the entry alone, exactly as the reference's `continue`
+// does.
+fn alias_put(ds: List[AliasD], n: Str, t: Str, ln: Int) -> List[AliasD] {
+  var out: List[AliasD] = []
+  var i = 0
+  var found = false
+  while (i < ds.length()) {
+    if (ds[i].name == n) {
+      out = out.push({ name: n, target: t, line: ln })
+      found = true
+    } else {
+      out = out.push(ds[i])
+    }
+    i += 1
+  }
+  return found ? out : out.push({ name: n, target: t, line: ln })
+}
+
+fn alias_index(ds: List[AliasD], n: Str) -> Int {
+  var i = 0
+  while (i < ds.length()) {
+    if (ds[i].name == n) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
+fn alias_scan(ts: List[Token], declared: List[Str]) -> AliasScan {
+  var ds: List[AliasD] = []
+  var ok = true
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "type")) {
+      let hi = type_decl_end(ts, i + 1)
+      let nm = tkc(ts, i + 1).text
+      let ln = tkc(ts, i).line
+      var j = i + 2
+      let generic = atk(ts, j, "[")
+      if (generic) { j = skip_brackets(ts, j) }
+      if (atk(ts, j, "=")) {
+        let r = alias_rhs(ts, j + 1, hi, declared)
+        if (r.kind == "bail") { ok = false }
+        if (r.kind == "alias") {
+          // `type Box[T] = Int`: the reference refuses the PARAMETERS of an
+          // alias-shaped declaration, in the collection loop and so ahead of
+          // any expansion. That refusal is not this phase's, so a program
+          // carrying one takes no alias verdict at all.
+          if (generic) { ok = false }
+          else { ds = alias_put(ds, nm, r.target, ln) }
+        }
+      }
+      i = hi
+    } else {
+      i += 1
+    }
+  }
+  return { ds: ds, ok: ok }
+}
+
+// "A -> B -> A": the stack from the position the repeated name first holds,
+// then that name again.
+fn alias_chain(stack: List[Str], at: Int, t: Str) -> Str {
+  var out = ""
+  var i = at
+  while (i < stack.length()) {
+    out = out == "" ? stack[i] : out.concat(" -> ").concat(stack[i])
+    i += 1
+  }
+  return out.concat(" -> ").concat(t)
+}
+
+// `_resolve_type_aliases`'s `expand`, iteratively: follow `start`'s chain with
+// `seed` the name the expansion was launched from. A name that re-enters the
+// stack is the cycle.
+fn alias_expand(ds: List[AliasD], start: Str, seed: Str) -> Verd {
+  var stack: List[Str] = [seed]
+  var t = start
+  var fuel = ds.length() + 2
+  while (fuel > 0) {
+    let k = alias_index(ds, t)
+    if (k == 0 - 1) { return no_verd() }
+    let at = stack.indexOf(t)
+    if (at != 0 - 1) {
+      return mk_verd(tagged("TYPE", "type alias cycle: "
+        .concat(alias_chain(stack, at, t))), ds[k].line)
+    }
+    stack = stack.push(t)
+    t = ds[k].target
+    fuel -= 1
+  }
+  return no_verd()
+}
+
+// The phase: the first cycle reached in the reference's own expansion order —
+// one launch per alias, in the table's insertion order.
+fn alias_cycle_refusal(ts: List[Token]) -> Verd {
+  if (has_use_decl(ts)) { return no_verd() }
+  let sc = alias_scan(ts, alias_decl_names(ts))
+  if (!sc.ok) { return no_verd() }
+  var i = 0
+  while (i < sc.ds.length()) {
+    let v = alias_expand(sc.ds, sc.ds[i].target, sc.ds[i].name)
+    if (v.v != "") { return v }
+    i += 1
+  }
+  return no_verd()
+}
+
 // A provide-method binding may not collide with a name already in scope: the
 // method's own parameters, or a COMPONENT-scope name (`_check_rebind`).
 //
@@ -9725,6 +9936,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, wrefs: List[Verd],
   // `_validate_declared_types`, the earliest of all), then cache-purity,
   // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
   // the component loop.
+  // the TRANSPARENT TYPE ALIASES first of all: `_resolve_type_aliases` is the
+  // earliest semantic phase in `check_and_lower`, ahead of the declared-type
+  // validation config-is-data is raised from.
+  let alv = alias_cycle_refusal(ts)
+  if (alv.v != "") { return { done: true, refs: [alv] } }
   let cfgv = config_data_refusal(ts, pg)
   if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
   // the SHADOWED MODULE CALLABLE (item 391): `_refuse_callable_shadowing` runs
@@ -16998,4 +17214,71 @@ test "a destructuring let is read, not refused" {
   // full agreement, and that one deliberately diverges.
   let v = admit_src("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }")
   assert v == ""
+}
+
+// ------------------------------- transparent type alias cycles (lower.py's
+// `_resolve_type_aliases`, the reference's first semantic phase)
+
+test "a two-step alias cycle is refused with the reference's chain" {
+  assert admit_src("type Handle = Ref type Ref = Handle fn open(h: Handle) -> Int { return 1 }")
+    == "TYPE|type alias cycle: Handle -> Ref -> Handle"
+}
+
+test "an alias that names itself is the one-step chain" {
+  assert admit_src("type A = A fn f(x: Int) -> Int { return x }")
+    == "TYPE|type alias cycle: A -> A"
+}
+
+test "the chain starts where the expansion RE-ENTERED, not where it began" {
+  // `A` is expanded first and reaches the cycle, but `A` is not on it: the
+  // reference slices its stack at the repeated name, so the chain is B's and so
+  // is the anchoring line.
+  assert admit_src("type A = B type B = C type C = B fn f(x: Int) -> Int { return x }")
+    == "TYPE|type alias cycle: B -> C -> B"
+}
+
+test "a name redeclared as an alias takes its LAST target" {
+  // `aliases[decl.name] = decl` overwrites, so `A` resolves to `Int` and the
+  // B -> A -> Int chain terminates. The reference admits this.
+  assert admit_src("type B = A type A = B type A = Int fn f(x: Int) -> Int { return x }")
+    == ""
+}
+
+test "a plain alias, a one-case variant and an alias of a variant all admit" {
+  assert admit_src("type Sku = Str fn f(s: Sku) -> Sku { return s }") == ""
+  // `Pending` names no declared type and no builtin, so this is a one-case
+  // variant rather than an alias (TypeScript reads the same right-hand side as
+  // TS2304) and has no chain to follow.
+  assert admit_src("type S = Pending fn f(x: Int) -> Int { return x }") == ""
+  assert admit_src("type V = Red | Blue type A = V fn f(x: Int) -> Int { return x }") == ""
+}
+
+test "an alias-shaped declaration the reader cannot resolve switches the phase off" {
+  // A BARE `Opt` is an alias target the reference refuses for its arity, in the
+  // collection loop and so ahead of every expansion — measured: it reports the
+  // `Opt`, not the cycle declared two lines above it. The gate withholds both,
+  // which is a no-objection and not a false rejection.
+  //
+  // The source goes through a `let` on purpose. Every program spelled as a
+  // STRING LITERAL directly inside an admission call in this section is held to
+  // FULL agreement with the reference by `test_in_file_test_programs_agree`,
+  // and these four are the deliberate under-refusals: the reference refuses
+  // each of them.
+  let arity = "type A = B type B = A type C = Opt fn f(x: Int) -> Int { return x }"
+  assert admit_src(arity) == ""
+  // ... and the same for the type PARAMETERS of an alias-shaped declaration,
+  // which the reference refuses in that same loop.
+  let params = "type A[T] = Int type B = C type C = B fn f(x: Int) -> Int { return x }"
+  assert admit_src(params) == ""
+}
+
+test "a cycle through a type APPLICATION is left undecided" {
+  // `type A = List[A]` and `type A = B?` are aliases to the reference too, and
+  // its `expand` recurses into the ARGUMENTS; this reader stops at a
+  // right-hand side that is not one bare identifier. The direction is the
+  // allowed one — a withheld refusal, never a wrong one.
+  let applied = "type A = List[A] fn f(x: Int) -> Int { return x }"
+  assert admit_src(applied) == ""
+  let suffixed = "type A = B? type B = A fn f(x: Int) -> Int { return x }"
+  assert admit_src(suffixed) == ""
 }

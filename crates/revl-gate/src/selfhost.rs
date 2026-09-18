@@ -212,6 +212,25 @@ pub struct ReachAcc {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AliasD {
+    name: String,
+    target: String,
+    line: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AliasScan {
+    ds: Vec<AliasD>,
+    ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AliasRhs {
+    kind: String,
+    target: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpawnEdge {
     parent: String,
     child: String,
@@ -4085,6 +4104,162 @@ fn has_use_decl(ts: &[Token]) -> bool {
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return false;
+}
+
+fn alias_plain_builtin(n: &str) -> bool {
+    return (((((((((n == "Str") || (n == "Int")) || (n == "Int32")) || (n == "Bool")) || (n == "Float")) || (n == "Bytes")) || (n == "Unit")) || (n == "Any")) || (n == "Never"));
+}
+
+fn alias_undecidable_head(n: &str) -> bool {
+    return ((((((n == "List") || (n == "Map")) || (n == "Opt")) || (n == "Result")) || (n == "Criterion")) || (n == "Guard"));
+}
+
+fn alias_decl_names(ts: &[Token]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
+        if atw(ts, i, "type") {
+            out.push(tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
+            i = type_decl_end(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+        } else {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn alias_rhs(ts: &[Token], lo: i64, hi: i64, declared: &[String]) -> AliasRhs {
+    if (lo >= hi) {
+        return AliasRhs { kind: String::from("bail"), target: String::from("") };
+    }
+    if atk(ts, lo, "{") {
+        return AliasRhs { kind: String::from("none"), target: String::from("") };
+    }
+    if is_variant_rhs(ts, lo, hi) {
+        return AliasRhs { kind: String::from("none"), target: String::from("") };
+    }
+    if ((!atk(ts, lo, "ident")) || ((lo).checked_add(1i64).expect("revl: Int overflow") < hi)) {
+        return AliasRhs { kind: String::from("bail"), target: String::from("") };
+    }
+    let n = tkc(ts, lo).text;
+    if (contains(declared, &n) || alias_plain_builtin(&n)) {
+        return AliasRhs { kind: String::from("alias"), target: n.clone() };
+    }
+    if alias_undecidable_head(&n) {
+        return AliasRhs { kind: String::from("bail"), target: String::from("") };
+    }
+    return AliasRhs { kind: String::from("none"), target: String::from("") };
+}
+
+fn alias_put(ds: &[AliasD], n: String, t: String, ln: i64) -> Vec<AliasD> {
+    let mut out: Vec<AliasD> = vec![];
+    let mut i = 0i64;
+    let mut found = false;
+    while (i < ds.revl_length()) {
+        if ((ds)[(i) as usize].name == n) {
+            out.push(AliasD { name: n.clone(), target: t.clone(), line: ln });
+            found = true;
+        } else {
+            out.push((ds)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return if found { out.clone() } else { out.revl_push(AliasD { name: n.clone(), target: t.clone(), line: ln }) };
+}
+
+fn alias_index(ds: &[AliasD], n: &str) -> i64 {
+    let mut i = 0i64;
+    while (i < ds.revl_length()) {
+        if ((ds)[(i) as usize].name == n) {
+            return i;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+}
+
+fn alias_scan(ts: &[Token], declared: &[String]) -> AliasScan {
+    let mut ds: Vec<AliasD> = vec![];
+    let mut ok = true;
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
+        if atw(ts, i, "type") {
+            let hi = type_decl_end(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+            let nm = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+            let ln = tkc(ts, i).line;
+            let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+            let generic = atk(ts, j.clone(), "[");
+            if generic {
+                j = skip_brackets(ts, j.clone());
+            }
+            if atk(ts, j, "=") {
+                let r = alias_rhs(ts, (j).checked_add(1i64).expect("revl: Int overflow"), hi, declared);
+                if (r.kind == "bail") {
+                    ok = false;
+                }
+                if (r.kind == "alias") {
+                    if generic {
+                        ok = false;
+                    } else {
+                        ds = alias_put(&ds, nm.clone(), r.target.clone(), ln);
+                    }
+                }
+            }
+            i = hi;
+        } else {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return AliasScan { ds: ds.clone(), ok: ok };
+}
+
+fn alias_chain(stack: &[String], at: i64, t: &str) -> String {
+    let mut out = String::from("");
+    let mut i = at;
+    while (i < stack.revl_length()) {
+        out = if (out == "") { (stack)[(i) as usize].clone() } else { (out.revl_concat(" -> ")).revl_concat(&(stack)[(i) as usize]) };
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (out.revl_concat(" -> ")).revl_concat(&t);
+}
+
+fn alias_expand(ds: &[AliasD], start: String, seed: String) -> Verd {
+    let mut stack = vec![seed];
+    let mut t = start;
+    let mut fuel = (ds.revl_length()).checked_add(2i64).expect("revl: Int overflow");
+    while (fuel > 0i64) {
+        let k = alias_index(ds, &t);
+        if (k == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return no_verd();
+        }
+        let at = stack.revl_index_of(&t);
+        if (at != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return mk_verd(tagged("TYPE", &(String::from("type alias cycle: ").revl_concat(&alias_chain(&stack, at, &t)))), (ds)[(k) as usize].line.clone());
+        }
+        stack.push(t.clone());
+        t = (ds)[(k) as usize].target.clone();
+        fuel = (fuel).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn alias_cycle_refusal(ts: &[Token]) -> Verd {
+    if has_use_decl(ts) {
+        return no_verd();
+    }
+    let sc = alias_scan(ts, &alias_decl_names(ts));
+    if (!sc.ok) {
+        return no_verd();
+    }
+    let mut i = 0i64;
+    while (i < sc.ds.revl_length()) {
+        let v = alias_expand(&sc.ds, (sc.ds)[(i) as usize].target.clone(), (sc.ds)[(i) as usize].name.clone());
+        if (v.v != "") {
+            return v;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
 }
 
 fn mth_rebind(pm: ProvM, scope: &[String], i: i64) -> Verd {
@@ -8583,6 +8758,10 @@ fn closure_assign_scan(ts: &[Token]) -> Verd {
 
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
     let base = ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone())), amb_ops_map(&ambOps, 0i64, std::collections::HashMap::new()));
+    let alv = alias_cycle_refusal(&ts);
+    if (alv.v != "") {
+        return NoLink { done: true, refs: vec![alv.clone()] };
+    }
     let cfgv = config_data_refusal(ts.clone(), pg.clone());
     if (cfgv.v != "") {
         return NoLink { done: true, refs: vec![cfgv.clone()] };
@@ -16615,6 +16794,49 @@ fn the_async_colour_reaches_the_fn_entries_transitively() {
 fn a_destructuring_let_is_read__not_refused() {
     let v = admit_src(String::from("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_two_step_alias_cycle_is_refused_with_the_reference_s_chain() {
+    assert!((admit_src(String::from("type Handle = Ref type Ref = Handle fn open(h: Handle) -> Int { return 1 }")) == "TYPE|type alias cycle: Handle -> Ref -> Handle"));
+}
+
+#[test]
+fn an_alias_that_names_itself_is_the_one_step_chain() {
+    assert!((admit_src(String::from("type A = A fn f(x: Int) -> Int { return x }")) == "TYPE|type alias cycle: A -> A"));
+}
+
+#[test]
+fn the_chain_starts_where_the_expansion_re_entered__not_where_it_began() {
+    assert!((admit_src(String::from("type A = B type B = C type C = B fn f(x: Int) -> Int { return x }")) == "TYPE|type alias cycle: B -> C -> B"));
+}
+
+#[test]
+fn a_name_redeclared_as_an_alias_takes_its_last_target() {
+    assert!((admit_src(String::from("type B = A type A = B type A = Int fn f(x: Int) -> Int { return x }")) == ""));
+}
+
+#[test]
+fn a_plain_alias__a_one_case_variant_and_an_alias_of_a_variant_all_admit() {
+    assert!((admit_src(String::from("type Sku = Str fn f(s: Sku) -> Sku { return s }")) == ""));
+    assert!((admit_src(String::from("type S = Pending fn f(x: Int) -> Int { return x }")) == ""));
+    assert!((admit_src(String::from("type V = Red | Blue type A = V fn f(x: Int) -> Int { return x }")) == ""));
+}
+
+#[test]
+fn an_alias_shaped_declaration_the_reader_cannot_resolve_switches_the_phase_off() {
+    let arity = String::from("type A = B type B = A type C = Opt fn f(x: Int) -> Int { return x }");
+    assert!((admit_src(arity.clone()) == ""));
+    let params = String::from("type A[T] = Int type B = C type C = B fn f(x: Int) -> Int { return x }");
+    assert!((admit_src(params.clone()) == ""));
+}
+
+#[test]
+fn a_cycle_through_a_type_application_is_left_undecided() {
+    let applied = String::from("type A = List[A] fn f(x: Int) -> Int { return x }");
+    assert!((admit_src(applied.clone()) == ""));
+    let suffixed = String::from("type A = B? type B = A fn f(x: Int) -> Int { return x }");
+    assert!((admit_src(suffixed.clone()) == ""));
 }
 
 #[test]

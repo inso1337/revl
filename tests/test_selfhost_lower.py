@@ -2518,6 +2518,83 @@ fn f() -> Int {
   let n = 2
 }
 """, "T1"),
+
+    # ---- transparent type ALIASES: the cycle (`_resolve_type_aliases`) ------
+    # The reference's FIRST semantic phase, ahead of the declared-type
+    # validation. Code-less, so before this slice the gate raised no objection
+    # and the census filed `t18_type_alias_cycle` as a false-admit; it was
+    # pinned in TYPE_LAYER_GAP below and has been struck from it.
+    ("a two-step type alias cycle", _fixture("t18_type_alias_cycle"), "TYPE"),
+    ("an alias that names itself", """
+type A = A
+
+fn f(x: Int) -> Int {
+  return x
+}
+""", "TYPE"),
+    ("a three-step alias cycle", """
+type A = B
+type B = C
+type C = A
+
+fn f(x: Int) -> Int {
+  return x
+}
+""", "TYPE"),
+    # the chain is sliced at the name the expansion RE-ENTERED, so `A` — the
+    # name the expansion started from — is not on it, and the anchoring line is
+    # `B`'s declaration rather than `A`'s.
+    ("a chain that runs INTO a cycle it is not part of", """
+type A = B
+type B = C
+type C = B
+
+fn f(x: Int) -> Int {
+  return x
+}
+""", "TYPE"),
+    # the expansion order is the alias table's, which is declaration order, so
+    # the FIRST declared name heads the chain.
+    ("the first declared alias heads the chain", """
+type B = A
+type A = B
+
+fn f(x: Int) -> Int {
+  return x
+}
+""", "TYPE"),
+    # a cycle declared after the program's functions still refuses, and the
+    # anchor follows the declaration rather than the file's first line.
+    ("a cycle declared below the functions", """
+fn f(x: Int) -> Int {
+  return x
+}
+
+type A = B
+type B = A
+""", "TYPE"),
+    # `pub` is a visibility prefix, not a declaration head: the reader
+    # dispatches on the `type` behind it.
+    ("a cycle through a `pub type`", """
+pub type A = B
+type B = A
+
+fn f(x: Int) -> Int {
+  return x
+}
+""", "TYPE"),
+    # two independent cycles: the reference reports the one its expansion
+    # reaches first, which is the first-declared alias's.
+    ("two independent cycles report the first", """
+type A = B
+type B = A
+type C = D
+type D = C
+
+fn f(x: Int) -> Int {
+  return x
+}
+""", "TYPE"),
 ]
 
 
@@ -3341,9 +3418,12 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
-    # declarations: alias cycles, bare generics, non-record destructuring.
+    # declarations: bare generics and non-record destructuring. The ALIAS CYCLE
+    # has landed (`_resolve_type_aliases`, the reference's first semantic
+    # phase): `t18_type_alias_cycle` moved into REJECTED_PROGRAMS above, where
+    # tag AND message are compared, and left this list. What stays needs the
+    # value-type table a destructuring site is judged against.
     "declarations": [
-        ("t18_type_alias_cycle", "TYPE"),
         ("t6_bare_generic", "T1"),
         ("t5_destructure_nonrecord", "TYPE"),
     ],
@@ -3492,16 +3572,16 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_19_fixtures():
+def test_the_type_layer_gap_is_exactly_18_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
     two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
-    rows for the module-`fn` surface, and the call-and-signature layer (T2b)
-    nine more; the twelfth document that moved with T3a,
-    `dynamic_reserved_key`, never had a row here because this pin addresses its
-    fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
+    rows for the module-`fn` surface, the call-and-signature layer (T2b) nine
+    more, and the transparent-alias cycle one; the twelfth document that moved
+    with T3a, `dynamic_reserved_key`, never had a row here because this pin
+    addresses its fixtures by bare name under `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 18, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
     assert len(set(names)) == 19, "a fixture is listed twice"
 
