@@ -341,13 +341,12 @@ def test_builder_text_literal_does_not_import_strings(emitted, reference):
                  "func revlFtoa", None, id="float-format-helper"),
     pytest.param('extern pure fn f() -> Str = @go {\n//revl:import strings\nreturn strings.ToUpper("x")\n}',
                  '"strings"', "<<DEFER-EXTERN-import:f>>", id="extern-imports"),
-    # The port drops the whole in-file test section and puts nothing in its
-    # place, so there is no port-only text to pin: witnessed by the absence of
-    # the reference's test driver from the port's output. (This case used to
-    # pin `func f()`, the document's own emitted function, which both sides
-    # emit -- see tests/_boundary_witness.py.)
+    # issue #1123: the port_token here used to be `func f()` — the emitted
+    # function itself, present in EVERY go emission of this document, so the
+    # witness could not tell a named refusal from silence, which is what the
+    # port actually produced. It now pins the marker.
     pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
-                 "*testing.T", None, id="in-file-tests"),
+                 "*testing.T", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
     pytest.param("service S { fn f() -> Int }\ncomponent C provides s: S { provide s { fn f() = 1 } }",
                  "stc-go", "pure typed-core tier", id="live-component"),
 ])
