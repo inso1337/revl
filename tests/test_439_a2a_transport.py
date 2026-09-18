@@ -2136,15 +2136,23 @@ def _policy_file(tmp_path, name: str, text: str) -> str:
     return str(path)
 
 
-def _evaluate(tmp_path, policy: str, *files: str) -> int:
-    """`revl policy evaluate POLICY FILES...` with the project root pinned."""
-    return _cli(["policy", "evaluate", policy,
-                 *[str(tmp_path / f) for f in files], "--root", str(tmp_path)])
+def _evaluate(tmp_path, policy: str, *files: str, root: bool = True) -> int:
+    """`revl policy evaluate POLICY FILES...`, with the project root pinned at
+    `tmp_path` so the row sources a composition names resolve where the fixture
+    wrote them. `root=False` leaves `--root` off, which is what the module
+    CONTROLS take: `--root` is an argument this slice adds, so a control that
+    passed it could not be run on the predecessor tree at all."""
+    argv = ["policy", "evaluate", policy, *[str(tmp_path / f) for f in files]]
+    if root:
+        argv += ["--root", str(tmp_path)]
+    return _cli(argv)
 
 
 def _dash(tmp_path, *files: str, policy: str | None = None,
-          as_json: bool = True) -> int:
-    argv = ["dash", *[str(tmp_path / f) for f in files], "--root", str(tmp_path)]
+          as_json: bool = True, root: bool = True) -> int:
+    argv = ["dash", *[str(tmp_path / f) for f in files]]
+    if root:
+        argv += ["--root", str(tmp_path)]
     if policy is not None:
         argv += ["--policy", policy]
     if as_json:
@@ -2239,7 +2247,7 @@ def test_revl_policy_evaluate_over_a_module_is_unchanged(tmp_path, capsys):
     takes."""
     write(tmp_path, module=MODULE)
     policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
-    assert _evaluate(tmp_path, policy, "module.rvl") == 1
+    assert _evaluate(tmp_path, policy, "module.rvl", root=False) == 1
     out = capsys.readouterr().out
     assert "LocalSvc" in out
     assert "would be REFUSED" in out
@@ -2278,7 +2286,7 @@ def test_revl_dash_over_a_module_is_unchanged(tmp_path, capsys):
     """THE CONTROL, green on both trees."""
     write(tmp_path, module=MODULE)
     policy = _policy_file(tmp_path, "deny.policy", DENY_NET)
-    assert _dash(tmp_path, "module.rvl", policy=policy) == 0
+    assert _dash(tmp_path, "module.rvl", policy=policy, root=False) == 0
     snapshot = json.loads(capsys.readouterr().out)
     exception, = snapshot["decisions"]["policy"]
     assert exception["component"] == "LocalSvc"
