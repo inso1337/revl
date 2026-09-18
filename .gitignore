@@ -62,3 +62,16 @@ formal/harness/out/
 # otherwise leave a few hundred MB of untracked artefacts behind.
 bench/inprocess_gate_rust/target/
 bench/inprocess_gate_rust/Cargo.lock
+
+# the playground/site compiler wheel (tools/check_site_wheel.py --write, or
+# `python3 site/build.py`). NOT committed: it vendors the whole of src/revl, so
+# a committed copy is stale the moment any module changes and can only be
+# refreshed by a commit that races the merge queue — which is how `site wheel
+# drift` came to be refreshed four times in one day and red again after each.
+# `.github/workflows/pages.yml` builds it into the published artifact instead,
+# so the deployed playground is built from the sha being deployed. Build it
+# before serving `site/` or `playground/` from a checkout.
+# (site/vendor/cordis-*.whl IS committed: its source is an external pinned
+# clone, not this tree, so it cannot be built at deploy time.)
+playground/vendor/revl-*.whl
+site/vendor/revl-*.whl

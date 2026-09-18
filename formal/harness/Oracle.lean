@@ -6,6 +6,7 @@ import RevL.Theorems.G8_ClassifiedBoundary
 import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.R4_NoResidue
+import RevL.Theorems.A9_ProvideKeyDeclared
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -25,7 +26,10 @@ proved model itself**, not from a private restatement of it (roadmap item
     resource half is the proved `RevL.Lemmas.Covers` over
     `stripCeilings` and whose ceiling half is the proved `budgetOf`
     development (`ceilingOKB_iff` discharges the unbounded `∀ k` through
-    `RevL.Lemmas.budgetOf_attained`).
+    `RevL.Lemmas.budgetOf_attained`);
+  * `A9 … a9=` is `a9RowB`, which IS `RevL.A9.a9B` over the component's
+    `LComponent` beside its installed provide-block keys (the `PB` rows);
+    `a9RowB_iff` PROVES `a9RowB c blocks = true ↔ RevL.A9.A9OK ⟨c, blocks⟩`.
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -77,10 +81,30 @@ Fact rows in (tab-separated, one fact per line):
   R <file> <comp> <local> <svc>              require binding -> service
   B <file> <svc> <meth> <plain|any|scoped>   service-method emission bound
   Q <file> <svc> <meth> <entry>              a scoped bound's declared entry
-  C <file> <comp> <key> <svc>                provide key -> service
-  K <file> <comp> <local> <cap>              require-held capability
-  A <file> <comp> <cap>                      activation emit-step surface
-  F <file> <comp> <key> <svc> <meth> <cap>   provide-method emission reach
+  C <file> <comp> <key> <svc>                provide key -> service, read
+                                             off the `provides` CLAUSE
+  PB <file> <comp> <key>                     one installed provide BLOCK
+                                             (`provide key { … }`), in body
+                                             order — a double install is a
+                                             repeated row. This is the fact
+                                             the A9 row reads; C is not it
+  K <file> <comp> <local> <cap>              require-held capability, named
+                                             by the DECLARED boundary
+  A <file> <comp> <cap>                      activation emit-step surface,
+                                             named by the DECLARED boundary
+  F <file> <comp> <key> <svc> <meth> <cap> <bound>
+                                             provide-method emission reach.
+                                             TWO spellings of the same
+                                             crossing: `cap` is the declared
+                                             BOUNDARY (what the attenuation
+                                             fold compares across a component
+                                             edge) and `bound` is the WIRING
+                                             KEY it went through (what the
+                                             provide-method bound compares
+                                             against its service's
+                                             `emission[...]`). `A` and `K`
+                                             feed the fold alone and carry
+                                             the boundary spelling only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context
@@ -127,6 +151,10 @@ Verdict rows out:
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
   W <file> <comp> <child> <atten=ok|fail>          spawn attenuation
   X <file> <refused=CODE>                          refusal of record
+  A9 <file> <comp> <a9=ok|fail>                    every installed block key
+                                                   is declared (RevL.A9);
+                                                   one row per component
+                                                   that installs a block
   D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
   O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a>   A8/R4 recovery
 
@@ -249,6 +277,21 @@ def linkVerdict (comps : List LComponent) : Bool :=
   match kahn l.length [] [] l with
   | none => false
   | some ord => linkOKB ord
+
+/-! ## Deciding A9
+
+The installed block keys live beside the `LComponent` (`RevL.A9.Installed`,
+additively — L0 carries the clause only), and the verdict is the L2 file's
+own `a9B`. Nothing is restated here; the bridge is the model's `a9B_iff`
+applied to the row's shape. -/
+
+def a9RowB (c : LComponent) (blocks : List String) : Bool :=
+  RevL.A9.a9B ⟨c, blocks⟩
+
+/-- **The A9 verdict is the model's judgment.** -/
+theorem a9RowB_iff (c : LComponent) (blocks : List String) :
+    a9RowB c blocks = true ↔ RevL.A9.A9OK ⟨c, blocks⟩ :=
+  RevL.A9.a9B_iff ⟨c, blocks⟩
 
 /-! ## Deciding the capability order
 
@@ -831,6 +874,21 @@ structure ARow where
   comp : String
   cap : String
 
+/-- A provide method's reached crossing. It is the one fact row two
+surfaces read, and they name a crossing in DIFFERENT namespaces, so it
+carries both spellings:
+
+* `cap` is the ATTENUATION element — the DECLARED boundary token and its
+  valuation (`lower._cap_keyed`), or the namespaced wiring key where no
+  declaration tokens it (`lower._wire_cap`). `Attenuates` compares a
+  parent's grant with a child's demand across a component boundary, and
+  `covers` clause 1 is a boundary IDENTITY test, so a local wiring key —
+  which two components spell however each likes — names nothing there;
+* `bound` is the BOUND element — the wiring key the crossing went through,
+  which is exactly how the reference names it when it measures a provide
+  method against its own service's `emission[...]` declaration.
+
+`A` and `K` feed only the attenuation fold and carry only that spelling. -/
 structure FRow where
   path : String
   comp : String
@@ -838,6 +896,7 @@ structure FRow where
   svc : String
   meth : String
   cap : String
+  bound : String
 
 structure KRow where
   path : String
@@ -849,6 +908,11 @@ structure SRow where
   path : String
   parent : String
   child : String
+
+structure PBRow where
+  path : String
+  comp : String
+  key : String
 
 structure XRow where
   path : String
@@ -1094,7 +1158,8 @@ def parseA (f : List String) : Option ARow :=
 
 def parseF (f : List String) : Option FRow :=
   match f with
-  | ["F", path, comp, key, svc, meth, cap] => some ⟨path, comp, key, svc, meth, cap⟩
+  | ["F", path, comp, key, svc, meth, cap, bound] =>
+      some ⟨path, comp, key, svc, meth, cap, bound⟩
   | _ => none
 
 def parseK (f : List String) : Option KRow :=
@@ -1105,6 +1170,11 @@ def parseK (f : List String) : Option KRow :=
 def parseS (f : List String) : Option SRow :=
   match f with
   | ["S", path, parent, child] => some ⟨path, parent, child⟩
+  | _ => none
+
+def parsePB (f : List String) : Option PBRow :=
+  match f with
+  | ["PB", path, comp, key] => some ⟨path, comp, key⟩
   | _ => none
 
 def parseX (f : List String) : Option XRow :=
@@ -1298,6 +1368,7 @@ def main (args : List String) : IO UInt32 := do
     let krows := fields.filterMap parseK
     let srows := fields.filterMap parseS
     let xrows := fields.filterMap parseX
+    let pbrows := fields.filterMap parsePB
     let harows := fields.filterMap parseHA
     let irows := fields.filterMap parseI
     let pgrows := fields.filterMap parsePG
@@ -1312,7 +1383,7 @@ def main (args : List String) : IO UInt32 := do
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
     let allCaps := ((arows.map (·.cap)) ++ (frows.map (·.cap))
-                    ++ (krows.map (·.cap))).eraseDups
+                    ++ (frows.map (·.bound)) ++ (krows.map (·.cap))).eraseDups
     let missing := allCaps.filter (fun c => (capOf capTable c).isNone)
     if !missing.isEmpty then
       IO.eprintln s!"oracle: capability rows without a Z decomposition: {missing}"
@@ -1372,6 +1443,7 @@ def main (args : List String) : IO UInt32 := do
       let us := srows.filter (fun r => r.path == p)
       let uu := urows.filter (fun r => r.path == p)
       let uha := harows.filter (fun r => r.path == p)
+      let upb := pbrows.filter (fun r => r.path == p)
       let ems : List (String × String) :=
         (ub.filter (fun b => b.mode != "plain")).map (fun b => (b.svc, b.meth))
       let bounds : List (String × String × String × List String) :=
@@ -1399,12 +1471,23 @@ def main (args : List String) : IO UInt32 := do
         let acquireOK := hostAcquireOK (uha.filter (fun r => r.comp == cn))
         let gv := if markerOK && acquireOK then "ok" else "fail"
         out := out ++ s!"G\t{p}\t{cn}\tg4={gv}\n"
+      -- A9 verdicts (issue 1167): every installed provide block's key is
+      -- declared in the clause. One row per component that installs a block
+      -- (a component with no block would agree vacuously); the clause comes
+      -- off the M row's `LComponent`, the blocks off the PB rows, and the
+      -- verdict is the model's `a9B` (`a9RowB_iff`). Templates included:
+      -- `lower._lower_provide` runs on a spawn target's body too.
+      for r in fm do
+        let blocks := (upb.filter (fun b => b.comp == r.name)).map (·.key)
+        if !blocks.isEmpty then
+          let av := if a9RowB (toLComponent r) blocks then "ok" else "fail"
+          out := out ++ s!"A9\t{p}\t{r.name}\ta9={av}\n"
       -- P verdicts (provide-method bound) per method reach group
       let fkeys := (uf.map (fun r => (r.comp, r.key, r.svc, r.meth))).eraseDups
       for k in fkeys do
         let caps := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
                                 && r.svc == k.2.2.1 && r.meth == k.2.2.2))
-                    |>.map (·.cap) |>.eraseDups
+                    |>.map (·.bound) |>.eraseDups
         let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 caps
         let pv := if ok then "ok" else "fail"
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"
@@ -1518,3 +1601,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.fenced_not_reissued
 #print axioms RevLOracle.declared_idempotent_reissued
 #print axioms RevLOracle.reportedSeqLabels_nil_iff_clean
+#print axioms RevLOracle.a9RowB_iff

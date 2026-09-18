@@ -37,10 +37,11 @@
 //! The self-host compiler is behind the reference implementation (roadmap item
 //! 391), and the shape of that gap is not "a few missing constructs" — it is a
 //! whole missing LAYER. `admit_src` decides the composition and guarantee layer
-//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not**
-//! run the reference's type layer. Measured, not assumed: the reference refuses
-//! `fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }`
-//! and `fn f() -> { }`; the self-host gate raises no objection to any of them.
+//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`), plus ONE slice
+//! of the reference's type layer — the fn-body statement layer. It does **not**
+//! run the rest of it. Measured, not assumed: the reference refuses
+//! `fn f() -> Int { return undefined_name }` and `fn f() -> { }`; the self-host
+//! gate raises no objection to either.
 //!
 //! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
 //! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
@@ -199,8 +200,10 @@
 //! # `compile_to` is Stage 4
 //!
 //! Exported so the shape is fixed; it refuses unconditionally today, because
-//! the self-host emitters still carry `@py`-only helper externs and do not emit
-//! to rust at all.
+//! this crate carries the FRONTEND only. `selfhost/lower.rvl` and its `use`
+//! closure are what `tools/build_gate_crate.py` emits into `selfhost.rs`; no
+//! emitter is in the crate, so there is no native emitter to call. See
+//! [`compile_to`] for what each tier still needs.
 //!
 //! # The navigation surface
 //!
@@ -699,20 +702,39 @@ fn verdict_from_wire(wire: &str) -> Verdict {
 
 /// Verdict plus emitted target source — **Stage 4, not available**.
 ///
-/// Always `Err(Verdict::OutsideFrontier)` today: the self-host emitters
-/// (`selfhost/emit_py.rvl`, `selfhost/emit_rust.rvl`) still carry `@py`-only
-/// helper externs (`string_lit`, `num_str`, `py_repr`, `mangle`) and do not emit
-/// to rust at all, so no native emitter exists to call. The signature is fixed
-/// here so its arrival is additive.
+/// Always `Err(Verdict::OutsideFrontier)` today: the crate carries the FRONTEND
+/// only (`selfhost/lower.rvl` and its `use` closure, emitted into `selfhost`),
+/// so there is no emitter in it to call. What each tier still needs differs, and
+/// the refusal names it rather than stating one reason for both:
+///
+/// * `py` — `selfhost/emit_py.rvl`'s six helper externs (`py_repr`, `mangle`,
+///   `snake`, `pascal`, `upper`, `newline`) carry `@py` bodies only, so that
+///   emitter has no rust form at all;
+/// * `rust` — `selfhost/emit_rust.rvl` now BUILDS as rust (every extern carries
+///   an `@rs` body, and roadmap item 146 closed the `Any`-erasure boxing that
+///   left it failing `cargo build`; pinned by
+///   `tests/test_selfhost_emit_rust.py::test_the_rust_emitter_builds_as_rust`).
+///   What is missing is the rest of the chain in this crate: the emitter is not
+///   generated into it, and its entry point takes the interchange IR as an
+///   `Any`, which erases to `cordis::Value` with no rust-side constructor to
+///   build one from source.
+///
+/// The signature is fixed here so its arrival is additive.
 pub fn compile_to(_source: &str, tier: Tier) -> Result<String, Verdict> {
     let tier_name = match tier {
         Tier::Py => "py",
         Tier::Rust => "rust",
     };
+    // The two tiers are blocked by different things, and a consumer reading this
+    // reason should be told which, not one summary that fits neither.
+    let tier_detail = match tier {
+        Tier::Py => "selfhost/emit_py.rvl carries @py-only helper externs and has no rust form",
+        Tier::Rust => "selfhost/emit_rust.rvl builds as rust but is not generated into this crate, and its entry takes the interchange IR as an erased cordis::Value with no rust-side constructor",
+    };
     Err(Verdict::OutsideFrontier {
         reason: format!(
-            "compile_to({}) is not available in this crate: the self-host emitters still depend on @py-only helper externs, so there is no native emitter to run (roadmap item 332 Stage 4). Emit with the reference `revl compile --backend {}`.",
-            tier_name, tier_name
+            "compile_to({}) is not available in this crate: it carries the frontend only, so there is no native emitter in it to run ({}) (roadmap item 332 Stage 4). Emit with the reference `revl compile --backend {}`.",
+            tier_name, tier_detail, tier_name
         ),
     })
 }
@@ -804,8 +826,17 @@ mod wire_tests {
     /// `store`, `App` provides `app` and requires `store`.
     const RUNNING: &str = "Kv/store/;App/app/;App<store";
 
-    /// A component that re-provides `store`, the key `Kv` already holds.
-    const AMBIENT_CONFLICT: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+    /// A component that re-provides `store`, the key `Kv` already holds. It
+    /// declares `Store` itself so its ONLY refusal is the composition one: the
+    /// component header's service-existence rule would otherwise refuse it for a
+    /// dangling `Store` before the link ever ran, which is the reference's own
+    /// answer but not the question these tests ask.
+    const AMBIENT_CONFLICT: &str = "service Store {\n\
+  fn get(k: Str) -> Str\n\
+  fn bump(n: Int) -> Int\n\
+  emission fn put(key: Str, value: Str)\n\
+}\n\
+service Cache { fn lookup(key: Str) -> Str }\n\
 component CacheLayer requires store: Store provides store: Store {\n\
   provide store {\n\
     fn get(key) = key\n\
@@ -813,6 +844,25 @@ component CacheLayer requires store: Store provides store: Store {\n\
     fn put(key, value) = value\n\
   }\n\
 }\n";
+
+    /// The issue-346 candidate: a fresh component that requires a service the
+    /// RUNNING composition declares and the incoming text does not.
+    const AMBIENT_ONLY_SERVICE: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+component CacheLayer requires store: Store provides cache: Cache {\n\
+  provide cache { fn lookup(key) = store.get(key) }\n\
+}\n";
+
+    /// The same candidate calling an operation the running `Store` does not
+    /// declare. Only a reader that resolved the requirement against the running
+    /// DECLARATION — not just its name — can tell the two apart.
+    const AMBIENT_MISSING_METHOD: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+component CacheMiss requires store: Store provides cache: Cache {\n\
+  provide cache { fn lookup(key) = store.nonexistent(key) }\n\
+}\n";
+
+    /// The issue-346 running composition's wire, operations included.
+    const HELD: &str =
+        "Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping";
 
     #[test]
     fn an_empty_manifest_is_the_standalone_gate() {
@@ -854,6 +904,68 @@ component CacheLayer requires store: Store provides store: Store {\n\
         match admit_into(AMBIENT_CONFLICT, "Kv/store/") {
             Verdict::Refused { code, .. } => assert_eq!(code, "G2"),
             other => panic!("expected an ambient G2 refusal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_requirement_resolves_against_the_running_services_operations() {
+        // Issue #346, the second half of the same question (docs/design/457
+        // T4b). With the running operations on the wire the gate resolves the
+        // requirement against the running DECLARATION, so a call to an
+        // operation `Store` declares is unobjectionable and a call to one it
+        // does not is refused in the reference's own words.
+        assert_eq!(admit_into(AMBIENT_ONLY_SERVICE, HELD), Verdict::NoObjection);
+        match admit_into(AMBIENT_MISSING_METHOD, HELD) {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "A6");
+                assert_eq!(
+                    message,
+                    "`store.nonexistent` is not a method of service Store"
+                );
+            }
+            other => panic!("expected the member refusal, got {:?}", other),
+        }
+        // The comma is the CLAIM. A wire whose rows carry only names says
+        // nothing about the running surface, so it decides no member — the
+        // under-refusing direction, and what every wire rendered by a producer
+        // with no operation table gets.
+        assert_eq!(
+            admit_into(AMBIENT_MISSING_METHOD, "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"),
+            Verdict::NoObjection
+        );
+    }
+
+    #[test]
+    fn a_requirement_resolves_against_the_running_service_block() {
+        // Issue #346. The component header's service-existence rule
+        // (docs/design/457 §2.4): `requires store: Store` names a service the
+        // incoming text does not declare, so STANDALONE it is refused in the
+        // reference's own words; against a running composition whose `!services`
+        // block declares `Store`, it resolves and the gate has nothing to object
+        // to. Two different answers to the same bytes, from the manifest alone.
+        match admit(AMBIENT_ONLY_SERVICE) {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "G1");
+                assert_eq!(message, "unknown service `Store` in `requires` of CacheLayer");
+            }
+            other => panic!("expected the header-rule refusal, got {:?}", other),
+        }
+        assert_eq!(
+            admit_into(AMBIENT_ONLY_SERVICE, "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"),
+            Verdict::NoObjection
+        );
+        // The `!services` HEADER is the claim, not the rows: a wire that makes
+        // none leaves the question undecided rather than refusing a candidate the
+        // running composition may well satisfy.
+        assert_eq!(admit_into(AMBIENT_ONLY_SERVICE, RUNNING), Verdict::NoObjection);
+        // ... and an EXHAUSTIVE block that omits the name refuses, exactly as the
+        // standalone question does.
+        match admit_into(AMBIENT_ONLY_SERVICE, "Kv/store/;App/app/;App<store;!services;:AppSvc") {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "G1");
+                assert_eq!(message, "unknown service `Store` in `requires` of CacheLayer");
+            }
+            other => panic!("expected the header-rule refusal, got {:?}", other),
         }
     }
 
@@ -1067,7 +1179,6 @@ component CacheLayer requires store: Store provides store: Store {\n\
         // small: the reference refuses this and the covered layer cannot see it,
         // so the honest answer is to withhold rather than to admit.
         for source in [
-            "fn f() -> Int { return \"s\" }",
             "fn f() -> Int { return undefined_name }",
             "fn f() -> { }",
         ] {

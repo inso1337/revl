@@ -1,2 +1,24 @@
 fn call_chain(s: Opt[Str]) -> Opt[Int] { return s?.length() }
 fn call_chain2(s: Opt[Str]) -> Opt[Str] { return s?.concat("!") }
+
+// A `?.m(..)` reaches the SAME render table a plain `.m(..)` does. It used to
+// emit `payload?.m(..)` verbatim, which is a method JS values do not have for
+// fourteen of the twenty-nine builtin forms — `o?.length is not a function`,
+// `o?.to_int`, `o?.to_str`, `o?.div_trunc`, the four ASCII classifiers. These
+// pin the rows the old spelling could not reach, including the one that has to
+// split its two receiver families at run time (`to_int`).
+fn opt_parse(s: Opt[Str]) -> Opt[Opt[Int]] { return s?.to_int() }
+fn opt_render(n: Opt[Int]) -> Opt[Str] { return n?.to_str() }
+fn opt_narrow(n: Opt[Int]) -> Opt[Int32] { return n?.to_int32() }
+fn opt_div_trunc(n: Opt[Int]) -> Opt[Int] { return n?.div_trunc(2) }
+fn opt_div_floor(n: Opt[Int]) -> Opt[Int] { return n?.div_floor(2) }
+fn opt_div_euclid(n: Opt[Int]) -> Opt[Int] { return n?.div_euclid(2) }
+fn opt_mod(n: Opt[Int]) -> Opt[Int] { return n?.mod(2) }
+fn opt_checked(n: Opt[Int]) -> Opt[Result[Int, Str]] { return n?.checked_div_trunc(2) }
+fn opt_digit(s: Opt[Str]) -> Opt[Bool] { return s?.is_digit() }
+fn opt_alpha(s: Opt[Str]) -> Opt[Bool] { return s?.is_alpha() }
+fn opt_alnum(s: Opt[Str]) -> Opt[Bool] { return s?.is_alnum() }
+fn opt_space(s: Opt[Str]) -> Opt[Bool] { return s?.is_space() }
+fn opt_split(s: Opt[Str]) -> Opt[List[Str]] { return s?.split("") }
+fn opt_points(s: Opt[Str], n: Int) -> Opt[Int] { return s?.codepoint_at(n) }
+fn opt_keys(m: Opt[Map[Str, Int]]) -> Opt[List[Str]] { return m?.keys() }

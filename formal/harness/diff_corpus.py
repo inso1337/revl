@@ -50,9 +50,9 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    what revl actually does, and it fails `make formal`.
 4. report checker alignment: compile each file with the real checker
    (`revl.compiler.compile_source`) and compare its refusal codes against
-   the formal verdicts. Informational, EXCEPT `missed-G4` and `missed-G2`
-   (`FATAL_BUCKETS`) — the checker refusing where the model sees nothing
-   is the dangerous direction and fails the gate.
+   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`
+   and `missed-A9` (`FATAL_BUCKETS`) — the checker refusing where the
+   model sees nothing is the dangerous direction and fails the gate.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -273,8 +273,57 @@ def attenuation_coverage() -> list[str]:
     return findings
 
 
+# A crossing has TWO names, and they live in different namespaces. The
+# exporter ships both, because the two surfaces that read a crossing disagree
+# about which one names it:
+#
+#   * the BOUND rule (`P`) asks whether a provide method stayed inside its own
+#     service's `emission[...]` declaration, and the reference names the
+#     crossing there by the WIRING KEY it went through — "`Cache.put` is
+#     declared `emission[db]`, but this implementation emits through `bus`"
+#     (`examples/rejections/g4_capability_not_declared.rvl`). `_canon_cap`
+#     below is that namespace and is right for it;
+#   * the ATTENUATION fold (`W`) compares a parent's grant against a child's
+#     demand ACROSS a component boundary, and two components wire the same
+#     boundary under whatever key each likes. `covers` clause 1 is a boundary
+#     IDENTITY test, so the fold element must be the DECLARED token — exactly
+#     what `lower._cap_keyed` says, and what `_declared_cap` builds here.
+#
+# Spelling both sides of the attenuation fold in the key namespace is a
+# LAUNDERING hole: `Supervisor requires kv: KvA` spawning
+# `Leaker requires kv: KvB` reaches a different boundary under the same key,
+# and the fold saw `kv` on both sides and derived no widening
+# (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
+_WIRE_NS = "key:"
+
+
+def _wire_cap(key: str) -> str:
+    """`lower._wire_cap`: the attenuation-fold element for a wiring key that no
+    declaration tokens (a bare `emission`, a plain or unresolvable service).
+    The key gets its OWN namespace so a key spelling can never masquerade as a
+    declared token, and so two such boundaries still compare by name."""
+    return _WIRE_NS + key
+
+
+def _declared_cap(declared: str) -> str:
+    """`lower._cap_keyed`: the attenuation-fold element for a crossing that a
+    declaration DOES token. The boundary is the declared token and its
+    valuation, never the local wiring key it was reached through, canonicalized
+    by the checker's own parser (so `net(requests=100)` and `net(calls=100)`
+    are one element and not two).
+
+    A malformed stored spelling degrades to the unnameable `*`, fail-closed on
+    both sides exactly as the bridge does: covered by nothing as a reach
+    element, covering nothing but `*` as a held one."""
+    try:
+        return parse_cap(declared).to_str()
+    except cap_order.CapError:
+        return "*"
+
+
 def _canon_cap(root: str, declared: str) -> str:
-    """Token the wiring key, params from the declared valuation: a declaring
+    """The BOUND namespace (`P` row only — see the note above): token the
+    wiring key, params from the declared valuation, so a declaring
     `fs.write(path="/tmp")` crossed through key `fs` renders `fs(path="/tmp")`,
     the spelling the checker's diagnostics use. A bare declared token keeps
     the bare key."""
@@ -611,16 +660,20 @@ def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
         apply_bindings(stmt)
 
 
-def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
-               psvc: dict, bounds: dict, em_set: set, emitting: set,
-               aliases: dict | None = None) -> None:
-    """Collect the canonical emission caps `node` crosses.
+def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
+               handles: dict, psvc: dict, bounds: dict, em_set: set,
+               emitting: set, aliases: dict | None = None) -> None:
+    """Collect the emission caps `node` crosses, each as the PAIR
+    `(attenuation spelling, bound spelling)` — the two namespaces a crossing
+    has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
+    its surface reads; nothing downstream has to re-derive the other.
 
     `region` is "emit-step" (count only MARKED crossings — the attenuation
     surface, like `_collect_emit_caps_pairs`) or "all" (also count any
     resolved emission call — a provide method's reach for the bound, like
     `_method_emissions.walk`). A spawn-handle emission is the unnameable
-    `*`; an emission extern / emitting-fn call contributes `*` too."""
+    `*`; an emission extern / emitting-fn call contributes `*` too. `*` is
+    unnameable in BOTH namespaces, so it is its own spelling on both sides."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
@@ -639,16 +692,20 @@ def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
                 svc, meth = res
                 if (svc, meth) in em_set:
                     if root in handles or (aliases and root in aliases):
-                        out.add("*")
+                        out.add(("*", "*"))
                     else:
                         mode, entries = bounds[(svc, meth)]
                         if mode == "any":
-                            out.add(root)
+                            # No declared token: the wiring key names the
+                            # boundary, in its own namespace for the fold and
+                            # bare for the bound.
+                            out.add((_wire_cap(root), root))
                         else:
                             for e in entries:
-                                out.add(_canon_cap(root, e))
+                                out.add((_declared_cap(e),
+                                         _canon_cap(root, e)))
             elif res is None and region == "all" and root in emitting:
-                out.add("*")
+                out.add(("*", "*"))
         for a in node.args:
             walk_reach(a, out, region, requires, handles, psvc, bounds,
                        em_set, emitting, aliases)
@@ -1017,23 +1074,35 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.append("\t".join(["R", rel, c.name, local, svc]))
             for key, svc, _ln in c.provides:
                 tsv.append("\t".join(["C", rel, c.name, key, svc]))
+            # PB: one row per installed provide BLOCK, in body order (issue
+            # 1167). C above reads the `provides` CLAUSE; A9 is the rule that
+            # the two agree, so the A9 row needs the block as its own fact —
+            # read off the same AST node `lower._lower_provide` refuses on.
+            # A double install is a repeated row, not a collapsed one.
+            for stmt in c.body:
+                if isinstance(stmt, ProvideStmt):
+                    tsv.append("\t".join(["PB", rel, c.name, stmt.key]))
 
             # require-held capability facts (K): the boundaries a requires
             # binding hands this component — the structured valuations of the
             # service's emission declarations (the held side of attenuation).
+            # K feeds the attenuation fold and nothing else, so it carries the
+            # ATTENUATION spelling only: the declared token where the service
+            # declares one, the namespaced wiring key where it does not
+            # (`lower._held_capabilities_pairs`, clause for clause).
             krows: list[tuple[str, str]] = []
             for local, svc in requires:
                 em = [(mode, ents) for (s, _m), (mode, ents) in bounds.items()
                       if s == svc and mode != "plain"]
                 if not em:
-                    krows.append((local, local))
+                    krows.append((local, _wire_cap(local)))
                     continue
                 for mode, ents in em:
                     if mode == "any":
-                        krows.append((local, local))
+                        krows.append((local, _wire_cap(local)))
                     else:
                         for e in ents:
-                            krows.append((local, _canon_cap(local, e)))
+                            krows.append((local, _declared_cap(e)))
             for local, cap in sorted(krows):
                 caps_seen.add(cap)
                 tsv.append("\t".join(["K", rel, c.name, local, cap]))
@@ -1071,12 +1140,15 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
 
             # activation emit-step surface (A): the component's OWN marked
             # crossings — the base of the attenuation reach.
-            act_reach: set[str] = set()
+            # A feeds the attenuation fold and nothing else, so — like K — it
+            # carries the attenuation spelling only.
+            act_reach: "set[tuple[str, str]]" = set()
             for stmt in c.body:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
                            psvc, bounds, em_set, emitting, aliases)
-            caps_seen.update(act_reach)
-            for cap in sorted(act_reach):
+            act_caps = {cap for cap, _bound in act_reach}
+            caps_seen.update(act_caps)
+            for cap in sorted(act_caps):
                 tsv.append("\t".join(["A", rel, c.name, cap]))
 
             # host acquisition facts (HA): each host-family acquisition the
@@ -1088,21 +1160,27 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
 
             # provide-method reach (F): emission caps a method's body crosses
             # (all-call) — the bound check's left side and, with A, the
-            # component surface for attenuation.
+            # component surface for attenuation. It is the ONE row both
+            # surfaces read, so it carries BOTH spellings: `cap` is the
+            # attenuation element (the declared boundary) and `bound` is the
+            # bound element (the wiring key the crossing went through). They
+            # differ, and collapsing them is the laundering hole.
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     svc = psvc.get(c.name, {}).get(stmt.key)
                     if svc is None:
                         continue
                     for pm in stmt.methods:
-                        reach: set[str] = set()
+                        reach: "set[tuple[str, str]]" = set()
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
                                        psvc, bounds, em_set, emitting, aliases)
-                        caps_seen.update(reach)
-                        for cap in sorted(reach):
+                        for cap, bound in sorted(reach):
+                            caps_seen.add(cap)
+                            caps_seen.add(bound)
                             tsv.append("\t".join(
-                                ["F", rel, c.name, stmt.key, svc, pm.name, cap]))
+                                ["F", rel, c.name, stmt.key, svc, pm.name,
+                                 cap, bound]))
 
             calls: list[tuple[str, str, str, str]] = []
             kinds: list[str] = []
@@ -1982,7 +2060,8 @@ class Verdicts(NamedTuple):
     `confinements` C rows (G6: a reconstructed statement's reach surface is
     within its component's declared context), `g8surface` S8 rows (G8: a
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
-    rows (G5: an effect's teardown registration count)."""
+    rows (G5: an effect's teardown registration count), `a9` A9 rows (every
+    installed provide block's key is declared in the `provides` clause)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -1993,13 +2072,14 @@ class Verdicts(NamedTuple):
     confinements: dict[tuple[str, str, str], str]
     g8surface: dict[tuple[str, str, str], object]
     g5reg: dict[tuple[str, str, str], object]
+    a9: dict[tuple[str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
                 + len(self.dispositions) + len(self.recoveries)
                 + len(self.confinements) + len(self.g8surface)
-                + len(self.g5reg))
+                + len(self.g5reg) + len(self.a9))
 
 
 def _cols(field: str) -> list[str]:
@@ -2020,6 +2100,7 @@ def parse_verdicts(text: str) -> Verdicts:
     confinements: dict[tuple[str, str, str], str] = {}
     g8surface: dict[tuple[str, str, str], object] = {}
     g5reg: dict[tuple[str, str, str], object] = {}
+    a9: dict[tuple[str, str], str] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -2075,10 +2156,13 @@ def parse_verdicts(text: str) -> Verdicts:
             body = parts[4].split("=", 1)[1]
             g5reg[(parts[1], parts[2], parts[3])] = (
                 "n/a" if body == "n/a" else int(body))
+        elif parts[0] == "A9" and len(parts) == 4:
+            # A9 provide-block declaration: (file, comp) -> ok|fail.
+            a9[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+                    recoveries, confinements, g8surface, g5reg, a9)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -2140,13 +2224,14 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     brows = [r for r in rows if r and r[0] == "B" and len(r) == 5]
     qrows = [r for r in rows if r and r[0] == "Q" and len(r) == 5]
     arows = [r for r in rows if r and r[0] == "A" and len(r) == 4]
-    frows = [r for r in rows if r and r[0] == "F" and len(r) == 7]
+    frows = [r for r in rows if r and r[0] == "F" and len(r) == 8]
     krows = [r for r in rows if r and r[0] == "K" and len(r) == 5]
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
     irows = [r for r in rows if r and r[0] == "I" and len(r) == 7]
     exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
     fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
+    pbrows = [r for r in rows if r and r[0] == "PB" and len(r) == 4]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -2205,9 +2290,12 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         comps[(rel, compn)] = "fail" if (raw or acquire) else "ok"
 
     providers: dict[tuple[str, str, str, str, str], str] = {}
+    # The BOUND surface reads the F row's bound spelling (column 8): the
+    # reference names a crossing by the wiring key it went through when it
+    # measures a provide method against its own service's declaration.
     fmethods: dict[tuple[str, str, str, str, str], set[str]] = {}
     for r in frows:
-        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), set()).add(r[6])
+        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), set()).add(r[7])
     for k, caps in fmethods.items():
         mode, ents = bounds_by_file.get((k[0], k[3], k[4]), ("plain", set()))
         if mode == "any":
@@ -2218,6 +2306,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             ok = {parse_cap(c).token for c in caps} <= ents
         providers[k] = "ok" if ok else "fail"
 
+    # ... and the ATTENUATION surface reads the same row's column 7, the
+    # declared boundary. A and K carry that spelling and no other.
     owns: dict[tuple[str, str], set[str]] = {}
     for r in arows:
         owns.setdefault((r[1], r[2]), set()).add(r[3])
@@ -2366,8 +2456,70 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                 g5reg[(rel, compn, index)] = n
                 _G5_REGS[(rel, compn, index)] = n
 
+    # A9 rows (issue 1167): every installed provide BLOCK's key is declared
+    # in the `provides` CLAUSE. The clause comes off the M row and the blocks
+    # off the PB rows — the two facts the exporter reads off two different
+    # AST nodes — so this is membership between two lists, recomputed here
+    # without the Lean side's `Installed` structure. One row per component
+    # that installs a block: a block-less component would agree vacuously.
+    _A9_ROWS.clear()
+    provides_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in mrows:
+        provides_by_comp[(r[1], r[2])] = [k for k in r[4].split(",") if k]
+    blocks_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in pbrows:
+        blocks_by_comp.setdefault((r[1], r[2]), []).append(r[3])
+    a9: dict[tuple[str, str], str] = {}
+    for key, blocks in blocks_by_comp.items():
+        declared = provides_by_comp.get(key, [])
+        undeclared = [k for k in blocks if k not in declared]
+        a9[key] = "ok" if not undeclared else "fail"
+        _A9_ROWS[key] = (not undeclared, len(blocks))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+                    recoveries, confinements, g8surface, g5reg, a9)
+
+
+#: What the REFERENCE computed for each A9 row, for the non-vacuity ratchet:
+#: (every block declared, block count). Filled by `reference_from_tsv`; read
+#: by `a9_coverage`. Evidence the row BITES, not a claim either side makes.
+_A9_ROWS: dict = {}
+
+
+def a9_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A9` row (issue 1167).
+
+    Same discipline as `confinement_coverage`: a row every corpus component
+    satisfies certifies nothing. So the corpus must carry BOTH verdicts on
+    the reference's own computation:
+
+      * some component installs at least one block and every block key is
+        declared — an admitted provider, the `ok` that is a real check;
+      * some component installs a block whose key the clause never declared
+        — the refused shape (`examples/rejections/a9_provide_key_not_declared.rvl`),
+        the `fail` without which `a9B` would be a constant `true` over the
+        corpus and the differential would prove nothing.
+
+    Returns findings, which the caller treats as gate failures.
+    """
+    admitted = refused = None
+    for key, (declared, n_blocks) in _A9_ROWS.items():
+        if declared and n_blocks > 0:
+            admitted = admitted or key
+        if not declared:
+            refused = refused or key
+    findings: list[str] = []
+    for label, witness in (
+            ("a component installing a block under a declared key", admitted),
+            ("a component installing a block the clause never declared",
+             refused)):
+        if witness is None:
+            findings.append(f"a9 coverage: NO witness of {label} — "
+                            "the A9 row would agree vacuously")
+    if not findings:
+        print(f"a9 coverage: {len(_A9_ROWS)} installing components; "
+              f"admitted={admitted} refused={refused}")
+    return findings
 
 
 # The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
@@ -2376,7 +2528,10 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
 # and the "the model agrees with the checker" claim would be false.
 # `formal-strict` — the model refusing what the checker accepts — stays
 # informational: it is the safe direction and names fragment gaps.
-FATAL_BUCKETS = ("missed-G4", "missed-G2")
+# `missed-A9` (issue 1167) is the same direction for the provide-block rule:
+# the checker refuses an undeclared block key and the model's A9 row says
+# `ok`.
+FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9")
 
 
 def checker_alignment(file_facts: dict, componentless: list[str],
@@ -2425,9 +2580,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
         prov_rows = [(k, x) for k, x in v.providers.items() if k[0] == rel]
         spawn_rows = [(k, x) for k, x in v.spawns.items() if k[0] == rel]
+        a9_rows = [(k, x) for k, x in v.a9.items() if k[0] == rel]
         vrow = v.files.get(rel, ("ok", "ok", "ok"))
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows)
+            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows + a9_rows)
         raw_found = any(x == "fail"
                         for _, x in comp_rows + prov_rows + spawn_rows)
         code, category = checker_code(rel)
@@ -2441,6 +2597,12 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif code in ("G2", "G3"):
             manifest_fail = vrow[0] == "fail" or vrow[2] == "fail"
             record(f"agree-{code}" if manifest_fail else f"missed-{code}", rel)
+        elif code == "A9":
+            # The A9 row is the model's `a9B` over the component's installed
+            # blocks (issue 1167): a checker A9 refusal the row does not see
+            # is the model being weaker than what revl enforces, and fatal.
+            a9_fail = any(x == "fail" for _, x in a9_rows)
+            record("agree-A9" if a9_fail else "missed-A9", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -2478,6 +2640,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             for rel in names:
                 print(f"    NO-MANIFEST {code}: {rel}")
     full = FORMAL / "harness" / "out" / "no_manifest.txt"
+    # A clean checkout has no out/ yet (the gate creates it when the oracle
+    # runs); the no-toolchain tests reach this writer first.
+    full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text("".join(
         f"{code}\t{rel}\n" for code in sorted(nm_codes)
         for rel in sorted(nm_codes[code])), encoding="utf-8")
@@ -2527,7 +2692,8 @@ def main() -> int:
             ("recovery", ref.recoveries, formal.recoveries),
             ("confinement", ref.confinements, formal.confinements),
             ("g8_surface", ref.g8surface, formal.g8surface),
-            ("g5_registration", ref.g5reg, formal.g5reg)):
+            ("g5_registration", ref.g5reg, formal.g5reg),
+            ("a9", ref.a9, formal.a9)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2544,7 +2710,8 @@ def main() -> int:
         f"{len(ref.recoveries)} recoveries + "
         f"{len(ref.confinements)} confinements + "
         f"{len(ref.g8surface)} surfaces + "
-        f"{len(ref.g5reg)} teardowns) — "
+        f"{len(ref.g5reg)} teardowns + "
+        f"{len(ref.a9)} provide-block components) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
@@ -2552,6 +2719,7 @@ def main() -> int:
     mismatches.extend(attenuation_coverage())
     mismatches.extend(confinement_coverage())
     mismatches.extend(prog_coverage())
+    mismatches.extend(a9_coverage())
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:

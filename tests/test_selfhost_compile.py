@@ -339,15 +339,15 @@ def test_native_compile_of_component_program_is_byte_identical(
 #     tier   corpus   emitter vs the REFERENCE IR   the FULLY-NATIVE chain
 #     py         54                   54 (100%)               38 (70.4%)
 #     ts         60                   60 (100%)               36 (60.0%)
-#     go         21                   21 (100%)              21 (100.0%)
+#     go         22                   22 (100%)              22 (100.0%)
 #     java       49                   49 (100%)               28 (57.1%)
 #     rust       34                   34 (100%)               32 (94.1%)
-#     wasm       19                   19 (100%)              19 (100.0%)
-#     TOTAL     237                  237 (100%)              174 (73.4%)
+#     wasm       20                   20 (100%)              20 (100.0%)
+#     TOTAL     239                  239 (100%)              176 (73.6%)
 #
-# The two columns are the whole finding. Every one of the 237 documents is
+# The two columns are the whole finding. Every one of the 239 documents is
 # reproduced byte-for-byte by its self-host emitter when the emitter is fed the
-# REFERENCE IR; only 174 survive the fully-native chain. So all 63 residual
+# REFERENCE IR; only 176 survive the fully-native chain. So all 63 residual
 # documents are ``selfhost/lower.rvl`` gaps — the native IR producer — and NOT
 # emitter gaps. The emitter half of roadmap item 146 is complete over the
 # enumerated corpus; what is left of the maximal story is item 391's arc.
@@ -359,6 +359,9 @@ GO_DOCS = [
     # issue #721: `%` on Float (math.Mod), a Float literal that must not be a
     # Go CONSTANT, and the `widen` marker over an Int literal.
     "float_rem.rvl",
+    # joined the go emitter corpus after the table above was first taken, and
+    # measured through the native chain here so the 100% row stays pinned
+    "arrow_captures.rvl",
     "../emit_java_corpus/records.rvl", "../emit_rust_corpus/perf_shapes.rvl",
     "../emit_wasm_corpus/loopctrl.rvl", "../emit_wasm_corpus/strlit.rvl",
 ]
@@ -383,6 +386,28 @@ JAVA_DOCS = [
     "../emit_ts_corpus/components_mixed.rvl",
     "../emit_wasm_corpus/constfold.rvl", "../emit_wasm_corpus/listmem.rvl",
     "../../../examples/ecosystem-consumer-js/candidates/double_tool.rvl",
+    # item 391: a component that ACQUIRES a host root (`let m = effect Map.new()
+    # undo m.drop()`) and calls its verbs. `selfhost/lower.rvl` refused the
+    # acquisition — an upper-cased callable head resolved as neither a required
+    # service nor a scoped name — and a refused step drops the WHOLE component
+    # `body` key, so the native chain emitted a body-less component. With the
+    # `host` node and its host-provenance verb dispatch lowered, these five
+    # documents compile byte-exact through the native java chain and move up out
+    # of JAVA_LOWER_GAP_DOCS.
+    "comp_host_map.rvl", "comp_host_map_generic.rvl",
+    # item 391: the realm-placement prelude. `isolate <key> in realm("…")` and
+    # `intercept <key> with { … }` are component HEADER declarations that emit no
+    # activation step; `cir_body` had no arm for either, so the body walk refused
+    # at the first one and the component lost its `body`, its `isolate` and its
+    # `intercept` together. Stepped over in the walk and collected into the two
+    # tables the reference stamps after `body`, these compile byte-exact.
+    "comp_realm_isolate.rvl", "comp_realm_intercept.rvl", "legacy_realms.rvl",
+    "metadata_null.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl", "../erase_realms.rvl",
+    "../realm_conformance/provider_a.rvl", "../../../examples/tenants.rvl",
+    "../../../backends/go/scenarios/tagger.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
 ]
 WASM_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "builtins.rvl",
@@ -390,6 +415,9 @@ WASM_DOCS = [
     "listmem.rvl", "loopctrl.rvl", "reads.rvl", "recmem.rvl", "residuals.rvl",
     "scratch_names.rvl", "string_ops.rvl", "strlit.rvl", "variants.rvl",
     "widening.rvl",
+    # joined the wasm emitter corpus after the table above was first taken, and
+    # measured through the native chain here so the 100% row stays pinned
+    "shortcircuit.rvl",
 ]
 
 WIRED_TIER_CORPUS = (
@@ -431,22 +459,13 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
 # branch surface, the native chain agrees, this test fails on the stale entry, and
 # the document moves up into JAVA_DOCS instead of quietly staying out.
 JAVA_LOWER_GAP_DOCS = [
-    # realm placement metadata (isolate / intercept / routes)
-    "comp_realm_isolate.rvl", "comp_realm_intercept.rvl", "legacy_realms.rvl",
-    "../emit_ts_corpus/realm_intercept.rvl", "../erase_realms.rvl",
-    "../realm_conformance/provider_a.rvl", "../../../examples/tenants.rvl",
-    # async coloring
+    # async coloring, `await`, and `spawn`
     "comp_await.rvl", "../emit_ts_corpus/services_async.rvl",
-    # host roots acquired in a component (Map/Pool/Job)
-    "comp_host_map.rvl", "comp_host_map_generic.rvl",
-    # component metadata / branch shapes / map inference
-    "metadata_null.rvl", "component_format.rvl", "component_branches.rvl",
+    # string interpolation in a component body, and branch shapes
+    "component_format.rvl", "component_branches.rvl",
     "map_inference.rvl",
     # whole-program documents that combine several of the above
-    "../../../backends/go/scenarios/tagger.rvl",
-    "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
     "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
-    "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
     "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
 ]
 

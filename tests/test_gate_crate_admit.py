@@ -667,11 +667,24 @@ component Add provides extra: Extra {
 """),
     # THE OPEN HALF: the reference resolves `store` against the running `Kv`
     # provider and ADMITS this into the composition (it REFUSES it standalone).
-    # This gate resolves nothing, so it can only decline to object.
+    # This gate has no admission arm on its VERDICT surface, so it can only
+    # decline to object - the remainder of docs/design/457 (T5/T6).
     ("requires_the_running_provider", """
 service Cache { fn lookup(key: Str) -> Str }
 component CacheLayer requires store: Store provides cache: Cache {
   provide cache { fn lookup(key) = store.get(key) }
+}
+"""),
+    # ... and its twin, which is the half that HAS closed (docs/design/457 T4b):
+    # the same shape calling an operation the running `Store` does not declare.
+    # The reference refuses it INTO the composition and admits nothing; the crate
+    # must now refuse it too, with the reference's own tag and message, which it
+    # can do only by resolving the requirement against the running declaration
+    # the wire's `:S,op,op` rows carry.
+    ("calls_an_operation_the_running_service_lacks", """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheMiss requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nonexistent(key) }
 }
 """),
     # G3 legs the manifest does not change: a component that requires a key it
@@ -825,10 +838,11 @@ _INTO_MATRIX_CANDIDATES = (
 
 def test_the_service_block_is_on_the_wire_the_reference_renders():
     """The block is the projection's, not the test's: `manifest_wire` renders the
-    `!services` header and one `:S` row per service the compiled composition
-    declares, in declaration order. A hand-spelled wire here would let the two
-    sides agree on a shape neither produces."""
-    assert ENUMERATED_MANIFEST.endswith(";!services;:Store;:AppSvc"), \
+    `!services` header and one `:S,op,op` row per service the compiled
+    composition declares, in declaration order, carrying each service's own
+    operations. A hand-spelled wire here would let the two sides agree on a shape
+    neither produces."""
+    assert ENUMERATED_MANIFEST.endswith(";!services;:Store,get;:AppSvc,snapshot"), \
         ENUMERATED_MANIFEST
     assert ENUMERATED_MANIFEST.startswith(
         "Kv/store/;App/app/;App<store"), ENUMERATED_MANIFEST
@@ -995,6 +1009,31 @@ def test_the_manifest_admission_arm_never_overclaims(consumer):
         f"anything ({admitted}); a gate that admits nothing must not pass here")
 
 
+def test_the_manifest_arm_resolves_a_requirement_against_the_running_service(
+        manifest_agreement):
+    """The half of issue #346 that has closed (docs/design/457 T4b), as a
+    POSITIVE claim rather than a clause inside the agreement sweep.
+
+    `calls_an_operation_the_running_service_lacks` names a service its own text
+    never declares and calls an operation the RUNNING `Store` never declares.
+    Deciding it needs both halves of the wire's service block: the name, to
+    resolve the requirement at all, and the operation list, to see that
+    `nonexistent` is not on the running surface. A crate reading only the names
+    could answer nothing here, which is what it did before this slice."""
+    verdict = next(v for name, _src, v in manifest_agreement
+                   if name == "calls_an_operation_the_running_service_lacks")
+    assert verdict["verdict"] == "refused", verdict
+    assert verdict["code"] == "A6", verdict
+    assert verdict["message"] == (
+        "`store.nonexistent` is not a method of service Store"), verdict
+    assert verdict["admitted"] is False, verdict
+    # ... and its twin, the SAME shape calling an operation the running service
+    # DOES declare, is not refused: the rule resolves rather than blanket-refuses.
+    twin = next(v for name, _src, v in manifest_agreement
+                if name == "requires_the_running_provider")
+    assert twin["verdict"] == "no_objection" and twin["code"] is None, twin
+
+
 def test_every_manifest_refusal_is_a_real_reference_manifest_refusal(
         manifest_agreement):
     """The sound direction on the manifest arm: every refusal must be a real
@@ -1099,11 +1138,23 @@ def test_the_manifest_parameter_is_read_rather_than_ignored(manifest_agreement):
 # everywhere. Kept as a live probe so the day the self-host grows the type layer,
 # this test says so and the crate docs can be updated with it.
 TYPE_LAYER_GAP = [
-    ("return type mismatch", 'fn f() -> Int { return "s" }'),
+    # `("return type mismatch", 'fn f() -> Int { return "s" }')` headed this
+    # list until the fn-body STATEMENT layer landed (docs/design/457 T3a): a
+    # declared return is a checking position the walk now carries, so the crate
+    # REFUSES it in the reference's own words and it is an agreement rather than
+    # a gap. `test_the_gap_that_closed_is_an_agreement_now` below holds that,
+    # so this list cannot go vacuous by attrition.
     ("undeclared name in a body", "fn f() -> Int { return undefined_name }"),
     ("return arrow with no type", "fn f() -> { }"),
-    ("declared return, non-returning body", "fn f() -> Int { }"),
-    ("unknown service in provides", "component C provides s: S { }"),
+    # `("unknown service in provides", "component C provides s: S { }")` used to
+    # sit here. It left when the gate learned the component header's
+    # service-existence rule (docs/design/457 §2.4): the crate now REFUSES it in
+    # the reference's own words, so it is an agreement and lives in the oracle's
+    # `REJECTED_PROGRAMS`, where tag AND message are compared.
+    # `("declared return, non-returning body", "fn f() -> Int { }")` left the
+    # same way one slice later, when the gate learned returns-on-every-path
+    # (docs/design/457 T3b). Its shapes are now rows of the oracle's
+    # `REJECTED_PROGRAMS`, which `agreement` above runs the crate over.
 ]
 
 
@@ -1120,6 +1171,21 @@ def test_the_type_layer_gap_never_reads_as_an_admission(consumer, name, source):
         f"{name}: unexpected arm {verdict['verdict']}")
     if verdict["verdict"] == "no_objection":
         assert verdict["code"] is None
+
+
+def test_the_gap_that_closed_is_an_agreement_now(consumer):
+    """The other end of the list above. A return-type mismatch was the crate's
+    worked example of the type-layer gap; the fn-body statement layer
+    (docs/design/457 T3a) closed it, so the crate refuses it with the
+    reference's tag AND sentence — and still issues no admission doing so."""
+    source = 'fn f() -> Int { return "s" }'
+    ref_code, ref_message = _reference(source)
+    assert ref_code == "T1", ref_code
+    verdict = _crate_verdicts(consumer, [source])[0]
+    assert verdict["verdict"] == "refused"
+    assert verdict["admitted"] is False
+    assert verdict["code"] == ref_code
+    assert verdict["message"] == ref_message
 
 
 # --------------------------------------------------------------- fail closed

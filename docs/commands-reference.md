@@ -40,14 +40,79 @@ import.
 
 ---
 
+## A COMPOSITION document argument
+
+Six commands share one compile step: `compile`, `audit`, `version`, `test`,
+`query` and `erase-report`. A `FILES` argument may be a MODULE or a single
+COMPOSITION document, and a composition is RESOLVED rather than compiled as a
+module (roadmap item 439): its rows are compiled, and the providers a `remote`
+row SYNTHESIZES are in the document these commands answer from, with their
+folded `net.<host>` reach.
+
+Before that they compiled every argument as a module, and a composition
+document, which declares no module-level component, compiled to nothing. Each
+command then answered from the empty compilation: `compile` wrote an IR
+document with no services and no components and exited 0, `version` read that
+same document and derived "the interface is unchanged", `test` printed "no
+tests to run", `query` answered "unknown component", and `erase-report`
+answered "unknown realm".
+
+The shapes these commands cannot resolve refuse by name with a nonzero exit,
+rather than answering from an empty compilation: a composition document listed
+beside modules (a composition names the rows it compiles, so the two describe
+different programs), two composition documents in one invocation (a composition
+document is the compiled unit), and a layer document (a layer is a delta over
+the composition that stacks it, so it has no composition of its own; run the
+command over the composition instead).
+
+A composition is admitted whole, never as a layer delta, so no row is skipped,
+and a non-first-party stack-layer row is compiled under its own untrusted-author
+profile. Both are the over-refusing direction, and there is deliberately no
+`--trust-host-code` on this path.
+
+Each of the six takes `--root DIR`: the project root row provenance and origins
+are recorded against (default: the working directory), the same root `revl
+composition` takes. It is ignored for module arguments.
+
+`revl goal` shares the same compile step and is deliberately NOT on this path.
+`goal audit`'s exit code over a composition with no termination contract is
+roadmap item 441/458's decision, and widening the document it is evaluated over
+belongs to that item.
+
+### The boundary-policy doors
+
+Three more commands read the same composition document off their own compile
+step rather than the shared one, and all three evaluate the item-33 boundary
+policy: `policy evaluate` (the dry run of the gate), `dash --policy` (the
+policy-exception queue) and `simulate policy-diff --composition` (the realms a
+realm-scoped rule decides by). Each resolves a composition document, refuses
+the same three shapes by name, and takes the same `--root DIR`.
+
+Before that, `policy evaluate` reported `clean` and exited 0 over a composition
+`revl audit --policy` refuses with a named violation, `dash --policy` showed an
+empty pending-decision queue for the same composition, and `simulate
+policy-diff` resolved no realms out of the document it was handed, leaving every
+action a realm-scoped rule selects undecided.
+
+`policy evaluate` and `simulate policy-diff` exit **2** on these refusals, not
+1: on both verbs 1 already means a component would be refused, so a document
+they could not read exits with their usage status instead. `dash` exits 1, the
+status it already uses for an input it cannot read.
+
+---
+
 ## Authoring and admission
 
 ### `revl compile`
 
 Parse, check, link, and lower `FILES` to a backend IR document.
 
-- `FILES` - one or more sources (required).
+- `FILES` - one or more sources, or a single composition document (required;
+  see [A COMPOSITION document argument](#a-composition-document-argument)).
 - `-o`, `--output PATH` - write the IR here (default: stdout).
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--json-diagnostics` - on rejection, print a structured diagnostic (code,
   guarantee, expected/actual, `fix` hint) instead of the human rendering.
 
@@ -282,8 +347,15 @@ subcommand, `evaluate`. See [boundary-policy.md](boundary-policy.md) for the
 DSL.
 
 - `POLICY` - the boundary policy file, DSL or JSON (required).
-- `PROGRAM.rvl ...` - the composition source(s) to evaluate against.
+- `PROGRAM.rvl ...` - the source(s) to evaluate against: modules, or a single
+  composition document (see [A COMPOSITION document
+  argument](#a-composition-document-argument)). A composition compiled as a
+  module reported `clean` and exited 0 for a composition `revl audit --policy`
+  refuses.
 - `--json` - machine-readable per-clause verdicts.
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--component NAME` - narrow the report to one component.
 - `--evidence DIR` - a component entry directory holding an `evidence/`
   bundle, for a bare-source component.
@@ -360,7 +432,14 @@ file or an empty one, reaches the same finding.
 - `NEW` - the boundary policy to simulate (required).
 - `--history FILE` - the write-ahead log to read (required).
 - `--composition FILE ...` - compile these composition sources and take each
-  component's realms from them; without one a realm-scoped rule is undecided.
+  component's realms from them; without one a realm-scoped rule is undecided. A
+  single COMPOSITION document is resolved rather than compiled as a module (see
+  [A COMPOSITION document argument](#a-composition-document-argument)); as a
+  module it named no component at all, so supplying one left the rule as
+  undecided as omitting it.
+- `--root DIR` - with a COMPOSITION document passed to `--composition`, the
+  project root row provenance and origins are recorded against (default: the
+  working directory). Ignored for module arguments.
 - `--json` - machine-readable output.
 
 Exit status follows the widening: `1` when the change newly allows a recorded
@@ -513,6 +592,12 @@ measurement of the change, not a policy choice.
   when given, the computed next version is printed too.
 - `--emit-manifest` - print the compiled composition document (the diff input
   a later `--against` reads) and exit, instead of deriving a bump.
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments. See
+  [A COMPOSITION document argument](#a-composition-document-argument): a
+  composition compiled as a module derived "the interface is unchanged" for a
+  composition whose rows had changed.
 - `--json` - machine-readable derivation.
 
 ### `revl changelog`
@@ -583,6 +668,11 @@ Static (over source; each takes `TARGET FILES`):
 - `drift SERVICE FILES` - which providers and call sites a service interface
   change implicates. Adds `--gains METHOD` and `--loses METHOD` (each
   repeatable) to model a method the service would gain or lose.
+
+Every static verb's `FILES` may be a single COMPOSITION document instead of
+modules, and each takes `--root DIR` (see [A COMPOSITION document argument](#a-composition-document-argument)). A composition
+compiled as a module answered "unknown component" for every name its rows
+define.
 
 Historical (over a recorded run):
 
@@ -1085,8 +1175,12 @@ Right-to-erasure evidence for one realm: in-process state gone (no-residue
 proof), boundary crossings compensated-vs-bare, and other realms provably
 untouched ([erase-report.md](erase-report.md)).
 
-- `FILES` (required).
+- `FILES` - sources, or a single composition document (required; see [A COMPOSITION document argument](#a-composition-document-argument)). A composition compiled as a module answered "unknown realm" for
+  every realm its rows declare.
 - `--realm R` - the realm to report erasure evidence for (required).
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--json` - machine-readable, versioned report document.
 - `--no-residue-proof` - skip the runtime teardown proof (static sections
   only; use where the cordis runtime is unavailable).
@@ -1141,7 +1235,13 @@ session or a recorded run - the dependency graph (realms, seams), the causal
 trace streaming, and the pending-decisions queue with evidence attached
 ([dash.md](dash.md)).
 
-- `FILES` - the composition whose graph to show (required).
+- `FILES` - the composition whose graph to show (required): modules, or a
+  single composition document (see [A COMPOSITION document
+  argument](#a-composition-document-argument)). A composition compiled as a
+  module rendered an empty graph and an empty `--policy` decision queue.
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--trace FILE` - a lifecycle JSONL (`revl run --trace`): streams the causal
   pane with no live runtime.
 - `--timeline FILE` - a replay recording JSON (a `revl_timeline` dump) for the
@@ -1185,7 +1285,11 @@ lower to the same IR).
 Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 `lifecycle test`).
 
-- `FILES` (required).
+- `FILES` - sources, or a single composition document (required; see [A COMPOSITION document argument](#a-composition-document-argument)). A composition compiled as a module collected nothing and printed
+  "no tests to run".
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--backend {py, ts, rust, java, wasm, go, all}` - tier to run the blocks on
   (default: `py`); `all` runs every tier whose toolchain is present.
 - `--list` - print every test name the compilation collects (plain `test`,

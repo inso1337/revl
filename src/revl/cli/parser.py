@@ -38,6 +38,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "its origin. Additive — a program that already passes without "
                           "it is unaffected")
 
+    # item 439: a COMPOSITION document argument is RESOLVED rather than
+    # compiled as a module, so the written IR document holds the rows and the
+    # providers a `remote` row synthesizes. Row provenance is recorded
+    # against the same project root `revl composition` uses.
+    cmd.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document argument: the project root "
+             "row provenance and origins are recorded against "
+             "(default: the working directory). Ignored for module "
+             "arguments")
+
     exp = sub.add_parser("explain", help="what a diagnostic code means and how to fix it")
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
     exp.add_argument("--json", action="store_true", help="machine-readable output")
@@ -295,6 +306,15 @@ def build_parser() -> argparse.ArgumentParser:
                                "policy against")
     pol_eval.add_argument("--json", action="store_true",
                           help="machine-readable per-clause verdicts")
+    # item 439 slice G8e: a COMPOSITION document argument is RESOLVED, not
+    # compiled as a module, so the dry run reads the same audit graph `revl
+    # audit --policy` gates over. Row provenance is recorded against the same
+    # project root `revl composition` uses.
+    pol_eval.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document argument: the project root row "
+             "provenance and origins are recorded against (default: the "
+             "working directory). Ignored for module arguments")
     pol_eval.add_argument("--component", metavar="NAME", default=None,
                           help="narrow the report to one component")
     pol_eval.add_argument("--evidence", metavar="DIR", default=None,
@@ -367,6 +387,11 @@ def build_parser() -> argparse.ArgumentParser:
              "every action such a rule selects is reported undecided")
     sim_policy.add_argument("--json", action="store_true",
                             help="machine-readable diff an agent can consume")
+    sim_policy.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document passed to `--composition`: the "
+             "project root row provenance and origins are recorded against "
+             "(default: the working directory). Ignored for module arguments")
 
     diff_cmd = sub.add_parser(
         "diff",
@@ -440,6 +465,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--emit-manifest", action="store_true",
         help="print the compiled composition document (the diff input a later "
              "`--against` reads) and exit, instead of deriving a bump")
+    version_cmd.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document argument: the project root "
+             "row provenance and origins are recorded against "
+             "(default: the working directory). Ignored for module "
+             "arguments")
     version_cmd.add_argument("--json", action="store_true",
                              help="machine-readable derivation")
 
@@ -482,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
     erase.add_argument("files", nargs="+")
     erase.add_argument("--realm", required=True, metavar="R",
                        help="the realm to report erasure evidence for")
+    erase.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document argument: the project root "
+             "row provenance and origins are recorded against "
+             "(default: the working directory). Ignored for module "
+             "arguments")
     erase.add_argument("--json", action="store_true",
                        help="machine-readable, versioned report document")
     erase.add_argument("--no-residue-proof", action="store_true",
@@ -638,6 +675,12 @@ def build_parser() -> argparse.ArgumentParser:
         sub_cmd.add_argument("files", nargs="+")
         sub_cmd.add_argument("--json", action="store_true",
                              help="machine-readable output")
+        sub_cmd.add_argument(
+            "--root", default=None, metavar="DIR",
+            help="with a COMPOSITION document argument: the project root "
+                 "row provenance and origins are recorded against "
+                 "(default: the working directory). Ignored for module "
+                 "arguments")
         if name == "drift":
             sub_cmd.add_argument("--gains", action="append", default=[],
                                  metavar="METHOD",
@@ -746,6 +789,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
+    test.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document argument: the project root "
+             "row provenance and origins are recorded against "
+             "(default: the working directory). Ignored for module "
+             "arguments")
     # selection and reporting (issue #843): `--list` answers "which tests does
     # this compilation collect" (the half of the liveness question that had no
     # answer at all) and `--filter` gives a targeted inner loop without
@@ -1642,6 +1691,14 @@ def build_parser() -> argparse.ArgumentParser:
              "attached (docs/dash.md)")
     dash.add_argument("files", nargs="+",
                       help=".rvl sources — the composition whose graph to show")
+    # item 439 slice G8e: a COMPOSITION document argument is RESOLVED, so the
+    # graph pane and the `--policy` exception queue read the rows and the
+    # providers a `remote` row synthesizes.
+    dash.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="with a COMPOSITION document argument: the project root row "
+             "provenance and origins are recorded against (default: the "
+             "working directory). Ignored for module arguments")
     dash.add_argument("--trace", default=None, metavar="FILE",
                       help="an item-27 lifecycle JSONL (`revl run --trace`): "
                            "streams the causal pane with no live runtime")
