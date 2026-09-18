@@ -281,6 +281,33 @@ a G4 spawn-emission bound, the BOOT count, and a component's own G4, in both
 orders plus two triples): 30 admissions, all agreeing, and the splice is
 load-bearing — reversing the two producers reds seven of them.
 
+Which components it runs over (issue #1127): `_admit_handoff_replacement` is
+handed `live_components`, which `check_and_lower` builds by dropping every
+component whose body lowering raised. A raise there is caught, recorded, and
+replaced by a `poisoned` header stub that keeps `_link`'s topology complete, so
+the component is still linked but is no longer walked by any body-reading
+post-pass. A component that refuses in its body therefore contributes NO
+hand-off verdict on the reference: the body refusal is the whole answer.
+
+`collect_nonlink` carries the same set. It records every component its loop
+refused over and `handoff_refusals` skips those, which is the only place the
+gate needs it — the withdrawal runs over the FULL list on both sides, for the
+reason stated above it. Without the set the gate ranked a `G2` hand-off drift,
+anchored at the COMPONENT line, ahead of an inline body refusal that `body_line`
+anchors at the offending STATEMENT, so `pick_min` named the hand-off where
+`check_and_lower` named the body. A whole-component aggregate verdict (the G4
+emission-reach one) is anchored at the component line, ties, and was saved by
+`seq`, which is why the ordering corpus above did not catch it.
+
+The skip can only remove a verdict from a component the sink already refuses
+over, so its failure direction is the same fail-CLOSED one: it narrows which of
+two true refusals gets NAMED and can never turn a refusal into an admission.
+`test_a_poisoned_component_contributes_no_handoff_verdict` measures the pair
+against the reference, and the two controls beside it pin that the suppressed
+verdict is real (repair the body and the drift is what both sides name) and that
+the skip is per COMPONENT rather than per admission (a poisoned sibling does not
+suppress a clean component's drift).
+
 Failure direction: fail-CLOSED. Every refusal here is an admission that does not
 happen; the running composition keeps running with its state where it is. The
 non-vacuity controls pin that it does not refuse everything: an identical shape,
