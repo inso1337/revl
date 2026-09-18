@@ -1452,6 +1452,26 @@ boot component B2 provides e2: Env2 {
     ("t29 field read on an erased Any", _fixture("t29_field_read_on_any"), "T1"),
     ("t36 a Float literal outside binary64",
      _fixture("t36_float_literal_range"), "TYPE"),
+    # ---- match exhaustiveness (docs/design/457 T3b, the match half) -------
+    # `_check_match_exhaustiveness`, which `_lower_pure_expr` runs at an
+    # `ExprMatch` before it lowers the scrutinee or the arms. Both of its
+    # refusals, in the reference's order: an arm naming something the ADT does
+    # not declare outranks a missing case.
+    ("v2 a match that does not cover every case",
+     _fixture("v2_match_nonexhaustive"), "T1"),
+    ("t13 a match arm naming something that is not a case",
+     _fixture("t13_unknown_match_case"), "TYPE"),
+    ("a match missing two cases, named in declaration order",
+     "type MSt = A | B | C\n\nfn f(s: MSt) -> Int {\n"
+     "  return match s {\n    A => 1,\n  }\n}\n", "T1"),
+    ("a match over a variant written across several lines",
+     "type MBig =\n    One\n  | Two\n  | Three\n\n"
+     "fn f(b: MBig) -> Int {\n  return match b {\n"
+     "    One => 1,\n    Two => 2,\n  }\n}\n", "T1"),
+    ("a match arm naming a case of no ADT at all",
+     "type MSt = A | B\n\nfn f(s: MSt) -> Int {\n"
+     "  let v = match s {\n    A => 1,\n    B => 2,\n    Q => 3,\n  }\n"
+     "  return v\n}\n", "TYPE"),
     # ---- optional chaining (docs/design/457 T2d) --------------------------
     # `a?.b` short-circuits on ABSENCE, so it requires an optional on the left.
     # On a value that is always present the short-circuit is dead syntax the
@@ -3348,16 +3368,14 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t33_arrow_value_arity", "T1"),
         ("t35_arrow_annotation_not_quantified", "T1"),
     ],
-    # return paths and match: unknown/missing match cases. The RETURN-PATH half
-    # has LANDED (docs/design/457 T3b): `fb_function` runs
-    # `_check_returns_on_every_path` over the statement tree `fb_scan` already
-    # builds, so `t8_missing_return` and `t9_return_path_incomplete` moved into
-    # REJECTED_PROGRAMS above, where tag AND message are compared. What stays
-    # here needs the variant table and the arm algebra, which is T2d's.
-    "return paths and match": [
-        ("t13_unknown_match_case", "TYPE"),
-        ("v2_match_nonexhaustive", "T1"),
-    ],
+    # return paths and match: CLOSED WHOLE. The RETURN-PATH half landed with
+    # docs/design/457 T3b (`fb_function` runs `_check_returns_on_every_path`
+    # over the statement tree `fb_scan` already builds), and the MATCH half
+    # landed with the exhaustiveness rule below: the declaration scan records
+    # each ADT's own case list and `tk_low` asks `_check_match_exhaustiveness`'s
+    # two questions at the position `_lower_pure_expr` asks them. All four
+    # fixtures are in REJECTED_PROGRAMS above, where tag AND message are
+    # compared, so this family has no row left here.
     # declarations: alias cycles, bare generics, non-record destructuring.
     "declarations": [
         ("t18_type_alias_cycle", "TYPE"),

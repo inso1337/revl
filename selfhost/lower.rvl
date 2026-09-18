@@ -8704,6 +8704,63 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
   return ""
 }
 
+// `_check_match_exhaustiveness` (src/revl/lower.py), which `_lower_pure_expr`
+// runs at an `ExprMatch` BEFORE it lowers the scrutinee or the arms — so it sits
+// in this walk rather than in the typing one, at the same position.
+//
+// Its premise is the scrutinee's static type naming a DECLARED variant. The
+// reference looks that name up verbatim (`types.get(type_name)`), so a
+// parameterized instance such as `Tree[Int]` resolves to nothing and decides
+// nothing on either side. A type this walk cannot infer decides nothing either,
+// which is the silent direction: naming a case as missing on a scrutinee whose
+// ADT is a guess would refuse a program the reference admits.
+//
+// Both refusals of the rule, in the reference's own order: an arm naming
+// something the ADT does not declare outranks a missing case, because a typo is
+// the better answer than a list of everything it is not.
+fn tk_match_verdict(m: MatchN, env: List[Bind]) -> Str {
+  let ty = tk_infer(m.scrut, env).ty
+  if (ty == "") { return "" }
+  let raw = tenv_get(env, "cases ".concat(ty))
+  if (raw == "") { return "" }
+  let declared = split_top_commas(raw)
+  var i = 0
+  while (i < m.arms.length()) {
+    let pat = m.arms[i].pat
+    if (pat != "_" && !contains(declared, pat)) {
+      return tagged("TYPE", "`".concat(pat).concat("` is not a case of `")
+        .concat(ty).concat("` (cases: ").concat(tk_case_list(declared, 0, ""))
+        .concat(")"))
+    }
+    i += 1
+  }
+  var wild = false
+  var covered: List[Str] = []
+  i = 0
+  while (i < m.arms.length()) {
+    if (m.arms[i].pat == "_") { wild = true } else { covered = covered.push(m.arms[i].pat) }
+    i += 1
+  }
+  if (wild) { return "" }
+  var missing: List[Str] = []
+  i = 0
+  while (i < declared.length()) {
+    if (!contains(covered, declared[i])) { missing = missing.push(declared[i]) }
+    i += 1
+  }
+  if (missing.length() == 0) { return "" }
+  return tagged("T1", "non-exhaustive match: missing "
+    .concat(missing.length() == 1 ? "case " : "cases ")
+    .concat(tk_case_list(missing, 0, "")))
+}
+
+// "`A`, `B`" — the reference's `', '.join(f'`{c}`' for c in names)`.
+fn tk_case_list(names: List[Str], i: Int, acc: Str) -> Str {
+  if (i >= names.length()) { return acc }
+  let one = "`".concat(names[i]).concat("`")
+  return tk_case_list(names, i + 1, acc == "" ? one : acc.concat(", ").concat(one))
+}
+
 fn tk_low(e: Expr, env: List[Bind]) -> Str {
   return match e {
     Bin(b)      => tk_low2(b.l, b.r, env),
@@ -8717,8 +8774,20 @@ fn tk_low(e: Expr, env: List[Bind]) -> Str {
     Lst(l)      => tk_low_items(l.items, 0, env),
     If(f)       => tk_low3(f.cond, f.then_, f.els, env),
     Templ(t)    => tk_low_parts(t.parts, 0, env),
+    Match(m)    => tk_low_match(m, env),
     _           => "",
   }
+}
+
+// The node's own verdict first, then the scrutinee, which is the order
+// `_lower_pure_expr` descends in. The ARMS are not walked here: this walk runs
+// after the CHECKING walk, and the checking walk does not yet type an arm body
+// (T2d), so refusing inside one would report a refusal the reference reaches at
+// an earlier phase and name the divergence rather than close it.
+fn tk_low_match(m: MatchN, env: List[Bind]) -> Str {
+  let own = tk_match_verdict(m, env)
+  if (own != "") { return own }
+  return tk_low(m.scrut, env)
 }
 
 fn tk_low2(a: Expr, b: Expr, env: List[Bind]) -> Str {
