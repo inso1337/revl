@@ -8772,7 +8772,14 @@ fn nr_known(n: Str, env: List[Bind]) -> Bool {
   // anything the type table itself knows the name of is something the program
   // declared: a module `fn` binds its own name to its function type.
   if (tenv_get(env, n) != "") { return true }
-  if (tenv_get(env, "case ".concat(n)) != "") { return true }
+  // An ADT case name read BARE is a value only where the reference's own
+  // `ExprVar` arm makes it one: a NULLARY user case, never a payload-carrying
+  // one and never a `Result`/`Opt` case. `infer_bare_case` is that exact guard,
+  // so the read rule and the type this walk gives the node agree by
+  // construction. A payload-carrying case read bare falls through to
+  // `callables`, which no case name joins, and the reference refuses it — the
+  // CALL position is exempted in `tk_low_call`, where the reference exempts it.
+  if (infer_bare_case(n, env) != "") { return true }
   if (tenv_get(env, "decl ".concat(n)) == "1") { return true }
   if (contains(foreign_names(), n)) { return true }
   // a builtin spec argument (`@elem`, `@member`, `@self`) is not a name read.
@@ -8816,12 +8823,24 @@ fn tk_low3(a: Expr, b: Expr, c: Expr, env: List[Bind]) -> Str {
   return tk_low(c, env)
 }
 
+// Whether a callee name is an ADT CONSTRUCTOR at this position, which the
+// reference's `ExprCall` arm answers ahead of the name resolver: a case name
+// that no local binding shadows builds an `adt` node and its own name is never
+// resolved. Unlike the bare-read rule this one does NOT ask about the payload —
+// `Ok(x)` and `NrSquare(1)` are constructions exactly as `NrCircle()` is.
+fn nr_ctor_callee(e: Expr, env: List[Bind]) -> Bool {
+  let n = match e { Var(v) => v, _ => "", }
+  if (n == "") { return false }
+  if (tenv_get(env, nr_bnd(n)) == "1") { return false }
+  return tagged_case_adt(env, n) != ""
+}
+
 // The node's own refusal FIRST: the reference raises before it lowers the
 // receiver and the arguments.
 fn tk_low_call(c: CallN, env: List[Bind]) -> Str {
   let own = tk_low_method(c, env)
   if (own != "") { return own }
-  let t = tk_low(c.target, env)
+  let t = nr_ctor_callee(c.target, env) ? "" : tk_low(c.target, env)
   if (t != "") { return t }
   return tk_low_items(c.args, 0, env)
 }
