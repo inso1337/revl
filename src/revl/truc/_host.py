@@ -161,6 +161,12 @@ def _write_no_follow(path: pathlib.Path, text: str, rel: str) -> None:
     `is_symlink()` (or `O_NOFOLLOW`), never `exists()`. `O_NOFOLLOW` is
     preferred where the platform has it: the refusal is then atomic with the
     open, so it cannot lose a race to a link planted in between.
+
+    The mode is `0o644`, not the `0o666` a bare `open(path, "w")` asks for: the
+    vendored entry is project SOURCE, meant to be world-readable and never
+    group- or world-WRITABLE. `0o666` is masked by the umask, so it is only a
+    request, but under a permissive umask (`000`) it would hand every local
+    account write access to a file the compiler later reads and executes.
     """
     if not _O_NOFOLLOW:
         if path.is_symlink():
@@ -169,7 +175,7 @@ def _write_no_follow(path: pathlib.Path, text: str, rel: str) -> None:
         return
     try:
         fd = os.open(path,
-                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, 0o666)
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, 0o644)
     except OSError:
         # The open refused it; name the rule when the reason was a link and let
         # every other failure (permissions, a directory in the way) stay as it is.
