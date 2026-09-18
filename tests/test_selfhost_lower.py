@@ -3552,7 +3552,7 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_19_fixtures():
+def test_the_type_layer_gap_is_exactly_12_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
@@ -3560,10 +3560,12 @@ def test_the_type_layer_gap_is_exactly_19_fixtures():
     rows for the module-`fn` surface, and the call-and-signature layer (T2b)
     nine more; the twelfth document that moved with T3a,
     `dynamic_reserved_key`, never had a row here because this pin addresses its
-    fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
+    fixtures by bare name under `examples/rejections/`. Seven more went with
+    the arrow slice (T2c, four), the optional-chain rule (T2d, one) and the
+    match half of T3b (two)."""
+    assert len(_TYPE_LAYER_CASES) == 12, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 19, "a fixture is listed twice"
+    assert len(set(names)) == 12, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
