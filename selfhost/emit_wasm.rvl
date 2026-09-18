@@ -2238,6 +2238,34 @@ fn unsupported_comments(ir: Any) -> List[Str] {
   return [`  ;; unsupported on this tier: externs ${names.join(", ")} (no @wasm body)`]
 }
 
+// ----------------------------------------------- the uncarried component tier
+// `emit_wasm_src` is this port's WHOLE answer for a document — it is what
+// `compile_to(source, "wasm")` returns — and the reference NEVER folds a
+// component into the functions module. `_ComponentEmitter` gives each component
+// its own module in the returned `{module: wat}` map, or the document is
+// refused outright: item 130 §4.6 refuses a stream component BY NAME on this
+// tier, because a subscription suspends a fiber and this tier awaits only
+// `Job.run(name)`.
+//
+// Either way this file carries nothing of the component, and it used to say
+// nothing about that: backends/go/testdata/stream_130.rvl came back as a
+// 376-byte module for a document the reference REFUSES BY NAME. That is worse
+// than a wrong lowering — what the port dropped was itself a refusal, so a tier
+// limit the reference states became silence in its port, which is the one
+// direction this design is meant to make impossible.
+//
+// So each component gets ONE marker naming it, in document order. Unlike
+// `unsupported_comments` above, this line has no counterpart in the reference's
+// bytes: it is the port's own refusal, in the `<<UNSUPPORTED-...>>` spelling the
+// rest of this file uses, so a survey that looks for markers finds it.
+fn uncarried_components(ir: Any) -> List[Str] {
+  var out = []
+  for (c of value_list(value_field(ir, "components"))) {
+    out = out.push(`  ;; <<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
+  }
+  return out
+}
+
 // ------------------------------------------------- item 432(b): the dead sweep
 // The reference emits the whole helper preamble and then drops every function
 // no export can reach (`prune_unreachable_funcs`). The preamble here is one
@@ -2375,6 +2403,7 @@ pub fn emit_wasm_src(ir: Any) -> Str {
   if (pruned != "") { lines = lines.push(pruned) }
   for (c of type_comments(rectypes)) { lines = lines.push(c) }
   for (c of unsupported_comments(ir)) { lines = lines.push(c) }
+  for (c of uncarried_components(ir)) { lines = lines.push(c) }
   if (functions.length() > 0) { lines = lines.push("") }
   for (b of blocks) {
     lines = lines.push(b)
