@@ -34,6 +34,8 @@ from .holes import render as render_holes
 from .run import run_command
 from .test import test_command
 
+from .cli.document import (  # noqa: F401 — _wiring_documents re-exported
+    _RESOLVES_A_COMPOSITION, _composition_document, _wiring_documents)
 from .cli.parser import build_parser
 from .cli.change import (
     _run_apply, _run_branch, _run_canary, _run_compare, _run_estop, _run_plan,
@@ -212,7 +214,21 @@ def _run_policy(args) -> int:
                 print("error: policy evaluate needs a POLICY and PROGRAM.rvl "
                       "(or --registry --candidate)", file=sys.stderr)
                 return 2
-            ir = compile_files(args.files)
+            # item 439 (issue #118), slice G8e: a COMPOSITION document
+            # argument. `revl audit --policy` runs this same `policy.evaluate`
+            # over a RESOLVED composition (slice G8c); this verb compiled the
+            # same document as a MODULE, so it read an empty audit graph,
+            # selected no component and printed "clean" with exit 0 for a
+            # composition the gate itself refuses. A dry run of a gate is read
+            # as what the gate would do, so that silence failed OPEN: it is the
+            # ONE positive verdict on this path, and it disagreed with the gate
+            # it previews. A refusal here exits 2 (usage), because 1 already
+            # means "a component would be refused".
+            resolved = _composition_document(args, label="policy evaluate",
+                                             refuse_code=2)
+            if isinstance(resolved, int):
+                return resolved
+            ir = compile_files(args.files) if resolved is None else resolved
             audit = audit_report(ir)
             comps = list(audit.get("boundary") or {})
             for name in comps:
@@ -316,8 +332,23 @@ def _run_simulate(args) -> int:
     # an action a realm rule selects is undecided without `--composition`.
     realms: dict = {}
     if args.composition:
+        # item 439 (issue #118), slice G8e: `--composition` takes the same
+        # COMPOSITION document `revl audit` resolves, and compiling it as a
+        # MODULE produced an empty manifest — so every action a realm-scoped
+        # rule selects was reported undecided, exactly as if the operator had
+        # not passed `--composition` at all. That direction is the refusing
+        # one, so this is a correction rather than a repair: undecided is not a
+        # clean diff, but it is a false statement about a document that DOES
+        # name the realms its rows join. A refusal exits 2, this verb's usage
+        # status, for the same reason `policy evaluate` uses 2.
+        resolved = _composition_document(args, label="simulate policy-diff",
+                                         files=args.composition, refuse_code=2)
+        if isinstance(resolved, int):
+            return resolved
         try:
-            manifest = compile_files(args.composition).get("manifest") or {}
+            document = (compile_files(args.composition)
+                        if resolved is None else resolved)
+            manifest = document.get("manifest") or {}
         except RevlError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
@@ -356,120 +387,6 @@ def _run_goal(args, ir: dict) -> int:
             print(render(report))
         return 0
     raise AssertionError(f"unknown goal subcommand {args.goal_command!r}")
-
-
-def _wiring_documents(paths: list[str]) -> tuple[list[str], list[str]]:
-    """Which of `paths` declare a COMPOSITION, and which declare a LAYER, read
-    by parsing alone.
-
-    Detection never speaks for the compiler: a file that will not parse or will
-    not open is skipped here and reaches the shared compile step, which reports
-    it in its own wording with its own pointer.
-    """
-    from .parser import parse_file  # noqa: PLC0415 — lazy, cli startup cost
-
-    compositions: list[str] = []
-    layers: list[str] = []
-    for path in paths:
-        try:
-            program = parse_file(path)
-        except (RevlError, OSError):
-            continue
-        if program.compositions:
-            compositions.append(path)
-        elif program.layers:
-            layers.append(path)
-    return compositions, layers
-
-
-def _audit_composition(args):
-    """`revl audit` over a COMPOSITION document (item 439, issue #118).
-
-    The shared compile step compiles its arguments as MODULES. A composition
-    document declares no module-level component — its rows, and the providers a
-    `remote` row SYNTHESIZES, exist only once the row table is resolved — so
-    pointing `revl audit` at one used to print an EMPTY boundary surface and
-    exit 0.
-
-    That is the wrong direction on an attestation surface, and the A2A binding
-    is the sharpest case of it: `docs/design/439-a2a-task-lifecycle.md` decision
-    3 states G8 as "the boundary surface is the four (or one) synthesized
-    externs, enumerable on the boundary surface `revl audit` renders, each
-    carrying the folded `net.<host>` reach". An operator who ran the CLI over a
-    composition holding a `remote ... through a2a` row read "no crossings" for a
-    composition that crosses to a peer over the network. An empty surface is
-    read as an ABSENCE of authority, so the silence failed OPEN.
-
-    A composition is now RESOLVED and compiled (`compile_composition`, the same
-    door `tests/test_439_a2a_transport.py::test_the_a2a_crossing_is_on_the_g8_
-    audit_surface` pins the property over), and every shape this command cannot
-    resolve REFUSES BY NAME instead of printing an empty surface.
-
-    Returns `None` when no argument declares a composition (the caller falls
-    through to the shared module compile), an `int` exit code when the command
-    refuses, or the compiled composition document.
-    """
-    import os  # noqa: PLC0415 — one call site
-
-    from .composition import compile_composition  # noqa: PLC0415 — lazy
-
-    docs, layers = _wiring_documents(args.files)
-
-    def _refuse(message: str, hint: str) -> int:
-        print(f"error: {message}", file=sys.stderr)
-        print(f"  hint: {hint}", file=sys.stderr)
-        return 1
-
-    if layers:
-        # A layer is a DELTA over a composition (426 §2.4): its rows are only
-        # meaningful folded into the base that stacks it, so a layer on its own
-        # has no boundary surface to render. Compiled as a module it has none
-        # either, which is the same empty answer for a different reason, and an
-        # empty surface reads as an absence of authority.
-        named = ", ".join(os.path.basename(layer) for layer in layers)
-        return _refuse(
-            f"`revl audit` was given the layer document{'s' if len(layers) > 1 else ''} "
-            f"{named}; a layer is a DELTA over a composition, so it has no "
-            f"boundary surface of its own",
-            "audit the composition that names this layer in its `stack` (or "
-            "`site`) list: the folded surface is the one an operator reads")
-    if not docs:
-        return None
-
-    names = ", ".join(os.path.basename(doc) for doc in docs)
-    if len(docs) > 1:
-        return _refuse(
-            f"`revl audit` was given {len(docs)} composition documents "
-            f"({names}); a composition document IS the audited unit, so there "
-            f"is no one boundary surface to render",
-            "audit one composition document per invocation")
-    if len(args.files) > 1:
-        others = ", ".join(os.path.basename(f) for f in args.files if f not in docs)
-        return _refuse(
-            f"`revl audit` was given the composition document `{names}` "
-            f"alongside modules ({others}); a composition names the rows it "
-            f"compiles, so auditing it beside hand-listed modules would render "
-            f"a surface neither of them describes",
-            f"audit the composition alone (`revl audit {names}`), or audit the "
-            f"modules without it")
-
-    # WHOLE-composition admission, and `confine=True` as `revl composition
-    # --admit` uses it: every row is compiled (never a layer delta, so nothing
-    # is skipped out of the surface an operator is counting), and a
-    # non-first-party stack-layer row compiles under its own untrusted-author
-    # profile. Both choices are the over-refusing direction. There is
-    # deliberately no `--trust-host-code` on this command: an audit that had to
-    # be told to trust the code it is enumerating would be answering a
-    # different question.
-    try:
-        return compile_composition(args.files[0], getattr(args, "root", None),
-                                   confine=True)
-    except RevlError as error:
-        if getattr(args, "json_diagnostics", False):
-            print(json.dumps(report(error), indent=2))
-        else:
-            print(f"error: {error}", file=sys.stderr)
-        return 1
 
 
 def _run_audit(args, ir: dict) -> int:
@@ -1397,18 +1314,23 @@ def main(argv: list[str] | None = None) -> int:
         from .cli.retention import _run_retention_receipt  # noqa: PLC0415
         return _run_retention_receipt(args)
 
-    # item 439 (issue #118): `revl audit` over a COMPOSITION document. The
-    # shared compile step below compiles its arguments as MODULES, so a
-    # composition — whose rows, and whose SYNTHESIZED remote providers, exist
-    # only once the row table is resolved — used to audit as an empty boundary
-    # surface with exit 0. `_audit_composition` resolves it instead, and
-    # refuses by name for the shapes it cannot.
+    # item 439 (issue #118): a COMPOSITION document argument, for the commands
+    # that share the module compile step below. That step compiles its
+    # arguments as MODULES, so a composition — whose rows, and whose
+    # SYNTHESIZED remote providers, exist only once the row table is resolved —
+    # used to reach every one of these commands as an EMPTY compilation.
+    # `_composition_document` resolves it instead, and refuses by name for the
+    # shapes it cannot.
+    #
+    # `goal` is deliberately absent from this set: `goal audit`'s zero exit
+    # over a composition with no termination contract is item 441/458's own
+    # decision, and widening the document it is made over belongs to that item.
     ir = None
-    if args.command == "audit":
-        audited = _audit_composition(args)
-        if isinstance(audited, int):
-            return audited
-        ir = audited
+    if args.command in _RESOLVES_A_COMPOSITION:
+        resolved = _composition_document(args)
+        if isinstance(resolved, int):
+            return resolved
+        ir = resolved
 
     if ir is None:
         try:

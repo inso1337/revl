@@ -1,0 +1,44 @@
+// CONTROL for tests/test_no_embedded_frontend_document_1120.py.
+//
+// Every string here carries angle brackets, and none of them is a frontend
+// document. This is the half of the gate that is easy to get wrong: a detector
+// that reds on `<` is a detector nobody can keep. The cases, in order:
+//
+//   - a usage line with metavariables in angle brackets, the way
+//     `src/revl/truc/components/assembler.rvl` spells its own;
+//   - a diagnostic that quotes the token it did not expect;
+//   - a placeholder marker of the `<<DEFER-...>>` family the self-hosted
+//     emitters use for a construct they cannot lower yet;
+//   - foreign-language type syntax, which is what `selfhost/emit_java.rvl` and
+//     `selfhost/emit_rust.rvl` are full of (`List<T>`, `Vec<T>`, `Box<dyn ..>`);
+//   - a documentation example that shows one element of HTML OUTPUT. It is a
+//     tag, and even a closed one, and it is still not a document.
+//
+// This file is scanned by the repo-wide gate like every other `.rvl`: it is not
+// on any skip list. It passing IS the assertion.
+service Notes {
+  fn usage() -> Str
+  fn unexpected(tok: Str) -> Str
+  fn deferred() -> Str
+  fn java_signature() -> Str
+  fn rust_signature() -> Str
+  fn doc_example() -> Str
+}
+
+component NotesSvc provides notes: Notes {
+  provide notes {
+    fn usage() = "notes: usage — notes <add TEXT | rm <id> | list [--all]>"
+
+    fn unexpected(tok) = `expected an expression, found <${tok}>`
+
+    fn deferred() = "<<DEFER-embedded-document-lowering>>"
+
+    fn java_signature() = "private static <T> java.util.List<T> concat(java.util.List<T> a, java.util.List<T> b) {"
+
+    fn rust_signature() = "fn revl_concat(&self, other: &Vec<T>) -> Vec<T>;"
+
+    // One closed element, shown as an example of what a renderer emits. A
+    // single pair with nothing nested in it is an illustration, not a tree.
+    fn doc_example() = "renders as <li>the escaped row text</li>"
+  }
+}

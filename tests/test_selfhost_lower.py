@@ -286,13 +286,27 @@ def _classify(e: RevlError) -> str:
     # message-shape families for the code-less remainder. It is append-only and
     # deliberately narrow: it must not name a refusal outside the type layer.
     # The extern-slot G4 family has since landed for real (item 391, above) and
-    # was struck from this list; `a2`/`a9`, `use`, the parser-form fixtures, the
-    # `unknown service` provide-clause refusals and the extern G5s (`deferred`
+    # was struck from this list, as has the component header's service-existence
+    # rule (docs/design/457 §2.4, the `in `requires`/`provides` of` arm below);
+    # `a2`/`a9`, `use`, the parser-form fixtures and the extern G5s (`deferred`
     # in teardown, a witnessed inverse that reaches an emission) stay "OUT:"
     # until their own slice lands and can refuse them natively.
-    if e.code in ("T1", "T2", "HOST-METHOD"):
+    # `HOST-ARITY` joins the pass-through set with the call-and-signature slice
+    # (docs/design/457 T2b): the gate now counts a host stub verb's arguments
+    # itself, and the code is the reference's own.
+    if e.code in ("T1", "T2", "HOST-METHOD", "HOST-ARITY"):
         return e.code
     if "is not declared in this function" in m:
+        return "G1"
+    # the component header's service-existence rule (`Env.__init__` over
+    # `comp.requires`, `_lower_component`'s `comp.provides` loop). The GATE now
+    # spells both byte for byte, so naming them here is what turns a parked
+    # divergence into a measured agreement. The marker carries the clause on
+    # purpose: lower.py's third `unknown service `S`` — the one a `provide`
+    # STATEMENT draws for a service the component never declared — is a
+    # different site the gate does not decide, and stays "OUT:".
+    if ("unknown service `" in m
+            and ("in `requires` of" in m or "in `provides` of" in m)):
         return "G1"
     if ("cannot reassign" in m
             or "is already declared in this function" in m
@@ -304,14 +318,46 @@ def _classify(e: RevlError) -> str:
         return "A6"
     if ("no builtin method" in m
             or "non-exhaustive match" in m
-            or "type argument(s), got" in m):
+            or "type argument(s), got" in m
+            # the unknown-field read, structural (item 71) and nominal alike.
+            # Code-less in the reference, but `revl.diagnostics.classify`
+            # already files it as a type mismatch, so it carries the T1 the
+            # design's §4.3 vocabulary gives it (slice T2a).
+            or "has no field" in m):
         return "T1"
     if ("is not a case of" in m
             or "record update names" in m
             or "record destructuring requires a record" in m
             or "type alias cycle" in m
-            or "`mod` by a literal zero" in m
-            or "Float literal is infinite" in m):
+            # all four of `_DIVIDES_BY`, not only `mod`: `div_trunc`,
+            # `div_floor` and `div_euclid` draw the identical sentence and were
+            # filed "OUT:" while their sibling was named.
+            or " by a literal zero is undefined" in m
+            or "Float literal is infinite" in m
+            # docs/design/457 T2b: `builtin_check`'s code-less receiver-family
+            # refusals and the lowering-time builtin arity count, plus the
+            # `Map.empty()` arity. Their CODED siblings (the `has no form for`
+            # row miss, the `join` element constraint and every `argument
+            # expects` mismatch) carry T1 and are named by the code arm above;
+            # these three shapes carry none, and the gate spells each one byte
+            # for byte, so leaving them "OUT:" would file an agreement as a tag
+            # mismatch.
+            or ("builtin `" in m and "` needs a " in m
+                and " receiver, got " in m)
+            or ("builtin `" in m and "` takes " in m
+                and " argument(s), " in m)
+            or "takes no arguments, " in m
+            # slice T2a's three remaining code-less expression refusals, named
+            # in the design's §4.3 TYPE list. Each is a zero-hit marker over the
+            # whole census corpus today (no program in the tree draws one), so
+            # naming them moves no document between buckets; they exist so the
+            # checker oracle can compare a TAG as well as a message when the
+            # statement layer (T3a) starts carrying these to `admit_src`.
+            or "cannot order" in m
+            or "ternary branches disagree" in m
+            or "record update requires" in m
+            or "record literal for `" in m
+            or "but the record has " in m):
         return "TYPE"
     return "OUT:" + m
 
@@ -1245,6 +1291,62 @@ component C provides cache: Cache {
   }
 }
 """),
+    # ---- docs/design/457 T3b: returns on every path, the ADMITTING side ----
+    # The direction this rule may not err in is the false alarm, so each shape
+    # the reference ACCEPTS is here beside the refusal it neighbours. The
+    # termination rule is conservative (JLS 14.21 / rust E0308), and each of
+    # these is a body it must judge terminating.
+    ("a fn with no declared return type need not return",
+     "fn f(n: Int) {\n  let doubled = n * 2\n}\n"),
+    ("an if/else whose arms both return", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else { return 2 }
+}
+"""),
+    # `while (true)` with no `break` targeting it diverges, so the path never
+    # reaches the end of the body (item 379).
+    ("a while(true) with no targeting break", """
+fn f() -> Int {
+  while (true) {
+    return 1
+  }
+}
+"""),
+    # a `break` in a NESTED loop belongs to that loop, so the outer
+    # `while (true)` still diverges.
+    ("a while(true) whose only break targets a nested loop", """
+fn f() -> Int {
+  while (true) {
+    while (true) { break }
+    return 1
+  }
+}
+"""),
+    ("a loop that may run zero times, followed by a return", """
+fn f(xs: List[Int]) -> Int {
+  for (x of xs) {
+    if (x > 0) { return x }
+  }
+  return 0
+}
+"""),
+    # an `else if` chain: `fb_scan` cannot model one, so the whole `fn` is
+    # withheld rather than judged on a truncated body. The reference admits it,
+    # and this is the case that proves the withholding is real.
+    ("an else-if chain whose every arm returns", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else if (!c) { return 2 } else { return 3 }
+}
+"""),
+    # a destructuring binder is the other `fb_scan` bail, and it sits BEFORE
+    # the return here so a reader that dropped the tail would refuse.
+    ("a destructuring binder ahead of the return", """
+type R = { a: Int, b: Int }
+fn f(r: R) -> Int {
+  let { a, b } = r
+  return a + b
+}
+"""),
 ]
 
 
@@ -1342,6 +1444,58 @@ boot component B2 provides e2: Env2 {
   provide e2 { fn b() = config.y }
 }
 """, "BOOT"),
+    # ---- the fn-body TYPE layer (docs/design/457 T3a) ----------------------
+    # The statement walk over a module `fn` body now carries a type environment
+    # beside its binding scope: parameters at their declared types over the
+    # program-wide declaration table, the written annotation at a `let`, and
+    # the declared return as every `return`'s checking position. Each of these
+    # was a `false-admit` in `tools/gate_reference_census.py` until it was, and
+    # each is compared on TAG and MESSAGE here.
+    ("t2 null in an expression", _fixture("t2_null_in_expression"), "T2"),
+    ("t11 field read through an optional",
+     _fixture("t11_field_through_opt"), "T1"),
+    ("t12 index on a Str", _fixture("t12_str_index"), "T1"),
+    ("t21 implicit Int -> Int32 narrowing at a return",
+     _fixture("t21_int32_narrow_implicit"), "T1"),
+    ("t22 mixed-width arithmetic", _fixture("t22_int32_width_mix"), "T1"),
+    ("t23 remainder on Int32 operands", _fixture("t23_int32_remainder"), "T1"),
+    ("t26 record update with a wrong field type",
+     _fixture("t26_anon_record_update_wrong_type"), "T1"),
+    ("t27 record update naming a field the literal has not",
+     _fixture("t27_anon_record_update_undeclared_field"), "TYPE"),
+    ("t28 bitwise on non-Int32 operands",
+     _fixture("t28_bitwise_non_int32"), "T1"),
+    ("t29 field read on an erased Any", _fixture("t29_field_read_on_any"), "T1"),
+    ("t36 a Float literal outside binary64",
+     _fixture("t36_float_literal_range"), "TYPE"),
+    # the same erased-`Any` field read reached through a backend fixture rather
+    # than a rejection fixture — the one census entry of this family with no
+    # `examples/rejections/` name.
+    ("dynamic reserved key: a field read on a json_parse result",
+     (ROOT / "backends" / "typescript" / "tests" / "fixtures"
+      / "dynamic_reserved_key.rvl").read_text(), "T1"),
+    # ---- calls and signatures (docs/design/457 T2b) ------------------------
+    # The same walk resolves a CALL against a declaration: the signature table's
+    # arity window and per-argument check (monomorphic by `compatible`, generic
+    # by `unify` + `substitute`), the host stub surface, `_BUILTIN_SIG`, and the
+    # four refusals the reference makes while LOWERING a method call rather than
+    # while typing it.
+    ("t10 a call at the wrong arity", _fixture("t10_call_arity"), "T1"),
+    ("t15 a generic fn's result at a call site",
+     _fixture("t15_generic_call_site"), "T1"),
+    ("t25 an explicit [T] list turns the implicit heuristic off",
+     _fixture("t25_explicit_tparam_heuristic_off"), "T1"),
+    ("v2 a Map value's `set` against the map's V",
+     _fixture("v2_map_set_value_mismatch"), "T1"),
+    ("v2 a method a Map value's stdlib surface does not name",
+     _fixture("v2_map_value_unknown_method"), "T1"),
+    ("a literal zero divisor", _fixture("arith_zero_divisor"), "TYPE"),
+    ("t24 a stdlib method on a receiver no constructor pins",
+     _fixture("t24_opaque_receiver_builtin"), "HOST-METHOD"),
+    ("a method the host stub surface does not name",
+     _fixture("host_method_not_on_surface"), "HOST-METHOD"),
+    ("g4 an extern undo slot's argument type",
+     _fixture("g4_extern_undo_wrong_arg_type"), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
@@ -2265,6 +2419,121 @@ component C provides cache: Cache {
     *[(f"{label} does not swallow the next operation",
        _sop(clause, _SOP_PLAIN_PUT, impl), "G4")
       for label, clause, impl in _SOP_CLAUSES],
+    # ---- docs/design/457 §2.4: the component header's service-existence rule -
+    # The reference resolves every `requires`/`provides` annotation against its
+    # service table (`Env.__init__` for the requirements, `_lower_component`'s
+    # `comp.provides` loop for the provisions) and refuses an unresolved one by
+    # name. Both are here, plus the ORDER between them: the reference decides
+    # every requirement before it reaches the provisions, so a component whose
+    # two clauses both dangle is refused for its requirement.
+    ("an undeclared service in requires",
+     "component C requires s: S { }", "G1"),
+    ("an undeclared service in provides",
+     "component C provides s: S { }", "G1"),
+    ("requires is decided before provides",
+     "component C requires a: A provides b: B { }", "G1"),
+    # the issue-346 harness candidate, verbatim: the STANDALONE question about a
+    # component that requires a service the running composition provides. The
+    # manifest arm of the same bytes is `test_the_manifest_gap_is_priced_not_hidden`.
+    ("a candidate requiring an ambient-only service, standalone", """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheLayer requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.get(key) }
+}
+""", "G1"),
+    # ---- docs/design/457 T4b: the required-service member rule (A6) -------
+    # `_component_req_call` / `_lower_postfix`'s `req` branch look the operation
+    # up in the service the requirement resolves to and refuse an absent one by
+    # name, before they count arguments or judge the emit marking. Both body
+    # positions are here — a setup `effect` bracket (the `a6_method_not_in_service`
+    # fixture's own shape) and a provide-method call — plus the ORDER against
+    # G4: an absent operation cannot be an unmarked emission, so the A6 refusal
+    # is what an `emission`-less name draws even under `emit`.
+    ("an absent service operation in a setup effect bracket", """
+service Database { fn query(sql: Str) -> Int }
+component P requires db: Database {
+  let n = effect db.execute("x") undo db.query("y")
+}
+""", "A6"),
+    ("an absent service operation in a provide method", """
+service Store { fn get(key: Str) -> Str }
+service Cache { fn lookup(key: Str) -> Str }
+component C requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nonexistent(key) }
+}
+""", "A6"),
+    ("an absent service operation under `emit` is A6, not G4", """
+service Bus { emission fn publish(topic: Str) }
+service Cache { fn put(key: Str) }
+component C requires bus: Bus provides cache: Cache {
+  provide cache { fn put(key) { emit bus.broadcast(key) } }
+}
+""", "A6"),
+    # ---- docs/design/457 T3b: returns on every path (T1) -------------------
+    # `_check_returns_on_every_path`, the last obligation `_lower_fns` runs for
+    # a `fn`. Two messages, and which one fires is decided by whether the body
+    # contains a `return` AT ALL — the fixtures are the reference's own
+    # documented pair, and the shapes below are the rest of the rule.
+    ("a declared return whose body never returns",
+     _fixture("t8_missing_return"), "T1"),
+    ("a declared return the trailing bare if can fall past",
+     _fixture("t9_return_path_incomplete"), "T1"),
+    # a bare `if` with no `else` may be skipped, so the path falls through.
+    ("an if with no else", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 }
+}
+""", "T1"),
+    # a `for` may run zero times and so terminates nothing.
+    ("a for loop as the only returning path", """
+fn f(xs: List[Int]) -> Int {
+  for (x of xs) { return x }
+}
+""", "T1"),
+    # a `while` whose condition is not the literal `true` may run zero times.
+    ("a conditional while as the only returning path", """
+fn f(c: Bool) -> Int {
+  while (c) { return 1 }
+}
+""", "T1"),
+    # `while (true)` with a `break` that TARGETS it may leave the loop and fall
+    # through, so it does not terminate the path (item 379).
+    ("a while(true) with a break targeting it", """
+fn f() -> Int {
+  while (true) {
+    if (true) { break }
+    return 1
+  }
+}
+""", "T1"),
+    # an `if`/`else` where only ONE arm returns.
+    ("an if/else with only one returning arm", """
+fn f(c: Bool) -> Int {
+  if (c) { return 1 } else { let n = 2 }
+}
+""", "T1"),
+    # the message quotes the DECLARED return spelling verbatim, arguments and
+    # fn types included, so a renderer that normalised it would show here.
+    ("the refusal quotes a generic return spelling", """
+fn f(n: Int) -> Map[Str, Int] {
+  let doubled = n * 2
+}
+""", "T1"),
+    ("the refusal quotes a fn-type return spelling", """
+fn f(n: Int) -> (Int) -> Int {
+  let doubled = n * 2
+}
+""", "T1"),
+    # the rule is per `fn` in DECLARATION order, and a clean `fn` ahead of the
+    # refusing one must not move the anchor.
+    ("the second fn is the one refused", """
+fn g() -> Int {
+  return 1
+}
+fn f() -> Int {
+  let n = 2
+}
+""", "T1"),
 ]
 
 
@@ -3010,7 +3279,7 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 42. The self-declared async-colour
+# `examples/rejections/`; it now stands at 40. The self-declared async-colour
 # arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
 # binding-discipline slice) moved OUT of the gap into gate/reference agreement,
 # and two slices have moved fixtures IN by making the gate READ a body it used
@@ -3047,46 +3316,25 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("v2_undeclared_fn_var", "G1"),
     ],
     # expression typing (T1/T2): the operator/field/index/record algebra and the
-    # literal-range and `null` refusals.
+    # literal-range and `null` refusals. The fn-body STATEMENT layer
+    # (docs/design/457 T3a) landed this family: the `lir_*` walk now carries a
+    # `TEnv` beside its binding scope and consults the algebra at each position
+    # `_lower_pure_stmt` does, so `t2`, `t11`, `t12`, `t21`, `t22`, `t23`,
+    # `t26`, `t27`, `t28`, `t29`, `t36` and the backend fixture
+    # `dynamic_reserved_key` moved into REJECTED_PROGRAMS above, where tag AND
+    # message are compared, and left this list.
+    #
+    # What stays needs the optional-chaining rules the expression slice did not
+    # build: `?.` on a non-optional is decided from the target's type at the
+    # CHAIN, which is T2d's.
     "expression typing (T1/T2)": [
-        ("t2_null_in_expression", "T2"),
-        ("t11_field_through_opt", "T1"),
-        ("t12_str_index", "T1"),
         ("t14_optional_chain_on_nonoptional", "T1"),
-        ("t21_int32_narrow_implicit", "T1"),
-        ("t22_int32_width_mix", "T1"),
-        ("t23_int32_remainder", "T1"),
-        ("t28_bitwise_non_int32", "T1"),
-        ("t26_anon_record_update_wrong_type", "T1"),
-        ("t27_anon_record_update_undeclared_field", "TYPE"),
-        ("t36_float_literal_range", "TYPE"),
-        # a field read on an erased `Any`. Pinned here once `p_top` learned the
-        # reference's `pub` prefix set: before that the fixture never reached a
-        # body at all, because its `pub extern` declaration drew a parse refusal,
-        # so the census filed it as tag-mismatch rather than as the type-layer
-        # false-admit it has always been.
-        ("t29_field_read_on_any", "T1"),
     ],
-    # calls and signatures: arity, generic call sites, builtin/method receivers,
-    # the literal zero divisor, extern-undo argument typing.
-    "calls and signatures": [
-        ("t10_call_arity", "T1"),
-        ("t15_generic_call_site", "T1"),
-        # the third fixture this gap gained by being READ rather than by moving:
-        # `fn typo[T](xs: List[U])` was refused by the gate's PARSER, which did
-        # not spell a type-parameter list at all, so the census filed it as
-        # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. The
-        # parse now reaches the body and the gate's real state shows: the
-        # reference refuses the argument type in its TYPE layer, and the gate
-        # runs no type layer. Its two neighbours above are the same family.
-        ("t25_explicit_tparam_heuristic_off", "T1"),
-        ("v2_map_set_value_mismatch", "T1"),
-        ("v2_map_value_unknown_method", "T1"),
-        ("arith_zero_divisor", "TYPE"),
-        ("t24_opaque_receiver_builtin", "HOST-METHOD"),
-        ("host_method_not_on_surface", "HOST-METHOD"),
-        ("g4_extern_undo_wrong_arg_type", "T1"),
-    ],
+    # calls and signatures: LANDED whole (docs/design/457 T2b). The signature
+    # table, `unify`/`substitute`, the host stub surface, `_BUILTIN_SIG` and the
+    # four lowering-time method refusals moved all nine of this family's
+    # fixtures into REJECTED_PROGRAMS above, where tag AND message are compared,
+    # so the family has no row left here.
     # arrows and function values: arrow-body checking, function-value flow and
     # arity, arrow annotations. (The self-declared async colour,
     # t34_arrow_self_declared_async, was in this family until the gate learned
@@ -3099,10 +3347,13 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t33_arrow_value_arity", "T1"),
         ("t35_arrow_annotation_not_quantified", "T1"),
     ],
-    # return paths and match: returns on every path, unknown/missing match cases.
+    # return paths and match: unknown/missing match cases. The RETURN-PATH half
+    # has LANDED (docs/design/457 T3b): `fb_function` runs
+    # `_check_returns_on_every_path` over the statement tree `fb_scan` already
+    # builds, so `t8_missing_return` and `t9_return_path_incomplete` moved into
+    # REJECTED_PROGRAMS above, where tag AND message are compared. What stays
+    # here needs the variant table and the arm algebra, which is T2d's.
     "return paths and match": [
-        ("t8_missing_return", "T1"),
-        ("t9_return_path_incomplete", "T1"),
         ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
@@ -3115,6 +3366,8 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # provide-method and component bodies: method params take the service
     # signature, the body checks against its return, required-service call
     # argument typing, config defaults, a method-local shadowing a component name.
+    # The member-EXISTENCE half of this family has landed (docs/design/457 T4b);
+    # what is left here all needs the expression algebra T1-T3 build.
     "provide-method and component bodies": [
         ("t1_service_arg_type", "T1"),
         ("t4_field_arg_type", "T1"),
@@ -3122,7 +3375,6 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t16_provide_method_missing_return", "T1"),
         ("t31_index_non_int_provide_method", "T1"),
         ("t3_config_default_type", "T1"),
-        ("a6_method_not_in_service", "A6"),
         # the t29 field-read-on-`Any` shape inside a provide method, pinned for
         # the same reason: the `pub extern` parse refusal used to hide it.
         ("t30_field_read_on_any_provide_method", "T1"),
@@ -3136,12 +3388,138 @@ _TYPE_LAYER_CASES = [
 ]
 
 
-def test_the_type_layer_gap_is_exactly_44_fixtures():
+def test_the_service_existence_rule_stops_at_a_use_declaration(admit):
+    """The declared frontier of the component header's service-existence rule
+    (docs/design/457 §2.4), pinned as a divergence rather than left to be
+    discovered.
+
+    A `use` declaration can IMPORT a service — the reference admits
+    `use "./svc.rvl" { Store }` followed by `requires store: Store` when the
+    module is supplied — and `p_top` steps over `use` without reading the module,
+    so a text carrying one has no knowable service set. The gate therefore
+    decides nothing there. That is the UNDER-refusing direction, which is the one
+    this gate is allowed to err in: refusing a program the reference admits is
+    the false alarm it may not produce.
+
+    The reference's own verdict on such a single source is the missing-`modules=`
+    refusal, which is out of this gate's slice for the same reason the three
+    `v2_use_*` fixtures are: the crate cannot supply `modules=` either. When a
+    later slice teaches the gate to read modules, this test flips to an
+    agreement — it is not a waiver on the rule, it is the rule's boundary."""
+    src = 'use "./svc.rvl" { S }\ncomponent C requires s: S { }\n'
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag.startswith("OUT:") and "`modules=`" in ref_msg, (
+        f"the reference's single-source `use` refusal changed: {ref_msg!r}")
+    assert admit(src) == "", (
+        "a text whose services may come from a module must draw no "
+        "service-existence verdict")
+    # ... and the SAME text without the `use` is refused, so the exemption is
+    # doing the work rather than the program being harmless.
+    assert admit("component C requires s: S { }\n") == (
+        "G1|unknown service `S` in `requires` of C")
+
+
+# ---- the A6 member rule against item 391's G6 shadowing discipline ----------
+#
+# Two slices landed a refusal into the SAME walk: the A6 member rule
+# (docs/design/457 T4b) refuses inside `req_call`, and `mth_rebind`
+# (`_check_rebind`, item 391) refuses a provide-method binding that collides
+# with a name already in scope. Both are raised by the reference DURING the body
+# lowering, so on a program carrying both the EARLIER SOURCE LINE wins - and the
+# gate has to pick the same one. That exact class of disagreement is item 419c,
+# and it is not something a per-slice corpus can see, because every corpus
+# program carries exactly one refusal.
+#
+# `csh_refusal` (`_refuse_callable_shadowing`, item 391's other half) is the
+# contrast: the reference runs it in `check_and_lower` BEFORE it lowers a single
+# component, so it beats a body refusal regardless of line order.
+
+_A6_G6_SVCS = ("service Store { fn get(key: Str) -> Str }\n"
+               "service Cache { fn lookup(key: Str) -> Str }\n")
+
+@pytest.mark.parametrize("name,src", [
+    # the method-PARAMETER arm of `_check_rebind`, each order
+    ("A6 on the earlier line", _A6_G6_SVCS + """component C requires store: Store provides cache: Cache {
+  provide cache {
+    fn lookup(key) {
+      let a = store.nope(key)
+      let key = "x"
+      return "y"
+    }
+  }
+}
+"""),
+    ("the rebind on the earlier line", _A6_G6_SVCS + """component C requires store: Store provides cache: Cache {
+  provide cache {
+    fn lookup(key) {
+      let key = "x"
+      let a = store.nope(key)
+      return "y"
+    }
+  }
+}
+"""),
+    # the COMPONENT-LOCAL arm, in the shape of the corpus fixture
+    # `g6_method_local_shadows_component.rvl`, each order
+    ("A6 before a component-local rebind",
+     "service Store { fn get(key: Str) -> Str }\n"
+     "service Cache { fn set(key: Str) }\n" + """component C requires svc: Store provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let a = svc.nope(key)
+      let store = key
+    }
+  }
+}
+"""),
+    ("a component-local rebind before the A6",
+     "service Store { fn get(key: Str) -> Str }\n"
+     "service Cache { fn set(key: Str) }\n" + """component C requires svc: Store provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let store = key
+      let a = svc.nope(key)
+    }
+  }
+}
+"""),
+    # the fail-fast phase, with the A6 deliberately on the EARLIER line
+    ("callable shadowing fails fast ahead of an earlier-line A6",
+     _A6_G6_SVCS + """component C requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nope(key) }
+}
+fn helper(xs: List[Int]) -> Int { return xs.length() }
+fn shadowed(g: (List[Int]) -> Int) -> Int {
+  let helper = g
+  return helper([1, 2, 3])
+}
+"""),
+])
+def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
+        admit, name, src):
+    """Both refusals are true of the program; the gate must name the one
+    `check_and_lower` names, not merely refuse something."""
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag in ("A6", "G6"), (
+        f"probe bug: the reference answers {ref_tag!r} ({ref_msg!r}), so this "
+        f"program does not pit the two rules against each other")
+    assert admit(src) == f"{ref_tag}|{ref_msg}"
+
+
+def test_the_type_layer_gap_is_exactly_19_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
-    leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 42, len(_TYPE_LAYER_CASES)
+    leave or join the pinned set without this number moving in the diff. It was
+    41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
+    two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
+    rows for the module-`fn` surface, and the call-and-signature layer (T2b)
+    nine more; the twelfth document that moved with T3a,
+    `dynamic_reserved_key`, never had a row here because this pin addresses its
+    fixtures by bare name under `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 42, "a fixture is listed twice"
+    assert len(set(names)) == 19, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -3167,6 +3545,82 @@ def test_type_layer_gap_is_a_named_selfhost_divergence(admit, family, name, tag)
         f"slice appears to have landed. Flip this fixture — delete its row "
         f"here, delete it from KNOWN_BYPASSES, re-record the census baseline, "
         f"and fold it into the slice's agreement corpus.")
+
+
+# ------------------------------------------ returns on every path: the anchor
+#
+# `_agree` compares the tag and the message; it does not compare the LINE, and
+# the two messages of this rule are anchored at DIFFERENT statements — the
+# never-returns one at the `fn` declaration, the falls-through one at the last
+# statement of the body. A port that spelled both sentences correctly off one
+# anchor would pass every row in REJECTED_PROGRAMS and still report the wrong
+# place, so the anchor is asserted here, against the reference's own line.
+
+_RETURN_PATH_ANCHORS = [
+    ("never returns, anchored at the declaration", _fixture("t8_missing_return")),
+    ("falls through, anchored at the last statement",
+     _fixture("t9_return_path_incomplete")),
+    # the two anchors pull APART here: the declaration is line 2 and the
+    # trailing `if` that falls through is line 5, so an anchor that had
+    # collapsed onto the declaration would show.
+    ("falls through several lines below the declaration", """
+fn f(c: Bool) -> Int {
+  let a = 1
+  let b = 2
+  if (c) { return a + b }
+}
+"""),
+    # and here the last statement is a `while`, not an `if`.
+    ("falls through at a trailing while", """
+fn f(c: Bool) -> Int {
+  let a = 1
+  while (c) { return a }
+}
+"""),
+]
+
+
+@pytest.mark.parametrize("name,src", _RETURN_PATH_ANCHORS,
+                         ids=[n for n, _ in _RETURN_PATH_ANCHORS])
+def test_the_return_path_refusal_is_anchored_where_the_reference_anchors_it(
+        admit_all, name, src):
+    try:
+        compile_source(src, "diff.rvl")
+        pytest.fail(f"corpus bug: the reference admits {name}")
+    except RevlError as error:
+        rows = [row for row in admit_all(src).split("\n") if row]
+        assert len(rows) == 1, f"{name}: expected one refusal, got {rows!r}"
+        line, tag, message = rows[0].split("|", 2)
+        assert tag == "T1"
+        assert message == error.message
+        assert int(line) == error.line, (
+            f"{name}: gate anchored the refusal at line {line}, the reference "
+            f"at line {error.line}")
+
+
+def test_an_unresolved_name_read_outranks_the_return_path_on_the_reference(
+        admit):
+    """A PRECEDENCE divergence this slice introduces, pinned rather than left to
+    be met.
+
+    The reference lowers a fn body statement by statement and only then asks
+    whether the fn returns on every path, so a body that BOTH reads an
+    undeclared name and never returns draws the name refusal. This gate runs the
+    body's binding discipline (which decides the ASSIGNMENT position only, not a
+    name READ — `g1_template_undeclared` and `v2_undeclared_fn_var` are still
+    pinned above for exactly that) and then the return-path rule, so it draws
+    the return-path refusal instead.
+
+    Both refusals are TRUE and the program is refused either way, so this is a
+    419c-style naming divergence and never an admission the reference would not
+    give. It closes with the name-resolution slice, which owns the read position;
+    until then the gate refuses a program it used to wave through, under the
+    other of the two guarantees the program breaks."""
+    src = "fn f() -> Int {\n  nobody\n}\n"
+    ref_tag, ref_msg = _ref(src)
+    assert (ref_tag, ref_msg) == ("G1", "`nobody` is not declared in this function")
+    assert admit(src) == (
+        "T1|`f` is declared to return `Int` but its body never returns a value")
 
 
 # ---------------------------------------------------------------- ambient / #86
@@ -3760,18 +4214,130 @@ def test_manifest_wire_projects_the_service_block():
     """The projection renders the header and one row per declared service, in
     declaration order, between the composition rows and the withdrawal rows: a
     service declaration describes the composition, and a withdrawal acts on what
-    precedes it, so `-C` stays last."""
+    precedes it, so `-C` stays last.
+
+    Each row carries the service's OPERATION names after its name (T4b), which
+    is what lets a candidate's call through a required key be resolved against
+    the RUNNING declaration and not only against its name. The comma is the
+    claim: `:A,pa` says the surface is exactly `pa`, and a bare `:A` — every
+    wire a producer with no operation table renders — says nothing about it."""
     from revl import manifest_wire
 
     ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
-    assert manifest_wire(ir).endswith(";!services;:A;:B"), manifest_wire(ir)
+    assert manifest_wire(ir).endswith(";!services;:A,pa;:B,pb"), manifest_wire(ir)
     rows = manifest_wire(ir, replacing=("A",)).split(";")
     assert rows[-1] == "-A"
-    assert rows[-4:-1] == ["!services", ":A", ":B"]
+    assert rows[-4:-1] == ["!services", ":A,pa", ":B,pb"]
     # the composition rows keep their exact positions and order, so the G3 DFS
     # seed order cannot have moved
     assert rows[:rows.index("!services")] == manifest_wire(ir).split(
         ";")[:rows.index("!services")]
+
+
+# ---- docs/design/457 T4b: the requirement resolved against the RUNNING service
+
+#: The issue-346 harness scenario verbatim (bench/admission_latency.py): a
+#: running `Store` provided by `Kv` and consumed by `App`. The candidates below
+#: are the two questions a drafting agent asks about it.
+_T4B_RUNNING = """
+service Store {
+  fn get(key: Str) -> Str
+  fn bump(n: Int) -> Int
+  emission fn put(key: Str, value: Str)
+}
+service AppSvc { fn ping() -> Str }
+
+component Kv provides store: Store {
+  let m = effect Map.new() undo m.drop()
+  provide store {
+    fn get(key) = key
+    fn bump(n) = n
+    fn put(key, value) = value
+  }
+}
+component App requires store: Store provides app: AppSvc {
+  provide app { fn ping() = store.get("boot") }
+}
+"""
+
+#: Calls an operation the running `Store` declares: the reference admits it
+#: INTO the composition, and refuses it standalone for the service's absence.
+_T4B_CANDIDATE = """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheLayer requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.get(key) }
+}
+"""
+
+#: The same shape calling an operation the running `Store` does NOT declare.
+#: Only a reader that resolved the requirement against the running declaration
+#: can tell the two apart.
+_T4B_MISSING = """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheMiss requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.nonexistent(key) }
+}
+"""
+
+
+def test_a_required_running_service_resolves_its_operations(admit_ambient):
+    """ORACLE B over the A6 member rule: a candidate whose `requires store:
+    Store` is satisfied by the RUNNING composition is checked against the
+    running service's declared operations, and agrees with the reference on
+    both answers — admitted for an operation `Store` declares, refused in the
+    reference's own words for one it does not.
+
+    This is the half `test_the_manifest_gap_is_priced_not_hidden` calls
+    requirement RESOLUTION: before it, the wire carried service NAMES and the
+    gate could say only that `Store` exists."""
+    assert _gate_ambient(admit_ambient, _T4B_CANDIDATE, _T4B_RUNNING) == ""
+    assert _ref_ambient(_T4B_CANDIDATE, _T4B_RUNNING) == ""
+
+    got = _gate_ambient(admit_ambient, _T4B_MISSING, _T4B_RUNNING)
+    assert got == "A6|`store.nonexistent` is not a method of service Store", got
+    assert got == _ref_ambient(_T4B_MISSING, _T4B_RUNNING)
+
+
+def test_a_wire_that_makes_no_operation_claim_decides_no_member(admit_ambient):
+    """The frontier of the same rule, pinned rather than left to be discovered.
+
+    A `:S` row with no comma names a running service and says NOTHING about its
+    surface — that is every wire a producer without an operation table renders.
+    Reading it as the EMPTY surface would refuse every call through that
+    requirement, which is the false-alarm direction this gate may not err in, so
+    it decides no member at all. The NAME still resolves, so the rule the
+    previous slice landed is untouched."""
+    named_only = "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"
+    assert admit_ambient(_T4B_MISSING, named_only) == ""
+    assert admit_ambient(_T4B_CANDIDATE, named_only) == ""
+    # ... and the SAME wire carrying the claim refuses, so the silence is what
+    # is doing the work rather than the program being harmless
+    claimed = "Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping"
+    assert admit_ambient(_T4B_MISSING, claimed) == (
+        "A6|`store.nonexistent` is not a method of service Store")
+    assert admit_ambient(_T4B_CANDIDATE, claimed) == ""
+
+
+def test_the_empty_operation_claim_is_a_claim(admit_ambient):
+    """`:S,` is the running service that declares NO operation — a claim, and a
+    different one from `:S`. Every call through a requirement bound to it is
+    refused, which is what makes the trailing comma load-bearing rather than
+    cosmetic."""
+    empty_claim = "Kv/store/;App/app/;App<store;!services;:Store,;:AppSvc,ping"
+    assert admit_ambient(_T4B_CANDIDATE, empty_claim) == (
+        "A6|`store.get` is not a method of service Store")
+
+
+@pytest.mark.parametrize("row", [":Store,get,", ":Store,,get", ":Store,ge t",
+                                 ":Store,get/put"])
+def test_a_garbled_operation_list_refuses_the_wire(admit_ambient, row):
+    """A malformed operation list fails the WIRE by name. Reading it as a
+    shorter surface would refuse calls the reference admits, and skipping it
+    would leave a claim half-read: a wire the gate cannot read decides
+    nothing at all."""
+    got = admit_ambient(_T4B_CANDIDATE, f"Kv/store/;!services;{row}")
+    assert got.startswith("MANIFEST|"), got
+    assert "does not name an operation" in got or "does not name a service" in got
 
 
 def test_manifest_wire_makes_no_service_claim_for_a_manifest_dict():
@@ -3922,7 +4488,7 @@ def test_manifest_wire_renders_the_route_rows():
     assert rows.index("Router<*kv") < rows.index("Router>kv/r1,r2"), rows
     # ... and the whole ordering of the combined wire, in one line
     assert rows == ["StoreA/kv/r1", "StoreB/kv/r2", "Router/api/", "Router<*kv",
-                    "Router>kv/r1,r2", "!services", ":Kv", ":Api"], rows
+                    "Router>kv/r1,r2", "!services", ":Kv,get", ":Api,go"], rows
     # the withdrawal row stays last, after the service block
     assert manifest_wire(ir, replacing=("StoreB",)).split(";")[-1] == "-StoreB"
     # a composition with no route renders no route row (the earlier slices are
@@ -4155,6 +4721,81 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
     assert ref, f"the corpus must refuse: {name}/{layout}"
     got = _gate_ambient(admit_ambient, src, _W_M)
     assert got == ref, (name, layout, got, ref)
+
+
+# ---- a CLOSED ordering divergence: the handoff verdict vs a body refusal ----
+#
+# `_admit_handoff_replacement` runs over `live_components`, which
+# `src/revl/lower.py` builds by DROPPING every component whose body lowering
+# raised (it appends a `poisoned` header stub instead). So on the reference a
+# component whose body refuses contributes NO handoff verdict at all — the body
+# refusal is the whole answer, whatever line either sits on.
+#
+# `selfhost/lower.rvl`'s `handoff_refusals` used to walk every component in the
+# text, poisoned or not, with its verdict anchored at the COMPONENT declaration
+# line. `pick_min` orders by `(line, seq)`, so it beat any INLINE body refusal,
+# which `body_line` anchors at the offending STATEMENT — a strictly later line.
+#
+# This predates the A6 member rule and was not caused by it: the reproducer below
+# uses the G1 undeclared-access refusal, which has been inline-anchored since
+# long before docs/design/457. A whole-component AGGREGATE verdict (the G4
+# emission-reach one) is anchored at the component line, ties, and is saved by
+# `seq` — which is why no corpus program caught this.
+#
+# Both refusals are TRUE of the program, so this was a 419c naming divergence and
+# never a false admission. The handoff slice (issue #1127) threaded the poisoned
+# set through `collect_nonlink`, so the pin below is now an AGREEMENT, kept as
+# the regression witness this comment asked the closing slice to leave behind.
+
+_HO_RUNNING = """service D { fn q(s: Str) -> Int }
+service Extra { fn e(s: Str) -> Str }
+component OldStore provides db: D {
+  handoff db: Str
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+"""
+
+#: (label, source) — each carries a handoff drift AND one body refusal.
+_HO_PAIRS = [
+    # the PRE-A6 member: an undeclared access, inline-anchored for many slices.
+    ("a G1 undeclared access", """service D { fn q(s: Str) -> Int }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { emit nope.execute(s)   return 0 } }
+}
+"""),
+    # the A6 member of the same family (docs/design/457 T4b), which is how this
+    # divergence was found.
+    ("an A6 member refusal", """service D { fn q(s: Str) -> Int }
+service Extra { fn e(s: Str) -> Str }
+component NewStore provides db: D requires ex: Extra {
+  handoff db: Int
+  provide db { fn q(s) { let y = ex.nope(s)   return 0 } }
+}
+"""),
+]
+
+
+@pytest.mark.parametrize("label,src", _HO_PAIRS, ids=[n for n, _ in _HO_PAIRS])
+def test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate(
+        admit_ambient, label, src):
+    """The former divergence, measured in both directions so it cannot return.
+
+    The reference names the BODY refusal, because the component never reaches
+    the handoff pass. The gate named the handoff drift until the poisoned set
+    was threaded through `collect_nonlink`; it now names the body refusal too."""
+    ref = _ref_ambient(src, _HO_RUNNING, replacing=("OldStore",))
+    got = _gate_ambient(admit_ambient, src, _HO_RUNNING, replacing=("OldStore",))
+    assert ref.startswith(("G1|", "A6|")), (
+        f"the reference must name the body refusal for {label}: {ref!r}")
+    assert got == ref, (label, got, ref)
+    # NON-VACUITY: with the handoff made compatible, the two agree on the body
+    # refusal, so the divergence is the handoff verdict's ranking and nothing
+    # else about these programs.
+    compatible = src.replace("handoff db: Int", "handoff db: Str")
+    assert _gate_ambient(admit_ambient, compatible, _HO_RUNNING,
+                         replacing=("OldStore",)) == _ref_ambient(
+        compatible, _HO_RUNNING, replacing=("OldStore",))
 
 
 def test_oracle_b_a_withdrawal_tying_with_a_spawn_bound_names_the_withdrawal(
@@ -4478,3 +5119,644 @@ def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
     expected = "G4|call to emission `bus.publish` must be marked `emit` (G4)"
     assert _gate_ambient(admit_ambient, src, _H_MO_M) == expected
     assert _ref_ambient(src, _H_MO_M) == expected
+
+
+# -- a poisoned component contributes no hand-off verdict (issue #1127) -------
+#
+# `_admit_handoff_replacement` runs over `live_components`, which
+# `src/revl/lower.py` builds by DROPPING every component whose body lowering
+# raised (it appends a `poisoned` header stub instead). So on the reference a
+# component whose body refuses contributes NO hand-off verdict at all: the body
+# refusal is the whole answer, whatever line either sits on.
+#
+# `handoff_refusals` used to walk every component in the text, poisoned or not,
+# and anchored its verdict at the COMPONENT declaration line. `pick_min` orders
+# by `(line, seq)`, so it beat any INLINE body refusal, which `body_line`
+# anchors at the offending STATEMENT — a strictly later line. Both refusals are
+# true of the program, so the divergence was a 419c NAMING one and never a false
+# admission; the fix narrows which of the two true refusals gets named and can
+# only ever remove a hand-off verdict the component loop has already refused
+# over, so it cannot turn a refusal into an admission.
+#
+# A whole-component AGGREGATE verdict (the G4 emission-reach one) is anchored at
+# the component line, tied, and was saved by `seq` — which is why no corpus
+# program caught this. The G1 undeclared access below is inline-anchored and has
+# been since long before the type layer, so the reproducer predates every recent
+# member of the family.
+
+_PC_RUNNING = """service D { fn q(s: Str) -> Int }
+component OldStore provides db: D {
+  handoff db: Str
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+"""
+
+#: The incoming text: `NewStore` accepts `Int` where the running `OldStore`
+#: exports `Str` (a hand-off drift, anchored at the component line) AND refuses
+#: inline on an undeclared access (anchored at the `provide` statement, later).
+_PC_BOTH = """service D { fn q(s: Str) -> Int }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { emit nope.execute(s)   return 0 } }
+}
+"""
+
+_PC_BODY_REFUSAL = "G1|`nope` is not a declared requirement of NewStore"
+_PC_DRIFT = ("G2|state hand-off on `db` differs from the running manifest: "
+             "`NewStore` accepts `Int`, but `OldStore` exports `Str` — the "
+             "successor cannot hold the predecessor's state, and dropping it "
+             "on the swap would be residue")
+
+
+def _pc_ambient(admit_ambient, src: str) -> tuple[str, str]:
+    kw = {"replacing": ("OldStore",)}
+    return (_gate_ambient(admit_ambient, src, _PC_RUNNING, **kw),
+            _ref_ambient(src, _PC_RUNNING, **kw))
+
+
+def test_a_poisoned_component_contributes_no_handoff_verdict(admit_ambient):
+    """Two TRUE refusals in one program, and the gate must name the one
+    `check_and_lower` names: the body refusal, because the reference never
+    reaches the hand-off pass for a component it poisoned.
+
+    Before the poisoned set was threaded into `collect_nonlink` the gate
+    answered the `G2` hand-off drift here, which is the issue-#1127
+    divergence."""
+    got, ref = _pc_ambient(admit_ambient, _PC_BOTH)
+    assert ref == _PC_BODY_REFUSAL, ref
+    assert got == ref, (got, ref)
+
+
+def test_the_handoff_verdict_is_genuinely_there_to_be_skipped(admit_ambient):
+    """NON-VACUITY, both halves.
+
+    Make the hand-off COMPATIBLE and the answer does not move: the body refusal
+    was always what both sides name. Repair the BODY instead and the hand-off
+    drift is what both sides name, so the verdict the test above suppresses is
+    a real one the gate still reports when nothing poisons its component."""
+    compatible = _PC_BOTH.replace("handoff db: Int", "handoff db: Str")
+    got, ref = _pc_ambient(admit_ambient, compatible)
+    assert ref == _PC_BODY_REFUSAL, ref
+    assert got == ref, (got, ref)
+
+    sound_body = _PC_BOTH.replace("emit nope.execute(s)   ", "")
+    got, ref = _pc_ambient(admit_ambient, sound_body)
+    assert ref == _PC_DRIFT, ref
+    assert got == ref, (got, ref)
+
+
+def test_a_sibling_component_still_carries_its_own_handoff_verdict(
+        admit_ambient):
+    """The skip is PER COMPONENT, not per admission — exactly `live_components`,
+    which drops the poisoned entry and keeps the rest.
+
+    `NewStore` drifts on its own key and lowers cleanly, so its hand-off verdict
+    survives; `Bad` refuses in its body, later in the file, and is poisoned. The
+    drift is what both sides name. A skip that fired for the whole admission
+    because SOME component was poisoned would name `Bad`'s `G1` here."""
+    src = """service D { fn q(s: Str) -> Int }
+service C { fn g(k: Str) -> Str }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+component Bad provides other: C {
+  provide other { fn g(k) { emit nope.execute(k)   return k } }
+}
+"""
+    bad_refusal = "G1|`nope` is not a declared requirement of Bad"
+    got, ref = _pc_ambient(admit_ambient, src)
+    assert ref == _PC_DRIFT, ref
+    assert got == ref, (got, ref)
+
+    # ... and `Bad` is genuinely refused, so the program really does carry two
+    # true refusals and the drift won on `(line, seq)` rather than alone.
+    assert _ref_ambient(src, _PC_RUNNING,
+                        replacing=("OldStore",)) != bad_refusal
+    compatible = src.replace("handoff db: Int", "handoff db: Str")
+    got, ref = _pc_ambient(admit_ambient, compatible)
+    assert ref == bad_refusal, ref
+    assert got == ref, (got, ref)
+
+
+# ======================= calls and signatures (docs/design/457 T2b) ==========
+#
+# `_tsb_program` draws a module `fn` whose body CALLS things: module `fn`s at
+# every arity and both genericities, an `extern` that declares no return, the
+# stdlib method table over every receiver family the walk can prove, the host
+# stub surface through its constructor roots and through a bound host value, and
+# `Map.empty()`. It is a DIFFERENTIAL draw, not an expectation table, compared
+# on TAG and MESSAGE.
+#
+# One divergence CLASS survives, pinned below rather than described in a
+# comment: the reference desugars a receiver-first list transform to its free
+# function and then refuses that undeclared NAME, which is the G1 name-read
+# family no slice has built. The gate refuses later, or not at all — an
+# under-refusal. The bound the draw actually holds is absolute.
+
+_TSB_HEAD = """type TsbRow = { h: Str }
+
+fn mono(a: Int, b: Str) -> Int {
+  return a
+}
+
+fn nores(a: Int) {
+  let z = a
+}
+
+fn ident(x: T) -> T {
+  return x
+}
+
+fn pick[T](xs: List[T]) -> T {
+  return xs[0]
+}
+
+extern pure fn opaque(s: Str) = @py { return None }
+
+"""
+
+_TSB_ARGS = ["1", '"s"', "true", "3.5", "[]", "[1]", '["a"]', "None", "a", "b",
+             "c", '{ h: "x" }', "Map.empty()", "0"]
+# never a bare `[` at a receiver head: a statement STARTING with one is a parser
+# refusal in the reference and a "bail" in this reader, which is the parser's
+# surface and not this slice's.
+_TSB_RECV = ["a", "b", "c", '"str"', "Map.empty()", "m", "p", "1", "3.5"]
+_TSB_METH = ["length", "push", "slice", "charAt", "concat", "indexOf", "split",
+             "join", "repeat", "startsWith", "to_int", "to_int32", "to_str",
+             "keys", "set", "lookup", "has", "size", "remove", "mod",
+             "div_trunc", "checked_mod", "putt", "fetch", "map", "field", "str"]
+_TSB_HOSTV = ["new", "drop", "insert", "insert_if_absent", "remove", "get",
+              "open", "close", "query", "run", "nope"]
+_TSB_TYPES = ["Int", "Int32", "Float", "Str", "Bool", "Opt[Int]", "List[Int]",
+              "List[Str]", "Any", "TsbRow", "Map[Str, Int]", "Map[Str, Str]"]
+
+
+def _tsb_args(rng, n):
+    return ", ".join(rng.choice(_TSB_ARGS) for _ in range(n))
+
+
+def _tsb_call(rng, depth=1):
+    k = rng.randrange(8)
+    n = rng.randrange(0, 3)
+    if k == 0:
+        return f"mono({_tsb_args(rng, rng.randrange(0, 4))})"
+    if k == 1:
+        return f"ident({_tsb_args(rng, 1)})"
+    if k == 2:
+        return f"pick({_tsb_args(rng, 1)})"
+    if k == 3:
+        return f"nores({_tsb_args(rng, n)})"
+    if k == 4:
+        return (f"{rng.choice(_TSB_RECV)}.{rng.choice(_TSB_METH)}"
+                f"({_tsb_args(rng, n)})")
+    if k == 5:
+        root = rng.choice(["Map", "Pool", "Job"])
+        return f"{root}.{rng.choice(_TSB_HOSTV)}({_tsb_args(rng, n)})"
+    if k == 6:
+        return f"m.{rng.choice(_TSB_HOSTV)}({_tsb_args(rng, n)})"
+    inner = (_tsb_call(rng, 0) if depth and rng.randrange(3) == 0
+             else _tsb_args(rng, 1))
+    return f"mono({inner}, {_tsb_args(rng, 1)})"
+
+
+def _tsb_stmt(rng):
+    e = _tsb_call(rng)
+    k = rng.randrange(6)
+    tag = rng.randrange(99)
+    if k == 0:
+        return f"let z{tag} = {e}"
+    if k == 1:
+        return f"let z{tag}: {rng.choice(_TSB_TYPES)} = {e}"
+    if k == 2:
+        return f"var w{tag} = {e}"
+    if k == 3:
+        return e
+    if k == 4:
+        return f"if ({e}) {{ let q{tag} = 1 }}"
+    return f"assert {e}"
+
+
+def _tsb_program(rng) -> str:
+    body = "\n  ".join(_tsb_stmt(rng) for _ in range(rng.randrange(1, 4)))
+    return (f"{_TSB_HEAD}fn f(a: Int, b: Str, c: List[Int]) -> "
+            f"{rng.choice(_TSB_TYPES)} {{\n"
+            f'  let m = Map.new()\n  let p = opaque("x")\n'
+            f"  {body}\n  return {rng.choice(_TSB_ARGS)}\n}}\n")
+
+
+# The one family whose EARLIER reference refusal this slice does not build: a
+# receiver-first list transform desugars to a free function and the reference
+# refuses that undeclared NAME. Resolving a name READ needs the whole callable
+# universe, which is still open (`g1_template_undeclared`,
+# `v2_undeclared_fn_var` in TYPE_LAYER_GAP above).
+_TSB_LATER_SLICES = ("is not declared in this function",)
+
+_TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
+
+
+@pytest.mark.parametrize("seed", [5, 17, 31])
+def test_call_and_signature_fuzz_never_refuses_what_the_reference_admits(
+        admit, seed):
+    """THE BOUND, over 400 drawn call-carrying fn bodies per seed.
+
+      * the gate NEVER refuses a program the reference admits — absolute, with
+        no allowance;
+      * where the reference's own refusal is in this slice's vocabulary and
+        outside the family a later slice owns, the gate's verdict is the
+        reference's TAG AND SENTENCE, byte for byte.
+    """
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(400):
+        src = _tsb_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _TSB_TAGS:
+            continue
+        if any(m in ref_msg for m in _TSB_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 350, drawn
+    assert compared >= 150, compared
+
+
+def test_the_stdlib_surface_the_gate_lists_is_the_references_own(ns):
+    """`no builtin method` names the WHOLE stdlib surface, sorted, and the two
+    tables are edited in different files. Held byte-exact so a method added to
+    `_BUILTIN_METHODS` reds here rather than inside a message diff."""
+    from revl.lower import _BUILTIN_METHODS
+    assert ns["tk_stdlib_surface"]() == ", ".join(sorted(_BUILTIN_METHODS))
+
+
+def test_the_host_stub_surface_the_gate_lists_is_the_references_own(ns):
+    """The same, per host family: the verb list the `has no method` refusal
+    quotes, and the declared argument types the arity and argument rules use."""
+    from revl.typecheck import _HOST_FAMILIES
+    for family, verbs in _HOST_FAMILIES.items():
+        assert ns["tk_host_verbs"](family) == sorted(verbs), family
+        for verb, params in verbs.items():
+            assert ns["tk_host_params"](family, verb) == list(params), \
+                f"{family}.{verb}"
+
+
+def test_a_fn_that_declares_no_return_types_its_call_unknown(admit):
+    """A FALSE REJECTION this slice closed, kept as its own case.
+
+    `case_binds` spells a module `fn`'s own name as a function type, and gives a
+    returnless `fn` the return `Unit` — which is the IR's spelling. The
+    reference's signature table records `None` there (no return type, not the
+    unit type), so `assert nores(1)` reads as an UNKNOWN condition and the
+    program is admitted. Reading `Unit` back off the function type refused it,
+    which is the one direction this gate may not err in. The signature table's
+    own `sigr` row is "" and the call types unknown."""
+    src = """fn nores(a: Int) {
+  let z = a
+}
+
+fn f() -> Int {
+  assert nores(1)
+  return 1
+}
+"""
+    assert _ref(src) == ("", "")
+    assert admit(src) == ""
+
+
+def test_the_call_and_signature_layer_reaches_a_module_fn_body(admit):
+    """NON-VACUITY, spelled out: each position the slice opens draws the
+    reference's own sentence, and the probe asserts the reference still spells
+    it that way."""
+    from revl.lower import _BUILTIN_METHODS
+    cases = [
+        # the arity window
+        ("fn g(a: Int) -> Int { return a }\n"
+         "fn f() -> Int { return g(1, 2) }\n",
+         "T1|`g` takes 1 argument(s), 2 given"),
+        # a monomorphic argument
+        ("fn g(a: Int) -> Int { return a }\n"
+         'fn f() -> Int { return g("s") }\n',
+         "T1|argument 1 of `g(...)` expects `Int`, got `Str`"),
+        # a generic call site: unify, then the UNIFIED return
+        ("fn id(x: T) -> T { return x }\n"
+         'fn f() -> Int { return id("s") }\n',
+         "T1|this function's return expects `Int`, got `Str`"),
+        # an explicit [T] list turns the implicit heuristic off, so `U` is an
+        # ordinary undeclared nominal
+        ("fn g[T](xs: List[U]) -> T { return xs[0] }\n"
+         "fn f() -> Int { return g([1]) }\n",
+         "T1|argument 1 of `g(...)` expects `List[U]`, got `List[Int]`"),
+        # the builtin argument specs, through `@elem`
+        ("fn f(m: Map[Str, Int], k: Str) -> Map[Str, Int] "
+         '{ return m.set(k, "one") }\n',
+         "T1|builtin `set` argument expects `Int`, got `Str`"),
+        # a builtin's receiver family
+        ("fn f(s: Str) -> Int { return s.div_trunc(2) }\n",
+         "TYPE|builtin `div_trunc` needs a Int receiver, got `Str`"),
+        # the multi-family row miss
+        ("fn f(b: Bool) -> Str { return b.to_str() }\n",
+         "T1|builtin `to_str` has no form for a `Bool` receiver "
+         "(its receiver families: Float, Int)"),
+        # the host stub surface, reached through a constructor-bound value
+        ('fn f() { let m = Map.new()  m.putt("k", "v") }\n',
+         "HOST-METHOD|`Map` has no method `putt` (its surface: drop, get, "
+         "insert, insert_if_absent, new, remove)"),
+        # the host constructor's own argument count
+        ('fn f() { let p = Pool.open("dsn") }\n',
+         "HOST-ARITY|host builtin `Pool.open` takes 2 arguments, got 1"),
+        # the LOWERING refusals: the surface, the arity, the divisor
+        ("fn f(m: Map[Str, Int], k: Str) -> Int { return m.fetch(k) ?? 0 }\n",
+         "T1|no builtin method `fetch` on values — the stdlib surface is "
+         + ", ".join(sorted(_BUILTIN_METHODS)) + " (docs/stdlib-2.0.md)"),
+        ("fn f(s: Str) -> Str { return s.charAt() }\n",
+         "TYPE|builtin `charAt` takes 1 argument(s), 0 given"),
+        ("fn f(n: Int) -> Int { return n.div_euclid(0) }\n",
+         "TYPE|`div_euclid` by a literal zero is undefined"),
+        # `Map.empty()` takes none
+        ('fn f() -> Map[Str, Int] { return Map.empty("k") }\n',
+         "TYPE|`Map.empty()` takes no arguments, 1 given"),
+    ]
+    for src, expected in cases:
+        ref_tag, ref_msg = _ref(src)
+        assert f"{ref_tag}|{ref_msg}" == expected, f"the probe drifted:\n{src}"
+        assert admit(src) == expected, src
+
+
+def test_a_defaulted_parameter_list_builds_no_signature_row(admit):
+    """A signature carrying a DEFAULT (item 187) gets no row, so the arity
+    window is never counted: a call omitting the default must not be refused
+    short. `params_at` cannot spell such a list, and `sig_walk` gates the row on
+    it spelling the whole one.
+
+    The gate still refuses this program, and the refusal is the PARSER's, not
+    this slice's — `fb_span`/`p_fn` read the same parameter list and neither
+    spells a default, so `fn g(a: Int, b: Str = "s")` never reaches a body. That
+    divergence is older than this slice (the reference admits the program) and
+    is not closed here; what is asserted is that the CALL layer adds nothing to
+    it, which is what the withheld row buys."""
+    src = ('fn g(a: Int, b: Str = "s") -> Int { return a }\n'
+           "fn f() -> Int { return g(1) }\n")
+    assert _ref(src) == ("", "")
+    got = admit(src)
+    assert got.startswith("BAD|"), got
+    assert "argument(s)" not in got, got
+
+
+def test_the_call_layer_stays_silent_where_it_cannot_prove_the_premise(admit):
+    """The companion bound: the shapes this slice must NOT decide, each with the
+    reason it cannot. A refusal appearing here is a false rejection waiting to
+    happen on real code."""
+    quiet = [
+        # a name the body REBINDS: the reference reads a local of function type
+        # first, and typing a function-value call is the arrow slice's (T2c).
+        "fn g(a: Int) -> Int { return a }\n"
+        "fn f() -> Int { let h = g\n  return 1 }\n",
+        # a receiver whose type is merely not inferred HERE — an arrow's result
+        # — is not a receiver PROVABLY without one, so the unpinned-receiver
+        # refusal must not reach it.
+        "fn f() -> Int { let k = (x: Int) => x\n  let v = k(1)\n  return 1 }\n",
+    ]
+    for src in quiet:
+        assert _ref(src) == ("", ""), \
+            f"the probe is not admitted by the reference:\n{src}"
+        assert admit(src) == "", src
+    # A list transform is SUGAR for a free function, and the reference types the
+    # DESUGARED call — so a builtin row must not be consulted for it. The
+    # reference's own refusal here is the undeclared `list_map` NAME, which is
+    # the G1 family no slice has built; what this slice owes is not to invent a
+    # builtin refusal in its place.
+    sugar = "fn f(c: List[Int]) -> List[Str] { return c.map(n => n.to_str()) }\n"
+    assert _ref(sugar)[0] == "G1", _ref(sugar)
+    got = admit(sugar)
+    assert "builtin `" not in got and "stdlib method `" not in got, got
+
+
+# ================================ the fn-body TYPE layer (docs/design/457 T3a)
+#
+# `_typed_fn_body` draws a module `fn` whose signature and body are built out of
+# the spellings the statement layer decides over: every scalar and container
+# type in a parameter and a return position, every operator family, literals at
+# the `Float` bound, field and index reads, record literals and updates, and the
+# statement forms that open a checking position (`let` with and without an
+# annotation, assignment and its compound form, `return`, `if`/`while`/`assert`).
+#
+# It is a DIFFERENTIAL draw, not an expectation table: the reference is the
+# ground truth on every input, and the two are compared on TAG and MESSAGE.
+#
+# Three divergence CLASSES survive by design; they are pinned below as named
+# tests rather than described in a comment, so a slice that closes one has to
+# come here and delete it. Each is the gate refusing LATER than the reference
+# because the reference's earlier refusal belongs to a surface this slice does
+# not build — an under-refusal, never a false rejection. The bound the fuzz
+# actually holds is absolute: the gate never refuses a program the reference
+# admits, and it never refuses with a tag or a sentence the reference does not
+# have for that program.
+
+_TFB_TYPES = ["Int", "Int32", "Float", "Str", "Bool", "Opt[Int]", "Opt[Str]",
+              "List[Int]", "List[Str]", "Any", "TfbRow", "Map[Str, Int]"]
+_TFB_BIN = ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", "==", "!=",
+            "<", "<=", ">", ">=", "&&", "||", "??"]
+_TFB_UN = ["!", "-", "~"]
+_TFB_LITS = ["1", "2", "0", "3.5", "1e999", "1e308", "1.8e308", "0.5", '"s"',
+             "true", "false", "null", "[]", "[1]", '["a"]', "{ h: 1 }",
+             '{ h: "x" }', "None"]
+_TFB_NAMES = ["a", "b", "c"]
+_TFB_HEAD = "type TfbRow = { h: Str, name: Str }\n\n"
+
+
+def _tfb_atom(rng, depth: int) -> str:
+    k = rng.randrange(10)
+    if depth <= 0 or k < 4:
+        return rng.choice(_TFB_LITS + _TFB_NAMES)
+    if k == 4:
+        field = rng.choice(["h", "name", "length", "kind", "missing"])
+        return f"{rng.choice(_TFB_NAMES)}.{field}"
+    if k == 5:
+        return f"{_tfb_atom(rng, depth - 1)}[{_tfb_atom(rng, depth - 1)}]"
+    if k == 6:
+        return (f"({_tfb_atom(rng, depth - 1)} {rng.choice(_TFB_BIN)} "
+                f"{_tfb_atom(rng, depth - 1)})")
+    if k == 7:
+        return f"{rng.choice(_TFB_UN)}{_tfb_atom(rng, depth - 1)}"
+    if k == 8:
+        return ("{ " + f"{rng.choice(_TFB_NAMES)} | h = "
+                f"{_tfb_atom(rng, depth - 1)}" + " }")
+    verb = rng.choice(["to_str", "to_int", "to_int32", "length", "push"])
+    return f"{rng.choice(_TFB_NAMES)}.{verb}()"
+
+
+def _tfb_stmt(rng) -> str:
+    k = rng.randrange(8)
+    name = rng.choice(_TFB_NAMES)
+    if k == 0:
+        return f"let {name} = {_tfb_atom(rng, 2)}"
+    if k == 1:
+        return f"let {name}: {rng.choice(_TFB_TYPES)} = {_tfb_atom(rng, 2)}"
+    if k == 2:
+        return f"var {name} = {_tfb_atom(rng, 2)}"
+    if k == 3:
+        return f"{name} = {_tfb_atom(rng, 2)}"
+    if k == 4:
+        return f"{name} += {_tfb_atom(rng, 2)}"
+    if k == 5:
+        return f"if ({_tfb_atom(rng, 2)}) {{ let z = {_tfb_atom(rng, 1)} }}"
+    if k == 6:
+        return f"assert {_tfb_atom(rng, 2)}"
+    return _tfb_atom(rng, 2)
+
+
+def _typed_fn_body(rng) -> str:
+    params = ", ".join(f"{n}: {rng.choice(_TFB_TYPES)}"
+                       for n in _TFB_NAMES[:rng.randrange(1, 4)])
+    body = "\n  ".join(_tfb_stmt(rng) for _ in range(rng.randrange(1, 5)))
+    return (f"{_TFB_HEAD}fn f({params}) -> {rng.choice(_TFB_TYPES)} {{\n"
+            f"  {body}\n  return {_tfb_atom(rng, 2)}\n}}\n")
+
+
+# The reference messages whose family this slice deliberately leaves to a later
+# one. A program whose reference refusal starts with one of these may be refused
+# LATER by the gate (or not at all); a program whose reference refusal does NOT
+# is held to tag and message exactly.
+_TFB_LATER_SLICES = (
+    # T2b: `builtin_check`'s receiver families and the unknown-receiver
+    # HOST-METHOD refusal.
+    "builtin `",
+    "stdlib method `",
+    # G1 name READS — resolving one needs the whole callable universe.
+    "is not declared in this function",
+    # item 485: the `List` index bounds pass, which runs over a body before it
+    # is lowered and so precedes every verdict here.
+    "is out of range for a",
+    # the INFER-position record update on a base that is not a record: code-less
+    # in the reference and classified OUT of the gate's vocabulary, so spelling
+    # it would trade a no-objection for a tag mismatch.
+    "record update requires a record type",
+    # the ordering family: `<`/`>` on an unorderable operand is code-less too.
+    "cannot order `",
+    # the NAMED record's field rules, which need the declared field SET the
+    # statement layer's environment does not enumerate: the field-existence
+    # read, and the two literal/annotation completeness sentences T2a names in
+    # `_classify` above. `selfhost/lower.rvl` spells none of the three, so a
+    # program whose reference minimum is one of them is refused LATER by the
+    # gate (an under-refusal over some other true objection in the same body).
+    "has no field `",
+    "record literal for `",
+    ", but the record has ",
+)
+
+
+# The tags this slice issues. A program whose reference minimum carries a tag
+# outside this set is decided by some OTHER phase of the gate, and which of the
+# two refusals is the minimum is that phase's ordering question, not this one's.
+_TFB_TAGS = ("T1", "T2", "TYPE")
+
+
+@pytest.mark.parametrize("seed", [11, 23, 97])
+def test_typed_fn_body_fuzz_never_refuses_what_the_reference_admits(admit, seed):
+    """THE BOUND, over 400 drawn fn bodies per seed.
+
+    Two claims, in the order they matter:
+
+      * the gate NEVER refuses a program the reference admits. Absolute, with no
+        allowance — a false rejection is the one direction a gate may not err in;
+      * where both sides' minimum refusal is in this slice's own vocabulary
+        (`_TFB_TAGS`) and outside the families a later slice owns
+        (`_TFB_LATER_SLICES`), the gate's verdict is the reference's TAG AND
+        SENTENCE, byte for byte.
+
+    What is deliberately not claimed: which of several true refusals is the
+    minimum when one of them belongs to a surface this slice does not build.
+    That is an under-refusal — the gate reports a LATER refusal, both of them
+    real — and the census tracks it as a tag or message mismatch rather than a
+    bypass."""
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(400):
+        src = _typed_fn_body(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _TFB_TAGS:
+            continue
+        if any(m in ref_msg for m in _TFB_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    # non-vacuity: the draw really does reach the layer under test
+    assert drawn >= 350, drawn
+    assert compared >= 50, compared
+
+
+def test_the_type_layer_reaches_a_module_fn_body(admit):
+    """NON-VACUITY, spelled out: each statement position the slice opens draws
+    the reference's own sentence."""
+    cases = [
+        ("fn f(n: Int) -> Int32 {\n  return n\n}\n",
+         "T1|this function's return expects `Int32`, got `Int`"),
+        ("fn f(a: Int32, b: Int) -> Int {\n  return a + b\n}\n",
+         "T1|`+` does not mix `Int32` and `Int`"),
+        ("fn f(s: Str) -> Str {\n  let c = s[0]\n  return c\n}\n",
+         "T1|`Str` has no index operator — `[...]` indexes a `List` only"),
+        ("fn f() -> Int {\n  var n = 1\n  n += 1e999\n  return n\n}\n",
+         "TYPE|Float literal is infinite: it is outside the range of a "
+         "64-bit float"),
+        ("fn f(s: Str) -> Int {\n  assert s\n  return 0\n}\n",
+         "T1|`assert` condition expects `Bool`, got `Str`"),
+        ("fn f(s: Str) -> Int {\n  while (s) { let z = 1 }\n  return 0\n}\n",
+         "T1|`while` condition expects `Bool`, got `Str`"),
+        ("fn f(xs: List[Int]) -> Int {\n  for (x of xs) { let z = ~x }\n"
+         "  return 0\n}\n",
+         "T1|`~` requires an `Int32` operand, got `Int`"),
+        ("fn f() -> List[Int] {\n  return [\"a\"]\n}\n",
+         "T1|element of `List[Int]` expects `Int`, got `Str`"),
+    ]
+    for src, expected in cases:
+        assert admit(src) == expected, src
+        _agree(admit, src)
+
+
+def test_the_type_layer_stays_silent_where_it_cannot_decide(admit):
+    """The other half of the bound, as named cases: each of these is a program
+    the reference ADMITS whose shape the walk approximates, and the walk must
+    say nothing about any of them."""
+    admitted = [
+        # a structural record literal flowing into a NOMINAL record — resolved
+        # through the declared-type table this walk does not carry
+        "type R = { h: Str }\n\nfn f() -> R {\n  return { h: \"x\" }\n}\n",
+        # a container of them, which the bracket-only argument split used to
+        # read as a two-argument `List`
+        "type R = { h: Str }\n\nfn f() -> List[R] {\n"
+        "  return [{ h: \"x\" }]\n}\n",
+        # calling an async-typed value yields the UNWRAPPED `T` (item 92 §2)
+        "fn run(start: Str, step: (Str) -> Async[Str]) -> Str {\n"
+        "  let a = step(start)\n  return a\n}\n",
+        # a generic callee's declared return is unified at the call site, which
+        # is the signature slice's; the parameter's own name is not the answer
+        "fn ident(x: T) -> T {\n  return x\n}\n"
+        "fn use_it() -> Str {\n  return ident(\"hello\")\n}\n",
+        # the accumulator idiom: a bottom-typed binding learns its element type
+        # at the first reassignment
+        "fn f() -> Map[Str, Int] {\n  var m = Map.empty()\n"
+        "  m = m.set(\"k\", 1)\n  return m\n}\n",
+        # a `Float` literal at the very edge of binary64 is finite
+        "fn f() -> Float {\n  return 1.7976931348623157e308\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
