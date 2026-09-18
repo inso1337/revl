@@ -338,16 +338,16 @@ def test_native_compile_of_component_program_is_byte_identical(
 # MEASURED on the tier's own emitter corpus — the enumerated document list
 # ``tests/test_selfhost_emit_<tier>.py::CORPUS`` holds to byte agreement — driven
 # by ``compile_to`` (native frontend + native IR producer + native emitter, no
-# reference in the chain). Snapshot at 8bc6b9ac:
+# reference in the chain). Snapshot at ac10ed84:
 #
 #     tier   corpus   emitter vs the REFERENCE IR   the FULLY-NATIVE chain
 #     py         55                   55 (100%)               42 (76.4%)
-#     ts         60                   60 (100%)               40 (66.7%)
+#     ts         60                   60 (100%)               44 (73.3%)
 #     go         23                   23 (100%)              23 (100.0%)
-#     java       59                   59 (100%)               36 (61.0%)
-#     rust       37                   37 (100%)               34 (91.9%)
+#     java       59                   59 (100%)               50 (84.7%)
+#     rust       37                   37 (100%)               36 (97.3%)
 #     wasm       21                   21 (100%)              21 (100.0%)
-#     TOTAL     255                  255 (100%)              196 (76.9%)
+#     TOTAL     255                  255 (100%)              216 (84.7%)
 #
 # The two columns are the whole finding, and neither is a snapshot any more:
 # ``test_the_residual_is_located_in_lower_not_in_the_emitter`` below RECOMPUTES
@@ -505,11 +505,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # spawn / instance-get
         "spawn.rvl",
         "instance_get.rvl",
-        # realm placement metadata (isolate / intercept / routes)
-        "realm_isolate.rvl",
-        "realm_intercept.rvl",
-        "v2_isolate_only.rvl",
-        "v2_intercept_only.rvl",
+        # (realm placement metadata — isolate / intercept / routes — left this
+        # list when lower.rvl grew the component-header prelude; the four ts
+        # realm documents now compile byte-exact through the native chain.)
         # whole-program documents combining several of the above
         "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
@@ -524,41 +522,24 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
     "java": (
-        # realm placement metadata (isolate / intercept / routes)
-        "comp_realm_isolate.rvl",
-        "comp_realm_intercept.rvl",
         # async coloring
         "comp_await.rvl",
-        # host roots acquired in a component (Map/Pool/Job)
-        "comp_host_map.rvl",
-        "comp_host_map_generic.rvl",
-        "legacy_realms.rvl",
-        # component metadata / branch shapes / map inference
-        "metadata_null.rvl",
-        # whole-program documents combining several of the above
-        "../../../examples/tenants.rvl",
+        # whole-program documents combining several of the shapes below
         "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
-        "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
         "../emit_ts_corpus/services_async.rvl",
         "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
-        "../../../backends/go/scenarios/tagger.rvl",
-        "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
-        "../emit_ts_corpus/realm_intercept.rvl",
-        "../erase_realms.rvl",
-        "../realm_conformance/provider_a.rvl",
+        # component string interpolation / branch shapes / map inference
         "component_format.rvl",
         "component_branches.rvl",
         "map_inference.rvl",
         # the stdlib builtin surface
         "stdlib_builtins.rvl",
-        "map_inference_builtins.rvl",
         "../emit_ts_corpus/property_edges.rvl",
     ),
     "rust": (
-        # component edge shapes, host roots in a component, realm placement
+        # component edge shapes; the host-root and realm-placement documents
+        # left this list when lower.rvl grew those two surfaces.
         "component_edges.rvl",
-        "comp_host_map.rvl",
-        "comp_realm_isolate.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
