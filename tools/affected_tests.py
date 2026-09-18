@@ -111,6 +111,12 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_selfhost_emit_py.py",
     "tests/test_selfhost_emit_ts.py",
     "tests/test_tokens_to_green.py",
+    # Scans EVERY `.rvl` in the repository, `bench/` included — 485 of the 1,035
+    # files it reads live there — so a bench change must re-run it. It also
+    # names `bench/results/...` explicitly: three model outputs under it do not
+    # lex, and they are the only exercise the gate's unlexable-file fallback
+    # gets.
+    "tests/test_no_embedded_frontend_document_1120.py",
 )
 
 # Self-host oracle tests, keyed by the selfhost/<stem>.rvl file they check.
@@ -150,7 +156,17 @@ SELFHOST_ORACLE_TESTS = {
 # asserts every self-host line stays exercised), so it is added on top of the
 # per-file oracle for every selfhost/*.rvl file — including checker.rvl and
 # parser.rvl, which issue #431 calls out as needing their oracle + this gate.
-SELFHOST_ALWAYS = ("tests/test_selfhost_line_coverage.py",)
+#
+# The repo-wide embedded-document gate is here for the same reason: it scans
+# every `.rvl` in the tree, selfhost/*.rvl included, and those twelve files are
+# the largest string-building programs in the repository. Without this line a
+# self-host edit selects its oracle and the gate covering it does not run, which
+# is a gate that cannot fire for the change most likely to trip it. It costs
+# under two seconds.
+SELFHOST_ALWAYS = (
+    "tests/test_selfhost_line_coverage.py",
+    "tests/test_no_embedded_frontend_document_1120.py",
+)
 
 # Which self-host emitter port mirrors a backend tier's REFERENCE emitter:
 # `backends/<package>/emit.py` is what `selfhost/emit_<stem>.rvl` is held
@@ -651,13 +667,18 @@ def select(changed, root) -> dict:
         if f.startswith("tools/"):
             return _full(f"non-python tools change {f} -> full")
 
-        # --- formal/** (the Lean backbone) ---------------------------------- #
-        # A formal/ change affects nothing else — the formal gate is the only
-        # thing it can break (plus lint, which is always run). Deliberately
-        # narrower than the fail-safe default so proof-engineering iterations
-        # stay fast on the inner loop.
-        if f.startswith("formal/"):
+        # --- formal/** (the Lean backbone) and its own corpus --------------- #
+        # A formal/ change affects the formal gate and one pytest module, and
+        # nothing else (plus lint, which is always run). Deliberately narrower
+        # than the fail-safe default so proof-engineering iterations stay fast
+        # on the inner loop. The pytest module is the python half of
+        # `formal/harness/diff_corpus.py` — the rules that decide its `P` and
+        # `W` rows — which `make formal` can only collect with a Lean
+        # toolchain installed, and which is therefore the half that can move
+        # unnoticed on a machine without one.
+        if f.startswith("formal/") or f.startswith("tests/formal_corpus/"):
             gates.add("formal")
+            pytest_nodes.add("tests/test_formal_attenuation_namespace.py")
             reasons.append(f"{f} (formal gate)")
             continue
 

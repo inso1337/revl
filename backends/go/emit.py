@@ -5446,7 +5446,18 @@ def _go_v3_optchain(node, ctx: _V3GoCtx, *, field=None, method=None, args=None):
     else:
         arg_renders = [_go_v3_expr(a, ctx) for a in args or []]
         # optcall receiver payload becomes _x; render the builtin against it.
+        # `_go_v3_builtin` dispatches several rows on the RECEIVER's surface
+        # type (`length` -> revlStrLen vs revlListLen, `concat`, `slice`,
+        # `indexOf`, `to_str` -> revlFtoa vs FormatInt), and the synthetic
+        # `__optx` node carried none: an `Opt[Str]?.length()` picked the List
+        # helper and the emitted package did not build
+        # ("type string of _x does not match []T"). The payload type is right
+        # here, so bind it for the length of the render.
         ret_surface = _v3_builtin_ret_type(method, payload)
+        # `__optx` is synthetic and written here only: the arguments above and
+        # the receiver are already rendered, so no other chain can be mid-render
+        # and there is nothing to save or restore.
+        ctx.var_types["__optx"] = payload
         body = _go_v3_builtin(
             ctx, method, {"kind": "var", "name": "__optx"}, "_x", arg_renders
         )
@@ -8313,6 +8324,15 @@ func revlOptOr[T any](o RevlOpt[T], d T) T {
 # strconv) so the helper needs no import; the uint64 accumulator allows the
 # one out-of-i64-magnitude digit string that is still IN range — `-9223372036854775808`
 # (Int.MIN) — while every larger magnitude is None, matching the Int bound.
+#
+# The bound is checked BEFORE the accumulate step, not after it. `n*10 + d` is
+# uint64 arithmetic and wraps silently, so a post-step `n > lim` test can be
+# passed by a magnitude that wrapped back under it: at n == 2**63 the next
+# `n*10` is exactly 5*2**64 and wraps to 0, so `"92233720368547758080"` (and
+# every other digit string whose running value lands back in [0, 2**63] mod
+# 2**64) was accepted and answered a VALUE where every other tier answers None.
+# `n > (lim-d)/10` is the same pre-check the wasm helper makes, and it is exact:
+# it admits n*10+d iff that product is <= lim.
 _V3_PARSE_INT_HELPER = '''// ---- Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int) ----------------
 func revlParseInt(s string) RevlOpt[int64] {
 \tif s == "" {
@@ -8334,10 +8354,11 @@ func revlParseInt(s string) RevlOpt[int64] {
 \t\tif c < '0' || c > '9' {
 \t\t\treturn RevlOpt[int64]{}
 \t\t}
-\t\tn = n*10 + uint64(c-'0')
-\t\tif n > lim {
+\t\td := uint64(c - '0')
+\t\tif n > (lim-d)/10 {
 \t\t\treturn RevlOpt[int64]{}
 \t\t}
+\t\tn = n*10 + d
 \t}
 \tif neg {
 \t\tif n == lim {
@@ -9060,6 +9081,23 @@ def _refuse_holes(ir: dict) -> None:
     )
 
 
+# A `fault test` is executed by driving a real activation and inspecting the
+# runtime's residue afterwards (docs/fault-tests.md).  The cordis-go tier
+# has no such driver, so it is refused loudly instead of being dropped on the
+# floor: a silently-missing fault test is a guarantee nobody is checking.
+def _refuse_fault_tests(ir) -> None:
+    fault_tests = (ir or {}).get("fault_tests") or []
+    if not fault_tests:
+        return
+    names = ", ".join(repr(unit.get("name")) for unit in fault_tests)
+    raise EmitError(
+        f"fault tests do not lower to the cordis-go tier ({names}) — `fault test` runs "
+        f"on the python reference tier only (docs/fault-tests.md). Compile "
+        f"this document with --backend py, or move the fault tests to a "
+        f"module that is not emitted for this tier."
+    )
+
+
 def _refuse_deferred_emissions(ir: dict) -> None:
     """Roadmap 245 Decision 2 tier gate: a CALL to a `deferred` emission needs a
     session-owner runtime (the deferral queue and the commit verb) this tier does
@@ -9170,6 +9208,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
+    _refuse_fault_tests(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old

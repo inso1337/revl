@@ -10,7 +10,7 @@ investigation each time. Two agents fixed the same defect independently because
 neither could see the other's scope.
 
 This is the same contract the repo already applies to generated artifacts
-(`tools/conformance.py --check-readme`, `tools/check_site_wheel.py`,
+(`tools/conformance.py --check-readme`, `tools/regen_goldens.py --check`,
 `tools/build_gate_crate.py --check`, the formal layer's non-vacuity registry):
 a claim that can be checked mechanically must be. Here the claim is "this
 finding is currently being fixed on branch X", and git is the oracle.
