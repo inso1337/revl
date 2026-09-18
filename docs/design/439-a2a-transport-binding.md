@@ -582,7 +582,7 @@ them, and neither note contradicts the other.
   had been omitted: the refusing direction, so a correction rather than a
   repair, but a false statement about a document that DOES name its rows'
   realms.
-  All three now go through `_composition_document` (`src/revl/__main__.py`),
+  All three now go through `_composition_document` (`src/revl/cli/document.py`),
   the door G8c built, and refuse the same three shapes by name. The refusal
   EXIT STATUS differs by verb and deliberately: on `policy evaluate` and on
   `simulate policy-diff`, 1 already means "a component would be refused", so a
@@ -789,11 +789,19 @@ effort against this binding.
   crossing, the funnel present on every generated ts crossing, the REST wire's
   one-way identity, the correlation refusal rendering nothing of the peer's,
   and the ts body's identity.
-- `src/revl/__main__.py`: slices G8c and G8d. `_wiring_documents` (which of the
-  arguments declare a composition, and which a layer, read by parsing alone) and
-  `_composition_document` (resolve and compile the one composition, or refuse by
-  name), routed from `main` ahead of the shared module compile for every command
-  in `_RESOLVES_A_COMPOSITION`.
+- `src/revl/cli/document.py`: slices G8c, G8d and G8e, the one door.
+  `_wiring_documents` (which of the arguments declare a composition, and which a
+  layer, read by parsing alone) and `_composition_document` (resolve and compile
+  the one composition, or refuse by name). G8e moved both here out of
+  `revl.__main__`, which runs `drop_cwd_entry()` at import: `revl.cli.observe`
+  needs the door for `revl dash`, and under `python -m revl` importing
+  `revl.__main__` from a per-command handler re-runs that side effect, since
+  `__main__` is not `revl.__main__` there.
+- `src/revl/__main__.py`: the routing. `main` calls the door ahead of the shared
+  module compile for every command in `_RESOLVES_A_COMPOSITION`, `_run_policy`
+  calls it for `policy evaluate`, and `_run_simulate` for `simulate policy-diff
+  --composition`.
+- `src/revl/cli/observe.py`: `_run_dash` calls the same door.
 - `tests/test_439_a2a_transport.py`: the seam/remote-provider exit test for the
   binding, the C3 taint section, the modality refusals, the four-op projection,
   `test_no_marked_value_can_cross_the_a2a_wire`, which pins question (2)'s

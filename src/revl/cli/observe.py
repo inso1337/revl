@@ -9,6 +9,7 @@ import json
 import sys
 
 from ..compiler import compile_files
+from .document import _composition_document
 from ..diagnostics import explain
 from ..errors import RevlError
 
@@ -90,7 +91,6 @@ def _run_dash(args) -> int:
     given: a `--live-state` snapshot colors the graph as it stands now; a
     `--trace`/`--timeline` renders a recorded run with no runtime at all."""
     from .. import dash, why_runtime  # noqa: PLC0415
-    from ..__main__ import _composition_document  # noqa: PLC0415 — lazy
 
     def _load_json(path):
         with open(path, encoding="utf-8") as handle:
