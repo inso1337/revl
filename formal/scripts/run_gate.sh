@@ -211,7 +211,16 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.ceiling_lineage_is_inhabited \
   RevL.G9.g9_context_hypotheses_are_inhabited \
   RevL.R4.r4_side_conditions_are_inhabited \
-  RevL.A8.a8_hypotheses_are_inhabited < .axioms.out
+  RevL.A8.a8_hypotheses_are_inhabited \
+  RevL.A9.a9B_iff \
+  RevL.A9.noDoubleInstallB_iff \
+  RevL.A9.installed_block_is_slot \
+  RevL.A9.undeclared_block_is_no_slot \
+  RevL.A9.installed_block_uniquely_provided \
+  RevL.A9.installed_slots_nodup \
+  RevL.A9.a9_not_vacuous \
+  RevL.A9.a9_rules_are_distinct \
+  RevL.A9.a9_row_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -251,6 +260,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.discharged_not_reissued \
   RevLOracle.fenced_not_reissued \
   RevLOracle.declared_idempotent_reissued \
-  RevLOracle.reportedSeqLabels_nil_iff_clean < .oracle-axioms.out
+  RevLOracle.reportedSeqLabels_nil_iff_clean \
+  RevLOracle.a9RowB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

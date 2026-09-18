@@ -324,13 +324,12 @@ def test_fn_type_param_refused(emitted, reference):
     # and not calls in general.
     pytest.param("extern pure fn f() -> Int = @wasm { (i64.const 7) }\nfn g() -> Int { return f() }",
                  "(func $f", "<<UNSUPPORTED-CALL:f>>", id="wasm-extern"),
-    # The port drops the whole in-file test section and puts nothing in its
-    # place, so there is no port-only text to pin: witnessed by the absence of
-    # the reference's test function from the port's output. (This case used to
-    # pin `$f`, the document's own emitted function, which both sides emit --
-    # see tests/_boundary_witness.py.)
+    # issue #1123: the port_token here used to be `$f` — the emitted function
+    # itself, present in EVERY wasm emission of this document, so the witness
+    # could not tell a named refusal from silence, which is what the port
+    # actually produced. It now pins the marker.
     pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
-                 "$revl_test_probe", None, id="in-file-tests"),
+                 "$revl_test_probe", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
 ])
 def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
                                          reference_token, port_token):
