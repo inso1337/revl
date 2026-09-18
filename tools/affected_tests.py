@@ -668,17 +668,19 @@ def select(changed, root) -> dict:
             return _full(f"non-python tools change {f} -> full")
 
         # --- formal/** (the Lean backbone) and its own corpus --------------- #
-        # A formal/ change affects the formal gate and one pytest module, and
+        # A formal/ change affects the formal gate and two pytest modules, and
         # nothing else (plus lint, which is always run). Deliberately narrower
         # than the fail-safe default so proof-engineering iterations stay fast
-        # on the inner loop. The pytest module is the python half of
+        # on the inner loop. The pytest modules are the python half of
         # `formal/harness/diff_corpus.py` — the rules that decide its `P` and
-        # `W` rows — which `make formal` can only collect with a Lean
-        # toolchain installed, and which is therefore the half that can move
-        # unnoticed on a machine without one.
+        # `W` rows, and the checker-alignment fidelity of its `U`/`F` rows and
+        # checker door (#1169) — which `make formal` can only collect with a
+        # Lean toolchain installed, and which is therefore the half that can
+        # move unnoticed on a machine without one.
         if f.startswith("formal/") or f.startswith("tests/formal_corpus/"):
             gates.add("formal")
             pytest_nodes.add("tests/test_formal_attenuation_namespace.py")
+            pytest_nodes.add("tests/test_formal_alignment.py")
             reasons.append(f"{f} (formal gate)")
             continue
 

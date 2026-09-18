@@ -49,7 +49,8 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    A mismatch is therefore drift between the machine-checked model and
    what revl actually does, and it fails `make formal`.
 4. report checker alignment: compile each file with the real checker
-   (`revl.compiler.compile_source`) and compare its refusal codes against
+   (`revl.compiler.compile_files`, the path the CLI takes, so a `use`
+   resolves) and compare its refusal codes against
    the formal verdicts. Informational, EXCEPT `missed-G4` and `missed-G2`
    (`FATAL_BUCKETS`) — the checker refusing where the model sees nothing
    is the dangerous direction and fails the gate.
@@ -83,7 +84,7 @@ sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
 from revl import recovery
-from revl.compiler import compile_source
+from revl.compiler import compile_files
 from revl.diagnostics import classify
 from revl.errors import RevlError
 from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
@@ -660,9 +661,52 @@ def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
         apply_bindings(stmt)
 
 
+def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
+                requires: dict, handles: dict, psvc: dict, bounds: dict,
+                em_set: set, emitting: set, aliases: dict | None,
+                externs: "set[str] | None") -> None:
+    """The crossing ONE call head contributes (see `walk_reach`). The
+    arguments are the caller's to walk, under whatever region encloses them:
+    a call evaluated to produce an argument is not the marked crossing."""
+    rt = _route(node.callee)
+    if not rt:
+        return
+    root, chain = rt
+    res = _resolve_emission(root, chain, requires, handles, psvc, aliases)
+    if res is not None and region == "all":
+        svc, meth = res
+        if (svc, meth) in em_set:
+            if root in handles or (aliases and root in aliases):
+                out.add(("*", "*"))
+            else:
+                mode, entries = bounds[(svc, meth)]
+                if mode == "any":
+                    # No declared token: the wiring key names the
+                    # boundary, in its own namespace for the fold and
+                    # bare for the bound.
+                    out.add((_wire_cap(root), root))
+                else:
+                    for e in entries:
+                        out.add((_declared_cap(e), _canon_cap(root, e)))
+    elif res is None and region == "all" and root in emitting:
+        # A host emission. The two namespaces part company here (#1169 F3):
+        # the attenuation fold gives it the unnameable `*` whatever the
+        # extern is called (`_emit_step_caps_pairs`: a non-`req` target is
+        # `Cap("*")`), but the provide-method BOUND names a DIRECT emission
+        # extern by the extern — `_emitting_capabilities` seeds the fixed
+        # point with `{wire}` for `extern emission fn wire`, and
+        # `_method_emissions` measures that name against the declared
+        # `emission[...]` entries, which is why `Db.execute` can be declared
+        # `emission[wire, ...]` at all. A transitively-emitting named fn
+        # stays `*` on both sides (STATUS.md, "known fidelity limits").
+        bound = root if externs is not None and root in externs else "*"
+        out.add(("*", bound))
+
+
 def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
                handles: dict, psvc: dict, bounds: dict, em_set: set,
-               emitting: set, aliases: dict | None = None) -> None:
+               emitting: set, aliases: dict | None = None,
+               externs: "set[str] | None" = None) -> None:
     """Collect the emission caps `node` crosses, each as the PAIR
     `(attenuation spelling, bound spelling)` — the two namespaces a crossing
     has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
@@ -672,53 +716,44 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     surface, like `_collect_emit_caps_pairs`) or "all" (also count any
     resolved emission call — a provide method's reach for the bound, like
     `_method_emissions.walk`). A spawn-handle emission is the unnameable
-    `*`; an emission extern / emitting-fn call contributes `*` too. `*` is
-    unnameable in BOTH namespaces, so it is its own spelling on both sides."""
+    `*` in both namespaces; an emitting-fn call too; a DIRECT emission-extern
+    call is `*` for the fold and the extern's name for the bound
+    (`_reach_call`). `externs` is the file's emission-extern name set.
+
+    An `emit` marks its HEAD call only: `_emit_step_caps_pairs` reads the
+    step's `expr.target` and nothing beneath it, so the arguments (and a
+    `compensate` slot or `with` clause) keep the ENCLOSING region. For the
+    F row that region is already "all" and nothing moves; for the A surface
+    it stops a call evaluated inside an emit's argument list from counting
+    as a marked crossing (#1169 F2, the `walk_calls` leak's twin)."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
+    args = (requires, handles, psvc, bounds, em_set, emitting, aliases, externs)
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
+        expr = getattr(node, "expr", None)
+        if isinstance(expr, ExprCall):
+            _reach_call(expr, out, "all", *args)
+            for a in expr.args:
+                walk_reach(a, out, region, *args)
+        else:
+            walk_reach(expr, out, "all", *args)
         if dataclasses.is_dataclass(node):
             for f in dataclasses.fields(node):
-                walk_reach(getattr(node, f.name), out, "all", requires,
-                           handles, psvc, bounds, em_set, emitting, aliases)
+                if f.name != "expr":
+                    walk_reach(getattr(node, f.name), out, region, *args)
         return
     if isinstance(node, ExprCall):
-        rt = _route(node.callee)
-        if rt:
-            root, chain = rt
-            res = _resolve_emission(root, chain, requires, handles, psvc,
-                                    aliases)
-            if res is not None and region == "all":
-                svc, meth = res
-                if (svc, meth) in em_set:
-                    if root in handles or (aliases and root in aliases):
-                        out.add(("*", "*"))
-                    else:
-                        mode, entries = bounds[(svc, meth)]
-                        if mode == "any":
-                            # No declared token: the wiring key names the
-                            # boundary, in its own namespace for the fold and
-                            # bare for the bound.
-                            out.add((_wire_cap(root), root))
-                        else:
-                            for e in entries:
-                                out.add((_declared_cap(e),
-                                         _canon_cap(root, e)))
-            elif res is None and region == "all" and root in emitting:
-                out.add(("*", "*"))
+        _reach_call(node, out, region, *args)
         for a in node.args:
-            walk_reach(a, out, region, requires, handles, psvc, bounds,
-                       em_set, emitting, aliases)
+            walk_reach(a, out, region, *args)
         return
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
-            walk_reach(getattr(node, f.name), out, region, requires, handles,
-                       psvc, bounds, em_set, emitting, aliases)
+            walk_reach(getattr(node, f.name), out, region, *args)
         return
     if isinstance(node, (list, tuple)):
         for x in node:
-            walk_reach(x, out, region, requires, handles, psvc, bounds,
-                       em_set, emitting, aliases)
+            walk_reach(x, out, region, *args)
 
 
 def collect_spawns(node, handles: dict, rows: list) -> None:
@@ -758,8 +793,24 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
         return
     if isinstance(node, (EmitStmt, EmitExpr)):
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            # The marker judges the HEAD call: `_lower_emit_step` asks
+            # `_is_emission_call` of the lowered expression's own node, and a
+            # call evaluated to produce one of its ARGUMENTS is a plain call
+            # (`emit webui.add_entry(..., { strategy: ranking.strategy() })`
+            # is accepted with `Ranker.strategy` plain). Handing `emit` to the
+            # whole subtree made the model refuse it (#1169 F2).
+            expr = getattr(node, "expr", None)
+            if isinstance(expr, ExprCall):
+                route = _route(expr.callee)
+                if route is not None:
+                    out.append((*route, "emit"))
+                for a in expr.args:
+                    walk_calls(a, out, "plain")
+            else:
+                walk_calls(expr, out, "emit")
             for f in dataclasses.fields(node):
-                walk_calls(getattr(node, f.name), out, "emit")
+                if f.name != "expr":
+                    walk_calls(getattr(node, f.name), out, "emit")
         return
     if isinstance(node, ExprCall):
         route = _route(node.callee)
@@ -1018,6 +1069,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for e in sorted(entries):
                 tsv.append("\t".join(["Q", rel, svc, meth, e]))
         emitting = _fn_emitting(prog)
+        # The DIRECT emission externs, for the F row's bound column: the one
+        # host crossing the reference can name (`_reach_call`).
+        emission_externs = {e.name for e in prog.externs
+                            if getattr(e, "classification", "") == "emission"}
         templates = _spawn_templates(prog)
         fns_by_name = {fn.name: fn for fn in prog.fn_decls}
         # provide-key -> service, file-wide (children resolve handle receivers).
@@ -1137,7 +1192,8 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             act_reach: "set[tuple[str, str]]" = set()
             for stmt in c.body:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
-                           psvc, bounds, em_set, emitting, aliases)
+                           psvc, bounds, em_set, emitting, aliases,
+                           emission_externs)
             act_caps = {cap for cap, _bound in act_reach}
             caps_seen.update(act_caps)
             for cap in sorted(act_caps):
@@ -1166,7 +1222,8 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         reach: "set[tuple[str, str]]" = set()
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
-                                       psvc, bounds, em_set, emitting, aliases)
+                                       psvc, bounds, em_set, emitting, aliases,
+                                       emission_externs)
                         for cap, bound in sorted(reach):
                             caps_seen.add(cap)
                             caps_seen.add(bound)
@@ -2454,13 +2511,34 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
 FATAL_BUCKETS = ("missed-G4", "missed-G2")
 
 
+def checker_code(rel: str) -> tuple[str, str]:
+    """The shipped checker's verdict on one corpus file: `("accept", "")`, or
+    the refusal's `(code, category)`.
+
+    Asked through `compile_files`, the path `revl check` and every other CLI
+    verb take, so a `use "stdlib/http.rvl"` resolves against the file's own
+    directory and the search path. `compile_source(text, rel)` reads a bare
+    string and refuses ANY `use` before checking a thing (`REVL`: "`use`
+    declarations need `modules=` ... or compile_files"), so a use-bearing
+    file was filed under a refusal that says nothing about its composition,
+    and whatever the model said about it sank into `formal-found-other`
+    (#1169 F1). The same door resolves an extern body file, a `ref` and an
+    `asset`, which the bare-string door refuses for the same reason."""
+    try:
+        compile_files([str(REPO / rel)])
+        return "accept", ""
+    except RevlError as e:
+        info = classify(e)
+        return (info.get("code") or "UNCODED"), (info.get("category") or "")
+
+
 def checker_alignment(file_facts: dict, componentless: list[str],
                       v: Verdicts) -> list[str]:
     """Compile each file with the real checker and compare refusal codes
     against the formal verdicts. Returns the fatal-bucket findings.
 
     Requirement CLOSURE (and hence linkability, which subsumes it) is
-    deliberately NOT part of `formal_clean`. `compile_source` type-checks
+    deliberately NOT part of `formal_clean`. `checker_code` type-checks
     and links ONE file: a requirement no in-file component provides is
     resolved against the rest of the composition at `revl link` time, and
     `lower._link` reports nothing for it. Reading the V row's `closed`
@@ -2487,14 +2565,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     # never reach this loop: one is refused at PARSE and one declares no
     # component, so both are reported by the no-manifest census below, not
     # bucketed here.
-
-    def checker_code(rel: str) -> tuple[str, str]:
-        try:
-            compile_source((REPO / rel).read_text(encoding="utf-8"), rel)
-            return "accept", ""
-        except RevlError as e:
-            info = classify(e)
-            return (info.get("code") or "UNCODED"), (info.get("category") or "")
 
     for rel in file_facts:
         comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
