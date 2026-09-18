@@ -2640,6 +2640,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             for rel in names:
                 print(f"    NO-MANIFEST {code}: {rel}")
     full = FORMAL / "harness" / "out" / "no_manifest.txt"
+    # A clean checkout has no out/ yet (the gate creates it when the oracle
+    # runs); the no-toolchain tests reach this writer first.
+    full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text("".join(
         f"{code}\t{rel}\n" for code in sorted(nm_codes)
         for rel in sorted(nm_codes[code])), encoding="utf-8")
