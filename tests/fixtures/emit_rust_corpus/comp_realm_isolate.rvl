@@ -1,0 +1,27 @@
+// A realm-pinned component (issue 1153): `isolate clock in realm("tenant_a")`
+// places the component's own provided key into a named local realm.
+//
+// No corpus document carried a realm placement before this one, so the rust
+// emitter's byte-agreement measurement was VACUOUS on it. The shapes this
+// document forces are the `_revl_realm` label-registry preamble (the
+// compile-time label -> index table and the tagged `cordis::Isolation`), and
+// the `ctx.isolate_with(..)` arm of the realm-placement match, which the
+// reference emits in place of the plain `_ => ctx.clone()` fallthrough.
+//
+// The provider method stays a pure `return <lit>`, so the only thing this adds
+// over the slice-3 provider corner is the realm surface itself. The trivial
+// `fn` forces ir_version 3 (a components-only document lowers to v1; item 217).
+fn tag() -> Str {
+  return "hi"
+}
+
+service Clock {
+  fn tick() -> Int
+}
+
+component TenantClock provides clock: Clock {
+  isolate clock in realm("tenant_a")
+  provide clock {
+    fn tick() { return 0 }
+  }
+}
