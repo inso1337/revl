@@ -37,10 +37,11 @@
 //! The self-host compiler is behind the reference implementation (roadmap item
 //! 391), and the shape of that gap is not "a few missing constructs" — it is a
 //! whole missing LAYER. `admit_src` decides the composition and guarantee layer
-//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not**
-//! run the reference's type layer. Measured, not assumed: the reference refuses
-//! `fn f() -> Int { return "s" }`, `fn f() -> Int { return undefined_name }`
-//! and `fn f() -> { }`; the self-host gate raises no objection to any of them.
+//! (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`), plus ONE slice
+//! of the reference's type layer — the fn-body statement layer. It does **not**
+//! run the rest of it. Measured, not assumed: the reference refuses
+//! `fn f() -> Int { return undefined_name }` and `fn f() -> { }`; the self-host
+//! gate raises no objection to either.
 //!
 //! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
 //! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
@@ -825,8 +826,17 @@ mod wire_tests {
     /// `store`, `App` provides `app` and requires `store`.
     const RUNNING: &str = "Kv/store/;App/app/;App<store";
 
-    /// A component that re-provides `store`, the key `Kv` already holds.
-    const AMBIENT_CONFLICT: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+    /// A component that re-provides `store`, the key `Kv` already holds. It
+    /// declares `Store` itself so its ONLY refusal is the composition one: the
+    /// component header's service-existence rule would otherwise refuse it for a
+    /// dangling `Store` before the link ever ran, which is the reference's own
+    /// answer but not the question these tests ask.
+    const AMBIENT_CONFLICT: &str = "service Store {\n\
+  fn get(k: Str) -> Str\n\
+  fn bump(n: Int) -> Int\n\
+  emission fn put(key: Str, value: Str)\n\
+}\n\
+service Cache { fn lookup(key: Str) -> Str }\n\
 component CacheLayer requires store: Store provides store: Store {\n\
   provide store {\n\
     fn get(key) = key\n\
@@ -834,6 +844,25 @@ component CacheLayer requires store: Store provides store: Store {\n\
     fn put(key, value) = value\n\
   }\n\
 }\n";
+
+    /// The issue-346 candidate: a fresh component that requires a service the
+    /// RUNNING composition declares and the incoming text does not.
+    const AMBIENT_ONLY_SERVICE: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+component CacheLayer requires store: Store provides cache: Cache {\n\
+  provide cache { fn lookup(key) = store.get(key) }\n\
+}\n";
+
+    /// The same candidate calling an operation the running `Store` does not
+    /// declare. Only a reader that resolved the requirement against the running
+    /// DECLARATION — not just its name — can tell the two apart.
+    const AMBIENT_MISSING_METHOD: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+component CacheMiss requires store: Store provides cache: Cache {\n\
+  provide cache { fn lookup(key) = store.nonexistent(key) }\n\
+}\n";
+
+    /// The issue-346 running composition's wire, operations included.
+    const HELD: &str =
+        "Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping";
 
     #[test]
     fn an_empty_manifest_is_the_standalone_gate() {
@@ -875,6 +904,68 @@ component CacheLayer requires store: Store provides store: Store {\n\
         match admit_into(AMBIENT_CONFLICT, "Kv/store/") {
             Verdict::Refused { code, .. } => assert_eq!(code, "G2"),
             other => panic!("expected an ambient G2 refusal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_requirement_resolves_against_the_running_services_operations() {
+        // Issue #346, the second half of the same question (docs/design/457
+        // T4b). With the running operations on the wire the gate resolves the
+        // requirement against the running DECLARATION, so a call to an
+        // operation `Store` declares is unobjectionable and a call to one it
+        // does not is refused in the reference's own words.
+        assert_eq!(admit_into(AMBIENT_ONLY_SERVICE, HELD), Verdict::NoObjection);
+        match admit_into(AMBIENT_MISSING_METHOD, HELD) {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "A6");
+                assert_eq!(
+                    message,
+                    "`store.nonexistent` is not a method of service Store"
+                );
+            }
+            other => panic!("expected the member refusal, got {:?}", other),
+        }
+        // The comma is the CLAIM. A wire whose rows carry only names says
+        // nothing about the running surface, so it decides no member — the
+        // under-refusing direction, and what every wire rendered by a producer
+        // with no operation table gets.
+        assert_eq!(
+            admit_into(AMBIENT_MISSING_METHOD, "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"),
+            Verdict::NoObjection
+        );
+    }
+
+    #[test]
+    fn a_requirement_resolves_against_the_running_service_block() {
+        // Issue #346. The component header's service-existence rule
+        // (docs/design/457 §2.4): `requires store: Store` names a service the
+        // incoming text does not declare, so STANDALONE it is refused in the
+        // reference's own words; against a running composition whose `!services`
+        // block declares `Store`, it resolves and the gate has nothing to object
+        // to. Two different answers to the same bytes, from the manifest alone.
+        match admit(AMBIENT_ONLY_SERVICE) {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "G1");
+                assert_eq!(message, "unknown service `Store` in `requires` of CacheLayer");
+            }
+            other => panic!("expected the header-rule refusal, got {:?}", other),
+        }
+        assert_eq!(
+            admit_into(AMBIENT_ONLY_SERVICE, "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc"),
+            Verdict::NoObjection
+        );
+        // The `!services` HEADER is the claim, not the rows: a wire that makes
+        // none leaves the question undecided rather than refusing a candidate the
+        // running composition may well satisfy.
+        assert_eq!(admit_into(AMBIENT_ONLY_SERVICE, RUNNING), Verdict::NoObjection);
+        // ... and an EXHAUSTIVE block that omits the name refuses, exactly as the
+        // standalone question does.
+        match admit_into(AMBIENT_ONLY_SERVICE, "Kv/store/;App/app/;App<store;!services;:AppSvc") {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "G1");
+                assert_eq!(message, "unknown service `Store` in `requires` of CacheLayer");
+            }
+            other => panic!("expected the header-rule refusal, got {:?}", other),
         }
     }
 
@@ -1088,7 +1179,6 @@ component CacheLayer requires store: Store provides store: Store {\n\
         // small: the reference refuses this and the covered layer cannot see it,
         // so the honest answer is to withhold rather than to admit.
         for source in [
-            "fn f() -> Int { return \"s\" }",
             "fn f() -> Int { return undefined_name }",
             "fn f() -> { }",
         ] {

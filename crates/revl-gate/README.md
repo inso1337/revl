@@ -60,13 +60,15 @@ The self-host compiler is behind the reference implementation (roadmap item
 391), and the gap is not "a few missing constructs" — it is a whole missing
 LAYER. `admit_src` decides the composition and guarantee layer (`G1`..`G4`,
 `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not** run the
-reference's type layer. Measured, not assumed: the reference refuses all of
+reference's type layer, of which it runs one slice — the fn-body statement
+layer — and not the rest. Measured, not assumed: the reference refuses both of
 
-    fn f() -> Int { return "s" }
     fn f() -> Int { return undefined_name }
     fn f() -> { }
 
-and the self-host gate raises no objection to any of them.
+and the self-host gate raises no objection to either. A return-type mismatch,
+`fn f() -> Int { return "s" }`, used to head that list; it is refused here now,
+in the reference's own words.
 
 So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
@@ -125,8 +127,9 @@ there on the §5 compatibility relation — the type layer — so a redeclaratio
 withheld while a fresh interface is admitted.
 
 The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
-header followed by one `:S` row per declared service (`revl.manifest_wire`
-renders it). The header is the load-bearing half. A wire without it CLAIMS
+header followed by one `:S,op,op` row per declared service
+(`revl.manifest_wire` renders it), carrying the service's name and the
+operations it declares. The header is the load-bearing half. A wire without it CLAIMS
 NOTHING about the running services, so the set is unknown rather than empty and
 any declared service is withheld, exactly as before the block existed — silence
 is never read as "declares nothing". Two things the block still does not buy: a
@@ -187,19 +190,25 @@ holds conflicts (`G2`), a route into a realm the union does not provide dangles
 compiled to rust like `admit`, and the manifest arrives as item 186's row wire
 (`docs/design/186-ambient-admission-guarantees.md`): `C/k/r` for a provision
 (`r` the realm, `""` for shared), `C<k` for a requirement, `C>k/r,r` for the
-realms a running component routes a key across, `!halted` for a halted
-composition, joined by `;`. The empty manifest is the empty composition,
+realms a running component routes a key across, `!services` + `:S,op,op` for
+the services the composition declares and the operations each offers,
+`!halted` for a halted composition, joined by `;`. The empty manifest is the empty composition,
 so `admit_into(source, "")` is `admit(source)` byte for byte — the arm
 generalises `admit` rather than re-implementing it.
 
 Two honest limits, both fail-closed:
 
-* **It closes the `G2`/`G3` legs and nothing else.** The reference TYPE layer is
-  its own lane (the self-host compiler has no type layer yet), so a
-  type-incorrect candidate is a no-objection here, exactly as in `admit`. This
-  arm does not RESOLVE the requirements a candidate declares either; it checks
-  them for disjointness and acyclicity. The reference remains the only tier that
-  admits.
+* **It closes the `G2`/`G3` legs, item 53's state compatibility, and one member
+  rule.** The reference TYPE layer is its own lane (docs/design/457), so a
+  type-incorrect candidate is still a no-objection here, exactly as in `admit`.
+  What this arm DOES resolve is a requirement against the running service's
+  declaration: a candidate calling an operation the running service does not
+  declare is refused `A6` in the reference's own words, and the same call to an
+  operation it does declare is not. That resolution runs only where the wire made
+  the claim — a `:S` row with no operation list says nothing about the running
+  surface, and silence decides nothing. Argument typing, arity and the §5
+  compatibility relation on a redeclared SERVICE are still the type layer's. The
+  reference remains the only tier that admits.
 * **A row it cannot honour is REFUSED, never skipped.** Every row kind the wire
   defines is folded, including the replacement (`-C`) and handoff (`C=k:T`)
   rows. A row of no kind, or a garbled row of a kind the fold does know, comes
@@ -283,7 +292,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:dec65dfcfbbf6cad"
+    // frontier "selfhost-admit:689c0dbbaea12119"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the

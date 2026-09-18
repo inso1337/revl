@@ -1475,6 +1475,7 @@ jobs:
           tests/test_458_interpolation_types.py
           tests/test_458_list_index_bounds.py
           tests/test_458_float_division_and_remainder.py
+          tests/test_458_conversion_dispatch.py
           tests/test_int_min_edges_cross_tier.py
           tests/test_str_index_bounds_cross_tier.py
           tests/test_realm_conformance.py

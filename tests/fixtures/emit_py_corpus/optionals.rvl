@@ -12,3 +12,16 @@ fn defaulted(m: Map[Str, Str], k: Str, d: Str) -> Str { return m.lookup(k) ?? d 
 fn joined(m: Map[Str, List[Str]], k: Str, sep: Opt[Str]) -> Opt[Str] {
   return m.lookup(k)?.join(sep ?? "-")
 }
+
+// A `?.m(..)` reaches the SAME render table a plain `.m(..)` does, so it pulls
+// in the same GATED preamble. These six are the ones the gate did not see: the
+// three divisions and the Int32 narrow rendered `_REVL_I64_MIN` / `_revl_i32`
+// into a module that never defined them, and `to_str` has to split on the
+// payload, because an optcall node carries no receiver type and `str(3.0)` is
+// not the canonical Float spelling.
+fn opt_div_trunc(n: Opt[Int]) -> Opt[Int] { return n?.div_trunc(2) }
+fn opt_div_floor(n: Opt[Int]) -> Opt[Int] { return n?.div_floor(2) }
+fn opt_div_euclid(n: Opt[Int]) -> Opt[Int] { return n?.div_euclid(2) }
+fn opt_narrow(n: Opt[Int]) -> Opt[Int32] { return n?.to_int32() }
+fn opt_render(n: Opt[Int]) -> Opt[Str] { return n?.to_str() }
+fn opt_render_float(x: Opt[Float]) -> Opt[Str] { return x?.to_str() }

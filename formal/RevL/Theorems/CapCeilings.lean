@@ -307,18 +307,57 @@ discharged from that shape.
 
 | reference | here |
 |---|---|
-| `_collect_emit_caps_pairs` (emit STEPS only, `req` target ⇒ key cone, else `*`) | `stmtCaps` / `bodyReach` |
+| `_collect_emit_caps_pairs` (emit STEPS only, `req` target ⇒ declared cone, else `*`) | `stmtCaps` / `bodyReach` |
 | `_held_capabilities_pairs` (own surface ∪ every `requires` key's cone) | `heldCaps` |
 | `_spawn_surface_closure` (parent absorbs every descendant's reach) | `reachIn` |
 | `_activation_spawn_sites` (activation-body spawns only) | `Comp.spawns` |
 | `_check_spawn_attenuation` (both relations, per edge) | `SpawnsAdmitted` |
 
-`_cap_keyed` is the bridge that makes this line up with `capKeys`: the
-token of a derived capability is the **wiring key**, and the valuation
-rides in from the service's declared emission. So a derived held set's
-tokens are the component's declared `requires` keys — proved below as
-`derived_held_tokens_are_declared_keys`, which is what turns the
-`capKeys` bridge from an assumption into a lemma.
+### The two namespaces a crossing has
+
+A crossing has two names and they are not interchangeable:
+
+* the **declared boundary** — the capability token an `emission[...]`
+  clause names, carrying its valuation. This is what the attenuation fold
+  compares across a spawn edge, because two components wire the same
+  boundary under whatever local key each likes. `lower._cap_keyed`
+  (item 294) is the reference's bridge and it deletes the key outright:
+  "the boundary is the declared token, never the local wiring key";
+* the **wiring key** — the local `requires` spelling a crossing went
+  through. This is the namespace G6 confinement reads (`capKeys`), and it
+  is what `derived_confinement_within_ceiling` needs to join a statement's
+  require-key roots to this order. No declared token would do: the key is
+  what appears in the statement.
+
+Both are derived here, by **one** traversal under two `Namer`s — the same
+two columns `formal/harness/diff_corpus.py` exports per fact row (`cap`
+and `bound`, issue 1132):
+
+* `capsOfDecls` names an element by what it **reaches**: the capabilities
+  the service behind the key declares. A service that declares none names
+  no boundary, so the key names it instead, in the reserved `key:`
+  namespace (`lower._WIRE_NS` / `lower._wire_cap`), where a key spelling
+  can never masquerade as a declared token;
+* `boundsOfDecls` names it by the **key**, which is the pre-294 shape.
+
+`heldCaps` / `bodyReach` are the first column and feed `SpawnsAdmitted`
+and every `Lineage` theorem; `heldBounds` / `bodyBounds` are the second
+and feed `capKeys` and confinement.
+`derived_held_tokens_are_declared_keys` states both halves: the bound
+column's tokens are *exactly* the declared wiring keys — the `capKeys`
+bridge, unchanged — and every element of the capability column is a
+capability some required service declares, or that key in the reserved
+namespace, never a bare key.
+
+**The bound column is lossy, and the loss is exhibited rather than
+described.** `same_key_different_boundary_refused` takes a parent wired
+`kv: KvA` spawning a child wired `kv: KvB`: the two derived *bound* sets
+are literally the same list, so a fold over them attenuates and admits the
+edge, while the capability column refuses it on `covers`' boundary
+identity clause. That is the edge the reference refuses under G4
+(`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`), and it is
+why the fold may not be run in the key namespace — which is what this
+section did before issue 1142.
 
 ### What the L0 fragment cannot derive, stated rather than assumed
 
@@ -339,7 +378,7 @@ neither:
 `NameableEmission` is the resulting hypothesis. It is named on every
 theorem that needs it, never assumed away, and
 `derivation_refuses_unnameable` shows the price of dropping it: the
-derivation records `*` and refuses to fold it into a held wiring key.
+derivation records `*` and refuses to fold it into a held element.
 
 Two further shapes are carried alongside the body rather than parsed out
 of it, for the same reason (L0 has no constructor for either), matching
@@ -351,29 +390,71 @@ and the manifest rather than from statements:
 * `Comp.requires` — the wiring key ↦ service map (the manifest).
 
 One more precision loss is worth naming: the reference resolves an emit
-to the *method* being called and takes that method's `emission[...]`
-valuations, while an L0 call head is the receiver root alone. `Iface`
-therefore maps a service to the valuations its emission methods declare,
-and a key's cone is the union over them. That over-approximates reach
-per statement, so the derived `SpawnsAdmitted` is at least as strict as
-the checker — never looser.
+to the *method* being called and takes that method's declared
+capabilities, while an L0 call head is the receiver root alone. `Iface`
+therefore maps a service to its whole emission declaration — one `Decl`
+per declared capability and one `none` per uncapped emission method, arm
+for arm with `_held_capabilities_pairs` — and a key's cone is the union
+over them, `none` entries included. So the cone is a superset of what any
+one method contributes: it over-approximates reach per statement, and the
+derived `SpawnsAdmitted` is at least as strict as the checker, never
+looser.
 -/
 
 /-! ### The program shape -/
 
-/-- A service's declared emission valuations — the right-hand side of
-`_cap_keyed(key, cap_str)`. A service with no parameterized emission
-declaration maps to `[]`, which `capsOfDecls` reads as the bare key. -/
-abbrev Iface := String → List Valuation
+/-- One entry of a service's emission declaration, read exactly as
+`_held_capabilities_pairs` reads it: `some d` for a capability an
+`emission[...]` clause names (the `(T, P)` pair `_cap_keyed` resolves it to,
+WITH its declared token), and `none` for an emission method that names no
+capability list at all — the reference's `if not m.capabilities` arm. -/
+abbrev Decl := Option Cap
 
-/-- The capabilities one wiring key grants, given the declared emission
-valuations of the service it names (`_held_capabilities_pairs`): a
-service that declares none contributes the bare key `Cap(key, [])` —
-today's element, byte-identical — and a parameterized one contributes
-its narrower cone *instead* of the bare key. -/
-def capsOfDecls (k : String) : List Valuation → List Cap
+/-- A service's emission declaration: one entry per declared capability, one
+`none` per uncapped emission method. A service with no emission method, and an
+unresolvable one, map to `[]`. -/
+abbrev Iface := String → List Decl
+
+/-- The namespace a wiring key is folded under when nothing declares a token
+for it (`lower._WIRE_NS`). A capability token is a dotted identifier list in
+the grammar, so a `:` is unspellable in source and this namespace can never
+collide with a declared boundary. -/
+def wireNS : String := "key:"
+
+/-- `lower._wire_cap`: the fold element for a wiring key with no declared
+capability token. -/
+def wireCap (k : String) : Cap := ⟨wireNS ++ k, []⟩
+
+/-- How one declaration entry is folded, in the capability column: a declared
+capability is itself, and an entry declaring none falls back to the key in the
+reserved namespace (`_wire_cap`). -/
+@[simp] def declCap (k : String) : Decl → Cap
+  | some d => d
+  | none => wireCap k
+
+/-- The same entry in the key column: the key, carrying whatever valuation
+rode in with the declaration. -/
+@[simp] def declBound (k : String) : Decl → Cap
+  | some d => ⟨k, d.params⟩
+  | none => ⟨k, []⟩
+
+/-- **The capability column.** What one wiring key grants, named by what it
+REACHES (`_held_capabilities_pairs` through `_cap_keyed`): the capabilities
+the service behind the key declares, entry for entry. A service that declares
+nothing names no boundary, so the key names it — in its own namespace, never
+as a bare token. -/
+def capsOfDecls (k : String) : List Decl → List Cap
+  | [] => [wireCap k]
+  | m :: ms => (m :: ms).map (declCap k)
+
+/-- **The bound column.** The same cone spelled by the wiring KEY it was
+reached through, which is the namespace `capKeys` and G6 confinement read.
+Kept deliberately: `derived_confinement_within_ceiling` joins a statement's
+require-key roots to this order, and no declared token appears in a
+statement. -/
+def boundsOfDecls (k : String) : List Decl → List Cap
   | [] => [⟨k, []⟩]
-  | p :: ps => (p :: ps).map (fun q => ⟨k, q⟩)
+  | m :: ms => (m :: ms).map (declBound k)
 
 /-- Resolve a wiring key to the service it is wired to (the manifest's
 `requires` map). -/
@@ -409,7 +490,15 @@ def ctxOf (c : Comp) : Ctx := reqKeys c ++ c.handles
 reference's "not a `req` target". -/
 def svcOf (c : Comp) (k : String) : Option String := lookupSvc c.requires k
 
-/-! ### The derivation -/
+/-! ### The derivation
+
+One traversal, two spellings. `Namer` is the only thing that differs
+between the columns, so "both columns see exactly the same crossings" is a
+fact about the definitions rather than a claim in a comment. -/
+
+/-- How a derived element is spelled, given the key it was reached through
+and the declaration of the service behind that key. -/
+abbrev Namer := String → List Decl → List Cap
 
 /-- The receiver an emitted expression names, when it names one. -/
 def emitTarget : Expr → Option String
@@ -418,35 +507,56 @@ def emitTarget : Expr → Option String
 
 /-- Resolve a named receiver: a wiring key yields its cone, anything else
 (a spawn handle) the unnameable `*`. -/
-def svcCaps (I : Iface) (k : String) : Option String → List Cap
+def svcCapsN (N : Namer) (I : Iface) (k : String) : Option String → List Cap
   | none => [starCap]
-  | some sv => capsOfDecls k (I sv)
+  | some sv => N k (I sv)
 
 /-- Resolve an emit target: no call head at all is the fragment's
 stand-in for an extern / emitting-function receiver, hence `*`. -/
-def targetCaps (I : Iface) (c : Comp) : Option String → List Cap
+def targetCapsN (N : Namer) (I : Iface) (c : Comp) : Option String → List Cap
   | none => [starCap]
-  | some k => svcCaps I k (svcOf c k)
+  | some k => svcCapsN N I k (svcOf c k)
 
 /-- The capabilities one statement crosses (`_collect_emit_caps_pairs`).
 Only an `emit` step contributes: an inverse-paired mutation is not a
 boundary crossing, and `raw` is not admitted at all. -/
-def stmtCaps (I : Iface) (c : Comp) : Stmt → List Cap
-  | .emit m => targetCaps I c (emitTarget m)
+def stmtCapsN (N : Namer) (I : Iface) (c : Comp) : Stmt → List Cap
+  | .emit m => targetCapsN N I c (emitTarget m)
   | .pure _ => []
   | .effect _ _ => []
   | .raw _ => []
 
-/-- A component's own emit-step surface — the `A` fact rows of the
-differential export. -/
-def bodyReach (I : Iface) (c : Comp) : List Cap :=
-  c.body.flatMap (stmtCaps I c)
+/-- A component's own emit-step surface. -/
+def bodyReachN (N : Namer) (I : Iface) (c : Comp) : List Cap :=
+  c.body.flatMap (stmtCapsN N I c)
 
 /-- What a component **holds** (`_held_capabilities_pairs`): its own
 surface plus, for every wiring key it declares, that key's cone. This is
 the set a spawn may pass down. -/
-def heldCaps (I : Iface) (c : Comp) : List Cap :=
-  bodyReach I c ++ c.requires.flatMap (fun kv => capsOfDecls kv.1 (I kv.2))
+def heldCapsN (N : Namer) (I : Iface) (c : Comp) : List Cap :=
+  bodyReachN N I c ++ c.requires.flatMap (fun kv => N kv.1 (I kv.2))
+
+/-- The capability column of one statement: what it **reaches**. -/
+def stmtCaps (I : Iface) (c : Comp) (s : Stmt) : List Cap :=
+  stmtCapsN capsOfDecls I c s
+
+/-- A component's own emit-step surface — the `A` fact rows of the
+differential export. -/
+def bodyReach (I : Iface) (c : Comp) : List Cap := bodyReachN capsOfDecls I c
+
+/-- The held set the attenuation fold reads, in the declared-boundary
+namespace. -/
+def heldCaps (I : Iface) (c : Comp) : List Cap := heldCapsN capsOfDecls I c
+
+/-- The bound column of one statement: the wiring key it went through. -/
+def stmtBounds (I : Iface) (c : Comp) (s : Stmt) : List Cap :=
+  stmtCapsN boundsOfDecls I c s
+
+/-- A component's own emit-step surface, in the key namespace. -/
+def bodyBounds (I : Iface) (c : Comp) : List Cap := bodyReachN boundsOfDecls I c
+
+/-- The held set `capKeys` and G6 confinement read, in the key namespace. -/
+def heldBounds (I : Iface) (c : Comp) : List Cap := heldCapsN boundsOfDecls I c
 
 /-- Name resolution in a composition. -/
 def compOf (P : Prog) (n : String) : Option Comp := P.find? (fun c => c.name == n)
@@ -486,8 +596,11 @@ inductive Descends (P : Prog) : String → String → Nat → Prop where
 /-- **The checker's spawn gate, read off the program text**
 (`_check_spawn_attenuation`): every activation-body spawn edge in `P`
 attenuates — the child's transitively closed derived reach sits inside
-the spawner's derived held set, under *both* relations. This is the
-hypothesis that replaces the given `Attenuates`/`Lineage` above. -/
+the spawner's derived held set, under *both* relations, and **in the
+declared-boundary namespace**, so a parent and child that spell a
+`requires` key alike are still compared on the boundaries they reach.
+This is the hypothesis that replaces the given `Attenuates`/`Lineage`
+above. -/
 def SpawnsAdmitted (I : Iface) (P : Prog) (f : Nat) : Prop :=
   ∀ p ∈ P, ∀ ch ∈ p.spawns, Attenuates (heldCaps I p) (reachIn I P f ch)
 
@@ -502,24 +615,75 @@ def NameableEmission (c : Comp) : Stmt → Prop
 
 /-! ### Shape lemmas -/
 
-theorem capsOfDecls_token (k : String) (ps : List Valuation) :
-    ∀ x ∈ capsOfDecls k ps, x.token = k := by
-  cases ps with
+/-- A namer that spells every element by the wiring key. True of the bound
+column; **false of the capability column**, which is the content of the
+split. -/
+def KeyNamed (N : Namer) : Prop := ∀ k ds, ∀ x ∈ N k ds, x.token = k
+
+/-- A namer never drops a key: every cone it names is non-empty, so no
+declared authority is lost. -/
+def TotalNamer (N : Namer) : Prop := ∀ k ds, ∃ x, x ∈ N k ds
+
+theorem declBound_token (k : String) (m : Decl) : (declBound k m).token = k := by
+  cases m <;> rfl
+
+theorem boundsOfDecls_keyNamed : KeyNamed boundsOfDecls := by
+  intro k ms
+  cases ms with
+  | nil =>
+    intro x hx
+    simp only [boundsOfDecls, List.mem_singleton] at hx
+    subst hx; rfl
+  | cons m ms =>
+    intro x hx
+    simp only [boundsOfDecls, List.mem_map] at hx
+    obtain ⟨q, _, hq⟩ := hx
+    rw [← hq]
+    exact declBound_token k q
+
+theorem boundsOfDecls_total : TotalNamer boundsOfDecls := by
+  intro k ms
+  cases ms with
+  | nil => exact ⟨⟨k, []⟩, by simp [boundsOfDecls]⟩
+  | cons m ms => exact ⟨declBound k m, by simp [boundsOfDecls]⟩
+
+theorem capsOfDecls_total : TotalNamer capsOfDecls := by
+  intro k ms
+  cases ms with
+  | nil => exact ⟨wireCap k, by simp [capsOfDecls]⟩
+  | cons m ms => exact ⟨declCap k m, by simp [capsOfDecls]⟩
+
+/-- The reserved namespace is not the unnameable boundary: `*` is one
+character and every element of `key:` is at least five. So a wiring key
+with nothing declared behind it can never be mistaken for a host
+crossing, whatever it is spelled. -/
+theorem wireCap_token_ne_star (k : String) : (wireCap k).token ≠ "*" := by
+  intro h
+  have hl := congrArg String.length h
+  rw [show (wireCap k).token = wireNS ++ k from rfl, String.length_append] at hl
+  have h4 : wireNS.length = 4 := rfl
+  have h1 : "*".length = 1 := rfl
+  omega
+
+/-- A key's cone is `*`-free as soon as the service behind it declares no
+`*`: an undeclared entry falls back to the reserved element, which never is,
+by `wireCap_token_ne_star`. -/
+theorem capsOfDecls_ne_star {k : String} {ms : List Decl}
+    (h : ∀ d : Cap, some d ∈ ms → d.token ≠ "*") :
+    ∀ x ∈ capsOfDecls k ms, x.token ≠ "*" := by
+  cases ms with
   | nil =>
     intro x hx
     simp only [capsOfDecls, List.mem_singleton] at hx
-    subst hx; rfl
-  | cons p ps =>
+    subst hx
+    exact wireCap_token_ne_star k
+  | cons m ms =>
     intro x hx
     simp only [capsOfDecls, List.mem_map] at hx
-    obtain ⟨q, _, hq⟩ := hx
-    rw [← hq]
-
-theorem capsOfDecls_nonempty (k : String) (ps : List Valuation) :
-    ∃ x, x ∈ capsOfDecls k ps := by
-  cases ps with
-  | nil => exact ⟨⟨k, []⟩, by simp [capsOfDecls]⟩
-  | cons p ps => exact ⟨⟨k, p⟩, by simp [capsOfDecls]⟩
+    obtain ⟨o, ho, hox⟩ := hx
+    cases o with
+    | none => rw [← hox]; exact wireCap_token_ne_star k
+    | some d => rw [← hox]; exact h d ho
 
 theorem lookupSvc_mem : ∀ {rs : List (String × String)} {k sv : String},
     lookupSvc rs k = some sv → (k, sv) ∈ rs := by
@@ -571,45 +735,75 @@ theorem typedIn_weaken {C D : Ctx} {s : Stmt} (h : ∀ k ∈ C, k ∈ D) :
   | effect m u hm hu => exact .effect _ m u (reachIn_weaken h hm) (reachIn_weaken h hu)
   | emit m hm => exact .emit _ m (reachIn_weaken h hm)
 
-/-- A nameable statement's derived capabilities are all keyed by one of
-the component's declared wiring keys. -/
-theorem stmtCaps_token (I : Iface) (c : Comp) {s : Stmt}
-    (hn : NameableEmission c s) : ∀ x ∈ stmtCaps I c s, x.token ∈ reqKeys c := by
+/-- **Provenance, in either namespace.** A nameable statement's derived
+elements all come from one declared wiring key's cone. Everything the two
+columns have in common is proved once, here: they differ only in how that
+cone is spelled. -/
+theorem stmtCapsN_provenance {N : Namer} (I : Iface) (c : Comp) {s : Stmt}
+    (hn : NameableEmission c s) :
+    ∀ x ∈ stmtCapsN N I c s, ∃ kv ∈ c.requires, x ∈ N kv.1 (I kv.2) := by
   cases s with
-  | pure e => intro x hx; simp [stmtCaps] at hx
-  | effect m u => intro x hx; simp [stmtCaps] at hx
-  | raw m => intro x hx; simp [stmtCaps] at hx
+  | pure e => intro x hx; simp [stmtCapsN] at hx
+  | effect m u => intro x hx; simp [stmtCapsN] at hx
+  | raw m => intro x hx; simp [stmtCapsN] at hx
   | emit m =>
     simp only [NameableEmission] at hn
     obtain ⟨k, sv, hk, hsv⟩ := hn
     intro x hx
-    simp only [stmtCaps, hk, targetCaps, hsv, svcCaps] at hx
-    rw [capsOfDecls_token k (I sv) x hx]
-    exact List.mem_map.mpr ⟨(k, sv), lookupSvc_mem hsv, rfl⟩
+    simp only [stmtCapsN, hk, targetCapsN, hsv, svcCapsN] at hx
+    exact ⟨(k, sv), lookupSvc_mem hsv, hx⟩
 
-/-- Every declared wiring key is a token of the derived held set: a key's
-cone is never empty, so no declared authority is lost. -/
-theorem reqKeys_sub_capKeys (I : Iface) (c : Comp) :
-    ∀ k ∈ reqKeys c, k ∈ capKeys (heldCaps I c) := by
-  intro k hk
-  obtain ⟨kv, hkv, hkv1⟩ := List.mem_map.mp hk
-  obtain ⟨x, hx⟩ := capsOfDecls_nonempty kv.1 (I kv.2)
-  refine List.mem_map.mpr ⟨x, ?_, ?_⟩
-  · exact List.mem_append_right _ (List.mem_flatMap.mpr ⟨kv, hkv, hx⟩)
-  · rw [capsOfDecls_token kv.1 (I kv.2) x hx]; exact hkv1
-
-/-- Dually, every token of the derived held set is a declared wiring key
-— provided the body's emissions are ones the fragment can name. -/
-theorem heldCaps_token (I : Iface) (c : Comp)
+/-- The same for a whole held set: nothing enters it that no declared key
+put there. -/
+theorem heldCapsN_provenance {N : Namer} (I : Iface) (c : Comp)
     (hnam : ∀ s ∈ c.body, NameableEmission c s) :
-    ∀ h ∈ heldCaps I c, h.token ∈ reqKeys c := by
+    ∀ h ∈ heldCapsN N I c, ∃ kv ∈ c.requires, h ∈ N kv.1 (I kv.2) := by
   intro h hh
+  simp only [heldCapsN] at hh
   rcases List.mem_append.mp hh with hl | hr
   · obtain ⟨s, hs, hxs⟩ := List.mem_flatMap.mp hl
-    exact stmtCaps_token I c (hnam s hs) h hxs
+    exact stmtCapsN_provenance I c (hnam s hs) h hxs
   · obtain ⟨kv, hkv, hx⟩ := List.mem_flatMap.mp hr
-    rw [capsOfDecls_token kv.1 (I kv.2) h hx]
-    exact List.mem_map.mpr ⟨kv, hkv, rfl⟩
+    exact ⟨kv, hkv, hx⟩
+
+/-- Under a key-naming namer, every token of the derived held set is a
+declared wiring key. -/
+theorem heldCapsN_token {N : Namer} (hN : KeyNamed N) (I : Iface) (c : Comp)
+    (hnam : ∀ s ∈ c.body, NameableEmission c s) :
+    ∀ h ∈ heldCapsN N I c, h.token ∈ reqKeys c := by
+  intro h hh
+  obtain ⟨kv, hkv, hx⟩ := heldCapsN_provenance I c hnam h hh
+  rw [hN kv.1 (I kv.2) h hx]
+  exact List.mem_map.mpr ⟨kv, hkv, rfl⟩
+
+/-- Dually: every declared wiring key is a token of the derived held set,
+because a key's cone is never empty. -/
+theorem reqKeys_sub_heldKeysN {N : Namer} (hN : KeyNamed N) (hT : TotalNamer N)
+    (I : Iface) (c : Comp) : ∀ k ∈ reqKeys c, k ∈ capKeys (heldCapsN N I c) := by
+  intro k hk
+  obtain ⟨kv, hkv, hkv1⟩ := List.mem_map.mp hk
+  obtain ⟨x, hx⟩ := hT kv.1 (I kv.2)
+  refine List.mem_map.mpr ⟨x, ?_, ?_⟩
+  · exact List.mem_append_right _ (List.mem_flatMap.mpr ⟨kv, hkv, hx⟩)
+  · rw [hN kv.1 (I kv.2) x hx]; exact hkv1
+
+/-- The `capKeys` bridge on the bound column. -/
+theorem reqKeys_sub_boundKeys (I : Iface) (c : Comp) :
+    ∀ k ∈ reqKeys c, k ∈ capKeys (heldBounds I c) :=
+  reqKeys_sub_heldKeysN boundsOfDecls_keyNamed boundsOfDecls_total I c
+
+/-- Its converse. -/
+theorem heldBounds_token (I : Iface) (c : Comp)
+    (hnam : ∀ s ∈ c.body, NameableEmission c s) :
+    ∀ h ∈ heldBounds I c, h.token ∈ reqKeys c :=
+  heldCapsN_token boundsOfDecls_keyNamed I c hnam
+
+/-- Provenance on the capability column: every held element is a
+capability behind one of the declared keys. -/
+theorem heldCaps_provenance (I : Iface) (c : Comp)
+    (hnam : ∀ s ∈ c.body, NameableEmission c s) :
+    ∀ h ∈ heldCaps I c, ∃ kv ∈ c.requires, h ∈ capsOfDecls kv.1 (I kv.2) :=
+  heldCapsN_provenance I c hnam
 
 /-! ### The closure -/
 
@@ -645,27 +839,55 @@ theorem descends_reach (I : Iface) (P : Prog) {a b : String} {d : Nat}
 Three theorems, one per assumption the section above made about `held`
 and `reach`. -/
 
-/-- **The `capKeys` bridge, derived.** For a component whose emissions
-the fragment can name, the tokens of the derived held set are *exactly*
-its declared wiring keys. `confinement_within_ceiling` assumed
-`TypedIn (capKeys Γ) s` for a given `Γ`; this makes `capKeys (heldCaps I c)`
-and the `Ctx` the checker confines against the same set of keys, so the
-assumption is discharged by weakening from `TypedIn (reqKeys c) s`. -/
+/-- **The `capKeys` bridge, derived — and the namespace split it now
+carries.**
+
+(a) and (b) are the bridge itself, on the BOUND column: the tokens of the
+derived held set are *exactly* the component's declared wiring keys. That
+is what `derived_confinement_within_ceiling` needs — it makes
+`capKeys (heldBounds I c)` and the `Ctx` the checker confines against the
+same set of keys, so `TypedIn (capKeys Γ)` is discharged by weakening from
+`TypedIn (reqKeys c)`.
+
+(c) is the half the fold reads, and it says the opposite: a held element
+of the CAPABILITY column is never the wiring key. It is a capability the
+service behind that key declares, or — where the service declares none —
+that key in the reserved `key:` namespace, which is unspellable as a
+token. So two components cannot compare equal merely because they spell a
+`requires` key alike (`lower._cap_keyed`, issue 1142);
+`same_key_different_boundary_refused` is the pair that shows the
+difference is real. -/
 theorem derived_held_tokens_are_declared_keys (I : Iface) (c : Comp)
     (hnam : ∀ s ∈ c.body, NameableEmission c s) :
-    (∀ k ∈ capKeys (heldCaps I c), k ∈ reqKeys c) ∧
-    (∀ k ∈ reqKeys c, k ∈ capKeys (heldCaps I c)) := by
-  refine ⟨fun k hk => ?_, reqKeys_sub_capKeys I c⟩
-  obtain ⟨h, hh, hht⟩ := List.mem_map.mp hk
-  rw [← hht]
-  exact heldCaps_token I c hnam h hh
+    (∀ k ∈ capKeys (heldBounds I c), k ∈ reqKeys c) ∧
+    (∀ k ∈ reqKeys c, k ∈ capKeys (heldBounds I c)) ∧
+    (∀ h ∈ heldCaps I c, ∃ kv ∈ c.requires,
+      some h ∈ I kv.2 ∨ h = wireCap kv.1) := by
+  refine ⟨fun k hk => ?_, reqKeys_sub_boundKeys I c, fun h hh => ?_⟩
+  · obtain ⟨b, hb, hbt⟩ := List.mem_map.mp hk
+    rw [← hbt]
+    exact heldBounds_token I c hnam b hb
+  · obtain ⟨kv, hkv, hx⟩ := heldCaps_provenance I c hnam h hh
+    refine ⟨kv, hkv, ?_⟩
+    cases hd : I kv.2 with
+    | nil =>
+      rw [hd] at hx
+      simp only [capsOfDecls, List.mem_singleton] at hx
+      exact Or.inr hx
+    | cons m ms =>
+      rw [hd] at hx
+      simp only [capsOfDecls, List.mem_map] at hx
+      obtain ⟨o, ho, hox⟩ := hx
+      cases o with
+      | none => exact Or.inr (by rw [← hox]; rfl)
+      | some d => exact Or.inl (by rw [← hox]; exact ho)
 
 /-- **The derived reach is the emit-step surface.** Agreement with
 `_collect_emit_caps_pairs`, which traverses for `step == "emit"` nodes
 only: a `pure`, `effect` or `raw` statement contributes nothing (an
 inverse-paired mutation is not a boundary crossing — only the marker is),
-an `emit` through a wiring key contributes exactly that key's cone, and
-nothing enters `bodyReach` that no statement put there. -/
+an `emit` through a wiring key contributes exactly the cone behind that
+key, and nothing enters `bodyReach` that no statement put there. -/
 theorem derived_reach_is_emit_surface (I : Iface) (c : Comp) :
     (∀ s : Stmt, ¬ IsEmit s → stmtCaps I c s = []) ∧
     (∀ (m : Expr) (k sv : String), emitTarget m = some k → svcOf c k = some sv →
@@ -677,23 +899,27 @@ theorem derived_reach_is_emit_surface (I : Iface) (c : Comp) :
     | effect m u => rfl
     | raw m => rfl
     | emit m => exact absurd (IsEmit.emit m) hs
-  · simp only [stmtCaps, hk, targetCaps, hsv, svcCaps]
+  · simp only [stmtCaps, stmtCapsN, hk, targetCapsN, hsv, svcCapsN]
 
 /-- **What the fragment cannot name, named.** Under the checker's own
 confinement judgment a call-headed emission is always nameable — its head
 is a declared wiring key unless it is a spawn-handle binder — so the
 derivation resolves it to a real `(T, P)` capability. The two residues
 are stated as equations, not swept away: a handle receiver and a
-head-less emission both derive exactly `[starCap]`, which is the
-reference's `caps.add("*")` and is covered only by `*`. -/
+head-less emission both derive exactly `[starCap]` in **both** columns,
+which is the reference's `caps.add("*")` and is covered only by `*`. -/
 theorem unnameable_receiver_is_star (I : Iface) (c : Comp) (m : Expr) :
     (∀ k, emitTarget m = some k → k ∈ reqKeys c →
       NameableEmission c (.emit m)) ∧
-    (emitTarget m = none → stmtCaps I c (.emit m) = [starCap]) ∧
+    (emitTarget m = none →
+      stmtCaps I c (.emit m) = [starCap] ∧ stmtBounds I c (.emit m) = [starCap]) ∧
     (∀ k, emitTarget m = some k → svcOf c k = none →
-      stmtCaps I c (.emit m) = [starCap]) := by
-  refine ⟨fun k hk hmem => ?_, fun h => by simp only [stmtCaps, h, targetCaps],
-    fun k hk hsv => by simp only [stmtCaps, hk, targetCaps, hsv, svcCaps]⟩
+      stmtCaps I c (.emit m) = [starCap] ∧ stmtBounds I c (.emit m) = [starCap]) := by
+  refine ⟨fun k hk hmem => ?_,
+    fun h => ⟨by simp only [stmtCaps, stmtCapsN, h, targetCapsN],
+              by simp only [stmtBounds, stmtCapsN, h, targetCapsN]⟩,
+    fun k hk hsv => ⟨by simp only [stmtCaps, stmtCapsN, hk, targetCapsN, hsv, svcCapsN],
+                     by simp only [stmtBounds, stmtCapsN, hk, targetCapsN, hsv, svcCapsN]⟩⟩
   obtain ⟨sv, hsv⟩ := lookupSvc_isSome hmem
   exact ⟨k, sv, hk, hsv⟩
 
@@ -750,14 +976,16 @@ theorem derived_budget_never_exceeds_root_ceiling {I : Iface} {P : Prog}
   budget_never_exceeds_root_ceiling k n (derived_lineage hA hp hstart) hH
     (descends_reach I P hdesc f x hx) hm hs
 
-/-- **`confinement_within_ceiling`, discharged.** Take a spawned
-component whose statements the checker admits under its *declared*
-requirement keys. Then (a) every key a statement reaches is a token of
-the component's own derived held set — the `capKeys` bridge is a lemma
-now, not a hypothesis — and (b) every capability the statement derivably
-crosses is covered by one the spawner holds. G6 bounds the reach by the
-declared context; `SpawnsAdmitted` bounds the declared context by the
-spawner's authority.
+/-- **`confinement_within_ceiling`, discharged — one clause per
+namespace.** Take a spawned component whose statements the checker admits
+under its *declared* requirement keys. Then (a) every key a statement
+reaches is a token of the component's own derived **bound** set — the
+`capKeys` bridge is a lemma now, not a hypothesis — and (b) every
+**capability** the statement derivably crosses is covered by one the
+spawner holds. G6 bounds the reach by the declared context;
+`SpawnsAdmitted` bounds the declared context by the spawner's authority.
+The two clauses read different columns on purpose: a statement spells a
+wiring key, and an attenuation edge compares declared boundaries.
 
 `NameableEmission` is required on (a) and is the named residue: a
 handle-reached emission has a receiver in `ctxOf` that is not a wiring
@@ -769,16 +997,16 @@ theorem derived_confinement_within_ceiling {I : Iface} {P : Prog} {f : Nat}
     (hres : Resolves P c) (hedge : c.name ∈ p.spawns) {s : Stmt}
     (hs : s ∈ c.body) (ht : TypedIn (reqKeys c) s) :
     ((∀ t ∈ c.body, NameableEmission c t) →
-      ∀ k ∈ stmtHeads s, ∃ cap ∈ heldCaps I c, cap.token = k) ∧
+      ∀ k ∈ stmtHeads s, ∃ b ∈ heldBounds I c, b.token = k) ∧
     (∀ x ∈ stmtCaps I c s,
       ∃ h ∈ heldCaps I p, Covers (stripCeilings h) (stripCeilings x)) := by
   constructor
   · intro _ k hk
-    have htw : TypedIn (capKeys (heldCaps I c)) s :=
-      typedIn_weaken (reqKeys_sub_capKeys I c) ht
-    obtain ⟨cap, hcap, htok, _⟩ :=
-      confinement_within_ceiling (H := heldCaps I c) .root htw k hk
-    exact ⟨cap, hcap, htok⟩
+    have htw : TypedIn (capKeys (heldBounds I c)) s :=
+      typedIn_weaken (reqKeys_sub_boundKeys I c) ht
+    obtain ⟨b, hb, htok, _⟩ :=
+      confinement_within_ceiling (H := heldBounds I c) .root htw k hk
+    exact ⟨b, hb, htok⟩
   · intro x hx
     have h1 : x ∈ bodyReach I c := List.mem_flatMap.mpr ⟨s, hs, hx⟩
     have hr : compOf P c.name = some c := hres
@@ -787,19 +1015,25 @@ theorem derived_confinement_within_ceiling {I : Iface} {P : Prog} {f : Nat}
     exact (hA p hp c.name hedge).1 x (ownReach_sub_reachIn I P f c.name x h2)
 
 /-- **`no_star_amplification`, discharged.** The side condition "the root
-declares no `*`" is itself derived: a held set is `*`-free exactly when
-no wiring key is spelled `*` and every emission in the body is one the
-fragment can name. Drop `NameableEmission` and the conclusion is false,
-which is `derivation_refuses_unnameable` below — so this is the honest
-boundary of the claim, not a convenient hypothesis. -/
+declares no `*`" is itself derived: a held set is `*`-free exactly when no
+service behind a declared key declares the unnameable boundary and every
+emission in the body is one the fragment can name. The wiring keys
+themselves need no side condition any more — a key with nothing declared
+behind it lands in the reserved `key:` namespace, which
+`wireCap_token_ne_star` shows is never `*`. Drop `NameableEmission` and
+the conclusion is false, which is `derivation_refuses_unnameable` below —
+so this is the honest boundary of the claim, not a convenient
+hypothesis. -/
 theorem derived_no_star_amplification {I : Iface} {P : Prog} {f d : Nat}
     (hA : SpawnsAdmitted I P (f + d)) {p : Comp} (hp : p ∈ P) {b ch : String}
     (hstart : b ∈ p.spawns) (hdesc : Descends P b ch d)
     (hnam : ∀ s ∈ p.body, NameableEmission p s)
-    (hkeys : ∀ k ∈ reqKeys p, k ≠ "*") :
+    (hdecl : ∀ kv ∈ p.requires, ∀ dc : Cap, some dc ∈ I kv.2 → dc.token ≠ "*") :
     ∀ x ∈ reachIn I P f ch, x.token ≠ "*" := by
-  have hns : ∀ h ∈ heldCaps I p, h.token ≠ "*" := fun h hh =>
-    hkeys h.token (heldCaps_token I p hnam h hh)
+  have hns : ∀ h ∈ heldCaps I p, h.token ≠ "*" := by
+    intro h hh
+    obtain ⟨kv, hkv, hx⟩ := heldCaps_provenance I p hnam h hh
+    exact capsOfDecls_ne_star (hdecl kv hkv) h hx
   exact fun x hx =>
     no_star_amplification (derived_lineage hA hp hstart) hns x
       (descends_reach I P hdesc f x hx)
@@ -807,24 +1041,31 @@ theorem derived_no_star_amplification {I : Iface} {P : Prog} {f d : Nat}
 /-! ### Non-vacuity of the derivation
 
 `CrossTier.annotation_necessary` is the model here: a hypothesis is only
-worth stating if dropping it breaks something. Three witnesses, all
+worth stating if dropping it breaks something. Four witnesses, all
 computed from component shapes rather than from given capability lists.
 
 The composition tracked is `examples/rejections/g4_spawn_widens_parameter.rvl`
 — a router wired to a `/tmp`-scoped filesystem service spawning a child
-wired to an `/etc`-scoped one. -/
+wired to an `/etc`-scoped one — plus, for the namespace split,
+`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`. -/
 
-/-- The witness service table: three filesystem services at three scopes,
-one model service with a `calls` budget, one without. -/
-def witIface (sv : String) : List Valuation :=
-  if sv = "FsTmp" then [[("path", .path ["tmp"])]]
-  else if sv = "FsEtc" then [[("path", .path ["etc"])]]
-  else if sv = "FsJob" then [[("path", .path ["tmp", "job-42"])]]
-  else if sv = "ModelCalls3" then [[("calls", .ceiling 3)]]
+/-- The witness service table, as declared capabilities: three filesystem
+services at three scopes, a model service with a `calls` budget and one
+without, and two key-value services declaring DIFFERENT boundaries, which
+is the pair the wiring key cannot tell apart. -/
+def witIface (sv : String) : List Decl :=
+  if sv = "FsTmp" then [some ⟨"fs.write", [("path", .path ["tmp"])]⟩]
+  else if sv = "FsEtc" then [some ⟨"fs.write", [("path", .path ["etc"])]⟩]
+  else if sv = "FsJob" then [some ⟨"fs.write", [("path", .path ["tmp", "job-42"])]⟩]
+  else if sv = "ModelCalls3" then [some ⟨"model.complete", [("calls", .ceiling 3)]⟩]
+  else if sv = "ModelBare" then [some ⟨"model.complete", []⟩]
+  else if sv = "KvA" then [some ⟨"kv.read", []⟩]
+  else if sv = "KvB" then [some ⟨"kv.write", []⟩]
   else []
 
-/-- The capability the witness derives at the wiring key `fs`. -/
-def wFs (p : List String) : Cap := ⟨"fs", [("path", .path p)]⟩
+/-- The capability the witness derives behind the wiring key `fs`: the
+DECLARED token `fs.write`, not the key. -/
+def wFs (p : List String) : Cap := ⟨"fs.write", [("path", .path p)]⟩
 
 /-- A supervisor holding `fs` at `/tmp`, spawning `child`, emitting
 nothing of its own. -/
@@ -885,11 +1126,14 @@ theorem derivation_non_vacuous :
     wFs ["etc"] ∈ reachIn witIface wProgBad 1 "Kid" ∧
     SpawnsAdmitted witIface wProgGood 1 ∧
     ¬ SpawnsAdmitted witIface wProgBad 1 := by
-  refine ⟨by simp [heldCaps, bodyReach, wRouter, capsOfDecls, witIface, wFs], ?_, ?_, ?_⟩
+  refine ⟨by
+    simp [heldCaps, heldCapsN, bodyReachN, wRouter, capsOfDecls, witIface, wFs],
+    ?_, ?_, ?_⟩
   · apply ownReach_sub_reachIn
     show wFs ["etc"] ∈ ownReach witIface wProgBad "Kid"
-    simp [ownReach, compOf, wProgBad, wRouter, wChild, bodyReach, stmtCaps,
-      emitTarget, targetCaps, svcOf, lookupSvc, svcCaps, capsOfDecls, witIface, wFs]
+    simp [ownReach, compOf, wProgBad, wRouter, wChild, bodyReach, bodyReachN,
+      stmtCapsN, emitTarget, targetCapsN, svcOf, lookupSvc, svcCapsN, capsOfDecls,
+      witIface, wFs]
   · intro p hp ch hch
     have hpk : p = wRouter "Job" := by
       simp only [wProgGood, List.mem_cons, List.not_mem_nil, or_false] at hp
@@ -900,11 +1144,11 @@ theorem derivation_non_vacuous :
     have hchj : ch = "Job" := by simpa [wRouter] using hch
     subst hchj
     have hheld : heldCaps witIface (wRouter "Job") = [wFs ["tmp"]] := by
-      simp [heldCaps, bodyReach, wRouter, capsOfDecls, witIface, wFs]
+      simp [heldCaps, heldCapsN, bodyReachN, wRouter, capsOfDecls, witIface, wFs]
     have hreach : reachIn witIface wProgGood 1 "Job" = [wFs ["tmp", "job-42"]] := by
       simp [reachIn, ownReach, childrenOf, compOf, wProgGood, wRouter, wChild,
-        bodyReach, stmtCaps, emitTarget, targetCaps, svcOf, lookupSvc, svcCaps,
-        capsOfDecls, witIface, wFs]
+        bodyReach, bodyReachN, stmtCapsN, emitTarget, targetCapsN, svcOf, lookupSvc,
+        svcCapsN, capsOfDecls, witIface, wFs]
     constructor
     · rw [hheld, hreach]
       intro x hx
@@ -928,12 +1172,13 @@ theorem derivation_non_vacuous :
     have hreach : wFs ["etc"] ∈ reachIn witIface wProgBad 1 "Kid" := by
       apply ownReach_sub_reachIn
       show wFs ["etc"] ∈ ownReach witIface wProgBad "Kid"
-      simp [ownReach, compOf, wProgBad, wRouter, wChild, bodyReach, stmtCaps,
-        emitTarget, targetCaps, svcOf, lookupSvc, svcCaps, capsOfDecls, witIface, wFs]
+      simp [ownReach, compOf, wProgBad, wRouter, wChild, bodyReach, bodyReachN,
+        stmtCapsN, emitTarget, targetCapsN, svcOf, lookupSvc, svcCapsN, capsOfDecls,
+        witIface, wFs]
     obtain ⟨h, hh, hcov⟩ := (hA _ hp _ hch).1 _ hreach
     have hhv : h = wFs ["tmp"] := by
       have : heldCaps witIface (wRouter "Kid") = [wFs ["tmp"]] := by
-        simp [heldCaps, bodyReach, wRouter, capsOfDecls, witIface, wFs]
+        simp [heldCaps, heldCapsN, bodyReachN, wRouter, capsOfDecls, witIface, wFs]
       rw [this] at hh; simpa using hh
     subst hhv
     rw [stripCeilings_wFs, stripCeilings_wFs] at hcov
@@ -946,6 +1191,81 @@ theorem derivation_non_vacuous :
       injection hr with e
       exact absurd e (by decide)
 
+/-! ### The laundering edge the key namespace could not see
+
+`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl` in one
+composition: a supervisor wired `kv: KvA` spawning a child wired
+`kv: KvB`. Both spell the key `kv`; the services behind it declare
+different boundaries. -/
+
+/-- The supervisor: holds whatever `KvA` declares, spawns `Leak`. -/
+def wKvRouter : Comp :=
+  { name := "KvRouter", requires := [("kv", "KvA")], handles := [],
+    body := [], spawns := ["Leak"] }
+
+/-- The child: same local key, a different service behind it, and it
+crosses that boundary once. -/
+def wKvLeak : Comp :=
+  { name := "Leak", requires := [("kv", "KvB")], handles := [],
+    body := [.emit (.call "kv" [])], spawns := [] }
+
+def wProgLaunder : Prog := [wKvRouter, wKvLeak]
+
+/-- **The namespace split is load-bearing.** Read in the key namespace,
+the parent's held set and the child's reach are *the same list*: the fold
+attenuates, the edge is admitted, and nothing is reported. Read in the
+declared-boundary namespace they are `kv.read` against `kv.write`, and
+`covers`' first clause — boundary identity — refuses the edge, which is
+what the reference does under G4.
+
+This is the whole content of issue 1142: before the split,
+`SpawnsAdmitted` ran the fold over the bound column and admitted this
+program. A derived theorem that admits an edge the implementation refuses
+is a theorem about a different language than the one that ships, and it
+does not fail loudly — it agrees. -/
+theorem same_key_different_boundary_refused :
+    bodyBounds witIface wKvLeak = heldBounds witIface wKvRouter ∧
+    Attenuates (heldBounds witIface wKvRouter) (bodyBounds witIface wKvLeak) ∧
+    heldCaps witIface wKvRouter = [⟨"kv.read", []⟩] ∧
+    reachIn witIface wProgLaunder 1 "Leak" = [⟨"kv.write", []⟩] ∧
+    ¬ SpawnsAdmitted witIface wProgLaunder 1 := by
+  have hbound : heldBounds witIface wKvRouter = [⟨"kv", []⟩] := by
+    simp [heldBounds, heldCapsN, bodyReachN, wKvRouter, boundsOfDecls, witIface]
+  have hleak : bodyBounds witIface wKvLeak = [⟨"kv", []⟩] := by
+    simp [bodyBounds, bodyReachN, wKvLeak, stmtCapsN, emitTarget, targetCapsN,
+      svcOf, lookupSvc, svcCapsN, boundsOfDecls, witIface]
+  have hheld : heldCaps witIface wKvRouter = [(⟨"kv.read", []⟩ : Cap)] := by
+    simp [heldCaps, heldCapsN, bodyReachN, wKvRouter, capsOfDecls, witIface]
+  have hreach : reachIn witIface wProgLaunder 1 "Leak" = [(⟨"kv.write", []⟩ : Cap)] := by
+    simp [reachIn, ownReach, childrenOf, compOf, wProgLaunder, wKvRouter, wKvLeak,
+      bodyReach, bodyReachN, stmtCapsN, emitTarget, targetCapsN, svcOf, lookupSvc,
+      svcCapsN, capsOfDecls, witIface]
+  refine ⟨by rw [hbound, hleak], ⟨?_, ?_⟩, hheld, hreach, ?_⟩
+  · rw [hbound, hleak]
+    intro x hx
+    have hxv : x = (⟨"kv", []⟩ : Cap) := by simpa using hx
+    subst hxv
+    exact ⟨⟨"kv", []⟩, List.mem_cons_self, covers_refl _⟩
+  · rw [hbound, hleak]
+    intro x _ k n hb
+    rw [budgetOf_none (fun c hc => by
+      have hcv : c = (⟨"kv", []⟩ : Cap) := by simpa using hc
+      subst hcv; rfl)] at hb
+    exact absurd hb (by simp)
+  · intro hA
+    have hp : wKvRouter ∈ wProgLaunder := List.mem_cons_self
+    have hch : "Leak" ∈ wKvRouter.spawns := by simp [wKvRouter]
+    have hx : (⟨"kv.write", []⟩ : Cap) ∈ reachIn witIface wProgLaunder 1 "Leak" := by
+      rw [hreach]; exact List.mem_cons_self
+    obtain ⟨h, hh, hcov⟩ := (hA _ hp _ hch).1 _ hx
+    rw [hheld] at hh
+    have hhv : h = (⟨"kv.read", []⟩ : Cap) := by simpa using hh
+    subst hhv
+    have htok : (⟨"kv.read", []⟩ : Cap).token = (⟨"kv.write", []⟩ : Cap).token := by
+      have := hcov.1
+      rwa [stripCeilings_token, stripCeilings_token] at this
+    exact absurd htok (by decide)
+
 /-- A child that crosses a boundary through a **spawn handle**: `w` is a
 spawn binder, in scope and admitted by the checker, but not a wiring key,
 so the fragment cannot resolve it. -/
@@ -955,28 +1275,28 @@ def wHandleKid : Comp :=
 
 /-- **The derivation refuses to over-approximate.** The handle-reached
 emission is a statement the checker *admits* (its receiver is in scope,
-`TypedIn (ctxOf wHandleKid)` holds), and the component even holds a `fs`
+`TypedIn (ctxOf wHandleKid)` holds), and the component even holds an `fs`
 capability. The derivation neither drops the crossing nor folds it into
-the held key: it records the unnameable `*`, which no nameable held set
-covers. This is the price of `NameableEmission`, made concrete — and it
-is why `derived_no_star_amplification` carries that hypothesis instead of
-pretending the fragment can see through a handle. -/
+the held element: it records the unnameable `*`, which no nameable held
+set covers. This is the price of `NameableEmission`, made concrete — and
+it is why `derived_no_star_amplification` carries that hypothesis instead
+of pretending the fragment can see through a handle. -/
 theorem derivation_refuses_unnameable :
     TypedIn (ctxOf wHandleKid) (.emit (.call "w" [])) ∧
     starCap ∈ bodyReach witIface wHandleKid ∧
     ¬ ResourceOK (heldCaps witIface (wRouter "Kid")) (bodyReach witIface wHandleKid) := by
   refine ⟨.emit _ _ (.call _ "w" [] (by simp [ctxOf, reqKeys, wHandleKid])
       (by intro a ha; simp at ha)), ?_, ?_⟩
-  · simp [bodyReach, wHandleKid, stmtCaps, emitTarget, targetCaps, svcOf, lookupSvc,
-      svcCaps]
+  · simp [bodyReach, bodyReachN, wHandleKid, stmtCapsN, emitTarget, targetCapsN,
+      svcOf, lookupSvc, svcCapsN]
   · intro hR
     have hstar : starCap ∈ bodyReach witIface wHandleKid := by
-      simp [bodyReach, wHandleKid, stmtCaps, emitTarget, targetCaps, svcOf, lookupSvc,
-        svcCaps]
+      simp [bodyReach, bodyReachN, wHandleKid, stmtCapsN, emitTarget, targetCapsN,
+        svcOf, lookupSvc, svcCapsN]
     obtain ⟨h, hh, hcov⟩ := hR _ hstar
     have hhv : h = wFs ["tmp"] := by
       have : heldCaps witIface (wRouter "Kid") = [wFs ["tmp"]] := by
-        simp [heldCaps, bodyReach, wRouter, capsOfDecls, witIface, wFs]
+        simp [heldCaps, heldCapsN, bodyReachN, wRouter, capsOfDecls, witIface, wFs]
       rw [this] at hh; simpa using hh
     subst hhv
     rw [stripCeilings_wFs] at hcov
@@ -984,8 +1304,9 @@ theorem derivation_refuses_unnameable :
       simpa [stripCeilings, starCap] using hcov)
     exact absurd this (by decide)
 
-/-- The budget composition: a supervisor holding `model(calls=3)` that
-spawns a worker whose service declares no ceiling at all. -/
+/-- The budget composition: a supervisor holding `model.complete(calls=3)`
+that spawns a worker whose service declares the same boundary with no
+ceiling at all. -/
 def wBudgetRouter : Comp :=
   { name := "Budget", requires := [("model", "ModelCalls3")], handles := [],
     body := [], spawns := ["Worker"] }
@@ -1001,30 +1322,34 @@ above, now with both sides read off component shapes: a child whose
 service drops the parent's `calls` ceiling passes the (ceiling-blind)
 resource fold and is caught only by the dedicated budget check. So the
 derivation feeds *both* relations of `Attenuates`, and the conjunction is
-still load-bearing after the sets stop being given. -/
+still load-bearing after the sets stop being given. Both sides name the
+same declared boundary, which is what lets the resource fold admit at all
+— under the key namespace this pair was indistinguishable from the
+laundering one above. -/
 theorem derived_ceiling_check_not_subsumed :
     ResourceOK (heldCaps witIface wBudgetRouter) (reachIn witIface wProgBudget 1 "Worker") ∧
     ¬ CeilingOK (heldCaps witIface wBudgetRouter) (reachIn witIface wProgBudget 1 "Worker") := by
   have hheld : heldCaps witIface wBudgetRouter
-      = [⟨"model", [("calls", .ceiling 3)]⟩] := by
-    simp [heldCaps, bodyReach, wBudgetRouter, capsOfDecls, witIface]
+      = [⟨"model.complete", [("calls", .ceiling 3)]⟩] := by
+    simp [heldCaps, heldCapsN, bodyReachN, wBudgetRouter, capsOfDecls, witIface]
   have hreach : reachIn witIface wProgBudget 1 "Worker"
-      = [⟨"model", []⟩] := by
+      = [⟨"model.complete", []⟩] := by
     simp [reachIn, ownReach, childrenOf, compOf, wProgBudget, wBudgetRouter,
-      wBudgetWorker, bodyReach, stmtCaps, emitTarget, targetCaps, svcOf,
-      lookupSvc, svcCaps, capsOfDecls, witIface]
+      wBudgetWorker, bodyReach, bodyReachN, stmtCapsN, emitTarget, targetCapsN,
+      svcOf, lookupSvc, svcCapsN, capsOfDecls, witIface]
   constructor
   · rw [hheld, hreach]
     intro x hx
-    have hxv : x = (⟨"model", []⟩ : Cap) := by simpa using hx
+    have hxv : x = (⟨"model.complete", []⟩ : Cap) := by simpa using hx
     subst hxv
-    refine ⟨⟨"model", [("calls", .ceiling 3)]⟩, List.mem_cons_self, rfl, fun k v hv => ?_⟩
-    rw [show (stripCeilings ⟨"model", [("calls", PVal.ceiling 3)]⟩).params = [] from rfl,
-      lookupV_nil] at hv
+    refine ⟨⟨"model.complete", [("calls", .ceiling 3)]⟩, List.mem_cons_self, rfl,
+      fun k v hv => ?_⟩
+    rw [show (stripCeilings ⟨"model.complete", [("calls", PVal.ceiling 3)]⟩).params
+        = [] from rfl, lookupV_nil] at hv
     exact absurd hv (by simp)
   · intro hC
     rw [hheld, hreach] at hC
-    obtain ⟨m, hm, _⟩ := hC ⟨"model", []⟩ List.mem_cons_self "calls" 3 rfl
+    obtain ⟨m, hm, _⟩ := hC ⟨"model.complete", []⟩ List.mem_cons_self "calls" 3 rfl
     exact absurd hm (by simp [ceilingOf, lookupV, ceilingVal])
 
 
@@ -1034,8 +1359,9 @@ that proves nothing; the one below is built by `derived_lineage` from a
 real spawn edge of `wProgGood`, and the child's reach is the `/tmp/job-42`
 cone rather than the router's own `/tmp`. `Spends` likewise takes a real
 run and refuses an overdraw, so `spend_within_budget` is not a statement
-about the empty run. `Resolves` and `NameableEmission` are exhibited at
-the same component. -/
+about the empty run. `Resolves`, `NameableEmission` and the `*`-free
+declaration side condition of `derived_no_star_amplification` are
+exhibited at the same component. -/
 theorem capceilings_hypotheses_are_inhabited :
     SpawnsAdmitted witIface wProgGood 1 ∧
     Lineage (heldCaps witIface (wRouter "Job"))
@@ -1045,6 +1371,8 @@ theorem capceilings_hypotheses_are_inhabited :
     Resolves wProgGood (wChild "Job" "FsJob") ∧
     (∀ s ∈ (wChild "Job" "FsJob").body,
       NameableEmission (wChild "Job" "FsJob") s) ∧
+    (∀ kv ∈ (wRouter "Job").requires, ∀ dc : Cap, some dc ∈ witIface kv.2 →
+      dc.token ≠ "*") ∧
     Spends 3 [2, 1] ∧ total [2, 1] = 3 ∧ ¬ Spends 3 [2, 2] := by
   have hA : SpawnsAdmitted witIface wProgGood 1 := derivation_non_vacuous.2.2.1
   have hp : wRouter "Job" ∈ wProgGood := by simp [wProgGood]
@@ -1052,14 +1380,23 @@ theorem capceilings_hypotheses_are_inhabited :
   have hreach : wFs ["tmp", "job-42"] ∈ reachIn witIface wProgGood 1 "Job" := by
     apply ownReach_sub_reachIn
     show wFs ["tmp", "job-42"] ∈ ownReach witIface wProgGood "Job"
-    simp [ownReach, compOf, wProgGood, wRouter, wChild, bodyReach, stmtCaps,
-      emitTarget, targetCaps, svcOf, lookupSvc, svcCaps, capsOfDecls, witIface, wFs]
+    simp [ownReach, compOf, wProgGood, wRouter, wChild, bodyReach, bodyReachN,
+      stmtCapsN, emitTarget, targetCapsN, svcOf, lookupSvc, svcCapsN, capsOfDecls,
+      witIface, wFs]
   have hnam : ∀ s ∈ (wChild "Job" "FsJob").body,
       NameableEmission (wChild "Job" "FsJob") s := by
     intro s hs
     simp only [wChild, List.mem_cons, List.not_mem_nil, or_false] at hs
     subst hs
     exact ⟨"fs", "FsJob", rfl, rfl⟩
+  have hdecl : ∀ kv ∈ (wRouter "Job").requires, ∀ dc : Cap,
+      some dc ∈ witIface kv.2 → dc.token ≠ "*" := by
+    intro kv hkv dc hdc
+    have hkvv : kv = ("fs", "FsTmp") := by simpa [wRouter] using hkv
+    subst hkvv
+    have : dc = wFs ["tmp"] := by simpa [witIface, wFs] using hdc
+    subst this
+    exact by decide
   have hspend : Spends 3 [2, 1] :=
     .step 3 2 [1] (by omega) (.step 1 1 [] (by omega) (.done 0))
   have hover : ¬ Spends 3 [2, 2] := by
@@ -1068,13 +1405,13 @@ theorem capceilings_hypotheses_are_inhabited :
     | step _ _ _ _ h' =>
       cases h' with
       | step _ _ _ hc _ => omega
-  exact ⟨hA, derived_lineage hA hp hch, hreach, .refl _, rfl, hnam, hspend, rfl,
-    hover⟩
+  exact ⟨hA, derived_lineage hA hp hch, hreach, .refl _, rfl, hnam, hdecl, hspend,
+    rfl, hover⟩
 
 
 /-- **Non-vacuity for the ceiling half** (roadmap item 418, step 8). The
-lineage above carries no ceiling, because the `fs` cone declares none, so on its
-own it leaves `lineage_ceiling_le` and
+lineage above carries no ceiling, because the `fs.write` cone declares none, so
+on its own it leaves `lineage_ceiling_le` and
 `budget_never_exceeds_root_ceiling` conditioned on a pair of hypotheses
 never shown to hold together. Here they do: a `model.complete(calls=3)`
 root, a spawn edge that narrows the ceiling to 2, and a counter run

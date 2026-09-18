@@ -124,6 +124,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _boundary_witness import shared_witness_token_reason  # noqa: E402
+
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
     # slice 1 (item 199) — functions-only base surface
@@ -448,8 +452,82 @@ def test_declared_boundary_still_diverges(
     got = emitted["emit_java_src"](ir)
     if reference_fragment not in want:
         pytest.fail(f"{rel} no longer exercises its reference boundary")
+    # A port fragment the reference emits too witnesses nothing (item 1136).
+    # This arm reports through pytest.fail rather than an assertion because the
+    # case is xfail-strict on AssertionError and would otherwise swallow it.
+    reason = shared_witness_token_reason(want, port_fragment)
+    if reason is not None:
+        pytest.fail(f"{rel}: {reason}")
     if port_fragment is not None and port_fragment not in got:
         pytest.fail(f"{rel} no longer exercises its port boundary")
     if port_fragment is None and reference_fragment in got:
         pytest.fail(f"{rel} gained its missing block; review and promote the case")
     assert got == want
+
+
+# ---------------------------------------------------------------------------
+# The deferred in-file test section stays LOUD (issue #1123).
+#
+# The self-host emitters' safety argument is that an unported construct answers
+# with a named `<<UNSUPPORTED-...>>` marker rather than with silence: a marker is
+# visible in the emitted bytes and is pinned here, while a section the port
+# simply skips is invisible to the byte oracle (no corpus document on any tier
+# carries a test section) and is counted as mirrored by
+# tools/selfhost_coverage.py.
+#
+# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+# every self-host slice, and all six ports used to emit NOTHING for it. Each now
+# emits one named marker per test, per section.
+IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
+
+LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
+component P provides p: Ping {
+  provide p { fn ping() = 1 }
+}
+lifecycle test "probe" {
+  load P
+  assert true
+}
+"""
+
+FAULT_TEST_SRC = """service Ping { fn ping() -> Int }
+component P provides p: Ping {
+  let scratch = effect Map.new() undo scratch.drop()
+  provide p { fn ping() = 1 }
+}
+fault test "probe" for P {
+  fail at step 1
+  assert no residue
+}
+"""
+
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param(IN_FILE_TEST_SRC, "public static void testProbe() {",
+                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
+    pytest.param(LIFECYCLE_TEST_SRC, "public static void lifecycleProbe() {",
+                 "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
+])
+def test_deferred_test_sections_are_named(emitted, reference, tmp_path, source,
+                                          reference_token, port_token):
+    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
+    path = tmp_path / "boundary.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_java_src"](ir)
+    assert reference_token in want
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"
+
+
+def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
+        emitted, reference, tmp_path):
+    """`fault test` runs on the python reference tier only (docs/fault-tests.md),
+    so this reference emitter refuses the whole document by name. The port has no
+    refusal channel - a pure self-host emitter fn cannot `fail` - so it names the
+    section with a marker instead of dropping it."""
+    path = tmp_path / "fault.rvl"
+    path.write_text(FAULT_TEST_SRC)
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError, match="fault tests do not lower"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_java_src"](ir)

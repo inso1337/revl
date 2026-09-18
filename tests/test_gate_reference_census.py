@@ -112,7 +112,7 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # gate deliberately does not run:
 #
 # THE TYPE LAYER (docs/design/457). The bulk of this list is the type-layer
-# gap named executably at slice T0: 45 fixtures over `examples/rejections/`
+# gap named executably at slice T0: 43 fixtures over `examples/rejections/`
 # that the reference refuses in its type checker and `selfhost/lower.rvl`'s
 # `admit_src` admits, because the gate runs no type layer yet. (The
 # self-declared async-colour arrow left this gap once the gate learned to parse
@@ -139,58 +139,35 @@ KNOWN_BYPASSES = {
     "examples/rejections/g1_template_undeclared.rvl",
     "examples/rejections/v2_undeclared_fn_var.rvl",
     # -- expression typing (T1/T2) --
-    "examples/rejections/t2_null_in_expression.rvl",
-    "examples/rejections/t11_field_through_opt.rvl",
-    "examples/rejections/t12_str_index.rvl",
+    # The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
+    # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
+    # `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
+    # reference's own sentence and have been struck from this list. What remains
+    # is the optional-chain rule (T2d) and the provide-method BODY, whose type
+    # environment — requirement handles, activation locals, config fields, the
+    # service signature — is the component slice's to build; the gate walks one
+    # over the empty environment today, which decides `null` and the `Float`
+    # literal bound and stays silent about every rule a name would answer for.
     "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-    "examples/rejections/t21_int32_narrow_implicit.rvl",
-    "examples/rejections/t22_int32_width_mix.rvl",
-    "examples/rejections/t23_int32_remainder.rvl",
-    "examples/rejections/t28_bitwise_non_int32.rvl",
-    "examples/rejections/t26_anon_record_update_wrong_type.rvl",
-    "examples/rejections/t27_anon_record_update_undeclared_field.rvl",
-    "examples/rejections/t36_float_literal_range.rvl",
-    # The field-read-on-`Any` family. These three were ALREADY type-layer
-    # false-admits; they were merely hidden behind a `pub extern` parse refusal
-    # ("unexpected declaration"), which made the census file them as
-    # `tag-mismatch/T1->BAD` — the right verdict for the wrong reason. `p_top`
-    # now accepts `pub` before every declaration form the reference accepts it
-    # before, so the parse reaches the body and the real state of the gate shows:
-    # the reference refuses "field read `.x` on a value of type `Any`" in its
-    # TYPE layer and the gate runs no type layer. Nothing new is admitted that
-    # was not already outside the covered surface.
-    "examples/rejections/t29_field_read_on_any.rvl",
     "examples/rejections/t30_field_read_on_any_provide_method.rvl",
-    # the same `Any` field read, reached through a backend fixture rather than a
-    # rejection fixture. It is the one entry on this list that has no row in
-    # `TYPE_LAYER_GAP`: that pin addresses its fixtures by bare name under
-    # `examples/rejections/`, and this program does not live there.
-    "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
     # -- calls and signatures --
-    "examples/rejections/t10_call_arity.rvl",
-    "examples/rejections/t15_generic_call_site.rvl",
-    # The same story as t29/t30, one slice later. `fn typo[T](xs: List[U])` was
-    # refused by the gate's PARSER — it did not spell a type-parameter list at
-    # all — so the census filed it as `tag-mismatch/T1->BAD`: the right verdict
-    # for the wrong reason. `p_fn` now steps over `[T, U]` the way the reference
-    # does, the parse reaches the body, and the gate's real state shows. The
-    # reference refuses the ARGUMENT TYPE in its type layer and this gate runs no
-    # type layer; its two neighbours above are the same family.
-    "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
-    "examples/rejections/v2_map_set_value_mismatch.rvl",
-    "examples/rejections/v2_map_value_unknown_method.rvl",
-    "examples/rejections/arith_zero_divisor.rvl",
-    "examples/rejections/t24_opaque_receiver_builtin.rvl",
-    "examples/rejections/host_method_not_on_surface.rvl",
-    "examples/rejections/g4_extern_undo_wrong_arg_type.rvl",
+    # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
+    # type parameters, the arity window, `unify`/`substitute` at a generic call
+    # site, the host stub surface, `_BUILTIN_SIG` with its receiver families and
+    # bottom learning, and the four refusals the reference makes while LOWERING
+    # a method call. All nine of this family's fixtures now refuse with the
+    # reference's own tag and sentence and are struck from this list.
     # -- arrows and function values --
     "examples/rejections/t17_arrow_body_unchecked.rvl",
     "examples/rejections/t32_arrow_value_result_flows.rvl",
     "examples/rejections/t33_arrow_value_arity.rvl",
     "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
     # -- return paths and match --
-    "examples/rejections/t8_missing_return.rvl",
-    "examples/rejections/t9_return_path_incomplete.rvl",
+    # The RETURN-PATH half landed with docs/design/457 T3b: `fb_function` runs
+    # `_check_returns_on_every_path` over the statement tree the fn-body walk
+    # already builds, so `t8_missing_return` and `t9_return_path_incomplete`
+    # now refuse with the reference's message AND its line and are struck from
+    # this list. What remains needs the variant table and the arm algebra.
     "examples/rejections/t13_unknown_match_case.rvl",
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --
@@ -210,7 +187,6 @@ KNOWN_BYPASSES = {
     "examples/rejections/t16_provide_method_missing_return.rvl",
     "examples/rejections/t31_index_non_int_provide_method.rvl",
     "examples/rejections/t3_config_default_type.rvl",
-    "examples/rejections/a6_method_not_in_service.rvl",
     # -- NOT the type layer, and pre-dating this design --
     # `_check_spawn_attenuation`'s PARAMETERIZED capability-widening refusal
     # (item 294): `fs.write(path="/etc")` is not within the held
