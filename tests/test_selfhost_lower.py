@@ -5600,8 +5600,6 @@ _TFB_LATER_SLICES = (
     # HOST-METHOD refusal.
     "builtin `",
     "stdlib method `",
-    # G1 name READS — resolving one needs the whole callable universe.
-    "is not declared in this function",
     # item 485: the `List` index bounds pass, which runs over a body before it
     # is lowered and so precedes every verdict here.
     "is out of range for a",
@@ -5620,7 +5618,7 @@ _TFB_LATER_SLICES = (
 # The tags this slice issues. A program whose reference minimum carries a tag
 # outside this set is decided by some OTHER phase of the gate, and which of the
 # two refusals is the minimum is that phase's ordering question, not this one's.
-_TFB_TAGS = ("T1", "T2", "TYPE")
+_TFB_TAGS = ("T1", "T2", "TYPE", "G1")
 
 
 @pytest.mark.parametrize("seed", [11, 23, 97])
@@ -5719,6 +5717,206 @@ def test_the_type_layer_stays_silent_where_it_cannot_decide(admit):
         "  m = m.set(\"k\", 1)\n  return m\n}\n",
         # a `Float` literal at the very edge of binary64 is finite
         "fn f() -> Float {\n  return 1.7976931348623157e308\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+
+
+# ==================== name resolution (docs/design/457, the G1 read position) =
+#
+# `_lower_pure_expr`'s `ExprVar` arm. `_nr_program` draws a module `fn` whose
+# body READS names from four disjoint pools — the fn's own binders, the module's
+# declarations, the callable universe (`Map`/`Pool`/`Job`/`Stream`,
+# `Some`/`None`/`Ok`/`Err`, `endorse`), and names nothing declares — at every
+# position the lowering walk descends through: a bare read, a call callee, a
+# call argument, a field target, an index, an interpolation, a ternary arm, a
+# list element, a record field and a receiver-first list transform.
+#
+# It is a DIFFERENTIAL draw compared on TAG and MESSAGE, not an expectation
+# table, and the absolute half of the bound (never refuse what the reference
+# admits) is what the mixture of declared and undeclared pools is for.
+
+_NR_HEAD = """type NrRow = { h: Str }
+type NrShape = NrCircle | NrSquare(Int)
+
+fn nr_helper(n: Int) -> Int {
+  return n
+}
+
+extern pure fn nr_ext(s: Str) -> Str = @py { return s }
+
+"""
+
+# Names the reference resolves: the fn's binders, the module's declarations and
+# the callable universe. Nothing drawn from here may EVER be refused.
+_NR_DECLARED = ["a", "b", "c", "loc", "nr_helper", "nr_ext", "Map", "Pool",
+                "Job", "Stream", "Some", "None", "Ok", "Err", "endorse",
+                "NrCircle", "NrSquare"]
+# Names nothing declares. The item-384 redirect table is deliberately absent:
+# those draw the reference's own sentence, not G1, and the token scanner that
+# ports them runs ahead of this walk.
+_NR_UNDECLARED = ["zz", "nobody", "missing", "nr_absent", "qqq", "list_map"]
+
+
+def _nr_name(rng):
+    return rng.choice(_NR_DECLARED if rng.randrange(3) else _NR_UNDECLARED)
+
+
+def _nr_expr(rng, depth=1):
+    n = _nr_name(rng)
+    k = rng.randrange(10 if depth else 1)
+    if k == 0:
+        return n
+    if k == 1:
+        return f"{n}({_nr_expr(rng, 0)})"
+    if k == 2:
+        return f"nr_helper({_nr_expr(rng, 0)})"
+    if k == 3:
+        return f"{n}.h"
+    if k == 4:
+        return f"{n}[0]"
+    if k == 5:
+        return f"`x${{{_nr_expr(rng, 0)}}}y`"
+    if k == 6:
+        return f"(a > 0 ? {_nr_expr(rng, 0)} : {_nr_expr(rng, 0)})"
+    if k == 7:
+        return f"[{_nr_expr(rng, 0)}]"
+    if k == 8:
+        return "{ h: " + _nr_expr(rng, 0) + " }"
+    return f"{n}.{rng.choice(['map', 'filter', 'reduce'])}(nr_helper)"
+
+
+def _nr_stmt(rng):
+    e = _nr_expr(rng)
+    tag = rng.randrange(99)
+    k = rng.randrange(6)
+    if k == 0:
+        return f"let s{tag} = {e}"
+    if k == 1:
+        return f"var v{tag} = {e}"
+    if k == 2:
+        return e
+    if k == 3:
+        return f"if (a > 0) {{ let w{tag} = {e} }}"
+    if k == 4:
+        return f"while (false) {{ let u{tag} = {e} }}"
+    return f"for (it{tag} of c) {{ let y{tag} = {e} }}"
+
+
+def _nr_program(rng) -> str:
+    body = "\n  ".join(_nr_stmt(rng) for _ in range(rng.randrange(1, 4)))
+    return (f"{_NR_HEAD}fn f(a: Int, b: Str, c: List[Int]) -> Int {{\n"
+            f"  let loc = a\n"
+            f"  {body}\n  return a\n}}\n")
+
+
+# The families whose EARLIER reference refusal this slice does not build, so a
+# program carrying one may be refused later by the gate, or not at all.
+_NR_LATER_SLICES = (
+    # T2d: a match arm's payload binding, which the lowering walk does not enter
+    "is not a case of",
+    # item 485: the List index bounds pass runs over a body before it is lowered
+    "is out of range for a",
+    # the NAMED record's field-existence rule (the declared field SET)
+    "has no field `",
+    # the ordering family, code-less in the reference
+    "cannot order `",
+)
+
+_NR_TAGS = ("G1", "T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
+
+
+@pytest.mark.parametrize("seed", [3, 19, 41])
+def test_name_resolution_fuzz_agrees_on_tag_and_message(admit, seed):
+    """THE BOUND, over 400 drawn name-reading fn bodies per seed.
+
+      * the gate NEVER refuses a program the reference admits — absolute, with
+        no allowance. Two thirds of every drawn name comes from the DECLARED
+        pool, so this half of the claim is the one that carries the risk;
+      * where the reference's own refusal is in this slice's vocabulary and
+        outside a later slice's family, the gate's verdict is the reference's
+        TAG AND SENTENCE, byte for byte.
+    """
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    g1 = 0
+    for _ in range(400):
+        src = _nr_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _NR_TAGS:
+            continue
+        if any(m in ref_msg for m in _NR_LATER_SLICES):
+            continue
+        compared += 1
+        if ref_tag == "G1":
+            g1 += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 350, drawn
+    assert compared >= 150, compared
+    assert g1 >= 50, g1
+
+
+def test_the_name_resolution_rule_reaches_every_lowered_position(admit):
+    """Each position the lowering walk descends through, as a named case. A
+    reader that stopped short of one of these would leave the family half
+    built, and the fuzz above would only report it as a rate."""
+    head = "type NrRow = { h: Str }\n\nfn g(n: Int) -> Int { return n }\n\n"
+    bodies = [
+        "  return zz",
+        "  return zz(1)",
+        "  return g(zz)",
+        "  return zz.h",
+        "  return zz[0]",
+        '  return `a${zz}b`',
+        "  return (a > 0 ? zz : 1)",
+        "  let xs = [zz]  return 1",
+        "  let r = { h: zz }  return 1",
+        "  let y = -zz  return 1",
+        "  let y = zz + 1  return 1",
+        "  if (a > 0) { let y = zz }  return 1",
+        "  while (false) { let y = zz }  return 1",
+        "  for (v of [1]) { let y = zz }  return 1",
+        "  var m = 1  m = zz  return 1",
+        "  assert zz  return 1",
+    ]
+    for body in bodies:
+        src = f"{head}fn f(a: Int) -> Int {{\n{body}\n}}\n"
+        assert admit(src) == "G1|`zz` is not declared in this function", src
+        _agree(admit, src)
+
+
+def test_the_name_resolution_rule_stays_silent_where_it_cannot_decide(admit):
+    """The other half of the bound as named cases: programs the reference
+    ADMITS whose shape this rule approximates, and says nothing about."""
+    admitted = [
+        # a nullary ADT case is a VALUE, not an unresolved name
+        "type Shape = Circle | Square\n\nfn f() -> Shape {\n  return Circle\n}\n",
+        # a module `fn` read as a function VALUE, not called
+        "fn g(n: Int) -> Int { return n }\n"
+        "fn f() -> Int {\n  let h = g\n  return h(1)\n}\n",
+        # an `extern`'s name, which no signature row of this reader spells in
+        # full when the declaration carries a witness or a slot
+        'extern pure fn e(s: Str) -> Str = @py { return s }\n'
+        'fn f() -> Str {\n  return e("x")\n}\n',
+        # the loop binder is live inside the body and gone after it
+        "fn f(xs: List[Int]) -> Int {\n  var t = 0\n"
+        "  for (x of xs) { t += x }\n  return t\n}\n",
+        # a `let` may mention its own name: the reference binds it in `scope`
+        # before it lowers the initialiser
+        "fn f(n: Int) -> Int {\n  let n2 = n\n  return n2\n}\n",
+        # `endorse` and the host roots
+        'fn f() -> Int {\n  let m = Map.new()\n  let p = Map.empty()\n'
+        '  return 1\n}\n',
     ]
     for src in admitted:
         assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
