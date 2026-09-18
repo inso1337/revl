@@ -61,7 +61,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
 | **A6** provide-methods match the service signature | **none** | 0 | partial | the oracle's P row is a *capability bound* check, not the signature match, and `methodBoundOK` is a private restatement. **Unbuilt work** |
 | **A8** mid-body failure reverts and contains | full over the WAL model | 18 | **yes** (1620 O rows) | the row WRITES each scenario's records as a real JSON-Lines WAL and runs `src/revl/recovery.py` over it, diffing recover's own verdict, the set it actually applied to the `World`, and its reported residue against the model's `outcome` / `replayed` / `reported`. It found the legacy-`effect` family's item-309 fence branch missing from `RevL.Lemmas.dispose` (see below). Crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
-| **A9** provide key declared in `provides` | **none** | 0 | no | **Unbuilt work** |
+| **A9** provide key declared in `provides` | full over the installed blocks | 9 | **yes** (235 A9 rows, 1 agree-A9) | the installed `provide k { … }` block keys are modelled beside the L0 `LComponent` (`RevL.A9.Installed`, no L0 edit); `A9OK` is membership of every block key in the `provides` clause, and `installed_block_is_slot` is the bridge to G2/G3: under A9 every block answers a `(key, realm)` slot of the universe `LinkOK` reasons over, and `undeclared_block_is_no_slot` is the refused fixture's shape. The oracle exports the blocks as `PB` facts (the `C` row reads the clause, not the block) and decides `a9B` per installing component; `a9_coverage` fails the gate unless the corpus carries both an admitted provider and the refused shape (`examples/rejections/a9_provide_key_not_declared.rvl`, `agree-A9`; `missed-A9` is FATAL). The double install ("provision `k` is installed twice", uncoded) is `NoDoubleInstall`, proved distinct from A9 and not under the row: no corpus file installs twice and the refusal carries no code. **Not enforced by the checker and so not stated**: a declared key with no block |
 | **T1/T2/T3** typing, `Opt[T]`, holes | **none** | 0 | no | the type checker is outside the guarantee backbone. **Out of scope by kind** |
 | **R4** no residue | full for the **abort path** | 9 | **yes** (the residue column of the 1620 O rows) | the column is the model's `reported`, diffed against `recover`'s `residue.outstanding`; it is printed only under `outcome = rolledBack`, which is R4's own scope condition. Stated over the abort; the roll-forward window's `flush-residue` surface is still not modelled and the column says `n/a` there rather than agreeing about a claim neither side makes. **Unbuilt work** |
 | items 66/294/260 capability ceilings | full, with the held/reach sets **derived** from component shapes | 23 | **yes** (8 W rows) | the ceiling half is now EXERCISED: `examples/budget_attenuation.rvl` (50 ≤ 100, admitted) and `examples/rejections/g4_spawn_widens_budget.rvl` (1000 > 100, refused by the ceiling half alone — strip the ceilings and the resource fold finds nothing uncovered), with `attenuation_coverage` failing the gate if the corpus stops containing both. Before those two files the row agreed over 6 edges with `ceilingOKB` never entered. Also unmodelled: parse-time canonicalization and `cap_order.disjoint`'s D2 same-token clause |
@@ -69,7 +69,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 
 Three summary readings of that map:
 
-- **The oracle reaches G2, G3, G4, G7, A8, R4 and the capability order.**
+- **The oracle reaches G2, G3, G4, G7, A8, R4, A9 and the capability order.**
   G5, G6, G8 and G9 are still proved against the design documents and the
   reference source read by hand. That remains the largest gap in the
   layer, and it is a gap in *coverage of the gate*, not in the proofs. The
@@ -82,8 +82,8 @@ Three summary readings of that map:
   and not a text: G7 drives `backends/python/runtime.py` over an
   enumerated teardown corpus, and A8/R4 drive `src/revl/recovery.py` over
   an enumerated WAL corpus.
-- **Seven guarantee codes have no theorem at all** (A1, A2, A3, A5, A6,
-  A9, T1-T3). Of those, A5 is the one worth naming twice: G7 proves how a
+- **Six guarantee codes have no theorem at all** (A1, A2, A3, A5, A6,
+  T1-T3). Of those, A5 is the one worth naming twice: G7 proves how a
   `compensation` entry is disposed without anything proving one has to
   exist.
 - **One row is UNPROVED by construction** (G9 path coverage) and says so
@@ -159,17 +159,18 @@ Three summary readings of that map:
 | `RevL.CapCeilings.no_star_amplification` | item 66 — the host boundary | **proved** | `propext` | `*` is covered only by `*`, so it is never manufactured |
 | `RevL.CapCeilings.parameter_widening_refused` | item 294 — non-vacuity | **proved** | `propext` | tracks `examples/rejections/g4_spawn_widens_parameter.rvl` |
 | `RevL.CapCeilings.ceiling_check_not_subsumed` | item 260 — non-vacuity | **proved** | `propext` | the resource fold is ceiling-blind; the budget check is not |
-| `RevL.CapCeilings.derived_held_tokens_are_declared_keys` | TODO 2(a) — the `capKeys` bridge | **proved** | `propext, Quot.sound` | derived held tokens are exactly the declared wiring keys |
-| `RevL.CapCeilings.derived_reach_is_emit_surface` | TODO 2(a) — `_collect_emit_caps_pairs` | **proved** | `propext, Quot.sound` | only `emit` contributes; an `emit` contributes its key's cone |
-| `RevL.CapCeilings.unnameable_receiver_is_star` | TODO 2(a) — the named residue | **proved** | `propext` | handle / head-less receivers derive exactly `[*]` |
+| `RevL.CapCeilings.derived_held_tokens_are_declared_keys` | TODO 2(a) — the `capKeys` bridge, split by namespace | **proved** | `propext, Quot.sound` | the BOUND column's tokens are exactly the declared wiring keys; every element of the CAPABILITY column is a declared capability, or that key in the reserved `key:` namespace — never a bare key |
+| `RevL.CapCeilings.derived_reach_is_emit_surface` | TODO 2(a) — `_collect_emit_caps_pairs` | **proved** | `propext, Quot.sound` | only `emit` contributes; an `emit` contributes the cone the service behind its key declares |
+| `RevL.CapCeilings.unnameable_receiver_is_star` | TODO 2(a) — the named residue | **proved** | `propext` | handle / head-less receivers derive exactly `[*]`, in both columns |
 | `RevL.CapCeilings.derived_lineage` | TODO 2(a) — text to `Lineage` | **proved** | `propext` | an admitted activation spawn edge is a lineage edge |
 | `RevL.CapCeilings.derived_attenuation_monotone` | TODO 2(a) — items 66/294 | **proved** | `propext, Quot.sound` | `attenuation_monotone` over derived sets; the closure carries the subtree |
 | `RevL.CapCeilings.derived_lineage_ceiling_le` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | `lineage_ceiling_le` with its `Lineage` hypothesis discharged |
 | `RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | the end-to-end budget claim, rooted in a component shape |
-| `RevL.CapCeilings.derived_confinement_within_ceiling` | TODO 2(a) + G6 | **proved** | `propext, Quot.sound` | `TypedIn (capKeys Γ)` discharged from `TypedIn (reqKeys c)` |
-| `RevL.CapCeilings.derived_no_star_amplification` | TODO 2(a) — item 66 | **proved** | `propext, Quot.sound` | the `*`-free side condition is itself derived |
+| `RevL.CapCeilings.derived_confinement_within_ceiling` | TODO 2(a) + G6 | **proved** | `propext, Quot.sound` | `TypedIn (capKeys Γ)` discharged from `TypedIn (reqKeys c)`; clause (a) reads the key namespace (`heldBounds`), clause (b) the declared one (`heldCaps`) |
+| `RevL.CapCeilings.derived_no_star_amplification` | TODO 2(a) — item 66 | **proved** | `propext, Classical.choice, Quot.sound` | the `*`-free side condition is itself derived, now from the declared cones; a reserved `key:` element is never `*` |
 | `RevL.CapCeilings.derivation_non_vacuous` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | derived sets carry valuations; `g4_spawn_widens_parameter` refused from the text |
-| `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into the held key |
+| `RevL.CapCeilings.same_key_different_boundary_refused` | TODO 2(a) — the namespace split | **proved** | `propext, Classical.choice, Quot.sound` | one `requires` key over two different declared boundaries: the bound column derives the same list on both sides and attenuates, the capability column refuses the edge |
+| `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into a held element |
 | `RevL.CapCeilings.derived_ceiling_check_not_subsumed` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | both relations still load-bearing once the sets are derived |
 | `RevL.G9.origin_persists_or_is_declassified` | G9 (item 249) — the core lemma | **proved** | `propext` | an origin survives a flow, or a declassifier on that path cleared it |
 | `RevL.G9.no_authority_from_untrusted` | G9 — untrusted data gains no authority | **proved** | `propext` | a `Trusted[T]` sink admits a tainted value only after an explicit declassification of that origin |
@@ -269,6 +270,15 @@ Three summary readings of that map:
 | `RevL.G9.g9_context_hypotheses_are_inhabited` | G9 + G6, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | a `TypedIn` crossing with a non-empty head list, an untrusted-free scope and an untrusted one |
 | `RevL.R4.r4_side_conditions_are_inhabited` | R4, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | freshness and disjointness hold at both traces, with the emitted set empty on one and not the other |
 | `RevL.A8.a8_hypotheses_are_inhabited` | A8, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | `SemLog`, a fork-free log, a discharged seq, and a `WAFrom` run that really fires an undeclared inverse under a unique seq space |
+| `RevL.A9.a9B_iff` | A9 — the oracle's decision (issue 1167) | **proved** | `propext, Quot.sound` | `a9B i = true ↔ A9OK i`: the `A9` row prints the model's judgment |
+| `RevL.A9.noDoubleInstallB_iff` | A9 — the uncoded sibling ("installed twice") | **proved** | `propext` | `noDoubleInstallB i = true ↔ NoDoubleInstall i` |
+| `RevL.A9.installed_block_is_slot` | A9 — the bridge to G2/G3 | **proved** | `propext, Quot.sound` | under `A9OK` every installed block's `(key, realm key)` is a `slots` member of its component |
+| `RevL.A9.undeclared_block_is_no_slot` | A9 — the refused shape | **proved** | `propext, Classical.choice, Quot.sound` | without `A9OK` some installed block is a slot of the component in NO realm |
+| `RevL.A9.installed_block_uniquely_provided` | A9 + `LinkOK` | **proved** | `propext, Quot.sound` | in an admitted composition an installed block's slot is provided by its own component and by no deeper one |
+| `RevL.A9.installed_slots_nodup` | A9 — no double install | **proved** | `propext, Quot.sound` | one block per slot: `NoDoubleInstall` makes the installed slots pairwise distinct |
+| `RevL.A9.a9_not_vacuous` | A9, non-vacuity | **proved** | `propext, Quot.sound` | the fixture refused; both of its hint's fixes admitted, the renamed one also linking |
+| `RevL.A9.a9_rules_are_distinct` | A9, anti-tautology | **proved** | `propext, Quot.sound` | `A9OK` and `NoDoubleInstall` separated in both directions |
+| `RevL.A9.a9_row_not_vacuous` | A9, oracle row non-vacuity | **proved** | none | same manifest, different block, different verdict: the row reads the `PB` fact, not the `C` fact |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -683,7 +693,9 @@ verdict file and exit 0.
 
 Facts exported: component manifests (M — with the component's `isolate`
 realm map and a `member`/`template` role), require-binding resolutions
-(R), provide-key resolutions (C), per-statement classifications (T), call
+(R), provide-key resolutions (C — off the `provides` clause), the
+installed provide blocks (PB — off the `provide k { … }` bodies, one row
+per block; issue 1167), per-statement classifications (T), call
 facts with marker context (U), service-method emission bounds (B) and a
 scoped bound's declared entries (Q), the **reachability** facts that let
 the model see past the marker — the capabilities a component's `requires`
@@ -791,6 +803,19 @@ Verdicts:
   flips when a leaking head is accepted. Host builtins and let-bound locals
   count as reach, so a component that uses them is a faithful `fail`, not a
   claim it is unsafe.
+- **A9 rows (per installing component, issue 1167)**: `RevLOracle.a9RowB`,
+  which IS `RevL.A9.a9B` over the component's `LComponent` (from M) beside
+  its installed block keys (from PB); `a9RowB_iff` proves the printed Bool
+  is exactly `RevL.A9.A9OK`. The reference recomputes membership of every
+  PB key in the M row's clause independently. One row per component that
+  installs at least one block — a block-less component would agree
+  vacuously and gets none. The fixture is a `fail` on both sides and files
+  under `agree-A9`; `a9_coverage` fails the gate unless the corpus carries
+  both an admitted provider and the refused shape, and
+  `RevL.A9.a9_row_not_vacuous` proves the verdict moves with the block
+  alone (same manifest, renamed block, different verdict). Blinding the
+  printed verdict on the fixture yields one `a9` mismatch and a FATAL
+  `missed-A9`; blinding `a9RowB` itself breaks the `a9RowB_iff` proof.
 
 ### The G7 row, and what it is evidence of
 
@@ -954,13 +979,15 @@ only the closure is local, the judgment it feeds is the model's).
 ### Census
 
 Nothing is dropped and nothing is counted without being named. Over the
-corpus as of `chore/formal-review`: **305 .rvl files → 189 components →
-414 statements = 137 modeled + 140 componentless + 28 refused at parse**,
-and **654 verdicts compared (137 files + 189 components + 27 provide
-methods + 6 spawn edges + 28 parse refusals + 267 teardown scenarios),
-654 agree, 0 mismatches**. (The corpus grows; the shape of the census
-does not. The step-6 numbers were 296 / 182 / 403 and 371 verdicts; the
-387 before the G7 row.)
+corpus as of the A9 row (issue 1167): **454 .rvl files → 310 components →
+849 statements = 216 modeled + 210 componentless + 28 refused at parse**,
+and **4761 verdicts compared (216 files + 310 components + 64 provide
+methods + 18 spawn edges + 28 parse refusals + 267 teardown scenarios +
+1620 recoveries + 849 confinements + 849 surfaces + 305 teardowns + 235
+provide-block components), 4761 agree, 0 mismatches**. (The corpus grows;
+the shape of the census does not. The step-6 numbers were 296 / 182 / 403
+and 371 verdicts; the 387 before the G7 row; 654 as of
+`chore/formal-review`; 4526 before the A9 row.)
 
 - The 28 parse refusals are LISTED by name and code, not counted. The
   previous "(28 parse-error skips, loud)" parenthesis hid
@@ -977,14 +1004,18 @@ does not. The step-6 numbers were 296 / 182 / 403 and 371 verdicts; the
   `harness/out/no_manifest.txt`.
 
 Checker alignment: each modeled file is compiled with the real checker
-and its refusal code compared against the formal verdicts. `missed-G4`
-and `missed-G2` are **gate failures** (item 418 step 7), not findings:
-the checker refusing where the model sees nothing is the model being
-weaker than what revl enforces. `formal-strict` — the model refusing what
-the checker accepts — stays informational; it is the safe direction and
-names fragment gaps. Current buckets: 93 agree-accept, 2 agree-G2, 1
-agree-G3, 7 agree-G4, 34 out-of-fragment, and **0 missed-G4, 0 missed-G2,
-0 formal-strict, 0 formal-found-other**.
+and its refusal code compared against the formal verdicts. `missed-G4`,
+`missed-G2` and `missed-A9` are **gate failures** (item 418 step 7; issue
+1167 for A9), not findings: the checker refusing where the model sees
+nothing is the model being weaker than what revl enforces.
+`formal-strict` — the model refusing what the checker accepts — stays
+informational; it is the safe direction and names fragment gaps. Current
+buckets: 141 agree-accept, 2 agree-G2, 1 agree-G3, 15 agree-G4, 1
+agree-A9, 53 out-of-fragment, and **0 missed-G4, 0 missed-G2, 0
+missed-A9**, with 1 formal-strict and 2 formal-found-other carried as
+informational findings. The A9 row moved
+`examples/rejections/a9_provide_key_not_declared.rvl` from
+out-of-fragment to agree-A9 and nothing else.
 
 Movements from the pre-step-6 buckets (52 agree-accept, 2 agree-G2, 6
 agree-G4, 36 formal-strict, 13 formal-found-other, 21 out-of-fragment),
@@ -1070,15 +1101,40 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    (a) ~~*theorem side*~~ — **done**. `held` and `reach` are now
    FUNCTIONS of a component shape, not given lists:
    `stmtCaps`/`bodyReach` track `_collect_emit_caps_pairs` (emit steps
-   only; a `req` receiver resolves to its wiring key's cone through
-   `_cap_keyed`, anything else to `*`), `heldCaps` tracks
-   `_held_capabilities_pairs`, `reachIn` tracks `_spawn_surface_closure`
-   as a fuel-indexed unfolding, and `SpawnsAdmitted` tracks
-   `_check_spawn_attenuation` over activation-body spawns only
-   (`_activation_spawn_sites`). The `capKeys` bridge stops being an
-   assumption: `derived_held_tokens_are_declared_keys` proves the derived
-   held set's tokens are exactly the component's declared `requires`
-   keys. Five of the nine theorems are re-stated with their `Lineage` (and
+   only; a `req` receiver resolves through `_cap_keyed` to the
+   capabilities the service behind the key DECLARES, anything else to
+   `*`), `heldCaps` tracks `_held_capabilities_pairs`, `reachIn` tracks
+   `_spawn_surface_closure` as a fuel-indexed unfolding, and
+   `SpawnsAdmitted` tracks `_check_spawn_attenuation` over
+   activation-body spawns only (`_activation_spawn_sites`).
+
+   A crossing has TWO names here, as it does in the harness (issue 1132)
+   and in `lower.py`: the declared boundary the `emission[...]` clause
+   names, and the local wiring key it was reached through. Both are
+   derived, by one traversal under two `Namer`s — `capsOfDecls` for the
+   capability column (`heldCaps`/`bodyReach`, what `SpawnsAdmitted` and
+   every `Lineage` theorem fold over) and `boundsOfDecls` for the key
+   column (`heldBounds`/`bodyBounds`, what `capKeys` and G6 confinement
+   read). `Iface` now carries a service's whole emission declaration, one
+   `Decl` per declared capability and one `none` per emission method that
+   names no capability list, which is `_held_capabilities_pairs` arm for
+   arm. An entry that declares nothing falls back to the key in the
+   reserved `key:` namespace (`lower._WIRE_NS`), so a key spelling is
+   never a bare fold element in the boundary namespace. The `capKeys` bridge stops being an
+   assumption: `derived_held_tokens_are_declared_keys` proves the bound
+   column's tokens are exactly the component's declared `requires` keys,
+   and that no element of the capability column is a bare key.
+   `same_key_different_boundary_refused` is why the split is not
+   cosmetic: a parent wired `kv: KvA` spawning a child wired `kv: KvB`
+   derives the SAME bound list on both sides — the fold over it
+   attenuates and admits the edge — while the capability column refuses
+   it, which is what the reference does under G4
+   (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
+   Running the fold in the key namespace, which this section did before
+   issue 1142, made the derived layer a theory about a different language
+   than the one that ships.
+
+   Five of the nine theorems are re-stated with their `Lineage` (and
    for confinement, `TypedIn (capKeys Γ)`) hypotheses discharged from the
    program text — `derived_attenuation_monotone`,
    `derived_lineage_ceiling_le`,
@@ -1102,6 +1158,11 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    `derived_no_star_amplification` and on half of
    `derived_confinement_within_ceiling`, and
    `derivation_refuses_unnameable` is the concrete price of dropping it.
+   `derived_no_star_amplification` no longer needs a side condition on
+   the wiring keys themselves: a key with nothing declared behind it is
+   folded in the reserved namespace, which `wireCap_token_ne_star` shows
+   is never `*`; what it needs instead is that no service behind a
+   declared key declares `*`.
    One precision loss: an L0 call head is the receiver ROOT, so a key's
    cone unions over the service's emission methods where the reference
    picks the method being called — the derived gate is therefore at least
@@ -1275,7 +1336,7 @@ importing outside L0, an L1 farm file importing anything but L0 or
 importing another farm file, and an L2 file importing another L2 file. It
 also fails when an L1 or L2 module is missing from `RevL.lean`, because a
 module outside the root import is a module outside the build and therefore
-outside `CheckAxioms.lean`. The tree passes today: 5 L0, 7 L1, 16 L2
+outside `CheckAxioms.lean`. The tree passes today: 5 L0, 7 L1, 17 L2
 modules, no upward or sideways import.
 
 ### The oracle's own bridge theorems (`chore/formal-review`)

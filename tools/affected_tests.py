@@ -671,14 +671,16 @@ def select(changed, root) -> dict:
         # A formal/ change affects the formal gate and one pytest module, and
         # nothing else (plus lint, which is always run). Deliberately narrower
         # than the fail-safe default so proof-engineering iterations stay fast
-        # on the inner loop. The pytest module is the python half of
-        # `formal/harness/diff_corpus.py` — the rules that decide its `P` and
-        # `W` rows — which `make formal` can only collect with a Lean
-        # toolchain installed, and which is therefore the half that can move
-        # unnoticed on a machine without one.
+        # on the inner loop. The two pytest modules are the halves `make
+        # formal` can only collect with a Lean toolchain installed, and which
+        # are therefore what can move unnoticed on a machine without one: the
+        # python rules deciding `diff_corpus.py`'s `P` and `W` rows, and the
+        # namespace the L2 derived layer states its theorems in.
         if f.startswith("formal/") or f.startswith("tests/formal_corpus/"):
             gates.add("formal")
             pytest_nodes.add("tests/test_formal_attenuation_namespace.py")
+            pytest_nodes.add("tests/test_formal_derived_namespace.py")
+            pytest_nodes.add("tests/test_formal_a9_row.py")
             reasons.append(f"{f} (formal gate)")
             continue
 

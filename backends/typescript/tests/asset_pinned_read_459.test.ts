@@ -144,6 +144,73 @@ describe('the jail', () => {
   })
 })
 
+// ===========================================================================
+// the window between the check and the read
+// ===========================================================================
+describe('the window between the check and the read', () => {
+  // `fsReadPinned` resolves the path ONCE (family 1, `resolveWithin`) and the
+  // read then re-resolves the LEAF by name, so a competing writer that swaps
+  // the leaf in between gets the read to follow a link no guard ever saw. That
+  // window is this module's stated difference from the py directory-fd walk,
+  // and it is what `rawReadPinnedConfined`'s `O_NOFOLLOW` open closes: after the
+  // fix the leaf is opened by the syscall that decides, and its content is read
+  // from THAT descriptor, so there is no observation left for a swap to beat.
+  //
+  // A name cannot be a regular file and a symlink at the same time, so the
+  // pre-swap world is reproduced by making the two OBSERVATIONS the guard makes
+  // about the leaf report it while the name on disk is the link. That is the
+  // same race with the timing made deterministic, not a weaker test: the swap
+  // is real on disk, and what the fix changes is that the read no longer
+  // depends on any observation of the leaf at all.
+  function withStaleLeafObservation<T>(leaf: string, body: () => T): T {
+    const realpath = fs.realpathSync as unknown as {
+      native: (p: fs.PathLike) => string
+    }
+    const proto = fs.Stats.prototype as unknown as Record<string, () => boolean>
+    const realNative = realpath.native
+    const realIsSymbolicLink = proto.isSymbolicLink
+    const realIsFile = proto.isFile
+    // the guard resolves the leaf before the swap and types it before the swap
+    realpath.native = (p) => (String(p) === leaf ? leaf : realNative(p))
+    proto.isSymbolicLink = () => false
+    proto.isFile = () => true
+    try {
+      return body()
+    } finally {
+      realpath.native = realNative
+      proto.isSymbolicLink = realIsSymbolicLink
+      proto.isFile = realIsFile
+    }
+  }
+
+  it('refuses a leaf swapped for a symlink out of the root after the guard looked', () => {
+    // The load-bearing one. The target holds EXACTLY the pinned bytes, so a read
+    // that followed the link would pass the digest check and hand the caller
+    // content from outside the jail: with the name-based read this returns
+    // `Ok(TEMPLATE)` and the jail is gone.
+    const swapped = path.join(ws, 'late.tpl')
+    fs.writeFileSync(swapped, TEMPLATE)
+    fs.unlinkSync(swapped)
+    fs.symlinkSync(path.join(outside, 'elsewhere.tpl'), swapped)
+    const r = withStaleLeafObservation(swapped, () => fsReadPinned('late.tpl', SHA))
+    expect(errCode(r)).toBe('EOUTSIDE')
+  })
+
+  it('refuses it by the OPEN, not by the pin', () => {
+    // With different bytes the name-based read still refuses, but it refuses
+    // with `EDIGEST` — meaning the read HAPPENED, the boundary was crossed, and
+    // the digest is the only thing that saved us. `EOUTSIDE` is the claim that
+    // the boundary itself held, so the jail does not depend on the pin.
+    const swapped = path.join(ws, 'late.tpl')
+    fs.writeFileSync(swapped, TEMPLATE)
+    fs.unlinkSync(swapped)
+    fs.writeFileSync(path.join(outside, 'other.tpl'), '<h1>SWAPPED</h1>\n')
+    fs.symlinkSync(path.join(outside, 'other.tpl'), swapped)
+    const r = withStaleLeafObservation(swapped, () => fsReadPinned('late.tpl', SHA))
+    expect(errCode(r)).toBe('EOUTSIDE')
+  })
+})
+
 describe('the surface', () => {
   it('lists the read helper, so the family scan covers it', () => {
     // Widening `READ_HELPERS` is a deliberate edit: a read helper is a new way
