@@ -1,0 +1,17 @@
+// REJECTED — G1: `merge(a, b)` is GRAMMAR in a `subscribe` head (item 130
+// Slice 3), not a callable, so the fan-in itself resolves — but its operands
+// are ordinary stream names and each one must be declared. `nob` is not.
+//
+// The pair of this and `g1_subscribe_undeclared_source.rvl` is what keeps the
+// `merge` allowance honest in the self-hosted gate: it is granted for the one
+// `merge(` shape the reference's `_at_stream_merge` accepts, for that statement
+// only, and it never reaches the operands.
+//
+// expected error:
+//   `nob` is not a declared requirement of Fanin
+
+component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe merge(a, nob) undo sub.close()
+  await sub.next()
+}
