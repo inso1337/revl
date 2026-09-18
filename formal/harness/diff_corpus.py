@@ -50,9 +50,9 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    what revl actually does, and it fails `make formal`.
 4. report checker alignment: compile each file with the real checker
    (`revl.compiler.compile_source`) and compare its refusal codes against
-   the formal verdicts. Informational, EXCEPT `missed-G4` and `missed-G2`
-   (`FATAL_BUCKETS`) — the checker refusing where the model sees nothing
-   is the dangerous direction and fails the gate.
+   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`
+   and `missed-A9` (`FATAL_BUCKETS`) — the checker refusing where the
+   model sees nothing is the dangerous direction and fails the gate.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -1074,6 +1074,14 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.append("\t".join(["R", rel, c.name, local, svc]))
             for key, svc, _ln in c.provides:
                 tsv.append("\t".join(["C", rel, c.name, key, svc]))
+            # PB: one row per installed provide BLOCK, in body order (issue
+            # 1167). C above reads the `provides` CLAUSE; A9 is the rule that
+            # the two agree, so the A9 row needs the block as its own fact —
+            # read off the same AST node `lower._lower_provide` refuses on.
+            # A double install is a repeated row, not a collapsed one.
+            for stmt in c.body:
+                if isinstance(stmt, ProvideStmt):
+                    tsv.append("\t".join(["PB", rel, c.name, stmt.key]))
 
             # require-held capability facts (K): the boundaries a requires
             # binding hands this component — the structured valuations of the
@@ -2052,7 +2060,8 @@ class Verdicts(NamedTuple):
     `confinements` C rows (G6: a reconstructed statement's reach surface is
     within its component's declared context), `g8surface` S8 rows (G8: a
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
-    rows (G5: an effect's teardown registration count)."""
+    rows (G5: an effect's teardown registration count), `a9` A9 rows (every
+    installed provide block's key is declared in the `provides` clause)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2063,13 +2072,14 @@ class Verdicts(NamedTuple):
     confinements: dict[tuple[str, str, str], str]
     g8surface: dict[tuple[str, str, str], object]
     g5reg: dict[tuple[str, str, str], object]
+    a9: dict[tuple[str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
                 + len(self.dispositions) + len(self.recoveries)
                 + len(self.confinements) + len(self.g8surface)
-                + len(self.g5reg))
+                + len(self.g5reg) + len(self.a9))
 
 
 def _cols(field: str) -> list[str]:
@@ -2090,6 +2100,7 @@ def parse_verdicts(text: str) -> Verdicts:
     confinements: dict[tuple[str, str, str], str] = {}
     g8surface: dict[tuple[str, str, str], object] = {}
     g5reg: dict[tuple[str, str, str], object] = {}
+    a9: dict[tuple[str, str], str] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -2145,10 +2156,13 @@ def parse_verdicts(text: str) -> Verdicts:
             body = parts[4].split("=", 1)[1]
             g5reg[(parts[1], parts[2], parts[3])] = (
                 "n/a" if body == "n/a" else int(body))
+        elif parts[0] == "A9" and len(parts) == 4:
+            # A9 provide-block declaration: (file, comp) -> ok|fail.
+            a9[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+                    recoveries, confinements, g8surface, g5reg, a9)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -2217,6 +2231,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     irows = [r for r in rows if r and r[0] == "I" and len(r) == 7]
     exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
     fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
+    pbrows = [r for r in rows if r and r[0] == "PB" and len(r) == 4]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -2441,8 +2456,70 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                 g5reg[(rel, compn, index)] = n
                 _G5_REGS[(rel, compn, index)] = n
 
+    # A9 rows (issue 1167): every installed provide BLOCK's key is declared
+    # in the `provides` CLAUSE. The clause comes off the M row and the blocks
+    # off the PB rows — the two facts the exporter reads off two different
+    # AST nodes — so this is membership between two lists, recomputed here
+    # without the Lean side's `Installed` structure. One row per component
+    # that installs a block: a block-less component would agree vacuously.
+    _A9_ROWS.clear()
+    provides_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in mrows:
+        provides_by_comp[(r[1], r[2])] = [k for k in r[4].split(",") if k]
+    blocks_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in pbrows:
+        blocks_by_comp.setdefault((r[1], r[2]), []).append(r[3])
+    a9: dict[tuple[str, str], str] = {}
+    for key, blocks in blocks_by_comp.items():
+        declared = provides_by_comp.get(key, [])
+        undeclared = [k for k in blocks if k not in declared]
+        a9[key] = "ok" if not undeclared else "fail"
+        _A9_ROWS[key] = (not undeclared, len(blocks))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+                    recoveries, confinements, g8surface, g5reg, a9)
+
+
+#: What the REFERENCE computed for each A9 row, for the non-vacuity ratchet:
+#: (every block declared, block count). Filled by `reference_from_tsv`; read
+#: by `a9_coverage`. Evidence the row BITES, not a claim either side makes.
+_A9_ROWS: dict = {}
+
+
+def a9_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A9` row (issue 1167).
+
+    Same discipline as `confinement_coverage`: a row every corpus component
+    satisfies certifies nothing. So the corpus must carry BOTH verdicts on
+    the reference's own computation:
+
+      * some component installs at least one block and every block key is
+        declared — an admitted provider, the `ok` that is a real check;
+      * some component installs a block whose key the clause never declared
+        — the refused shape (`examples/rejections/a9_provide_key_not_declared.rvl`),
+        the `fail` without which `a9B` would be a constant `true` over the
+        corpus and the differential would prove nothing.
+
+    Returns findings, which the caller treats as gate failures.
+    """
+    admitted = refused = None
+    for key, (declared, n_blocks) in _A9_ROWS.items():
+        if declared and n_blocks > 0:
+            admitted = admitted or key
+        if not declared:
+            refused = refused or key
+    findings: list[str] = []
+    for label, witness in (
+            ("a component installing a block under a declared key", admitted),
+            ("a component installing a block the clause never declared",
+             refused)):
+        if witness is None:
+            findings.append(f"a9 coverage: NO witness of {label} — "
+                            "the A9 row would agree vacuously")
+    if not findings:
+        print(f"a9 coverage: {len(_A9_ROWS)} installing components; "
+              f"admitted={admitted} refused={refused}")
+    return findings
 
 
 # The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
@@ -2451,7 +2528,10 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
 # and the "the model agrees with the checker" claim would be false.
 # `formal-strict` — the model refusing what the checker accepts — stays
 # informational: it is the safe direction and names fragment gaps.
-FATAL_BUCKETS = ("missed-G4", "missed-G2")
+# `missed-A9` (issue 1167) is the same direction for the provide-block rule:
+# the checker refuses an undeclared block key and the model's A9 row says
+# `ok`.
+FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9")
 
 
 def checker_alignment(file_facts: dict, componentless: list[str],
@@ -2500,9 +2580,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
         prov_rows = [(k, x) for k, x in v.providers.items() if k[0] == rel]
         spawn_rows = [(k, x) for k, x in v.spawns.items() if k[0] == rel]
+        a9_rows = [(k, x) for k, x in v.a9.items() if k[0] == rel]
         vrow = v.files.get(rel, ("ok", "ok", "ok"))
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows)
+            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows + a9_rows)
         raw_found = any(x == "fail"
                         for _, x in comp_rows + prov_rows + spawn_rows)
         code, category = checker_code(rel)
@@ -2516,6 +2597,12 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif code in ("G2", "G3"):
             manifest_fail = vrow[0] == "fail" or vrow[2] == "fail"
             record(f"agree-{code}" if manifest_fail else f"missed-{code}", rel)
+        elif code == "A9":
+            # The A9 row is the model's `a9B` over the component's installed
+            # blocks (issue 1167): a checker A9 refusal the row does not see
+            # is the model being weaker than what revl enforces, and fatal.
+            a9_fail = any(x == "fail" for _, x in a9_rows)
+            record("agree-A9" if a9_fail else "missed-A9", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -2553,6 +2640,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             for rel in names:
                 print(f"    NO-MANIFEST {code}: {rel}")
     full = FORMAL / "harness" / "out" / "no_manifest.txt"
+    # A clean checkout has no out/ yet (the gate creates it when the oracle
+    # runs); the no-toolchain tests reach this writer first.
+    full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text("".join(
         f"{code}\t{rel}\n" for code in sorted(nm_codes)
         for rel in sorted(nm_codes[code])), encoding="utf-8")
@@ -2602,7 +2692,8 @@ def main() -> int:
             ("recovery", ref.recoveries, formal.recoveries),
             ("confinement", ref.confinements, formal.confinements),
             ("g8_surface", ref.g8surface, formal.g8surface),
-            ("g5_registration", ref.g5reg, formal.g5reg)):
+            ("g5_registration", ref.g5reg, formal.g5reg),
+            ("a9", ref.a9, formal.a9)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2619,7 +2710,8 @@ def main() -> int:
         f"{len(ref.recoveries)} recoveries + "
         f"{len(ref.confinements)} confinements + "
         f"{len(ref.g8surface)} surfaces + "
-        f"{len(ref.g5reg)} teardowns) — "
+        f"{len(ref.g5reg)} teardowns + "
+        f"{len(ref.a9)} provide-block components) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
@@ -2627,6 +2719,7 @@ def main() -> int:
     mismatches.extend(attenuation_coverage())
     mismatches.extend(confinement_coverage())
     mismatches.extend(prog_coverage())
+    mismatches.extend(a9_coverage())
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:

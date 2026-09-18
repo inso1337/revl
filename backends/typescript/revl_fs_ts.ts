@@ -71,12 +71,21 @@
 //    AND requires it to be a sidecar this workspace itself produced.
 // 4. `syscall-time` (`openConfinedWrite`, `writeThrough`, `snapshotPreimage`,
 //    `confirmLanded`, `replaceConfined`, `removeConfined`, `mkdirConfined`,
-//    `rmdirConfined`, `closeHandle`, `discardWrite`), the mutation itself.
-//    `resolveWithin` followed by a separate NAME-BASED `fs.writeFileSync`
-//    leaves a check-to-syscall window, and a competing writer in the workspace
-//    that swapped the leaf for a symlink won it (measured: diverted a witnessed
-//    write outside the root within 88 attempts). See "what node cannot express"
-//    for exactly how far this is closed here and where it is only narrowed.
+//    `rmdirConfined`, `closeHandle`, `discardWrite`, and the READ-side
+//    `readPinnedConfined`), the mutation itself, plus the one read that holds
+//    an fd from `openSync`. The family is "the syscall, with the descriptor in
+//    hand", not "the write": `readPinnedConfined` reads CONTENT through a
+//    `O_NOFOLLOW` fd rather than by name, which is the same property the write
+//    half needs and the same reason it cannot live in a read helper.
+//    The write half's motivating incident: `resolveWithin` followed by a
+//    separate NAME-BASED `fs.writeFileSync` leaves a check-to-syscall window,
+//    and a competing writer in the workspace that swapped the leaf for a
+//    symlink won it (measured: diverted a witnessed write outside the root
+//    within 88 attempts). The read half had the identical window — family 1
+//    resolves the leaf ONCE, and the pre-fix read re-resolved it BY NAME — so
+//    `readPinnedConfined` moved here for the same reason. See "what node cannot
+//    express" for exactly how far this is closed here and where it is only
+//    narrowed.
 //
 // # HARDLINKS, which realpath cannot see at all
 //
@@ -199,7 +208,7 @@ export const PATH_FAMILIES: Record<string, readonly string[]> = {
     'confirmLanded', 'replaceConfined', 'installCapturedSidecar',
     'parkCapturedSidecar', 'installParkedSidecar',
     'removeConfined', 'mkdirConfined', 'rmdirConfined', 'closeHandle',
-    'discardWrite'],
+    'discardWrite', 'readPinnedConfined'],
 }
 
 /** Read-only helpers an entry point may call. They observe and mutate nothing,
@@ -233,6 +242,7 @@ export const SYSCALL_PATH_ARGS: Record<string, readonly number[]> = {
   rmdirConfined: [0],
   closeHandle: [],
   discardWrite: [],
+  readPinnedConfined: [0],
 }
 
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0
@@ -1393,14 +1403,19 @@ const SHA256_HEX = /^[0-9a-f]{64}$/
  * asset load and nothing wider:
  *
  * - `real` is a path a family 1-3 guard already resolved, and the parent chain
- *   is re-walked (`assertRealDirChain`) and the LEAF `lstat`ed before the read,
- *   so a directory component or a leaf swapped for a symlink after the
- *   membership test is refused rather than followed. Node exposes no `*at()`
- *   syscall and no read that takes a `O_NOFOLLOW` descriptor without an
- *   `openSync`, so the check-to-read window is NARROWED here rather than closed,
- *   which is this module's stated difference from the py directory-fd walk (see
- *   "what node CANNOT express" at the top) and not a new one;
- * - a non-regular file is refused (`ENOTFILE`) before a byte is read;
+ *   is re-walked (`assertRealDirChain`) before the open. The LEAF is opened
+ *   `O_NOFOLLOW` and the content is read from THAT descriptor, never by name,
+ *   so a leaf swapped for a symlink after the membership test cannot be
+ *   followed: the OPEN refuses (`ELOOP` -> `EOUTSIDE`) rather than the read
+ *   happening through the link. The fd must then still BE the name (`leafIsFd`,
+ *   the `(dev, ino)` identity check `openConfinedWrite` already applies to the
+ *   write direction), so the check-to-read window the py directory-fd walk
+ *   closes is closed here too. The residual is the intermediate DIRECTORY
+ *   component swapped during the open, which node's absent `*at()` family
+ *   cannot close and which is stated at the top of this module;
+ * - a non-regular file is refused (`ENOTFILE`) before a byte is read, and the
+ *   `O_NONBLOCK` open is what keeps a fifo from hanging the reader before that
+ *   check can run;
  * - a digest mismatch returns NOTHING, not the bytes, not their length, not a
  *   prefix, so the compile-time pin item 459 F1 puts in the handle is ENFORCED
  *   by the runtime read rather than weakened by it;
@@ -1416,19 +1431,38 @@ function rawReadPinnedConfined(real: string, expectedSha256: string): string {
   }
   const [parent] = splitLeaf(real)
   assertRealDirChain(parent)
-  const st = fs.lstatSync(real)   // the LEAF, without following a link
-  if (st.isSymbolicLink()) {
-    throw new ConfinementError(
-      'EOUTSIDE',
-      'the pinned read target is a symlink, so the read would leave the '
-      + 'session workspace root',
-      sanitized(real))
+  let fd = -1
+  try {
+    fd = fs.openSync(real, fs.constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+  } catch (e) {
+    const code = errnoCode(e)
+    if (code === 'ELOOP' || code === 'ENOTDIR') {
+      throw new ConfinementError(
+        'EOUTSIDE',
+        'the pinned read target is a symlink, so the read would leave the '
+        + 'session workspace root',
+        sanitized(real))
+    }
+    throw e
   }
-  if (!st.isFile()) {
-    throw new FsOpError(
-      'ENOTFILE', 'pinned read target is not a regular file', sanitized(real))
+  let data: Buffer
+  try {
+    const st = fs.fstatSync(fd, { bigint: true })
+    if (!st.isFile()) {
+      throw new FsOpError(
+        'ENOTFILE', 'pinned read target is not a regular file', sanitized(real))
+    }
+    if (!leafIsFd(fd, real)) {
+      throw new FsOpError(
+        'ERACE',
+        'the pinned read target was replaced by a concurrent writer while it '
+        + 'was being opened, so the fd and the name have parted',
+        sanitized(real))
+    }
+    data = fs.readFileSync(fd)
+  } finally {
+    fs.closeSync(fd)
   }
-  const data = fs.readFileSync(real)
   const actual = Buffer.from(createHash('sha256').update(data).digest('hex'), 'utf8')
   const expected = Buffer.from(expectedSha256, 'utf8')
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {

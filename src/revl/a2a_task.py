@@ -56,9 +56,11 @@ papered over — the correlation identity rides ONE WAY (there is no envelope
 is percent-encoded whole (`a2a_boundary.py_rest_task_url`).
 
 gRPC is not a sub-transport of either: it is binary framing over HTTP/2, not a
-JSON POST, and it needs its own `through` name. The stream sugar (T2) waits on
-item 130's stream-valued service operation; the ts async recolour waits on the
-async crossing. Neither is built here.
+JSON POST, and it needs its own `through` name. The stream sugar (T2) is not
+built here and is not waiting either: a `through a2a` row SYNTHESIZES a
+provider, and item 130 refuses provider-side `provides <k>: Stream[T]` BY NAME
+(`docs/design/130-stream-reactive-types.md` §6c, `src/revl/parser.py`), which is
+the shape T2 would need. The ts async recolour waits on the async crossing.
 """
 
 from __future__ import annotations
