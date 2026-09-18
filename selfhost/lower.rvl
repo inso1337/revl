@@ -9139,6 +9139,23 @@ type FbStepR = { step: FbStep, i: Int }
 // and the TYPE environment the following statement in the SAME block sees.
 type FbR = { v: Verd, scope: List[Bind], tys: List[Bind] }
 
+// A record pattern's field names ride the step's single `name` slot, joined by
+// `|` — a character no identifier may carry, so the split back is exact.
+fn pat_bar_join(names: List[Str], i: Int, acc: Str) -> Str {
+  if (i >= names.length()) { return acc }
+  return pat_bar_join(names, i + 1,
+                      acc == "" ? names[i] : acc.concat("|").concat(names[i]))
+}
+
+fn pat_bar_split(s: Str, i: Int, cur: Str, acc: List[Str]) -> List[Str] {
+  if (i >= s.length()) { return cur == "" ? acc : acc.push(cur) }
+  let c = s.charAt(i)
+  if (c == "|") {
+    return pat_bar_split(s, i + 1, "", cur == "" ? acc : acc.push(cur))
+  }
+  return pat_bar_split(s, i + 1, cur.concat(c), acc)
+}
+
 fn fb_step(kind: Str, name: Str, mutable: Bool, line: Int, v: Expr) -> FbStep {
   return fb_step7(kind, name, mutable, line, v, "", "")
 }
@@ -9201,9 +9218,24 @@ fn fb_host_value(e: Expr, scope: List[Bind]) -> Bool {
 fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
-    // a destructuring pattern binds names this reader does not enumerate
-    if (atk(ts, i + 1, "{") || atk(ts, i + 1, "[")) {
+    // a LIST pattern binds names this reader does not enumerate
+    if (atk(ts, i + 1, "[")) {
       return { step: fb_bail(), i: hi }
+    }
+    // a RECORD pattern is read for its field names: they are the names
+    // `_lower_let_pattern_stmt` puts through the scope guard, and the statement
+    // carries the value whose type decides whether the destructure is legal at
+    // all. The step ENDS the block all the same (see `fb_walk`'s `letpat` arm),
+    // so nothing after it is judged and the returns-on-every-path rule counts
+    // it as an abandoned tail exactly as the bail it replaces did.
+    if (atk(ts, i + 1, "{")) {
+      let pr = pat_record(ts, i + 1)
+      if (!pr.ok || !atk(ts, pr.i, "=")) { return { step: fb_bail(), i: hi } }
+      let pv = expr_at(ts, pr.i + 1)
+      if (is_bad(pv.e) || pv.i <= pr.i + 1) { return { step: fb_bail(), i: hi } }
+      return { step: fb_step7("letpat", pat_bar_join(pr.names, 0, ""),
+                              t.text == "var", t.line, pv.e, "", ""),
+               i: pv.i }
     }
     let name = tkc(ts, i + 1).text
     var j = i + 2
