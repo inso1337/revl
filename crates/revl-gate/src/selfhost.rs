@@ -56,6 +56,7 @@ pub struct Provide {
     key: String,
     svcName: String,
     methods: Vec<ProvM>,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1505,6 +1506,43 @@ fn mk_srun(ss: Vec<Stmt>, i: i64) -> SRun {
     return SRun { ss: ss.clone(), i: i };
 }
 
+fn p_guard_chain(ts: Vec<Token>, lo: i64, hi: i64, acc: Vec<Stmt>) -> SRun {
+    let c = expr_at(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"));
+    if (is_bad(c.e.clone()) || (!atk(&ts, c.i, "{"))) {
+        return mk_srun(acc.revl_push(mkstmt(String::from("skip"), c.e.clone())), hi);
+    }
+    let bend = close_brace(&ts, c.i);
+    if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return mk_srun(acc.revl_push(mkstmt(String::from("skip"), c.e.clone())), hi);
+    }
+    let withThen = p_guard_stmts(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), acc.revl_push(mkstmt(String::from("expr"), c.e.clone())));
+    if atw(&ts, bend, "else") {
+        if (atw(&ts, (bend).checked_add(1i64).expect("revl: Int overflow"), "if") && atk(&ts, (bend).checked_add(2i64).expect("revl: Int overflow"), "(")) {
+            return p_guard_chain(ts.clone(), (bend).checked_add(1i64).expect("revl: Int overflow"), hi, withThen.clone());
+        }
+        if atk(&ts, (bend).checked_add(1i64).expect("revl: Int overflow"), "{") {
+            let eend = close_brace(&ts, (bend).checked_add(1i64).expect("revl: Int overflow"));
+            if (eend != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return mk_srun(p_guard_stmts(ts.clone(), (bend).checked_add(2i64).expect("revl: Int overflow"), (eend).checked_sub(1i64).expect("revl: Int overflow"), withThen.clone()), eend);
+            }
+        }
+    }
+    return mk_srun(withThen.clone(), bend);
+}
+
+fn p_guard_stmts(ts: Vec<Token>, lo: i64, hi: i64, acc: Vec<Stmt>) -> Vec<Stmt> {
+    if ((lo >= hi) || atk(&ts, lo, "}")) {
+        return acc;
+    }
+    let le = line_end(&ts, lo, hi);
+    if (atw(&ts, lo, "if") && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "(")) {
+        let g = p_guard_chain(ts.clone(), lo, le, acc.clone());
+        return p_guard_stmts(ts.clone(), if (g.i > lo) { g.i } else { le }, hi, g.ss.clone());
+    }
+    let r = p_stmt_run(ts.clone(), lo, le);
+    return p_guard_stmts(ts.clone(), if (r.i > lo) { r.i } else { le }, hi, append_stmts(acc.clone(), stamp_lines(&r.ss, tkc(&ts, lo).line)));
+}
+
 fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
     let t = tkc(&ts, lo);
     if ((t.kind == "kw") && ((t.text == "let") || (t.text == "var"))) {
@@ -2329,7 +2367,7 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         if (!ms.ok) {
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), pend, false);
         }
-        return p_comp_body(ts.clone(), pend, end, provh.clone(), reqh.clone(), cname, provs.revl_push(Provide { key: key.clone(), svcName: bind_lookup(&provh, &key, 0i64), methods: ms.xs.clone() }), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), true);
+        return p_comp_body(ts.clone(), pend, end, provh.clone(), reqh.clone(), cname, provs.revl_push(Provide { key: key.clone(), svcName: bind_lookup(&provh, &key, 0i64), methods: ms.xs.clone(), line: tkc(&ts, i).line }), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), true);
     }
     if atw(&ts, i, "isolate") {
         if (atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in") && ati(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realms")) {
@@ -2364,7 +2402,8 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("HANDOFF", &handoff_twice_msg(cname)), skip_line(&ts, i), true);
         }
         let hty = if atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), ":") { type_at(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow")).ty } else { String::from("") };
-        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), Bind { name: key.clone(), ty: hty }, action);
+        let hnx = if (hty == "") { skip_line(&ts, i) } else { type_at(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow")).i };
+        return p_comp_body(ts.clone(), hnx, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), Bind { name: key.clone(), ty: hty.clone() }, action);
     }
     if atw(&ts, i, "intercept") {
         if action {
@@ -2394,6 +2433,11 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         if (ce != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return p_comp_body(ts.clone(), ce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
         }
+    }
+    if (atw(&ts, i, "if") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "(")) {
+        let gle = line_end(&ts, i, end);
+        let g = p_guard_chain(ts.clone(), i, gle, vec![]);
+        return p_comp_body(ts.clone(), if (g.i > i) { g.i } else { gle }, end, provh.clone(), reqh.clone(), cname, provs.clone(), append_stmts(setup.clone(), stamp_lines(&g.ss, tkc(&ts, i).line)), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), true);
     }
     let le = line_end(&ts, i, end);
     let r = p_stmt_run(ts.clone(), i, le);
@@ -4069,6 +4113,35 @@ fn unknown_svc_at(comp: CompD, names: &[String], amb: &[String], i: i64) -> Verd
     return unknown_svc_at(comp.clone(), names, amb, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
+fn block_key_undeclared_msg(key: &str, cname: &str) -> String {
+    return (((String::from("`").revl_concat(&key)).revl_concat("` is not declared in the `provides` clause of ")).revl_concat(&cname)).revl_concat(" (A9)");
+}
+
+fn uninstalled_provision_msg(key: &str, cname: &str) -> String {
+    return (((((String::from("`").revl_concat(&key)).revl_concat("` is declared in the `provides` clause of ")).revl_concat(&cname)).revl_concat(" but no `provide ")).revl_concat(&key)).revl_concat(" { … }` block installs it (A9)");
+}
+
+fn prov_installed(provs: &[Provide], key: &str, i: i64) -> bool {
+    if (i >= provs.revl_length()) {
+        return false;
+    }
+    if ((provs)[(i) as usize].key == key) {
+        return true;
+    }
+    return prov_installed(provs, key, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn uninstalled_provision_at(comp: CompD, i: i64) -> Verd {
+    if (i >= comp.svcRefs.revl_length()) {
+        return no_verd();
+    }
+    let r = (comp.svcRefs)[(i) as usize].clone();
+    if (((r.clause == "provides") && (!prov_installed(&comp.provs, &r.key, 0i64))) && (!routes_has(&comp.routes, &r.key, 0i64))) {
+        return mk_verd(tagged("A9", &uninstalled_provision_msg(&r.key, &comp.name)), r.line);
+    }
+    return uninstalled_provision_at(comp.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
 fn svc_names(svcs: Vec<SvcD>, i: i64, acc: Vec<String>) -> Vec<String> {
     if (i >= svcs.revl_length()) {
         return acc;
@@ -4122,6 +4195,9 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
         let pv = (comp.provs)[(pi) as usize].clone();
+        if (pv.svcName == "") {
+            return mk_verd(tagged("A9", &block_key_undeclared_msg(&pv.key, &comp.name)), pv.line);
+        }
         let dsvc = svc_of(cx.clone(), pv.svcName.clone());
         let mut mi = 0i64;
         while (mi < pv.methods.revl_length()) {
@@ -8638,6 +8714,12 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
                     if (v.v != "") {
                         refs.push(v.clone());
                         poisoned.push(comp.name.clone());
+                    } else {
+                        let uv = uninstalled_provision_at(comp.clone(), 0i64);
+                        if (uv.v != "") {
+                            refs.push(uv.clone());
+                            poisoned.push(comp.name.clone());
+                        }
                     }
                 }
             }
@@ -15945,6 +16027,31 @@ fn an_undeclared_service_in_requires_is_refused_by_name() {
 #[test]
 fn an_undeclared_service_in_provides_is_refused_by_name() {
     assert!((admit_src(String::from("component C provides s: S { }")) == "G1|unknown service `S` in `provides` of C"));
+}
+
+#[test]
+fn a_provide_block_keyed_outside_the_clause_is_refused__a9_() {
+    assert!((admit_src(String::from("service S { fn go() -> Int } component C provides s1: S { provide s { fn go() = 1 } }")) == "A9|`s` is not declared in the `provides` clause of C (A9)"));
+}
+
+#[test]
+fn a_declared_provides_key_with_no_provide_block_is_refused__a9_converse_() {
+    assert!((admit_src(String::from("service S { fn go() -> Int } component C provides s: S { }")) == "A9|`s` is declared in the `provides` clause of C but no `provide s { … }` block installs it (A9)"));
+}
+
+#[test]
+fn the_converse_names_the_first_uninstalled_key_in_clause_order() {
+    assert!((admit_src(String::from("service S { fn go() -> Int } component C provides a: S, b: S { provide a { fn go() = 1 } }")) == "A9|`b` is declared in the `provides` clause of C but no `provide b { … }` block installs it (A9)"));
+}
+
+#[test]
+fn a_routes_only_router_installs_its_declared_key_without_a_block() {
+    assert!((admit_src(String::from("service S { fn go() -> Int } component W provides s: S { isolate s in realm(\"r1\") provide s { fn go() = 1 } } component R requires s: S provides s: S { isolate s in realms(\"r1\") }")) == ""));
+}
+
+#[test]
+fn a_body_refusal_outranks_the_converse() {
+    assert!((admit_src(String::from("service S { fn go() -> Int } component C provides s: S { emit db.go() }")) == "G1|`db` is not a declared requirement of C"));
 }
 
 #[test]
