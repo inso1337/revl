@@ -772,6 +772,14 @@ fn test_block_end(ts: List[Token], i: Int) -> Int {
 
 fn contains(xs: List[Str], s: Str) -> Bool { return xs.indexOf(s) != 0 - 1 }
 
+// `a` with every element of `b` appended, in order (`b`'s names win a
+// membership test either way; this list is only ever read through
+// `contains`).
+fn push_all(a: List[Str], b: List[Str], i: Int) -> List[Str] {
+  if (i >= b.length()) { return a }
+  return push_all(a.push(b[i]), b, i + 1)
+}
+
 fn contains_int(xs: List[Int], v: Int) -> Bool {
   var i = 0
   while (i < xs.length()) {
@@ -11380,7 +11388,7 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 // A component-dialect pure value expression -> an IR node. `sc` is the lexical
 // scope (names visible as `{"kind": "name", "id": …}`); `reqSet` the required-
 // service roots.
-fn cir_expr(e: Expr, sc: List[Str], reqSet: List[Str]) -> IrRes {
+fn cir_expr(e: Expr, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
   return match e {
     IntLit(v)   => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
     FloatLit(v) => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
@@ -11389,29 +11397,29 @@ fn cir_expr(e: Expr, sc: List[Str], reqSet: List[Str]) -> IrRes {
     Var(n)      => contains(sc, n)
       ? mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
       : mk_irres(false, ""),
-    Bin(b)      => cir_bin(b, sc, reqSet),
-    Un(u)       => cir_un(u, sc, reqSet),
-    If(f)       => cir_if_expr(f, sc, reqSet),
-    Field(f)    => cir_field(f, sc, reqSet),
-    Call(c)     => cir_call(c.target, c.args, sc, reqSet),
+    Bin(b)      => cir_bin(b, sc, hostSc, reqSet),
+    Un(u)       => cir_un(u, sc, hostSc, reqSet),
+    If(f)       => cir_if_expr(f, sc, hostSc, reqSet),
+    Field(f)    => cir_field(f, sc, hostSc, reqSet),
+    Call(c)     => cir_call(c.target, c.args, sc, hostSc, reqSet),
     // `emit <call>` in value/return position is a plain observation of the
     // emission: the reference (`_lower_component_pure_expr` EmitExpr) strips the
     // marker and lowers the inner call, so the IR node is just that call.
-    Emit(u)     => cir_expr(u.e, sc, reqSet),
+    Emit(u)     => cir_expr(u.e, sc, hostSc, reqSet),
     _           => mk_irres(false, ""),
   }
 }
 
-fn cir_args(args: List[Expr], i: Int, sc: List[Str], reqSet: List[Str], acc: Str) -> IrRes {
+fn cir_args(args: List[Expr], i: Int, sc: List[Str], hostSc: List[Str], reqSet: List[Str], acc: Str) -> IrRes {
   if (i >= args.length()) { return mk_irres(true, acc) }
-  let e = cir_expr(args[i], sc, reqSet)
+  let e = cir_expr(args[i], sc, hostSc, reqSet)
   if (!e.ok) { return mk_irres(false, "") }
   let nacc = acc == "" ? e.js : acc.concat(", ").concat(e.js)
-  return cir_args(args, i + 1, sc, reqSet, nacc)
+  return cir_args(args, i + 1, sc, hostSc, reqSet, nacc)
 }
 
-fn cir_reqcall(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let a = cir_args(args, 0, sc, reqSet, "")
+fn cir_reqcall(root: Str, meth: Str, args: List[Expr], sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true,
     "{\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": "
@@ -11423,8 +11431,8 @@ fn cir_reqcall(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: Li
 // `recv` tag; the covered component surface never spells one, so the receiver
 // type is unknown here and it is emitted as `null` (byte-exact where `recv` is
 // unread, honest where it would be — no corpus component reaches it).
-fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let a = cir_args(args, 0, sc, reqSet, "")
+fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
   if (!a.ok) { return mk_irres(false, "") }
   var s = "{\"kind\": \"builtin\", \"method\": ".concat(jstr(meth))
     .concat(", \"target\": {\"kind\": \"name\", \"id\": ").concat(jstr(root)).concat("}")
@@ -11433,50 +11441,86 @@ fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Str], reqSet: Li
   return mk_irres(true, s.concat("}"))
 }
 
-fn cir_call(tg: Expr, args: List[Expr], sc: List[Str], reqSet: List[Str]) -> IrRes {
+fn cir_call(tg: Expr, args: List[Expr], sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
   return match tg {
     Field(fl) => match fl.target {
       Var(root) => contains(reqSet, root)
-        ? cir_reqcall(root, fl.name, args, sc, reqSet)
-        : (contains(sc, root) && is_builtin_method(fl.name)
-            ? cir_builtin(root, fl.name, args, sc, reqSet)
-            : mk_irres(false, "")),
+        ? cir_reqcall(root, fl.name, args, sc, hostSc, reqSet)
+        // Host provenance is read BEFORE the stdlib builtin table, exactly as
+        // the reference reads it (`src/revl/lower.py::_lower_postfix`): `remove`
+        // is spelled by both surfaces, and on a host-acquired receiver it is the
+        // host verb, dispatched by receiver KIND and not by name.
+        : (contains(hostSc, root)
+            ? cir_hostverb(root, fl.name, args, sc, hostSc, reqSet)
+            : (is_host_root(root)
+                ? cir_hostacq(root, fl.name, args, sc, hostSc, reqSet)
+                : (contains(sc, root) && is_builtin_method(fl.name)
+                    ? cir_builtin(root, fl.name, args, sc, hostSc, reqSet)
+                    : mk_irres(false, "")))),
       _ => mk_irres(false, ""),
     },
     _ => mk_irres(false, ""),
   }
 }
 
-fn cir_field(f: FieldN, sc: List[Str], reqSet: List[Str]) -> IrRes {
+// `Map.new()` / `Pool.open(…)` — a HOST ACQUISITION. The reference lowers an
+// upper-cased callable head in a component position to `{kind:"host", fn:
+// "<Root>.<verb>", args}` (`_lower_postfix`); `Map.empty()` is the Map VALUE
+// constructor rather than an acquisition and lowers to a `maplit`, so it is
+// stepped aside here instead of being given a host node it is not.
+fn cir_hostacq(root: Str, meth: Str, args: List[Expr], sc: List[Str],
+               hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  if (root == "Map" && meth == "empty") { return mk_irres(false, "") }
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"host\", \"fn\": "
+    .concat(jstr(root.concat(".").concat(meth)))
+    .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+// A verb called on a name bound to a host acquisition (`store.insert(k, v)`
+// where `let store = effect Map.new() …`). The host object's verb surface stays
+// verbatim, so the node is a plain `call` on the name — never a `builtin`.
+fn cir_hostverb(root: Str, meth: Str, args: List[Expr], sc: List[Str],
+                hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, reqSet, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true,
+    "{\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": "
+      .concat(jstr(root)).concat("}, \"method\": ").concat(jstr(meth))
+      .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+fn cir_field(f: FieldN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
   let isConfig = match f.target { Var(n) => n == "config", _ => false, }
   if (isConfig) {
     return mk_irres(true, "{\"kind\": \"config\", \"field\": ".concat(jstr(f.name)).concat("}"))
   }
-  let t = cir_expr(f.target, sc, reqSet)
+  let t = cir_expr(f.target, sc, hostSc, reqSet)
   if (!t.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"field\", \"target\": ".concat(t.js)
     .concat(", \"name\": ").concat(jstr(f.name)).concat("}"))
 }
 
-fn cir_bin(b: BinN, sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let l = cir_expr(b.l, sc, reqSet)
-  let r = cir_expr(b.r, sc, reqSet)
+fn cir_bin(b: BinN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let l = cir_expr(b.l, sc, hostSc, reqSet)
+  let r = cir_expr(b.r, sc, hostSc, reqSet)
   if (!l.ok || !r.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"bin\", \"op\": ".concat(jstr(b.op))
     .concat(", \"left\": ").concat(l.js).concat(", \"right\": ").concat(r.js).concat("}"))
 }
 
-fn cir_un(u: UnN, sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let o = cir_expr(u.e, sc, reqSet)
+fn cir_un(u: UnN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let o = cir_expr(u.e, sc, hostSc, reqSet)
   if (!o.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"un\", \"op\": ".concat(jstr(u.op))
     .concat(", \"operand\": ").concat(o.js).concat("}"))
 }
 
-fn cir_if_expr(f: IfN, sc: List[Str], reqSet: List[Str]) -> IrRes {
-  let c = cir_expr(f.cond, sc, reqSet)
-  let t = cir_expr(f.then_, sc, reqSet)
-  let e = cir_expr(f.els, sc, reqSet)
+fn cir_if_expr(f: IfN, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrRes {
+  let c = cir_expr(f.cond, sc, hostSc, reqSet)
+  let t = cir_expr(f.then_, sc, hostSc, reqSet)
+  let e = cir_expr(f.els, sc, hostSc, reqSet)
   if (!c.ok || !t.ok || !e.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"if\", \"cond\": ".concat(c.js)
     .concat(", \"then\": ").concat(t.js).concat(", \"else\": ").concat(e.js).concat("}"))
@@ -11488,21 +11532,21 @@ type StepR = { ok: Bool, js: Str, i: Int }
 // `if (<cond>) { <guard> } [else { <guard> }]` -> the component guard step. The
 // then/else bodies hold only `fail` and nested `if` (a component `if` is an
 // L-Raise decision, not general control flow). `else` is present only when spelled.
-fn cir_if_step(ts: List[Token], i: Int, reqSet: List[Str], sc: List[Str]) -> StepR {
+fn cir_if_step(ts: List[Token], i: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str]) -> StepR {
   let c = expr_at(ts, i + 1)
   if (is_bad(c.e)) { return { ok: false, js: "", i: i } }
-  let ce = cir_expr(c.e, sc, reqSet)
+  let ce = cir_expr(c.e, sc, hostSc, reqSet)
   if (!ce.ok || !atk(ts, c.i, "{")) { return { ok: false, js: "", i: i } }
   let tend = close_brace(ts, c.i)
   if (tend == 0 - 1) { return { ok: false, js: "", i: i } }
-  let thenR = cir_guard_stmts(ts, c.i + 1, tend - 1, reqSet, sc, "")
+  let thenR = cir_guard_stmts(ts, c.i + 1, tend - 1, reqSet, sc, hostSc, "")
   if (!thenR.ok) { return { ok: false, js: "", i: i } }
   var js = "{\"step\": \"if\", \"cond\": ".concat(ce.js).concat(", \"then\": [").concat(thenR.js).concat("]")
   var nexti = tend
   if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
     let eend = close_brace(ts, tend + 1)
     if (eend == 0 - 1) { return { ok: false, js: "", i: i } }
-    let elseR = cir_guard_stmts(ts, tend + 2, eend - 1, reqSet, sc, "")
+    let elseR = cir_guard_stmts(ts, tend + 2, eend - 1, reqSet, sc, hostSc, "")
     if (!elseR.ok) { return { ok: false, js: "", i: i } }
     js = js.concat(", \"else\": [").concat(elseR.js).concat("]")
     nexti = eend
@@ -11511,49 +11555,49 @@ fn cir_if_step(ts: List[Token], i: Int, reqSet: List[Str], sc: List[Str]) -> Ste
 }
 
 // The `fail`/nested-`if` guard steps of a component `if`.
-fn cir_guard_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], acc: Str) -> IrRes {
+fn cir_guard_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
   if (atw(ts, lo, "fail")) {
     let r = expr_at(ts, lo + 1)
     if (is_bad(r.e)) { return mk_irres(false, "") }
-    let m = cir_expr(r.e, sc, reqSet)
+    let m = cir_expr(r.e, sc, hostSc, reqSet)
     if (!m.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"fail\", \"message\": ".concat(m.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_guard_stmts(ts, r.i, hi, reqSet, sc, nacc)
+    return cir_guard_stmts(ts, r.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "if")) {
-    let g = cir_if_step(ts, lo, reqSet, sc)
+    let g = cir_if_step(ts, lo, reqSet, sc, hostSc)
     if (!g.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? g.js : acc.concat(", ").concat(g.js)
-    return cir_guard_stmts(ts, g.i, hi, reqSet, sc, nacc)
+    return cir_guard_stmts(ts, g.i, hi, reqSet, sc, hostSc, nacc)
   }
   return mk_irres(false, "")
 }
 
 // A run of `emit <expr>` steps (a timer body). `compensate` is permitted but
 // absent from the covered timer corpus.
-fn cir_emit_steps(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], acc: Str) -> IrRes {
+fn cir_emit_steps(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
   if (!atw(ts, lo, "emit")) { return mk_irres(false, "") }
-  let em = cir_emit_step(ts, lo, reqSet, sc)
+  let em = cir_emit_step(ts, lo, reqSet, sc, hostSc)
   if (!em.ok) { return mk_irres(false, "") }
   let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-  return cir_emit_steps(ts, em.i, hi, reqSet, sc, nacc)
+  return cir_emit_steps(ts, em.i, hi, reqSet, sc, hostSc, nacc)
 }
 
 // One `emit <expr> [compensate <expr>]` step.
-fn cir_emit_step(ts: List[Token], lo: Int, reqSet: List[Str], sc: List[Str]) -> StepR {
+fn cir_emit_step(ts: List[Token], lo: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str]) -> StepR {
   let r = expr_at(ts, lo + 1)
   if (is_bad(r.e)) { return { ok: false, js: "", i: lo } }
-  let ee = cir_expr(r.e, sc, reqSet)
+  let ee = cir_expr(r.e, sc, hostSc, reqSet)
   if (!ee.ok) { return { ok: false, js: "", i: lo } }
   var step = "{\"step\": \"emit\", \"expr\": ".concat(ee.js)
   var nx = r.i
   if (atw(ts, r.i, "compensate")) {
     let cmp = expr_at(ts, r.i + 1)
     if (is_bad(cmp.e)) { return { ok: false, js: "", i: lo } }
-    let ce = cir_expr(cmp.e, sc, reqSet)
+    let ce = cir_expr(cmp.e, sc, hostSc, reqSet)
     if (!ce.ok) { return { ok: false, js: "", i: lo } }
     step = step.concat(", \"compensate\": ").concat(ce.js)
     nx = cmp.i
@@ -11563,43 +11607,43 @@ fn cir_emit_step(ts: List[Token], lo: Int, reqSet: List[Str], sc: List[Str]) -> 
 
 // A provide-method's body steps (`effect`/`emit`/`return`/`let`). Scope `sc`
 // starts as the method's params and grows with each `let`.
-fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], acc: Str) -> IrRes {
+fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
-  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, acc) }
+  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, hostSc, acc) }
   if (atw(ts, lo, "effect")) {
     if (atw(ts, lo + 1, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, lo + 1)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
-    let ae = cir_expr(acq.e, sc, reqSet)
+    let ae = cir_expr(acq.e, sc, hostSc, reqSet)
     if (!ae.ok) { return mk_irres(false, "") }
     if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
-    let ue = cir_expr(und.e, sc, reqSet)
+    let ue = cir_expr(und.e, sc, hostSc, reqSet)
     if (!ue.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, und.i, hi, reqSet, sc, nacc)
+    return cir_method_stmts(ts, und.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "emit")) {
-    let em = cir_emit_step(ts, lo, reqSet, sc)
+    let em = cir_emit_step(ts, lo, reqSet, sc, hostSc)
     if (!em.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-    return cir_method_stmts(ts, em.i, hi, reqSet, sc, nacc)
+    return cir_method_stmts(ts, em.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "return")) {
     let r = expr_at(ts, lo + 1)
     if (is_bad(r.e) || r.i <= lo + 1) {
       let step0 = "{\"step\": \"return\", \"expr\": null}"
       let nacc0 = acc == "" ? step0 : acc.concat(", ").concat(step0)
-      return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, nacc0)
+      return cir_method_stmts(ts, lo + 1, hi, reqSet, sc, hostSc, nacc0)
     }
-    let ve = cir_expr(r.e, sc, reqSet)
+    let ve = cir_expr(r.e, sc, hostSc, reqSet)
     if (!ve.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"return\", \"expr\": ".concat(ve.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, reqSet, sc, nacc)
+    return cir_method_stmts(ts, r.i, hi, reqSet, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "let") || atw(ts, lo, "var")) {
     let mutable = atw(ts, lo, "var")
@@ -11609,12 +11653,12 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: Li
     if (!atk(ts, j, "=")) { return mk_irres(false, "") }
     let r = expr_at(ts, j + 1)
     if (is_bad(r.e) || r.i <= j + 1) { return mk_irres(false, "") }
-    let ve = cir_expr(r.e, sc, reqSet)
+    let ve = cir_expr(r.e, sc, hostSc, reqSet)
     if (!ve.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"let\", \"name\": ".concat(jstr(name)).concat(", \"value\": ")
       .concat(ve.js).concat(", \"mutable\": ").concat(mutable ? "true" : "false").concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, reqSet, sc.push(name), nacc)
+    return cir_method_stmts(ts, r.i, hi, reqSet, sc.push(name), hostSc, nacc)
   }
   return mk_irres(false, "")
 }
@@ -11622,7 +11666,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], sc: Li
 // A `provide <key> { … }` method table -> `[{name, params, body}]`. Method
 // params are the surface names (typed by the service, not carried here); the
 // shorthand `= expr` becomes a single `return`.
-fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], acc: Str) -> IrRes {
+fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], sc: List[Str], hostSc: List[Str], acc: Str) -> IrRes {
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
   if (atw(ts, i, "async")) { return mk_irres(false, "") }
   if (!atw(ts, i, "fn")) { return mk_irres(false, "") }
@@ -11635,22 +11679,22 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], acc: S
   if (atk(ts, h, "=")) {
     let r = expr_at(ts, h + 1)
     if (is_bad(r.e)) { return mk_irres(false, "") }
-    let be = cir_expr(r.e, pnames, reqSet)
+    let be = cir_expr(r.e, pnames, hostSc, reqSet)
     if (!be.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(be.js).concat("}]}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, r.i, end, reqSet, nacc)
+    return cir_prov_methods(ts, r.i, end, reqSet, sc, hostSc, nacc)
   }
   if (atk(ts, h, "{")) {
     let bend = close_brace(ts, h)
     if (bend == 0 - 1) { return mk_irres(false, "") }
-    let br = cir_method_stmts(ts, h + 1, bend - 1, reqSet, pnames, "")
+    let br = cir_method_stmts(ts, h + 1, bend - 1, reqSet, push_all(sc, pnames, 0), hostSc, "")
     if (!br.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [").concat(br.js).concat("]}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, bend, end, reqSet, nacc)
+    return cir_prov_methods(ts, bend, end, reqSet, sc, hostSc, nacc)
   }
   return mk_irres(false, "")
 }
@@ -11659,81 +11703,107 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str], acc: S
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
 fn cir_body(ts: List[Token], i: Int, end: Int, reqSet: List[Str],
-            provs: List[Bind], sc: List[Str], acc: Str) -> IrRes {
+            provs: List[Bind], sc: List[Str], hostSc: List[Str],
+            acc: Str) -> IrRes {
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
   if (atw(ts, i, "config") && atk(ts, i + 1, "{")) {
     let ce = close_brace(ts, i + 1)
     if (ce == 0 - 1) { return mk_irres(false, "") }
-    return cir_body(ts, ce, end, reqSet, provs, sc, acc)
+    return cir_body(ts, ce, end, reqSet, provs, sc, hostSc, acc)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
     if (!atk(ts, i + 2, "{")) { return mk_irres(false, "") }
     let pend = close_brace(ts, i + 2)
     if (pend == 0 - 1) { return mk_irres(false, "") }
-    let ms = cir_prov_methods(ts, i + 3, pend - 1, reqSet, "")
+    let ms = cir_prov_methods(ts, i + 3, pend - 1, reqSet, sc, hostSc, "")
     if (!ms.ok) { return mk_irres(false, "") }
     let svc = bind_lookup(provs, key, 0)
     let step = "{\"step\": \"provide\", \"name\": ".concat(jstr(key))
       .concat(", \"service\": ").concat(jstr(svc))
       .concat(", \"methods\": [").concat(ms.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, pend, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, pend, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "let") && atk(ts, i + 2, "=") && atw(ts, i + 3, "effect")) {
     let name = tkc(ts, i + 1).text
     if (atw(ts, i + 4, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, i + 4)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
-    let ae = cir_expr(acq.e, sc, reqSet)
+    let ae = cir_expr(acq.e, sc, hostSc, reqSet)
     if (!ae.ok) { return mk_irres(false, "") }
     if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
     let sc2 = sc.push(name)
+    // host provenance (the reference's `env.host_locals`): a bind whose
+    // acquisition lowered to a host node keeps the host verb surface, so every
+    // later `name.<verb>(…)` is a `call` and not a stdlib builtin.
+    let hostSc2 = starts_with(ae.js, "{\"kind\": \"host\"")
+      ? hostSc.push(name) : hostSc
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
-    let ue = cir_expr(und.e, sc2, reqSet)
+    let ue = cir_expr(und.e, sc2, hostSc2, reqSet)
     if (!ue.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
       .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, und.i, end, reqSet, provs, sc2, nacc)
+    return cir_body(ts, und.i, end, reqSet, provs, sc2, hostSc2, nacc)
   }
   if (atw(ts, i, "effect")) {
     if (atw(ts, i + 1, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, i + 1)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
-    let ae = cir_expr(acq.e, sc, reqSet)
+    let ae = cir_expr(acq.e, sc, hostSc, reqSet)
     if (!ae.ok) { return mk_irres(false, "") }
     if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
-    let ue = cir_expr(und.e, sc, reqSet)
+    let ue = cir_expr(und.e, sc, hostSc, reqSet)
     if (!ue.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, und.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, und.i, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "if")) {
-    let g = cir_if_step(ts, i, reqSet, sc)
+    let g = cir_if_step(ts, i, reqSet, sc, hostSc)
     if (!g.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? g.js : acc.concat(", ").concat(g.js)
-    return cir_body(ts, g.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, g.i, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "fail")) {
     let r = expr_at(ts, i + 1)
     if (is_bad(r.e)) { return mk_irres(false, "") }
-    let m = cir_expr(r.e, sc, reqSet)
+    let m = cir_expr(r.e, sc, hostSc, reqSet)
     if (!m.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"fail\", \"message\": ".concat(m.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, r.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, r.i, end, reqSet, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "emit")) {
-    let em = cir_emit_step(ts, i, reqSet, sc)
+    let em = cir_emit_step(ts, i, reqSet, sc, hostSc)
     if (!em.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-    return cir_body(ts, em.i, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, em.i, end, reqSet, provs, sc, hostSc, nacc)
+  }
+  // `isolate <key> in realm("<label>")` and `intercept <key> with { … }` are
+  // PRELUDE declarations, not activation steps: the reference records them on
+  // the component (`isolate`/`intercept`) and emits no body step for either, so
+  // the walk steps over them structurally. The multi-realm ROUTING spelling
+  // (`in realms(...)`, item 162) is a different declaration with a different
+  // key (`routes`) and is deliberately NOT matched here — it keeps refusing.
+  if (atw(ts, i, "isolate")) {
+    if (!(atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
+          && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
+          && atk(ts, i + 6, ")"))) { return mk_irres(false, "") }
+    return cir_body(ts, i + 7, end, reqSet, provs, sc, hostSc, acc)
+  }
+  if (atw(ts, i, "intercept")) {
+    var k = i + 1
+    while (k < end && !atk(ts, k, "{")) { k += 1 }
+    if (!atk(ts, k, "{")) { return mk_irres(false, "") }
+    let ce = close_brace(ts, k)
+    if (ce == 0 - 1) { return mk_irres(false, "") }
+    return cir_body(ts, ce, end, reqSet, provs, sc, hostSc, acc)
   }
   if (atw(ts, i, "every") || atw(ts, i, "after")) {
     let mode = tkc(ts, i).text
@@ -11745,13 +11815,13 @@ fn cir_body(ts: List[Token], i: Int, end: Int, reqSet: List[Str],
     if (!atk(ts, i + 3, "{")) { return mk_irres(false, "") }
     let bend = close_brace(ts, i + 3)
     if (bend == 0 - 1) { return mk_irres(false, "") }
-    let bodyR = cir_emit_steps(ts, i + 4, bend - 1, reqSet, sc, "")
+    let bodyR = cir_emit_steps(ts, i + 4, bend - 1, reqSet, sc, hostSc, "")
     if (!bodyR.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"timer\", \"mode\": ".concat(jstr(mode))
       .concat(", \"interval_ms\": ").concat(ims)
       .concat(", \"body\": [").concat(bodyR.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_body(ts, bend, end, reqSet, provs, sc, nacc)
+    return cir_body(ts, bend, end, reqSet, provs, sc, hostSc, nacc)
   }
   return mk_irres(false, "")
 }
@@ -11788,6 +11858,80 @@ fn ir_config_default(ts: List[Token], i: Int) -> CfgDef {
   // a non-literal default is deferred: do not consume it, keep `null`.
   if (dv == "null") { return { js: "null", i: i } }
   return { js: dv, i: r.i }
+}
+
+// A static metadata VALUE (`docs`: the `record_literal` grammar — a scalar, or
+// a flat list of scalars; the grammar admits no nesting). Anything else leaves
+// `ok` false, which withholds the whole `intercept` table rather than stamping a
+// value the reference did not lower.
+fn ir_meta_value(e: Expr) -> IrRes {
+  return match e {
+    IntLit(v)   => mk_irres(true, v),
+    FloatLit(v) => mk_irres(true, v),
+    BoolLit(v)  => mk_irres(true, v),
+    StrLit(v)   => mk_irres(true, jstr(v)),
+    NullLit     => mk_irres(true, "null"),
+    Un(u)       => u.op == "-" ? ir_meta_neg(u.e) : mk_irres(false, ""),
+    Lst(l)      => ir_meta_items(l.items, 0, ""),
+    _           => mk_irres(false, ""),
+  }
+}
+
+fn ir_meta_neg(e: Expr) -> IrRes {
+  return match e {
+    IntLit(v)   => mk_irres(true, "-".concat(v)),
+    FloatLit(v) => mk_irres(true, "-".concat(v)),
+    _           => mk_irres(false, ""),
+  }
+}
+
+fn ir_meta_items(xs: List[Expr], i: Int, acc: Str) -> IrRes {
+  if (i >= xs.length()) { return mk_irres(true, "[".concat(acc).concat("]")) }
+  let v = ir_meta_value(xs[i])
+  if (!v.ok) { return mk_irres(false, "") }
+  return ir_meta_items(xs, i + 1, acc == "" ? v.js : acc.concat(", ").concat(v.js))
+}
+
+fn ir_meta_fields(fs: List[InitN], i: Int, acc: Str) -> IrRes {
+  if (i >= fs.length()) { return mk_irres(true, acc) }
+  let v = ir_meta_value(fs[i].value)
+  if (!v.ok) { return mk_irres(false, "") }
+  let e = jstr(fs[i].name).concat(": ").concat(v.js)
+  return ir_meta_fields(fs, i + 1, acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+// `intercept <key> with { … }` -> `"<key>": {…}` entries, in declaration order.
+// Scanned over the component body the way `ir_config` scans the config block:
+// the clause is a prelude declaration, so its extent is a header fact and not a
+// step the activation walk carries.
+fn ir_intercept(ts: List[Token], lo: Int, hi: Int, acc: Str) -> IrRes {
+  var j = lo
+  while (j < hi && !atw(ts, j, "intercept")) { j += 1 }
+  if (j >= hi) { return mk_irres(true, acc) }
+  let key = tkc(ts, j + 1).text
+  var k = j + 1
+  while (k < hi && !atk(ts, k, "{")) { k += 1 }
+  if (!atk(ts, k, "{")) { return mk_irres(false, "") }
+  let r = expr_at(ts, k)
+  let meta = match r.e { Rec(rc) => ir_meta_fields(rc.fields, 0, ""), _ => mk_irres(false, ""), }
+  if (!meta.ok) { return mk_irres(false, "") }
+  let e = jstr(key).concat(": {").concat(meta.js).concat("}")
+  return ir_intercept(ts, r.i, hi, acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+// `isolate <key> in realm("<label>")` -> `"<key>": "<label>"` entries. The
+// multi-realm routing spelling (`in realms(...)`) declares `routes`, not a pin,
+// and is stepped over rather than collected here.
+fn ir_isolate(ts: List[Token], lo: Int, hi: Int, acc: Str) -> Str {
+  var j = lo
+  while (j < hi && !atw(ts, j, "isolate")) { j += 1 }
+  if (j >= hi) { return acc }
+  if (atw(ts, j + 2, "in") && atw(ts, j + 3, "realm")
+      && atk(ts, j + 4, "(") && atk(ts, j + 5, "string")) {
+    let e = jstr(tkc(ts, j + 1).text).concat(": ").concat(jstr(tkc(ts, j + 5).text))
+    return ir_isolate(ts, j + 6, hi, acc == "" ? e : acc.concat(", ").concat(e))
+  }
+  return ir_isolate(ts, j + 1, hi, acc)
 }
 
 // The `config { field: Type [= <literal>] … }` block -> `[{name, type, default}]`.
@@ -11856,18 +12000,29 @@ fn ir_component(ts: List[Token], i: Int, fname: Str) -> IrCompR {
   let lo = j + 1
   let hi = end == 0 - 1 ? j + 1 : end - 1
   let reqSet = bind_names(reqs, 0, [])
-  let bodyRes = cir_body(ts, lo, hi, reqSet, provs, [], "")
+  let bodyRes = cir_body(ts, lo, hi, reqSet, provs, [], [], "")
+  let isoJs = ir_isolate(ts, lo, hi, "")
+  let iceptRes = ir_intercept(ts, lo, hi, "")
   var js = "{\"name\": ".concat(jstr(nm))
     .concat(", \"source\": ").concat(jstr(fname))
     .concat(", \"config\": [").concat(ir_config(ts, lo, hi))
     .concat("], \"requires\": {").concat(ir_binds_json(reqs))
     .concat("}, \"provides\": {").concat(ir_binds_json(provs)).concat("}")
-  if (bodyRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  // an `intercept` whose metadata this producer cannot render is a component
+  // fact it would emit WITHOUT — so the body is withheld with it, rather than
+  // handing an emitter a component that silently lost its interception.
+  if (bodyRes.ok && iceptRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  // the realm-placement prelude, in the reference's key order (after `body`):
+  // `isolate` then `intercept` (`src/revl/lower.py::_lower_component`).
+  if (isoJs != "") { js = js.concat(", \"isolate\": {").concat(isoJs).concat("}") }
+  if (iceptRes.ok && iceptRes.js != "") {
+    js = js.concat(", \"intercept\": {").concat(iceptRes.js).concat("}")
+  }
   js = js.concat("}")
   // a body-level stdlib builtin (or tagged ADT) construction is the reference's
   // body-only v3 trigger (`_has_builtin`); now that the body is lowered, the
   // lowered node's presence is the same signal a token scan cannot see.
-  let bodyV3 = bodyRes.ok
+  let bodyV3 = bodyRes.ok && iceptRes.ok
     && (str_has(bodyRes.js, "\"kind\": \"builtin\"") || str_has(bodyRes.js, "\"kind\": \"adt\""))
   let v3 = bodyV3 || comp_has_kw(ts, lo, hi, "if") || comp_has_kw(ts, lo, hi, "fail")
     || comp_has_kw(ts, lo, hi, "every") || comp_has_kw(ts, lo, hi, "after")
