@@ -310,3 +310,22 @@ import RevL
 #print axioms RevL.A9.routed_installs_without_block
 #print axioms RevL.A9.a9_converse_not_vacuous
 #print axioms RevL.A9.a9_directions_are_distinct
+
+-- Issue 1166: A2 (no acquisition after a provision) stated over the LIFO
+-- stack. The checker's fold (`a2B`), its bridge to the declarative rule,
+-- the body's registrations as a `RevL.Semantics` stack, the proof-pass
+-- ordering under every settling verdict, and the fixture's converse.
+#print axioms RevL.A2.a2Fold_iff
+#print axioms RevL.A2.a2B_iff
+#print axioms RevL.A2.labels_distinct
+#print axioms RevL.A2.stack_all_brackets
+#print axioms RevL.A2.phase1_of_brackets
+#print axioms RevL.A2.stack_of_no_acquire
+#print axioms RevL.A2.stack_shape
+#print axioms RevL.A2.proof_pass_is_withdrawals_then_releases
+#print axioms RevL.A2.withdrawals_precede_releases
+#print axioms RevL.A2.teardown_labels
+#print axioms RevL.A2.fixture_refused
+#print axioms RevL.A2.fixture_release_before_withdrawal
+#print axioms RevL.A2.fixture_opens_the_window
+#print axioms RevL.A2.a2_not_vacuous

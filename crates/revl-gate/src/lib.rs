@@ -713,11 +713,15 @@ fn verdict_from_wire(wire: &str) -> Verdict {
 /// * `rust` — `selfhost/emit_rust.rvl` now BUILDS as rust (every extern carries
 ///   an `@rs` body, and roadmap item 146 closed the `Any`-erasure boxing that
 ///   left it failing `cargo build`; pinned by
-///   `tests/test_selfhost_emit_rust.py::test_the_rust_emitter_builds_as_rust`).
-///   What is missing is the rest of the chain in this crate: the emitter is not
-///   generated into it, and its entry point takes the interchange IR as an
-///   `Any`, which erases to `cordis::Value` with no rust-side constructor to
-///   build one from source.
+///   `tests/test_selfhost_emit_rust.py::test_the_rust_emitter_builds_as_rust`),
+///   and it RUNS as rust: `stdlib/json.rvl::json_parse` is the constructor for
+///   the `cordis::Value` its `Any` parameter erases to, so revl source in and
+///   rust source out is a single native binary, byte-for-byte the reference
+///   compile (`tests/test_selfhost_emit_rust.py
+///   ::test_the_whole_native_chain_runs_as_rust_and_matches_the_reference`).
+///   What is missing is only that THIS crate does not carry it: the generated
+///   `selfhost` module is `selfhost/lower.rvl`'s `use` closure, which does not
+///   reach the emitter.
 ///
 /// The signature is fixed here so its arrival is additive.
 pub fn compile_to(_source: &str, tier: Tier) -> Result<String, Verdict> {
@@ -729,7 +733,7 @@ pub fn compile_to(_source: &str, tier: Tier) -> Result<String, Verdict> {
     // reason should be told which, not one summary that fits neither.
     let tier_detail = match tier {
         Tier::Py => "selfhost/emit_py.rvl carries @py-only helper externs and has no rust form",
-        Tier::Rust => "selfhost/emit_rust.rvl builds as rust but is not generated into this crate, and its entry takes the interchange IR as an erased cordis::Value with no rust-side constructor",
+        Tier::Rust => "selfhost/emit_rust.rvl builds and runs as rust, but is not generated into this crate: the generated selfhost module is selfhost/lower.rvl's use closure, which does not reach the emitter",
     };
     Err(Verdict::OutsideFrontier {
         reason: format!(

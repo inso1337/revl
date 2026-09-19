@@ -50,9 +50,10 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    what revl actually does, and it fails `make formal`.
 4. report checker alignment: compile each file with the real checker
    (`revl.compiler.compile_source`) and compare its refusal codes against
-   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`
-   and `missed-A9` (`FATAL_BUCKETS`) — the checker refusing where the
-   model sees nothing is the dangerous direction and fails the gate.
+   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`,
+   `missed-A9` and `missed-A2` (`FATAL_BUCKETS`) — the checker refusing
+   where the model sees nothing is the dangerous direction and fails the
+   gate.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -104,6 +105,8 @@ from revl.parser import (
     ProvideStmt,
     RouteStmt,
     SpawnExpr,
+    StreamIterStmt,
+    TimerStmt,
 )
 
 
@@ -984,6 +987,20 @@ def _host_acquire_facts(comp, fns: dict) -> list[tuple[str, str]]:
     return out
 
 
+def _a2_step(stmt: object) -> str:
+    """One activation-body statement as the A2 rule sees it (issue 1166):
+    the four statement forms `lower._dispatch_action` refuses once
+    `provide_seen_line` is set are `acquire`; a `provide` block is what sets
+    it; everything else moves nothing. A component `if` arm admits only
+    `fail` and nested `if` (`_lower_component_guard_stmts`), so the body is
+    flat for this rule and no acquisition can hide inside an arm."""
+    if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt, StreamIterStmt)):
+        return "acquire"
+    if isinstance(stmt, ProvideStmt):
+        return "provide"
+    return "other"
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
     tsv: list[str] = []
@@ -1285,6 +1302,13 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for idx, kind, heads, inverse in terms:
                 tsv.append("\t".join(["I", rel, c.name, str(idx), kind,
                                        ",".join(heads), ",".join(inverse)]))
+            # body-step facts (AQ, issue 1166): the activation body in
+            # order, one row per statement, each as the A2 rule sees it. The
+            # oracle folds `RevL.A2.a2B` over them and the reference folds
+            # the checker's rule over the same rows.
+            for ord_, stmt in enumerate(c.body):
+                tsv.append("\t".join(["AQ", rel, c.name, str(ord_),
+                                       _a2_step(stmt)]))
             ff["components"][c.name] = {"calls": calls, "kinds": kinds}
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
@@ -2055,6 +2079,52 @@ def prog_coverage() -> list[str]:
     return findings
 
 
+#: non-vacuity ratchet for the A2 row (issue 1166). Filled by
+#: `reference_from_tsv`, read by `a2_coverage`: `(file, comp) ->
+#: (admitted, acquisitions, provisions)` for every component's body.
+_A2_BODIES: dict = {}
+
+
+def a2_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A2` row (issue 1166).
+
+    Same discipline as the ratchets above: a row that says `ok` over bodies
+    with no provision, or no acquisition, certifies nothing about the
+    ordering — the fold's flag is never set, or never tested. So the corpus
+    must EXERCISE the rule on the reference's own fold:
+
+      * some body is ADMITTED with at least one provision AND at least one
+        acquisition — the ordinary `let x = effect … undo …; provide k { … }`
+        shape, where the flag is set and every acquisition sits above it;
+      * some body is REFUSED — an acquisition after the first `provide`
+        (`examples/rejections/a2_acquire_after_provide.rvl`).
+
+    A refused body is a `fail` on both sides (the oracle's `a2OKB` and this
+    fold are the same rule), so the row bites through
+    `RevL.A2.a2_not_vacuous` / `RevL.A2.fixture_refused`: the verdict flips
+    between the two shapes, and a reference that drifted to accept the
+    second would diverge from the Lean row here. Returns findings, treated
+    as gate failures."""
+    admitted = refused = None
+    for key, (ok, n_acq, n_prov) in _A2_BODIES.items():
+        if ok and n_acq > 0 and n_prov > 0:
+            admitted = admitted or key
+        if not ok:
+            refused = refused or key
+    findings: list[str] = []
+    for label, witness in (
+            ("an admitted body with both a provision and an acquisition",
+             admitted),
+            ("a body refused for an acquisition after a provision", refused)):
+        if witness is None:
+            findings.append(f"a2 coverage: NO witness of {label} — "
+                            "the A2 row would agree vacuously")
+    if not findings:
+        print(f"a2 coverage: {len(_A2_BODIES)} bodies; "
+              f"admitted={admitted} refused={refused}")
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -2082,7 +2152,9 @@ class Verdicts(NamedTuple):
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
     rows (G5: an effect's teardown registration count), `a9` A9 rows (every
     installed provide block's key is declared in the `provides` clause, and
-    every declared key is installed by a block or a `realms(...)` route)."""
+    every declared key is installed by a block or a `realms(...)` route),
+    `a2` A2 rows (A2: no acquisition after a provision in a component's
+    activation body)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2094,13 +2166,14 @@ class Verdicts(NamedTuple):
     g8surface: dict[tuple[str, str, str], object]
     g5reg: dict[tuple[str, str, str], object]
     a9: dict[tuple[str, str], str]
+    a2: dict[tuple[str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
                 + len(self.dispositions) + len(self.recoveries)
                 + len(self.confinements) + len(self.g8surface)
-                + len(self.g5reg) + len(self.a9))
+                + len(self.g5reg) + len(self.a9) + len(self.a2))
 
 
 def _cols(field: str) -> list[str]:
@@ -2122,6 +2195,7 @@ def parse_verdicts(text: str) -> Verdicts:
     g8surface: dict[tuple[str, str, str], object] = {}
     g5reg: dict[tuple[str, str, str], object] = {}
     a9: dict[tuple[str, str], str] = {}
+    a2: dict[tuple[str, str], str] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -2181,10 +2255,13 @@ def parse_verdicts(text: str) -> Verdicts:
             # A9 provide-block declaration, both directions: (file, comp) ->
             # ok|fail.
             a9[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
+        elif parts[0] == "A2" and len(parts) == 4:
+            # A2 ordering: (file, comp) -> ok|fail.
+            a2[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg, a9)
+                    recoveries, confinements, g8surface, g5reg, a9, a2)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -2514,8 +2591,36 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         a9[key] = "ok" if not (undeclared or uninstalled) else "fail"
         _A9_ROWS[key] = (not undeclared, not uninstalled, len(blocks), len(routed))
 
+    # A2 rows (no acquisition after a provision, issue 1166), recomputed
+    # INDEPENDENTLY from the AQ rows: the checker's own rule
+    # (`lower._dispatch_action`) folded over the body in index order — a flag
+    # set at the first `provide`, an `acquire` refused while it is set. One
+    # verdict per component the M rows name, so a body with no statements is
+    # a (vacuous) `ok` on both sides rather than a missing row.
+    aqrows = [r for r in rows if r and r[0] == "AQ" and len(r) == 5]
+    bodies: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    for r in aqrows:
+        bodies.setdefault((r[1], r[2]), []).append((int(r[3]), r[4]))
+    _A2_BODIES.clear()
+    a2: dict[tuple[str, str], str] = {}
+    for r in mrows:
+        key = (r[1], r[2])
+        seen = False
+        ok = True
+        n_acq = n_prov = 0
+        for _ord, kind in sorted(bodies.get(key, [])):
+            if kind == "provide":
+                seen = True
+                n_prov += 1
+            elif kind == "acquire":
+                n_acq += 1
+                if seen:
+                    ok = False
+        a2[key] = "ok" if ok else "fail"
+        _A2_BODIES[key] = (ok, n_acq, n_prov)
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg, a9)
+                    recoveries, confinements, g8surface, g5reg, a9, a2)
 
 
 #: What the REFERENCE computed for each A9 row, for the non-vacuity ratchet:
@@ -2577,7 +2682,7 @@ def a9_coverage() -> list[str]:
     return findings
 
 
-# The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
+# The buckets that are GATE FAILURES, not findings (item 418 step 7). All
 # are the DANGEROUS direction: the real checker REFUSES a file and the model
 # sees nothing wrong with it, so the model is weaker than what revl enforces
 # and the "the model agrees with the checker" claim would be false.
@@ -2586,7 +2691,8 @@ def a9_coverage() -> list[str]:
 # `missed-A9` (issues 1167 / #1172) is the same direction for the
 # provide-block rule: the checker refuses an undeclared block key or a
 # declared key nothing installs, and the model's A9 row says `ok`.
-FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9")
+# `missed-A2` (issue 1166): the checker's A2 refusal with the A2 row `ok`.
+FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9", "missed-A2")
 
 
 def checker_alignment(file_facts: dict, componentless: list[str],
@@ -2636,9 +2742,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         prov_rows = [(k, x) for k, x in v.providers.items() if k[0] == rel]
         spawn_rows = [(k, x) for k, x in v.spawns.items() if k[0] == rel]
         a9_rows = [(k, x) for k, x in v.a9.items() if k[0] == rel]
+        # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
+        # refuses the shape with code A2, so a model `fail` on an accepted
+        # file is `formal-strict` and a checker A2 with the row `ok` is the
+        # fatal `missed-A2`.
+        a2_rows = [(k, x) for k, x in v.a2.items() if k[0] == rel]
         vrow = v.files.get(rel, ("ok", "ok", "ok"))
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows + a9_rows)
+            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows + a9_rows
+            + a2_rows)
+        a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail"
                         for _, x in comp_rows + prov_rows + spawn_rows)
         code, category = checker_code(rel)
@@ -2659,6 +2772,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # what revl enforces, and fatal.
             a9_fail = any(x == "fail" for _, x in a9_rows)
             record("agree-A9" if a9_fail else "missed-A9", rel)
+        elif code == "A2":
+            record("agree-A2" if a2_found else "missed-A2", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -2749,7 +2864,8 @@ def main() -> int:
             ("confinement", ref.confinements, formal.confinements),
             ("g8_surface", ref.g8surface, formal.g8surface),
             ("g5_registration", ref.g5reg, formal.g5reg),
-            ("a9", ref.a9, formal.a9)):
+            ("a9", ref.a9, formal.a9),
+            ("a2", ref.a2, formal.a2)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2767,7 +2883,8 @@ def main() -> int:
         f"{len(ref.confinements)} confinements + "
         f"{len(ref.g8surface)} surfaces + "
         f"{len(ref.g5reg)} teardowns + "
-        f"{len(ref.a9)} provide-clause components) — "
+        f"{len(ref.a9)} provide-clause components + "
+        f"{len(ref.a2)} a2 bodies) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
@@ -2776,6 +2893,7 @@ def main() -> int:
     mismatches.extend(confinement_coverage())
     mismatches.extend(prog_coverage())
     mismatches.extend(a9_coverage())
+    mismatches.extend(a2_coverage())
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:
