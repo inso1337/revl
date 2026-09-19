@@ -9,8 +9,11 @@ meaningful comparison: the same stages emitted to a fast NATIVE tier (rust) vs
 CPython. This tool builds that number.
 
 Same stages, same corpus as the py-tier baseline (imported from
-`bench_selfhost` so "same" is literal, not a copy that can drift). For each
-stage:
+`bench_selfhost` so "same" is literal, not a copy that can drift), plus the
+self-hosted rust EMITTER, which the py-tier baseline never timed — it became
+driveable natively only once it built as rust (item 146 condition 2) and got a
+rust-side IR constructor (condition 3, "the IR driver" below). It is reported
+with no CPython column rather than against an invented baseline. For each stage:
 
   1. Compile selfhost/<stage>.rvl to rust through the reference rust backend
      (backends/rust/emit.py), assemble a runnable cargo binary crate whose
@@ -39,6 +42,7 @@ Run:  python3 tools/bench_selfhost_rust.py
 from __future__ import annotations
 
 import importlib.util
+import json
 import platform
 import re
 import shutil
@@ -95,9 +99,22 @@ CPYTHON_SELFHOST_RUN_MS = {
 #   "str_in"  — entry(source: Str) over a list of source strings; we sink the
 #               length of the (Str or List) result so the call is not elided.
 #   "ir_in"   — entry(ir: Any); the input is an IR document, not a string. `Any`
-#               erases to cordis::Value on the rust tier and there is no rust-side
-#               constructor to feed a real IR, so this stage is not driveable from
-#               a generated rust main today (recorded, not faked).
+#               erases to `cordis::Value` on the rust tier, so a generated `main`
+#               (which has only string literals) cannot hand the entry an IR
+#               directly. The rust-side CONSTRUCTOR for that slot is
+#               `stdlib/json.rvl::json_parse`, whose `@rs` body is exactly
+#               `Value::new(serde_json::from_str::<serde_json::Value>(&s)..)` —
+#               the same boxing stdlib/value.rvl's `@rs` accessors downcast back
+#               out. So an `ir_in` stage is driven through a generated DRIVER
+#               DOCUMENT (`driver_document` below) composing the two in revl:
+#               `drive(ir_text: Str) -> Str = <entry>(json_parse(ir_text))`. The
+#               corpus is then IR documents serialised to JSON text and the stage
+#               is a `str_in` stage again — one revl artifact, no hand-written
+#               rust anywhere in the chain.
+#               A stage whose module cannot be emitted to rust AT ALL (emit_py —
+#               its CPython-only `py_repr` extern has no `@rs` body, and the
+#               reference refuses a bodyless extern by name) stays unmeasured,
+#               with that refusal as the reason: recorded, not faked.
 
 class Stage:
     def __init__(self, name, rvl, entry, kind, corpus, warmup, repeats):
@@ -126,7 +143,155 @@ def stages():
               list(pyb.LOWER_PROGRAMS), warmup=3, repeats=20),
         Stage("emit_py", "selfhost/emit_py.rvl", "emit_py_src", "ir_in",
               None, warmup=5, repeats=25),
+        # The rust EMITTER, driven natively (roadmap item 146, condition 3 — the
+        # thing that drives the emitted emitter). Its corpus is IR, so it goes
+        # through the json_parse driver document; unlike emit_py it BUILDS as
+        # rust (item 146 condition 2), so it measures rather than skipping.
+        # No CPython row: the item-229 py-tier baseline never timed emit_rust,
+        # so the rust-vs-cpython column is reported as absent, not invented.
+        Stage("emit_rust", "selfhost/emit_rust.rvl", "emit_rust_src", "ir_in",
+              None, warmup=3, repeats=10),
     ]
+
+
+EMIT_RUST_CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
+
+
+def emit_rust_corpus_irs():
+    """`[(name, ir_json_text)]` for every emit_rust corpus document, sorted.
+
+    The IR corpus an `ir_in` emitter stage is driven over is the SAME set its
+    byte-agreement oracle holds it to (tests/test_selfhost_emit_rust.py::CORPUS),
+    compiled by the reference frontend and serialised to JSON text. A function,
+    not a constant, so importing this module compiles nothing.
+    """
+    return [(path.name, json.dumps(compile_files([str(path)])))
+            for path in sorted(EMIT_RUST_CORPUS_DIR.glob("*.rvl"))]
+
+
+# ------------------------------------------------------------- the IR driver
+#
+# The rust-side IR constructor, written in revl. An emitter entry takes the
+# interchange IR as an `Any`, which erases to the opaque `cordis::Value`; nothing
+# a generated `main` can spell builds one of those. `stdlib/json.rvl::json_parse`
+# does: its `@rs` body boxes a `serde_json::Value` into a `cordis::Value`, which
+# is precisely the representation stdlib/value.rvl's `@rs` accessors downcast
+# back out. Composing the two in a revl document turns the IR-consuming entry
+# into a Str -> Str function a generated `main` — or any embedder — can call,
+# with no hand-written rust in the chain.
+#
+# The `use` paths are absolute so the driver can be written into a scratch
+# directory instead of into the repo tree.
+
+_DRIVER_TEMPLATE = """\
+// GENERATED by tools/bench_selfhost_rust.py -- the native IR driver.
+//
+// `{entry}` takes the backend-IR document as an `Any`, which erases to
+// `cordis::Value` on the rust tier. `json_parse` is the constructor for that
+// slot: its `@rs` body boxes a `serde_json::Value`, the same representation
+// stdlib/value.rvl's accessors read back. Composed, the emitter becomes a
+// Str -> Str function a generated `main` can drive.
+use "{stage_rvl}" {{ {entry} }}
+use "{json_rvl}" {{ json_parse }}
+
+pub fn drive(ir_text: Str) -> Str {{
+  return {entry}(json_parse(ir_text))
+}}
+"""
+
+DRIVER_ENTRY = "drive"
+
+# The same constructor, one stage earlier: `selfhost/lower.rvl::lower_to_ir`
+# already produces the interchange IR as JSON TEXT, so composing it with
+# `json_parse` and the emitter gives the WHOLE native chain — revl source in,
+# target source out — as a single Str -> Str function, which is what
+# `selfhost/compile.rvl::compile_to` is on the py tier. compile.rvl itself cannot
+# be emitted to rust (it `use`s emit_py.rvl, whose CPython-only `py_repr` extern
+# has no `@rs` body), so the rust-tier chain is spelled here over the one emitter
+# that does build as rust.
+_FULL_DRIVER_TEMPLATE = """\
+// GENERATED by tools/bench_selfhost_rust.py -- the native SOURCE -> target driver.
+//
+// `lower_to_ir` renders the interchange IR as JSON text, `json_parse` builds the
+// `cordis::Value` the emitter's `Any` parameter erases to, and `{entry}` emits.
+// Nothing in this chain is the reference: it is the rust-tier spelling of
+// selfhost/compile.rvl's `compile_to`, which cannot itself be emitted to rust.
+use "{lower_rvl}" {{ admit_src, lower_to_ir }}
+use "{stage_rvl}" {{ {entry} }}
+use "{json_rvl}" {{ json_parse }}
+
+pub fn drive(source: Str) -> Str {{
+  let verdict = admit_src(source)
+  if (verdict != "") {{ return "REFUSED|".concat(verdict) }}
+  return {entry}(json_parse(lower_to_ir(source)))
+}}
+"""
+
+
+def driver_document(stage_rvl: str, entry: str, out_dir: Path,
+                    whole_chain: bool = False) -> Path:
+    """Write the json_parse driver for `entry` and return its path.
+
+    `stage_rvl` is repo-relative (as `Stage.rvl` is); `out_dir` is any writable
+    directory, since the `use` paths are absolute. `whole_chain` spells the
+    SOURCE -> target driver (lower_to_ir + json_parse + the emitter) instead of
+    the IR -> target one.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "revl_ir_driver.rvl"
+    template = _FULL_DRIVER_TEMPLATE if whole_chain else _DRIVER_TEMPLATE
+    path.write_text(template.format(
+        entry=entry,
+        stage_rvl=(ROOT / stage_rvl).as_posix(),
+        json_rvl=(ROOT / "stdlib" / "json.rvl").as_posix(),
+        lower_rvl=(ROOT / "selfhost" / "lower.rvl").as_posix(),
+    ), encoding="utf-8")
+    return path
+
+
+# A `main` for the driver that RUNS one document rather than timing many: read an
+# IR document as JSON text on stdin, write the emitted target source on stdout.
+# That makes the emitted emitter an ordinary filter a caller can diff against the
+# reference emitter's bytes (tests/test_selfhost_emit_rust.py's run gate), which
+# is the only thing that shows the emitted emitter RUNS — byte-exact emit under
+# CPython does not (the item-266 lesson).
+_STDIN_MAIN = """
+
+fn main() {
+    let mut ir_text = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut ir_text)
+        .expect("revl driver: could not read the IR document from stdin");
+    print!("{}", %(entry)s(ir_text));
+}
+""" % {"entry": DRIVER_ENTRY}
+
+
+def build_ir_driver_binary(stage_rvl: str, entry: str, crate_dir: Path,
+                           crate_name: str = "revl_ir_driver",
+                           whole_chain: bool = False):
+    """Build the json_parse driver for `entry` as a runnable cargo binary.
+
+    The binary is a filter: one document on stdin (the interchange IR as JSON
+    text, or — with `whole_chain` — revl source), the emitted target source on
+    stdout.
+
+    Returns `(binary_path_or_None, cargo_result)`. `binary_path` is None when the
+    build failed; `cargo_result` carries the compiler output either way, so a
+    caller can report the real reason instead of a bare failure.
+    """
+    driver = driver_document(stage_rvl, entry, crate_dir / "rvl",
+                             whole_chain=whole_chain)
+    module_src = _RUSTEMIT.emit(compile_files([str(driver)]))
+    (crate_dir / "src").mkdir(parents=True, exist_ok=True)
+    (crate_dir / "src" / "main.rs").write_text(
+        module_src + _STDIN_MAIN, encoding="utf-8")
+    (crate_dir / "Cargo.toml").write_text(
+        _RUSTEMIT.cargo_toml(crate_name), encoding="utf-8")
+    built = _cargo("build", crate_dir, "--release")
+    binary = crate_dir / "target" / "release" / crate_name
+    if built.returncode != 0 or not binary.exists():
+        return None, built
+    return binary, built
 
 
 # ---------------------------------------------------------------- rust codegen
@@ -156,7 +321,8 @@ def _sink_expr(entry: str) -> str:
     return f"sink = sink.wrapping_add({entry}(item.clone()).len() as u64);"
 
 
-def _gen_main(stage: Stage) -> str:
+def _gen_main(stage: Stage, entry: str | None = None) -> str:
+    entry = entry or stage.entry
     items = ",\n        ".join(_rust_str_literal(s) for s in stage.corpus)
     return f"""
 
@@ -169,14 +335,14 @@ fn main() {{
     let mut sink: u64 = 0;
     for _ in 0..warmup {{
         for item in &corpus {{
-            {_sink_expr(stage.entry)}
+            {_sink_expr(entry)}
         }}
     }}
     let mut samples: Vec<f64> = Vec::with_capacity(repeats);
     for _ in 0..repeats {{
         let t0 = std::time::Instant::now();
         for item in &corpus {{
-            {_sink_expr(stage.entry)}
+            {_sink_expr(entry)}
         }}
         samples.push(t0.elapsed().as_secs_f64() * 1e3);
     }}
@@ -249,20 +415,25 @@ def _build_stage(stage: Stage, workdir: Path) -> StageResult:
     the others)."""
     res = StageResult(stage)
 
+    # An IR-consuming stage is compiled through the json_parse DRIVER (see "the
+    # IR driver" above), which makes it a Str -> Str stage over IR JSON text.
+    # `stage.corpus` is filled in here rather than in `stages()` so importing
+    # this module compiles nothing.
     if stage.kind == "ir_in":
-        res.reason = ("entry takes an IR document (`Any`), which erases to "
-                      "cordis::Value on the rust tier; no rust-side IR "
-                      "constructor exists to feed it from a generated main")
-        # even so, surface whether the module would emit at all
-        try:
-            _RUSTEMIT.emit(compile_files([str(ROOT / stage.rvl)]))
-        except Exception as exc:  # noqa: BLE001
-            res.reason = f"cannot emit to rust: {exc}"
-        return res
+        stage = Stage(stage.name, stage.rvl, stage.entry, stage.kind,
+                      [text for _name, text in emit_rust_corpus_irs()],
+                      stage.warmup, stage.repeats)
+        source_rvl = driver_document(stage.rvl, stage.entry,
+                                     workdir / f"{stage.name}_driver")
+        entry = DRIVER_ENTRY
+    else:
+        source_rvl = ROOT / stage.rvl
+        entry = stage.entry
 
-    # 1) emit the stage module
+    # 1) emit the stage module (for an ir_in stage: the driver, whose `use`
+    #    closure pulls in the emitter and stdlib/json.rvl)
     try:
-        ir = compile_files([str(ROOT / stage.rvl)])
+        ir = compile_files([str(source_rvl)])
         module_src = _RUSTEMIT.emit(ir)
     except Exception as exc:  # noqa: BLE001  (EmitError and friends)
         res.reason = f"cannot emit to rust: {exc}"
@@ -272,7 +443,7 @@ def _build_stage(stage: Stage, workdir: Path) -> StageResult:
     crate = workdir / stage.name
     (crate / "src").mkdir(parents=True, exist_ok=True)
     (crate / "src" / "main.rs").write_text(
-        module_src + _gen_main(stage), encoding="utf-8")
+        module_src + _gen_main(stage, entry), encoding="utf-8")
     (crate / "Cargo.toml").write_text(
         _RUSTEMIT.cargo_toml(f"revl_bench_{stage.name}"), encoding="utf-8")
 
