@@ -31,7 +31,7 @@
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
         },
-        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every \u2026 in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on \u2026 as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 \u00a78's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the \u00a74.5 `replay(\u2026)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead. The ACQUISITION arm this slice adds to `_document_holds_stream` is uncovered for exactly the same reason, and is the third statement group the function contributes: a bare `Stream.*` provider acquisition (`let src = effect Stream.source() undo src.close()`) carries neither a `subscribe` flag nor a `stream-iter` step, and a document carrying one is still a stream document, so it is still not a byte-agreement case. The arm is pinned by tests/test_stream_reactive.py::test_go_diverts_a_source_only_component_beside_a_top_level_declaration.": {
+        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every \u2026 in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on \u2026 as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 \u00a78's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the \u00a74.5 `replay(\u2026)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
           "_document_holds_stream": 6,
           "_flag_stream": 1,
           "_flag_stream_drain": 3,
@@ -197,7 +197,7 @@
         "Remaining constructor paths implement deferred builtin Some/None/Ok/Err layouts, or reject unknown cases/bad arity. Covered user variants take the declared-layout branch; builtin tagged preambles are not emitted by the port.": {
           "_go_v3_construct": 29
         },
-        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead. Item 130 adds one statement on this same unentered path: the `_refuse_stream_document_top_level(ir)` call under the stream diversion, which no corpus document reaches because no corpus document holds a stream at all.": {
+        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead.": {
           "_emit": 111
         },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
@@ -827,12 +827,12 @@
       "uncovered_statements": 678
     },
     "rust": {
-      "statements": 3708,
+      "statements": 3771,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
-          "_emit_step": 92,
+          "_emit_step": 21,
           "_guard_frame_neutral_loop": 1,
-          "_uses_timer.walk": 2
+          "_uses_timer.walk": 1
         },
         "Async function coloring is intentionally erased by the Rust tier; the residual branch strips malformed/nested Async return spellings not produced by accepted typed corpus input.": {
           "_erase_async": 1
@@ -851,7 +851,7 @@
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
           "_emit_component": 5,
           "_emit_component_new": 23,
-          "_emit_components": 7,
+          "_emit_components": 6,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
@@ -864,7 +864,6 @@
           "_revl_ftoa_helper": 1,
           "_revl_record_preamble": 2,
           "_revl_teardown_preamble": 1,
-          "_revl_timer_preamble": 1,
           "_uses_float_interp.walk": 5
         },
         "Explicit invalid/deferred-input guards: accepted frontend IR contains no unresolved holes or ownerless deferred approvals; these walkers and refusal branches make such direct or stale IR fail loudly instead of generating Rust.": {
@@ -877,15 +876,13 @@
           "_rust_extern_config_bind": 9
         },
         "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs.": {
-          "_component_map_values": 1,
-          "_emit_host_stubs": 5,
           "_host_of": 4,
           "_map_expr_inserts": 3,
           "_map_insert_candidates": 7,
           "_map_value_expr_type": 67,
           "_map_value_rust_type": 2
         },
-        "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions. The count rose 26 -> 32 with issue #1157: a test body now gets the same per-fn by-value analysis a function body gets (reuse counts, the loop-repeat widening, movable `for` iterables, empty-`vec!` element types), because running those rules with an EMPTY reuse set moved a reused local at its first use and `cargo check` never compiles `#[cfg(test)]` to say so. The six statements sit on the same unreachable path as the rest of this bucket: no rust byte-agreement corpus document carries an in-file `test` at all, and one that did would flip the oracle red rather than close the gap, because selfhost/emit_rust.rvl emits no test section. The reference half is pinned by backends/rust/test_emit_rust.py::test_test_body_gets_the_same_by_value_analysis_as_a_function_body and by the `--all-targets` build of tests/fixtures/emit_rust_corpus/loop_moves.rvl.": {
+        "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions.": {
           "_emit_v3_lifecycle_tests": 81,
           "_emit_v3_tests": 32,
           "_lifecycle_uses_advance": 1,
@@ -955,15 +952,11 @@
           "cargo_toml": 1
         },
         "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 \u00a74.5 puts the `replay(\u2026)` refusal beside the surviving `drain` one. The two are refused for different reasons \u2014 the window for the deterministic clock this tier does not carry, replay for the recovery surface (\u00a74.9) that lives on py \u2014 and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
-          "_is_stream_next": 7,
+          "_is_stream_next": 1,
           "_refuse_required_stream": 1,
-          "_refuse_unlowered_stream_surface": 4,
-          "_stream_chain": 12,
-          "_stream_event_host_rust": 1,
-          "_stream_head": 4,
-          "_stream_stage_arrow": 10,
-          "_subscription_binds": 1,
-          "_uses_stream_event": 1
+          "_refuse_unlowered_stream_surface": 2,
+          "_stream_chain": 1,
+          "_stream_stage_arrow": 1
         },
         "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered.": {
           "_arg_ref_name": 2,
@@ -1006,7 +999,7 @@
           "_witnessed_extern_for": 3
         },
         "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read \u2014 `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 \u00a74.5 adds two statements: the `replay(\u2026)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_render_expr": 59
+          "_render_expr": 54
         },
         "backends/rust/emit.py::_borrow_list_arg: item 437d borrow of a read-only list parameter into a `&[T]` slot. The already-lowered-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual statement is the List-index place-borrow arm (`&xs[i]` via _v3_strip_index_clone), which no byte-agreement corpus document passes into a borrowed `&[T]` argument, the same shape left uncovered on _v3_strip_index_clone itself.": {
           "_borrow_list_arg": 1
@@ -1027,10 +1020,10 @@
           "_secret_mark_call": 9,
           "_secret_method_params": 4,
           "_secret_result_lines": 8,
-          "_stream_host_rust": 8
+          "_stream_host_rust": 6
         }
       },
-      "uncovered_statements": 1306
+      "uncovered_statements": 1190
     },
     "ts": {
       "statements": 2208,
@@ -1817,10 +1810,9 @@
       "uncovered_statements": 103
     },
     "rust": {
-      "statements": 2691,
+      "statements": 4092,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
-          "component_uses_await": 1,
           "erase_async_ret": 1
         },
         "Canonical ABI bridge boundary: these residuals emit opaque/non-scalar Value extraction, serialization and deserialization plus proxy glue. Scalar and scalar-Option bridge paths are covered; records, collections, Results and opaque payloads remain explicit DEFER cases.": {
@@ -1833,7 +1825,7 @@
         "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming.": {
           "checked_method": 5,
           "default_for_rust_type": 11,
-          "emit_host_stubs": 5,
+          "emit_host_stubs": 2,
           "ind": 1,
           "is_addsubmul": 1,
           "is_builtin_ctor": 1,
@@ -1841,13 +1833,12 @@
           "is_scalar_option": 1,
           "list_element_type": 3,
           "resolved": 1,
-          "rstrip": 5,
-          "set_vts": 1
+          "rstrip": 5
         },
         "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered.": {
           "config_default_lit": 1,
           "emit_component": 1,
-          "emit_component_new": 2,
+          "emit_component_new": 1,
           "has_extra_linebreak": 1,
           "is_extra_linebreak": 3,
           "method_body_lines": 5,
@@ -1867,28 +1858,24 @@
         },
         "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153).": {
           "by_value_reuse": 2,
-          "component_map_values": 3,
-          "emit_comp_step": 5,
-          "emit_let_effect_step": 8,
+          "component_map_values": 1,
+          "emit_comp_step": 8,
+          "emit_let_effect_step": 6,
           "host_of": 6,
           "map_insert_candidates": 8,
           "map_value_expr_type": 75,
           "map_value_surface_type": 1,
-          "steps_use_timer": 3,
-          "uses_stream_event": 1,
-          "uses_timer": 1,
+          "steps_use_timer": 2,
           "witnessed_acquire": 5
         },
         "Host-object blocks no corpus document acquires: the corpus declares a host `Map`, so the Pool and Job literal line lists (and the CAS verb test that selects `insert_if_absent`) are emitted by a branch the corpus never takes. Each is a verbatim transcription of the reference's own literal list, so there is nothing for a second implementation to get wrong beyond the gate on which block rides along, which the Map case does exercise (issue 1153).": {
-          "host_job_lines": 86,
-          "host_pool_lines": 129,
           "is_map_cas_verb": 1
         },
         "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one \u2014 no rust corpus document negates an Int32.": {
           "borrow_str_arg": 1,
           "by_value_arg": 2,
           "collect_fn_value_refs": 2,
-          "is_atomic": 3,
+          "is_atomic": 2,
           "list_param_escapes": 3,
           "mentions_name": 1,
           "owned_borrowed_tail": 1,
@@ -1896,7 +1883,7 @@
           "render_builtin": 2,
           "render_call": 1,
           "render_component_call": 1,
-          "render_inner": 4,
+          "render_inner": 5,
           "render_interp": 2,
           "render_un": 2,
           "render_var": 2,
@@ -1905,6 +1892,22 @@
           "v3_is_float": 3,
           "v3_is_str": 1,
           "v3_stmt": 1
+        },
+        "The in-file `test` declarations that drive the clock. Consulted only when no component arms a timer \u2014 `uses_timer(..) || tests_use_advance(ir)` at selfhost/emit_rust.rvl:5568 short-circuits on the left \u2014 and the corpus's own document arms one. The section that would consult it is the in-file test section the port defers (tests/fixtures/selfhost_blind_spots.json, `step=advance`) (issue 1153).": {
+          "tests_use_advance": 4
+        },
+        "The port's own `json.dumps` for the typed-event contract schema (`json_str`, `json_dumps`) and the non-BMP `\\uXXXX` escape arm inside it (`hex4`). They are reached only through `Stream::contract` at selfhost/emit_rust.rvl:4889, which the corpus's `comp_stream.rvl` `Handler` component does not reach; the reference calls python's `json`, so it has no counterpart in `backends/rust/emit.py` (issue 1153).": {
+          "hex4": 8,
+          "json_dumps": 6,
+          "json_str": 12
+        },
+        "The port's stream / typed-event / host-dialect expression dispatch arms. The corpus's `comp_stream.rvl` reaches the enclosing gate (`render_expr`'s kind test and the `on <Event>` window guard) but never the call, so `render_host`, `render_subscribe`, `stream_chain`, `stream_stage_arrow`, `is_stream_next` and `is_subscription_bind` stay unexecuted. These are the arms that emit `Stream::contract` or a `<<DEFER-stream-*>>` marker for the substrate this port does not assemble; the same shapes are named in tests/fixtures/selfhost_blind_spots.json (issue 1153).": {
+          "is_stream_next": 2,
+          "is_subscription_bind": 2,
+          "render_host": 2,
+          "render_subscribe": 3,
+          "stream_chain": 1,
+          "stream_stage_arrow": 1
         },
         "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered.": {
           "build_type_tables": 2,
@@ -1930,7 +1933,7 @@
           "strip_index_clone": 1
         }
       },
-      "uncovered_statements": 473
+      "uncovered_statements": 289
     },
     "ts": {
       "statements": 2166,
@@ -2078,7 +2081,7 @@
         "Remaining guards reject malformed emitted constant text: missing closing parenthesis, empty/sign-only numeral, or nondigit. Valid renderer-produced integer constants satisfy this parser.": {
           "const_numeral": 3
         },
-        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle. The second statement is the splice that pushes the item-130 component markers into the module; no emit_wasm_corpus document declares a component, so the loop body never runs. The third is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
           "emit_wasm_src": 3
         },
         "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
