@@ -287,19 +287,30 @@ def test_the_historical_collision_on_the_real_selfhost_files(tmp_path):
     plant — which is also how much it will take for the next `use` edge to
     reintroduce it.
 
-    The record's name is asserted into the COPY rather than read out of the
-    tree, so the plant keeps reproducing the historical collision once the
-    #1144 rename to `TyField` lands and nobody has to notice that this test
-    quietly stopped planting anything."""
+    The record's name is DERIVED from the shipped declaration and then asserted
+    into the COPY. Deriving is what keeps the plant planting: renaming away from
+    `Field` is the fix this gate exists to make unnecessary, and every file that
+    takes a `use` edge onto `types.rvl` renames it again — `RecField` for
+    `checker.rvl`'s expression algebra, `TyField` in #1144. A hard-coded rename
+    target matches nothing the day the next one lands, and a plant that silently
+    plants nothing is the `port_token` failure #1136 closed. The record's SHAPE
+    is still asserted, so a reshaped declaration fails loudly here instead of
+    quietly reproducing no collision at all."""
     shutil.copytree(SELFHOST, tmp_path / "selfhost")
     shutil.copytree(ROOT / "stdlib", tmp_path / "stdlib")
     types_rvl = tmp_path / "selfhost" / "types.rvl"
     source = types_rvl.read_text()
-    planted = re.sub(r"\bTyField\b", "Field", source)
-    types_rvl.write_text(planted)
-    assert "type Field = { name: Str, ty: Str }" in planted, (
+    declared = re.search(r"^(?:pub )?type (\w+) = \{ name: Str, ty: Str \}$",
+                         source, re.MULTILINE)
+    assert declared is not None, (
         "the structural-record declaration this plant depends on has been "
         "reshaped in selfhost/types.rvl; re-derive the plant from it"
+    )
+    planted = re.sub(rf"\b{declared.group(1)}\b", "Field", source)
+    types_rvl.write_text(planted)
+    assert "type Field = { name: Str, ty: Str }" in planted, (
+        f"renaming `{declared.group(1)}` to `Field` did not reproduce the "
+        "historical declaration; re-derive the plant from selfhost/types.rvl"
     )
     # the case half is the shipped one, unedited.
     assert "| Field(FieldN)" in (tmp_path / "selfhost" / "parser.rvl").read_text()
