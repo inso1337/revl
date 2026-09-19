@@ -1833,13 +1833,16 @@ fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MSig]) -> MethsR {
     if (atw(ts, j, "emission")) {
       em = true
       j += 1
+      // `cap_list_at` reads the scope list the way `_capability_list` does — a
+      // DOTTED token is one capability (`fs.write`, not `fs` and `write`) and
+      // an item-294 parameter list canonicalizes through the same closed
+      // registry, so `caps` carries the declaration's own spelling. Scraping
+      // every `ident` out of the brackets, as this did, split a dotted token in
+      // two and admitted a parameter NAME as a third capability.
       if (atk(ts, j, "[")) {
-        var k = j + 1
-        while (k < end && !atk(ts, k, "]")) {
-          if (atk(ts, k, "ident")) { caps = caps.push(tkc(ts, k).text) }
-          k += 1
-        }
-        j = k + 1
+        let cl = cap_list_at(ts, j, end)
+        caps = cl.xs
+        j = cl.i
       }
     } else if (ati(ts, j, "endorse")) {
       j += 1
@@ -5015,6 +5018,801 @@ fn emis_surface_map(comps: List[CompD], cx: Ctx) -> SurfMap {
   return m
 }
 
+// ========================================================= capability order
+//
+// `src/revl/cap_order.py`'s partial order on a capability `(T, P)` pair, and the
+// key-to-token bridge `lower.py::_cap_keyed` that spells BOTH sides of the
+// spawn-attenuation fold in the boundary's own namespace.
+//
+// WHY IT IS HERE. Attenuation (item 66, extended by 294/260) asks whether a
+// spawned child reaches only boundaries its spawner holds. Until this section
+// the fold ran over WIRING KEYS: `emit fs.ingest(row)` contributed the local
+// `requires` spelling `fs`, and any spawner requiring anything at all under a
+// key spelled `fs` covered it. A key is a per-component spelling, so two
+// components wiring unrelated services both spelled `fs` compared equal and the
+// child's boundary was laundered past the invariant — the very defect
+// `_cap_keyed`'s docstring records the reference having fixed, and the reason
+// `examples/rejections/g4_spawn_widens_parameter.rvl` and
+// `examples/rejections/g4_spawn_widens_budget.rvl` were no-objections. The
+// key-rename shape itself has no corpus fixture: the in-file test below is its
+// only home, because `formal/harness/diff_corpus.py::_canon_cap` exports BOTH
+// sides of the model's attenuation fold under the wiring key too, so a
+// rejection fixture for it fails that gate's `missed-G4` ratchet against a
+// model this change does not touch.
+//
+// The BOUNDS half of the spawn gate keeps the old string surface on purpose:
+// the reference's `_spawn_emission_surface` reads `_collect_emit_caps` (wiring
+// keys), not the `_pairs` variants, so `emis_surface_map` below is untouched and
+// its refusals stay byte-identical. Only attenuation moves to this namespace,
+// exactly as the reference splits them.
+//
+// WHAT IS MODELLED: the closed registry verbatim. `path` (a lexical cone,
+// component-wise prefix), `host`/`table` (discrete equality), and the three
+// ceiling kinds `calls`/`size`/`time` with their `requests`/`bytes` aliases. A
+// ceiling is EXEMPT from crossing coverage — a crossing binds no ceiling — and
+// is decided by the dedicated budget check, the same split `_strip_ceilings`
+// and `_ceiling_attenuation_check` make.
+//
+// WHAT IS NOT, AND WHY THAT IS SILENCE RATHER THAN A WRONG ANSWER. A
+// per-instance `config.<field>` symbol resolves against a spawn site's literal
+// `with { … }` bindings (`cap_order.substitute`), and this gate's spawn reader
+// keeps no `with` block. Refusing an unresolved symbol WITHOUT the substitution
+// that clears it would refuse programs the reference admits, so a program
+// carrying one takes no spawn-attenuation verdict at all — an under-refusal,
+// the direction this gate is allowed to err in. The same bail covers a
+// parameter list this reader cannot canonicalize; those are reference PARSE
+// errors, not this slice's verdict either. Both are marked with the token `?`,
+// a spelling no capability token can have (a token is a dotted ident).
+
+// A canonical capability parameter. `ord` is its registered value order —
+// "path" (a component cone), "disc" (equality), "ceil" (a numeric ceiling) or
+// "sym" (an unresolved per-instance `config.` value). `sv` carries the path /
+// discrete / symbol spelling, `iv` the canonical ceiling integer.
+type CapP = { name: Str, ord: Str, sv: Str, iv: Int }
+// A capability as a point in the order: a token and a valuation sorted by
+// parameter name, so one capability has exactly one canonical spelling.
+type CapT = { token: Str, ps: List[CapP] }
+
+// The wiring-key namespace (`lower.py::_WIRE_NS`). A boundary that no
+// declaration tokens is named by its G2 wiring key HERE, so a key spelling can
+// never masquerade as a declared token; `cap_render_s` strips it back off for
+// a diagnostic, which is what keeps a parameter-free chain byte-identical.
+fn wire_cap(k: Str) -> Str { return "key:".concat(k) }
+
+fn cap_render_s(s: Str) -> Str {
+  return starts_with(s, "key:") ? s.slice(4, s.length()) : s
+}
+
+// The closed registry (`cap_order._REGISTRY`), by canonical parameter name.
+// "" is "not registered", which refuses AT PARSE in the reference and is a bail
+// here — a discrete default would make the no-widening invariant false and turn
+// a typo (`pth=`) into a silent non-narrowing.
+fn cap_ord(n: Str) -> Str {
+  if (n == "path") { return "path" }
+  if (n == "host" || n == "table") { return "disc" }
+  if (n == "calls" || n == "size" || n == "time") { return "ceil" }
+  return ""
+}
+
+// The budget sugar (`cap_order._ALIASES`, item 260 §3.1): `requests` is an ALIAS
+// of `calls` and `bytes` of `size`, resolved at READ so both spellings
+// canonicalize to one stored parameter and binding both is a duplicate.
+fn cap_alias(n: Str) -> Str {
+  if (n == "requests") { return "calls" }
+  if (n == "bytes") { return "size" }
+  return n
+}
+
+// A non-negative decimal integer, -1 on anything else (a non-digit, an empty
+// text, or a value past the 64-bit bound). The same pre-multiply bound test
+// `lexer.rvl::radix_value` uses, so the overflow is refused rather than wrapped.
+fn dec_value(s: Str) -> Int {
+  if (s.length() == 0) { return 0 - 1 }
+  let max = 9223372036854775807
+  var v = 0
+  var i = 0
+  while (i < s.length()) {
+    let cp = s.codepoint_at(i)
+    if (cp < 48 || cp > 57) { return 0 - 1 }
+    let d = cp - 48
+    if (v > (max - d).div_trunc(10)) { return 0 - 1 }
+    v = v * 10 + d
+    i += 1
+  }
+  return v
+}
+
+fn cap_ws(cp: Int) -> Bool {
+  return cp == 32 || cp == 9 || cp == 10 || cp == 13
+}
+
+// `str.strip()` over the four ASCII whitespace bytes python's does for these
+// literals (the values are source string literals, never arbitrary Unicode).
+fn cap_trim(s: Str) -> Str {
+  var lo = 0
+  var hi = s.length()
+  while (lo < hi && cap_ws(s.codepoint_at(lo))) { lo += 1 }
+  while (hi > lo && cap_ws(s.codepoint_at(hi - 1))) { hi = hi - 1 }
+  return s.slice(lo, hi)
+}
+
+// ASCII case-insensitive equality — `_parse_suffixed` lowercases its input
+// before matching a unit, and revl's Str surface has no case fold.
+fn cap_eq_ci(a: Str, b: Str) -> Bool {
+  if (a.length() != b.length()) { return false }
+  var i = 0
+  while (i < a.length()) {
+    var x = a.codepoint_at(i)
+    var y = b.codepoint_at(i)
+    if (x >= 65 && x <= 90) { x = x + 32 }
+    if (y >= 65 && y <= 90) { y = y + 32 }
+    if (x != y) { return false }
+    i += 1
+  }
+  return true
+}
+
+fn cap_ends_ci(s: Str, suf: Str) -> Bool {
+  if (suf.length() > s.length()) { return false }
+  return cap_eq_ci(s.slice(s.length() - suf.length(), s.length()), suf)
+}
+
+// The unit multiplier for a `size`/`time` suffix, 0 when the suffix is not this
+// parameter's. Matched LONGEST FIRST so `ms` wins over `s` and `kb` over `b`,
+// the ordering `sorted(units, key=len, reverse=True)` gives.
+fn cap_unit_mul(nm: Str, low: Str) -> Int {
+  if (nm == "size") {
+    if (cap_ends_ci(low, "kb")) { return 1024 }
+    if (cap_ends_ci(low, "mb")) { return 1048576 }
+    if (cap_ends_ci(low, "gb")) { return 1073741824 }
+    if (cap_ends_ci(low, "tb")) { return 1099511627776 }
+    if (cap_ends_ci(low, "b")) { return 1 }
+    return 0
+  }
+  if (cap_ends_ci(low, "ms")) { return 1 }
+  if (cap_ends_ci(low, "s")) { return 1000 }
+  if (cap_ends_ci(low, "m")) { return 60000 }
+  if (cap_ends_ci(low, "h")) { return 3600000 }
+  return 0
+}
+
+fn cap_unit_len(nm: Str, low: Str) -> Int {
+  if (nm == "size") {
+    if (cap_ends_ci(low, "kb") || cap_ends_ci(low, "mb")
+        || cap_ends_ci(low, "gb") || cap_ends_ci(low, "tb")) { return 2 }
+    return 1
+  }
+  if (cap_ends_ci(low, "ms")) { return 2 }
+  return 1
+}
+
+// `cap_order._parse_suffixed`: a `<int><unit>` budget literal (`"10MB"`, `"2s"`)
+// to its base integer (bytes / milliseconds). -1 on anything that is not one.
+fn cap_suffixed(raw: Str, nm: Str) -> Int {
+  let low = cap_trim(raw)
+  let mul = cap_unit_mul(nm, low)
+  if (mul == 0) { return 0 - 1 }
+  let n = dec_value(cap_trim(low.slice(0, low.length() - cap_unit_len(nm, low))))
+  if (n < 0) { return 0 - 1 }
+  let max = 9223372036854775807
+  if (mul != 1 && n > max.div_trunc(mul)) { return 0 - 1 }
+  return n * mul
+}
+
+// The format's own metacharacters (`cap_order._forbidden_chars`): a value
+// carrying one would not round-trip through the canonical spelling, so the
+// reference refuses it at parse and this reader bails on it.
+fn cap_forbidden(v: Str) -> Bool {
+  var i = 0
+  while (i < v.length()) {
+    let cp = v.codepoint_at(i)
+    if (cp == 34 || cp == 40 || cp == 41 || cp == 44 || cp == 61) { return true }
+    i += 1
+  }
+  return false
+}
+
+// `cap_order._canon_path`, lexical only: split on `/`, drop ONE trailing slash
+// (`/tmp/` == `/tmp`, one spelling per cone), refuse a relative path, an empty
+// component (a `//`), a `.`/`..` component, and `"/"` itself (a root-wide
+// narrowing narrows nothing and is already the bare token). "" marks a refusal.
+fn canon_path(raw: Str) -> Str {
+  if (!starts_with(raw, "/")) { return "" }
+  var body = raw.slice(1, raw.length())
+  if (body.length() > 0 && body.slice(body.length() - 1, body.length()) == "/") {
+    body = body.slice(0, body.length() - 1)
+  }
+  if (body.length() == 0) { return "" }
+  var out = ""
+  var cur = ""
+  var i = 0
+  while (i <= body.length()) {
+    let ch = i < body.length() ? body.slice(i, i + 1) : "/"
+    if (ch == "/") {
+      if (cur == "" || cur == "." || cur == "..") { return "" }
+      out = out.concat("/").concat(cur)
+      cur = ""
+    } else {
+      cur = cur.concat(ch)
+    }
+    i += 1
+  }
+  return out
+}
+
+// -------------------------------------------------- reading a capability list
+//
+// `parser.py::_capability_list` + `_capability_params`, canonicalized through
+// the one point `cap_order.make_cap` is: a dotted token, an optional literal
+// parameter list, the alias resolved, the value validated for its registered
+// order, the bindings sorted by name. The result is the canonical SPELLING (a
+// `Str`), which is what the reference stores on the declaration too, so the
+// fold below re-reads it at a single point (`cap_parse`).
+
+// One `name = value` binding. `ok` false marks one this reader cannot
+// canonicalize; `i` is always past the binding so no caller can spin.
+type CapPR = { name: Str, rend: Str, ok: Bool, i: Int }
+// One capability token's canonical spelling and the index after it.
+type CapRd = { s: Str, i: Int }
+
+fn cap_pr_bad(i: Int) -> CapPR { return { name: "", rend: "", ok: false, i: i } }
+
+fn cap_param_at(ts: List[Token], i: Int) -> CapPR {
+  if (!atk(ts, i, "ident")) { return cap_pr_bad(i + 1) }
+  if (!atk(ts, i + 1, "=")) { return cap_pr_bad(i + 2) }
+  let nm = cap_alias(tkc(ts, i).text)
+  let ord = cap_ord(nm)
+  if (ord == "") { return cap_pr_bad(i + 3) }
+  let v = tkc(ts, i + 2)
+  // a per-instance value (item 294 Slice 2): `path=config.job_root`. `config`
+  // is a keyword, so the head is a `kw` token, exactly as the reference reads it.
+  if (v.kind == "kw" && v.text == "config" && atk(ts, i + 3, ".")
+      && atk(ts, i + 4, "ident")) {
+    // a ceiling is a STATIC bound and takes no per-instance value
+    if (ord == "ceil") { return cap_pr_bad(i + 5) }
+    return { name: nm, rend: "config.".concat(tkc(ts, i + 4).text), ok: true,
+             i: i + 5 }
+  }
+  if (ord == "ceil") {
+    if (v.kind == "int") {
+      let n = dec_value(v.text)
+      if (n < 0) { return cap_pr_bad(i + 3) }
+      return { name: nm, rend: n.to_str(), ok: true, i: i + 3 }
+    }
+    // `calls` is the plain count order and takes an integer only; `size`/`time`
+    // also accept a unit-suffixed string literal.
+    if (v.kind == "string" && nm != "calls") {
+      let n = cap_suffixed(v.text, nm)
+      if (n < 0) { return cap_pr_bad(i + 3) }
+      return { name: nm, rend: n.to_str(), ok: true, i: i + 3 }
+    }
+    return cap_pr_bad(i + 3)
+  }
+  if (v.kind != "string" || cap_forbidden(v.text)) { return cap_pr_bad(i + 3) }
+  if (ord == "path") {
+    let p = canon_path(v.text)
+    if (p == "") { return cap_pr_bad(i + 3) }
+    return { name: nm, rend: "\"".concat(p).concat("\""), ok: true, i: i + 3 }
+  }
+  return { name: nm, rend: "\"".concat(v.text).concat("\""), ok: true, i: i + 3 }
+}
+
+fn cap_tok_at(ts: List[Token], i: Int, end: Int) -> CapRd {
+  if (!atk(ts, i, "ident")) { return { s: "?", i: i + 1 } }
+  var tok = tkc(ts, i).text
+  var j = i + 1
+  while (atk(ts, j, ".") && atk(ts, j + 1, "ident")) {
+    tok = tok.concat(".").concat(tkc(ts, j + 1).text)
+    j += 2
+  }
+  if (!atk(ts, j, "(")) { return { s: tok, i: j } }
+  var ps: List[Str] = []
+  var names: List[Str] = []
+  var bad = false
+  var k = j + 1
+  while (k < end && !atk(ts, k, ")")) {
+    let pr = cap_param_at(ts, k)
+    k = pr.i > k ? pr.i : k + 1
+    if (!pr.ok) {
+      bad = true
+    } else if (contains(names, pr.name)) {
+      bad = true                       // binding one parameter twice
+    } else {
+      names = names.push(pr.name)
+      ps = ps.push(pr.name.concat("=").concat(pr.rend))
+    }
+    if (atk(ts, k, ",")) { k += 1 }
+    else if (!atk(ts, k, ")")) { bad = true  k += 1 }
+  }
+  let past = atk(ts, k, ")") ? k + 1 : k
+  if (bad) { return { s: "?", i: past } }
+  // an empty list is `make_cap(token, [])`, whose canonical spelling is the
+  // bare token — so `emission[fs.write()]` is the bare boundary, not a bail.
+  if (ps.length() == 0) { return { s: tok, i: past } }
+  // names are distinct and the registry holds no name that prefixes another,
+  // so sorting the rendered `name=value` pieces sorts by name.
+  return { s: tok.concat("(").concat(comma_join(sort_strs(ps))).concat(")"),
+           i: past }
+}
+
+type CapsRd = { xs: List[Str], i: Int }
+
+// `[a, b(path="/x")]` — the whole emission scope list. `i` points at the `[`;
+// the result's `i` is past the `]`.
+fn cap_list_at(ts: List[Token], i: Int, end: Int) -> CapsRd {
+  var out: List[Str] = []
+  var j = i + 1
+  while (j < end && !atk(ts, j, "]")) {
+    let r = cap_tok_at(ts, j, end)
+    out = out.push(r.s)
+    j = r.i > j ? r.i : j + 1
+    if (atk(ts, j, ",")) { j += 1 }
+    else if (!atk(ts, j, "]")) { j += 1 }
+  }
+  return { xs: out, i: j + 1 }
+}
+
+
+// -------------------------------------------------------------- the (T, P) read
+//
+// `cap_order.parse_cap` over a canonical stored spelling. Every value that
+// reaches here was rendered by the reader above, so the shapes are exactly the
+// three the renderer emits: a quoted string, a bare integer, or an unquoted
+// `config.<field>`.
+
+fn cap_piece(p: Str) -> CapP {
+  let eq = p.indexOf("=")
+  if (eq == 0 - 1) { return { name: "?", ord: "bad", sv: "", iv: 0 } }
+  let nm = p.slice(0, eq)
+  let v = p.slice(eq + 1, p.length())
+  if (v.length() >= 2 && starts_with(v, "\"")) {
+    return { name: nm, ord: cap_ord(nm), sv: v.slice(1, v.length() - 1), iv: 0 }
+  }
+  if (starts_with(v, "config.")) { return { name: nm, ord: "sym", sv: v, iv: 0 } }
+  return { name: nm, ord: "ceil", sv: "", iv: dec_value(v) }
+}
+
+fn cap_parse(s: Str) -> CapT {
+  let op = s.indexOf("(")
+  if (op == 0 - 1) { return { token: s, ps: [] } }
+  let inner = s.slice(op + 1, s.length() - 1)
+  var out: List[CapP] = []
+  var cur = ""
+  var inq = false
+  var i = 0
+  while (i <= inner.length()) {
+    let ch = i < inner.length() ? inner.slice(i, i + 1) : ","
+    if (ch == "\"") {
+      inq = !inq
+      cur = cur.concat(ch)
+    } else if (ch == "," && !inq) {
+      if (cur != "") { out = out.push(cap_piece(cur)) }
+      cur = ""
+    } else {
+      cur = cur.concat(ch)
+    }
+    i += 1
+  }
+  return { token: s.slice(0, op), ps: out }
+}
+
+fn cap_val_str(p: CapP) -> Str {
+  if (p.ord == "sym") { return p.sv }
+  if (p.ord == "ceil") { return p.iv.to_str() }
+  return "\"".concat(p.sv).concat("\"")
+}
+
+fn cap_to_str(c: CapT) -> Str {
+  if (c.ps.length() == 0) { return c.token }
+  var body = ""
+  var i = 0
+  while (i < c.ps.length()) {
+    if (i > 0) { body = body.concat(",") }
+    body = body.concat(c.ps[i].name).concat("=").concat(cap_val_str(c.ps[i]))
+    i += 1
+  }
+  return c.token.concat("(").concat(body).concat(")")
+}
+
+fn cap_param_get(c: CapT, n: Str) -> CapP {
+  var i = 0
+  while (i < c.ps.length()) {
+    if (c.ps[i].name == n) { return c.ps[i] }
+    i += 1
+  }
+  return { name: "", ord: "", sv: "", iv: 0 }
+}
+
+// ------------------------------------------------------------------ the order
+
+// `narrow <=_path wide` iff wide's COMPONENT list is a prefix of narrow's —
+// never a string prefix: `/tmp/job-42 <= /tmp` holds, `/tmp/jobber <= /tmp/job`
+// does not. Comparing with the separator appended is that test exactly.
+fn leq_path(narrow: Str, wide: Str) -> Bool {
+  if (narrow == wide) { return true }
+  return starts_with(narrow, wide.concat("/"))
+}
+
+// `cap_order._param_leq`: narrow is at-or-below wide in the parameter's order.
+fn cap_param_leq(narrow: CapP, wide: CapP) -> Bool {
+  // an unresolved per-instance symbol is comparable ONLY to the identical
+  // symbol; a symbol against a literal, on either side, is incomparable
+  if (narrow.ord == "sym" || wide.ord == "sym") {
+    return narrow.ord == wide.ord && narrow.sv == wide.sv
+  }
+  if (wide.ord == "path") { return leq_path(narrow.sv, wide.sv) }
+  if (wide.ord == "ceil") { return narrow.iv <= wide.iv }
+  return narrow.sv == wide.sv
+}
+
+// `cap_order.covers`: `a covers b` iff b is at-or-below a. Clause 1 is a
+// BOUNDARY identity test (distinct tokens are incomparable, and `*` is strictly
+// top); clause 2 says b must bind, at-or-below, every parameter a binds — so a
+// bare token tops its cone and DROPPING a parameter widens.
+fn cap_covers(a: CapT, b: CapT) -> Bool {
+  if (a.token == "*") { return b.token == "*" }
+  if (b.token == "*") { return false }
+  if (a.token != b.token) { return false }
+  var i = 0
+  while (i < a.ps.length()) {
+    let w = a.ps[i]
+    let n = cap_param_get(b, w.name)
+    if (n.name == "") { return false }
+    if (!cap_param_leq(n, w)) { return false }
+    i += 1
+  }
+  return true
+}
+
+fn cap_covers_s(a: Str, b: Str) -> Bool {
+  return cap_covers(cap_parse(a), cap_parse(b))
+}
+
+fn cap_covered_by_any(held: List[Str], c: Str) -> Bool {
+  var i = 0
+  while (i < held.length()) {
+    if (cap_covers_s(held[i], c)) { return true }
+    i += 1
+  }
+  return false
+}
+
+// `cap_order.covers_set`: the reach elements no held element covers.
+fn cap_covers_set(held: List[Str], reach: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < reach.length()) {
+    if (!cap_covered_by_any(held, reach[i])) { out = out.push(reach[i]) }
+    i += 1
+  }
+  return out
+}
+
+// `cap_order.split_ceilings`, resource-only projection. A CROSSING binds no
+// ceiling (one call is one call), so the coverage fold is ceiling-BLIND and the
+// budget is decided by `ceil_atten` over the unstripped pairs.
+fn cap_strip_s(s: Str) -> Str {
+  let c = cap_parse(s)
+  var out: List[CapP] = []
+  var i = 0
+  while (i < c.ps.length()) {
+    if (c.ps[i].ord != "ceil") { out = out.push(c.ps[i]) }
+    i += 1
+  }
+  return cap_to_str({ token: c.token, ps: out })
+}
+
+fn cap_strip_all(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    out = union_into(out, [cap_strip_s(xs[i])])
+    i += 1
+  }
+  return out
+}
+
+fn cap_render_all(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    out = union_into(out, [cap_render_s(xs[i])])
+    i += 1
+  }
+  return out
+}
+
+// `lower.py::_cap_offending`: the unnameable host boundary reads in words,
+// everything else as its canonical spelling with the wiring namespace stripped.
+fn cap_offending_join(xs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(", ") }
+    if (xs[i] == "*") { out = out.concat("an unnameable host boundary") }
+    else { out = out.concat("`").concat(cap_render_s(xs[i])).concat("`") }
+    i += 1
+  }
+  return out
+}
+
+// Whether every capability in a set is one this section models. A `?` is a
+// parameter list the reader could not canonicalize; a `sym` is a per-instance
+// value whose spawn-site substitution is not ported. Both make the attenuation
+// verdict unavailable rather than wrong — see the header.
+fn cap_modelled(s: Str) -> Bool {
+  if (s == "?") { return false }
+  let c = cap_parse(s)
+  var i = 0
+  while (i < c.ps.length()) {
+    let o = c.ps[i].ord
+    if (o == "sym" || o == "bad" || o == "") { return false }
+    i += 1
+  }
+  return true
+}
+
+fn caps_modelled(xs: List[Str]) -> Bool {
+  var i = 0
+  while (i < xs.length()) {
+    if (!cap_modelled(xs[i])) { return false }
+    i += 1
+  }
+  return true
+}
+
+fn svc_caps_modelled(svcs: List[SvcD], i: Int) -> Bool {
+  if (i >= svcs.length()) { return true }
+  var mi = 0
+  while (mi < svcs[i].methods.length()) {
+    if (!caps_modelled(svcs[i].methods[mi].caps)) { return false }
+    mi += 1
+  }
+  return svc_caps_modelled(svcs, i + 1)
+}
+
+// ------------------------------------------------------ the budget attenuation
+
+// One budget violation: the child crossing, the ceiling parameter, and the two
+// bounds. `dropped` marks a ceiling the parent declares and the child does not
+// (a missing ceiling is unbounded, hence wider).
+type CVio = { capStr: Str, param: Str, child: Int, parent: Int, dropped: Bool }
+
+// `sorted(key=lambda v: (v["cap"].to_str(), v["param"]))` — the TUPLE order,
+// spelled as a comparison rather than a concatenated key. Concatenating with
+// no separator compares `net` + `calls` against `net(calls=5)` + `size` as
+// `netcalls` vs `net(calls=5)size` and orders the parameterized capability
+// first, where the tuple orders the bare `net` first; and a discrete parameter
+// value may carry any byte but the five the spelling reserves, so no printable
+// separator makes a concatenated key faithful either.
+fn cvio_gt(a: CVio, b: CVio) -> Bool {
+  if (a.capStr != b.capStr) { return a.capStr > b.capStr }
+  return a.param > b.param
+}
+
+fn sort_cvios(xs: List[CVio]) -> List[CVio] {
+  var out: List[CVio] = []
+  var i = 0
+  while (i < xs.length()) {
+    let v = xs[i]
+    var k = 0
+    var placed = false
+    var res: List[CVio] = []
+    while (k < out.length()) {
+      if (!placed && cvio_gt(out[k], v)) {
+        res = res.push(v)
+        placed = true
+      }
+      res = res.push(out[k])
+      k += 1
+    }
+    if (!placed) { res = res.push(v) }
+    out = res
+    i += 1
+  }
+  return out
+}
+
+fn push_cvios(acc: List[CVio], xs: List[CVio]) -> List[CVio] {
+  var out = acc
+  var i = 0
+  while (i < xs.length()) { out = out.push(xs[i])  i += 1 }
+  return out
+}
+
+// The ceilings ONE held capability fails to license for one child crossing.
+// Empty means this held capability licenses the crossing outright.
+fn ceil_fails(h: CapT, c: CapT, cs: Str) -> List[CVio] {
+  var fails: List[CVio] = []
+  var pi = 0
+  while (pi < h.ps.length()) {
+    let w = h.ps[pi]
+    if (w.ord == "ceil") {
+      let n = cap_param_get(c, w.name)
+      if (n.name == "") {
+        fails = fails.push({ capStr: cs, param: w.name, child: 0,
+                             parent: w.iv, dropped: true })
+      } else if (n.iv > w.iv) {
+        fails = fails.push({ capStr: cs, param: w.name, child: n.iv,
+                             parent: w.iv, dropped: false })
+      }
+    }
+    pi += 1
+  }
+  return fails
+}
+
+// `lower.py::_ceiling_attenuation_check`. The coverage fold STRIPS ceilings, so
+// a child budget wider than its parent's would slip past it; this parallel check
+// reads the unstripped pairs.
+//
+// The rule is EXISTENTIAL, and that is the soundness of it: ONE held capability
+// must license the whole crossing — its resource cone covers, and every ceiling
+// it binds the child binds at-or-below. Aggregating per token instead (a `max`
+// over same-token held caps) let a generous budget on a SIBLING cone license a
+// crossing on a cone the parent barely holds, and a per-parameter `max` claims a
+// combination the parent never holds at once. A covering capability that binds
+// no ceiling licenses freely — the parent declares no budget on that cone.
+fn ceil_atten(held: List[Str], reach: List[Str]) -> List[CVio] {
+  let hs = sort_strs(held)
+  let cs = sort_strs(reach)
+  var out: List[CVio] = []
+  var ci = 0
+  while (ci < cs.length()) {
+    let c = cap_parse(cs[ci])
+    let cRes = cap_strip_s(cs[ci])
+    var closest: List[CVio] = []
+    var have = false
+    var licensed = false
+    var hi = 0
+    while (hi < hs.length() && !licensed) {
+      // a sibling cone licenses nothing: the cone test is the same `covers` the
+      // crossing fold runs, over the resource-only projections
+      if (cap_covers_s(cap_strip_s(hs[hi]), cRes)) {
+        let fails = ceil_fails(cap_parse(hs[hi]), c, cs[ci])
+        if (fails.length() == 0) { licensed = true }
+        else if (!have || fails.length() < closest.length()) {
+          closest = fails
+          have = true
+        }
+      }
+      hi += 1
+    }
+    // `!have` also covers "no held cone covers this crossing" — unreachable
+    // here, since the coverage fold refuses that first.
+    if (!licensed && have) { out = push_cvios(out, closest) }
+    ci += 1
+  }
+  return sort_cvios(out)
+}
+
+fn cvio_str(v: CVio) -> Str {
+  if (v.dropped) {
+    return "`".concat(v.capStr).concat("` drops the `").concat(v.param)
+      .concat("` budget (a missing ceiling is unbounded, hence wider)")
+  }
+  return "`".concat(v.capStr).concat("` widens `").concat(v.param)
+    .concat("` to ").concat(v.child.to_str()).concat(" over the parent's ")
+    .concat(v.parent.to_str())
+}
+
+fn budget_msg(parent: Str, child: Str, vs: List[CVio]) -> Str {
+  var off = ""
+  var i = 0
+  while (i < vs.length()) {
+    if (i > 0) { off = off.concat(", ") }
+    off = off.concat(cvio_str(vs[i]))
+    i += 1
+  }
+  return "`".concat(parent).concat("` spawns `").concat(child)
+    .concat("` with a wider resource budget than it holds: ").concat(off)
+    .concat(". A spawned child's budget may only narrow, never widen ")
+    .concat("(attenuation, item 66/294/260)")
+}
+
+// ------------------------------------------------------------- the bridge
+//
+// `lower.py::_spawn_reached_surface_pairs` and `_held_capabilities_pairs`: both
+// sides of the fold, resolved key -> requires-target service -> declared
+// emission token. A method that declares `emission` with no capability list
+// names no token, so the wiring key names that boundary in its own namespace.
+
+fn req_svc_of(reqs: List[Bind], key: Str, i: Int) -> Str {
+  if (i >= reqs.length()) { return "" }
+  if (reqs[i].name == key) { return reqs[i].ty }
+  return req_svc_of(reqs, key, i + 1)
+}
+
+fn req_emit_caps(key: Str, meth: Str, comp: CompD, cx: Ctx) -> List[Str] {
+  let sv = req_svc_of(comp.reqMap, key, 0)
+  if (sv == "") { return ["*"] }
+  let m = find_msig(svc_of(cx, sv), meth, 0)
+  if (m.name == "" || m.caps.length() == 0) { return [wire_cap(key)] }
+  return m.caps
+}
+
+// The capabilities one `emit` statement crosses, in the BOUNDARY's namespace
+// (`_emit_step_caps_pairs`): a required-service emission resolves to the called
+// method's declared tokens; every other emission is the unnameable `*`.
+fn emit_caps_pairs(e: Expr, comp: CompD, cx: Ctx) -> List[Str] {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => req_emit_caps(v, fl.name, comp, cx),
+        _      => ["*"],
+      },
+      _ => ["*"],
+    },
+    _ => ["*"],
+  }
+}
+
+fn emit_pairs_in(ss: List[Stmt], i: Int, comp: CompD, cx: Ctx,
+                 acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  let s = ss[i]
+  let a2 = s.kind == "emit" ? union_into(acc, emit_caps_pairs(s.e, comp, cx)) : acc
+  return emit_pairs_in(ss, i + 1, comp, cx, a2)
+}
+
+fn own_emit_pairs(comp: CompD, cx: Ctx) -> List[Str] {
+  var out = emit_pairs_in(comp.setup, 0, comp, cx, [])
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      out = emit_pairs_in(pv.methods[mi].body, 0, comp, cx, out)
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+fn reach_surface_pairs(comps: List[CompD], cx: Ctx) -> SurfMap {
+  var m: SurfMap = Map.empty()
+  var i = 0
+  while (i < comps.length()) {
+    m = m.set(comps[i].name, own_emit_pairs(comps[i], cx))
+    i += 1
+  }
+  return m
+}
+
+// What a component HOLDS: what its own body reaches, plus — for every requires
+// key — the DECLARED emission tokens of the service that key wires. The boundary
+// the wiring reaches, never the local spelling it was reached through.
+fn held_req_caps(svc: SvcD, key: Str, acc: List[Str]) -> List[Str] {
+  var out = acc
+  var any = false
+  var mi = 0
+  while (mi < svc.methods.length()) {
+    let m = svc.methods[mi]
+    if (m.isEm) {
+      any = true
+      out = m.caps.length() == 0 ? union_into(out, [wire_cap(key)])
+                                 : union_into(out, m.caps)
+    }
+    mi += 1
+  }
+  // a plain or unresolvable service declares no emission token at all: a child
+  // cannot reach a non-emission key, so the key-named element only ever covers
+  // another key-named boundary of the same name
+  return any ? out : union_into(out, [wire_cap(key)])
+}
+
+fn held_caps_pairs(comp: CompD, cx: Ctx, base: List[Str]) -> List[Str] {
+  var out = base
+  var i = 0
+  while (i < comp.reqMap.length()) {
+    out = held_req_caps(svc_of(cx, comp.reqMap[i].ty), comp.reqMap[i].name, out)
+    i += 1
+  }
+  return out
+}
+
+
 // G4/G6 spawn-emission bounds. For every provide-method spawn, the target's
 // (closed) emission surface must fit the method's declared bound.
 fn bounds_method(pv: Provide, m: ProvM, cx: Ctx, closed: SurfMap) -> Str {
@@ -5072,33 +5870,45 @@ fn check_spawn_bounds(comps: List[CompD], ci: Int, cx: Ctx, closed: SurfMap) -> 
 }
 
 // Capability attenuation. For every ACTIVATION (setup) spawn, the child's
-// (closed) reachable set must be a subset of what the spawner HOLDS.
-fn atten_comp(comp: CompD, base: SurfMap, closed: SurfMap) -> Str {
-  let held = union_into(comp_req_keys(comp), surf_get(base, comp.name))
+// (closed) reachable set must be covered by what the spawner HOLDS — both sides
+// spelled in the BOUNDARY's namespace through the bridge above, so a child that
+// reaches a wider cone, or renames the key it reaches it through, is refused.
+//
+// Two questions, in the reference's order. First CROSSING COVERAGE over the
+// resource-only projection, which is ceiling-blind by construction; then the
+// dedicated BUDGET attenuation over the unstripped pairs, which is the only
+// thing that can see a ceiling widen.
+fn atten_comp(comp: CompD, cx: Ctx, base: SurfMap, closed: SurfMap) -> Str {
+  let held = held_caps_pairs(comp, cx, surf_get(base, comp.name))
+  let heldRes = cap_strip_all(held)
   let tgts = stmt_spawns(comp.setup, 0, [])
   var i = 0
   while (i < tgts.length()) {
     let child = tgts[i]
-    let extra = sort_strs(minus_list(surf_get(closed, child), held))
+    let reach = surf_get(closed, child)
+    let extra = sort_strs(cap_covers_set(heldRes, cap_strip_all(reach)))
     if (extra.length() > 0) {
-      let hs = sort_strs(held)
+      let hs = sort_strs(cap_render_all(heldRes))
       let heldStr = hs.length() == 0 ? "no capabilities" : quote_join(hs)
       return "`".concat(comp.name).concat("` spawns `").concat(child)
-        .concat("`, granting it ").concat(offending_join(extra))
+        .concat("`, granting it ").concat(cap_offending_join(extra))
         .concat(", but `").concat(comp.name).concat("` holds only ").concat(heldStr)
         .concat(" — a spawn may narrow a child's capabilities, never widen them")
     }
+    let bad = ceil_atten(held, reach)
+    if (bad.length() > 0) { return budget_msg(comp.name, child, bad) }
     i += 1
   }
   return ""
 }
 
-fn check_spawn_atten(comps: List[CompD], ci: Int, base: SurfMap, closed: SurfMap) -> Verd {
+fn check_spawn_atten(comps: List[CompD], ci: Int, cx: Ctx, base: SurfMap,
+                     closed: SurfMap) -> Verd {
   if (ci >= comps.length()) { return no_verd() }
-  let r = atten_comp(comps[ci], base, closed)
+  let r = atten_comp(comps[ci], cx, base, closed)
   // item 419c: the spawner component's declaration line anchors the attenuation.
   if (r != "") { return mk_verd(tagged("G4", r), comps[ci].line) }
-  return check_spawn_atten(comps, ci + 1, base, closed)
+  return check_spawn_atten(comps, ci + 1, cx, base, closed)
 }
 
 // ---------------------------------------------------------------- spawn forms
@@ -5162,9 +5972,13 @@ fn check_spawn(pg: Prog, cx: Ctx) -> Verd {
   let emisClosed = surf_closure(emis_surface_map(pg.comps, cx), edges)
   let bv = check_spawn_bounds(pg.comps, 0, cx, emisClosed)
   if (bv.v != "") { return bv }
-  let reachBase = reach_surface_map(pg.comps)
+  // a capability this slice does not model leaves the attenuation verdict
+  // UNAVAILABLE rather than wrong: see the capability-order header on the
+  // per-instance `config.` symbol and the uncanonicalizable parameter list.
+  if (!svc_caps_modelled(pg.svcs, 0)) { return no_verd() }
+  let reachBase = reach_surface_pairs(pg.comps, cx)
   let reachClosed = surf_closure(reachBase, edges)
-  let av = check_spawn_atten(pg.comps, 0, reachBase, reachClosed)
+  let av = check_spawn_atten(pg.comps, 0, cx, reachBase, reachClosed)
   if (av.v != "") { return av }
   return no_verd()
 }
@@ -16377,6 +17191,164 @@ component Supervisor requires kv_a: StoreA {
   let l = effect spawn Leaker with { } undo l.dispose()
 }""")
   assert v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// The SAME widening with both keys spelled `kv`. The test above passes under a
+// fold keyed by the wiring key only because its fixture happens to spell each
+// key like its token; rename them together and a key-keyed fold sees `kv` ⊆
+// `kv` and raises no objection. The boundary is the DECLARED token, so this is
+// the same refusal, and this program is where that is pinned — see the
+// capability-order header for why it has no `examples/rejections/` twin.
+test "a spawn laundered through a same-spelled requires key is refused (G4)" {
+  let v = admit_src("""service KvA { emission[kv_a] fn put(k: Str) -> Int }
+service KvB { emission[kv_b] fn put(k: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Leaker requires kv: KvB provides worker: Worker {
+  provide worker { fn run() { emit kv.put("row")  return "k" } }
+}
+component Supervisor requires kv: KvA {
+  let w = effect spawn Leaker with { } undo w.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// item 294: a spawn widens a capability PARAMETER. Strip the valuation and both
+// sides are the same `fs.write` token, so only the (T, P) order sees it. The
+// refusal names the declared boundary, never the `fs` key it was reached
+// through — `examples/rejections/g4_spawn_widens_parameter.rvl`.
+test "a spawn reaching outside the parent's path cone is refused (G4)" {
+  let v = admit_src("""service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service EtcStore { emission[fs.write(path="/etc")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: EtcStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { } undo w.dispose()
+}""")
+  assert v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// The admitted twin: a child cone INSIDE the parent's (`/tmp/jobs` narrows
+// `/tmp`) attenuates. The path order is component-wise, so this must admit while
+// the sibling `/tmp-other` (a string prefix, not a component prefix) does not.
+test "a spawn narrowing into the parent's path cone admits" {
+  assert admit_src("""service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service JobStore { emission[fs.write(path="/tmp/jobs")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: JobStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { } undo w.dispose()
+}""") == ""
+}
+
+test "a sibling path is not a narrowing of the parent's cone (G4)" {
+  let v = admit_src("""service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service OtherStore { emission[fs.write(path="/tmp-other")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: OtherStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { } undo w.dispose()
+}""")
+  assert v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/tmp-other\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// item 260 §3.3: the BUDGET half. The crossing fold is ceiling-blind — stripped,
+// both sides are the bare `net` — so a widened ceiling is only ever seen by the
+// dedicated check. `requests` is the declared alias of the stored `calls`, which
+// is why the diagnostic names `calls`
+// (`examples/rejections/g4_spawn_widens_budget.rvl`).
+test "a spawn widening a budget ceiling is refused (G4)" {
+  let v = admit_src("""service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetWide { emission[net(requests=1000)] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+component Child requires net: NetWide provides worker: Worker {
+  provide worker { fn go() { emit net.call("row")  return 0 } }
+}
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"
+}
+
+// A child that DROPS a ceiling the parent declares widens it to unbounded, so it
+// is the same refusal spelled the other way.
+test "a spawn dropping the parent's budget ceiling is refused (G4)" {
+  let v = admit_src("""service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetBare { emission[net] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+component Child requires net: NetBare provides worker: Worker {
+  provide worker { fn go() { emit net.call("row")  return 0 } }
+}
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net` drops the `calls` budget (a missing ceiling is unbounded, hence wider). A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"
+}
+
+// The admitted twin: a NARROWER child ceiling attenuates.
+test "a spawn narrowing a budget ceiling admits" {
+  assert admit_src("""service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetNarrow { emission[net(requests=50)] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+component Child requires net: NetNarrow provides worker: Worker {
+  provide worker { fn go() { emit net.call("row")  return 0 } }
+}
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}""") == ""
+}
+
+// The bail (item 294 Slice 2): a per-instance `config.` capability symbol
+// resolves against the spawn site's `with { … }` literal bindings
+// (`cap_order.substitute`), and this gate's spawn reader keeps no `with` block.
+// Refusing an unresolved symbol WITHOUT the substitution that clears it would
+// refuse this program, which the reference ADMITS — `/tmp/jobs` resolves into
+// the parent's `/tmp` cone. So the attenuation verdict is unavailable rather
+// than wrong, and the agreement here is what pins that the bail is a
+// no-objection and not a false rejection.
+test "a per-instance capability symbol resolved into the parent's cone admits" {
+  assert admit_src("""service JobStore { emission[fs.write(path=config.job_root)] fn ingest(r: Str) -> Int }
+service TmpStore { emission[fs.write(path="/tmp")] fn ingest(r: Str) -> Int }
+service Worker { emission fn run() -> Str }
+component Kid requires fs: JobStore provides worker: Worker {
+  provide worker { fn run() { emit fs.ingest("row")  return "k" } }
+  config { job_root: Str }
+}
+component Router requires fs: TmpStore {
+  let w = effect spawn Kid with { job_root: "/tmp/jobs" } undo w.dispose()
+}""") == ""
+}
+
+// The scope list is read as `_capability_list` reads it: a DOTTED realm-style
+// token (item 343) is ONE capability. Scraping every ident out of the brackets
+// made `emission[fs.write]` the two capabilities `fs` and `write`, so the
+// WIRING KEY `fs` the body crosses appeared in the declared scope by accident
+// and the declaration bound passed. The reference names the crossing by its
+// key and the declaration by its token, so the two do not match and the
+// implementation is refused — `examples/rejections/g4_dotted_capability_key.rvl`.
+test "a dotted capability token is one capability, not two (G4)" {
+  let v = admit_src("""service Store { emission[fs.write] fn ingest(r: Str) -> Int }
+service Task { emission[fs.write] fn go() -> Int }
+component Worker requires fs: Store provides task: Task {
+  provide task { fn go() { emit fs.ingest("x")  return 0 } }
+}""")
+  assert v == "G4|`Task.go` is declared `emission[fs.write]`, but this implementation emits through `fs` (reaching `fs.ingest`)"
+}
+
+// The admitted twin: the same dotted token declared on a method that does NOT
+// emit is within bound, so the reader change is inert wherever the scope is not
+// actually exercised.
+test "a dotted capability token on a non-emitting method admits" {
+  assert admit_src("""service Store { emission[fs.write] fn ingest(r: Str) -> Int }
+service Task { emission[fs.write] fn go() -> Int }
+component Worker provides task: Task {
+  provide task { fn go() { return 0 } }
+}""") == ""
 }
 
 // An emission reached through a spawn handle (`w.task.run`) must still be marked

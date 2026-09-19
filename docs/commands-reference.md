@@ -79,6 +79,26 @@ composition` takes. It is ignored for module arguments.
 roadmap item 441/458's decision, and widening the document it is evaluated over
 belongs to that item.
 
+### The boundary-policy doors
+
+Three more commands read the same composition document off their own compile
+step rather than the shared one, and all three evaluate the item-33 boundary
+policy: `policy evaluate` (the dry run of the gate), `dash --policy` (the
+policy-exception queue) and `simulate policy-diff --composition` (the realms a
+realm-scoped rule decides by). Each resolves a composition document, refuses
+the same three shapes by name, and takes the same `--root DIR`.
+
+Before that, `policy evaluate` reported `clean` and exited 0 over a composition
+`revl audit --policy` refuses with a named violation, `dash --policy` showed an
+empty pending-decision queue for the same composition, and `simulate
+policy-diff` resolved no realms out of the document it was handed, leaving every
+action a realm-scoped rule selects undecided.
+
+`policy evaluate` and `simulate policy-diff` exit **2** on these refusals, not
+1: on both verbs 1 already means a component would be refused, so a document
+they could not read exits with their usage status instead. `dash` exits 1, the
+status it already uses for an input it cannot read.
+
 ---
 
 ## Authoring and admission
@@ -327,8 +347,15 @@ subcommand, `evaluate`. See [boundary-policy.md](boundary-policy.md) for the
 DSL.
 
 - `POLICY` - the boundary policy file, DSL or JSON (required).
-- `PROGRAM.rvl ...` - the composition source(s) to evaluate against.
+- `PROGRAM.rvl ...` - the source(s) to evaluate against: modules, or a single
+  composition document (see [A COMPOSITION document
+  argument](#a-composition-document-argument)). A composition compiled as a
+  module reported `clean` and exited 0 for a composition `revl audit --policy`
+  refuses.
 - `--json` - machine-readable per-clause verdicts.
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--component NAME` - narrow the report to one component.
 - `--evidence DIR` - a component entry directory holding an `evidence/`
   bundle, for a bare-source component.
@@ -405,7 +432,14 @@ file or an empty one, reaches the same finding.
 - `NEW` - the boundary policy to simulate (required).
 - `--history FILE` - the write-ahead log to read (required).
 - `--composition FILE ...` - compile these composition sources and take each
-  component's realms from them; without one a realm-scoped rule is undecided.
+  component's realms from them; without one a realm-scoped rule is undecided. A
+  single COMPOSITION document is resolved rather than compiled as a module (see
+  [A COMPOSITION document argument](#a-composition-document-argument)); as a
+  module it named no component at all, so supplying one left the rule as
+  undecided as omitting it.
+- `--root DIR` - with a COMPOSITION document passed to `--composition`, the
+  project root row provenance and origins are recorded against (default: the
+  working directory). Ignored for module arguments.
 - `--json` - machine-readable output.
 
 Exit status follows the widening: `1` when the change newly allows a recorded
@@ -1201,7 +1235,13 @@ session or a recorded run - the dependency graph (realms, seams), the causal
 trace streaming, and the pending-decisions queue with evidence attached
 ([dash.md](dash.md)).
 
-- `FILES` - the composition whose graph to show (required).
+- `FILES` - the composition whose graph to show (required): modules, or a
+  single composition document (see [A COMPOSITION document
+  argument](#a-composition-document-argument)). A composition compiled as a
+  module rendered an empty graph and an empty `--policy` decision queue.
+- `--root DIR` - with a COMPOSITION document argument, the project root row
+  provenance and origins are recorded against (default: the working
+  directory). Ignored for module arguments.
 - `--trace FILE` - a lifecycle JSONL (`revl run --trace`): streams the causal
   pane with no live runtime.
 - `--timeline FILE` - a replay recording JSON (a `revl_timeline` dump) for the

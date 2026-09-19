@@ -1,0 +1,31 @@
+// REJECTED - G4: a provide method declares a DOTTED (item 343, realm-style)
+// emission scope and its implementation crosses a wiring key.
+//
+// `Task.go` is declared `emission[fs.write]`: one capability whose token is the
+// two-segment `fs.write`. The implementation emits through the requires key
+// `fs`, and a crossing is named by that key. `fs` is not `fs.write`, so the
+// implementation reaches outside its own declared scope and is refused.
+//
+// The companion `examples/rejections/g4_capability_not_declared.rvl` is the
+// single-segment case. This one exists because a DOTTED token is the shape a
+// reader can silently split: treating `emission[fs.write]` as the two
+// capabilities `fs` and `write` puts the wiring key into the declared scope by
+// accident, and the bound then passes on a program the reference refuses.
+// `selfhost/lower.rvl`'s scope-list reader did exactly that, and nothing in the
+// corpus spelled a dotted scope on an emitting method, so nothing measured it.
+//
+// expected error:
+//   `Task.go` is declared `emission[fs.write]`, but this implementation emits
+//   through `fs` (reaching `fs.ingest`)
+
+service Store { emission[fs.write] fn ingest(row: Str) -> Int }
+service Task { emission[fs.write] fn go() -> Int }
+
+component Worker requires fs: Store provides task: Task {
+  provide task {
+    fn go() {
+      emit fs.ingest("row")
+      return 0
+    }
+  }
+}
