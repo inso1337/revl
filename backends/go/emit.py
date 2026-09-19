@@ -2640,7 +2640,8 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
 
 def _document_holds_stream(ir: dict) -> bool:
     """True when a component in this document holds a stream — a `subscribe`
-    bracket or a `stream-iter` (`every … in` / `on … as`) body step (item 130).
+    bracket, a `stream-iter` (`every … in` / `on … as`) body step, or a bare
+    `Stream.*` provider acquisition (item 130).
 
     The pure typed-core path exists for documents whose component is incidental
     to a record/pure-fn/test case, and it DROPS those components. A stream
@@ -2650,12 +2651,74 @@ def _document_holds_stream(ir: dict) -> bool:
     path (which keeps the component AND materializes its record types) rather
     than routed to the pure path — the case a typed-event program always reaches,
     because the event's record declaration is what puts a `types` entry in the
-    document in the first place."""
+    document in the first place.
+
+    The ACQUISITION arm is the same rule applied to the same surface one step
+    earlier. `let src = effect Stream.source() undo src.close()` with nothing
+    reading it is the source-only program every lowered tier is required to emit
+    (tests/test_stream_reactive.py::
+    test_source_only_program_still_emits_on_the_lowered_tiers), and it opens a
+    live host listener with a `Close` inverse on the teardown stack — exactly
+    what makes a stream component non-incidental. It carries neither a
+    `subscribe` flag nor a `stream-iter` step, though, so without this arm the
+    document routed to the pure path and the provider and its inverse vanished
+    with no diagnostic the moment anything top-level appeared beside it."""
     for comp in ir.get("components") or []:
         for step in comp.get("body") or []:
             if step.get("step") == "stream-iter" or step.get("subscribe"):
                 return True
+            acquire = step.get("acquire")
+            if (isinstance(acquire, dict) and acquire.get("kind") == "host"
+                    and str(acquire.get("fn") or "").startswith("Stream.")):
+                return True
     return False
+
+
+#: The top-level IR sections the live stc-go path does NOT render, and the
+#: predicate that reads each off the document. It emits types, externs,
+#: services, components and lifecycle tests; a top-level `fn` and a PLAIN
+#: `test` block belong to the pure typed-core path, which is the path a stream
+#: document is deliberately diverted AWAY from (`_document_holds_stream`). A
+#: LIFECYCLE test is not in this table — `_emit_stc_lifecycle_tests` renders it
+#: on the live path, and a windowed subscription driven by `advance` is exactly
+#: the §8 program that needs both in one document. Held here so the diversion
+#: states what it cannot carry instead of answering with a module quietly short
+#: of a section.
+_LIVE_PATH_DROPS = (
+    ("functions", "a top-level `fn`",
+     lambda ir: bool(ir.get("functions"))),
+    ("tests", "a plain `test` block",
+     lambda ir: any(not t.get("lifecycle") for t in (ir.get("tests") or []))),
+)
+
+
+def _refuse_stream_document_top_level(ir: dict) -> None:
+    """Refuse a stream document carrying a top-level section the live stc-go
+    path would drop (item 130).
+
+    Item 130 routes a stream document to the live path because the pure typed-
+    core path drops components and a dropped stream component is a program that
+    silently never subscribes. The live path has a drop of its own in the other
+    direction: it renders no top-level `fn` and no plain `test` block. So a
+    document holding BOTH compiled either way to a module missing a section its
+    author wrote, with no error on either side of the fork.
+
+    There is no third path to send it down, so it is refused by name. A stream
+    is the one thing in this document the tier cannot get wrong quietly: its
+    contract is a live listener with an inverse, and the whole point of the
+    diversion is that a tier says what it cannot lower rather than lowering
+    something else."""
+    for key, described, present in _LIVE_PATH_DROPS:
+        if present(ir):
+            raise EmitError(
+                "this document holds a stream and declares %s; the stream is "
+                "lowered on the live stc-go path, which renders types, externs, "
+                "services, components and lifecycle tests but NOT `%s`, and the "
+                "pure typed-core path that does render them drops the component "
+                "the stream lives in. Emitting either way would answer with a "
+                "module missing a section you wrote, so the tier refuses by name "
+                "instead (item 130 §4.6) — split the %s into its own document, "
+                "or try `--backend py`" % (described, key, key))
 
 
 def _stream_head(node, env) -> str:
@@ -9248,6 +9311,10 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     # the first place, so a typed-event program would otherwise route to the
     # pure path and compile to a bare struct.
     holds_stream = _document_holds_stream(ir)
+    if ver == 3 and holds_stream:
+        # ... and the live path has a drop of its own in the other direction,
+        # which the diversion must not spend silently (see the helper).
+        _refuse_stream_document_top_level(ir)
     if (ver == 3 and not holds_stream
             and (not ir.get("components")
                  or (has_top_level and not has_lifecycle))):
