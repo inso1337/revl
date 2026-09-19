@@ -144,9 +144,14 @@ SELFHOST_IR_CONSTRUCTOR = "stdlib/json.rvl"
 # The whole `use` closure of the generated module, ordered. Both halves: the gate
 # (`lower.rvl` + its front end) and the emitter (`emit_rust.rvl` + the stdlib
 # modules it reads an erased `Value` through, + the IR constructor).
+# `selfhost/types.rvl` (and the two stdlib leaves it reads) joined the closure
+# with the type layer's slice T1: `lower.rvl` `use`s the shared type-SPELLING
+# algebra rather than carrying a second copy of it, so the crate's generated
+# bytes now depend on those files too and the drift gate has to see them.
 SELFHOST_CLOSURE = (
     "selfhost/lexer.rvl",
     "selfhost/parser.rvl",
+    "selfhost/types.rvl",
     "selfhost/lower.rvl",
     "stdlib/value.rvl",
     "stdlib/list.rvl",
