@@ -18,7 +18,8 @@
    "backends/go/testdata/stream_event_130.rvl",
    "backends/java/scenarios/stream_130.rvl",
    "backends/java/scenarios/stream_event_130.rvl",
-   "backends/rust/scenarios/stream.rvl"
+   "backends/rust/scenarios/stream.rvl",
+   "tests/fixtures/emit_rust_corpus/comp_stream.rvl"
   ]
  },
  "corpus_dirs": [
@@ -198,6 +199,18 @@
    "reference": {
     "message": "non-exhaustive match: missing case `Invalid`",
     "tag": "T1"
+   }
+  },
+  "tests/fixtures/emit_rust_corpus/comp_stream.rvl": {
+   "bucket": "false-reject/G1",
+   "gate": {
+    "code": "G1",
+    "kind": "refused",
+    "message": "`sub` is not a declared requirement of Parked"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
    }
   }
  },
