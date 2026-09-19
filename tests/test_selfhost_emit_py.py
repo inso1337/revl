@@ -141,6 +141,11 @@ CORPUS = [
     "services_interp.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
+    # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
+    # The new gate phase is the reason this document exists — it can fail in the
+    # accepting direction as easily as in the refusing one, and a rejection
+    # fixture proves nothing about that half.
+    "declared_type_shapes.rvl",
     "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
     "floats.rvl",      # `_revl_ftoa` canonical Float->Str, gated by a float `${…}` interpolation
     # issue #721 — `%` on Float is its own helper here, because IEEE gives it a
