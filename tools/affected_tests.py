@@ -674,12 +674,16 @@ def select(changed, root) -> dict:
         # on the inner loop. The pytest modules are the python half of
         # `formal/harness/diff_corpus.py` — the rules that decide its `P` and
         # `W` rows, and the checker-alignment fidelity of its `U`/`F` rows and
-        # checker door (#1169) — which `make formal` can only collect with a
-        # Lean toolchain installed, and which is therefore the half that can
-        # move unnoticed on a machine without one.
+        # checker door (#1169) — plus the namespace the L2 derived layer states
+        # its theorems in: halves `make formal` can only collect with a Lean
+        # toolchain installed, and which is therefore what can move unnoticed on
+        # a machine without one.
         if f.startswith("formal/") or f.startswith("tests/formal_corpus/"):
             gates.add("formal")
             pytest_nodes.add("tests/test_formal_attenuation_namespace.py")
+            pytest_nodes.add("tests/test_formal_derived_namespace.py")
+            pytest_nodes.add("tests/test_formal_a9_row.py")
+            pytest_nodes.add("tests/test_formal_a2_row.py")
             pytest_nodes.add("tests/test_formal_alignment.py")
             reasons.append(f"{f} (formal gate)")
             continue
