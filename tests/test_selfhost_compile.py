@@ -92,6 +92,10 @@ def _exec_selfhost(rvl_relpath: str) -> dict:
 TIER_SUBDIR = {"py": "python", "rust": "rust", "ts": "typescript",
                "go": "go", "java": "java", "wasm": "wasm"}
 
+# The six tiers ``compile.rvl`` dispatches, in the order the item-146 table below
+# reports them.
+TIERS = ("py", "ts", "go", "java", "rust", "wasm")
+
 
 def _load_reference_emit(tier: str):
     """The reference emitter for a tier, loaded by path — the exact file the
@@ -334,23 +338,29 @@ def test_native_compile_of_component_program_is_byte_identical(
 # MEASURED on the tier's own emitter corpus — the enumerated document list
 # ``tests/test_selfhost_emit_<tier>.py::CORPUS`` holds to byte agreement — driven
 # by ``compile_to`` (native frontend + native IR producer + native emitter, no
-# reference in the chain):
+# reference in the chain). Snapshot at ac10ed84:
 #
 #     tier   corpus   emitter vs the REFERENCE IR   the FULLY-NATIVE chain
-#     py         54                   54 (100%)               38 (70.4%)
-#     ts         60                   60 (100%)               36 (60.0%)
-#     go         22                   22 (100%)              22 (100.0%)
-#     java       49                   49 (100%)               28 (57.1%)
-#     rust       34                   34 (100%)               32 (94.1%)
-#     wasm       20                   20 (100%)              20 (100.0%)
-#     TOTAL     239                  239 (100%)              176 (73.6%)
+#     py         55                   55 (100%)               42 (76.4%)
+#     ts         60                   60 (100%)               44 (73.3%)
+#     go         23                   23 (100%)              23 (100.0%)
+#     java       59                   59 (100%)               50 (84.7%)
+#     rust       37                   37 (100%)               36 (97.3%)
+#     wasm       21                   21 (100%)              21 (100.0%)
+#     TOTAL     255                  255 (100%)              216 (84.7%)
 #
-# The two columns are the whole finding. Every one of the 239 documents is
-# reproduced byte-for-byte by its self-host emitter when the emitter is fed the
-# REFERENCE IR; only 176 survive the fully-native chain. So all 63 residual
-# documents are ``selfhost/lower.rvl`` gaps — the native IR producer — and NOT
-# emitter gaps. The emitter half of roadmap item 146 is complete over the
-# enumerated corpus; what is left of the maximal story is item 391's arc.
+# The two columns are the whole finding, and neither is a snapshot any more:
+# ``test_the_residual_is_located_in_lower_not_in_the_emitter`` below RECOMPUTES
+# both, per tier, over whatever that tier's CORPUS holds on the day it runs. The
+# left column is asserted for EVERY document — each self-host emitter reproduces
+# the reference bytes when fed the REFERENCE IR — and the right column's residue
+# is pinned document-by-document in ``LOWER_GAP_DOCS``.
+#
+# So every residual document is a ``selfhost/lower.rvl`` gap — the native IR
+# producer — and NOT an emitter gap; the earlier table read that off a java-only
+# probe, and it now holds on all six tiers. The emitter half of roadmap item 146
+# is complete over the enumerated corpus; what is left of the maximal story is
+# item 391's arc.
 GO_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
     "lists.rvl", "records.rvl", "variants.rvl", "transforms.rvl", "secrets.rvl",
@@ -373,7 +383,7 @@ JAVA_DOCS = [
     # block-bodied `if` in value position, the empty template, the token-level
     # record-update as a `return` rvalue — so this document was a lower.rvl gap
     # rather than an emitter one. It compiles byte-exact through the fully
-    # native chain now and moves up out of JAVA_LOWER_GAP_DOCS.
+    # native chain now and moves up out of LOWER_GAP_DOCS["java"].
     "branch_shapes.rvl",
     # the component/service surface the java native emitter covers
     "service.rvl", "services_multi.rvl", "comp_config_req.rvl",
@@ -393,7 +403,7 @@ JAVA_DOCS = [
     # `body` key, so the native chain emitted a body-less component. With the
     # `host` node and its host-provenance verb dispatch lowered, these five
     # documents compile byte-exact through the native java chain and move up out
-    # of JAVA_LOWER_GAP_DOCS.
+    # of LOWER_GAP_DOCS["java"].
     "comp_host_map.rvl", "comp_host_map_generic.rvl",
     # item 391: the realm-placement prelude. `isolate <key> in realm("…")` and
     # `intercept <key> with { … }` are component HEADER declarations that emit no
@@ -451,61 +461,146 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
         f"--- lengths ref={len(want)} got={len(got)} ---")
 
 
-# The residual, NAMED rather than skipped. These are the java corpus documents the
-# fully-native chain does NOT reproduce — and for every one of them the native java
-# EMITTER is byte-exact when fed the reference IR, so the divergence is located in
-# ``selfhost/lower.rvl``, not in ``selfhost/emit_java.rvl``. Recording that split is
-# what makes this a ratchet: the day lower.rvl grows the realm/async/host-map/
-# branch surface, the native chain agrees, this test fails on the stale entry, and
-# the document moves up into JAVA_DOCS instead of quietly staying out.
-JAVA_LOWER_GAP_DOCS = [
-    # async coloring, `await`, and `spawn`
-    "comp_await.rvl", "../emit_ts_corpus/services_async.rvl",
-    # string interpolation in a component body, and branch shapes
-    "component_format.rvl", "component_branches.rvl",
-    "map_inference.rvl",
-    # whole-program documents that combine several of the above
-    "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
-    "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
-]
+# The residual, NAMED rather than skipped, for EVERY tier. These are the corpus
+# documents the fully-native chain does NOT reproduce — and for every one of them
+# the tier's native EMITTER is byte-exact when fed the reference IR, so the
+# divergence is located in ``selfhost/lower.rvl``, not in the emitter. Recording
+# that split is what makes this a ratchet: the day lower.rvl grows the realm/
+# async/host-map/branch surface, the native chain agrees, the test below fails on
+# the stale entry, and the document moves out of this list instead of quietly
+# staying in it.
+#
+# This list was java-only when the split was first measured, which left the
+# "all residuals are lower.rvl gaps" claim resting on one tier's probe. It now
+# covers all six, and the test recomputes the set rather than sampling it.
+LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
+    "py": (
+        # service dispatch and interpolation inside a component method
+        "services_match.rvl",
+        "services_interp.rvl",
+        # witnessed effects / secret marking on the activation path
+        "witnessed.rvl",
+        "witnessed_secret.rvl",
+        # component branch shapes
+        "branches.rvl",
+        # whole-program documents combining several of the above
+        "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
+        "../../../examples/v3_step_scheduler.rvl",
+        "../../../backends/typescript/tests/fixtures/conformance.rvl",
+        "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+        "../policy_agents.rvl",
+        "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
+        "../../../examples/java_match.rvl",
+        "../../../src/revl/truc/components/cli.rvl",
+    ),
+    "ts": (
+        # composite service dispatch and component expressions
+        "services_composite.rvl",
+        "component_exprs.rvl",
+        # async coloring (async methods / await / async arrows)
+        "services_async.rvl",
+        "components_await.rvl",
+        "async_effects.rvl",
+        "async_arrow_emission.rvl",
+        # spawn / instance-get
+        "spawn.rvl",
+        "instance_get.rvl",
+        # (realm placement metadata — isolate / intercept / routes — left this
+        # list when lower.rvl grew the component-header prelude; the four ts
+        # realm documents now compile byte-exact through the native chain.)
+        # whole-program documents combining several of the above
+        "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
+        "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+        "../../../examples/java_match.rvl",
+        "../../../backends/typescript/tests/fixtures/async_http.rvl",
+        "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
+        # property/component edge shapes and the CAS runtime surface
+        "property_edges.rvl",
+        "component_edges.rvl",
+        "cas_runtime.rvl",
+    ),
+    # no residual: the fully-native chain reproduces the whole go corpus.
+    "go": (),
+    "java": (
+        # async coloring
+        "comp_await.rvl",
+        # whole-program documents combining several of the shapes below
+        "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
+        "../emit_ts_corpus/services_async.rvl",
+        "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
+        # component string interpolation / branch shapes / map inference
+        "component_format.rvl",
+        "component_branches.rvl",
+        "map_inference.rvl",
+        # the stdlib builtin surface
+        "stdlib_builtins.rvl",
+        "../emit_ts_corpus/property_edges.rvl",
+    ),
+    "rust": (
+        # component edge shapes; the host-root and realm-placement documents
+        # left this list when lower.rvl grew those two surfaces.
+        "component_edges.rvl",
+    ),
+    # no residual: the fully-native chain reproduces the whole wasm corpus.
+    "wasm": (),
+}
 
 
-@pytest.mark.parametrize("name", JAVA_LOWER_GAP_DOCS)
-def test_the_residual_java_gap_is_located_in_lower_not_in_the_emitter(
-        compile_rvl, compile_to, reference_emit, name):
-    """The measurement that prices what is left of roadmap item 146.
-
-    For each document the fully-native chain does not reproduce, assert BOTH
-    halves: the native chain diverges, AND the native emitter driven by the
-    REFERENCE IR is byte-exact. Together those say the defect is in the native IR
-    producer. A one-sided claim would not: an emitter that diverges everywhere
-    also "does not reproduce the document"."""
-    path = _fixture_path("emit_java_corpus", name)
-    reference_ir = compile_files([str(path)])
-    want = reference_emit["java"](reference_ir)
-
-    # (a) the native EMITTER reproduces the reference bytes from the reference IR
-    assert compile_rvl["emit_java_src"](reference_ir) == want, (
-        f"{name} is no longer a lower.rvl gap on the emitter side: "
-        f"selfhost/emit_java.rvl diverged on the REFERENCE IR")
-
-    # (b) the fully-native chain still does not — the IR producer is the gap
-    assert compile_to(path.read_text(encoding="utf-8"), "java") != want, (
-        f"{name} now compiles byte-exact through the fully-native chain: "
-        f"move it from JAVA_LOWER_GAP_DOCS into JAVA_DOCS")
+def _tier_corpus(tier: str) -> list[tuple[str, Path]]:
+    """The tier's OWN enumerated emitter corpus — the document list
+    ``tests/test_selfhost_emit_<tier>.py::CORPUS`` that the tier's byte-agreement
+    oracle runs over. Read from that module rather than restated here, so the two
+    measurements can never end up enumerating different documents."""
+    name = f"test_selfhost_emit_{tier}"
+    spec = importlib.util.spec_from_file_location(
+        "corpus_" + name, ROOT / "tests" / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return [(doc, Path(module.CORPUS_DIR) / doc) for doc in module.CORPUS]
 
 
-# NON-VACUITY for the split above: the two probes it runs are real ones. A
-# document in JAVA_DOCS must pass BOTH — native emitter byte-exact on the
-# reference IR AND the native chain byte-exact — so neither assertion in the gap
-# test is trivially true of every input.
-@pytest.mark.parametrize("name", ["arith.rvl", "service.rvl", "comp_fail.rvl"])
-def test_the_gap_probe_is_not_vacuous(compile_rvl, compile_to, reference_emit, name):
-    path = _fixture_path("emit_java_corpus", name)
-    reference_ir = compile_files([str(path)])
-    want = reference_emit["java"](reference_ir)
-    assert compile_rvl["emit_java_src"](reference_ir) == want
-    assert compile_to(path.read_text(encoding="utf-8"), "java") == want
+@pytest.mark.parametrize("tier", TIERS)
+def test_the_residual_is_located_in_lower_not_in_the_emitter(
+        compile_rvl, compile_to, reference_emit, tier):
+    """The measurement that prices what is left of roadmap item 146, recomputed.
+
+    Over the tier's whole enumerated corpus, assert BOTH halves:
+
+      (a) for EVERY document, the native emitter driven by the REFERENCE IR is
+          byte-exact — this is the emitter half of item 146, held as a fact
+          rather than as a comment;
+      (b) the set of documents the FULLY-NATIVE chain does not reproduce is
+          exactly ``LOWER_GAP_DOCS[tier]``.
+
+    Together those locate every residual divergence in the native IR producer.
+    Neither half alone would: an emitter that diverged everywhere would also
+    "not reproduce the document", and a hand-kept gap list can silently absorb a
+    new divergence. (a) is the non-vacuity of (b) — it runs on the documents that
+    PASS the native chain too, so the gap list cannot be padded and the emitter
+    column cannot rot unnoticed."""
+    native_emit = compile_rvl[f"emit_{tier}_src"]
+    diverged: list[str] = []
+    for name, path in _tier_corpus(tier):
+        reference_ir = compile_files([str(path)])
+        want = reference_emit[tier](reference_ir)
+
+        assert native_emit(reference_ir) == want, (
+            f"{tier}:{name}: selfhost/emit_{tier}.rvl diverged on the REFERENCE "
+            "IR, so this document is an EMITTER gap, not a lower.rvl gap — the "
+            "emitter half of item 146 no longer holds over the enumerated corpus")
+
+        if compile_to(path.read_text(encoding="utf-8"), tier) != want:
+            diverged.append(name)
+
+    expected = list(LOWER_GAP_DOCS[tier])
+    closed = [n for n in expected if n not in diverged]
+    opened = [n for n in diverged if n not in expected]
+    assert diverged == expected, (
+        f"the {tier} residual moved.\n"
+        f"  now byte-exact through the native chain (remove from "
+        f"LOWER_GAP_DOCS[{tier!r}]): {closed}\n"
+        f"  newly diverging (a lower.rvl regression, or a corpus document whose "
+        f"IR surface lower.rvl does not cover yet): {opened}")
 
 
 def test_six_way_composition_co_compiles(compile_rvl):
