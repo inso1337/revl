@@ -142,6 +142,135 @@ def test_a_non_persistence_sink_does_not_refuse():
     compile_source(PAST + FLOW.format(cap="log"), "retain.rvl")
 
 
+# ---------------------------------------------------------------------------
+# 1b. The same refusal ACROSS A SERVICE SEAM.
+#
+# The interface parameter a caller can see is unqualified — nothing else can
+# cross a unit boundary, so a qualifier on it would be a promise the caller
+# could not check — and the sink lives in the PROVIDER's body, so the caller
+# never names it. The refusal therefore has to follow the value through the
+# operation's inferred reach, exactly as the return half already follows the
+# provider's body. Without it the guarantee is argument-blind at precisely the
+# boundary it exists to police: the caller hands over a value that has outlived
+# its deadline and the compiler says nothing, because the side that knows about
+# the store is not the side that holds the value.
+# ---------------------------------------------------------------------------
+
+_LOAD = ('extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py '
+         '{ return k }\n')
+_DB_PUT = ('extern emission[db.insert] fn db_put(row: Str) -> Int = @py '
+           '{ return 0 }\n')
+_LOG_WRITE = ('extern emission[log.write] fn log_write(row: Str) -> Int = @py '
+              '{ return 0 }\n')
+_HELPER = 'fn write_row(row: Str) -> Int { return db_put(row) }\n'
+
+_PERSISTS = 'let n = db_put(row)\n      return n'
+
+
+def _seam(*, externs: str = _DB_PUT, sig: str = 'row: Str', impl: str = 'row',
+          store: str = _PERSISTS, call: str = 'row') -> str:
+    """One seam source, parameterised at the four points the tests vary: what
+    the provider body does with the value, how the caller hands it over, and
+    whether the value is the first argument."""
+    return _LOAD + externs + f'''service Vault {{ emission fn stash({sig}) -> Int }}
+service Ops {{ emission fn go(k: Str) -> Int }}
+component Store provides vault: Vault {{
+  provide vault {{
+    fn stash({impl}) {{
+      {store}
+    }}
+  }}
+}}
+component Caller requires vault: Vault provides ops: Ops {{
+  provide ops {{
+    fn go(k) {{
+      let row = load(k)
+      let n = emit vault.stash({call})
+      return n
+    }}
+  }}
+}}
+'''
+
+
+SEAM_PERSISTS = _seam()
+# a provider that only RECEIVES the value: no sink, so no refusal to make
+SEAM_PURE = _seam(externs='', store='return 0')
+SEAM_LOG = _seam(externs=_LOG_WRITE,
+                 store='let n = log_write(row)\n      return n')
+# the sink one hop further out: the provider reaches it through a helper fn, so
+# the reach has to be carried interprocedurally or the seam loses it again
+SEAM_HELPER = _seam(externs=_DB_PUT + _HELPER,
+                    store='let n = write_row(row)\n      return n')
+# the retained value is NOT the first argument: the reach is per-parameter, so a
+# seam that only guarded position 0 would admit this
+SEAM_INDEX = _seam(sig='tag: Str, row: Str', impl='tag, row', call='"x", row')
+# the caller hands over something with no retention origin at all
+SEAM_CLEAN = _seam(call='k')
+
+
+def test_a_retained_value_crossing_a_service_seam_is_refused_at_the_sink():
+    """The exit criterion for the seam: the caller names no sink, and the value
+    is still refused, by the name of the sink it actually reached."""
+    err = _refuses(PAST + SEAM_PERSISTS)
+    assert err.code == "G-RETAIN"
+    assert "`db_put`" in err.message, err.message
+    assert "`db` crossing" in err.message
+    assert "may not be written to durable storage" in err.message
+
+
+def test_the_seam_refusal_names_the_path_through_the_provider():
+    """A refusal that named only the sink would leave the caller looking for a
+    call it never wrote. The chain names the seam."""
+    err = _refuses(PAST + SEAM_PERSISTS)
+    assert "load() -> Store.stash -> db_put" in err.message, err.message
+
+
+def test_a_retained_value_reaching_the_sink_through_a_helper_fn_is_refused():
+    """The reach is carried interprocedurally: the provider's helper is not a
+    place the guarantee gets to forget about."""
+    err = _refuses(PAST + SEAM_HELPER)
+    assert err.code == "G-RETAIN"
+    assert "`db_put`" in err.message, err.message
+    assert "write_row -> db_put" in err.message, err.message
+
+
+def test_a_retained_value_at_a_non_first_seam_argument_is_refused():
+    """The reach is per-parameter. Guarding position 0 alone would admit every
+    seam that happens to take a tag first."""
+    err = _refuses(PAST + SEAM_INDEX)
+    assert err.code == "G-RETAIN"
+    assert "at argument 2" in err.message, err.message
+
+
+def test_a_pure_service_body_does_not_refuse_a_retained_value():
+    """The negative control that keeps the seam rule honest: the provider has to
+    actually persist. A crossing that only receives the value is not a sink."""
+    compile_source(PAST + SEAM_PURE, "retain.rvl")
+
+
+def test_a_seam_whose_provider_only_logs_does_not_refuse():
+    """A log is a disclosure sink, not a persistence sink — through a seam as
+    much as directly."""
+    compile_source(PAST + SEAM_LOG, "retain.rvl")
+
+
+def test_a_clean_value_at_a_persisting_seam_does_not_refuse():
+    """The reach is a reach, not a verdict: an argument with no retention origin
+    is admitted however durable the sink behind it is."""
+    compile_source(PAST + SEAM_CLEAN, "retain.rvl")
+
+
+def test_a_declared_legal_hold_overrides_the_deadline_across_the_seam():
+    """The hold is a property of the policy, so it survives the seam: the same
+    source, one added `hold:` line, admitted."""
+    compile_source(HELD + SEAM_PERSISTS, "retain.rvl")
+
+
+def test_a_seam_policy_whose_deadline_has_not_passed_compiles():
+    compile_source(FUTURE + SEAM_PERSISTS, "retain.rvl")
+
+
 # ===========================================================================
 # 2. The legal hold overrides the deadline, as declared.
 # ===========================================================================

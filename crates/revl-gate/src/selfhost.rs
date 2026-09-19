@@ -16849,7 +16849,7 @@ pub fn collect_tparams(type_names: Vec<String>, declared: Vec<String>, explicit:
     let mut found = explicit.clone();
     let mut i = 0i64;
     while (i < type_names.revl_length()) {
-        found = collect_walk((type_names)[(i) as usize].clone(), declared.clone(), explicit.clone(), implicit, found.clone());
+        found = collect_walk((type_names)[(i) as usize].clone(), declared.clone(), explicit.clone(), implicit.clone(), found.clone());
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return list_sort(list_dedup(found.clone()));
