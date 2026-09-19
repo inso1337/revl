@@ -1588,6 +1588,66 @@ fn overflow32_preamble() -> List[Str] {
   return o
 }
 
+// ----------------------------------------------- the uncarried component tier
+// A `component` belongs to the go LIVE tier (the v1/v2 stc-go path in the
+// reference's `emit`), which this slice does not mirror — see WHAT IT DEFERS
+// above. What follows is about SAYING SO, not about carrying it.
+//
+// The rule is: NAME every `components` entry this file does not carry, except
+// where naming it would break a byte agreement the REFERENCE itself produces.
+//
+// That exception is real on this tier and on no other. The reference has two
+// document-level answers. Its PURE typed-core path — the one this slice mirrors
+// — routes PAST the components of a document that also carries top-level
+// declarations and emits ordinary Go for those declarations alone; both sides
+// then drop the same thing, and 38 documents in the tree are byte-identical on
+// this tier for exactly that reason. A marker there would name a gap that is
+// not there and cost every one of those agreements.
+//
+// Everywhere else the marker is free, and it was badly needed. A document whose
+// components are ALL it declares never reaches the pure path: the reference
+// answers it with a whole stc-go module, and this slice used to answer with its
+// three-line banner and nothing else — 144 bytes against the reference's 40502
+// on backends/go/testdata/stream_130.rvl, with no marker anywhere in the output.
+// A refusal that is silent is indistinguishable from a lowering that is missing,
+// which is the one direction the byte-agreement oracle exists to rule out. The
+// same is true of a document that declares in-file `test` blocks: this slice
+// defers the whole test section, so its bytes already differ from the
+// reference's for that document and there is no agreement left to protect.
+//
+// So the suppression is narrow and checkable without reading a component STEP:
+// pure declarations present AND no deferred test section. What it still leaves
+// silent is item 130's STREAM DIVERSION — a document that holds a stream is
+// sent to the live path even when it carries top-level declarations, which a
+// typed-event program always does (the event's record declaration is what puts
+// a `types` entry in the document). Three documents in the tree are in that
+// state. Mirroring it would mean reading the `subscribe` / `stream-iter`
+// discriminants, and tools/selfhost_coverage.py takes a port's construct table
+// straight off those spellings: reading one here would move them out of the
+// blind-spot ledger's `unported` baseline and claim a port of the stream
+// lowering this slice does not have. A marker is a refusal, not an
+// implementation. The residual is pinned by a test rather than left to prose.
+//
+// Markers are one per entry, in document order — the same total-dispatch
+// convention every expression- and step-level arm in this file already uses.
+fn carries_pure_declarations(ir: Any) -> Bool {
+  if (value_list(value_field(ir, "functions")).length() > 0) { return true }
+  if (value_keys(value_field(ir, "types")).length() > 0) { return true }
+  return value_list(value_field(ir, "externs")).length() > 0
+}
+
+fn uncarried_components(ir: Any) -> List[Str] {
+  let comps = value_list(value_field(ir, "components"))
+  if (comps.length() == 0) { return [] }
+  let deferred_tests = value_list(value_field(ir, "tests")).length() > 0
+  if (carries_pure_declarations(ir) && !deferred_tests) { return [] }
+  var out = []
+  for (c of comps) {
+    out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
+  }
+  return out
+}
+
 // The document assembly for a FUNCTION-ONLY v3 document (`_emit_v3_go`, subset):
 // the banner + package, the conditional import block, the feature preambles in
 // the reference's fixed order (revlDiv, then the overflow trio, then the Int32
@@ -1708,6 +1768,8 @@ pub fn emit_go_src(ir: Any) -> Str {
   // The reference's section order: types, then externs, then the free functions.
   if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
   out = out.concat(fnlines)
+  // What this file did not carry, named — never dropped on the floor.
+  out = out.concat(uncarried_components(ir))
   // The deferred in-file test section: one named marker per test instead of
   // silence (issue #1123).
   let test_markers = deferred_test_markers(ir)
