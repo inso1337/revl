@@ -122,6 +122,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _boundary_witness import assert_boundary_witness  # noqa: E402
+
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
 CORPUS = [
     "arith.rvl",     # bounded int/int32, / widening, %, comparisons, unary, ??
@@ -913,6 +917,33 @@ def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_rust_src"](ir)
 
 
+# item 130 (issue #81): the stream surface this port does not carry
+# ---------------------------------------------------------------------------
+#
+# The reference emitter lowers the whole `Stream[T]` surface on this tier; the
+# Path B port does not, and `tests/fixtures/selfhost_blind_spots.json` carries
+# that as a named `unported` baseline. The baseline records the GAP. What was
+# never checked is that the port is LOUD about it: the ledger is satisfied by a
+# port that silently emits a module with the subscription missing, which is the
+# section-level silence issue #1123 found for the in-file test section and the
+# worst answer item 130 admits for a stream. So the marker is pinned here,
+# where it runs.
+
+
+def test_the_stream_surface_is_named_not_dropped(emitted, reference):
+    """The rust port already gates the stream HOST RUNTIME behind
+    `<<DEFER-stream-host>>` (it is the one host block not ported, and the byte
+    oracle would otherwise agree vacuously on a crate with no stream runtime in
+    it). The body steps that USE that runtime are pinned here beside it."""
+    ir = compile_files([str(ROOT / "backends" / "go" / "testdata"
+                            / "stream_event_130.rvl")])
+    want = reference.emit(ir)
+    got = emitted["emit_rust_src"](ir)
+    for reference_token, port_token in (
+        ("Stream::subscribe(", "<<DEFER-stream-host>>"),
+        ("Stream::contract(", "<<DEFER-comp-step:stream-iter>>"),
+    ):
+        assert_boundary_witness(want, got, reference_token, port_token)
 # --------------------------------------------------------------------------
 # item 146 / issue #98 Stage 4 — the rust EMITTER RUNS as rust, and its output
 # is the reference's, byte for byte.
