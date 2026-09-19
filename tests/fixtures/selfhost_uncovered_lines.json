@@ -1402,7 +1402,7 @@
   },
   "selfhost": {
     "go": {
-      "statements": 1190,
+      "statements": 1208,
       "uncovered": {
         "Context builder used only by emit_go.rvl's own unit tests; emit_src builds the production context directly. This is not an unsupported emitted construct.": {
           "typed_ctx": 9
@@ -1418,6 +1418,10 @@
           "is_eq_op": 1,
           "is_scalar": 1,
           "json_tag": 1
+        },
+        "Item 130 / issue #81: the loop that names each `components` entry this pure typed-core port does not carry, and the `carries_pure_declarations` guard that suppresses it exactly where naming it would break a byte agreement the reference itself produces. No emit_go_corpus document declares a component, and one that did could not close this: a components-only document is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED rather than cover these lines, and a document that also carries pure declarations reaches only the suppressing arm, where the reference routes past its own components too. Both arms are pinned instead by tests/test_selfhost_emit_go.py: test_a_components_only_document_names_every_component over stream_130.rvl, and test_an_incidental_component_on_the_pure_path_is_not_marked for the suppressing arm.": {
+          "carries_pure_declarations": 5,
+          "uncarried_components": 7
         },
         "Only Float operands remain; they request revlFtoa, absent from the explicitly deferred Float-interpolation scaffold. Expression-free templates and non-Float typed interpolation are now exercised.": {
           "render_interp": 3
@@ -1489,7 +1493,7 @@
           "concat_pieces": 8
         }
       },
-      "uncovered_statements": 87
+      "uncovered_statements": 99
     },
     "java": {
       "statements": 2044,
@@ -2007,7 +2011,7 @@
       "uncovered_statements": 97
     },
     "wasm": {
-      "statements": 1279,
+      "statements": 1286,
       "uncovered": {
         "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_wasm_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
           "deferred_test_markers": 2
@@ -2025,6 +2029,9 @@
           "no_loop": 1,
           "printable": 1,
           "wty": 3
+        },
+        "Item 130 \u00a74.6 / issue #81: the loop that names each `components` entry this module-only port does not carry. No emit_wasm_corpus document declares a component, and one that did could not join that corpus: the reference answers a component document with a SEPARATE module per component in its `{module: wat}` map, or refuses the document by name (a stream component is refused on this tier because a subscription suspends a fiber and this tier awaits only `Job.run(name)`), and neither is byte-comparable against the functions module this port emits. Pinned instead by tests/test_selfhost_emit_wasm.py: test_a_stream_document_the_reference_refuses_is_refused_by_name_here_too over backends/go/testdata/stream_130.rvl, and test_the_component_marker_is_text_only_the_port_emits.": {
+          "uncarried_components": 1
         },
         "Only non-generic and unrecognized-generic negative layout lookups remain. Valid tagged declarations resolve their layouts; bare Some covers the empty-expected-type return.": {
           "tagged_layout": 2
@@ -2068,8 +2075,8 @@
         "Remaining guards reject malformed emitted constant text: missing closing parenthesis, empty/sign-only numeral, or nondigit. Valid renderer-produced integer constants satisfy this parser.": {
           "const_numeral": 3
         },
-        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
-          "emit_wasm_src": 2
+        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle. The second statement is the splice that pushes the item-130 component markers into the module; no emit_wasm_corpus document declares a component, so the loop body never runs. The third is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+          "emit_wasm_src": 3
         },
         "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
           "render_bin": 1
@@ -2102,7 +2109,7 @@
           "rstrip": 1
         }
       },
-      "uncovered_statements": 63
+      "uncovered_statements": 65
     }
   }
 }
