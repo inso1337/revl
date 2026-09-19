@@ -8295,7 +8295,8 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
 // not scanned (the reference's grammar has no such position).
 fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
   let declared = ext_declared_names(ts, pg)
-  let gtys = sig_binds(ts, case_binds(ts))
+  let al = alias_map(ts)
+  let gtys = sig_binds(ts, case_binds(ts, al), al)
   var seen: List[Str] = []
   var d = 0
   var i = 0
@@ -9320,52 +9321,56 @@ fn sig_raw_fnty(ps: List[ParamN], ret: Str) -> Str {
 // The second pass over the token stream: `case_binds` has to finish first,
 // because the single-uppercase heuristic is switched off by a DECLARED type
 // and a `type` may be written after the `fn` that mentions it.
-pub fn sig_binds(ts: List[Token], base: List[Bind]) -> List[Bind] {
-  return sig_walk(ts, 0, base, base)
+pub fn sig_binds(ts: List[Token], base: List[Bind],
+                 al: Map[Str, Str]) -> List[Bind] {
+  return sig_walk(ts, 0, base, base, al)
 }
 
 fn sig_walk(ts: List[Token], i: Int, decls: List[Bind],
-            acc: List[Bind]) -> List[Bind] {
+            acc: List[Bind], al: Map[Str, Str]) -> List[Bind] {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return sig_walk(ts, i + 1, decls, acc) }
-  if (at_event(ts, i)) { return sig_walk(ts, event_decl_end(ts, i), decls, acc) }
-  if (t.kind != "kw") { return sig_walk(ts, skip_line(ts, i), decls, acc) }
-  if (at_pub_prefix(ts, i)) { return sig_walk(ts, i + 1, decls, acc) }
-  if (t.text == "use") { return sig_walk(ts, skip_line(ts, i), decls, acc) }
+  if (at_boot(ts, i)) { return sig_walk(ts, i + 1, decls, acc, al) }
+  if (at_event(ts, i)) { return sig_walk(ts, event_decl_end(ts, i), decls, acc, al) }
+  if (t.kind != "kw") { return sig_walk(ts, skip_line(ts, i), decls, acc, al) }
+  if (at_pub_prefix(ts, i)) { return sig_walk(ts, i + 1, decls, acc, al) }
+  if (t.text == "use") { return sig_walk(ts, skip_line(ts, i), decls, acc, al) }
   if (t.text == "type") {
-    return sig_walk(ts, type_decl_end(ts, i + 1), decls, acc)
+    return sig_walk(ts, type_decl_end(ts, i + 1), decls, acc, al)
   }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return sig_walk(ts, e, decls, acc) }
-    return sig_walk(ts, skip_line(ts, i), decls, acc)
+    if (e != 0 - 1) { return sig_walk(ts, e, decls, acc, al) }
+    return sig_walk(ts, skip_line(ts, i), decls, acc, al)
   }
   if (t.text == "extern") {
     let h = ext_head(ts, i)
     let nx = p_extern(ts, i, empty_prog()).i
-    if (!h.ok) { return sig_walk(ts, nx, decls, acc) }
+    if (!h.ok) { return sig_walk(ts, nx, decls, acc, al) }
     let tps = collect_tparams(h.ps, h.ret, decls, [])
     return sig_walk(ts, nx, decls,
-                    sig_put(acc, h.name, h.ps, h.ret, tps, ""))
+                    sig_put(acc, h.name, alias_subst_params(h.ps, al),
+                            alias_subst(h.ret, al), tps, ""), al)
   }
   if (t.text == "service") {
-    return sig_walk(ts, p_service(ts, i, empty_prog()).i, decls, acc)
+    return sig_walk(ts, p_service(ts, i, empty_prog()).i, decls, acc, al)
   }
   if (t.text == "component") {
-    return sig_walk(ts, p_component(ts, i, empty_prog()).i, decls, acc)
+    return sig_walk(ts, p_component(ts, i, empty_prog()).i, decls, acc, al)
   }
   if (t.text == "fn") {
     let ps = params_at(ts, fn_params_i(ts, i))
     let nx = p_fn(ts, i, empty_prog()).i
-    if (!ps.ok) { return sig_walk(ts, nx, decls, acc) }
+    if (!ps.ok) { return sig_walk(ts, nx, decls, acc, al) }
     let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : ""
     let tps = collect_tparams(ps.ps, ret, decls, explicit_tparams(ts, i))
+    let sps = alias_subst_params(ps.ps, al)
+    let sret = alias_subst(ret, al)
     return sig_walk(ts, nx, decls,
-                    sig_put(acc, tkc(ts, i + 1).text, ps.ps, ret, tps,
-                            sig_raw_fnty(ps.ps, ret)))
+                    sig_put(acc, tkc(ts, i + 1).text, sps, sret, tps,
+                            sig_raw_fnty(sps, sret)), al)
   }
-  return sig_walk(ts, skip_line(ts, i), decls, acc)
+  return sig_walk(ts, skip_line(ts, i), decls, acc, al)
 }
 
 // One `extern` declaration's header: its name, parameters and declared return,
@@ -10109,7 +10114,7 @@ fn fb_host_value(e: Expr, scope: List[Bind]) -> Bool {
 
 // One statement of a fn body. Mirrors `own_one`'s reader token for token, so the
 // two cannot disagree about where a statement ends; what differs is the payload.
-fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
+fn fb_one(ts: List[Token], i: Int, hi: Int, al: Map[Str, Str]) -> FbStepR {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     // a destructuring pattern binds names this reader does not enumerate
@@ -10121,11 +10126,18 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     var dty = ""
     if (atk(ts, j, ":")) {
       let tr = type_at(ts, j + 1)
-      if (tr.ok) { dty = taint_strip(tr.ty) }
+      // a WRITTEN annotation is the checking position for the initialiser and
+      // the type the name takes, so it is erased here exactly as a declaration
+      // site's is (`_subst_body_annotations`): `let c: Count = 1` types as an
+      // `Int` binding, not a `Count` one.
+      if (tr.ok) { dty = alias_subst(taint_strip(tr.ty), al) }
       j = tr.i
     }
     if (!atk(ts, j, "=")) { return { step: fb_bail(), i: hi } }
-    let r = lir_rhs(ts, j + 1, [])
+    // `Map.empty()`: only the RHS reader's EXTENT is taken from `lir_rhs`
+    // (`r.i`), never the text it would render, so the alias table it renders
+    // with is not threaded here.
+    let r = lir_rhs(ts, j + 1, [], Map.empty())
     if (!r.ok) { return { step: fb_bail(), i: hi } }
     let ve = expr_at(ts, j + 1)
     return { step: fb_step7("let", name, t.text == "var", t.line, ve.e, dty, ""),
@@ -10159,12 +10171,12 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     }
     let tend = close_brace(ts, c.i)
     if (tend == 0 - 1) { return { step: fb_bail(), i: hi } }
-    let thenS = fb_scan(ts, c.i + 1, tend - 1)
+    let thenS = fb_scan(ts, c.i + 1, tend - 1, al)
     var elseS: List[FbStep] = []
     var nexti = tend
     if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
       let eend = close_brace(ts, tend + 1)
-      if (eend != 0 - 1) { elseS = fb_scan(ts, tend + 2, eend - 1)  nexti = eend }
+      if (eend != 0 - 1) { elseS = fb_scan(ts, tend + 2, eend - 1, al)  nexti = eend }
     }
     return { step: fb_block("if", "", t.line, c.e, thenS, elseS, []), i: nexti }
   }
@@ -10174,7 +10186,7 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     let bend = close_brace(ts, c.i)
     if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
     return { step: fb_block("while", "", t.line, c.e, [], [],
-                            fb_scan(ts, c.i + 1, bend - 1)), i: bend }
+                            fb_scan(ts, c.i + 1, bend - 1, al)), i: bend }
   }
   if (t.kind == "kw" && t.text == "for") {
     if (!atk(ts, i + 1, "(")) { return { step: fb_bail(), i: hi } }
@@ -10186,7 +10198,7 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     let bend = close_brace(ts, it.i + 1)
     if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
     return { step: fb_block("for", bind, t.line, it.e, [], [],
-                            fb_scan(ts, it.i + 2, bend - 1)), i: bend }
+                            fb_scan(ts, it.i + 2, bend - 1, al)), i: bend }
   }
   if (t.kind == "ident" && atk(ts, i + 1, "=")) {
     let r = expr_at(ts, i + 2)
@@ -10206,13 +10218,13 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
   return { step: fb_step7("expr", "", false, t.line, r.e, "", ""), i: r.i }
 }
 
-fn fb_scan(ts: List[Token], lo: Int, hi: Int) -> List[FbStep] {
+fn fb_scan(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[FbStep] {
   var i = lo
   var out: List[FbStep] = []
   while (i < hi && !atk(ts, i, "}")) {
     if (atk(ts, i, ";")) { i += 1 }
     else {
-      let so = fb_one(ts, i, hi)
+      let so = fb_one(ts, i, hi, al)
       out = out.push(so.step)
       // a reader that cannot advance abandons the REST of this block, exactly
       // as a "bail" step does, so it records one: `fb_walk` reads the two
@@ -10382,11 +10394,17 @@ fn fb_params_scope(ps: List[ParamN], i: Int, acc: List[Bind]) -> List[Bind] {
 // contributes nothing, which leaves it on the gradual frontier rather than
 // guessing at it.
 fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
-                 tps: List[Str]) -> List[Bind] {
+                 tps: List[Str], al: Map[Str, Str]) -> List[Bind] {
   if (i >= ps.length()) { return acc }
-  let ty = mark_tparams(taint_strip(ps[i].ty), tps)
+  // The checker types the body against the ERASED annotation, because the
+  // reference erases before the checker runs — so `a + b` over two `Count`
+  // parameters of `fn add(a: Count, b: Count)` carries `operands: "Int"`. A
+  // seed that kept the alias spelling refused the document's own arithmetic
+  // with "operand of `+` expects `Int`, got `Count`" and reported a
+  // false-reject divergence the reference does not have.
+  let ty = mark_tparams(alias_subst(taint_strip(ps[i].ty), al), tps)
   return fb_params_tys(ps, i + 1,
-                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps)
+                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps, al)
 }
 
 // One module `fn` located from its `fn` keyword (`pub` already stepped over by
@@ -10579,7 +10597,8 @@ fn rp_refusal(ts: List[Token], sp: FbSpan, steps: List[FbStep]) -> Verd {
                  rp_last_line(steps, sp.line))
 }
 
-fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
+fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind],
+               al: Map[Str, Str]) -> Verd {
   // Inside its own body a fn's type parameters are universally quantified
   // wildcards (`T` -> `?T`, `mark_tparams`), so a generic signature's return
   // is not a concrete type the body can be held to. Without the marking
@@ -10587,11 +10606,11 @@ fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
   // `return ident("hello")` drew a T1 naming `T` where the reference names the
   // UNIFIED `Str` — a refusal with the right verdict and the wrong sentence.
   let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
-  let steps = fb_scan(ts, sp.lo, sp.hi)
+  let steps = fb_scan(ts, sp.lo, sp.hi, al)
   // the body first, then the return question — `_lower_fns`' own order.
   let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []),
-                  fb_params_tys(sp.ps, 0, gtys, tps),
-                  mark_tparams(sp.ret, tps)).v
+                  fb_params_tys(sp.ps, 0, gtys, tps, al),
+                  mark_tparams(alias_subst(sp.ret, al), tps)).v
   if (v.v != "") { return v }
   return rp_refusal(ts, sp, steps)
 }
@@ -10606,40 +10625,42 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // signature rows (docs/design/457 T2b) are a second pass over the same
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
-  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts)))
+  let al = alias_map(ts)
+  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts, al), al), al)
 }
 
-fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind]) -> Verd {
+fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind],
+                 al: Map[Str, Str]) -> Verd {
   if (i >= ts.length() || atk(ts, i, "eof")) { return no_verd() }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fb_refusal_at(ts, i + 1, gtys) }
-  if (at_event(ts, i)) { return fb_refusal_at(ts, event_decl_end(ts, i), gtys) }
-  if (t.kind != "kw") { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
-  if (at_pub_prefix(ts, i)) { return fb_refusal_at(ts, i + 1, gtys) }
-  if (t.text == "type") { return fb_refusal_at(ts, type_decl_end(ts, i + 1), gtys) }
-  if (t.text == "use") { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
+  if (at_boot(ts, i)) { return fb_refusal_at(ts, i + 1, gtys, al) }
+  if (at_event(ts, i)) { return fb_refusal_at(ts, event_decl_end(ts, i), gtys, al) }
+  if (t.kind != "kw") { return fb_refusal_at(ts, skip_line(ts, i), gtys, al) }
+  if (at_pub_prefix(ts, i)) { return fb_refusal_at(ts, i + 1, gtys, al) }
+  if (t.text == "type") { return fb_refusal_at(ts, type_decl_end(ts, i + 1), gtys, al) }
+  if (t.text == "use") { return fb_refusal_at(ts, skip_line(ts, i), gtys, al) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fb_refusal_at(ts, e, gtys) }
-    return fb_refusal_at(ts, skip_line(ts, i), gtys)
+    if (e != 0 - 1) { return fb_refusal_at(ts, e, gtys, al) }
+    return fb_refusal_at(ts, skip_line(ts, i), gtys, al)
   }
   if (t.text == "extern") {
-    return fb_refusal_at(ts, p_extern(ts, i, empty_prog()).i, gtys)
+    return fb_refusal_at(ts, p_extern(ts, i, empty_prog()).i, gtys, al)
   }
   if (t.text == "service") {
-    return fb_refusal_at(ts, p_service(ts, i, empty_prog()).i, gtys)
+    return fb_refusal_at(ts, p_service(ts, i, empty_prog()).i, gtys, al)
   }
   if (t.text == "component") {
-    return fb_refusal_at(ts, p_component(ts, i, empty_prog()).i, gtys)
+    return fb_refusal_at(ts, p_component(ts, i, empty_prog()).i, gtys, al)
   }
   if (t.text == "fn") {
     let sp = fb_span(ts, i)
-    if (!sp.ok) { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
-    let v = fb_function(ts, i, sp, gtys)
+    if (!sp.ok) { return fb_refusal_at(ts, skip_line(ts, i), gtys, al) }
+    let v = fb_function(ts, i, sp, gtys, al)
     if (v.v != "") { return v }
-    return fb_refusal_at(ts, sp.next, gtys)
+    return fb_refusal_at(ts, sp.next, gtys, al)
   }
-  return fb_refusal_at(ts, skip_line(ts, i), gtys)
+  return fb_refusal_at(ts, skip_line(ts, i), gtys, al)
 }
 
 // --------------------------------------- the shadowed module callable (G6/391)
@@ -10867,7 +10888,7 @@ fn csh_function(ts: List[Token], i: Int, sp: FbSpan, u: CshU) -> Verd {
   let pend = params_at(ts, i + 3).i
   let seed = csh_params(ts, i + 3, pend, sp.ps, 0, tkc(ts, i).line,
                         { bs: [], ok: true })
-  let bs = csh_binders(fb_scan(ts, sp.lo, sp.hi), 0, seed)
+  let bs = csh_binders(fb_scan(ts, sp.lo, sp.hi, Map.empty()), 0, seed)
   if (!bs.ok) { return no_verd() }
   return csh_first(bs.bs, 0, amb, u)
 }
@@ -12568,7 +12589,7 @@ fn ir_caps_json(cs: List[Str]) -> Str {
 // pairs. Mirrors the reference's per-method dict (check_and_lower's `services`
 // comprehension): `capabilities` present iff a SCOPED `emission[..]`, `async`
 // iff the op is `async` (each of which also bumps `ir_version` to 3).
-fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR {
+fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str]) -> IrMethR {
   if (i >= end || atk(ts, i, "}")) { return mk_irmethr(acc, i, v3) }
   var j = i
   var em = false
@@ -12612,7 +12633,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
-    let rawRet = taint_strip(tr.ty)
+    let rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"
       retJson = jstr("Opt[Bool]")
@@ -12624,7 +12645,8 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
     }
     nexti = tr.i
   }
-  var mj = jstr(nm).concat(": {\"params\": [").concat(ir_params_json(ps.ps))
+  var mj = jstr(nm).concat(": {\"params\": [")
+    .concat(ir_params_json(alias_subst_params(ps.ps, al)))
     .concat("], \"returns\": ").concat(retJson)
   if (term != "") {
     mj = mj.concat(", \"termination\": ").concat(jstr(term))
@@ -12637,14 +12659,14 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
   if (isIdempotent) { mj = mj.concat(", \"idempotent\": true") }
   mj = mj.concat("}")
   let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al)
 }
 
-fn ir_service(ts: List[Token], i: Int) -> IrSvcR {
+fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str]) -> IrSvcR {
   let nm = tkc(ts, i + 1).text
   let end = close_brace(ts, i + 2)
   let hi = end == 0 - 1 ? i + 3 : end - 1
-  let ms = ir_methods(ts, i + 3, hi, "", false)
+  let ms = ir_methods(ts, i + 3, hi, "", false, al)
   return mk_irsvcr(jstr(nm).concat(": {\"methods\": {").concat(ms.js).concat("}}"),
                    ms.v3)
 }
@@ -13245,7 +13267,7 @@ fn ir_isolate(ts: List[Token], lo: Int, hi: Int, acc: Str) -> Str {
 }
 
 // The `config { field: Type [= <literal>] … }` block -> `[{name, type, default}]`.
-fn ir_config(ts: List[Token], lo: Int, hi: Int) -> Str {
+fn ir_config(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
   var j = lo
   while (j < hi && !(atw(ts, j, "config") && atk(ts, j + 1, "{"))) { j += 1 }
   if (j >= hi) { return "" }
@@ -13262,8 +13284,9 @@ fn ir_config(ts: List[Token], lo: Int, hi: Int) -> Str {
       // qualifier is stripped exactly as everywhere else — so the field matches
       // a scalar type and can take a default — and the flag left behind is what
       // an emitted `ConfigSchema` reads to keep the value out of the run log.
+      let fty = alias_subst(tr.ty, al)
       var entry = "{\"name\": ".concat(jstr(nm)).concat(", \"type\": ")
-        .concat(jstr(taint_strip(tr.ty))).concat(", \"default\": ").concat(dfl.js)
+        .concat(jstr(taint_strip(fty))).concat(", \"default\": ").concat(dfl.js)
       if (taint_mentions_secret(tr.ty)) { entry = entry.concat(", \"secret\": true") }
       entry = entry.concat("}")
       out = out == "" ? entry : out.concat(", ").concat(entry)
@@ -13288,7 +13311,7 @@ fn comp_has_kw(ts: List[Token], lo: Int, hi: Int, w: Str) -> Bool {
 // not readable out of the component. It is threaded from `lower_to_ir_at`
 // rather than invented here, so the key is the caller's answer and not this
 // file's guess.
-fn ir_component(ts: List[Token], i: Int, fname: Str) -> IrCompR {
+fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCompR {
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   var reqs: List[Bind] = []
@@ -13315,7 +13338,7 @@ fn ir_component(ts: List[Token], i: Int, fname: Str) -> IrCompR {
   let iceptRes = ir_intercept(ts, lo, hi, "")
   var js = "{\"name\": ".concat(jstr(nm))
     .concat(", \"source\": ").concat(jstr(fname))
-    .concat(", \"config\": [").concat(ir_config(ts, lo, hi))
+    .concat(", \"config\": [").concat(ir_config(ts, lo, hi, al))
     .concat("], \"requires\": {").concat(ir_binds_json(reqs))
     .concat("}, \"provides\": {").concat(ir_binds_json(provs)).concat("}")
   // an `intercept` whose metadata this producer cannot render is a component
@@ -13836,11 +13859,11 @@ fn arm_payload(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
 
 // ---------------------------------------------------------------- expr lowering
 
-fn lir_args(args: List[Expr], env: List[Bind]) -> Str {
+fn lir_args(args: List[Expr], env: List[Bind], al: Map[Str, Str]) -> Str {
   var out = ""
   var i = 0
   while (i < args.length()) {
-    let e = lir_expr(args[i], env)
+    let e = lir_expr(args[i], env, al)
     out = i == 0 ? e : out.concat(",").concat(e)
     i += 1
   }
@@ -13850,7 +13873,7 @@ fn lir_args(args: List[Expr], env: List[Bind]) -> Str {
 // Like `lir_args`, but marks each argument's Int/Int32 -> Float / Int32 -> Int
 // widen against the callee's declared parameter types (`_mark_widen` at a call
 // site). A missing parameter type (defaults, varargs) leaves its argument bare.
-fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind]) -> Str {
+fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind], al: Map[Str, Str]) -> Str {
   var out = ""
   var i = 0
   while (i < args.length()) {
@@ -13858,8 +13881,8 @@ fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind]) -> Str {
     // an ARROW argument is lowered against the parameter it is checked against,
     // so an unannotated lambda carries the signature the declaration gave it
     var e = match args[i] {
-      Arrow(ar) => lir_arrow_at(ar, env, expected),
-      _ => lir_expr(args[i], env),
+      Arrow(ar) => lir_arrow_at(ar, env, expected, al),
+      _ => lir_expr(args[i], env, al),
     }
     if (expected != "") { e = apply_arg_markers(e, expected, infer(args[i], env)) }
     out = i == 0 ? e : out.concat(",").concat(e)
@@ -13868,12 +13891,12 @@ fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind]) -> Str {
   return out
 }
 
-fn lir_fields(fields: List[InitN], env: List[Bind]) -> Str {
+fn lir_fields(fields: List[InitN], env: List[Bind], al: Map[Str, Str]) -> Str {
   var out = ""
   var i = 0
   while (i < fields.length()) {
     let seg = "[".concat(jstr(fields[i].name)).concat(",")
-      .concat(lir_expr(fields[i].value, env)).concat("]")
+      .concat(lir_expr(fields[i].value, env, al)).concat("]")
     out = i == 0 ? seg : out.concat(",").concat(seg)
     i += 1
   }
@@ -13886,40 +13909,40 @@ fn lir_fields(fields: List[InitN], env: List[Bind]) -> Str {
 // as `true`/`false`. `Str` and `Int` stay tag-less, so the common template is
 // byte-identical to what it was. The key is appended LAST, matching the
 // reference, which sets it on the finished node.
-fn lir_interp_operand(e: Expr, env: List[Bind]) -> Str {
-  let inner = lir_expr(e, env)
+fn lir_interp_operand(e: Expr, env: List[Bind], al: Map[Str, Str]) -> Str {
+  let inner = lir_expr(e, env, al)
   let ty = infer(e, env)
   if (ty != "Float" && ty != "Bool") { return inner }
   return inner.slice(0, inner.length() - 1)
     .concat(",\"interp_type\":").concat(jstr(ty)).concat("}")
 }
 
-fn lir_parts(parts: List[PartN], env: List[Bind]) -> Str {
+fn lir_parts(parts: List[PartN], env: List[Bind], al: Map[Str, Str]) -> Str {
   var out = ""
   var i = 0
   while (i < parts.length()) {
     let p = parts[i]
     let seg = p.kind == "t"
       ? "[\"text\",".concat(jstr(p.text)).concat("]")
-      : "[\"expr\",".concat(lir_interp_operand(p.e, env)).concat("]")
+      : "[\"expr\",".concat(lir_interp_operand(p.e, env, al)).concat("]")
     out = i == 0 ? seg : out.concat(",").concat(seg)
     i += 1
   }
   return out
 }
 
-fn lir_bin(b: BinN, env: List[Bind]) -> Str {
+fn lir_bin(b: BinN, env: List[Bind], al: Map[Str, Str]) -> Str {
   let opnd = operands_of(b.op, infer(b.l, env), infer(b.r, env))
   var s = "{\"kind\":\"bin\",\"op\":".concat(jstr(b.op))
-    .concat(",\"left\":").concat(lir_expr(b.l, env))
-    .concat(",\"right\":").concat(lir_expr(b.r, env))
+    .concat(",\"left\":").concat(lir_expr(b.l, env, al))
+    .concat(",\"right\":").concat(lir_expr(b.r, env, al))
   if (opnd != "") { s = s.concat(",\"operands\":").concat(jstr(opnd)) }
   return s.concat("}")
 }
 
-fn lir_un(u: UnN, env: List[Bind]) -> Str {
+fn lir_un(u: UnN, env: List[Bind], al: Map[Str, Str]) -> Str {
   var s = "{\"kind\":\"un\",\"op\":".concat(jstr(u.op))
-    .concat(",\"operand\":").concat(lir_expr(u.e, env))
+    .concat(",\"operand\":").concat(lir_expr(u.e, env, al))
   if (u.op == "-") {
     let ot = infer(u.e, env)
     if (ot == "Int" || ot == "Int32") { s = s.concat(",\"operands\":").concat(jstr(ot)) }
@@ -13927,22 +13950,22 @@ fn lir_un(u: UnN, env: List[Bind]) -> Str {
   return s.concat("}")
 }
 
-fn lir_field(f: FieldN, env: List[Bind]) -> Str {
+fn lir_field(f: FieldN, env: List[Bind], al: Map[Str, Str]) -> Str {
   if (f.name == "length") {
     let h = parse_head(infer(f.target, env))
     if (h == "Str" || h == "Bytes" || h == "List") {
-      return "{\"kind\":\"len\",\"target\":".concat(lir_expr(f.target, env)).concat("}")
+      return "{\"kind\":\"len\",\"target\":".concat(lir_expr(f.target, env, al)).concat("}")
     }
   }
   let opt = parse_head(infer_field(infer(f.target, env), f.name, env)) == "Opt"
-  return "{\"kind\":\"field\",\"target\":".concat(lir_expr(f.target, env))
+  return "{\"kind\":\"field\",\"target\":".concat(lir_expr(f.target, env, al))
     .concat(",\"name\":").concat(jstr(f.name)).concat(opt ? ",\"opt\":true" : "").concat("}")
 }
 
-fn lir_builtin(f: FieldN, args: List[Expr], env: List[Bind]) -> Str {
+fn lir_builtin(f: FieldN, args: List[Expr], env: List[Bind], al: Map[Str, Str]) -> Str {
   var s = "{\"kind\":\"builtin\",\"method\":".concat(jstr(f.name))
-    .concat(",\"target\":").concat(lir_expr(f.target, env))
-    .concat(",\"args\":[").concat(lir_args(args, env)).concat("]")
+    .concat(",\"target\":").concat(lir_expr(f.target, env, al))
+    .concat(",\"args\":[").concat(lir_args(args, env, al)).concat("]")
   if (f.name == "to_int") {
     let rt = infer(f.target, env)
     s = s.concat(",\"recv\":").concat(rt == "" ? "null" : jstr(rt))
@@ -14030,7 +14053,7 @@ fn case_add(a: CaseAcc, name: Str, adt: Str, payload: Str) -> CaseAcc {
 // environment. `is_record_key`, not a bare `ident`: a field named `config` is a
 // field, and this table is what stamps `operands` on arithmetic over `r.config`.
 fn rec_field_binds(ts: List[Token], lo: Int, hi: Int, nm: Str,
-                   acc: List[Bind]) -> List[Bind] {
+                   acc: List[Bind], al: Map[Str, Str]) -> List[Bind] {
   var binds = acc
   var k = lo
   var go = true
@@ -14040,7 +14063,7 @@ fn rec_field_binds(ts: List[Token], lo: Int, hi: Int, nm: Str,
       if (!tr.ok || tr.i <= k + 2) { go = false }
       else {
         binds = tenv_put(binds, "field ".concat(nm).concat(".").concat(tkc(ts, k).text),
-                         taint_strip(tr.ty))
+                         taint_strip(alias_subst(tr.ty, al)))
         k = tr.i
       }
     } else { k += 1 }
@@ -14051,17 +14074,17 @@ fn rec_field_binds(ts: List[Token], lo: Int, hi: Int, nm: Str,
 // An `event` declaration's record body, read into the same field table. The
 // reference contributes a full record `TypeDecl` for one, so every rule that
 // reads a record's fields applies to an event with no event-specific case.
-fn event_field_binds(ts: List[Token], i: Int, acc: List[Bind]) -> List[Bind] {
+fn event_field_binds(ts: List[Token], i: Int, acc: List[Bind], al: Map[Str, Str]) -> List[Bind] {
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   if (atk(ts, j, "(")) { j = close_paren(ts, j) }
   if (j == 0 - 1 || !atk(ts, j, "{")) { return acc }
   let bend = close_brace(ts, j)
   if (bend == 0 - 1) { return acc }
-  return rec_field_binds(ts, j + 1, bend - 1, nm, acc)
+  return rec_field_binds(ts, j + 1, bend - 1, nm, acc, al)
 }
 
-fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
+fn decl_cases(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> CaseStep {
   // the WHOLE declaration, not its first line. A variant is routinely written
   // over several lines (`pub type Method =` then one `| Case` per line), and a
   // line-bounded read collected only the cases that happened to share a line
@@ -14080,7 +14103,7 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
     if (bend == 0 - 1 || atk(ts, i + 2, "[")) {
       return { a: a, i: bend == 0 - 1 ? lineHi : bend }
     }
-    let fields = rec_field_binds(ts, j + 1, bend - 1, nm, a.binds)
+    let fields = rec_field_binds(ts, j + 1, bend - 1, nm, a.binds, al)
     return { a: { binds: fields, amb: a.amb }, i: bend }
   }
   if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
@@ -14093,7 +14116,7 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
       var nk = k + 1
       if (atk(ts, k + 1, "(")) {
         let tr = type_at(ts, k + 2)
-        payload = tr.ty
+        payload = alias_subst(tr.ty, al)
         nk = tr.i
         if (atk(ts, nk, ")")) { nk += 1 }
       }
@@ -14104,20 +14127,20 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
   return { a: acc, i: lineHi }
 }
 
-fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
+fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> CaseAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return case_binds_walk(ts, i + 1, a) }
+  if (at_boot(ts, i)) { return case_binds_walk(ts, i + 1, a, al) }
   if (at_event(ts, i)) {
     // an `event` IS a record type with a contract (item 130 §6), so the
     // reference appends an ordinary record `TypeDecl` beside it: its name is a
     // declared type for the tparam heuristic exactly as a `type` head is.
-    let eb = tenv_put(event_field_binds(ts, i, a.binds),
+    let eb = tenv_put(event_field_binds(ts, i, a.binds, al),
                       "decl ".concat(tkc(ts, i + 1).text), "1")
-    return case_binds_walk(ts, event_decl_end(ts, i), { binds: eb, amb: a.amb })
+    return case_binds_walk(ts, event_decl_end(ts, i), { binds: eb, amb: a.amb }, al)
   }
-  if (t.kind != "kw") { return case_binds_walk(ts, skip_line(ts, i), a) }
-  if (at_pub_prefix(ts, i)) { return case_binds_walk(ts, i + 1, a) }
+  if (t.kind != "kw") { return case_binds_walk(ts, skip_line(ts, i), a, al) }
+  if (at_pub_prefix(ts, i)) { return case_binds_walk(ts, i + 1, a, al) }
   if (t.text == "type") {
     // item 391: the DECLARED type names, recorded beside the case table. The
     // single-uppercase heuristic that makes `T` a type parameter is switched off
@@ -14126,37 +14149,39 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
     // carries a space, which no identifier may, so it can never collide with a
     // binding.
     let named = tenv_put(a.binds, "decl ".concat(tkc(ts, i + 1).text), "1")
-    let d = decl_cases(ts, i, { binds: named, amb: a.amb })
-    return case_binds_walk(ts, d.i, d.a)
+    let d = decl_cases(ts, i, { binds: named, amb: a.amb }, al)
+    return case_binds_walk(ts, d.i, d.a, al)
   }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return case_binds_walk(ts, e, a) }
-    return case_binds_walk(ts, skip_line(ts, i), a)
+    if (e != 0 - 1) { return case_binds_walk(ts, e, a, al) }
+    return case_binds_walk(ts, skip_line(ts, i), a, al)
   }
-  if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a) }
+  if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a, al) }
   if (t.text == "fn") {
     let fi = i
     let ps = params_at(ts, fn_params_i(ts, fi))
-    let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : "Unit"
+    let ret = atk(ts, ps.i, "arrow")
+      ? taint_strip(alias_subst(type_at(ts, ps.i + 1).ty, al)) : "Unit"
+    let sps = alias_subst_params(ps.ps, al)
     var param_types: List[Str] = []
     var pi = 0
-    while (pi < ps.ps.length()) {
-      param_types = param_types.push(taint_strip(ps.ps[pi].ty))
+    while (pi < sps.length()) {
+      param_types = param_types.push(taint_strip(sps[pi].ty))
       pi += 1
     }
     let ty = "(".concat(param_types.join(", ")).concat(") -> ").concat(ret)
     let binds = tenv_put(a.binds, tkc(ts, fi + 1).text, ty)
-    return case_binds_walk(ts, p_fn(ts, fi, empty_prog()).i, { binds: binds, amb: a.amb })
+    return case_binds_walk(ts, p_fn(ts, fi, empty_prog()).i, { binds: binds, amb: a.amb }, al)
   }
-  if (t.text == "service") { return case_binds_walk(ts, p_service(ts, i, empty_prog()).i, a) }
-  if (t.text == "component") { return case_binds_walk(ts, p_component(ts, i, empty_prog()).i, a) }
-  return case_binds_walk(ts, skip_line(ts, i), a)
+  if (t.text == "service") { return case_binds_walk(ts, p_service(ts, i, empty_prog()).i, a, al) }
+  if (t.text == "component") { return case_binds_walk(ts, p_component(ts, i, empty_prog()).i, a, al) }
+  return case_binds_walk(ts, skip_line(ts, i), a, al)
 }
 
 // The built-in half of `_case_table`, declared first so a user ADT can shadow
 // `Ok`/`Err` and a user reuse of `Some`/`None` collides with something.
-fn case_binds(ts: List[Token]) -> List[Bind] {
+fn case_binds(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
   var b = []
   b = b.push({ name: "case Some", ty: "Opt[Any]" })
   b = b.push({ name: "payload Some", ty: "" })
@@ -14166,7 +14191,7 @@ fn case_binds(ts: List[Token]) -> List[Bind] {
   b = b.push({ name: "payload Ok", ty: "" })
   b = b.push({ name: "case Err", ty: "Result[Any, Any]" })
   b = b.push({ name: "payload Err", ty: "" })
-  return case_binds_walk(ts, 0, { binds: b, amb: [] }).binds
+  return case_binds_walk(ts, 0, { binds: b, amb: [] }, al).binds
 }
 
 // `_tagged_case`: the ADT a name constructs, or "" when it constructs none.
@@ -14176,10 +14201,10 @@ fn tagged_case_adt(env: List[Bind], name: Str) -> Str {
   return tenv_get(env, "case ".concat(name))
 }
 
-fn lir_adt(adt: Str, case_: Str, args: List[Expr], env: List[Bind]) -> Str {
+fn lir_adt(adt: Str, case_: Str, args: List[Expr], env: List[Bind], al: Map[Str, Str]) -> Str {
   return "{\"kind\":\"adt\",\"type\":".concat(jstr(adt))
     .concat(",\"case\":").concat(jstr(case_))
-    .concat(",\"args\":[").concat(lir_args(args, env)).concat("]}")
+    .concat(",\"args\":[").concat(lir_args(args, env, al)).concat("]}")
 }
 
 // item 189 (self-host port): the Value dot-accessors. A `Value` receiver's
@@ -14202,10 +14227,10 @@ fn value_accessor_free(name: Str) -> Str {
 // receiver-first redirects (item 383's list transforms, item 189's Value
 // accessors), which differ only in the free function they name.
 fn lir_receiver_first(free: Str, recv: Expr, args: List[Expr],
-                      env: List[Bind]) -> Str {
+                      env: List[Bind], al: Map[Str, Str]) -> Str {
   return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":"
-    .concat(jstr(free)).concat("},\"args\":[").concat(lir_expr(recv, env))
-    .concat(args.length() > 0 ? "," : "").concat(lir_args(args, env)).concat("]}")
+    .concat(jstr(free)).concat("},\"args\":[").concat(lir_expr(recv, env, al))
+    .concat(args.length() > 0 ? "," : "").concat(lir_args(args, env, al)).concat("]}")
 }
 
 fn is_empty_map_callee(callee: Expr) -> Bool {
@@ -14215,7 +14240,7 @@ fn is_empty_map_callee(callee: Expr) -> Bool {
   }
 }
 
-fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
+fn lir_call(callee: Expr, args: List[Expr], env: List[Bind], al: Map[Str, Str]) -> Str {
   if (is_empty_map_callee(callee) && args.length() == 0) {
     return "{\"kind\":\"maplit\",\"entries\":[]}"
   }
@@ -14224,7 +14249,7 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
   let ctor = match callee { Var(n) => tagged_case_adt(env, n), _ => "", }
   if (ctor != "") {
     let cname = match callee { Var(n) => n, _ => "", }
-    return lir_adt(ctor, cname, args, env)
+    return lir_adt(ctor, cname, args, env, al)
   }
   let transform = match callee {
     Field(f) => is_host_root_recv(f.target) ? "" : list_transform_free(f.name),
@@ -14233,7 +14258,7 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
   if (transform != "") {
     // `recv.map(...)` -> `list_map(recv, ...)`.
     let recv = match callee { Field(f) => f.target, _ => callee, }
-    return lir_receiver_first(transform, recv, args, env)
+    return lir_receiver_first(transform, recv, args, env, al)
   }
   let vaccess = match callee {
     Field(f) => (is_host_root_recv(f.target)
@@ -14244,11 +14269,11 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
   if (vaccess != "") {
     // `node.field("k")` -> `value_field(node, "k")`.
     let recv = match callee { Field(f) => f.target, _ => callee, }
-    return lir_receiver_first(vaccess, recv, args, env)
+    return lir_receiver_first(vaccess, recv, args, env, al)
   }
   let builtin = match callee {
     Field(f) => (is_host_root_recv(f.target) || !is_builtin_method(f.name))
-      ? "" : lir_builtin(f, args, env),
+      ? "" : lir_builtin(f, args, env, al),
     _ => "",
   }
   if (builtin != "") { return builtin }
@@ -14258,8 +14283,8 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
   // a `Var` callee names a signature (the reference's `ExprVar` guard), so a
   // higher-order callee keeps its arguments un-marked.
   let ptypes = match callee { Var(n) => fn_param_types(tenv_get(env, n)), _ => [], }
-  let argsjs = ptypes.length() == 0 ? lir_args(args, env) : lir_call_args(args, ptypes, env)
-  return "{\"kind\":\"call\",\"callee\":".concat(lir_expr(callee, env))
+  let argsjs = ptypes.length() == 0 ? lir_args(args, env, al) : lir_call_args(args, ptypes, env, al)
+  return "{\"kind\":\"call\",\"callee\":".concat(lir_expr(callee, env, al))
     .concat(",\"args\":[").concat(argsjs).concat("]}")
 }
 
@@ -14363,7 +14388,7 @@ fn arrow_captures_json(a: ArrowN, env: List[Bind]) -> Str {
   return out
 }
 
-fn lir_arrow(a: ArrowN, env: List[Bind]) -> Str { return lir_arrow_at(a, env, "") }
+fn lir_arrow(a: ArrowN, env: List[Bind], al: Map[Str, Str]) -> Str { return lir_arrow_at(a, env, "", al) }
 
 // `expected` is the declared function type of the position the arrow sits in —
 // the reference's CHECKING position, and "" where there is none.
@@ -14381,7 +14406,7 @@ fn lir_arrow(a: ArrowN, env: List[Bind]) -> Str { return lir_arrow_at(a, env, ""
 // the reference's rule C2: the colour is a certificate that some declaration
 // promised to await this arrow, so it may come from a checking position and
 // never from the author's own annotation.
-fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str) -> Str {
+fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str, al: Map[Str, Str]) -> Str {
   let expPs = fn_param_types(expected)
   let expRet = function_return_ty(expected)
   var pn = ""
@@ -14396,7 +14421,13 @@ fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str) -> Str {
   var i = 0
   while (i < a.params.length()) {
     let p = a.params[i]
-    let pty = p.ty != "" ? p.ty : (i < expPs.length() ? expPs[i] : "")
+    // the author's annotation is erased exactly as a declaration-site one is:
+    // `_subst_body_annotations` reaches an arrow's `written_param_types` and
+    // `written_returns` inside a body, which the declaration sweep cannot see.
+    // The RESOLVED return follows from the same substitution, since an
+    // unannotated arrow's return is inferred in this environment.
+    let pty = p.ty != "" ? alias_subst(p.ty, al)
+                         : (i < expPs.length() ? expPs[i] : "")
     pn = i == 0 ? jstr(p.name) : pn.concat(",").concat(jstr(p.name))
     pt = i == 0 ? jstr(pty) : pt.concat(",").concat(jstr(pty))
     if (pty == "") { allTyped = false } else { inner = tenv_put(inner, p.name, pty) }
@@ -14404,7 +14435,7 @@ fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str) -> Str {
   }
   var s = "{\"kind\":\"arrow\",\"params\":[".concat(pn).concat("],\"captures\":[")
     .concat(arrow_captures_json(a, env)).concat("],\"body\":")
-    .concat(lir_expr(a.body, inner))
+    .concat(lir_expr(a.body, inner, al))
   let rt = expRet != "" ? expRet : infer(a.body, inner)
   if (allTyped) {
     s = s.concat(",\"param_types\":[").concat(pt).concat("],\"returns\":")
@@ -14445,7 +14476,7 @@ fn predeclared_mangle(name: Str) -> Str {
   return name
 }
 
-fn lir_match(m: MatchN, env: List[Bind]) -> Str {
+fn lir_match(m: MatchN, env: List[Bind], al: Map[Str, Str]) -> Str {
   let scrutTy = infer(m.scrut, env)
   var arms = ""
   var i = 0
@@ -14456,13 +14487,13 @@ fn lir_match(m: MatchN, env: List[Bind]) -> Str {
     if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
     var arm = "{\"pattern\":".concat(jstr(a.pat))
       .concat(",\"bind\":").concat(a.bind == "" ? "null" : jstr(predeclared_mangle(a.bind)))
-      .concat(",\"body\":").concat(lir_expr(a.body, inner))
+      .concat(",\"body\":").concat(lir_expr(a.body, inner, al))
     if (pay != "") { arm = arm.concat(",\"payload_type\":").concat(jstr(pay)) }
     arm = arm.concat("}")
     arms = i == 0 ? arm : arms.concat(",").concat(arm)
     i += 1
   }
-  return "{\"kind\":\"match\",\"scrutinee\":".concat(lir_expr(m.scrut, env))
+  return "{\"kind\":\"match\",\"scrutinee\":".concat(lir_expr(m.scrut, env, al))
     .concat(",\"arms\":[").concat(arms).concat("]}")
 }
 
@@ -14489,7 +14520,7 @@ fn hole_json(h: HoleN, expected: Str) -> Str {
   return js.concat("}")
 }
 
-fn lir_expr(e: Expr, env: List[Bind]) -> Str {
+fn lir_expr(e: Expr, env: List[Bind], al: Map[Str, Str]) -> Str {
   return match e {
     IntLit(v)   => "{\"kind\":\"lit\",\"value\":".concat(v).concat("}"),
     FloatLit(v) => "{\"kind\":\"lit\",\"value\":".concat(v).concat("}"),
@@ -14503,32 +14534,32 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
                     && tenv_get(env, "payload ".concat(n)) == ""
                     && !tagged_case_adt(env, n).startsWith("Result")
                     && !tagged_case_adt(env, n).startsWith("Opt"))
-                     ? lir_adt(tagged_case_adt(env, n), n, [], env)
+                     ? lir_adt(tagged_case_adt(env, n), n, [], env, al)
                      : "{\"kind\":\"var\",\"name\":".concat(
                          jstr(tenv_get(env, n) != "" ? predeclared_mangle(n) : n)).concat("}"),
-    Bin(b)      => lir_bin(b, env),
-    Un(u)       => lir_un(u, env),
+    Bin(b)      => lir_bin(b, env, al),
+    Un(u)       => lir_un(u, env, al),
     Emit(u)     => "{\"kind\":\"bad\"}",
-    Call(c)     => lir_call(c.target, c.args, env),
-    Field(f)    => lir_field(f, env),
-    OptField(f) => "{\"kind\":\"optfield\",\"target\":".concat(lir_expr(f.target, env))
+    Call(c)     => lir_call(c.target, c.args, env, al),
+    Field(f)    => lir_field(f, env, al),
+    OptField(f) => "{\"kind\":\"optfield\",\"target\":".concat(lir_expr(f.target, env, al))
                      .concat(",\"name\":").concat(jstr(f.name)).concat("}"),
-    OptCall(c)  => "{\"kind\":\"optcall\",\"target\":".concat(lir_expr(c.target, env))
+    OptCall(c)  => "{\"kind\":\"optcall\",\"target\":".concat(lir_expr(c.target, env, al))
                      .concat(",\"method\":").concat(jstr(c.name))
-                     .concat(",\"args\":[").concat(lir_args(c.args, env)).concat("]}"),
-    Index(x)    => "{\"kind\":\"index\",\"target\":".concat(lir_expr(x.target, env))
-                     .concat(",\"index\":").concat(lir_expr(x.idx, env))
+                     .concat(",\"args\":[").concat(lir_args(c.args, env, al)).concat("]}"),
+    Index(x)    => "{\"kind\":\"index\",\"target\":".concat(lir_expr(x.target, env, al))
+                     .concat(",\"index\":").concat(lir_expr(x.idx, env, al))
                      .concat(map_index_tags(infer(x.target, env))).concat("}"),
-    If(f)       => "{\"kind\":\"if\",\"cond\":".concat(lir_expr(f.cond, env))
-                     .concat(",\"then\":").concat(lir_expr(f.then_, env))
-                     .concat(",\"else\":").concat(lir_expr(f.els, env)).concat("}"),
-    Rec(r)      => "{\"kind\":\"record\",\"fields\":[".concat(lir_fields(r.fields, env)).concat("]}"),
-    Lst(l)      => "{\"kind\":\"list\",\"items\":[".concat(lir_args(l.items, env)).concat("]}"),
-    Arrow(a)    => lir_arrow(a, env),
-    Match(m)    => lir_match(m, env),
-    Templ(t)    => "{\"kind\":\"interp\",\"parts\":[".concat(lir_parts(t.parts, env)).concat("]}"),
-    RecUpd(r)   => "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(r.base, env))
-                     .concat(",\"updates\":[").concat(lir_updates(r.upds, 0, "", env)).concat("]}"),
+    If(f)       => "{\"kind\":\"if\",\"cond\":".concat(lir_expr(f.cond, env, al))
+                     .concat(",\"then\":").concat(lir_expr(f.then_, env, al))
+                     .concat(",\"else\":").concat(lir_expr(f.els, env, al)).concat("}"),
+    Rec(r)      => "{\"kind\":\"record\",\"fields\":[".concat(lir_fields(r.fields, env, al)).concat("]}"),
+    Lst(l)      => "{\"kind\":\"list\",\"items\":[".concat(lir_args(l.items, env, al)).concat("]}"),
+    Arrow(a)    => lir_arrow(a, env, al),
+    Match(m)    => lir_match(m, env, al),
+    Templ(t)    => "{\"kind\":\"interp\",\"parts\":[".concat(lir_parts(t.parts, env, al)).concat("]}"),
+    RecUpd(r)   => "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(r.base, env, al))
+                     .concat(",\"updates\":[").concat(lir_updates(r.upds, 0, "", env, al)).concat("]}"),
     Hole(h)     => hole_json(h, ""),
     // item 459 F1: `asset "<path>"` lowers on the reference to the RESOLVED
     // record `{ path, sha256 }` (`ExprAsset` IS an `ExprRecord`, and
@@ -14666,15 +14697,15 @@ fn ru_at(ts: List[Token], j: Int) -> RuR {
   return { ok: true, base: base.e, upds: u.xs, i: close }
 }
 
-fn lir_updates(xs: List[InitN], i: Int, acc: Str, env: List[Bind]) -> Str {
+fn lir_updates(xs: List[InitN], i: Int, acc: Str, env: List[Bind], al: Map[Str, Str]) -> Str {
   if (i >= xs.length()) { return acc }
-  let seg = "[".concat(jstr(xs[i].name)).concat(",").concat(lir_expr(xs[i].value, env)).concat("]")
-  return lir_updates(xs, i + 1, acc == "" ? seg : acc.concat(",").concat(seg), env)
+  let seg = "[".concat(jstr(xs[i].name)).concat(",").concat(lir_expr(xs[i].value, env, al)).concat("]")
+  return lir_updates(xs, i + 1, acc == "" ? seg : acc.concat(",").concat(seg), env, al)
 }
 
 // An rvalue: an ordinary expression, or a token-level record-update.
-fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
-  return lir_rhs_exp(ts, j, env, "")
+fn lir_rhs(ts: List[Token], j: Int, env: List[Bind], al: Map[Str, Str]) -> RhsR {
+  return lir_rhs_exp(ts, j, env, "", al)
 }
 
 // The rvalue reader, with the DECLARED type of the position it is read into.
@@ -14682,18 +14713,18 @@ fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
 // context, and an annotated `let`/`var` and a `return` are the two contexts this
 // producer has in hand. Every other node ignores `expected`, so a document with
 // no hole in it is byte-identical.
-fn lir_rhs_exp(ts: List[Token], j: Int, env: List[Bind], expected: Str) -> RhsR {
+fn lir_rhs_exp(ts: List[Token], j: Int, env: List[Bind], expected: Str, al: Map[Str, Str]) -> RhsR {
   let ru = ru_at(ts, j)
   if (ru.ok) {
-    let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(ru.base, env))
-      .concat(",\"updates\":[").concat(lir_updates(ru.upds, 0, "", env)).concat("]}")
+    let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(ru.base, env, al))
+      .concat(",\"updates\":[").concat(lir_updates(ru.upds, 0, "", env, al)).concat("]}")
     return { js: js, ty: infer(ru.base, env), i: ru.i, ok: true }
   }
   let r = expr_at(ts, j)
   if (is_bad(r.e) || r.i <= j) { return { js: "", ty: "", i: j, ok: false } }
   let js = match r.e {
     Hole(h) => hole_json(h, expected),
-    _       => lir_expr(r.e, env),
+    _       => lir_expr(r.e, env, al),
   }
   return { js: js, ty: infer(r.e, env), i: r.i, ok: true }
 }
@@ -15261,7 +15292,10 @@ fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
     if (!atk(ts, j, "=")) { return { step: ostep_simple("other", NullLit), i: hi } }
     let ru = ru_at(ts, j + 1)
     if (ru.ok) { return { step: ostep_ru("let", i, name, ru.base, ru.upds), i: ru.i } }
-    let r = lir_rhs(ts, j + 1, [])
+    // `Map.empty()`: the ownership scan reads a statement's SHAPE (which node
+    // kind a `let` is born from), never a declared type, so the alias table it
+    // would erase with buys it nothing and is not threaded here.
+    let r = lir_rhs(ts, j + 1, [], Map.empty())
     if (!r.ok) { return { step: ostep_simple("other", NullLit), i: hi } }
     let ve = expr_at(ts, j + 1)
     return { step: ostep_let(i, name, own_birth_kind(r.js), ve.e), i: r.i }
@@ -15649,13 +15683,13 @@ fn own_birth_marker(births: Map[Str, Str], tok: Int) -> Str {
 
 fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
                 muts: List[Str], ret: Str, marks: Map[Str, Int],
-                births: Map[Str, Str]) -> StmtOne {
+                births: Map[Str, Str], al: Map[Str, Str]) -> StmtOne {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     let mutable = t.text == "var"
     let pat = pat_at(ts, i + 1)
     if (pat.ok && atk(ts, pat.i, "=")) {
-      let pr = lir_rhs(ts, pat.i + 1, env)
+      let pr = lir_rhs(ts, pat.i + 1, env, al)
       if (!pr.ok) { return mk_one("", env, muts, hi) }
       var penv = env
       var pjs = ""
@@ -15688,9 +15722,13 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     let name = tkc(ts, i + 1).text
     var j = i + 2
     var declared = ""
-    if (atk(ts, j, ":")) { let tr = type_at(ts, j + 1)  declared = tr.ty  j = tr.i }
+    if (atk(ts, j, ":")) {
+      let tr = type_at(ts, j + 1)
+      declared = alias_subst(tr.ty, al)
+      j = tr.i
+    }
     if (!atk(ts, j, "=")) { return mk_one("", env, muts, hi) }
-    let r = lir_rhs_exp(ts, j + 1, env, declared)
+    let r = lir_rhs_exp(ts, j + 1, env, declared, al)
     if (!r.ok) { return mk_one("", env, muts, hi) }
     // read the rhs out of the step ONCE: both the type and the JSON are used
     // more than once below, and a repeated FIELD read is what the rust tier
@@ -15719,7 +15757,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     // an rvalue, not only an expression: `return { r | class = r.class_ }` is a
     // record-update in return position, and the shared parser's grammar has no
     // node for it.
-    let r = lir_rhs_exp(ts, i + 1, env, ret)
+    let r = lir_rhs_exp(ts, i + 1, env, ret, al)
     if (!r.ok) {
       return mk_one("{\"step\":\"return\",\"expr\":null}", env, muts, i + 1)
     }
@@ -15730,7 +15768,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
   if (t.kind == "kw" && t.text == "assert") {
     let r = expr_at(ts, i + 1)
     if (is_bad(r.e) || r.i <= i + 1) { return mk_one("", env, muts, hi) }
-    return mk_one("{\"step\":\"assert\",\"expr\":".concat(lir_expr(r.e, env)).concat("}"),
+    return mk_one("{\"step\":\"assert\",\"expr\":".concat(lir_expr(r.e, env, al)).concat("}"),
                   env, muts, r.i)
   }
   // item 379 / 391: bare loop control. Additive step kinds, no payload but a
@@ -15746,14 +15784,14 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
   if (t.kind == "kw" && t.text == "if") {
     let c = expr_at(ts, i + 1)
     if (is_bad(c.e) || c.i <= i + 1) { return mk_one("", env, muts, hi) }
-    let tb = lir_body(ts, c.i, hi, env, muts, ret, marks, births)
+    let tb = lir_body(ts, c.i, hi, env, muts, ret, marks, births, al)
     if (!tb.ok) { return mk_one("", env, muts, hi) }
     let tend = tb.i
     let thenjs = tb.js
     var elsejs = "null"
     var nexti = tend
     if (atw(ts, tend, "else") && !atw(ts, tend + 1, "if")) {
-      let eb = lir_body(ts, tend + 1, hi, env, muts, ret, marks, births)
+      let eb = lir_body(ts, tend + 1, hi, env, muts, ret, marks, births, al)
       if (eb.ok) {
         elsejs = "[".concat(eb.js).concat("]")
         nexti = eb.i
@@ -15769,22 +15807,22 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     // statement after the chain (`stdlib/escape.rvl`'s `i += 1`, the increment
     // that ends the loop).
     if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) {
-      let r = lir_one_stmt(ts, tend + 1, hi, env, muts, ret, marks, births)
+      let r = lir_one_stmt(ts, tend + 1, hi, env, muts, ret, marks, births, al)
       if (r.js != "" && r.i > tend + 1) {
         elsejs = "[".concat(r.js).concat("]")
         nexti = r.i
       }
     }
-    let js = "{\"step\":\"if\",\"cond\":".concat(lir_expr(c.e, env))
+    let js = "{\"step\":\"if\",\"cond\":".concat(lir_expr(c.e, env, al))
       .concat(",\"then\":[").concat(thenjs).concat("],\"else\":").concat(elsejs).concat("}")
     return mk_one(js, env, muts, nexti)
   }
   if (t.kind == "kw" && t.text == "while") {
     let c = expr_at(ts, i + 1)
     if (is_bad(c.e)) { return mk_one("", env, muts, hi) }
-    let wb = lir_body(ts, c.i, hi, env, muts, ret, marks, births)
+    let wb = lir_body(ts, c.i, hi, env, muts, ret, marks, births, al)
     if (!wb.ok) { return mk_one("", env, muts, hi) }
-    let js = "{\"step\":\"while\",\"cond\":".concat(lir_expr(c.e, env))
+    let js = "{\"step\":\"while\",\"cond\":".concat(lir_expr(c.e, env, al))
       .concat(",\"body\":[").concat(wb.js).concat("]}")
     return mk_one(js, env, muts, wb.i)
   }
@@ -15799,10 +15837,10 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       let el = type_arg1(iterTy)
       if (el != "") { inner = tenv_put(inner, bind, el) }
     }
-    let fb = lir_body(ts, it.i + 1, hi, inner, muts, ret, marks, births)
+    let fb = lir_body(ts, it.i + 1, hi, inner, muts, ret, marks, births, al)
     if (!fb.ok) { return mk_one("", env, muts, hi) }
     let js = "{\"step\":\"for\",\"bind\":".concat(jstr(predeclared_mangle(bind))).concat(",\"iterable\":")
-      .concat(lir_expr(it.e, env)).concat(",\"body\":[").concat(fb.js).concat("]}")
+      .concat(lir_expr(it.e, env, al)).concat(",\"body\":[").concat(fb.js).concat("]}")
     return mk_one(js, env, muts, fb.i)
   }
   if (t.kind == "ident" && atk(ts, i + 1, "=")) {
@@ -15812,7 +15850,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     // parser's grammar cannot carry. Reading it with `expr_at` failed, the whole
     // statement was dropped AND `lir_stmts` gave up on the rest of the block, so
     // a loop body holding one lowered as `[]`.
-    let r = lir_rhs(ts, i + 2, env)
+    let r = lir_rhs(ts, i + 2, env, al)
     if (!r.ok) { return mk_one("", env, muts, hi) }
     let js = "{\"step\":\"assign\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(r.js).concat(own_marker(marks, i)).concat("}")
@@ -15825,12 +15863,12 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (is_bad(r.e) || r.i <= i + 3) { return mk_one("", env, muts, hi) }
     let binE = Bin({ op: baseop, l: Var(name), r: r.e, paren: false })
     let js = "{\"step\":\"assign\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
-      .concat(lir_expr(binE, env)).concat("}")
+      .concat(lir_expr(binE, env, al)).concat("}")
     return mk_one(js, assign_env(env, name, binE), muts, r.i)
   }
   let r = expr_at(ts, i)
   if (is_bad(r.e) || r.i <= i) { return mk_one("", env, muts, hi) }
-  return mk_one("{\"step\":\"expr\",\"expr\":".concat(lir_expr(r.e, env)).concat("}"),
+  return mk_one("{\"step\":\"expr\",\"expr\":".concat(lir_expr(r.e, env, al)).concat("}"),
                 env, muts, r.i)
 }
 
@@ -15933,21 +15971,21 @@ fn pat_muts(muts: List[Str], names: List[Str], i: Int) -> List[Str] {
 type BodyR = { js: Str, i: Int, ok: Bool }
 
 fn lir_body(ts: List[Token], i: Int, hi: Int, env: List[Bind], muts: List[Str],
-            ret: Str, marks: Map[Str, Int], births: Map[Str, Str]) -> BodyR {
+            ret: Str, marks: Map[Str, Int], births: Map[Str, Str], al: Map[Str, Str]) -> BodyR {
   if (atk(ts, i, "{")) {
     let e = close_brace(ts, i)
     if (e == 0 - 1) { return { js: "", i: i, ok: false } }
-    return { js: lir_stmts(ts, i + 1, e - 1, env, muts, ret, marks, births),
+    return { js: lir_stmts(ts, i + 1, e - 1, env, muts, ret, marks, births, al),
              i: e, ok: true }
   }
-  let r = lir_one_stmt(ts, i, hi, env, muts, ret, marks, births)
+  let r = lir_one_stmt(ts, i, hi, env, muts, ret, marks, births, al)
   if (r.i <= i) { return { js: "", i: i, ok: false } }
   return { js: r.js, i: r.i, ok: true }
 }
 
 fn lir_stmts(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
              muts0: List[Str], ret: Str, marks: Map[Str, Int],
-             births: Map[Str, Str]) -> Str {
+             births: Map[Str, Str], al: Map[Str, Str]) -> Str {
   var i = lo
   var env = env0
   var muts = muts0
@@ -15955,7 +15993,7 @@ fn lir_stmts(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
   while (i < hi && !atk(ts, i, "}")) {
     if (atk(ts, i, ";")) { i += 1 }
     else {
-      let st = lir_one_stmt(ts, i, hi, env, muts, ret, marks, births)
+      let st = lir_one_stmt(ts, i, hi, env, muts, ret, marks, births, al)
       if (st.i <= i) { i = hi }
       else {
         if (st.js != "") { out = out == "" ? st.js : out.concat(",").concat(st.js) }
@@ -16070,14 +16108,19 @@ fn params_env(ps: List[ParamN], acc: List[Bind], tps: List[Str]) -> List[Bind] {
 
 // One module `fn` -> its `functions` entry. Advances past the whole fn.
 fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
-                colored: List[Str], sm: Map[Str, Str]) -> LirFn {
+                colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str]) -> LirFn {
   let nm = tkc(ts, i + 1).text
-  let ps = params_at(ts, fn_params_i(ts, i))
+  let ps0 = params_at(ts, fn_params_i(ts, i))
+  // the declaration is read through the alias table, so the IR spelling, the
+  // signature's type parameters and the body's type environment are all built on
+  // the ERASED type - which is what the reference's one-pass erasure gives it.
+  let ps = { i: ps0.i, ps: alias_subst_params(ps0.ps, al), ok: ps0.ok }
   var reti = ps.i
   var retJson = "null"
   var retBare = ""
   if (atk(ts, ps.i, "arrow")) {
-    let tr = type_at(ts, ps.i + 1)
+    let tr0 = type_at(ts, ps.i + 1)
+    let tr = { i: tr0.i, ty: alias_subst(tr0.ty, al), ok: tr0.ok }
     // the qualifier is stripped for BOTH the IR and the body's type
     // environment: a `Secret[T]` is a `T` everywhere past the declaration, and
     // the marking survives only as the flag `ir_params_json` stamps.
@@ -16097,7 +16140,7 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
   if (bend == 0 - 1) { return { js: "", i: ts.length() } }
   let om = own_marks(ts, reti + 1, bend - 1, sm)
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
-                         params_env(ps.ps, cases, tps), [], retTy, om.marks, om.births)
+                         params_env(ps.ps, cases, tps), [], retTy, om.marks, om.births, al)
   let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
@@ -16110,17 +16153,17 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
 // Collect every top-level `fn` into the `functions` list; skip other decls
 // wholesale (a nested `fn` inside a component is not a module function).
 fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
-            colored: List[Str], sm: Map[Str, Str]) -> Str {
+            colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str]) -> Str {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm) }
-  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm) }
-  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm) }
-  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm) }
+  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al) }
+  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm, al) }
+  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
+  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored, sm) }
-    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm)
+    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored, sm, al) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -16129,23 +16172,23 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
   // top-level declaration head to this walker: `type Envelope = {` then
   // `component: Int,` on its own line minted a component named ":". Same span
   // `type_ctors` and `p_top` already read.
-    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm)
+    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm, al)
   }
-  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm) }
+  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
   let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
   if (t.text == "fn" || public_fn) {
-    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn, colored, sm)
+    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn, colored, sm, al)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
-    return fns_walk(ts, f.i, acc2, cases, colored, sm)
+    return fns_walk(ts, f.i, acc2, cases, colored, sm, al)
   }
   // the remaining `pub` forms (`pub type` / `pub service` / `pub extern`) carry
   // nothing this walker reads, so the prefix is stepped over and the declaration
   // it heads dispatches above. `pub fn` cannot reach here: it is the one form
   // whose prefix IS data (the `"public"` stamp), handled with the `fn` branch.
-  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm) }
-  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored, sm) }
-  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored, sm) }
-  return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm)
+  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al) }
+  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
+  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
+  return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
 }
 
 // ================================================================ externs IR
@@ -16192,7 +16235,7 @@ fn ir_cap_list(ts: List[Token], i: Int) -> CapR {
 // a capability scope (`witnessed[fs]`/`emission[net]`, item 343) and the
 // `undo`/`compensate` teardown slots (items 243/309/440) are all in the covered
 // surface and lower to the reference's `_lower_externs` shape.
-fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
+fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str]) -> IrRes {
   // `witnessed` is a contextual keyword (an ident), so `.text` is the class for
   // every classification. `pure`/`acquire`/`emission` are reserved keywords.
   let cls = tkc(ts, i + 1).text
@@ -16221,8 +16264,8 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
   var retDecl = ""
   if (atk(ts, k, "arrow")) {
     let tr = type_at(ts, k + 1)
-    retJson = jstr(taint_strip(tr.ty))
-    retDecl = tr.ty
+    retJson = jstr(taint_strip(alias_subst(tr.ty, al)))
+    retDecl = alias_subst(tr.ty, al)
     k = tr.i
   }
   // Teardown slots. `undo [idempotent] [pure] <inverse>` (items 243/309/440) and
@@ -16247,7 +16290,7 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
     }
     let r = expr_at(ts, u)
     if (is_bad(r.e) || r.i <= u) { return mk_irres(false, "") }
-    undoJson = lir_expr(r.e, [])
+    undoJson = lir_expr(r.e, [], al)
     undoRecv = taint_witness_receiver(r.e, decls)
     hasUndo = true
     k = r.i
@@ -16255,7 +16298,7 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
   if (atw(ts, k, "compensate")) {
     let r = expr_at(ts, k + 1)
     if (is_bad(r.e) || r.i <= k + 1) { return mk_irres(false, "") }
-    compJson = lir_expr(r.e, [])
+    compJson = lir_expr(r.e, [], al)
     hasComp = true
     k = r.i
   }
@@ -16271,7 +16314,11 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
   if (atw(ts, k, "config") && atk(ts, k + 1, "{")) {
     let ce = close_brace(ts, k + 1)
     if (ce == 0 - 1) { return mk_irres(false, "") }
-    cfgJson = ir_config(ts, k, ce)
+    // `Map.empty()`, not `al`: the reference's `_resolve_type_aliases` walks
+    // `ext.params` and `ext.returns` and stops there — a component's config
+    // fields are in its sweep, an extern's are not. Erasing here would be a
+    // divergence in the other direction.
+    cfgJson = ir_config(ts, k, ce, Map.empty())
     hasCfg = true
     k = ce
   }
@@ -16290,7 +16337,8 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
   }
   if (bcount == 0) { return mk_irres(false, "") }
   var js = "{\"name\": ".concat(jstr(nm)).concat(", \"class\": ").concat(jstr(cls))
-    .concat(", \"params\": [").concat(ir_params_json(ps.ps)).concat("], \"returns\": ").concat(retJson)
+    .concat(", \"params\": [").concat(ir_params_json(alias_subst_params(ps.ps, al)))
+    .concat("], \"returns\": ").concat(retJson)
     .concat(", \"bodies\": {").concat(bodies).concat("}")
   // The RETURN-side half of the marking (the counterpart of a parameter's
   // `secret`). `returns` above is stripped, so these two flags are the only
@@ -16348,29 +16396,29 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
 // outside the covered surface drops the whole section (ok=false), mirroring the
 // component-body omission discipline.
 fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
-                 decls: List[TaintDecl]) -> ExAcc {
+                 decls: List[TaintDecl], al: Map[Str, Str]) -> ExAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return { js: acc, ok: ok } }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls) }
-  if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls) }
-  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls) }
-  if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls) }
+  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al) }
+  if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls, al) }
+  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al) }
+  if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al) }
   if (t.text == "extern") {
-    let ex = ir_extern(ts, i, decls)
+    let ex = ir_extern(ts, i, decls, al)
     let ni = p_extern(ts, i, empty_prog()).i
     let acc2 = ex.ok ? (acc == "" ? ex.js : acc.concat(", ").concat(ex.js)) : acc
-    return externs_walk(ts, ni, acc2, ok && ex.ok, decls)
+    return externs_walk(ts, ni, acc2, ok && ex.ok, decls, al)
   }
-  if (t.text == "type") { return externs_walk(ts, type_decl_end(ts, i + 1), acc, ok, decls) }
+  if (t.text == "type") { return externs_walk(ts, type_decl_end(ts, i + 1), acc, ok, decls, al) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls) }
-    return externs_walk(ts, skip_line(ts, i), acc, ok, decls)
+    if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls, al) }
+    return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al)
   }
-  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls) }
-  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok, decls) }
-  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok, decls) }
-  return externs_walk(ts, skip_line(ts, i), acc, ok, decls)
+  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls, al) }
+  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok, decls, al) }
+  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok, decls, al) }
+  return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al)
 }
 
 // ================================================================ types IR
@@ -16393,7 +16441,7 @@ fn skip_brackets(ts: List[Token], i: Int) -> Int {
   return i
 }
 
-fn ir_type_fields(ts: List[Token], lo: Int, hi: Int) -> Str {
+fn ir_type_fields(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
   var k = lo
   var out = ""
   var first = true
@@ -16404,7 +16452,7 @@ fn ir_type_fields(ts: List[Token], lo: Int, hi: Int) -> Str {
     if (is_record_key(tkc(ts, k)) && atk(ts, k + 1, ":")) {
       let nm = tkc(ts, k).text
       let tr = type_at(ts, k + 2)
-      let seg = jstr(nm).concat(":").concat(jstr(tr.ty))
+      let seg = jstr(nm).concat(":").concat(jstr(alias_subst(tr.ty, al)))
       out = first ? seg : out.concat(",").concat(seg)
       first = false
       k = tr.i
@@ -16414,7 +16462,7 @@ fn ir_type_fields(ts: List[Token], lo: Int, hi: Int) -> Str {
   return out
 }
 
-fn ir_type_cases(ts: List[Token], lo: Int, hi: Int) -> Str {
+fn ir_type_cases(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
   var k = lo
   var out = ""
   var first = true
@@ -16425,7 +16473,7 @@ fn ir_type_cases(ts: List[Token], lo: Int, hi: Int) -> Str {
       var nk = k + 1
       if (atk(ts, k + 1, "(")) {
         let tr = type_at(ts, k + 2)
-        payload = jstr(tr.ty)
+        payload = jstr(alias_subst(tr.ty, al))
         nk = tr.i
         if (atk(ts, nk, ")")) { nk += 1 }
       }
@@ -16449,7 +16497,7 @@ fn is_variant_rhs(ts: List[Token], lo: Int, hi: Int) -> Bool {
   return false
 }
 
-fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
+fn ir_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> LirFn {
   // the whole declaration span, for the reason `decl_cases` states: a variant
   // written over several lines lost every case below the first one, and the
   // `types` section reported a partial `cases` list rather than no list at all.
@@ -16467,10 +16515,17 @@ fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
   }
   if (!atk(ts, j, "=")) { return { js: "", i: lineHi } }
   j += 1
+  // A TRANSPARENT ALIAS contributes NO entry: the reference drops the
+  // declaration outright once it has substituted it everywhere, so nothing
+  // downstream — the `types` section included — ever names it. Asked BEFORE the
+  // shape questions below, because a function-type alias
+  // (`type Handler = (Int) -> Str`) carries a `(` and so read as a variant with
+  // one case per parameter type.
+  if (al.has(nm)) { return { js: "", i: lineHi } }
   if (atk(ts, j, "{")) {
     let bend = close_brace(ts, j)
     if (bend == 0 - 1) { return { js: "", i: lineHi } }
-    let fields = ir_type_fields(ts, j + 1, bend - 1)
+    let fields = ir_type_fields(ts, j + 1, bend - 1, al)
     // Reference declaration lowering treats an empty field table as a variant.
     if (fields == "") {
       return { js: jstr(nm).concat(": {\"params\": [").concat(tparams)
@@ -16482,19 +16537,29 @@ fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
     return { js: js, i: bend }
   }
   if (is_variant_rhs(ts, j, lineHi)) {
-    let cases = ir_type_cases(ts, j, lineHi)
+    let cases = ir_type_cases(ts, j, lineHi, al)
     let js = jstr(nm).concat(": {\"params\": [").concat(tparams)
       .concat("], \"kind\": \"variant\", \"cases\": [")
       .concat(cases).concat("]}")
     return { js: js, i: lineHi }
   }
-  return { js: "", i: lineHi }
+  // Neither an alias nor a variant right-hand side: a single-case NOMINAL
+  // (`type Status = Pending`, the spelling TypeScript rejects as TS2304 and revl
+  // is therefore free to give its own meaning). The reference lowers it as the
+  // one-case variant it is; this reader skipped every bare right-hand side
+  // alike, so the entry was dropped. The alias question above is what separates
+  // the two.
+  let one = ir_type_cases(ts, j, lineHi, al)
+  if (one == "") { return { js: "", i: lineHi } }
+  return { js: jstr(nm).concat(": {\"params\": [").concat(tparams)
+             .concat("], \"kind\": \"variant\", \"cases\": [").concat(one)
+             .concat("]}"), i: lineHi }
 }
 
 // The `types` entry a typed `event` contributes. The contract clause
 // (`(key: f[, window: n])`) carries no type information, so only the brace body
 // is read, with exactly `ir_type_decl`'s record reader.
-fn ir_event_decl(ts: List[Token], i: Int) -> LirFn {
+fn ir_event_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> LirFn {
   let hi = event_decl_end(ts, i)
   let nm = tkc(ts, i + 1).text
   var j = i + 2
@@ -16502,7 +16567,7 @@ fn ir_event_decl(ts: List[Token], i: Int) -> LirFn {
   if (j == 0 - 1 || !atk(ts, j, "{")) { return { js: "", i: hi } }
   let bend = close_brace(ts, j)
   if (bend == 0 - 1) { return { js: "", i: hi } }
-  let fields = ir_type_fields(ts, j + 1, bend - 1)
+  let fields = ir_type_fields(ts, j + 1, bend - 1, al)
   // the reference refuses a field-less `event`, so an empty table is not the
   // empty-variant shape `ir_type_decl` reads it as — no entry is produced.
   if (fields == "") { return { js: "", i: hi } }
@@ -16511,53 +16576,53 @@ fn ir_event_decl(ts: List[Token], i: Int) -> LirFn {
   return { js: js, i: bend }
 }
 
-fn types_walk(ts: List[Token], i: Int, acc: Str) -> Str {
+fn types_walk(ts: List[Token], i: Int, acc: Str, al: Map[Str, Str]) -> Str {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return types_walk(ts, i + 1, acc) }
+  if (at_boot(ts, i)) { return types_walk(ts, i + 1, acc, al) }
   // An `event` declaration IS a record declaration with a contract clause (item
   // 130 §6): the reference parser appends an ordinary `TypeDecl` beside the
   // `EventDecl`, so the `types` section carries the same entry a `type` spelling
   // would produce. Without this the section lost the entry entirely.
   if (at_event(ts, i)) {
-    let d = ir_event_decl(ts, i)
+    let d = ir_event_decl(ts, i, al)
     let acc3 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
-    return types_walk(ts, d.i, acc3)
+    return types_walk(ts, d.i, acc3, al)
   }
-  if (t.kind != "kw") { return types_walk(ts, skip_line(ts, i), acc) }
-  if (at_pub_prefix(ts, i)) { return types_walk(ts, i + 1, acc) }
+  if (t.kind != "kw") { return types_walk(ts, skip_line(ts, i), acc, al) }
+  if (at_pub_prefix(ts, i)) { return types_walk(ts, i + 1, acc, al) }
   if (t.text == "type") {
-    let d = ir_type_decl(ts, i)
+    let d = ir_type_decl(ts, i, al)
     let acc2 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
-    return types_walk(ts, d.i, acc2)
+    return types_walk(ts, d.i, acc2, al)
   }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return types_walk(ts, e, acc) }
-    return types_walk(ts, skip_line(ts, i), acc)
+    if (e != 0 - 1) { return types_walk(ts, e, acc, al) }
+    return types_walk(ts, skip_line(ts, i), acc, al)
   }
-  if (t.text == "extern") { return types_walk(ts, p_extern(ts, i, empty_prog()).i, acc) }
-  if (t.text == "fn") { return types_walk(ts, p_fn(ts, i, empty_prog()).i, acc) }
-  if (t.text == "service") { return types_walk(ts, p_service(ts, i, empty_prog()).i, acc) }
-  if (t.text == "component") { return types_walk(ts, p_component(ts, i, empty_prog()).i, acc) }
-  return types_walk(ts, skip_line(ts, i), acc)
+  if (t.text == "extern") { return types_walk(ts, p_extern(ts, i, empty_prog()).i, acc, al) }
+  if (t.text == "fn") { return types_walk(ts, p_fn(ts, i, empty_prog()).i, acc, al) }
+  if (t.text == "service") { return types_walk(ts, p_service(ts, i, empty_prog()).i, acc, al) }
+  if (t.text == "component") { return types_walk(ts, p_component(ts, i, empty_prog()).i, acc, al) }
+  return types_walk(ts, skip_line(ts, i), acc, al)
 }
 
 // ---------------------------------------------------------------- top level
 
-fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str) -> IrAcc {
+fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str]) -> IrAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname) }
-  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname) }
-  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname) }
-  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname) }
-  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname) }
+  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname, al) }
+  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname, al) }
+  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname, al) }
+  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al) }
+  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al) }
   if (t.text == "test") {
     let na = mk_iracc(a.svcs, a.comps, true, a.v2)
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return ir_walk(ts, e, na, fname) }
-    return ir_walk(ts, skip_line(ts, i), na, fname)
+    if (e != 0 - 1) { return ir_walk(ts, e, na, fname, al) }
+    return ir_walk(ts, skip_line(ts, i), na, fname, al)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -16566,29 +16631,34 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str) -> IrAcc {
   // top-level declaration head to this walker: `type Envelope = {` then
   // `component: Int,` on its own line minted a component named ":". Same span
   // `type_ctors` and `p_top` already read.
-    return ir_walk(ts, type_decl_end(ts, i + 1), mk_iracc(a.svcs, a.comps, true, a.v2), fname)
+    // A transparent alias is ERASED before the reference builds its type table,
+    // so it contributes no `types` entry and is not the declaration that bumps
+    // `ir_version`; only one that survives the erasure is.
+    let survives = !al.has(tkc(ts, i + 1).text)
+    return ir_walk(ts, type_decl_end(ts, i + 1),
+                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2), fname, al)
   }
   if (t.text == "extern") {
     return ir_walk(ts, p_extern(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname)
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al)
   }
   if (t.text == "fn") {
     return ir_walk(ts, p_fn(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname)
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al)
   }
   if (t.text == "service") {
-    let sv = ir_service(ts, i)
+    let sv = ir_service(ts, i, al)
     let svcs2 = a.svcs == "" ? sv.js : a.svcs.concat(", ").concat(sv.js)
     return ir_walk(ts, p_service(ts, i, empty_prog()).i,
-                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname)
+                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname, al)
   }
   if (t.text == "component") {
-    let cp = ir_component(ts, i, fname)
+    let cp = ir_component(ts, i, fname, al)
     let comps2 = a.comps == "" ? cp.js : a.comps.concat(", ").concat(cp.js)
     return ir_walk(ts, p_component(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname)
+                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname, al)
   }
-  return ir_walk(ts, skip_line(ts, i), a, fname)
+  return ir_walk(ts, skip_line(ts, i), a, fname, al)
 }
 
 // The IR producer (SEAM 1). Returns the covered surface of the interchange IR
@@ -16620,7 +16690,13 @@ fn default_filename() -> Str { return "<string>" }
 // to omit it; not having a filename was. Given one, the producer stamps it.
 pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   let ts = lex_src(src)
-  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname)
+  // The transparent aliases this program declares, resolved ONCE and threaded
+  // into every declaration reader below. `_resolve_type_aliases` runs once over
+  // the whole program on the reference side too, ahead of the type table and the
+  // checker, for the same reason: an alias that reached either of them would be
+  // an undeclared type name.
+  let al = alias_map(ts)
+  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname, al)
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   // The async COLOUR is a whole-program property, so the streaming function
   // producer cannot decide it one declaration at a time: the reference runs the
@@ -16630,9 +16706,9 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   // reads it rather than deriving a second one.
   let pg = parse_prog_ts(ts)
   let colored = async_colored(pg.fns, async_slots_map(pg.fns))
-  let fnsjs = fns_walk(ts, 0, "", case_binds(ts), colored, own_program_summary(ts))
-  let typesjs = types_walk(ts, 0, "")
-  let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts))
+  let fnsjs = fns_walk(ts, 0, "", case_binds(ts, al), colored, own_program_summary(ts), al)
+  let typesjs = types_walk(ts, 0, "", al)
+  let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts), al)
   var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
     .concat(a.svcs).concat("}, \"components\": [").concat(a.comps).concat("]")
   if (typesjs != "") { out = out.concat(", \"types\": {").concat(typesjs).concat("}") }
