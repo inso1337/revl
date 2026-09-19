@@ -30,12 +30,15 @@
     "Str",
     "Unit"
   ],
-  "admission_surface": "admission-interface:01276278e4368767",
+  "admission_surface": "admission-interface:591d5cd49a922ef0",
   "admitted_layer": "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides",
   "covered_layer": "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer",
   "crate": "revl-gate",
   "crate_version": "0.1.0",
   "digest_inputs": [
+    "stdlib/str.rvl",
+    "stdlib/list.rvl",
+    "selfhost/types.rvl",
     "selfhost/lexer.rvl",
     "selfhost/parser.rvl",
     "selfhost/lower.rvl",
@@ -44,7 +47,7 @@
     "src/revl/typecheck.py",
     "tools/build_gate_crate.py"
   ],
-  "frontier": "selfhost-admit:01276278e4368767",
+  "frontier": "selfhost-admit:591d5cd49a922ef0",
   "frontier_excluded_builtins": [],
   "frontier_excluded_keywords": [],
   "gate_api_version": "1.0.0",
@@ -79,12 +82,15 @@
   "navigation_surface": "revl_gate::symbols \u2014 declarations and their lines; issues no verdicts",
   "note": "Regenerate with `python3 tools/build_gate_crate.py`. The source_digest is a pure function of digest_inputs, not a git sha, so `--check` can verify the committed crate against the tree it was generated from. The VERDICT surface admits nothing, by construction: that surface decides the composition/guarantee layer, not the reference type layer, so its non-refusing arm is `no_objection` and never an admission \u2014 across the manifest boundary too. Admissions are issued only through the separate `Admission` surface, inside `admitted_layer`, where the covered layer is the whole question (issue #346).",
   "selfhost_closure": [
+    "stdlib/str.rvl",
+    "stdlib/list.rvl",
+    "selfhost/types.rvl",
     "selfhost/lexer.rvl",
     "selfhost/parser.rvl",
     "selfhost/lower.rvl"
   ],
   "selfhost_root": "selfhost/lower.rvl",
-  "source_digest": "01276278e436876794a4d4ec283df9be4f1d17f2c4ea737ed22276f9fddef7b4",
+  "source_digest": "591d5cd49a922ef0725a9cb9e8b9493d084d25db79fb7ad7668d1f1918e32f17",
   "symbols_api_version": "0.1.0",
   "verdict_arms": [
     "refused",
