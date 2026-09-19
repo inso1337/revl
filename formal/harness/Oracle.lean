@@ -6,6 +6,8 @@ import RevL.Theorems.G8_ClassifiedBoundary
 import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.R4_NoResidue
+import RevL.Theorems.A9_ProvideKeyDeclared
+import RevL.Theorems.A2_NoAcquisitionAfterProvision
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -25,7 +27,10 @@ proved model itself**, not from a private restatement of it (roadmap item
     resource half is the proved `RevL.Lemmas.Covers` over
     `stripCeilings` and whose ceiling half is the proved `budgetOf`
     development (`ceilingOKB_iff` discharges the unbounded `∀ k` through
-    `RevL.Lemmas.budgetOf_attained`).
+    `RevL.Lemmas.budgetOf_attained`);
+  * `A9 … a9=` is `a9RowB`, which IS `RevL.A9.a9B` over the component's
+    `LComponent` beside its installed provide-block keys (the `PB` rows);
+    `a9RowB_iff` PROVES `a9RowB c blocks = true ↔ RevL.A9.A9OK ⟨c, blocks⟩`.
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -77,7 +82,13 @@ Fact rows in (tab-separated, one fact per line):
   R <file> <comp> <local> <svc>              require binding -> service
   B <file> <svc> <meth> <plain|any|scoped>   service-method emission bound
   Q <file> <svc> <meth> <entry>              a scoped bound's declared entry
-  C <file> <comp> <key> <svc>                provide key -> service
+  C <file> <comp> <key> <svc>                provide key -> service, read
+                                             off the `provides` CLAUSE
+  PB <file> <comp> <key>                     one installed provide BLOCK
+                                             (`provide key { … }`), in body
+                                             order — a double install is a
+                                             repeated row. This is the fact
+                                             the A9 row reads; C is not it
   K <file> <comp> <local> <cap>              require-held capability, named
                                              by the DECLARED boundary
   A <file> <comp> <cap>                      activation emit-step surface,
@@ -130,6 +141,15 @@ Fact rows in (tab-separated, one fact per line):
                                              re-issued. Not a WAL record — a
                                              property of the world the
                                              reference drives.
+  AQ <file> <comp> <ord> <acquire|provide|other>
+                                             one activation-body statement,
+                                             at body index `ord`, as the A2
+                                             rule sees it (issue 1166):
+                                             `acquire` is a `let … = effect`,
+                                             a bare `effect`, a timer or an
+                                             `every … in` iteration — the four
+                                             forms `lower._dispatch_action`
+                                             refuses after a provision
 
 Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 — the checker's own parser. Nothing here re-reads the capability grammar.
@@ -141,8 +161,15 @@ Verdict rows out:
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
   W <file> <comp> <child> <atten=ok|fail>          spawn attenuation
   X <file> <refused=CODE>                          refusal of record
+  A9 <file> <comp> <a9=ok|fail>                    every installed block key
+                                                   is declared (RevL.A9);
+                                                   one row per component
+                                                   that installs a block
   D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
   O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a>   A8/R4 recovery
+  A2 <file> <comp> <a2=ok|fail>                    no acquisition after a
+                                                   provision: `RevL.A2.a2B`
+                                                   over the body's `AQ` steps
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -263,6 +290,21 @@ def linkVerdict (comps : List LComponent) : Bool :=
   match kahn l.length [] [] l with
   | none => false
   | some ord => linkOKB ord
+
+/-! ## Deciding A9
+
+The installed block keys live beside the `LComponent` (`RevL.A9.Installed`,
+additively — L0 carries the clause only), and the verdict is the L2 file's
+own `a9B`. Nothing is restated here; the bridge is the model's `a9B_iff`
+applied to the row's shape. -/
+
+def a9RowB (c : LComponent) (blocks : List String) : Bool :=
+  RevL.A9.a9B ⟨c, blocks⟩
+
+/-- **The A9 verdict is the model's judgment.** -/
+theorem a9RowB_iff (c : LComponent) (blocks : List String) :
+    a9RowB c blocks = true ↔ RevL.A9.A9OK ⟨c, blocks⟩ :=
+  RevL.A9.a9B_iff ⟨c, blocks⟩
 
 /-! ## Deciding the capability order
 
@@ -880,6 +922,11 @@ structure SRow where
   parent : String
   child : String
 
+structure PBRow where
+  path : String
+  comp : String
+  key : String
+
 structure XRow where
   path : String
   code : String
@@ -1138,6 +1185,11 @@ def parseS (f : List String) : Option SRow :=
   | ["S", path, parent, child] => some ⟨path, parent, child⟩
   | _ => none
 
+def parsePB (f : List String) : Option PBRow :=
+  match f with
+  | ["PB", path, comp, key] => some ⟨path, comp, key⟩
+  | _ => none
+
 def parseX (f : List String) : Option XRow :=
   match f with
   | ["X", path, code] => some ⟨path, code⟩
@@ -1302,6 +1354,71 @@ def closeN (n : Nat) (edges : List (String × String)) (closed : CapMap) : CapMa
   | 0 => closed
   | n + 1 => closeN n edges (oneStep edges closed)
 
+/-! ## Deciding A2: no acquisition after a provision (issue 1166)
+
+The `AQ` rows are one component's activation body in order, each statement
+as the rule sees it. The verdict is `RevL.A2.a2B` — the checker's own fold
+(`lower._dispatch_action`: a flag set at the first `provide`, an acquisition
+refused while it is set) — and `a2OKB_iff` below is the bridge to the
+declarative rule `RevL.A2.A2OK`, the hypothesis of
+`RevL.A2.withdrawals_precede_releases`: under it the Phase-1 proof pass of
+the body's stack runs every withdrawal before every release. So an `A2 …
+a2=ok` row is a component whose teardown cannot revert an acquisition while a
+provision is still callable, and the reference recomputes the same fold
+independently from the TSV (`diff_corpus.reference_from_tsv`). -/
+
+section A2Ordering
+
+/-- One activation-body statement of one component, at body index `ord`. -/
+structure AQRow where
+  path : String
+  comp : String
+  ord : Nat
+  kind : String
+
+def parseAQ (f : List String) : Option AQRow :=
+  match f with
+  | ["AQ", path, comp, ord, kind] => ord.toNat?.map fun n => ⟨path, comp, n, kind⟩
+  | _ => none
+
+/-- The exporter's spelling of a step, read back as the model's `Step`. -/
+def parseStep : String → Option RevL.A2.Step
+  | "acquire" => some .acquire
+  | "provide" => some .provide
+  | "other" => some .other
+  | _ => none
+
+/-- The exporter's spelling of a step (`diff_corpus._a2_step`). -/
+def stepName : RevL.A2.Step → String
+  | .acquire => "acquire"
+  | .provide => "provide"
+  | .other => "other"
+
+/-- **The spelling round-trips**: every step the model names is read back
+as itself, so no body step is silently dropped between the two sides. -/
+theorem parseStep_stepName : ∀ s : RevL.A2.Step, parseStep (stepName s) = some s := by
+  intro s; cases s <;> rfl
+
+/-- Insertion by body index, so the steps are folded in body order whatever
+order the rows arrived in. -/
+def insertByOrd (r : AQRow) : List AQRow → List AQRow
+  | [] => [r]
+  | x :: xs => if r.ord ≤ x.ord then r :: x :: xs else x :: insertByOrd r xs
+
+def sortByOrd (rs : List AQRow) : List AQRow := rs.foldr insertByOrd []
+
+/-- **A2 decider**: the model's fold over the body's steps. -/
+def a2OKB (steps : List RevL.A2.Step) : Bool := RevL.A2.a2B steps
+
+/-- **The A2 verdict is the model's rule**: the printed Bool is `true`
+exactly when no `provide` is followed by an `acquire`
+(`RevL.A2.a2B_iff`). -/
+theorem a2OKB_iff (steps : List RevL.A2.Step) :
+    a2OKB steps = true ↔ RevL.A2.A2OK steps :=
+  RevL.A2.a2B_iff steps
+
+end A2Ordering
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1329,6 +1446,7 @@ def main (args : List String) : IO UInt32 := do
     let krows := fields.filterMap parseK
     let srows := fields.filterMap parseS
     let xrows := fields.filterMap parseX
+    let pbrows := fields.filterMap parsePB
     let harows := fields.filterMap parseHA
     let irows := fields.filterMap parseI
     let pgrows := fields.filterMap parsePG
@@ -1339,6 +1457,7 @@ def main (args : List String) : IO UInt32 := do
     let lrecs := fields.filterMap parseL
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
+    let aqrows := fields.filterMap parseAQ
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
@@ -1403,6 +1522,7 @@ def main (args : List String) : IO UInt32 := do
       let us := srows.filter (fun r => r.path == p)
       let uu := urows.filter (fun r => r.path == p)
       let uha := harows.filter (fun r => r.path == p)
+      let upb := pbrows.filter (fun r => r.path == p)
       let ems : List (String × String) :=
         (ub.filter (fun b => b.mode != "plain")).map (fun b => (b.svc, b.meth))
       let bounds : List (String × String × String × List String) :=
@@ -1430,6 +1550,17 @@ def main (args : List String) : IO UInt32 := do
         let acquireOK := hostAcquireOK (uha.filter (fun r => r.comp == cn))
         let gv := if markerOK && acquireOK then "ok" else "fail"
         out := out ++ s!"G\t{p}\t{cn}\tg4={gv}\n"
+      -- A9 verdicts (issue 1167): every installed provide block's key is
+      -- declared in the clause. One row per component that installs a block
+      -- (a component with no block would agree vacuously); the clause comes
+      -- off the M row's `LComponent`, the blocks off the PB rows, and the
+      -- verdict is the model's `a9B` (`a9RowB_iff`). Templates included:
+      -- `lower._lower_provide` runs on a spawn target's body too.
+      for r in fm do
+        let blocks := (upb.filter (fun b => b.comp == r.name)).map (·.key)
+        if !blocks.isEmpty then
+          let av := if a9RowB (toLComponent r) blocks then "ok" else "fail"
+          out := out ++ s!"A9\t{p}\t{r.name}\ta9={av}\n"
       -- P verdicts (provide-method bound) per method reach group
       let fkeys := (uf.map (fun r => (r.comp, r.key, r.svc, r.meth))).eraseDups
       for k in fkeys do
@@ -1493,6 +1624,19 @@ def main (args : List String) : IO UInt32 := do
           else
             let n := registrationsB prog fuel (bodyOfHeads r.inverse)
             out := out ++ s!"U5\t{p}\t{r.comp}\t{r.index}\tteardown={n}\n"
+      -- A2 verdicts (no acquisition after a provision, issue 1166), one per
+      -- component, decided by the model's own fold over the body's ordered
+      -- steps — the component's `AQ` rows, sorted by body index. An unknown
+      -- step kind is a hard error, never a silently shorter body.
+      let uaq := aqrows.filter (fun r => r.path == p)
+      for cn in fm.map (·.name) do
+        let mine := sortByOrd (uaq.filter (fun r => r.comp == cn))
+        if mine.any (fun r => (parseStep r.kind).isNone) then
+          IO.eprintln s!"oracle: unknown body step kind in {p} {cn}"
+          return 1
+        let steps := mine.filterMap (fun r => parseStep r.kind)
+        let av := if a2OKB steps then "ok" else "fail"
+        out := out ++ s!"A2\t{p}\t{cn}\ta2={av}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1549,3 +1693,6 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.fenced_not_reissued
 #print axioms RevLOracle.declared_idempotent_reissued
 #print axioms RevLOracle.reportedSeqLabels_nil_iff_clean
+#print axioms RevLOracle.a9RowB_iff
+#print axioms RevLOracle.parseStep_stepName
+#print axioms RevLOracle.a2OKB_iff

@@ -43,6 +43,14 @@ use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
 // `list_contains` (the membership test superseding the local `contains`).
 use "../stdlib/str.rvl" { split_top }
 use "../stdlib/list.rvl" { list_contains }
+// The shared type-SPELLING algebra (docs/design/457 §3.1). Slice T2a drops this
+// file's private `compatible` for the full port: `Value` laundering and the
+// structural record rule are what an anonymous record literal's type needs, and
+// two copies of a value-flow relation are exactly the drift the module exists to
+// stop. `render_type` is part of every message this slice emits, so it is an
+// obligation and not a convenience.
+use "./types.rvl" { RecField, compatible, format_structural, join, parse_type,
+                    render_type, structural_parse }
 
 // ---------------------------------------------------------------- env
 
@@ -55,8 +63,13 @@ fn lookup_at(env: List[Bind], n: Str, i: Int) -> Str {
   return lookup_at(env, n, i + 1)
 }
 
-// The spike's fixed environment. Both sides of the oracle use exactly these
-// five bindings (see ENV in tests/test_selfhost_checker.py).
+// The fixed environment. Both sides of the oracle use exactly these bindings
+// (see ENV in tests/test_selfhost_checker.py).
+//
+// `opt` and `xs` are slice T2a's additions: the optional-escape refusals
+// (a field read and an index THROUGH an `Opt`, examples/rejections/t11) and
+// the `??` rule need an optional in scope, and the index rules need a `List`.
+// Neither name is drawn by the fuzz generators, whose unknown stays `q`.
 pub fn base_env() -> List[Bind] {
   return [
     { name: "x", ty: "Int" },
@@ -65,6 +78,8 @@ pub fn base_env() -> List[Bind] {
     { name: "s", ty: "Str" },
     { name: "flag", ty: "Bool" },
     { name: "m", ty: "Int32" },
+    { name: "opt", ty: "Opt[Str]" },
+    { name: "xs", ty: "List[Int]" },
   ]
 }
 
@@ -72,54 +87,162 @@ pub fn base_env() -> List[Bind] {
 
 // ty "" is the unknown of the gradual frontier; ok false is a definite
 // refusal (the reference raises RevlError at these).
-type Infer = { ty: Str, ok: Bool, msg: Str }
+//
+// SLICE T2a (docs/design/457 §4.3): the result carries the refusal's TAG as
+// well as its message, so the oracle compares `"<TAG>|<message>"` — the same
+// comparison unit `tests/test_selfhost_lower.py` holds the lowering to. The
+// message is `RevlError.message` byte for byte (never the `file:line:` prefix,
+// never the hint); the tag is what `_classify` derives from that error.
+type Infer = { ty: Str, ok: Bool, tag: Str, msg: Str }
 
-fn ok_ty(t: Str) -> Infer { return { ty: t, ok: true, msg: "" } }
+fn ok_ty(t: Str) -> Infer { return { ty: t, ok: true, tag: "", msg: "" } }
 
-fn refuse(msg: Str) -> Infer { return { ty: "", ok: false, msg: msg } }
+fn refuse(tag: Str, msg: Str) -> Infer {
+  return { ty: "", ok: false, tag: tag, msg: msg }
+}
+
+// The wire the oracle reads: "" when the expression checks, else
+// "<TAG>|<message>".
+pub fn verdict_of(r: Infer) -> Str {
+  if (r.ok) { return "" }
+  return r.tag.concat("|").concat(r.msg)
+}
+
+// ------------------------------------------------- the reference's messages
+//
+// Each of these is one `RevlError.message` from src/revl/typecheck.py, spelled
+// here byte for byte. They are grouped so a future port has one place to read
+// the obligation, and so a divergence shows up as a diff in this block rather
+// than scattered through the walk.
+
+// typecheck.mismatch: the T1 "these types disagree" refusal. The `where`
+// strings are part of the message (`operand of \`+\``, `index`,
+// `update of field \`f\``, ...).
+fn mismatch(where_: Str, expected: Str, actual: Str) -> Infer {
+  return refuse("T1", where_.concat(" expects `").concat(render_type(expected))
+                  .concat("`, got `").concat(render_type(actual)).concat("`"))
+}
+
+// typecheck.incomparable: `==`/`!=` over two operands with no common type.
+// Deliberately NOT `mismatch` — equality has no expected/actual direction.
+fn incomparable(op: Str, lt: Str, rt: Str) -> Infer {
+  return refuse("T1", "`".concat(op).concat("` cannot compare `")
+                  .concat(render_type(lt)).concat("` with `")
+                  .concat(render_type(rt))
+                  .concat("` — the operands have no type in common"))
+}
+
+// typecheck.opt_escape_error: `Opt[T]` reached through as if it were `T`.
+fn opt_escape(what: Str, target: Str) -> Infer {
+  return refuse("T1", what.concat(" on `").concat(render_type(target))
+                  .concat("`: the optional wrapper has no such member — `T` ")
+                  .concat("flows into `Opt[T]`, never silently back out"))
+}
+
+// typecheck.null_error.
+fn null_refusal() -> Infer {
+  return refuse("T2", "`null` has no type in revl — absence is `Opt[T]`")
+}
+
+// The unknown-field refusal, shared by the structural (item 71) and the
+// nominal record reads. `none` is the reference's spelling for an empty set.
+fn no_field(target: Str, fname: Str, fields: List[Str]) -> Infer {
+  let shown = fields.length() == 0 ? "none" : sort_strs(fields).join(", ")
+  return refuse("T1", "`".concat(render_type(target)).concat("` has no field `")
+                  .concat(fname).concat("` (fields: ").concat(shown).concat(")"))
+}
 
 // ---------------------------------------------------------------- algebra
 
-fn is_numeric(t: Str) -> Bool { return t == "Int" || t == "Float" }
+// typecheck._NUMERIC. Int32 IS numeric here: `+ - * %` accept two Int32s and
+// yield Int32, and it is the WIDTH MIX below, not the operand family, that
+// refuses `Int32 + Int`. Reading Int32 as non-numeric refused `m + m`, which
+// the reference accepts.
+fn is_numeric(t: Str) -> Bool {
+  return t == "Int" || t == "Float" || t == "Int32"
+}
 
-fn orderable(t: Str) -> Bool { return is_numeric(t) || t == "Str" }
+// The ordering family tests the type's HEAD (`parse_type(t)[0] not in
+// _NUMERIC | {"Str"}`), not the whole spelling, so `Opt[Int] < 1` is refused
+// by its head rather than escaping on the frontier.
+fn orderable_head(t: Str) -> Bool {
+  let h = parse_type(t).head
+  return h == "Int" || h == "Float" || h == "Int32" || h == "Str"
+}
 
-// May a value of type `actual` flow into a position typed `expected`?
-// Port of typecheck.compatible for the slice's reachable surface: wildcards
-// (the gradual "" plus Any/Never), equal names, Int->Float and Int32 widening,
-// the Opt family (T injects into Opt[T]; Opt[T] vs Opt[U] compares inside),
-// and equal generic heads compared elementwise. FN heads are out of slice
-// (no fn-typed value exists in base_env or the corpus).
-fn compatible(expected: Str, actual: Str) -> Bool {
-  if (expected == "" || actual == "") { return true }
-  // `Never` is the checker's inferred bottom, not a two-way wildcard: it flows
-  // OUT of a `Never` position into any other (nothing inhabits it) and NOTHING
-  // flows in. Port of the reference's one-way bottom rule; the two-way version
-  // was an unchecked cast under a spelling with no cast syntax.
-  if (split_type(expected).head == "Never") {
-    return actual == "Never" || actual == "Any"
+// ------------------------------------------- the table-aware value flow
+//
+// `types.rvl`'s `compatible` is the reference's `compatible(types=None)` path:
+// it fails closed wherever a STRUCTURAL record meets a NOMINAL one, because
+// resolving that needs the declared-type table and the spelling algebra is
+// AST- and table-free by design (types.rvl, "NOT in this slice").
+//
+// This file HAS the table, so it supplies the one rule the shared module
+// leaves out — and only that rule. `compat_tt` is `compatible` plus the
+// reference's `nominal_record_fields` resolution, applied at every position
+// `compatible` itself descends to. Resolution stays ONE-SIDED: it fires only
+// where the other side is structural, so two nominal records never become
+// structurally interchangeable.
+//
+// Without it, `fn f() -> Opt[Row] { return { name: s, age: 1 } }` is a
+// refusal the reference admits — a FALSE REJECTION, the one direction this
+// gate is not allowed to err in, and the statement layer (T3a) is what would
+// have reached it.
+pub fn compat_tt(expected: Str, actual: Str, tt: Tt) -> Bool {
+  if (compatible(expected, actual)) { return true }
+  return compat_mixed(expected, actual, tt, 0)
+}
+
+fn compat_mixed(expected: Str, actual: Str, tt: Tt, d: Int) -> Bool {
+  if (d > 12) { return false }
+  let es = structural_parse(expected)
+  let as_ = structural_parse(actual)
+  // The resolution is attempted at this position; when it does not apply the
+  // pair FALLS THROUGH to the head algebra, exactly as the reference does.
+  // `Opt[Row]` against a bare record literal is resolved one level down by the
+  // `T -> Opt[T]` injection below, not here.
+  if (es.is_rec && !as_.is_rec) {
+    let r = nominal_rec_fields(actual, tt)
+    if (r.is_rec) { return struct_pairs_ok(es.fields, r.fields, tt, d) }
   }
-  if (expected == "Any" || actual == "Any" || actual == "Never") { return true }
-  if (expected == actual) { return true }
-  let es = split_type(expected)
-  let as_ = split_type(actual)
-  if (es.head == "Float" && as_.head == "Int") { return true }
-  if ((es.head == "Int" || es.head == "Float") && as_.head == "Int32") {
-    return true
+  if (as_.is_rec && !es.is_rec) {
+    let r = nominal_rec_fields(expected, tt)
+    if (r.is_rec) { return struct_pairs_ok(r.fields, as_.fields, tt, d) }
   }
-  if (es.head == "Opt") {
-    let einner = es.args.length() > 0 ? es.args[0] : ""
-    if (as_.head == "Opt") {
-      let ainner = as_.args.length() > 0 ? as_.args[0] : ""
-      return compatible(einner, ainner)
+  if (es.is_rec && as_.is_rec) { return false }  // `compatible` already decided
+  let ep = parse_type(expected)
+  let ap = parse_type(actual)
+  if (ep.head == "Async" && ap.head != "Async") {
+    return compat_at(arg_or_empty(ep.args, 0), actual, tt, d + 1)
+  }
+  if (ep.head == "->") {
+    if (ep.head != ap.head || ep.args.length() != ap.args.length()) {
+      return false
     }
-    return compatible(einner, actual)  // T -> Opt[T] injection
-  }
-  if (es.head == as_.head && es.args.length() == as_.args.length()) {
     var i = 0
     var ok = true
-    while (i < es.args.length()) {
-      if (!compatible(es.args[i], as_.args[i])) { ok = false }
+    while (i < ep.args.length() - 1) {
+      if (!compat_at(ap.args[i], ep.args[i], tt, d + 1)) { ok = false }
+      i += 1
+    }
+    let er = arg_or_empty(ep.args, ep.args.length() - 1)
+    let ar = arg_or_empty(ap.args, ap.args.length() - 1)
+    if (!compat_at(er, ar, tt, d + 1)) { ok = false }
+    return ok
+  }
+  if (ep.head == "Opt") {
+    let einner = arg_or_empty(ep.args, 0)
+    if (ap.head == "Opt") {
+      return compat_at(einner, arg_or_empty(ap.args, 0), tt, d + 1)
+    }
+    return compat_at(einner, actual, tt, d + 1)
+  }
+  if (ep.head == ap.head && ep.args.length() == ap.args.length()
+      && ep.args.length() > 0) {
+    var i = 0
+    var ok = true
+    while (i < ep.args.length()) {
+      if (!compat_at(ep.args[i], ap.args[i], tt, d + 1)) { ok = false }
       i += 1
     }
     return ok
@@ -127,55 +250,127 @@ fn compatible(expected: Str, actual: Str) -> Bool {
   return false
 }
 
-// The equality family accepts either direction (reference checks
-// compatible(lt, rt) or compatible(rt, lt)).
-fn eq_compatible(lt: Str, rt: Str) -> Bool {
-  return compatible(lt, rt) || compatible(rt, lt)
+fn compat_at(expected: Str, actual: Str, tt: Tt, d: Int) -> Bool {
+  if (compatible(expected, actual)) { return true }
+  return compat_mixed(expected, actual, tt, d)
 }
 
-// Port of typecheck._binop_type for the slice's operators.
-fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
-  if (op == "==" || op == "!=") {
-    if (!eq_compatible(lt, rt)) {
-      return refuse("incompatible operands for ".concat(op))
+fn arg_or_empty(args: List[Str], i: Int) -> Str {
+  if (i < 0 || i >= args.length()) { return "" }
+  return args[i]
+}
+
+// The declared fields of a NOMINAL record, else `is_rec == false`. A generic
+// record (one with declared parameters) stays unresolved in this slice, as the
+// reference leaves an arity mismatch unresolved.
+type NomFields = { is_rec: Bool, fields: List[RecField] }
+
+fn nominal_rec_fields(name: Str, tt: Tt) -> NomFields {
+  if (!tt.has(name)) { return { is_rec: false, fields: [] } }
+  let spec = unwrap_spec(tt, name)
+  if (spec.kind != "record") { return { is_rec: false, fields: [] } }
+  var out: List[RecField] = []
+  let ks = sort_strs(spec.fields.keys())
+  var i = 0
+  while (i < ks.length()) {
+    out = out.push({ name: ks[i], ty: unwrap_str(spec.fields, ks[i]) })
+    i += 1
+  }
+  return { is_rec: true, fields: out }
+}
+
+// Two record shapes unify field-wise: the same field set, each value type
+// compatible.
+fn struct_pairs_ok(ef: List[RecField], af: List[RecField], tt: Tt,
+                   d: Int) -> Bool {
+  if (ef.length() != af.length()) { return false }
+  var i = 0
+  var ok = true
+  while (i < ef.length()) {
+    let k = ef[i].name
+    if (!rec_has(af, k)) { ok = false }
+    else if (!compat_at(ef[i].ty, struct_field_ty(af, k), tt, d + 1)) {
+      ok = false
+    }
+    i += 1
+  }
+  return ok
+}
+
+fn rec_has(fs: List[RecField], name: Str) -> Bool {
+  var i = 0
+  while (i < fs.length()) {
+    if (fs[i].name == name) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The equality family accepts either direction (reference checks
+// compatible(lt, rt) or compatible(rt, lt)).
+fn eq_compatible(lt: Str, rt: Str, tt: Tt) -> Bool {
+  return compat_tt(lt, rt, tt) || compat_tt(rt, lt, tt)
+}
+
+// `join` with the table: the reference's `join(a, b, types)`.
+fn join_tt(a: Str, b: Str, tt: Tt) -> Str {
+  if (a == "" || b == "") { return "" }
+  if (compat_tt(a, b, tt)) { return a }
+  if (compat_tt(b, a, tt)) { return b }
+  return ""
+}
+
+// Port of typecheck._binop_type, message for message.
+fn binop_type(op: Str, lt: Str, rt: Str, tt: Tt) -> Infer {
+  if (op == "==" || op == "!=" || op == "===" || op == "!==") {
+    if (lt != "" && rt != "" && !eq_compatible(lt, rt, tt)) {
+      return incomparable(op, lt, rt)
     }
     return ok_ty("Bool")
   }
   if (op == "<" || op == "<=" || op == ">" || op == ">=") {
-    if (lt != "" && !orderable(lt)) {
-      return refuse("`".concat(op).concat("` cannot order this operand"))
+    if (lt != "" && !orderable_head(lt)) { return cannot_order(op, lt) }
+    if (rt != "" && !orderable_head(rt)) { return cannot_order(op, rt) }
+    return ok_ty("Bool")
+  }
+  if (op == "&&" || op == "||") {
+    if (lt != "" && lt != "Bool") {
+      return mismatch("operand of `".concat(op).concat("`"), "Bool", lt)
     }
-    if (rt != "" && !orderable(rt)) {
-      return refuse("`".concat(op).concat("` cannot order this operand"))
+    if (rt != "" && rt != "Bool") {
+      return mismatch("operand of `".concat(op).concat("`"), "Bool", rt)
     }
     return ok_ty("Bool")
+  }
+  if (op == "??") {
+    let lp = parse_type(lt)
+    if (lp.head == "Opt") {
+      let inner = lp.args.length() > 0 ? lp.args[0] : ""
+      let j = join_tt(inner, rt, tt)
+      if (j != "") { return ok_ty(j) }
+      return ok_ty(inner != "" ? inner : rt)
+    }
+    if (lt != "" && !is_wildcard_ty(lt)) {
+      return refuse("T1", "`??` needs an optional on the left, got `"
+                      .concat(render_type(lt)).concat("`"))
+    }
+    return ok_ty(lt != "" ? lt : rt)
   }
   if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
     // Bitwise operators are Int32-only (item 366, docs/arithmetic.md); Int
     // (64-bit) is deliberately excluded. An unknown operand ("") stays on the
-    // gradual frontier — the reference skips the check for a None type — but
-    // any KNOWN non-Int32 operand is refused. For a shift the count is Int32
-    // too, and the result is Int32.
-    if (lt != "" && ty_head(lt) != "Int32") {
-      return refuse("`".concat(op).concat("` requires `Int32` operands"))
-    }
-    if (rt != "" && ty_head(rt) != "Int32") {
-      return refuse("`".concat(op).concat("` requires `Int32` operands"))
-    }
+    // gradual frontier — the reference skips the check for a None type.
+    if (lt != "" && parse_type(lt).head != "Int32") { return bitwise_bad(op, lt) }
+    if (rt != "" && parse_type(rt).head != "Int32") { return bitwise_bad(op, rt) }
     return ok_ty("Int32")
   }
   if (op == "+") {
     if (lt == "Str" || rt == "Str") {
-      // string concatenation path: `+` on a `Str` concatenates two `Str`s, so
-      // any KNOWN non-Str operand is refused — numeric included (issue #549:
-      // `Str + Int` scattered across the tiers, now a compile error on every
-      // tier). An UNKNOWN operand ("") stays on the gradual frontier and the
-      // result is unknown until it resolves.
-      if (lt != "" && lt != "Str") {
-        return refuse("operand of string `+`")
-      }
-      if (rt != "" && rt != "Str") {
-        return refuse("operand of string `+`")
+      // string concatenation path: a KNOWN non-Str operand is refused, numeric
+      // included (issue #549). An UNKNOWN operand stays on the frontier.
+      if ((lt != "" && lt != "Str") || (rt != "" && rt != "Str")) {
+        let bad = lt != "Str" ? lt : rt
+        return mismatch("operand of string `+`", "Str", bad)
       }
       if (lt == "Str" && rt == "Str") { return ok_ty("Str") }
       return ok_ty("")
@@ -183,22 +378,47 @@ fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
   }
   if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
     if (lt != "" && !is_numeric(lt)) {
-      return refuse("operand of `".concat(op).concat("`"))
+      return mismatch("operand of `".concat(op).concat("`"), "Int", lt)
     }
     if (rt != "" && !is_numeric(rt)) {
-      return refuse("operand of `".concat(op).concat("`"))
+      return mismatch("operand of `".concat(op).concat("`"), "Int", rt)
     }
     if (op == "/") {
-      // TRUE division: Float even on two Ints (docs/arithmetic.md §0);
-      // integer division is div_trunc/div_floor/div_euclid, never `/`.
+      // TRUE division: Float even on two Ints (docs/arithmetic.md §0).
       if (is_numeric(lt) && is_numeric(rt)) { return ok_ty("Float") }
       return ok_ty("")
     }
+    // `+ - * %` do not silently mix widths (docs/arithmetic.md).
+    if ((lt == "Int32" || rt == "Int32") && lt != rt && lt != "" && rt != "") {
+      return refuse("T1", "`".concat(op).concat("` does not mix `")
+                      .concat(render_type(lt)).concat("` and `")
+                      .concat(render_type(rt)).concat("`"))
+    }
+    if (op == "%" && (lt == "Int32" || rt == "Int32")) {
+      return refuse("T1", "`%` is Int-only; widen the Int32 operands with "
+                      .concat("`.to_int()` first (docs/arithmetic.md)"))
+    }
     if (lt == "Float" || rt == "Float") { return ok_ty("Float") }
+    if (lt == "Int32" && rt == "Int32") { return ok_ty("Int32") }
     if (lt == "Int" && rt == "Int") { return ok_ty("Int") }
     return ok_ty("")
   }
   return ok_ty("")
+}
+
+fn cannot_order(op: Str, t: Str) -> Infer {
+  return refuse("TYPE", "`".concat(op).concat("` cannot order `")
+                  .concat(render_type(t)).concat("` values"))
+}
+
+fn bitwise_bad(op: Str, t: Str) -> Infer {
+  return refuse("T1", "`".concat(op).concat("` requires `Int32` operands, got `")
+                  .concat(render_type(t)).concat("`"))
+}
+
+// typecheck._is_wildcard, minus the `?T` marker this slice never mints.
+fn is_wildcard_ty(t: Str) -> Bool {
+  return t == "" || t == "Any" || t == "Never" || starts_with(t, "?")
 }
 
 // ---------------------------------------------------------------- inference
@@ -210,43 +430,175 @@ fn infer(e: Expr, env: List[Bind]) -> Infer {
 // SLICE THREE: the tables ride along with every recursive call. The no-table
 // wrapper above keeps slices one-two's call sites byte-identical in behavior
 // (an empty case/table map makes every new arm silent).
+//
+// SLICE T2a: the arms below cover the whole of design §2.2 minus calls (T2b),
+// arrows (T2c) and match/optional-chaining (T2d) — operators, fields, index,
+// ternary, lists, records, record update, and the Float literal range.
 fn infer_t(e: Expr, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   return match e {
     IntLit(_)   => ok_ty("Int"),
-    FloatLit(_) => ok_ty("Float"),
+    // The Int twin of this bound is unreachable HERE: `lexer.rvl`'s
+    // `radix_value` already refuses a decimal run that leaves the i64 range
+    // (an `error` token), so no `IntLit` reaching the checker is out of range.
+    // The Float literal keeps its source spelling, so its bound is the
+    // checker's — `1e999` folds to IEEE infinity, which revl has no spelling
+    // for (issue #312).
+    FloatLit(v) => float_lit_ty(v),
     StrLit(_)   => ok_ty("Str"),
     BoolLit(_) => ok_ty("Bool"),
-    NullLit    => refuse("`null` has no type in revl — absence is Opt[T]"),
+    NullLit    => null_refusal(),
     Var(n)     => infer_var_t(n, env, tt, ct),
     Bin(b)     => infer_bin_t(b.op, b.l, b.r, env, tt, ct),
     Un(u)      => infer_un_t(u.op, u.e, env, tt, ct),
     Field(fd)  => infer_field_t(fd, env, tt, ct),
     Call(c)    => infer_call_t(c, env, tt, ct),
+    Index(x)   => infer_index_t(x.target, x.idx, env, tt, ct),
+    If(f)      => infer_if_t(f.cond, f.then_, f.els, env, tt, ct),
+    Lst(l)     => infer_list_t(l.items, env, tt, ct),
+    Rec(r)     => infer_rec_t(r.fields, env, tt, ct),
+    RecUpd(r)  => infer_recupd_t(r, env, tt, ct),
+    Templ(_)   => ok_ty("Str"),
     _          => ok_ty(""),   // outside the slice: walked, not typed
   }
 }
 
-// Port of typecheck.infer_ast's ExprUn arm: `!` is Bool-only -> Bool; `~` is
-// the Int32-only bitwise complement -> Int32 (item 366); unary `-` requires a
-// numeric operand and returns that operand's type. An unknown operand ("")
-// stays on the gradual frontier, exactly as the reference skips a None type.
+// ------------------------------------------------- the Float literal bound
+//
+// `typecheck._reject_float_literal_range`: a Float literal whose value folds to
+// a non-finite binary64 has no spelling in revl and no single reading across
+// tiers (py `inf`, rust `inff64`, java `infd`, go `float64(inf)` — all unbound
+// identifiers — while TypeScript alone prints `Infinity` and runs).
+//
+// The reference decides it by folding with the host's `float()`. revl has no
+// Str->Float conversion, so the bound is decided on the literal's TEXT, which
+// the lexer has already normalised (`<digits>[.<digits>][e[+-]<digits>]`, no
+// `_` separators). The decision is deliberately FAIL-OPEN in the rounding band
+// around DBL_MAX: a literal is refused only when it is definitely infinite, so
+// this can never refuse one the reference folds to a finite value (an
+// over-refusal is a false rejection; an under-refusal is the gradual frontier
+// this checker already lives on).
+//
+// value = 0.<sig digits> * 10^exp10. DBL_MAX = 1.7976931348623157e308, i.e.
+// 0.17976931348623157 * 10^309, and the round-to-infinity threshold is the
+// midpoint 0.17976931348623158079... * 10^309. So: exp10 > 309 is infinite;
+// exp10 < 309 is finite; at exp10 == 309 the first 17 significant digits decide
+// it when they are strictly above the midpoint's, and the literal is left alone
+// when they are equal.
+fn float_lit_ty(text: Str) -> Infer {
+  if (!float_is_infinite(text)) { return ok_ty("Float") }
+  return refuse("TYPE", "Float literal is infinite: it is outside the range "
+                  .concat("of a 64-bit float"))
+}
+
+type FloatParts = { sig: Str, exp10: Int }
+
+// Split the lexer's normalised spelling into its significant digits (leading
+// zeros dropped) and the decimal exponent of the leading digit.
+fn float_split(text: Str) -> FloatParts {
+  var intpart = ""
+  var frac = ""
+  var expstr = ""
+  var seen_dot = false
+  var seen_e = false
+  var i = 0
+  while (i < text.length()) {
+    let ch = text.slice(i, i + 1)
+    if (ch == ".") { seen_dot = true }
+    else if (ch == "e" || ch == "E") { seen_e = true }
+    else if (seen_e) { expstr = expstr.concat(ch) }
+    else if (seen_dot) { frac = frac.concat(ch) }
+    else { intpart = intpart.concat(ch) }
+    i += 1
+  }
+  // strip the integer part's leading zeros
+  var k = 0
+  while (k < intpart.length() && intpart.slice(k, k + 1) == "0") { k += 1 }
+  let istr = intpart.slice(k, intpart.length())
+  if (istr != "") {
+    return { sig: istr.concat(frac), exp10: istr.length() + exp_value(expstr) }
+  }
+  // no integer digits: the exponent is negative by the run of leading zeros
+  var z = 0
+  while (z < frac.length() && frac.slice(z, z + 1) == "0") { z += 1 }
+  let fstr = frac.slice(z, frac.length())
+  return { sig: fstr, exp10: (0 - z) + exp_value(expstr) }
+}
+
+// The signed exponent. A run longer than this cannot be needed: 5 digits
+// already dwarfs binary64's range, so a longer one is clamped rather than
+// folded (the fold would trap on the self-host's own Int bound).
+fn exp_value(expstr: Str) -> Int {
+  if (expstr == "") { return 0 }
+  var neg = false
+  var i = 0
+  let c0 = expstr.slice(0, 1)
+  if (c0 == "-") { neg = true  i = 1 }
+  else if (c0 == "+") { i = 1 }
+  var v = 0
+  while (i < expstr.length()) {
+    if (v > 100000) { return neg ? 0 - 100000 : 100000 }
+    v = v * 10 + digit_value(expstr.slice(i, i + 1))
+    i += 1
+  }
+  return neg ? 0 - v : v
+}
+
+fn digit_value(c: Str) -> Int {
+  let ds = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+  var i = 0
+  while (i < ds.length()) {
+    if (ds[i] == c) { return i }
+    i += 1
+  }
+  return 0
+}
+
+// The round-to-infinity midpoint's first 17 significant digits.
+fn dbl_max_sig() -> Str { return "17976931348623158" }
+
+fn float_is_infinite(text: Str) -> Bool {
+  let fp = float_split(text)
+  if (fp.sig == "") { return false }   // the literal is zero
+  if (fp.exp10 > 309) { return true }
+  if (fp.exp10 < 309) { return false }
+  return sig_above(fp.sig, dbl_max_sig())
+}
+
+// `a` strictly greater than `b`, both read as digit strings of the same
+// magnitude (`b` is exactly 17 digits; `a` is padded or truncated to match).
+fn sig_above(a: Str, b: Str) -> Bool {
+  var i = 0
+  while (i < b.length()) {
+    let ac = i < a.length() ? digit_value(a.slice(i, i + 1)) : 0
+    let bc = digit_value(b.slice(i, i + 1))
+    if (ac > bc) { return true }
+    if (ac < bc) { return false }
+    i += 1
+  }
+  return false
+}
+
+// ------------------------------------------------------------ the arms
+
+// Port of typecheck.infer_ast's ExprUn arm.
 fn infer_un_t(op: Str, operand: Expr, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   let o = infer_t(operand, env, tt, ct)
   if (!o.ok) { return o }
   let t = o.ty
   if (op == "!") {
-    if (t != "" && t != "Bool") { return refuse("operand of `!`") }
+    if (t != "" && t != "Bool") { return mismatch("operand of `!`", "Bool", t) }
     return ok_ty("Bool")
   }
   if (op == "~") {
-    if (t != "" && ty_head(t) != "Int32") {
-      return refuse("`~` requires an `Int32` operand")
+    if (t != "" && parse_type(t).head != "Int32") {
+      return refuse("T1", "`~` requires an `Int32` operand, got `"
+                      .concat(render_type(t)).concat("`"))
     }
     return ok_ty("Int32")
   }
-  // unary `-`: numeric operand (Int / Float / Int32), result is that type.
-  if (t != "" && t != "Int" && t != "Float" && t != "Int32") {
-    return refuse("operand of unary `-`")
+  // unary `-`: a numeric operand (Int / Float / Int32); the result is its type.
+  if (t != "" && !is_numeric(t)) {
+    return mismatch("operand of unary `-`", "Int", t)
   }
   return ok_ty(t)
 }
@@ -303,22 +655,47 @@ fn ty_head(t: Str) -> Str {
   return t.slice(0, b)
 }
 
-// Port of typecheck.infer_ast's ExprField arm for the named-type subset:
-// opt-escape refusal, `.length` on sized heads, then the record spec — an
-// unknown field is a refusal spelled as the reference spells it; a target
-// whose type names nothing declared stays on the gradual frontier.
+fn sized_head(h: Str) -> Bool {
+  return h == "Str" || h == "Bytes" || h == "List"
+}
+
+// Port of typecheck.infer_ast's ExprField arm, in the reference's order:
+// the opt escape, `.length` on a sized head, the erased-`Any`/`Value` read
+// (item 380(2)), the structural record shape (item 71), then the nominal spec.
 fn infer_field_t(f: FieldN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   let tgt = infer_t(f.target, env, tt, ct)
   if (!tgt.ok) { return tgt }
   let head = ty_head(tgt.ty)
   if (head == "Opt") {
-    return refuse("field access on an optional — absence is unchecked here")
+    return opt_escape("field access `.".concat(f.name).concat("`"), tgt.ty)
   }
-  if (f.name == "length"
-      && list_contains(["Str", "List", "Bytes"], head)) {
-    return ok_ty("Int")
+  if (f.name == "length" && sized_head(head)) { return ok_ty("Int") }
+  if (head == "Any" || head == "Value") {
+    return refuse("T1", "field read `.".concat(f.name)
+                    .concat("` on a value of type `")
+                    .concat(render_type(tgt.ty))
+                    .concat("` — an erased value has no known fields"))
+  }
+  let sp = structural_parse(tgt.ty)
+  if (sp.is_rec) {
+    var names: List[Str] = []
+    var i = 0
+    while (i < sp.fields.length()) { names = names.push(sp.fields[i].name)  i += 1 }
+    if (!list_contains(names, f.name)) {
+      return no_field(tgt.ty, f.name, names)
+    }
+    return ok_ty(struct_field_ty(sp.fields, f.name))
   }
   return field_spec_ty(tgt.ty, f.name, tt)
+}
+
+fn struct_field_ty(fields: List[RecField], name: Str) -> Str {
+  var i = 0
+  while (i < fields.length()) {
+    if (fields[i].name == name) { return fields[i].ty }
+    i += 1
+  }
+  return ""
 }
 
 fn field_spec_ty(target: Str, fname: Str, tt: Tt) -> Infer {
@@ -326,12 +703,187 @@ fn field_spec_ty(target: Str, fname: Str, tt: Tt) -> Infer {
   let spec = unwrap_spec(tt, target)
   if (spec.kind != "record") { return ok_ty("") }  // variant: silent
   if (!spec.fields.has(fname)) {
-    return refuse("`".concat(target).concat("` has no field `")
-                    .concat(fname).concat("` (fields: ")
-                    .concat(sort_strs(spec.fields.keys()).join(", "))
-                    .concat(")"))
+    return no_field(target, fname, spec.fields.keys())
   }
   return ok_ty(unwrap_str(spec.fields, fname))
+}
+
+// Port of typecheck.infer_ast's ExprIndex arm. The target is inferred first,
+// then the index, and the refusals fire in the reference's order.
+fn infer_index_t(target: Expr, index: Expr, env: List[Bind], tt: Tt,
+                 ct: Ct) -> Infer {
+  let tgt = infer_t(target, env, tt, ct)
+  if (!tgt.ok) { return tgt }
+  let idx = infer_t(index, env, tt, ct)
+  if (!idx.ok) { return idx }
+  let tp = parse_type(tgt.ty)
+  if (tp.head == "Opt") { return opt_escape("index `[...]`", tgt.ty) }
+  if (tp.head == "Str") {
+    // `Str` is not indexable: the specified surface is charAt / charCodeAt /
+    // slice (docs/stdlib-2.0.md). rust indexes bytes and java has no operator,
+    // so `s[0]` is unportable even where py and ts accept it.
+    return refuse("T1", "`Str` has no index operator — `[...]` indexes a "
+                    .concat("`List` only"))
+  }
+  if (idx.ty != "" && (tp.head == "List" || tp.head == "Str")
+      && idx.ty != "Int") {
+    return mismatch("index", "Int", idx.ty)
+  }
+  if (tp.head == "List") {
+    return ok_ty(tp.args.length() > 0 ? tp.args[0] : "")
+  }
+  return ok_ty("")
+}
+
+// Port of typecheck.infer_ast's ExprIf (ternary) arm: the condition is walked
+// for its own refusals, the branches join, and a disagreement is named.
+fn infer_if_t(cond: Expr, then_: Expr, els: Expr, env: List[Bind], tt: Tt,
+              ct: Ct) -> Infer {
+  let c = infer_t(cond, env, tt, ct)
+  if (!c.ok) { return c }
+  let a = infer_t(then_, env, tt, ct)
+  if (!a.ok) { return a }
+  let b = infer_t(els, env, tt, ct)
+  if (!b.ok) { return b }
+  let j = join_tt(a.ty, b.ty, tt)
+  if (a.ty != "" && b.ty != "" && j == "") {
+    return refuse("TYPE", "ternary branches disagree: `"
+                    .concat(render_type(a.ty)).concat("` vs `")
+                    .concat(render_type(b.ty)).concat("`"))
+  }
+  return ok_ty(j)
+}
+
+// Port of typecheck.infer_ast's ExprList arm: the elements join; an empty or
+// unjoinable list is the `List[Never]` bottom the widening rules then fill.
+fn infer_list_t(items: List[Expr], env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  // `item = t if item is None else join(item, t)`: an element whose type is
+  // unknown does not poison the accumulator, it leaves it unset, so `[q, y]`
+  // is `List[Int]` and not the bottom. Seeding on a `first` flag instead
+  // answered `List[Never]` there.
+  var item = ""
+  var i = 0
+  while (i < items.length()) {
+    let t = infer_t(items[i], env, tt, ct)
+    if (!t.ok) { return t }
+    item = item == "" ? t.ty : join_tt(item, t.ty, tt)
+    i += 1
+  }
+  if (item == "") { return ok_ty("List[Never]") }
+  return ok_ty("List[".concat(item).concat("]"))
+}
+
+// Port of typecheck.infer_ast's ExprRecord arm (item 71): an anonymous literal
+// infers a STRUCTURAL record type from its fields, sorted, with an unknown
+// field type degrading to `Any`. That type is what lets an update on a
+// `let`-bound literal be field-checked instead of escaping.
+fn infer_rec_t(fields: List[InitN], env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  // The shape is the reference's `dict`: every value is inferred, in source
+  // order, and a repeated field name keeps the LAST one under a single key.
+  // Appending blindly spelled `{h: Float, h: Float}` where the reference
+  // spells `{h: Int}`, and that spelling is part of every message below it.
+  var shape: List[RecField] = []
+  var i = 0
+  while (i < fields.length()) {
+    let v = infer_t(fields[i].value, env, tt, ct)
+    if (!v.ok) { return v }
+    shape = put_field(shape, fields[i].name, v.ty)
+    i += 1
+  }
+  return ok_ty(format_structural(shape))
+}
+
+fn put_field(shape: List[RecField], name: Str, ty: Str) -> List[RecField] {
+  var out: List[RecField] = []
+  var replaced = false
+  var i = 0
+  while (i < shape.length()) {
+    if (shape[i].name == name) {
+      out = out.push({ name: name, ty: ty })
+      replaced = true
+    } else {
+      out = out.push(shape[i])
+    }
+    i += 1
+  }
+  if (replaced) { return out }
+  return out.push({ name: name, ty: ty })
+}
+
+// The declared field set of a record type: its own structural shape when the
+// base is an anonymous literal (item 71), else the nominal spec's fields.
+// `is_rec == false` on the result means "not a record at all".
+type RecFields = { is_rec: Bool, structural: Bool, fields: List[RecField] }
+
+fn rec_fields_of(t: Str, tt: Tt) -> RecFields {
+  let sp = structural_parse(t)
+  if (sp.is_rec) { return { is_rec: true, structural: true, fields: sp.fields } }
+  if (!tt.has(t)) { return { is_rec: false, structural: false, fields: [] } }
+  let spec = unwrap_spec(tt, t)
+  if (spec.kind != "record") {
+    return { is_rec: false, structural: false, fields: [] }
+  }
+  var out: List[RecField] = []
+  let ks = sort_strs(spec.fields.keys())
+  var i = 0
+  while (i < ks.length()) {
+    out = out.push({ name: ks[i], ty: unwrap_str(spec.fields, ks[i]) })
+    i += 1
+  }
+  return { is_rec: true, structural: false, fields: out }
+}
+
+fn field_names(fs: List[RecField]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < fs.length()) { out = out.push(fs[i].name)  i += 1 }
+  return out
+}
+
+// `record update names \`f\`, which is not a field of \`R\`` — the same
+// message for a structural base (item 71) and a nominal one.
+fn upd_unknown(name: Str, base: Str) -> Infer {
+  return refuse("TYPE", "record update names `".concat(name)
+                  .concat("`, which is not a field of `")
+                  .concat(render_type(base)).concat("`"))
+}
+
+// Port of typecheck.infer_ast's ExprRecordUpdate arm (docs/records.md §3).
+fn infer_recupd_t(r: RecUpdN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  let base = infer_t(r.base, env, tt, ct)
+  if (!base.ok) { return base }
+  if (base.ty == "") {
+    // an unknown base still walks its replacements for their own refusals
+    return walk_updates(r.upds, 0, env, tt, ct)
+  }
+  let rf = rec_fields_of(base.ty, tt)
+  if (!rf.is_rec) {
+    return refuse("TYPE", "record update requires a record type, `"
+                    .concat(render_type(base.ty)).concat("` is not one"))
+  }
+  let names = field_names(rf.fields)
+  var i = 0
+  while (i < r.upds.length()) {
+    let u = r.upds[i]
+    if (!list_contains(names, u.name)) {
+      // the NOMINAL base's unknown-field refusal is the same sentence; the
+      // reference reaches it one branch later, with the same text.
+      return upd_unknown(u.name, base.ty)
+    }
+    let c = check_t(u.value, struct_field_ty(rf.fields, u.name), env, tt, ct,
+                    "update of field `".concat(u.name).concat("`"))
+    if (!c.ok) { return c }
+    i += 1
+  }
+  return ok_ty(base.ty)
+}
+
+fn walk_updates(upds: List[InitN], i: Int, env: List[Bind], tt: Tt,
+                ct: Ct) -> Infer {
+  if (i >= upds.length()) { return ok_ty("") }
+  let v = infer_t(upds[i].value, env, tt, ct)
+  if (!v.ok) { return v }
+  return walk_updates(upds, i + 1, env, tt, ct)
 }
 
 // Port of typecheck.infer_ast's ExprCall arm, Var-callee subset: an ADT case
@@ -351,7 +903,7 @@ fn infer_call_t(c: CallN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   return match c.target {
     // a named ADT case constructor; anything else (plain fns — no signature
     // table in this slice — and non-name callees) stays unchecked
-    Var(n) => case_call_ty(n, unwrap_case(ct, n), args, ct.has(n)),
+    Var(n) => case_call_ty(n, unwrap_case(ct, n), args, ct.has(n), tt),
     _      => ok_ty(""),
   }
 }
@@ -365,13 +917,13 @@ fn pick_arg0(args: List[Str]) -> Str {
 // is refused only where BOTH sides know their types (the reference's gradual
 // silence on unknowns, kept exactly); Some/Ok/Err keep their builtin
 // parametric results; every other case yields its ADT regardless of arity.
-fn case_call_ty(n: Str, ci: CaseInfo, args: List[Str], known: Bool) -> Infer {
+fn case_call_ty(n: Str, ci: CaseInfo, args: List[Str], known: Bool,
+                tt: Tt) -> Infer {
   if (!known) { return ok_ty("") }
   if (ci.payload != "" && args.length() > 0 && args[0] != ""
-      && !compatible(ci.payload, args[0])) {
-    return refuse("`".concat(n).concat("(...)` payload expects `")
-                    .concat(ci.payload).concat("`, got `")
-                    .concat(args[0]).concat("`"))
+      && !compat_tt(ci.payload, args[0], tt)) {
+    return mismatch("`".concat(n).concat("(...)` payload"),
+                    ci.payload, args[0])
   }
   let a0 = pick_arg0(args)
   if (n == "Some") { return ok_ty("Opt[".concat(a0).concat("]")) }
@@ -386,7 +938,206 @@ fn infer_bin_t(op: Str, l: Expr, r: Expr, env: List[Bind],
   if (!lhs.ok) { return lhs }
   let rhs = infer_t(r, env, tt, ct)
   if (!rhs.ok) { return rhs }
-  return binop_type(op, lhs.ty, rhs.ty)
+  return binop_type(op, lhs.ty, rhs.ty, tt)
+}
+
+// ------------------------------------------------- the bidirectional half
+//
+// `typecheck.check_ast` for the kinds this slice owns: a record literal
+// against a nominal record, list elements, the two ternary branches, a record
+// update, then `compatible(expected, actual)` with `mismatch(where)`.
+// Arrows (T2c), match arms and block arms (T2d) keep the inference path.
+pub fn check_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
+               where_: Str) -> Infer {
+  if (expected == "") {
+    let r = infer_t(e, env, tt, ct)
+    if (!r.ok) { return r }
+    return ok_ty("")
+  }
+  return match e {
+    Rec(rc)   => check_rec_t(rc.fields, expected, env, tt, ct, where_),
+    Lst(l)    => check_list_t(l.items, expected, env, tt, ct, where_),
+    If(f)     => check_if_t(f.cond, f.then_, f.els, expected, env, tt, ct,
+                            where_),
+    RecUpd(r) => check_recupd_t(r, expected, env, tt, ct, where_),
+    _         => check_default_t(e, expected, env, tt, ct, where_),
+  }
+}
+
+fn check_default_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
+                   where_: Str) -> Infer {
+  let a = infer_t(e, env, tt, ct)
+  if (!a.ok) { return a }
+  if (a.ty == "") { return ok_ty("") }
+  // `check_ast`'s tail: a STRUCTURAL actual (item 71 — from any expression,
+  // not only a literal at the top) meeting a DECLARED nominal record is the
+  // boundary where the two unify, and it carries its own two messages. It is
+  // handled here rather than inside `compatible` because the shared spelling
+  // algebra is table-free by design (types.rvl §"NOT in this slice"), and the
+  // declared-type table lives in this file.
+  let sp = structural_parse(a.ty)
+  if (sp.is_rec && tt.has(expected) && unwrap_spec(tt, expected).kind == "record") {
+    return check_struct_against(sp.fields, expected, unwrap_spec(tt, expected),
+                                where_, tt)
+  }
+  if (!compat_tt(expected, a.ty, tt)) {
+    return mismatch(where_, expected, a.ty)
+  }
+  return ok_ty("")
+}
+
+fn check_struct_against(struct: List[RecField], expected: Str, spec: TySpec,
+                        where_: Str, tt: Tt) -> Infer {
+  let declared = spec.fields
+  var given: List[Str] = []
+  var i = 0
+  while (i < struct.length()) { given = given.push(struct[i].name)  i += 1 }
+  let missing = sort_strs(minus_list(declared.keys(), given))
+  let extra = sort_strs(minus_list(given, declared.keys()))
+  if (missing.length() > 0 || extra.length() > 0) {
+    var parts: List[Str] = []
+    if (missing.length() > 0) {
+      parts = parts.push("missing ".concat(quote_join(missing)))
+    }
+    if (extra.length() > 0) {
+      parts = parts.push("unknown ".concat(quote_join(extra)))
+    }
+    return refuse("TYPE", where_.concat(" expects `").concat(expected)
+                    .concat("`, but the record has ").concat(parts.join("; ")))
+  }
+  // the structural spelling is canonical (sorted), which is the dict order the
+  // reference iterates in
+  var k = 0
+  while (k < struct.length()) {
+    let fname = struct[k].name
+    let fty = struct[k].ty
+    if (fty != "" && !compat_tt(unwrap_str(declared, fname), fty, tt)) {
+      return mismatch("field `".concat(fname).concat("` of `").concat(expected)
+                        .concat("`"), unwrap_str(declared, fname), fty)
+    }
+    k += 1
+  }
+  return ok_ty("")
+}
+
+// A record literal flowing into a DECLARED nominal record is the boundary
+// where the structural type unifies with the nominal (item 71): the field set
+// must match, and each field is checked against its declared type.
+fn check_rec_t(fields: List[InitN], expected: Str, env: List[Bind], tt: Tt,
+               ct: Ct, where_: Str) -> Infer {
+  let rf = rec_fields_of(expected, tt)
+  if (!rf.is_rec || rf.structural) {
+    let a = infer_rec_t(fields, env, tt, ct)
+    if (!a.ok) { return a }
+    if (!compat_tt(expected, a.ty, tt)) {
+      return mismatch(where_, expected, a.ty)
+    }
+    return ok_ty("")
+  }
+  // `given` is the reference's SET comprehension: a field written twice is
+  // named once in `unknown …`.
+  var given: List[Str] = []
+  var i = 0
+  while (i < fields.length()) {
+    if (!list_contains(given, fields[i].name)) {
+      given = given.push(fields[i].name)
+    }
+    i += 1
+  }
+  let declared = field_names(rf.fields)
+  let missing = sort_strs(minus_list(declared, given))
+  let extra = sort_strs(minus_list(given, declared))
+  if (missing.length() > 0 || extra.length() > 0) {
+    var parts: List[Str] = []
+    if (missing.length() > 0) {
+      parts = parts.push("missing ".concat(quote_join(missing)))
+    }
+    if (extra.length() > 0) {
+      parts = parts.push("unknown ".concat(quote_join(extra)))
+    }
+    return refuse("TYPE", "record literal for `".concat(expected)
+                    .concat("` has ").concat(parts.join("; ")))
+  }
+  var k = 0
+  while (k < fields.length()) {
+    let f = fields[k]
+    let c = check_t(f.value, struct_field_ty(rf.fields, f.name), env, tt, ct,
+                    "field `".concat(f.name).concat("` of `")
+                      .concat(expected).concat("`"))
+    if (!c.ok) { return c }
+    k += 1
+  }
+  return ok_ty("")
+}
+
+fn check_list_t(items: List[Expr], expected: Str, env: List[Bind], tt: Tt,
+                ct: Ct, where_: Str) -> Infer {
+  let ep = parse_type(expected)
+  if (ep.head != "List") {
+    let a = infer_list_t(items, env, tt, ct)
+    if (!a.ok) { return a }
+    if (a.ty == "") { return ok_ty("") }
+    if (!compat_tt(expected, a.ty, tt)) {
+      return mismatch(where_, expected, a.ty)
+    }
+    return ok_ty("")
+  }
+  // NOT `ep.args.length() > 0 ? ep.args[0] : ""`. The rust emitter infers a
+  // binding's surface type to decide whether a by-value use must clone, and a
+  // ternary initialiser has none — so `elem` was MOVED into the call and the
+  // second iteration of this loop borrowed a moved value (E0382). A call with
+  // a declared return type is a type it can read, which is the same shape
+  // `check_service_src`'s `caps` has always had.
+  let elem = arg_or_empty(ep.args, 0)
+  var i = 0
+  while (i < items.length()) {
+    let c = check_t(items[i], elem, env, tt, ct,
+                    "element of `".concat(expected).concat("`"))
+    if (!c.ok) { return c }
+    i += 1
+  }
+  return ok_ty("")
+}
+
+// `check_ast`'s ExprRecordUpdate arm, which is NOT the inference arm: a base
+// that carries no record type is not refused here (the expectation itself
+// reports the disagreement), the unknown-field check fires for a STRUCTURAL
+// base only, and the per-field `where` names the base type as well as the
+// field. All three differences are the reference's, and each one is a message
+// a corpus row would otherwise get wrong.
+fn check_recupd_t(r: RecUpdN, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
+                  where_: Str) -> Infer {
+  let base = infer_t(r.base, env, tt, ct)
+  if (!base.ok) { return base }
+  let rf = rec_fields_of(base.ty, tt)
+  if (rf.is_rec) {
+    let names = field_names(rf.fields)
+    var i = 0
+    while (i < r.upds.length()) {
+      let u = r.upds[i]
+      if (rf.structural && !list_contains(names, u.name)) {
+        return upd_unknown(u.name, base.ty)
+      }
+      let c = check_t(u.value, struct_field_ty(rf.fields, u.name), env, tt, ct,
+                      "update of field `".concat(u.name).concat("` of `")
+                        .concat(render_type(base.ty)).concat("`"))
+      if (!c.ok) { return c }
+      i += 1
+    }
+  }
+  if (base.ty != "" && !compat_tt(expected, base.ty, tt)) {
+    return mismatch(where_, expected, base.ty)
+  }
+  return ok_ty("")
+}
+
+fn check_if_t(cond: Expr, then_: Expr, els: Expr, expected: Str,
+              env: List[Bind], tt: Tt, ct: Ct, where_: Str) -> Infer {
+  let c = infer_t(cond, env, tt, ct)
+  if (!c.ok) { return c }
+  let a = check_t(then_, expected, env, tt, ct, where_)
+  if (!a.ok) { return a }
+  return check_t(els, expected, env, tt, ct, where_)
 }
 
 // ---------------------------------------------------------------- entry
@@ -417,8 +1168,18 @@ test "Float contaminates +" {
   assert infer_expr_str("f + 1") == "Float"
 }
 
-test "string + number is accepted but unknown" {
-  assert infer_expr_str("s + 1") == "?"
+// Issue #549 made a KNOWN non-Str operand of a string `+` a refusal on every
+// tier; this assertion kept the pre-#549 answer. It was never caught because
+// nothing ran this file's in-file tests until slice T2a added the gate
+// (tests/test_selfhost_checker.py::test_checker_in_file_tests_pass), while
+// `s + 1` has sat in that file's REJECTED corpus, pinning the opposite, the
+// whole time.
+test "string + a KNOWN number is refused (issue #549)" {
+  assert infer_expr_str("s + 1") == "refuse"
+}
+
+test "string + an UNKNOWN operand stays on the gradual frontier" {
+  assert infer_expr_str("s + q") == "?"
 }
 
 test "string + string is Str" {
@@ -447,6 +1208,110 @@ test "equality with an unknown local is Bool" {
 
 test "null is refused" {
   assert infer_expr_str("null") == "refuse"
+}
+
+// ------------------------------------------------------- slice T2a in-file
+//
+// The tags this slice mints, pinned here as well as in `_classify`: a refusal
+// that loses its tag is a refusal the census cannot bucket.
+
+test "a refusal carries the reference's tag and message" {
+  assert infer_expr_verdict("null")
+    == "T2|`null` has no type in revl — absence is `Opt[T]`"
+}
+
+test "an accepted expression carries no verdict" {
+  assert infer_expr_verdict("1 + 2") == ""
+}
+
+test "the Int32 width mix is T1, named" {
+  assert infer_expr_verdict("m + x") == "T1|`+` does not mix `Int32` and `Int`"
+}
+
+test "Int32 is numeric, so two Int32 operands add" {
+  assert infer_expr_str("m + m") == "Int32"
+}
+
+test "a Str has no index operator" {
+  assert infer_expr_verdict("s[0]")
+    == "T1|`Str` has no index operator — `[...]` indexes a `List` only"
+}
+
+test "an index through an optional is the opt escape" {
+  assert infer_expr_verdict("opt[0]")
+    == "T1|index `[...]` on `Opt[Str]`: the optional wrapper has no such "
+         .concat("member — `T` flows into `Opt[T]`, never silently back out")
+}
+
+test "a list indexes to its element" {
+  assert infer_expr_str("xs[0]") == "Int"
+}
+
+test "disagreeing ternary branches are TYPE" {
+  assert infer_expr_verdict("flag ? 1 : s")
+    == "TYPE|ternary branches disagree: `Int` vs `Str`"
+}
+
+test "a record literal infers its sorted structural shape" {
+  assert infer_expr_str("{ b: s, a: 1 }") == "{a: Int, b: Str}"
+}
+
+test "a repeated field keeps the last value under one key" {
+  assert infer_expr_str("{ a: s, a: 1 }") == "{a: Int}"
+}
+
+test "an unknown element leaves the list accumulator unset" {
+  assert infer_expr_str("[q, y]") == "List[Int]"
+}
+
+test "an update names a field the literal does not have" {
+  assert infer_expr_verdict("{ { h: s } | missing = s }")
+    == "TYPE|record update names `missing`, which is not a field of `{h: Str}`"
+}
+
+test "an update replaces a field with the wrong type" {
+  assert infer_expr_verdict("{ { h: s } | h = 5 }")
+    == "T1|update of field `h` expects `Str`, got `Int`"
+}
+
+test "an update on a non-record is TYPE" {
+  assert infer_expr_verdict("{ x | h = 5 }")
+    == "TYPE|record update requires a record type, `Int` is not one"
+}
+
+test "a Float literal outside binary64 is refused" {
+  assert infer_expr_verdict("1e999")
+    == "TYPE|Float literal is infinite: it is outside the range of a 64-bit float"
+}
+
+test "a Float literal inside binary64 is not" {
+  assert infer_expr_verdict("1.7976931348623157e308") == ""
+  assert infer_expr_verdict("1e308") == ""
+  assert infer_expr_verdict("0.0") == ""
+}
+
+test "a field read through an optional is the opt escape" {
+  assert infer_expr_verdict("opt.length")
+    == "T1|field access `.length` on `Opt[Str]`: the optional wrapper has no "
+         .concat("such member — `T` flows into `Opt[T]`, never silently back out")
+}
+
+test "a check position names its where-string" {
+  assert check_prog_verdict("", "x", "Int32", "this function\'s return")
+    == "T1|this function\'s return expects `Int32`, got `Int`"
+}
+
+test "a record literal checks against a declared record" {
+  assert check_prog_verdict("type Row = { name: Str }", "{ name: s }", "Row",
+                            "`let r: Row`") == ""
+  assert check_prog_verdict("type Row = { name: Str }", "{ nom: s }", "Row",
+                            "`let r: Row`")
+    == "TYPE|record literal for `Row` has missing `name`; unknown `nom`"
+}
+
+test "a record literal reaches a declared record through an Opt" {
+  assert check_prog_verdict("type Row = { name: Str }", "{ name: s }",
+                            "Opt[Row]", "`let r: Opt[Row]`") == ""
 }
 
 // ================================================================ slice two
@@ -825,9 +1690,14 @@ fn mk_comp(nm: Str, rq: List[Bind], pv: List[Provide],
 
 fn mk_ev2(l: List[Str], c: List[Str]) -> Ev { return { labels: l, caps: c } }
 
+fn tbl_or_empty(built: TblR) -> Tt {
+  if (built.err != "") { return Map.empty() }
+  return built.tbl
+}
+
 fn mk_ctx(nm: Str, rq: Map[Str, Str], sv: Map[Str, SvcD], fn_: Map[Str, FnD],
-          cp: CapsT) -> Ctx {
-  return { compName: nm, reqMap: rq, svcs: sv, fns: fn_, caps: cp }
+          cp: CapsT, tb: Tt) -> Ctx {
+  return { compName: nm, reqMap: rq, svcs: sv, fns: fn_, caps: cp, tt: tb }
 }
 
 fn mk_ck2(x: Ctx, en: List[Bind], e2: Ev, m: Str) -> Ck {
@@ -1639,8 +2509,16 @@ fn reached_caps(called: List[Str], caps: CapsT, i: Int,
 
 // ---------------------------------------------------------------- checking
 
+// `tt` is slice T2a's addition: slice one's expression walk now types a
+// record LITERAL structurally (item 71), so a literal handed to a service
+// method meets the method's declared record type. Without the program's
+// declared-type table that comparison cannot be resolved and the walk refused
+// a call the reference does not object to — `examples/app/notes.rvl` and
+// `examples/webui-entry/console.rvl`, both of which this file's census pins as
+// UNDECIDED. Carrying the table is what keeps them undecided for the right
+// reason instead of decided for the wrong one.
 type Ctx = { compName: Str, reqMap: Map[Str, Str], svcs: Map[Str, SvcD],
-             fns: Map[Str, FnD], caps: CapsT }
+             fns: Map[Str, FnD], caps: CapsT, tt: Tt }
 type Ev  = { labels: List[Str], caps: List[Str] }
 type Ck  = { ctx: Ctx, env: List[Bind], ev: Ev, msg: Str }
 
@@ -1780,7 +2658,7 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
     // calls in the value count even though the statement also binds
     next = walk_expr(s.e, s.kind == "emit", ck)
     if (next.msg != "") { return next }
-    let inf = infer(s.e, next.env)
+    let inf = infer_t(s.e, next.env, next.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(next, inf.msg) }
     next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
               ev: next.ev, msg: "" }
@@ -1892,10 +2770,10 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   }
   var k = 0
   while (k < args.length()) {
-    let inf = infer(args[k], ck.env)
+    let inf = infer_t(args[k], ck.env, ck.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(ck, inf.msg) }
     let pt = decl.params[k].ty
-    if (pt != "" && inf.ty != "" && !compatible(pt, inf.ty)) {
+    if (pt != "" && inf.ty != "" && !compat_tt(pt, inf.ty, ck.ctx.tt)) {
       return refuse_ck(ck, "`".concat(root).concat(".").concat(meth)
         .concat("` argument `").concat(decl.params[k].name)
         .concat("` expects `").concat(pt)
@@ -1959,10 +2837,10 @@ fn fn_sig_check(name: Str, args: List[Expr], ck: Ck) -> Ck {
   }
   var k = 0
   while (k < args.length()) {
-    let inf = infer(args[k], ck.env)
+    let inf = infer_t(args[k], ck.env, ck.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(ck, inf.msg) }
     let pt = d.params[k].ty
-    if (pt != "" && inf.ty != "" && !compatible(pt, inf.ty)) {
+    if (pt != "" && inf.ty != "" && !compat_tt(pt, inf.ty, ck.ctx.tt)) {
       return refuse_ck(ck, "argument ".concat(int_str(k + 1)).concat(" of `")
         .concat(name).concat("(...)` expects `").concat(pt)
         .concat("`, got `").concat(inf.ty).concat("`"))
@@ -2010,6 +2888,13 @@ fn g4_verdict(svcName: Str, mname: Str, decl: MethSig, ev: Ev) -> Str {
 pub fn check_service_src(src: Str) -> Str {
   let pg = parse_prog(src)
   if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  // A table this walk could not build leaves it exactly where it was before
+  // the table existed: silent on the comparisons that need one. `tbl_or_empty`
+  // rather than a ternary for the reason `check_list_t`'s `elem` spells out:
+  // the rust emitter reads a binding's type off its initialiser, and a ternary
+  // has none, so the binding is moved into the first component's `mk_ctx` and
+  // the second iteration of the loop below is an E0382.
+  let tbl = tbl_or_empty(build_types(pg.types))
   var svcs: Map[Str, SvcD] = Map.empty()
   var si = 0
   while (si < pg.services.length()) {
@@ -2026,7 +2911,7 @@ pub fn check_service_src(src: Str) -> Str {
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
-    let ctx: Ctx = mk_ctx(comp.name, bind_map(comp.reqs), svcs, fnt, caps)
+    let ctx: Ctx = mk_ctx(comp.name, bind_map(comp.reqs), svcs, fnt, caps, tbl)
     let sck = check_stmts(comp.setup, 0,
                           { ctx: ctx, env: [], ev: empty_ev(), msg: "" })
     if (sck.msg != "") { return sck.msg }
@@ -2463,4 +3348,99 @@ pub fn infer_prog_expr(progSrc: Str, exprSrc: Str) -> Str {
   if (!r.ok) { return "refuse" }
   if (r.ty == "") { return "?" }
   return r.ty
+}
+
+// ---------------------------------------------- the T2a message channel
+//
+// The slice-one/three entry points above answer VERDICT-and-type, which is
+// what slices one to three were held to. Slice T2a adds the obligation the
+// design fixes in §2: on a refusal the self-host must spell the reference's
+// message BYTE FOR BYTE, under the tag `_classify` derives from it. These
+// three return that wire — "" when the expression checks, else
+// "<TAG>|<message>" — and `tests/test_selfhost_checker.py` compares it
+// against `RevlError.message` directly.
+
+// One expression against base_env(), no program.
+pub fn infer_expr_verdict(src: Str) -> Str {
+  let e = parse_expr_str(src)
+  if (is_bad(e)) { return "(bad)" }
+  return verdict_of(infer(e, base_env()))
+}
+
+// One expression against a program's declarations.
+pub fn infer_prog_verdict(progSrc: Str, exprSrc: Str) -> Str {
+  let pg = parse_prog(progSrc)
+  if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  let built = build_types(pg.types)
+  if (built.err != "") { return "(table) ".concat(built.err) }
+  let ct = build_cases(built.tbl)
+  let e = parse_expr_str(exprSrc)
+  if (is_bad(e)) { return "(bad)" }
+  return verdict_of(infer_t(e, base_env(), built.tbl, ct))
+}
+
+// One expression against a program's declarations AND a written environment —
+// the entry point the corpus of `examples/rejections` fixtures uses, because a
+// fixture's message names the types its own `fn` signature declares
+// (`Opt[Row]`, `Any`, `Int32`) and `base_env()` cannot carry every one of
+// them. `envSpec` is `name: Type` entries separated by `;` — the separator
+// types.rvl's own string-in/string-out entry points use, because a revl string
+// literal has no `\n` escape (item 183, docs/strings.md) and a type spelling
+// never contains a semicolon. An empty `expected` is the inference position.
+pub fn check_env_verdict(progSrc: Str, envSpec: Str, exprSrc: Str,
+                         expected: Str, where_: Str) -> Str {
+  let pg = parse_prog(progSrc)
+  if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  let built = build_types(pg.types)
+  if (built.err != "") { return "(table) ".concat(built.err) }
+  let ct = build_cases(built.tbl)
+  let e = parse_expr_str(exprSrc)
+  if (is_bad(e)) { return "(bad)" }
+  return verdict_of(check_t(e, expected, env_of(envSpec), built.tbl, ct, where_))
+}
+
+// "name: Type" entries -> `base_env()` EXTENDED, the written bindings first so
+// one of them shadows a base binding of the same name (`lookup_at` answers the
+// first match). The oracle's reference side is `dict(ENV)` with the same
+// overrides applied, so the two environments are the same environment. An
+// entry with no colon is skipped, so an empty spec IS `base_env()`.
+fn env_of(spec: Str) -> List[Bind] {
+  var out: List[Bind] = []
+  let lines = spec.split(";")
+  var i = 0
+  while (i < lines.length()) {
+    let ln = lines[i]
+    let c = ln.indexOf(":")
+    if (c != 0 - 1) {
+      out = out.push({ name: trim_ws(ln.slice(0, c)),
+                       ty: trim_ws(ln.slice(c + 1, ln.length())) })
+    }
+    i += 1
+  }
+  let base = base_env()
+  var k = 0
+  while (k < base.length()) { out = out.push(base[k])  k += 1 }
+  return out
+}
+
+fn trim_ws(x: Str) -> Str {
+  var lo = 0
+  var hi = x.length()
+  while (lo < hi && is_space_ch(x.slice(lo, lo + 1))) { lo += 1 }
+  while (hi > lo && is_space_ch(x.slice(hi - 1, hi))) { hi -= 1 }
+  return x.slice(lo, hi)
+}
+
+// One expression in CHECK position against a declared type — the
+// bidirectional half, where the `where` string is part of the message.
+pub fn check_prog_verdict(progSrc: Str, exprSrc: Str, expected: Str,
+                          where_: Str) -> Str {
+  let pg = parse_prog(progSrc)
+  if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  let built = build_types(pg.types)
+  if (built.err != "") { return "(table) ".concat(built.err) }
+  let ct = build_cases(built.tbl)
+  let e = parse_expr_str(exprSrc)
+  if (is_bad(e)) { return "(bad)" }
+  return verdict_of(check_t(e, expected, base_env(), built.tbl, ct, where_))
 }

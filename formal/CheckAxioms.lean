@@ -131,7 +131,9 @@ import RevL
 -- the statement fragment instead of taken as given -- the capKeys bridge
 -- and the emit-step surface as lemmas, the unnameable receivers named,
 -- the five affected guarantees re-stated over `SpawnsAdmitted`, and the
--- three derived non-vacuity witnesses.
+-- four derived non-vacuity witnesses (issue 1142: the capability column
+-- and the wiring-key column are separate namespaces, and the witness
+-- that separates them is `same_key_different_boundary_refused`).
 #print axioms RevL.CapCeilings.derived_held_tokens_are_declared_keys
 #print axioms RevL.CapCeilings.derived_reach_is_emit_surface
 #print axioms RevL.CapCeilings.unnameable_receiver_is_star
@@ -142,6 +144,7 @@ import RevL
 #print axioms RevL.CapCeilings.derived_confinement_within_ceiling
 #print axioms RevL.CapCeilings.derived_no_star_amplification
 #print axioms RevL.CapCeilings.derivation_non_vacuous
+#print axioms RevL.CapCeilings.same_key_different_boundary_refused
 #print axioms RevL.CapCeilings.derivation_refuses_unnameable
 #print axioms RevL.CapCeilings.derived_ceiling_check_not_subsumed
 -- G9 (items 249/256/329): untrusted data gains no authority — the label is
@@ -283,3 +286,34 @@ import RevL
 #print axioms RevL.G9.g9_context_hypotheses_are_inhabited
 #print axioms RevL.R4.r4_side_conditions_are_inhabited
 #print axioms RevL.A8.a8_hypotheses_are_inhabited
+
+-- Issue 1167: A9, every provide block is a declared slot. The installed
+-- block keys are modelled beside `LComponent` (no L0 edit); `a9B` is what
+-- the differential oracle's `A9` row decides.
+#print axioms RevL.A9.a9B_iff
+#print axioms RevL.A9.noDoubleInstallB_iff
+#print axioms RevL.A9.installed_block_is_slot
+#print axioms RevL.A9.undeclared_block_is_no_slot
+#print axioms RevL.A9.installed_block_uniquely_provided
+#print axioms RevL.A9.installed_slots_nodup
+#print axioms RevL.A9.a9_not_vacuous
+#print axioms RevL.A9.a9_rules_are_distinct
+#print axioms RevL.A9.a9_row_not_vacuous
+-- Issue 1166: A2 (no acquisition after a provision) stated over the LIFO
+-- stack. The checker's fold (`a2B`), its bridge to the declarative rule,
+-- the body's registrations as a `RevL.Semantics` stack, the proof-pass
+-- ordering under every settling verdict, and the fixture's converse.
+#print axioms RevL.A2.a2Fold_iff
+#print axioms RevL.A2.a2B_iff
+#print axioms RevL.A2.labels_distinct
+#print axioms RevL.A2.stack_all_brackets
+#print axioms RevL.A2.phase1_of_brackets
+#print axioms RevL.A2.stack_of_no_acquire
+#print axioms RevL.A2.stack_shape
+#print axioms RevL.A2.proof_pass_is_withdrawals_then_releases
+#print axioms RevL.A2.withdrawals_precede_releases
+#print axioms RevL.A2.teardown_labels
+#print axioms RevL.A2.fixture_refused
+#print axioms RevL.A2.fixture_release_before_withdrawal
+#print axioms RevL.A2.fixture_opens_the_window
+#print axioms RevL.A2.a2_not_vacuous
