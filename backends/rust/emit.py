@@ -308,6 +308,119 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+# Step -> the field(s) carrying the names that step DECLARES. A declaration is
+# what makes a name loop-local: the iteration gets its own value, so moving it
+# strands nothing. `assign` is deliberately ABSENT — a rebind under a branch
+# (`if (c) { s = t }` then `f(s)`) does not re-establish the value on every
+# path, so a name merely ASSIGNED in a loop stays repeated.
+_DECL_FIELDS = {
+    "let": ("name",),
+    "for": ("bind",),
+    "let-effect": ("bind",),
+    "let_pattern": ("names", "rest"),
+}
+
+
+def _decl_site_names(node: dict) -> "list[str]":
+    """The binding names a single IR node DECLARES (possibly none).
+
+    A def site is always a plain string field, never a reference node — the
+    same fact `_body_multi_use` relies on from the other side. A statement
+    spells it in the field `_DECL_FIELDS` names; the two EXPRESSION binders
+    carry no `step`, so they are recognised by shape: an `arrow` declares its
+    `params`, and a `match` arm (a `pattern` with a payload) declares `bind`."""
+    step = node.get("step")
+    if step is not None:
+        keys = _DECL_FIELDS.get(step) or ()
+    elif node.get("kind") == "arrow":
+        keys = ("params",)
+    elif "pattern" in node:
+        keys = ("bind",)
+    else:
+        keys = ()
+    out: list[str] = []
+    for key in keys:
+        value = node.get(key)
+        if isinstance(value, str):
+            out.append(value)
+        elif value:
+            out.extend(name for name in value if isinstance(name, str))
+    return out
+
+
+def _loop_repeated_reads(body: object) -> "set[str]":
+    """Names whose reads sit inside a loop body and so execute MORE THAN ONCE,
+    even when the body spells the name exactly once (issue #1157).
+
+    `_body_multi_use` is a TEXTUAL reference count with no notion of a loop, so
+    a binding the emitter could not type (a ternary initialiser, a block
+    expression) that is read once inside a `while`/`for` body counted as
+    single-use and was MOVED — sound on the first iteration, E0382 on the
+    second. A binding whose surface type IS known never had this problem: the
+    known-non-Copy path clones regardless of the count, which is why
+    `let caps = emit_caps(pg.fns)` (a call with a declared return type) always
+    compiled where `let elem = cond ? xs[0] : ""` did not.
+
+    So a read inside a loop body is a REUSE, and joins the same `ctx.multi_use`
+    set the textual count feeds. Two exclusions keep it from cloning what a move
+    already handles:
+
+      * a name BOUND inside that loop body is fresh on every iteration, so
+        moving it strands nothing (`for (x of xs) { f(x) }` is unchanged); and
+      * a `for` iterable is evaluated ONCE, before the loop, so it is read
+        outside the frame it opens — `_movable_for_iterables` keeps deciding
+        that position on the textual count alone.
+
+    A `while` CONDITION is inside the frame: it is re-evaluated per iteration
+    exactly as the body is. The analysis nests, so a binding introduced by the
+    outer loop and read only by an inner one is still repeated.
+    """
+    repeated: set[str] = set()
+    # One (reads, bound) frame per enclosing loop body, innermost last.
+    frames: list[tuple[set[str], set[str]]] = []
+
+    def close(frame: "tuple[set[str], set[str]]") -> None:
+        reads, bound = frame
+        repeated.update(reads - bound)
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") in ("var", "name", "req"):
+                ident = node.get("id") or node.get("name")
+                if ident is not None:
+                    for reads, _ in frames:
+                        reads.add(ident)
+            for name in _decl_site_names(node):
+                for _, bound in frames:
+                    bound.add(name)
+            step = node.get("step")
+            if step in ("while", "for"):
+                # The `for` iterable runs once, before the loop opens; a `while`
+                # condition runs once per iteration, so it belongs to the frame.
+                if step == "for":
+                    walk(node.get("iterable"))
+                frame: tuple[set[str], set[str]] = (set(), set())
+                frames.append(frame)
+                if step == "for":
+                    bind = node.get("bind")
+                    if isinstance(bind, str):
+                        frame[1].add(bind)
+                for key, value in node.items():
+                    if key != "iterable":
+                        walk(value)
+                frames.pop()
+                close(frame)
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(body)
+    return repeated
+
+
 def _movable_for_iterables(body: object, multi_use: "set[str]") -> "set[int]":
     """The `id()` of every `for` node whose bare-name iterable may be MOVED
     (`for x in v`) instead of CLONED (`for x in v.clone()`) — item 437f.
@@ -6179,10 +6292,12 @@ class _V3Ctx:
         # disambiguates a non-unique field-set (item 268). Set per fn by
         # `_emit_v3_functions`; None everywhere the context is unknown.
         self.current_return: str | None = None
-        # Bindings referenced more than once in the fn body currently being
-        # emitted. A by-value use of one whose surface type is unknown must
-        # clone (see `_by_value_arg`); reset per fn by `_emit_v3_functions`,
-        # empty everywhere the reuse context is not established.
+        # Bindings whose reads in the fn body currently being emitted can run
+        # more than once -- referenced more than once textually, or referenced
+        # inside a loop body that repeats the read (#1157). A by-value use of
+        # one whose surface type is unknown must clone (see `_by_value_arg`);
+        # reset per fn by `_emit_v3_functions`, empty everywhere the reuse
+        # context is not established.
         self.multi_use: set[str] = set()
         # `id()` of every `for` node whose bare-name iterable is dead after the
         # loop and so may be MOVED rather than `.clone()`d (item 437f); reset per
@@ -8048,7 +8163,11 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         ctx.current_return = fn.get("returns")
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
-        ctx.multi_use = {n for n, c in counts.items() if c > 1}
+        # The textual count, widened by the reads a LOOP repeats (#1157): a name
+        # spelled once inside a `while`/`for` body is still consumed on every
+        # iteration, so it is a reuse even though the count says one.
+        ctx.multi_use = ({n for n, c in counts.items() if c > 1}
+                         | _loop_repeated_reads(fn.get("body") or []))
         # `for` iterables that are dead after the loop and so move rather than
         # clone (item 437f). Computed from the same whole-body reference counts.
         ctx.movable_for_iterables = _movable_for_iterables(
@@ -8309,29 +8428,23 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
         if not test.get("body"):
             out.append("    // (empty test body)")
         else:
-            # The reuse signal, per test body, exactly as `_emit_v3_functions`
-            # establishes it per fn. Without it a non-Copy local consumed by
-            # value more than once inside a `test` block is MOVED at the first
-            # use and the second use borrows a moved value (E0382): the emitted
-            # crate builds and the emitted `cargo test` does not. Measured on
-            # `selfhost/emit_rust.rvl`, whose `test "rust_type maps user type
-            # names and their generics"` passes one `Map[Str, Str]` local to
-            # five calls.
-            #
-            # A test body's locals are not in `ctx.var_types` (that map is
-            # seeded from a fn's params), so every bare name in a test is
-            # un-inferred and the reuse fallback in `_by_value_arg` /
-            # `_by_value_tail` is the only thing that can decide the clone.
-            # Setting it can only ADD clones — each consumer reads `multi_use`
-            # to turn a move into a `.clone()` and never the other way — so the
-            # change is in the sound direction: a single-use name stays a move
-            # and is byte-identical to before.
+            # A test body is a function body: it gets the same per-fn analyses
+            # `_emit_v3_functions` establishes, or the by-value rules run with
+            # an EMPTY reuse set and every move is unconditional. `cargo check`
+            # stops at the lib and never compiles `#[cfg(test)]`, so a test
+            # body that moved a reused local was invisible to every oracle
+            # (issue #1157); `--all-targets` is what sees it. Bindings are
+            # per-test, so the type table is reset with them.
+            ctx.var_types = {}
             counts: dict[str, int] = {}
             _body_multi_use(test["body"], counts)
-            ctx.multi_use = {n for n, c in counts.items() if c > 1}
+            ctx.multi_use = ({n for n, c in counts.items() if c > 1}
+                             | _loop_repeated_reads(test["body"]))
+            ctx.movable_for_iterables = _movable_for_iterables(
+                test["body"], ctx.multi_use)
+            ctx.vec_elems = _v3_empty_vec_elem_types(test["body"], ctx)
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, out, 1, test_mode=True)
-            ctx.multi_use = set()
         out.append("}")
         out.append("")
     return out

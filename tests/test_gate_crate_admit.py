@@ -1584,13 +1584,27 @@ def test_compile_to_is_byte_identical_to_the_reference(consumer, tier):
 # `compile_to` above still fails closed because it takes revl SOURCE and would
 # need a native FRONTEND as well. `emit_ir` is the half that does not: the
 # emitter is held to the reference over the SAME corpus its own byte-exact
-# oracle uses (tests/test_selfhost_emit_rust.py::CORPUS), with no exclusions.
+# oracle uses — the explicit declaration at
+# tests/test_selfhost_emit_rust.py::CORPUS, which is the port's coverage
+# contract (37 documents over this very directory, each with a scope comment).
+#
+# `selfhost/emit_rust.rvl` is a documented SUBSET emitter: its docstring
+# enumerates the surfaces deliberately OUT, deferred to the remaining Rust
+# Path B slices. So "every document in the fixture directory" is not a contract
+# the port can meet. #1159 extended `backends/rust/emit.py` with the loop-read
+# reuse analysis and added `loop_moves.rvl` to this directory for the
+# REFERENCE's corpus without advancing the port. A document outside the
+# declaration is therefore not asserted byte-identical; it is RECORDED in the
+# shrink-only ratchet below, so a new divergence still reds and covering one is
+# a deliberate edit to that record.
 #
 # Byte-exact emit under CPython does not show the emitted emitter RUNS (the
 # item-266 lesson, one level up), and building it does not either (#1121). This
 # drives the shipped crate, from a consumer binary, over the whole corpus.
 
 _EMIT_CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
+_EMIT_CORPUS_DIVERGENCES = (
+    ROOT / "tests" / "fixtures" / "selfhost_emit_corpus_divergences.json")
 
 
 def _crate_emits(binary: Path, tier: str, documents: list[str]) -> list[dict]:
@@ -1621,20 +1635,58 @@ def _reference_rust_emitter():
     return module
 
 
+def _declared_emit_corpus() -> set[str]:
+    """The port's own coverage declaration — `test_selfhost_emit_rust.py::
+    CORPUS`, read from the file rather than restated here, so the crate oracle
+    and the port's byte-exact oracle cannot drift apart."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_selfhost_emit_rust_declaration",
+        ROOT / "tests" / "test_selfhost_emit_rust.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    declared = set(module.CORPUS)
+    assert declared, "the port declares no covered corpus"
+    return declared
+
+
+def _recorded_emit_divergences() -> set[str]:
+    """The documents the crate is KNOWN not to emit byte-identically, i.e. those
+    outside the port's declared corpus. SHRINK ONLY — see the fixture."""
+    return set(json.loads(_EMIT_CORPUS_DIVERGENCES.read_text())["diverged"])
+
+
 def test_emit_ir_is_byte_identical_to_the_reference(consumer):
     """The crate's `emit_ir(document, rust)` is `backends/rust/emit.py`, byte
-    for byte, over the rust emitter's own byte-exact corpus.
+    for byte, over every document the port declares it covers.
 
     The reference frontend stages each document's IR; the reference backend
-    emits from it; the crate emits from the same JSON text. No exclusions: the
-    frontier this crate is limited by is the self-host FRONTEND, and no frontend
-    is in this path.
+    emits from it; the crate emits from the same JSON text. The frontier this
+    crate is limited by is the self-host FRONTEND, and no frontend is in this
+    path — but the EMITTER embedded in the crate is itself a declared subset of
+    the reference, so the compared corpus is that declaration
+    (`test_selfhost_emit_rust.py::CORPUS`).
+
+    A fixture document outside the declaration is not silently skipped: the set
+    of documents that diverge must equal the recorded gap exactly, so a
+    divergence inside the declaration fails, a new one outside it fails, and a
+    recorded one that starts matching fails as a stale record.
     """
     from revl import compile_files  # noqa: PLC0415
 
     rustemit = _reference_rust_emitter()
+    declared = _declared_emit_corpus()
+    recorded = _recorded_emit_divergences()
+    assert recorded.isdisjoint(declared), (
+        "selfhost_emit_corpus_divergences.json lists documents the port "
+        "DECLARES it covers, so it cannot record them as a gap: "
+        f"{sorted(recorded & declared)}")
     paths = sorted(_EMIT_CORPUS_DIR.glob("*.rvl"))
     assert paths, f"the emit corpus is empty at {_EMIT_CORPUS_DIR}"
+    names = {path.name for path in paths}
+    assert declared <= names, (
+        "the port declares documents this directory does not hold: "
+        f"{sorted(declared - names)}")
 
     documents, expected = [], []
     for path in paths:
@@ -1643,23 +1695,31 @@ def test_emit_ir_is_byte_identical_to_the_reference(consumer):
         expected.append(rustemit.emit(ir))
 
     records = _crate_emits(consumer, "rust", documents)
-    offenders = []
+    offenders, diverged = [], set()
     for path, want, record in zip(paths, expected, records):
         if record["ok"] is not True:
+            diverged.add(path.name)
             offenders.append(f"{path.name}: refused {record.get('error')}")
         elif record["output"] != want:
+            diverged.add(path.name)
             offenders.append(
                 f"{path.name}: diverged (reference {len(want)} bytes, "
                 f"crate {len(record['output'] or '')})")
-    assert not offenders, (
-        f"the crate's native emitter diverged from the reference on "
-        f"{len(offenders)} of {len(paths)} documents:\n  "
+    assert diverged == recorded, (
+        f"the crate's native emitter diverged on {len(diverged)} of "
+        f"{len(paths)} documents: {sorted(diverged)}; "
+        f"selfhost_emit_corpus_divergences.json records {sorted(recorded)}. "
+        "A divergence INSIDE the port's declared corpus is a defect, one "
+        "outside it is the recorded gap, and a recorded gap that no longer "
+        "diverges is a stale record to delete.\n  "
         + "\n  ".join(offenders[:20]))
 
     # non-vacuity: the same comparison, against an expectation off by one byte.
     # A byte comparison that cannot fail is not evidence.
-    assert records[0]["output"] == expected[0]
-    assert records[0]["output"] != expected[0] + "X"
+    probe = next(i for i, path in enumerate(paths) if path.name in declared)
+    assert records[probe]["ok"] is True
+    assert records[probe]["output"] == expected[probe]
+    assert records[probe]["output"] != expected[probe] + "X"
 
 
 def test_emit_ir_fails_closed_outside_what_it_can_back(consumer):
