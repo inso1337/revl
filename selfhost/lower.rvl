@@ -8010,7 +8010,8 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
 // not scanned (the reference's grammar has no such position).
 fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
   let declared = ext_declared_names(ts, pg)
-  let gtys = sig_binds(ts, case_binds(ts, alias_map(ts)))
+  let al = alias_map(ts)
+  let gtys = sig_binds(ts, case_binds(ts, al), al)
   var seen: List[Str] = []
   var d = 0
   var i = 0
@@ -9035,52 +9036,56 @@ fn sig_raw_fnty(ps: List[ParamN], ret: Str) -> Str {
 // The second pass over the token stream: `case_binds` has to finish first,
 // because the single-uppercase heuristic is switched off by a DECLARED type
 // and a `type` may be written after the `fn` that mentions it.
-pub fn sig_binds(ts: List[Token], base: List[Bind]) -> List[Bind] {
-  return sig_walk(ts, 0, base, base)
+pub fn sig_binds(ts: List[Token], base: List[Bind],
+                 al: Map[Str, Str]) -> List[Bind] {
+  return sig_walk(ts, 0, base, base, al)
 }
 
 fn sig_walk(ts: List[Token], i: Int, decls: List[Bind],
-            acc: List[Bind]) -> List[Bind] {
+            acc: List[Bind], al: Map[Str, Str]) -> List[Bind] {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return sig_walk(ts, i + 1, decls, acc) }
-  if (at_event(ts, i)) { return sig_walk(ts, event_decl_end(ts, i), decls, acc) }
-  if (t.kind != "kw") { return sig_walk(ts, skip_line(ts, i), decls, acc) }
-  if (at_pub_prefix(ts, i)) { return sig_walk(ts, i + 1, decls, acc) }
-  if (t.text == "use") { return sig_walk(ts, skip_line(ts, i), decls, acc) }
+  if (at_boot(ts, i)) { return sig_walk(ts, i + 1, decls, acc, al) }
+  if (at_event(ts, i)) { return sig_walk(ts, event_decl_end(ts, i), decls, acc, al) }
+  if (t.kind != "kw") { return sig_walk(ts, skip_line(ts, i), decls, acc, al) }
+  if (at_pub_prefix(ts, i)) { return sig_walk(ts, i + 1, decls, acc, al) }
+  if (t.text == "use") { return sig_walk(ts, skip_line(ts, i), decls, acc, al) }
   if (t.text == "type") {
-    return sig_walk(ts, type_decl_end(ts, i + 1), decls, acc)
+    return sig_walk(ts, type_decl_end(ts, i + 1), decls, acc, al)
   }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return sig_walk(ts, e, decls, acc) }
-    return sig_walk(ts, skip_line(ts, i), decls, acc)
+    if (e != 0 - 1) { return sig_walk(ts, e, decls, acc, al) }
+    return sig_walk(ts, skip_line(ts, i), decls, acc, al)
   }
   if (t.text == "extern") {
     let h = ext_head(ts, i)
     let nx = p_extern(ts, i, empty_prog()).i
-    if (!h.ok) { return sig_walk(ts, nx, decls, acc) }
+    if (!h.ok) { return sig_walk(ts, nx, decls, acc, al) }
     let tps = collect_tparams(h.ps, h.ret, decls, [])
     return sig_walk(ts, nx, decls,
-                    sig_put(acc, h.name, h.ps, h.ret, tps, ""))
+                    sig_put(acc, h.name, alias_subst_params(h.ps, al),
+                            alias_subst(h.ret, al), tps, ""), al)
   }
   if (t.text == "service") {
-    return sig_walk(ts, p_service(ts, i, empty_prog()).i, decls, acc)
+    return sig_walk(ts, p_service(ts, i, empty_prog()).i, decls, acc, al)
   }
   if (t.text == "component") {
-    return sig_walk(ts, p_component(ts, i, empty_prog()).i, decls, acc)
+    return sig_walk(ts, p_component(ts, i, empty_prog()).i, decls, acc, al)
   }
   if (t.text == "fn") {
     let ps = params_at(ts, fn_params_i(ts, i))
     let nx = p_fn(ts, i, empty_prog()).i
-    if (!ps.ok) { return sig_walk(ts, nx, decls, acc) }
+    if (!ps.ok) { return sig_walk(ts, nx, decls, acc, al) }
     let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : ""
     let tps = collect_tparams(ps.ps, ret, decls, explicit_tparams(ts, i))
+    let sps = alias_subst_params(ps.ps, al)
+    let sret = alias_subst(ret, al)
     return sig_walk(ts, nx, decls,
-                    sig_put(acc, tkc(ts, i + 1).text, ps.ps, ret, tps,
-                            sig_raw_fnty(ps.ps, ret)))
+                    sig_put(acc, tkc(ts, i + 1).text, sps, sret, tps,
+                            sig_raw_fnty(sps, sret)), al)
   }
-  return sig_walk(ts, skip_line(ts, i), decls, acc)
+  return sig_walk(ts, skip_line(ts, i), decls, acc, al)
 }
 
 // One `extern` declaration's header: its name, parameters and declared return,
@@ -9824,7 +9829,7 @@ fn fb_host_value(e: Expr, scope: List[Bind]) -> Bool {
 
 // One statement of a fn body. Mirrors `own_one`'s reader token for token, so the
 // two cannot disagree about where a statement ends; what differs is the payload.
-fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
+fn fb_one(ts: List[Token], i: Int, hi: Int, al: Map[Str, Str]) -> FbStepR {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     // a destructuring pattern binds names this reader does not enumerate
@@ -9836,13 +9841,17 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     var dty = ""
     if (atk(ts, j, ":")) {
       let tr = type_at(ts, j + 1)
-      if (tr.ok) { dty = taint_strip(tr.ty) }
+      // a WRITTEN annotation is the checking position for the initialiser and
+      // the type the name takes, so it is erased here exactly as a declaration
+      // site's is (`_subst_body_annotations`): `let c: Count = 1` types as an
+      // `Int` binding, not a `Count` one.
+      if (tr.ok) { dty = alias_subst(taint_strip(tr.ty), al) }
       j = tr.i
     }
     if (!atk(ts, j, "=")) { return { step: fb_bail(), i: hi } }
-    // `Map.empty()`: this reader belongs to the ADMISSION walk, which judges a
-    // body's flow and emits nothing, so the alias table it would erase with is
-    // not threaded here.
+    // `Map.empty()`: only the RHS reader's EXTENT is taken from `lir_rhs`
+    // (`r.i`), never the text it would render, so the alias table it renders
+    // with is not threaded here.
     let r = lir_rhs(ts, j + 1, [], Map.empty())
     if (!r.ok) { return { step: fb_bail(), i: hi } }
     let ve = expr_at(ts, j + 1)
@@ -9877,12 +9886,12 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     }
     let tend = close_brace(ts, c.i)
     if (tend == 0 - 1) { return { step: fb_bail(), i: hi } }
-    let thenS = fb_scan(ts, c.i + 1, tend - 1)
+    let thenS = fb_scan(ts, c.i + 1, tend - 1, al)
     var elseS: List[FbStep] = []
     var nexti = tend
     if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
       let eend = close_brace(ts, tend + 1)
-      if (eend != 0 - 1) { elseS = fb_scan(ts, tend + 2, eend - 1)  nexti = eend }
+      if (eend != 0 - 1) { elseS = fb_scan(ts, tend + 2, eend - 1, al)  nexti = eend }
     }
     return { step: fb_block("if", "", t.line, c.e, thenS, elseS, []), i: nexti }
   }
@@ -9892,7 +9901,7 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     let bend = close_brace(ts, c.i)
     if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
     return { step: fb_block("while", "", t.line, c.e, [], [],
-                            fb_scan(ts, c.i + 1, bend - 1)), i: bend }
+                            fb_scan(ts, c.i + 1, bend - 1, al)), i: bend }
   }
   if (t.kind == "kw" && t.text == "for") {
     if (!atk(ts, i + 1, "(")) { return { step: fb_bail(), i: hi } }
@@ -9904,7 +9913,7 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
     let bend = close_brace(ts, it.i + 1)
     if (bend == 0 - 1) { return { step: fb_bail(), i: hi } }
     return { step: fb_block("for", bind, t.line, it.e, [], [],
-                            fb_scan(ts, it.i + 2, bend - 1)), i: bend }
+                            fb_scan(ts, it.i + 2, bend - 1, al)), i: bend }
   }
   if (t.kind == "ident" && atk(ts, i + 1, "=")) {
     let r = expr_at(ts, i + 2)
@@ -9924,13 +9933,13 @@ fn fb_one(ts: List[Token], i: Int, hi: Int) -> FbStepR {
   return { step: fb_step7("expr", "", false, t.line, r.e, "", ""), i: r.i }
 }
 
-fn fb_scan(ts: List[Token], lo: Int, hi: Int) -> List[FbStep] {
+fn fb_scan(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[FbStep] {
   var i = lo
   var out: List[FbStep] = []
   while (i < hi && !atk(ts, i, "}")) {
     if (atk(ts, i, ";")) { i += 1 }
     else {
-      let so = fb_one(ts, i, hi)
+      let so = fb_one(ts, i, hi, al)
       out = out.push(so.step)
       // a reader that cannot advance abandons the REST of this block, exactly
       // as a "bail" step does, so it records one: `fb_walk` reads the two
@@ -10100,11 +10109,17 @@ fn fb_params_scope(ps: List[ParamN], i: Int, acc: List[Bind]) -> List[Bind] {
 // contributes nothing, which leaves it on the gradual frontier rather than
 // guessing at it.
 fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
-                 tps: List[Str]) -> List[Bind] {
+                 tps: List[Str], al: Map[Str, Str]) -> List[Bind] {
   if (i >= ps.length()) { return acc }
-  let ty = mark_tparams(taint_strip(ps[i].ty), tps)
+  // The checker types the body against the ERASED annotation, because the
+  // reference erases before the checker runs — so `a + b` over two `Count`
+  // parameters of `fn add(a: Count, b: Count)` carries `operands: "Int"`. A
+  // seed that kept the alias spelling refused the document's own arithmetic
+  // with "operand of `+` expects `Int`, got `Count`" and reported a
+  // false-reject divergence the reference does not have.
+  let ty = mark_tparams(alias_subst(taint_strip(ps[i].ty), al), tps)
   return fb_params_tys(ps, i + 1,
-                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps)
+                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps, al)
 }
 
 // One module `fn` located from its `fn` keyword (`pub` already stepped over by
@@ -10297,7 +10312,8 @@ fn rp_refusal(ts: List[Token], sp: FbSpan, steps: List[FbStep]) -> Verd {
                  rp_last_line(steps, sp.line))
 }
 
-fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
+fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind],
+               al: Map[Str, Str]) -> Verd {
   // Inside its own body a fn's type parameters are universally quantified
   // wildcards (`T` -> `?T`, `mark_tparams`), so a generic signature's return
   // is not a concrete type the body can be held to. Without the marking
@@ -10305,11 +10321,11 @@ fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind]) -> Verd {
   // `return ident("hello")` drew a T1 naming `T` where the reference names the
   // UNIFIED `Str` — a refusal with the right verdict and the wrong sentence.
   let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
-  let steps = fb_scan(ts, sp.lo, sp.hi)
+  let steps = fb_scan(ts, sp.lo, sp.hi, al)
   // the body first, then the return question — `_lower_fns`' own order.
   let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []),
-                  fb_params_tys(sp.ps, 0, gtys, tps),
-                  mark_tparams(sp.ret, tps)).v
+                  fb_params_tys(sp.ps, 0, gtys, tps, al),
+                  mark_tparams(alias_subst(sp.ret, al), tps)).v
   if (v.v != "") { return v }
   return rp_refusal(ts, sp, steps)
 }
@@ -10324,40 +10340,42 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // signature rows (docs/design/457 T2b) are a second pass over the same
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
-  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts, alias_map(ts))))
+  let al = alias_map(ts)
+  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts, al), al), al)
 }
 
-fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind]) -> Verd {
+fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind],
+                 al: Map[Str, Str]) -> Verd {
   if (i >= ts.length() || atk(ts, i, "eof")) { return no_verd() }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fb_refusal_at(ts, i + 1, gtys) }
-  if (at_event(ts, i)) { return fb_refusal_at(ts, event_decl_end(ts, i), gtys) }
-  if (t.kind != "kw") { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
-  if (at_pub_prefix(ts, i)) { return fb_refusal_at(ts, i + 1, gtys) }
-  if (t.text == "type") { return fb_refusal_at(ts, type_decl_end(ts, i + 1), gtys) }
-  if (t.text == "use") { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
+  if (at_boot(ts, i)) { return fb_refusal_at(ts, i + 1, gtys, al) }
+  if (at_event(ts, i)) { return fb_refusal_at(ts, event_decl_end(ts, i), gtys, al) }
+  if (t.kind != "kw") { return fb_refusal_at(ts, skip_line(ts, i), gtys, al) }
+  if (at_pub_prefix(ts, i)) { return fb_refusal_at(ts, i + 1, gtys, al) }
+  if (t.text == "type") { return fb_refusal_at(ts, type_decl_end(ts, i + 1), gtys, al) }
+  if (t.text == "use") { return fb_refusal_at(ts, skip_line(ts, i), gtys, al) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fb_refusal_at(ts, e, gtys) }
-    return fb_refusal_at(ts, skip_line(ts, i), gtys)
+    if (e != 0 - 1) { return fb_refusal_at(ts, e, gtys, al) }
+    return fb_refusal_at(ts, skip_line(ts, i), gtys, al)
   }
   if (t.text == "extern") {
-    return fb_refusal_at(ts, p_extern(ts, i, empty_prog()).i, gtys)
+    return fb_refusal_at(ts, p_extern(ts, i, empty_prog()).i, gtys, al)
   }
   if (t.text == "service") {
-    return fb_refusal_at(ts, p_service(ts, i, empty_prog()).i, gtys)
+    return fb_refusal_at(ts, p_service(ts, i, empty_prog()).i, gtys, al)
   }
   if (t.text == "component") {
-    return fb_refusal_at(ts, p_component(ts, i, empty_prog()).i, gtys)
+    return fb_refusal_at(ts, p_component(ts, i, empty_prog()).i, gtys, al)
   }
   if (t.text == "fn") {
     let sp = fb_span(ts, i)
-    if (!sp.ok) { return fb_refusal_at(ts, skip_line(ts, i), gtys) }
-    let v = fb_function(ts, i, sp, gtys)
+    if (!sp.ok) { return fb_refusal_at(ts, skip_line(ts, i), gtys, al) }
+    let v = fb_function(ts, i, sp, gtys, al)
     if (v.v != "") { return v }
-    return fb_refusal_at(ts, sp.next, gtys)
+    return fb_refusal_at(ts, sp.next, gtys, al)
   }
-  return fb_refusal_at(ts, skip_line(ts, i), gtys)
+  return fb_refusal_at(ts, skip_line(ts, i), gtys, al)
 }
 
 // --------------------------------------- the shadowed module callable (G6/391)
@@ -10585,7 +10603,7 @@ fn csh_function(ts: List[Token], i: Int, sp: FbSpan, u: CshU) -> Verd {
   let pend = params_at(ts, i + 3).i
   let seed = csh_params(ts, i + 3, pend, sp.ps, 0, tkc(ts, i).line,
                         { bs: [], ok: true })
-  let bs = csh_binders(fb_scan(ts, sp.lo, sp.hi), 0, seed)
+  let bs = csh_binders(fb_scan(ts, sp.lo, sp.hi, Map.empty()), 0, seed)
   if (!bs.ok) { return no_verd() }
   return csh_first(bs.bs, 0, amb, u)
 }

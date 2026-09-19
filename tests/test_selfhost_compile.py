@@ -733,6 +733,84 @@ def test_native_gate_admits_the_whole_emit_surface(admit):
                 assert verdict == "", f"{key}: {verdict!r}"
 
 
+# The four checking positions a transparent type alias has to be erased at, plus
+# the ones that must not move. Issue #1148's own fix erased at every LOWERING
+# site and left the ADMISSION walk seeding its type environment from the RAW
+# annotations, so the gate typed a body against the alias SPELLING while the
+# reference types it against the erased type: `fn add(a: Count, b: Count)` drew
+# "operand of `+` expects `Int`, got `Count`" for `a + b`, on a document the
+# reference admits. Every case below is admitted by the reference and refused by
+# the native gate before the fix, except the four marked GUARD, which are admitted
+# on both trees and are here so the fix cannot buy the four by spilling substitution
+# somewhere it does not belong.
+ALIAS_ERASURE_CASES: dict[str, str] = {
+    # the reference's whole-program uniform-name-substitution rule, so a
+    # declaration site alone is not enough: the environment has to be seeded.
+    "fn_params": "type Count = Int\n"
+                 "fn add(a: Count, b: Count) -> Count { return a + b }",
+    "fn_returns": "type Sku = Str\n"
+                  "fn tag() -> Sku { return \"x\" }",
+    "let_annotation": "type Count = Int\n"
+                      "fn one() -> Count { let c: Count = 1 return c }",
+    "let_annotation_widens": "type Ratio = Float\n"
+                             "fn wide() -> Ratio { let r: Ratio = 1 return r }",
+    "let_annotation_pins_empty": "type Ids = List[Int]\n"
+                                 "fn none() -> Ids { let xs: Ids = [] return xs }",
+    "extern_parameter": "type Count = Int\n"
+                        "extern pure fn bump(n: Count) -> Count = @py { return n + 1 }\n"
+                        "fn calls() -> Count { return bump(1) }",
+    "extern_parameter_through_a_let":
+        "type Count = Int\n"
+        "extern pure fn bump(n: Count) -> Count = @py { return n + 1 }\n"
+        "fn calls2() -> Count { let n: Count = 1 return bump(n) }",
+    "operand_of_a_multiply": "type Ratio = Float\n"
+                             "fn scale(r: Ratio) -> Ratio { return r * 2.0 }",
+    "variant_payload":
+        "type Count = Int\n"
+        "type Found = Hit(Count) | Missing\n"
+        "fn payload(f: Found) -> Count { return match f { Hit(n) => n, Missing => 0 } }",
+    "record_field": "type Count = Int\n"
+                    "type Row = { id: Count }\n"
+                    "fn read(r: Row) -> Count { return r.id }",
+    "alias_of_an_alias": "type Count = Int\n"
+                         "type Tally = Count\n"
+                         "fn chained(n: Tally) -> Tally { return n }",
+    # GUARD: every alias in the same document without a checker position that
+    # would have disagreed, so only a substitution that is too eager can move one.
+    "handler_in_a_parameter": "type Count = Int\n"
+                              "type Sku = Str\n"
+                              "type Handler = (Count) -> Sku\n"
+                              "fn takes(h: Handler) -> Sku { return h(1) }",
+    "arrow_annotations": "type Count = Int\n"
+                         "type Sku = Str\n"
+                         "fn f() -> Sku { let g = (v: Count): Sku => \"x\" return g(1) }",
+    "keyed_read": "type Reg = Map[Str, Int]\n"
+                  "type Sku = Str\n"
+                  "fn keyed(m: Reg, k: Sku) -> Int { return m[k] }",
+    "nested_type_argument": "type Ids = List[Int]\n"
+                            "fn first(xs: Ids) -> Int { return xs[0] }",
+}
+
+
+@pytest.mark.parametrize("case", sorted(ALIAS_ERASURE_CASES))
+def test_native_gate_erases_a_transparent_alias_before_it_types_a_body(admit, case):
+    """Issue #1148's GATE half. `selfhost/lower.rvl` erases a transparent alias
+    (`_resolve_type_aliases`' counterpart) at every declaration site, and the
+    reference erases BEFORE the checker runs — so the admission walk must seed its
+    type environment, its `let` annotations, its return type and its signature
+    rows from the ERASED spelling too. Seeded from the raw annotation instead, the
+    gate refused the document's own arithmetic (`got `Count``), its own return, its
+    own `let`, and its own call to an aliased extern, all four on documents the
+    reference admits.
+
+    Named separately from the corpus sweep above so a regression reports WHICH
+    checking position lost the substitution, not just that some document refused.
+    """
+    source = ALIAS_ERASURE_CASES[case]
+    compile_source(source)  # the reference admits it first
+    assert admit(source) == "", f"{case}: {admit(source)!r}"
+
+
 # --------------------------------------------- the refusal composes too
 
 # Programs the reference REJECTS. The composed native driver must refuse them with
