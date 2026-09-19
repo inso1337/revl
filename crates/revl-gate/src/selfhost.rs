@@ -4464,7 +4464,7 @@ fn wire_cap(k: &str) -> String {
 }
 
 fn cap_render_s(s: String) -> String {
-    return if starts_with(&s, "key:") { s.revl_slice(4i64, s.revl_length()) } else { s.clone() };
+    return if starts_with__m0(&s, "key:") { s.revl_slice(4i64, s.revl_length()) } else { s.clone() };
 }
 
 fn cap_ord(n: &str) -> String {
@@ -4634,7 +4634,7 @@ fn cap_forbidden(v: &str) -> bool {
 }
 
 fn canon_path(raw: &str) -> String {
-    if (!starts_with(raw, "/")) {
+    if (!starts_with__m0(raw, "/")) {
         return String::from("");
     }
     let mut body = raw.revl_slice(1i64, raw.revl_length());
@@ -4739,7 +4739,7 @@ fn cap_tok_at(ts: &[Token], i: i64, end: i64) -> CapRd {
         if (!pr.ok) {
             bad = true;
         } else {
-            if contains(&names, &pr.name) {
+            if contains__m0(&names, &pr.name) {
                 bad = true;
             } else {
                 names.push(pr.name.clone());
@@ -4790,10 +4790,10 @@ fn cap_piece(p: &str) -> CapP {
     }
     let nm = p.revl_slice(0i64, eq);
     let v = p.revl_slice((eq).checked_add(1i64).expect("revl: Int overflow"), p.revl_length());
-    if ((v.revl_length() >= 2i64) && starts_with(&v, "\"")) {
+    if ((v.revl_length() >= 2i64) && starts_with__m0(&v, "\"")) {
         return CapP { name: nm.clone(), ord: cap_ord(&nm), sv: v.revl_slice(1i64, (v.revl_length()).checked_sub(1i64).expect("revl: Int overflow")), iv: 0i64 };
     }
-    if starts_with(&v, "config.") {
+    if starts_with__m0(&v, "config.") {
         return CapP { name: nm.clone(), ord: String::from("sym"), sv: v.clone(), iv: 0i64 };
     }
     return CapP { name: nm.clone(), ord: String::from("ceil"), sv: String::from(""), iv: dec_value(&v) };
@@ -4870,7 +4870,7 @@ fn leq_path(narrow: &str, wide: &str) -> bool {
     if (narrow == wide) {
         return true;
     }
-    return starts_with(narrow, &(wide.revl_concat("/")));
+    return starts_with__m0(narrow, &(wide.revl_concat("/")));
 }
 
 fn cap_param_leq(narrow: CapP, wide: CapP) -> bool {
