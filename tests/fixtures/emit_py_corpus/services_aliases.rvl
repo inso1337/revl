@@ -1,0 +1,25 @@
+// The COMPONENT-side declaration sites a transparent type alias reaches (issue
+// #1148): a service method's parameters and return, and a component config
+// field. The reference erases the alias at all three before the IR is written
+// (`lower.py`'s `_resolve_type_aliases`), so the services table, the component
+// header's config schema and the provide-method bodies all carry the aliased
+// type and never the alias name.
+//
+// `type_aliases.rvl` is the module half of the same construct; this is the half
+// the services/config/provide projections see.
+type Sku = Str
+type Count = Int
+
+service Ledger {
+  fn record(sku: Sku, n: Count) -> Count
+  fn label(sku: Sku) -> Sku
+}
+
+component Books provides ledger: Ledger {
+  config { prefix: Sku, start: Count }
+
+  provide ledger {
+    fn record(sku, n) = n + 1
+    fn label(sku) = config.prefix
+  }
+}
