@@ -141,14 +141,13 @@ KNOWN_BYPASSES = {
     # The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
     # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
     # `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
-    # reference's own sentence and have been struck from this list. What remains
-    # is the optional-chain rule (T2d) and the provide-method BODY, whose type
-    # environment — requirement handles, activation locals, config fields, the
-    # service signature — is the component slice's to build; the gate walks one
-    # over the empty environment today, which decides `null` and the `Float`
-    # literal bound and stays silent about every rule a name would answer for.
+    # reference's own sentence and have been struck from this list, and the
+    # provide-method slice has since struck `t30` the same way: the walk over a
+    # component body now carries the environment that slice left empty — the
+    # method parameters at the service's declared types, the body's annotated
+    # and inferred locals, the activation locals at the operations they bind.
+    # What remains is the optional-chain rule, which is T2d's.
     "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-    "examples/rejections/t30_field_read_on_any_provide_method.rvl",
     # -- calls and signatures --
     # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
     # type parameters, the arity window, `unify`/`substitute` at a generic call
@@ -179,17 +178,18 @@ KNOWN_BYPASSES = {
     # destructuring rule in `_lower_let_pattern_stmt`.
     "examples/rejections/t18_type_alias_cycle.rvl",
     "examples/rejections/t5_destructure_nonrecord.rvl",
-    # -- provide-method and component bodies --
-    "examples/rejections/t1_service_arg_type.rvl",
-    "examples/rejections/t4_field_arg_type.rvl",
-    "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
-    "examples/rejections/t16_provide_method_missing_return.rvl",
-    "examples/rejections/t31_index_non_int_provide_method.rvl",
-    "examples/rejections/t3_config_default_type.rvl",
-    # -- NOT the type layer --
-    # `_check_spawn_attenuation`'s two parameterized rows —
+    # -- provide-method and component bodies: NONE --
+    # The whole family closed with the provide-method slice (docs/design/457).
+    # `t1_service_arg_type`, `t4_field_arg_type`,
+    # `t7_provide_param_annotation_mismatch`,
+    # `t16_provide_method_missing_return`,
+    # `t31_index_non_int_provide_method` and `t3_config_default_type` now refuse
+    # with the reference's own sentence; `t30_field_read_on_any_provide_method`
+    # left the expression-typing group above in the same change.
+    # -- NOT the type layer: the parameterized rows are STRUCK --
+    # `_check_spawn_attenuation`'s two parameterized rows --
     # `g4_spawn_widens_parameter` (a `path` cone) and `g4_spawn_widens_budget`
-    # (a `calls` ceiling) — are STRUCK: `selfhost/lower.rvl` now carries the
+    # (a `calls` ceiling) -- are STRUCK: `selfhost/lower.rvl` now carries the
     # `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
     # so both sides of the attenuation fold are spelled in the boundary's own
     # namespace and both refuse with the reference's message byte-for-byte.
