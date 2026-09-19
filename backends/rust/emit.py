@@ -9850,7 +9850,22 @@ def emit(ir: dict, record: bool = False) -> str:
 
 
 def cargo_toml(name: str = "revl_components") -> str:
-    """A minimal Cargo.toml for the emitted crate."""
+    """A minimal Cargo.toml for the emitted crate.
+
+    `serde_json` carries `preserve_order`. stdlib/value.rvl's `@rs` accessors
+    box a `serde_json::Value`, and `value_keys` / `value_children` over a record
+    read the host map in INSERTION order — which serde_json preserves only with
+    that feature (its default map is a `BTreeMap`, i.e. sorted). Every emitted
+    crate that walks an erased `Value` — a self-hosted emitter reading the
+    backend IR is the whole point of the erasure — needs it, and stdlib/json.rvl
+    needs the same for `json_stringify`'s canonical key order (the `@py` body is
+    `json.dumps` without `sort_keys`, so insertion order IS canonical).
+    Measured, not assumed: without it 10 of the 34 documents in
+    tests/fixtures/emit_rust_corpus emit rust that differs from the reference's
+    when the self-hosted rust emitter is RUN natively (the record-shaped ones —
+    records/variants/services/config), because a record's fields come back
+    sorted rather than in document order.
+    """
     return (
         "[package]\n"
         f'name = "{name}"\n'
@@ -9860,7 +9875,7 @@ def cargo_toml(name: str = "revl_components") -> str:
         "[dependencies]\n"
         'cordis = { package = "cordis-rs", version = "0.6" }\n'
         'serde = { version = "1", features = ["derive"] }\n'
-        'serde_json = "1"\n'
+        'serde_json = { version = "1", features = ["preserve_order"] }\n'
     )
 
 
