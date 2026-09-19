@@ -2160,7 +2160,7 @@ fn list_param_escapes(node: Value, candidates: std::collections::HashMap<String,
             return true;
         }
         for a in value_list(value_field(node.clone(), String::from("args"))) {
-            if list_param_escapes(a.clone(), candidates.clone(), read, borrow.clone(), names.clone()) {
+            if list_param_escapes(a.clone(), candidates.clone(), read.clone(), borrow.clone(), names.clone()) {
                 return true;
             }
         }

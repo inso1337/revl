@@ -882,9 +882,9 @@
           "_map_value_expr_type": 67,
           "_map_value_rust_type": 2
         },
-        "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions.": {
+        "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions. The count rose 26 -> 32 with issue #1157: a test body now gets the same per-fn by-value analysis a function body gets (reuse counts, the loop-repeat widening, movable `for` iterables, empty-`vec!` element types), because running those rules with an EMPTY reuse set moved a reused local at its first use and `cargo check` never compiles `#[cfg(test)]` to say so. The six statements sit on the same unreachable path as the rest of this bucket: no rust byte-agreement corpus document carries an in-file `test` at all, and one that did would flip the oracle red rather than close the gap, because selfhost/emit_rust.rvl emits no test section. The reference half is pinned by backends/rust/test_emit_rust.py::test_test_body_gets_the_same_by_value_analysis_as_a_function_body and by the `--all-targets` build of tests/fixtures/emit_rust_corpus/loop_moves.rvl.": {
           "_emit_v3_lifecycle_tests": 81,
-          "_emit_v3_tests": 30,
+          "_emit_v3_tests": 32,
           "_lifecycle_uses_advance": 1,
           "_refuse_fault_tests": 2
         },

@@ -2724,17 +2724,83 @@ def test_for_iterable_dead_and_live_and_nested_cargo_build(tmp_path):
         assert result.returncode == 0, result.stderr
 
 
+# ---------------------------------------------------------------------------
+# issue #1157: the reuse signal counts TEXTUAL references and cannot see a loop.
+#
+# `_by_value_arg` decides a move from the binding's surface type and falls back
+# to a reference count when it cannot infer one. A ternary initialiser is
+# exactly that un-inferable case, so a binding read once inside a `while` body
+# counted as single-use and was moved — sound on the first iteration, E0382 on
+# the second. `let caps = emit_caps(pg.fns)` in the same loop always compiled,
+# because a call with a declared return type IS typed and the known-non-Copy
+# path clones regardless of the count.
+#
+# The fix is the count, not the type: a read inside a loop body executes more
+# than once, so it is a reuse. `tests/fixtures/emit_rust_corpus/loop_moves.rvl`
+# pins the shape — before the fix it emitted three `E0382`s under
+# `cargo check --all-targets`; the two controls in it (a binding DECLARED inside
+# the loop that reads it, and a `for` iterable, which is evaluated once before
+# the loop opens) still move, so the fix does not just clone everything.
+_LOOP_MOVES_RVL = ROOT / "tests" / "fixtures" / "emit_rust_corpus" / "loop_moves.rvl"
+
+
+def _loop_moves_src() -> str:
+    return emit.emit(compile_files([str(_LOOP_MOVES_RVL)]))
+
+
+def test_ternary_binding_read_once_inside_a_loop_clones():
+    """A once-read binding the emitter could not type is cloned when the read
+    is inside the loop, and still moved when the binding is loop-local."""
+    src = _loop_moves_src()
+    # declared before the `while`, read once inside it -> the read repeats
+    assert "own(head.clone())" in src
+    # declared by the OUTER loop, read by the INNER one -> still repeats
+    assert "own(inner.clone())" in src
+    # declared inside the loop that reads it -> fresh per iteration, still moves
+    assert "own(each)" in src
+    assert "own(each.clone())" not in src
+    # a `for` iterable is evaluated once, before the loop opens
+    assert "for row in rows {" in src
+    # ... but under an outer `while` that evaluation itself repeats
+    assert "for row in rows.clone() {" in src
+
+
+def test_test_body_gets_the_same_by_value_analysis_as_a_function_body():
+    """`_emit_v3_tests` ran the by-value rules with an EMPTY reuse set, so a
+    reused local in a `#[cfg(test)]` body moved at its first use. `cargo check`
+    stops at the lib, so no oracle compiled the body that held the error."""
+    src = _loop_moves_src()
+    tests = src[src.index("#[test]"):]
+    assert tests.count("own(head.clone())") == 3  # 2 textual reuses + 1 in a loop
+    assert "own(head)" not in tests
+
+
+@needs_cargo
+def test_loop_moves_corpus_cargo_checks_all_targets(tmp_path):
+    """`cargo check` alone does not reach a `#[cfg(test)]` body, so the gate for
+    this shape is `--all-targets`. On the pre-fix emitter this document failed
+    with `use of moved value` for `head`, `inner` and `rows` in the lib, and for
+    `head` twice more in the test target."""
+    result = _cargo_check(tmp_path, _loop_moves_src(), "--all-targets")
+    assert result.returncode == 0, result.stderr
+
+
 @needs_cargo
 def test_all_selfhost_stages_cargo_build(tmp_path):
     """The item-278 definition-of-done: EACH of the lexer/parser/checker/lower
     self-host stages emits AND `cargo build`s (item 270 got only the lexer; the
     other three hit the E0072/E0382/E0308/E0282 gaps this item closes). This is
-    the precondition for the item-266 full-pipeline native benchmark."""
+    the precondition for the item-266 full-pipeline native benchmark.
+
+    `--all-targets` because a plain `cargo check` builds the lib and stops: it
+    never compiles the `#[cfg(test)]` module the emitter writes out of the
+    document's own in-file `test` blocks, so a borrow error in an emitted test
+    body was invisible to every oracle (issue #1157)."""
     for stage in ("lexer", "parser", "checker", "lower"):
         crate = tmp_path / stage
         crate.mkdir()
         src = emit.emit(compile_files([str(ROOT / "selfhost" / f"{stage}.rvl")]))
-        result = _cargo_check(crate, src)
+        result = _cargo_check(crate, src, "--all-targets")
         assert result.returncode == 0, f"{stage} failed:\n{result.stderr}"
 
 
