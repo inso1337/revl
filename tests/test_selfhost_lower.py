@@ -1186,6 +1186,58 @@ service S { fn go(u: Str) -> Int }
 component C provides s: S { provide s { fn go(u) = 1 } }
 """),
 
+    # ---- issue #1151: what is NOT a transparent alias -----------------------
+    # `type Sv = Ops` and `type O = Unknown` look like aliases and are not: the
+    # reference's `_alias_target` reads the CLASSIFIER, and a right-hand side
+    # that is neither an application, a builtin head nor a declared type is a
+    # one-case VARIANT whose single case is a nullary tag. A nullary tag carries
+    # no type to walk, so both are data and both ADMIT. The gate classified by
+    # RHS shape, called them aliases, followed the right-hand side into the
+    # service and into the unresolvable head, and refused — in the FAIL-FAST
+    # config phase, so nothing behind it ran either.
+    ("a one-case nominal whose case name is a service name", """
+service Ops { fn go() -> Int }
+type Sv = Ops
+component C provides ops: Ops {
+  config { s: Sv }
+  provide ops { fn go() = 1 }
+}
+"""),
+    ("a one-case nominal whose case name is declared nowhere", """
+type Opaque = NotDeclaredAnywhere
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { x: Opaque }
+  provide ops { fn go() = 1 }
+}
+"""),
+    # the CONTROL: a transparent alias that really is data still admits, and a
+    # variant of nullary tags — the shape the two rows above are misread as —
+    # admits as it always did.
+    ("a component config field aliasing a scalar", """
+type Name = Str
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { n: Name = "x" }
+  provide ops { fn go() = 1 }
+}
+"""),
+    ("a component config field of a nullary-tag variant", """
+type Colour = Red | Green
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { c: Colour }
+  provide ops { fn go() = 1 }
+}
+"""),
+    ("a component config field written as a secret", """
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { t: Secret[Str] }
+  provide ops { fn go() = 1 }
+}
+"""),
+
     # ---- item 391 / issue #106: extern declarations and inverse slots ------
     # The accepting twins of the extern refusals pinned in REJECTED_PROGRAMS.
     # Each is a legal extern whose inverse slot must keep admitting: an
@@ -2585,6 +2637,104 @@ fn f() -> Int {
   let n = 2
 }
 """, "T1"),
+
+
+    # ---- issue #1151: the config-is-data walk asks AFTER alias erasure -----
+    # `_resolve_type_aliases` runs before `check_config_field_is_data`, so the
+    # reference asks the config question of a program in which every transparent
+    # alias is already substituted and its declaration dropped. The gate read the
+    # WRITTEN spelling and followed the alias itself, which named the alias in
+    # the diagnostic where the reference names the erased type. Each row below
+    # pins the byte the reference writes, and the pair of them pins the two
+    # DIFFERENT answers the same alias draws either side of the substitution
+    # boundary: a component's `config` IS a substitution site, an extern's is
+    # NOT — so the extern sees an alias head with no declaration left behind it
+    # and calls it opaque.
+    #
+    # The COMPONENT half is pinned here and not as a file under
+    # `examples/rejections/` on purpose. `formal/harness/diff_corpus.py` walks
+    # `examples`, `tck` and `tests` and treats `missed-G4` as FATAL, and the
+    # Lean model's G4 row is the emission-marker and host-acquire pair — it has
+    # no config-is-data obligation and no type-shape facts to build one from —
+    # so a COMPONENT-shaped G4 document anywhere in those trees fails the formal
+    # gate until that row exists. Measured both ways: the document fails the
+    # harness from `examples/rejections/` and from `tests/formal_corpus/`
+    # alike. These rows are STRINGS, so `load_corpus` still carries them into
+    # the gate/reference census and the formal harness never sees them. The
+    # EXTERN half stays a file (`g4_extern_config_alias_opaque.rvl`): it
+    # declares no component, so the harness files it under `no-manifest`
+    # beside `g4_missing_undo.rvl` — named, not fatal.
+    ("a component config field aliasing an arrow type", """
+type Cb = (Int) -> Str
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: Cb }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("a component config field aliasing a list of arrows", """
+type Cb = (Int) -> Str
+type Row = List[Cb]
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: Row }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("a component config field aliasing an alias of an arrow", """
+type Inner = (Int) -> Str
+type Outer = Inner
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: Outer }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("a component config field aliasing the erased type", """
+type Loose = Any
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { x: Loose }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("an extern config field aliasing an arrow type is OPAQUE", """
+type Cb = (Int) -> Str
+extern pure fn render(body: Str) -> Str
+  config { cb: Cb }
+  = @py { return body }
+""", "G4"),
+    # the alias TARGET keeps its qualifier, and that is what decides this one.
+    # A config field WRITTEN `Secret[Str]` is legitimate — the parser takes the
+    # qualifier off the annotation, so `cfg.type` is `Str` and the walk sees
+    # data — but an alias target is a TYPE SPELLING, so substitution puts
+    # `Secret[Str]` itself into the field and the walk finds `Secret` opaque.
+    # This reader stripped the qualifier off a declaration's right-hand side
+    # when it recorded it, remembered `type Tok = Secret[Str]` as `Str`, and
+    # drew nothing. Its accepting twin — the same field written out — is in
+    # ACCEPTED_PROGRAMS.
+    ("a component config field aliasing a secret", """
+type Tok = Secret[Str]
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { t: Tok }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    # the CONTROLS that must keep refusing unchanged: the same field written
+    # without an alias, on both owners.
+    ("a component config field written as an arrow type", """
+service Ops { fn go() -> Int }
+component C provides ops: Ops {
+  config { cb: (Int) -> Str }
+  provide ops { fn go() = 1 }
+}
+""", "G4"),
+    ("an extern config field written as an arrow type", """
+extern pure fn render(body: Str) -> Str
+  config { cb: (Int) -> Str }
+  = @py { return body }
+""", "G4"),
 ]
 
 
@@ -3597,6 +3747,79 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
         f"probe bug: the reference answers {ref_tag!r} ({ref_msg!r}), so this "
         f"program does not pit the two rules against each other")
     assert admit(src) == f"{ref_tag}|{ref_msg}"
+
+
+# ---- issue #1151: rule C1 is not reachable through a type alias ------------
+#
+# The issue reads `refuse_self_declared_async` as a site that asks a type
+# question BEFORE alias erasure: the reference erases first and sees
+# `Async[Int]`, the gate asks first and sees `Later`. The reading is right about
+# the order and wrong about the consequence, and the difference is worth an
+# executable pin rather than a sentence, because it is the reason this gate has
+# nothing to erase there.
+#
+# `_resolve_type_aliases` calls `check_type_wellformed` on every alias TARGET,
+# with `allow_async_param=False`, before it expands anything. `Async` is
+# position-restricted: outside a function type's return it is "not a value
+# type", and inside one it is "only supported as a module `fn` parameter". So an
+# alias whose target mentions `Async` at all is refused AT ITS OWN DECLARATION,
+# in the erasure pass, and no arrow annotation naming it is ever reached. An
+# expansion can only introduce `Async` through some link whose immediate target
+# spells it, and that link is checked too, so a chain cannot smuggle one either.
+#
+# These programs are deliberately NOT rows in ACCEPTED_PROGRAMS or
+# REJECTED_PROGRAMS: those lists are census corpus (`load_corpus`), the
+# reference refusal here carries `code="A1"`, and the gate runs no type
+# well-formedness layer — so filing them there would book a `false-admit/A1`
+# against a divergence that is the type-layer gap already named above.
+ALIAS_OF_ASYNC = [
+    ("a bare alias of Async", """
+type Later = Async[Int]
+fn run() -> Int {
+  let g = (n: Int): Later => n
+  return 1
+}
+"""),
+    ("an alias of a function type returning Async", """
+type Task = (Int) -> Async[Str]
+fn run() -> Int {
+  let g = (n: Int): Task => (m: Int) => "x"
+  return 1
+}
+"""),
+    ("an alias of an alias of a function type returning Async", """
+type Inner = (Int) -> Async[Str]
+type Task = Inner
+fn run() -> Int {
+  let g = (n: Int): Task => (m: Int) => "x"
+  return 1
+}
+"""),
+    ("the alias declared after the arrow that names it", """
+fn run() -> Int {
+  let g = (n: Int): Task => (m: Int) => "x"
+  return 1
+}
+type Task = (Int) -> Async[Str]
+"""),
+]
+
+
+@pytest.mark.parametrize("name,src", ALIAS_OF_ASYNC,
+                         ids=[n for n, _ in ALIAS_OF_ASYNC])
+def test_an_alias_mentioning_async_is_refused_at_its_declaration(name, src):
+    """Not by rule C1, and not at the arrow: by the erasure pass itself.
+
+    The line the reference reports is the ALIAS declaration's, which is what
+    makes the point — C1 never runs on these programs, so an alias table
+    threaded into `self_async_expr` would have no input that changes an answer.
+    """
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "A1", (name, ref_tag, ref_msg)
+    assert "may not declare its own async colour" not in ref_msg, (name, ref_msg)
+    assert ("is not a value type" in ref_msg
+            or "only supported as a module `fn` parameter" in ref_msg), \
+        (name, ref_msg)
 
 
 def test_the_type_layer_gap_is_exactly_18_fixtures():

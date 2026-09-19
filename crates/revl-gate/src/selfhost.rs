@@ -335,6 +335,7 @@ pub struct CfgFld {
 pub struct CfgOwner {
     owner: String,
     flds: Vec<CfgFld>,
+    erase: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -347,6 +348,13 @@ pub struct CfgAcc {
 pub struct CfgTyR {
     t: CfgTy,
     i: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AliasScan {
+    declared: Vec<String>,
+    names: Vec<String>,
+    targets: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -6307,21 +6315,6 @@ fn cfg_walk(fname: &str, owner: &str, tyname: &str, root_: &str, svcs: &[String]
         let offender = if cfg_data_erased(&p.head) { (String::from("the erased type `").revl_concat(&p.head)).revl_concat("`") } else { (String::from("the opaque type `").revl_concat(&p.head)).revl_concat("`") };
         return cfg_data_msg(fname, owner, root_, &offender);
     }
-    if (d.kind == "alias") {
-        let r = cfg_walk(fname, owner, &d.rhs, root_, svcs, decls, visited, &d.params);
-        if (r != "") {
-            return r;
-        }
-        let mut i = 0i64;
-        while (i < p.args.revl_length()) {
-            let r2 = cfg_walk(fname, owner, &(p.args)[(i) as usize], root_, svcs, decls, visited, tparams);
-            if (r2 != "") {
-                return r2;
-            }
-            i = (i).checked_add(1i64).expect("revl: Int overflow");
-        }
-        return String::from("");
-    }
     if (!contains__m0(visited, &p.head)) {
         let v2 = visited.revl_push(p.head.clone());
         let tp2 = d.params;
@@ -6512,6 +6505,130 @@ fn cfg_collect_types(ts: Vec<Token>) -> Vec<CfgTy> {
     return out;
 }
 
+fn is_aliasable_builtin(name: &str) -> bool {
+    return ((is_builtin_type_name(name) || (name == "Criterion")) || (name == "Guard"));
+}
+
+fn is_alias_target(target: String, declared: &[String]) -> bool {
+    if (target == "") {
+        return false;
+    }
+    let p = ty_parse(target.clone());
+    if (p.args.revl_length() > 0i64) {
+        return true;
+    }
+    return (is_aliasable_builtin(&p.head) || contains__m0(declared, &p.head));
+}
+
+fn alias_scan(ts: Vec<Token>) -> AliasScan {
+    let mut declared: Vec<String> = vec![];
+    let mut names: Vec<String> = vec![];
+    let mut targets: Vec<String> = vec![];
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        if at_event(&ts, i) {
+            declared.push(tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
+            let e = event_decl_end(&ts, i);
+            i = if (e > i) { e } else { (i).checked_add(1i64).expect("revl: Int overflow") };
+        } else {
+            if atw(&ts, i, "type") {
+                let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+                declared.push(nm.clone());
+                let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+                let mut tparams = false;
+                if atk(&ts, j.clone(), "[") {
+                    tparams = true;
+                    j = skip_brackets(&ts, j.clone());
+                }
+                let mut end = cfg_decl_end(&ts, j);
+                if atk(&ts, j, "=") {
+                    end = cfg_decl_end(&ts, (j).checked_add(1i64).expect("revl: Int overflow"));
+                    if (((!tparams) && (!atk(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "{"))) && (!cfg_is_variant_rhs(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), end))) {
+                        names.push(nm.clone());
+                        targets.push(type_at(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow")).ty);
+                    }
+                }
+                i = if (end > i) { end } else { skip_line(&ts, i) };
+            } else {
+                i = (i).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+    }
+    return AliasScan { declared: declared.clone(), names: names.clone(), targets: targets.clone() };
+}
+
+fn alias_at(al: std::collections::HashMap<String, String>, name: String) -> String {
+    return match al.get(&name).cloned() {
+    Some(v) => v,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+}
+
+fn alias_subst(ty: String, al: std::collections::HashMap<String, String>) -> String {
+    if ((ty == "") || ((al.len() as i64) == 0i64)) {
+        return ty;
+    }
+    let p = ty_parse(ty.clone());
+    if (p.args.revl_length() > 0i64) {
+        let mut out: Vec<String> = vec![];
+        let mut i = 0i64;
+        while (i < p.args.revl_length()) {
+            out.push(alias_subst((p.args)[(i) as usize].clone(), al.clone()));
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return ty_render(p.head.clone(), &out);
+    }
+    return if al.contains_key(&p.head) { alias_at(al.clone(), p.head.clone()) } else { ty.clone() };
+}
+
+fn alias_subst_params(ps: Vec<ParamN>, al: std::collections::HashMap<String, String>) -> Vec<ParamN> {
+    if ((al.len() as i64) == 0i64) {
+        return ps;
+    }
+    let mut out: Vec<ParamN> = vec![];
+    let mut i = 0i64;
+    while (i < ps.revl_length()) {
+        out.push(Bind { name: (ps)[(i) as usize].name.clone(), ty: alias_subst((ps)[(i) as usize].ty.clone(), al.clone()) });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn alias_map(ts: Vec<Token>) -> std::collections::HashMap<String, String> {
+    let sc = alias_scan(ts.clone());
+    let mut raw = std::collections::HashMap::new();
+    let mut i = 0i64;
+    while (i < sc.names.revl_length()) {
+        if is_alias_target((sc.targets)[(i) as usize].clone(), &sc.declared) {
+            raw.insert((sc.names)[(i) as usize].clone(), (sc.targets)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut out = raw.clone();
+    let mut round = 0i64;
+    let mut settled = ((raw.len() as i64) == 0i64);
+    while ((!settled) && (round <= sc.names.revl_length())) {
+        let mut next = std::collections::HashMap::new();
+        let mut changed = false;
+        let ks = { let mut ks: std::vec::Vec<String> = out.keys().cloned().collect(); ks.sort(); ks };
+        let mut k = 0i64;
+        while (k < ks.revl_length()) {
+            let v = alias_at(out.clone(), (ks)[(k) as usize].clone());
+            let e = alias_subst(v.clone(), out.clone());
+            next.insert((ks)[(k) as usize].clone(), e.clone());
+            if (e != v) {
+                changed = true;
+            }
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        out = next.clone();
+        settled = (!changed);
+        round = (round).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn cfg_fields_in(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgFld> {
     let mut j = lo;
     while ((j < hi) && (!(atw(&ts, j, "config") && atk(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "{")))) {
@@ -6551,7 +6668,7 @@ fn cfg_comp_owner(ts: Vec<Token>, i: i64) -> CfgOwner {
     let end = close_brace(&ts, j.clone());
     let lo = (j).checked_add(1i64).expect("revl: Int overflow");
     let hi = if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { (end).checked_sub(1i64).expect("revl: Int overflow") };
-    return CfgOwner { owner: (String::from("component `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), lo, hi) };
+    return CfgOwner { owner: (String::from("component `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), lo, hi), erase: true };
 }
 
 fn cfg_extern_owner(ts: Vec<Token>, i: i64, endi: i64) -> CfgOwner {
@@ -6560,7 +6677,7 @@ fn cfg_extern_owner(ts: Vec<Token>, i: i64, endi: i64) -> CfgOwner {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     let nm = if atw(&ts, j.clone(), "fn") { tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text } else { String::from("") };
-    return CfgOwner { owner: (String::from("extern `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), i, endi) };
+    return CfgOwner { owner: (String::from("extern `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), i, endi), erase: false };
 }
 
 fn cfg_owners_walk(ts: Vec<Token>, i: i64, a: CfgAcc) -> CfgAcc {
@@ -6633,14 +6750,47 @@ fn cfg_svc_names(svcs: &[SvcD]) -> Vec<String> {
     return out;
 }
 
-fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
-    let svcs = cfg_svc_names(&pg.svcs);
-    let decls = cfg_collect_types(ts.clone());
-    let acc = cfg_owners_walk(ts.clone(), 0i64, CfgAcc { comps: vec![], exts: vec![] });
-    let owners = cfg_owner_concat(acc.comps.clone(), acc.exts.clone());
+fn cfg_erase_binds(bs: &[Bind], al: std::collections::HashMap<String, String>) -> Vec<Bind> {
+    let mut out: Vec<Bind> = vec![];
+    let mut i = 0i64;
+    while (i < bs.revl_length()) {
+        out.push(Bind { name: (bs)[(i) as usize].name.clone(), ty: alias_subst((bs)[(i) as usize].ty.clone(), al.clone()) });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn cfg_erase_cases(cs: &[CfgCaseD], al: std::collections::HashMap<String, String>) -> Vec<CfgCaseD> {
+    let mut out: Vec<CfgCaseD> = vec![];
+    let mut i = 0i64;
+    while (i < cs.revl_length()) {
+        out.push(CfgCaseD { cname: (cs)[(i) as usize].cname.clone(), payload: alias_subst((cs)[(i) as usize].payload.clone(), al.clone()) });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn cfg_erase_decls(ds: &[CfgTy], al: std::collections::HashMap<String, String>) -> Vec<CfgTy> {
+    let mut out: Vec<CfgTy> = vec![];
+    let mut i = 0i64;
+    while (i < ds.revl_length()) {
+        let d = (ds)[(i) as usize].clone();
+        if (!al.contains_key(&d.name)) {
+            if (d.kind == "alias") {
+                out.push(CfgTy { name: d.name.clone(), kind: String::from("variant"), fields: vec![], cases: vec![CfgCaseD { cname: d.rhs.clone(), payload: String::from("") }], params: d.params.clone(), rhs: String::from("") });
+            } else {
+                out.push(CfgTy { name: d.name.clone(), kind: d.kind.clone(), fields: cfg_erase_binds(&d.fields, al.clone()), cases: cfg_erase_cases(&d.cases, al.clone()), params: d.params.clone(), rhs: d.rhs.clone() });
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn cfg_owner_verdict(os: &[CfgOwner], al: std::collections::HashMap<String, String>, svcs: &[String], decls: &[CfgTy]) -> Verd {
     let mut oi = 0i64;
-    while (oi < owners.revl_length()) {
-        let o = (owners)[(oi) as usize].clone();
+    while (oi < os.revl_length()) {
+        let o = (os)[(oi) as usize].clone();
         let mut fi = 0i64;
         while (fi < o.flds.revl_length()) {
             let f = (o.flds)[(fi) as usize].clone();
@@ -6648,7 +6798,8 @@ fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
             if (wf.v != "") {
                 return wf;
             }
-            let r = cfg_walk(&f.fname, &o.owner, &f.fty, &f.fty, &svcs, &decls, &(vec![]), &(vec![]));
+            let t = if o.erase { alias_subst(f.fty.clone(), al.clone()) } else { f.fty };
+            let r = cfg_walk(&f.fname, &o.owner, &t, &t, svcs, decls, &(vec![]), &(vec![]));
             if (r != "") {
                 return mk_verd(r.clone(), f.line);
             }
@@ -6657,6 +6808,14 @@ fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
         oi = (oi).checked_add(1i64).expect("revl: Int overflow");
     }
     return no_verd();
+}
+
+fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
+    let svcs = cfg_svc_names(&pg.svcs);
+    let al = alias_map(ts.clone());
+    let decls = cfg_erase_decls(&cfg_collect_types(ts.clone()), al.clone());
+    let acc = cfg_owners_walk(ts.clone(), 0i64, CfgAcc { comps: vec![], exts: vec![] });
+    return cfg_owner_verdict(&cfg_owner_concat(acc.comps.clone(), acc.exts.clone()), al.clone(), &svcs, &decls);
 }
 
 fn wf_has(msg: &str, sub: &str) -> bool {
