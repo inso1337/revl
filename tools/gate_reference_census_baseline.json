@@ -1,9 +1,5 @@
 {
  "buckets": {
-  "false-admit/G1": [
-   "examples/rejections/g1_template_undeclared.rvl",
-   "examples/rejections/v2_undeclared_fn_var.rvl"
-  ],
   "false-admit/T1": [
    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
    "examples/rejections/t16_provide_method_missing_return.rvl",
@@ -102,18 +98,6 @@
    "reference": {
     "message": "",
     "tag": ""
-   }
-  },
-  "examples/rejections/g1_template_undeclared.rvl": {
-   "bucket": "false-admit/G1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`nobody` is not declared in this function",
-    "tag": "G1"
    }
   },
   "examples/rejections/t13_unknown_match_case.rvl": {
@@ -318,18 +302,6 @@
    "reference": {
     "message": "non-exhaustive match: missing case `Invalid`",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/v2_undeclared_fn_var.rvl": {
-   "bucket": "false-admit/G1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`missing` is not declared in this function",
-    "tag": "G1"
    }
   }
  },
