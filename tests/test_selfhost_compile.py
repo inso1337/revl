@@ -540,6 +540,20 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # component edge shapes; the host-root and realm-placement documents
         # left this list when lower.rvl grew those two surfaces.
         "component_edges.rvl",
+        # issue 1153's two component documents. Neither is an EMITTER residual:
+        # the rust byte oracle in tests/test_selfhost_emit_rust.py holds both
+        # byte-exact when it is handed the REFERENCE IR (host runtime and all),
+        # so what is left is the native IR producer. `comp_await_job.rvl`'s
+        # activation body awaits a host `Job`: the reference IR carries that
+        # host declaration's runtime block and `selfhost/lower.rvl` does not, so
+        # the native chain emits 7,067 bytes against the reference's 11,094 —
+        # the module with no `Job`/`JobHandle` runtime in it. `comp_stream.rvl`
+        # is refused before any rust is built (the same G1 `NATIVE_GATE_GAPS`
+        # records below). Both are `selfhost/lower.rvl`'s, and both are NAMED
+        # rather than skipped, so the day lower.rvl grows either surface this
+        # list shrinks instead of quietly keeping a waiver nobody rereads.
+        "comp_await_job.rvl",
+        "comp_stream.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
@@ -704,6 +718,20 @@ NATIVE_GATE_GAPS: dict[str, str] = {
     # The `witnessed.rvl` false refusal (`BAD|expected fn after extern`) is CLOSED
     # — the gate admits it, and its `lower_to_ir` externs section was already
     # byte-exact (tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP is empty).
+    #
+    # `selfhost/lower.rvl` does not put a `subscribe` acquisition's bind into the
+    # component scope it resolves call heads against (`call_head_declared` reads
+    # `cx.scopeNames`), so the later `sub.next()` reads as an undeclared access
+    # and draws the shared G1 diagnostic. The REFERENCE admits the document; it
+    # is the self-host frontend that refuses, and it refuses the tree's existing
+    # stream scenario `backends/rust/scenarios/stream.rvl` with the identical
+    # verdict. So this is a pre-existing lower.rvl gap that the first stream
+    # document in the emit corpus makes visible, not one this document
+    # introduces, and it is the frontend lane's to close (item 391), not the
+    # emitter's: the rust emit oracle holds this same document byte-exact
+    # against the reference, stream runtime and all (issue 1153).
+    "emit_rust_corpus/comp_stream.rvl":
+        "G1|`sub` is not a declared requirement of Parked",
 }
 
 
