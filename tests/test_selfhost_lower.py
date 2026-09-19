@@ -5966,6 +5966,16 @@ _NR_LATER_SLICES = (
     # Owned by the signature slice, which decides what a name's type is; matched
     # on the arrow because that is the only thing the missing type appears as.
     ") -> ",
+    # the TERNARY branch-agreement rule (`typecheck.py`): the two arms of
+    # `cond ? A : B` must share a type. The draw is `_nr_expr`'s `k == 6`, and
+    # against `_NR_HEAD`'s `type NrShape = NrCircle | NrSquare(Int)` an arm that
+    # is the bare case `NrCircle` beside one that is `c: List[Int]` always
+    # disagrees. The reference raises it while TYPING the statement, ahead of the
+    # lowering walk this slice runs in, so a program carrying one is refused by
+    # the gate at a LATER statement — the name read inside a following statement,
+    # which is a true refusal of the same program and not a gate error. Owned by
+    # the type layer, like `payload expects` above.
+    "ternary branches disagree",
 )
 
 _NR_TAGS = ("G1", "T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
