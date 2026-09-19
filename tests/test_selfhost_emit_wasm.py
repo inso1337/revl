@@ -324,13 +324,12 @@ def test_fn_type_param_refused(emitted, reference):
     # and not calls in general.
     pytest.param("extern pure fn f() -> Int = @wasm { (i64.const 7) }\nfn g() -> Int { return f() }",
                  "(func $f", "<<UNSUPPORTED-CALL:f>>", id="wasm-extern"),
-    # The port drops the whole in-file test section and puts nothing in its
-    # place, so there is no port-only text to pin: witnessed by the absence of
-    # the reference's test function from the port's output. (This case used to
-    # pin `$f`, the document's own emitted function, which both sides emit --
-    # see tests/_boundary_witness.py.)
+    # issue #1123: the port_token here used to be `$f` — the emitted function
+    # itself, present in EVERY wasm emission of this document, so the witness
+    # could not tell a named refusal from silence, which is what the port
+    # actually produced. It now pins the marker.
     pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
-                 "$revl_test_probe", None, id="in-file-tests"),
+                 "$revl_test_probe", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
 ])
 def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
                                          reference_token, port_token):
@@ -361,6 +360,64 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
     with pytest.raises(AssertionError, match="text the REFERENCE also emits"):
         assert_boundary_witness(want, got, "$revl_test_probe", "$f")
     assert_boundary_witness(want, got, "$revl_test_probe", None)
+
+
+STREAM_130 = ROOT / "backends" / "go" / "testdata" / "stream_130.rvl"
+
+
+def test_a_stream_document_the_reference_refuses_is_refused_by_name_here_too(
+    emitted, reference,
+):
+    """item 130 §4.6 / issue #81: the port must not answer where the reference refuses.
+
+    `backends/go/testdata/stream_130.rvl` is six stream components. This tier
+    REFUSES it BY NAME -- a subscription suspends a fiber and this tier awaits
+    only `Job.run(name)` -- and the refusal names the component it stopped on.
+    The port answered the same document with a 376-byte module: a valid, empty
+    WAT module for a program this tier does not accept.
+
+    That is the sharpest form of the defect, because what the port dropped was
+    ITSELF A REFUSAL. A wrong lowering is visible; a tier limit the reference
+    states and its port does not is silence, and silence is the one direction
+    this design is meant to make impossible. Each component is now named.
+    """
+    ir = compile_files([str(STREAM_130)])
+    names = [component["name"] for component in ir["components"]]
+    assert names == ["Consumer", "Parked", "Fanin", "Windowed", "Iterate", "Chain"]
+    with pytest.raises(reference.EmitError) as exc:
+        reference.emit(ir)
+    assert "Consumer" in str(exc.value), (
+        "the reference names what it refuses: this case no longer exercises it"
+    )
+    got = emitted["emit_wasm_src"](ir)
+    assert [line.strip() for line in got.splitlines() if "<<" in line] == [
+        f";; <<UNSUPPORTED-COMPONENT:{name}>>" for name in names
+    ], "one marker per components entry, in document order"
+
+
+def test_the_component_marker_is_text_only_the_port_emits(emitted, reference,
+                                                          tmp_path):
+    """The boundary witness for the marker, on a document the reference EMITS.
+
+    `emit_wasm_src` is this port's whole answer for a document -- it is what
+    `compile_to(source, "wasm")` returns -- while the reference answers with a
+    `{module: wat}` map that carries a SEPARATE module per component. Here the
+    reference emits both `functions` and `C`; the port emits the functions
+    module and has nothing of `C`, so the marker is the only place the absence
+    is stated. `<<UNSUPPORTED-COMPONENT:C>>` appears nowhere in the reference's
+    answer, which is what makes this a witness rather than a coincidence
+    (item 1136).
+    """
+    path = tmp_path / "mixed.rvl"
+    path.write_text("fn f() -> Int { return 1 }\n"
+                    "service S { fn g() -> Int }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+    ir = compile_files([str(path)])
+    modules = reference.emit(ir)
+    assert set(modules) == {"functions", "C"}
+    want, got = "\n".join(modules.values()), emitted["emit_wasm_src"](ir)
+    assert_boundary_witness(want, got, ';; component C',
+                            "<<UNSUPPORTED-COMPONENT:C>>")
 
 
 @pytest.mark.parametrize("source, reason", [
