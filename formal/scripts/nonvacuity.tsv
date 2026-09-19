@@ -211,3 +211,17 @@ RevL.A9.unrouted_needs_a_block	instance	RevL.A9.a9_not_vacuous	the renamed twin 
 RevL.A9.routed_installs_without_block	instance	RevL.A9.a9_converse_not_vacuous	RoundRobin: no block, every declared key routed, admitted
 RevL.A9.a9_converse_not_vacuous	concrete	-	the second fixture refused, RoundRobin admitted with no block, a backend with a block admitted
 RevL.A9.a9_directions_are_distinct	concrete	-	the two directions separated: halfDeclaredS passes 1 and fails 2, extraBlockS fails 1 and passes 2
+RevL.A2.a2Fold_iff	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_refused	both sides inhabited: the fold from a clear flag accepts okBody and A2OK holds of it; the fixture is refused by the fold and by the rule
+RevL.A2.a2B_iff	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_refused	a2B decides true on okBody (which satisfies A2OK) and false on the fixture, so the printed A2 verdict is mutation-sensitive
+RevL.A2.labels_distinct	necessity	RevL.A2.a2_not_vacuous	the two labels are different Expr literals; both are exhibited on the stack of okBody
+RevL.A2.stack_all_brackets	instance	RevL.A2.a2_not_vacuous	the stack of okBody is [release, withdrawal], two brackets
+RevL.A2.phase1_of_brackets	instance	RevL.A2.a2_not_vacuous	the all-bracket hypothesis holds of okBody's stack and the settling one of commit and abort; the halted pass is empty, so settling is load-bearing
+RevL.A2.stack_of_no_acquire	instance	RevL.A2.a2_not_vacuous	a body of provisions only is [provide]'s suffix of okBody; the hypothesis is not the empty body's alone
+RevL.A2.stack_shape	instance	RevL.A2.a2_not_vacuous	A2OK holds of okBody and its stack is one release then one withdrawal, both counts 1
+RevL.A2.proof_pass_is_withdrawals_then_releases	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_opens_the_window	A2OK and settles hold together on okBody under commit and abort, where the pass is [withdrawal, release]; the fixture shows the A2OK hypothesis excludes a real body
+RevL.A2.withdrawals_precede_releases	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_opens_the_window	the same instance; the fixture's pass violates the conclusion, so the ordering claim is not true of every body
+RevL.A2.teardown_labels	instance	RevL.A2.a2_not_vacuous	okBody's commit teardown is the two labels in that order, and the halted teardown is empty
+RevL.A2.fixture_refused	concrete	-	the fold refuses [acquire, provide, acquire], the shape of a2_acquire_after_provide.rvl
+RevL.A2.fixture_release_before_withdrawal	concrete	-	the fixture's proof pass under commit and abort runs a release before the withdrawal: the window docs/rejections.md#a2 describes
+RevL.A2.fixture_opens_the_window	necessity	RevL.A2.fixture_release_before_withdrawal,RevL.A2.a2_not_vacuous	the refused pass is computed, and the refusal is not universal: okBody's pass satisfies the ordering claim
+RevL.A2.a2_not_vacuous	concrete	-	okBody = [acquire, provide]: admitted by the fold and the rule, stack [release, withdrawal], commit and abort passes [withdrawal, release], halted pass empty

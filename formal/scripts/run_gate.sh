@@ -227,7 +227,21 @@ python3 scripts/axioms_gate.py \
   RevL.A9.unrouted_needs_a_block \
   RevL.A9.routed_installs_without_block \
   RevL.A9.a9_converse_not_vacuous \
-  RevL.A9.a9_directions_are_distinct < .axioms.out
+  RevL.A9.a9_directions_are_distinct \
+  RevL.A2.a2Fold_iff \
+  RevL.A2.a2B_iff \
+  RevL.A2.labels_distinct \
+  RevL.A2.stack_all_brackets \
+  RevL.A2.phase1_of_brackets \
+  RevL.A2.stack_of_no_acquire \
+  RevL.A2.stack_shape \
+  RevL.A2.proof_pass_is_withdrawals_then_releases \
+  RevL.A2.withdrawals_precede_releases \
+  RevL.A2.teardown_labels \
+  RevL.A2.fixture_refused \
+  RevL.A2.fixture_release_before_withdrawal \
+  RevL.A2.fixture_opens_the_window \
+  RevL.A2.a2_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -268,6 +282,8 @@ python3 scripts/axioms_gate.py \
   RevLOracle.fenced_not_reissued \
   RevLOracle.declared_idempotent_reissued \
   RevLOracle.reportedSeqLabels_nil_iff_clean \
-  RevLOracle.a9RowB_iff < .oracle-axioms.out
+  RevLOracle.a9RowB_iff \
+  RevLOracle.parseStep_stepName \
+  RevLOracle.a2OKB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

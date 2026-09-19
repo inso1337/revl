@@ -7,6 +7,7 @@ import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.R4_NoResidue
 import RevL.Theorems.A9_ProvideKeyDeclared
+import RevL.Theorems.A2_NoAcquisitionAfterProvision
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -150,6 +151,15 @@ Fact rows in (tab-separated, one fact per line):
                                              re-issued. Not a WAL record — a
                                              property of the world the
                                              reference drives.
+  AQ <file> <comp> <ord> <acquire|provide|other>
+                                             one activation-body statement,
+                                             at body index `ord`, as the A2
+                                             rule sees it (issue 1166):
+                                             `acquire` is a `let … = effect`,
+                                             a bare `effect`, a timer or an
+                                             `every … in` iteration — the four
+                                             forms `lower._dispatch_action`
+                                             refuses after a provision
 
 Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 — the checker's own parser. Nothing here re-reads the capability grammar.
@@ -170,6 +180,9 @@ Verdict rows out:
                                                    or installs anything
   D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
   O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a>   A8/R4 recovery
+  A2 <file> <comp> <a2=ok|fail>                    no acquisition after a
+                                                   provision: `RevL.A2.a2B`
+                                                   over the body's `AQ` steps
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -1364,6 +1377,71 @@ def closeN (n : Nat) (edges : List (String × String)) (closed : CapMap) : CapMa
   | 0 => closed
   | n + 1 => closeN n edges (oneStep edges closed)
 
+/-! ## Deciding A2: no acquisition after a provision (issue 1166)
+
+The `AQ` rows are one component's activation body in order, each statement
+as the rule sees it. The verdict is `RevL.A2.a2B` — the checker's own fold
+(`lower._dispatch_action`: a flag set at the first `provide`, an acquisition
+refused while it is set) — and `a2OKB_iff` below is the bridge to the
+declarative rule `RevL.A2.A2OK`, the hypothesis of
+`RevL.A2.withdrawals_precede_releases`: under it the Phase-1 proof pass of
+the body's stack runs every withdrawal before every release. So an `A2 …
+a2=ok` row is a component whose teardown cannot revert an acquisition while a
+provision is still callable, and the reference recomputes the same fold
+independently from the TSV (`diff_corpus.reference_from_tsv`). -/
+
+section A2Ordering
+
+/-- One activation-body statement of one component, at body index `ord`. -/
+structure AQRow where
+  path : String
+  comp : String
+  ord : Nat
+  kind : String
+
+def parseAQ (f : List String) : Option AQRow :=
+  match f with
+  | ["AQ", path, comp, ord, kind] => ord.toNat?.map fun n => ⟨path, comp, n, kind⟩
+  | _ => none
+
+/-- The exporter's spelling of a step, read back as the model's `Step`. -/
+def parseStep : String → Option RevL.A2.Step
+  | "acquire" => some .acquire
+  | "provide" => some .provide
+  | "other" => some .other
+  | _ => none
+
+/-- The exporter's spelling of a step (`diff_corpus._a2_step`). -/
+def stepName : RevL.A2.Step → String
+  | .acquire => "acquire"
+  | .provide => "provide"
+  | .other => "other"
+
+/-- **The spelling round-trips**: every step the model names is read back
+as itself, so no body step is silently dropped between the two sides. -/
+theorem parseStep_stepName : ∀ s : RevL.A2.Step, parseStep (stepName s) = some s := by
+  intro s; cases s <;> rfl
+
+/-- Insertion by body index, so the steps are folded in body order whatever
+order the rows arrived in. -/
+def insertByOrd (r : AQRow) : List AQRow → List AQRow
+  | [] => [r]
+  | x :: xs => if r.ord ≤ x.ord then r :: x :: xs else x :: insertByOrd r xs
+
+def sortByOrd (rs : List AQRow) : List AQRow := rs.foldr insertByOrd []
+
+/-- **A2 decider**: the model's fold over the body's steps. -/
+def a2OKB (steps : List RevL.A2.Step) : Bool := RevL.A2.a2B steps
+
+/-- **The A2 verdict is the model's rule**: the printed Bool is `true`
+exactly when no `provide` is followed by an `acquire`
+(`RevL.A2.a2B_iff`). -/
+theorem a2OKB_iff (steps : List RevL.A2.Step) :
+    a2OKB steps = true ↔ RevL.A2.A2OK steps :=
+  RevL.A2.a2B_iff steps
+
+end A2Ordering
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1410,6 +1488,7 @@ def main (args : List String) : IO UInt32 := do
     let lrecs := fields.filterMap parseL
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
+    let aqrows := fields.filterMap parseAQ
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
@@ -1583,6 +1662,19 @@ def main (args : List String) : IO UInt32 := do
           else
             let n := registrationsB prog fuel (bodyOfHeads r.inverse)
             out := out ++ s!"U5\t{p}\t{r.comp}\t{r.index}\tteardown={n}\n"
+      -- A2 verdicts (no acquisition after a provision, issue 1166), one per
+      -- component, decided by the model's own fold over the body's ordered
+      -- steps — the component's `AQ` rows, sorted by body index. An unknown
+      -- step kind is a hard error, never a silently shorter body.
+      let uaq := aqrows.filter (fun r => r.path == p)
+      for cn in fm.map (·.name) do
+        let mine := sortByOrd (uaq.filter (fun r => r.comp == cn))
+        if mine.any (fun r => (parseStep r.kind).isNone) then
+          IO.eprintln s!"oracle: unknown body step kind in {p} {cn}"
+          return 1
+        let steps := mine.filterMap (fun r => parseStep r.kind)
+        let av := if a2OKB steps then "ok" else "fail"
+        out := out ++ s!"A2\t{p}\t{cn}\ta2={av}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1640,3 +1732,5 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.declared_idempotent_reissued
 #print axioms RevLOracle.reportedSeqLabels_nil_iff_clean
 #print axioms RevLOracle.a9RowB_iff
+#print axioms RevLOracle.parseStep_stepName
+#print axioms RevLOracle.a2OKB_iff
