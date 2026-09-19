@@ -103,6 +103,19 @@ document each, which is the half that stops them regressing:
     every arm over it lost its `payload_type`.
   * `async_colour.rvl` — the whole-program async colour on a fn entry, the stamp
     an emitter reads to render `async`/`await`.
+
+Issue #1148 is the same shape reached from the DECLARATION side. A transparent
+type alias (`type Count = Int`) is erased by the reference before anything
+downstream runs (`lower.py`'s `_resolve_type_aliases`), so the IR, the checker
+and every backend read `Int` and never `Count`. No document in this corpus had
+ever declared one, so both oracles agreed vacuously on the construct while the
+self-host producer carried the alias name through untouched — at fn and extern
+signatures, service methods, record fields, case payloads, config fields, `let`
+annotations and arrow annotations, and in every annotation the erased type
+DECIDES (`operands`, `widen`, the empty-literal pin, a keyed `Map` read).
+`type_aliases.rvl` and `services_aliases.rvl` are those documents, with
+`type_aliases_control.rvl` — the same program with the aliases spelled out —
+green on both trees so a broken projection cannot pass for the fix.
 """
 
 import importlib.util
@@ -139,6 +152,7 @@ FUNCTION_EMIT_READY_DOCS = [
     "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
     "maps.rvl", "annotated_lets.rvl", "adt_inference.rvl",
     "extern_neighbours.rvl", "async_colour.rvl",
+    "type_aliases.rvl", "type_aliases_control.rvl",
     "generics.rvl", "variant_multiline.rvl", "else_if.rvl", "arrows.rvl",
     "async_arrow_arg.rvl",
     "events.rvl", "braceless.rvl", "record_writes.rvl", "reserved_keys.rvl",
@@ -310,6 +324,61 @@ def test_native_ir_annotates_a_map_subscript(lower_to_ir):
     assert keyed["key_type"] == "Str" and keyed["value_type"] == "Int"
     assert "key_type" not in reference[1]["body"][-1]["expr"]
     assert native == reference
+
+
+def test_native_ir_erases_a_transparent_type_alias(lower_to_ir):
+    """Issue #1148 — `type Count = Int` is a TRANSPARENT alias, and the reference
+    substitutes it at every declaration site and drops the declaration before the
+    IR is written (`_resolve_type_aliases`), so nothing downstream ever sees the
+    name. The self-host producer carried it through, and this corpus declared no
+    alias at all, so the byte-agreement projections had nothing to compare.
+
+    Each site the reference's sweep covers is pinned here beside the reference's
+    own answer, including the annotations the ERASED type decides rather than
+    spells: `operands` on arithmetic over two aliased parameters is `Int`, not
+    absent."""
+    source = (
+        "type Count = Int\n"
+        "type Ids = List[Count]\n"
+        "type Tally = Count\n"
+        "type Row = { id: Count }\n"
+        "type Found = Hit(Count) | Missing\n"
+        "extern pure fn bump(n: Count) -> Count = @py { return n + 1 }\n"
+        "fn add(a: Count, b: Count) -> Tally { return a + b }\n"
+        "fn first(xs: Ids) -> Count { return xs[0] }\n"
+    )
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert reference["functions"][0]["params"][0]["type"] == "Int"
+    assert reference["functions"][0]["returns"] == "Int"
+    assert reference["functions"][0]["body"][-1]["expr"]["operands"] == "Int"
+    assert reference["functions"][1]["params"][0]["type"] == "List[Int]"
+    assert reference["externs"][0]["returns"] == "Int"
+    assert reference["types"] == {
+        "Row": {"params": [], "kind": "record", "fields": {"id": "Int"}},
+        "Found": {"params": [], "kind": "variant",
+                  "cases": [{"name": "Hit", "payload": "Int"},
+                            {"name": "Missing", "payload": None}]},
+    }
+    for section in ("functions", "types", "externs", "ir_version"):
+        assert native[section] == reference[section], section
+
+
+def test_native_ir_keeps_a_single_case_nominal(lower_to_ir):
+    """The other side of #1148's classifier. `type Status = Pending` names no
+    declared type and no builtin, which is where TypeScript raises TS2304 — so
+    revl keeps its own one-case-variant reading and the name SURVIVES. Erasing by
+    the shape of the right-hand side rather than by the reference's
+    `_alias_target` question would take this entry out of the `types` section
+    with it."""
+    source = "type Status = Pending\nfn hold(s: Status) -> Status { return s }\n"
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert reference["types"]["Status"]["cases"] == [
+        {"name": "Pending", "payload": None}]
+    assert reference["functions"][0]["returns"] == "Status"
+    for section in ("functions", "types", "ir_version"):
+        assert native[section] == reference[section], section
 
 
 def test_native_ir_keeps_the_declaration_after_an_extern(lower_to_ir):
