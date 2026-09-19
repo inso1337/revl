@@ -244,6 +244,7 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+
     # item 378: the third rule under G4, and the only one that judges a
     # DECLARED TYPE rather than a crossing. A config value is injected as
     # static data, so an arrow field would be a live callable the body invokes
@@ -254,6 +255,15 @@ REJECTIONS = {
     "g4_config_record_arrow.rvl":
         "config field `hooks` of component `Loader` has type `Hooks`, which "
         "reaches an arrow (function) type; a config field must be static data",
+
+    # item 343: the same bound with a DOTTED, realm-style token. It is here
+    # because a dotted token is the shape a reader can silently split into two
+    # capabilities, which puts the wiring key into the declared scope by
+    # accident and passes the bound on a program the reference refuses.
+    "g4_dotted_capability_key.rvl":
+        "`Task.go` is declared `emission[fs.write]`, but this implementation "
+        "emits through `fs` (reaching `fs.ingest`)",
+
     # item 260: the BUDGET half of attenuation. Stripping the ceilings makes
     # both sides the same bare `net`, so only the dedicated ceiling check sees
     # it. Its accepted twin is `examples/budget_attenuation.rvl`; the pair is

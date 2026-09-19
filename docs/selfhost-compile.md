@@ -242,15 +242,60 @@ clean. `tests/test_selfhost_emit_rust.py::test_the_rust_emitter_builds_as_rust`
 holds it, running the build rather than inferring it from byte-exact emit, which
 is the item-266 lesson.
 
+### Driving it: the rust-side IR constructor
+
+Building is not running, one level up from the item-266 lesson. The emitted
+emitter's entry takes the interchange IR as an `Any`, which erases to the opaque
+`cordis::Value`, and nothing a generated `main` can spell builds one of those.
+
+The constructor for that slot already shipped: `stdlib/json.rvl::json_parse`,
+whose `@rs` body is `Value::new(serde_json::from_str::<serde_json::Value>(&s)..)`
+— the same boxing `stdlib/value.rvl`'s `@rs` accessors downcast back out. What
+was missing was the COMPOSITION, and it is a revl document, not rust:
+
+```
+use "selfhost/emit_rust.rvl" { emit_rust_src }
+use "stdlib/json.rvl" { json_parse }
+
+pub fn drive(ir_text: Str) -> Str { return emit_rust_src(json_parse(ir_text)) }
+```
+
+`tools/bench_selfhost_rust.py::driver_document` generates exactly that, which
+turns an IR-consuming emitter into a `Str -> Str` filter a generated `main` — or
+any embedder — can call. One stage earlier, `selfhost/lower.rvl::lower_to_ir`
+already renders the IR as JSON TEXT, so the same composition spells the WHOLE
+native chain: revl source in, rust source out, in one binary. That is what
+`selfhost/compile.rvl::compile_to` is on the py tier; compile.rvl itself cannot
+be emitted to rust, because it `use`s `emit_py.rvl` and that emitter's
+CPython-only `py_repr` extern has no `@rs` body.
+
+Two gates hold the result, each checking that the comparison it just passed is
+capable of failing (a byte comparison that cannot fail is not evidence):
+
+* `test_the_rust_emitter_runs_as_rust_and_matches_the_reference` — the emitter,
+  run natively over the whole byte-exact corpus, emits the reference's bytes;
+* `test_the_whole_native_chain_runs_as_rust_and_matches_the_reference` — source
+  in, rust out, over the subset `tests/test_selfhost_compile.py` already holds
+  the native chain to (its `RUST_FUNCTION_DOCS` + `RUST_COMPONENT_DOCS`; the rest
+  of the emitter corpus is excluded there for the same reason, the native IR
+  producer rather than the emitter being the frontier).
+
+`tools/bench_selfhost_rust.py` therefore measures the `emit_rust` stage natively
+instead of recording it unmeasured. `emit_py` stays unmeasured, with the `py_repr`
+refusal as its reason.
+
+One manifest requirement comes with this. `stdlib/value.rvl`'s `value_keys` /
+`value_children` read a record's fields in INSERTION order, which `serde_json`
+preserves only under its `preserve_order` feature (its default map is sorted), so
+`backends/rust/emit.py::cargo_toml` now enables it. Measured, not assumed:
+without it, 10 of the 34 emit_rust corpus documents — the record-shaped ones —
+emit rust that differs from the reference's when the emitter is RUN.
+
 What Stage 4 still needs after this is no longer an emit gap:
 
-* the emitted emitter has to be DRIVEN, and its entry takes the interchange IR as
-  an `Any`, which erases to `cordis::Value` with no rust-side constructor to build
-  one from source. That is why `tools/bench_selfhost_rust.py` records every
-  emitter stage as `ir_in` and measures none of them;
 * `crates/revl-gate` generates the FRONTEND only (`selfhost/lower.rvl` and its
-  `use` closure). Its `compile_to` names both blockers per tier now, rather than
-  giving one reason that fits neither;
+  `use` closure), so the emitter is not in it. Its `compile_to` names what each
+  tier is missing;
 * `selfhost/emit_rust.rvl` does not mirror `_coerce_any_arg`, so no byte-agreement
   corpus document can reach the four crossings above without flipping the oracle
   red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines.json` with
