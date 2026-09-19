@@ -667,6 +667,18 @@ def select(changed, root) -> dict:
         if f.startswith("tools/"):
             return _full(f"non-python tools change {f} -> full")
 
+        # --- formal/harness/** (the differential oracle's own half) --------- #
+        # Narrower than the block below, and deliberately: `diff_corpus.py`
+        # decides the REFERENCE side of every verdict the Lean oracle is
+        # diffed against, and `Oracle.lean` states each judgment a second
+        # time. `tests/test_formal_config_data_row.py` holds the two spellings
+        # of the config-is-data allowlist to each other and the exporter's
+        # type walk to the shipped checker, and needs no toolchain — so a
+        # change in here is collected on a machine where the gate skips. It
+        # falls through to the formal block, which adds the gate itself.
+        if f.startswith("formal/harness/"):
+            pytest_nodes.add("tests/test_formal_config_data_row.py")
+
         # --- formal/** (the Lean backbone) and its own corpus --------------- #
         # A formal/ change affects the formal gate and one pytest module, and
         # nothing else (plus lint, which is always run). Deliberately narrower
