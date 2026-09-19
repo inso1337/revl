@@ -680,20 +680,23 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_formal_config_data_row.py")
 
         # --- formal/** (the Lean backbone) and its own corpus --------------- #
-        # A formal/ change affects the formal gate and one pytest module, and
-        # nothing else (plus lint, which is always run). Deliberately narrower
-        # than the fail-safe default so proof-engineering iterations stay fast
-        # on the inner loop. The two pytest modules are the halves `make
-        # formal` can only collect with a Lean toolchain installed, and which
-        # are therefore what can move unnoticed on a machine without one: the
-        # python rules deciding `diff_corpus.py`'s `P` and `W` rows, and the
-        # namespace the L2 derived layer states its theorems in.
+        # A formal/ change affects the formal gate and the pytest modules
+        # below, and nothing else (plus lint, which is always run). Deliberately
+        # narrower than the fail-safe default so proof-engineering iterations
+        # stay fast on the inner loop. Those modules are the python half of
+        # `formal/harness/diff_corpus.py` — the rules that decide its `P` and
+        # `W` rows, the checker-alignment fidelity of its `U`/`F` rows and
+        # checker door (#1169), the namespace the L2 derived layer states its
+        # theorems in, and its A9/A2 row modules: halves `make formal` can only
+        # collect with a Lean toolchain installed, and which are therefore what
+        # can move unnoticed on a machine without one.
         if f.startswith("formal/") or f.startswith("tests/formal_corpus/"):
             gates.add("formal")
             pytest_nodes.add("tests/test_formal_attenuation_namespace.py")
             pytest_nodes.add("tests/test_formal_derived_namespace.py")
             pytest_nodes.add("tests/test_formal_a9_row.py")
             pytest_nodes.add("tests/test_formal_a2_row.py")
+            pytest_nodes.add("tests/test_formal_alignment.py")
             reasons.append(f"{f} (formal gate)")
             continue
 
