@@ -8010,7 +8010,7 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
 // not scanned (the reference's grammar has no such position).
 fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
   let declared = ext_declared_names(ts, pg)
-  let gtys = sig_binds(ts, case_binds(ts))
+  let gtys = sig_binds(ts, case_binds(ts, alias_map(ts)))
   var seen: List[Str] = []
   var d = 0
   var i = 0
@@ -10324,7 +10324,7 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // signature rows (docs/design/457 T2b) are a second pass over the same
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
-  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts)))
+  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts, alias_map(ts))))
 }
 
 fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind]) -> Verd {
