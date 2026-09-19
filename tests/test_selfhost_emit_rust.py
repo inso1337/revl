@@ -237,6 +237,34 @@ CORPUS = [
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
+    "comp_await_job.rvl",    # the activation-body `await` step and the
+                             #   `plugin_async` + `|ctx, config| async move {`
+                             #   lowering it forces on BOTH component paths, the
+                             #   host async seam (`Job::run(..).await`) vs the
+                             #   erased awaitable (a required-service call, item
+                             #   131), the `host` component-dialect expression
+                             #   kind, and the `Job` host stub — whose emitted
+                             #   block was missing `pub struct Job;` itself.
+                             #   No document awaited anything before this one.
+    "comp_stream.rvl",       # the `Stream[T]` surface (item 130): the ~950-line
+                             #   stream host runtime, the `subscribe` acquisition
+                             #   with its policy/buffer operands, the `merge`
+                             #   fan-in, the `filter`/`map`/`take` derived chain,
+                             #   the blocking `await sub.next()`, and the
+                             #   `every .. in` loop. No document subscribed to a
+                             #   stream before this one, so all three were
+                             #   measured vacuously at once. The typed-event
+                             #   handler rides along: its contract line renders
+                             #   the derived schema through python `json.dumps`
+                             #   DEFAULTS, reproduced in pure revl.
+    "comp_timer.rvl",       # the activation-body `timer` step (item 57): both
+                             #   modes (`revl_schedule_every` / `_after`), the
+                             #   per-timer required-service clone the `move`
+                             #   firing closure needs, the derived cancellation
+                             #   on the same `ctx.effect` ledger, the
+                             #   per-COMPONENT counter, and the `uses_timer` gate
+                             #   on the clock/scheduler preamble. No document
+                             #   armed a timer before this one.
     "comp_body_steps.rvl",   # the activation-body steps other than `provide`:
                              #   the bare `effect`/`undo` bracket over a required
                              #   service, the fire-and-forget `emit`, and the
