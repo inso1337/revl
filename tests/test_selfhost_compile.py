@@ -540,6 +540,20 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # component edge shapes; the host-root and realm-placement documents
         # left this list when lower.rvl grew those two surfaces.
         "component_edges.rvl",
+        # issue 1153's two component documents. Neither is an EMITTER residual:
+        # the rust byte oracle in tests/test_selfhost_emit_rust.py holds both
+        # byte-exact when it is handed the REFERENCE IR (host runtime and all),
+        # so what is left is the native IR producer. `comp_await_job.rvl`'s
+        # activation body awaits a host `Job`: the reference IR carries that
+        # host declaration's runtime block and `selfhost/lower.rvl` does not, so
+        # the native chain emits 7,067 bytes against the reference's 11,094 —
+        # the module with no `Job`/`JobHandle` runtime in it. `comp_stream.rvl`
+        # is refused before any rust is built (the same G1 `NATIVE_GATE_GAPS`
+        # records below). Both are `selfhost/lower.rvl`'s, and both are NAMED
+        # rather than skipped, so the day lower.rvl grows either surface this
+        # list shrinks instead of quietly keeping a waiver nobody rereads.
+        "comp_await_job.rvl",
+        "comp_stream.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
