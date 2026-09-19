@@ -56,7 +56,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
 | **A1** iteration boundaries only during activation | **none** | 0 | no | not modelled at all: L0 has no `await` and no iteration boundary. **Unbuilt work**, and it needs L0 to grow first |
-| **A2** no acquisition after a provision | **none** | 0 | no | L0 bodies carry no acquisition/provision ordering. **Unbuilt work** |
+| **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (310 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
 | **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
 | **A6** provide-methods match the service signature | **none** | 0 | partial | the oracle's P row is a *capability bound* check, not the signature match, and `methodBoundOK` is a private restatement. **Unbuilt work** |
@@ -69,7 +69,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 
 Three summary readings of that map:
 
-- **The oracle reaches G2, G3, G4, G7, A8, R4, A9 and the capability order.**
+- **The oracle reaches G2, G3, G4, G7, A2, A8, R4, A9 and the capability order.**
   G5, G6, G8 and G9 are still proved against the design documents and the
   reference source read by hand. That remains the largest gap in the
   layer, and it is a gap in *coverage of the gate*, not in the proofs. The
@@ -82,10 +82,11 @@ Three summary readings of that map:
   and not a text: G7 drives `backends/python/runtime.py` over an
   enumerated teardown corpus, and A8/R4 drive `src/revl/recovery.py` over
   an enumerated WAL corpus.
-- **Six guarantee codes have no theorem at all** (A1, A2, A3, A5, A6,
+- **Five guarantee codes have no theorem at all** (A1, A3, A5, A6,
   T1-T3). Of those, A5 is the one worth naming twice: G7 proves how a
   `compensation` entry is disposed without anything proving one has to
-  exist.
+  exist. A9 left this list in issue 1167 and A2 in issue 1166: each rule
+  is now a theorem and a differential row.
 - **One row is UNPROVED by construction** (G9 path coverage) and says so
   in the table, rather than being absent.
 
@@ -279,6 +280,21 @@ Three summary readings of that map:
 | `RevL.A9.a9_not_vacuous` | A9, non-vacuity | **proved** | `propext, Quot.sound` | the fixture refused; both of its hint's fixes admitted, the renamed one also linking |
 | `RevL.A9.a9_rules_are_distinct` | A9, anti-tautology | **proved** | `propext, Quot.sound` | `A9OK` and `NoDoubleInstall` separated in both directions |
 | `RevL.A9.a9_row_not_vacuous` | A9, oracle row non-vacuity | **proved** | none | same manifest, different block, different verdict: the row reads the `PB` fact, not the `C` fact |
+
+| `RevL.A2.a2Fold_iff` | A2 — the checker's fold (issue 1166) | **proved** | `propext, Quot.sound` | `lower._dispatch_action`'s fold with its flag SET is "no acquisition at all" plus the rule; the induction-friendly form behind the bridge |
+| `RevL.A2.a2B_iff` | A2 — the bridge | **proved** | `propext, Quot.sound` | `a2B body = true ↔ A2OK body`: the printed `A2` verdict is exactly "no `provide` is followed by an `acquire`" |
+| `RevL.A2.labels_distinct` | A2 — the two labels | **proved** | `propext, Classical.choice, Quot.sound` | a release and a withdrawal carry different labels in the `inverse` slot |
+| `RevL.A2.stack_all_brackets` | A2 — the stack | **proved** | `propext, Quot.sound` | every entry the body registers is a `bracket`: releases and withdrawals replay under every settling verdict |
+| `RevL.A2.phase1_of_brackets` | A2 over G7 | **proved** | `propext, Quot.sound` | under a settling verdict the Phase-1 pass over an all-bracket stack is the whole stack, LIFO |
+| `RevL.A2.stack_of_no_acquire` | A2 — the stack | **proved** | `propext` | a body with no acquisition registers only withdrawals |
+| `RevL.A2.stack_shape` | A2 — the rule as a stack shape | **proved** | `propext` | under `A2OK` the stack is every release, then every withdrawal, with the body's own counts |
+| `RevL.A2.proof_pass_is_withdrawals_then_releases` | A2 — the content theorem | **proved** | `propext, Quot.sound` | under `A2OK` and any settling verdict `phase1` runs every withdrawal, then every release. The settling hypothesis is load-bearing: the E-Stop runs nothing |
+| `RevL.A2.withdrawals_precede_releases` | A2 — as the guarantee reads | **proved** | `propext, Classical.choice, Quot.sound` | `List.Pairwise`: once a release has run, nothing that runs after it is a withdrawal, so no provide-method is callable against a released handle |
+| `RevL.A2.teardown_labels` | A2 — the D-row reading | **proved** | `propext, Classical.choice, Quot.sound` | the model's `teardown` of the body's stack is the withdrawal labels then the release labels; no compensation drain |
+| `RevL.A2.fixture_refused` | A2 — non-vacuity | **proved** | none | `a2_acquire_after_provide.rvl`'s shape `[acquire, provide, acquire]` is refused by the fold |
+| `RevL.A2.fixture_release_before_withdrawal` | A2 — the converse, computed | **proved** | `propext` | on the fixture's stack every settling verdict runs a release BEFORE the withdrawal: the window `docs/rejections.md#a2` describes |
+| `RevL.A2.fixture_opens_the_window` | A2 — the converse | **proved** | `propext` | the fixture's pass violates the ordering claim, so the `A2OK` hypothesis excludes a real body rather than nothing |
+| `RevL.A2.a2_not_vacuous` | A2 — non-vacuity | **proved** | `propext, Quot.sound` | `[acquire, provide]`: admitted by fold and rule, stack `[release, withdrawal]`, commit and abort passes `[withdrawal, release]`, halted pass empty |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -704,7 +720,8 @@ capabilities a provide method's body crosses (F), the activation-body
 spawn edges (S), and the spawn handles (H) through which
 `w.task.run(...)` resolves to the child's provision — the canonical
 capability decompositions (Z/Y, straight out of `cap_order.parse_cap`),
-parse refusals (X) and componentless files (N).
+parse refusals (X) and componentless files (N), and the ordered
+activation-body steps as the A2 rule sees them (AQ, issue 1166).
 
 Two families of facts are of a different kind and are listed apart for
 that reason, because neither is extracted from any `.rvl` text:
@@ -816,6 +833,21 @@ Verdicts:
   alone (same manifest, renamed block, different verdict). Blinding the
   printed verdict on the fixture yields one `a9` mismatch and a FATAL
   `missed-A9`; blinding `a9RowB` itself breaks the `a9RowB_iff` proof.
+- **A2 rows (per component, A2, issue 1166)**: `Oracle.a2OKB` —
+  `RevL.A2.a2B`, the checker's own fold — over the component's `AQ` body
+  steps in body order, with `a2OKB_iff` proving the printed Bool is exactly
+  `RevL.A2.A2OK` (no `provide` followed by an `acquire`), the hypothesis
+  of `RevL.A2.withdrawals_precede_releases`. The reference folds
+  `lower._dispatch_action`'s rule over the same rows independently. A
+  refusal is a `fail` on both sides, so the row is kept honest by
+  `a2_coverage` (an admitted body with both shapes AND the refused fixture
+  must be in the corpus) and by `RevL.A2.a2_not_vacuous` /
+  `RevL.A2.fixture_refused`, which prove the verdict flips between the two
+  shapes. The alignment arm is `agree-A2` / `missed-A2`, the latter fatal;
+  blinding the printed verdict was seen to produce one mismatch and
+  `missed-A2 1 FATAL` on the fixture before the row was trusted, while
+  blinding `a2OKB` itself never reached the row — `a2OKB_iff` stopped
+  elaborating, the same layer that catches D-row model drift.
 
 ### The G7 row, and what it is evidence of
 
@@ -979,15 +1011,16 @@ only the closure is local, the judgment it feeds is the model's).
 ### Census
 
 Nothing is dropped and nothing is counted without being named. Over the
-corpus as of the A9 row (issue 1167): **454 .rvl files → 310 components →
-849 statements = 216 modeled + 210 componentless + 28 refused at parse**,
-and **4761 verdicts compared (216 files + 310 components + 64 provide
-methods + 18 spawn edges + 28 parse refusals + 267 teardown scenarios +
-1620 recoveries + 849 confinements + 849 surfaces + 305 teardowns + 235
-provide-block components), 4761 agree, 0 mismatches**. (The corpus grows;
-the shape of the census does not. The step-6 numbers were 296 / 182 / 403
-and 371 verdicts; the 387 before the G7 row; 654 as of
-`chore/formal-review`; 4526 before the A9 row.)
+corpus as of the A9 and A2 rows (issues 1167, 1166): **454 .rvl files →
+310 components → 849 statements = 216 modeled + 210 componentless + 28
+refused at parse**, and **5071 verdicts compared (216 files + 310
+components + 64 provide methods + 18 spawn edges + 28 parse refusals + 267
+teardown scenarios + 1620 recoveries + 849 confinements + 849 surfaces +
+305 teardowns + 235 provide-block components + 310 A2 bodies), 5071
+agree, 0 mismatches**. (The corpus grows; the shape of the census does
+not. The step-6 numbers were 296 / 182 / 403 and 371 verdicts; the 387
+before the G7 row; 654 as of `chore/formal-review`; 4526 before the A9 and
+A2 rows; 4761 with A9 alone.)
 
 - The 28 parse refusals are LISTED by name and code, not counted. The
   previous "(28 parse-error skips, loud)" parenthesis hid
@@ -1005,17 +1038,19 @@ and 371 verdicts; the 387 before the G7 row; 654 as of
 
 Checker alignment: each modeled file is compiled with the real checker
 and its refusal code compared against the formal verdicts. `missed-G4`,
-`missed-G2` and `missed-A9` are **gate failures** (item 418 step 7; issue
-1167 for A9), not findings: the checker refusing where the model sees
+`missed-G2`, `missed-A9` and `missed-A2` are **gate failures** (item 418
+step 7; issues 1167 and 1166), not findings: the checker refusing where the model sees
 nothing is the model being weaker than what revl enforces.
 `formal-strict` — the model refusing what the checker accepts — stays
 informational; it is the safe direction and names fragment gaps. Current
 buckets: 141 agree-accept, 2 agree-G2, 1 agree-G3, 15 agree-G4, 1
-agree-A9, 53 out-of-fragment, and **0 missed-G4, 0 missed-G2, 0
-missed-A9**, with 1 formal-strict and 2 formal-found-other carried as
-informational findings. The A9 row moved
-`examples/rejections/a9_provide_key_not_declared.rvl` from
-out-of-fragment to agree-A9 and nothing else.
+agree-A9, 1 agree-A2, 52 out-of-fragment, 1 formal-strict, 2
+formal-found-other, and **0 missed-G4, 0 missed-G2, 0 missed-A9, 0
+missed-A2**. The A9 row moved
+`examples/rejections/a9_provide_key_not_declared.rvl` and the A2 row
+`examples/rejections/a2_acquire_after_provide.rvl` from out-of-fragment
+(54 before either) to their agree buckets; the three informational rows
+predate both.
 
 Movements from the pre-step-6 buckets (52 agree-accept, 2 agree-G2, 6
 agree-G4, 36 formal-strict, 13 formal-found-other, 21 out-of-fragment),
@@ -1259,13 +1294,13 @@ carry non-vacuity evidence". So every theorem registered in
 `CheckAxioms.lean` now has a row in `scripts/nonvacuity.tsv` naming the
 evidence, in one of four kinds:
 
-- **instance** (97 rows): the hypotheses are jointly satisfiable, and the
+- **instance** (112 rows): the hypotheses are jointly satisfiable, and the
   named witness theorems exhibit a concrete instance satisfying them.
-- **necessity** (8 rows): the theorem refuses, so joint satisfiability is
+- **necessity** (10 rows): the theorem refuses, so joint satisfiability is
   precisely what it denies. The witnesses show each hypothesis satisfiable
   on its own and the refusal not universal. `G3.linkOK_no_cycles` and
   `R4.abort_leaves_no_residue` are the shape.
-- **concrete** (63 rows): the theorem is itself a computation on concrete
+- **concrete** (73 rows): the theorem is itself a computation on concrete
   data, so it has no hypotheses to satisfy. The gate accepts this label
   **only** when some other row cites the theorem as its witness, so it
   cannot be used to opt out.
@@ -1336,7 +1371,7 @@ importing outside L0, an L1 farm file importing anything but L0 or
 importing another farm file, and an L2 file importing another L2 file. It
 also fails when an L1 or L2 module is missing from `RevL.lean`, because a
 module outside the root import is a module outside the build and therefore
-outside `CheckAxioms.lean`. The tree passes today: 5 L0, 7 L1, 17 L2
+outside `CheckAxioms.lean`. The tree passes today: 5 L0, 7 L1, 18 L2
 modules, no upward or sideways import.
 
 ### The oracle's own bridge theorems (`chore/formal-review`)

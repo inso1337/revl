@@ -4,10 +4,6 @@
    "examples/rejections/g1_template_undeclared.rvl",
    "examples/rejections/v2_undeclared_fn_var.rvl"
   ],
-  "false-admit/G4": [
-   "examples/rejections/g4_spawn_widens_budget.rvl",
-   "examples/rejections/g4_spawn_widens_parameter.rvl"
-  ],
   "false-admit/T1": [
    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
    "examples/rejections/t17_arrow_body_unchecked.rvl",
@@ -111,30 +107,6 @@
    "reference": {
     "message": "`nobody` is not declared in this function",
     "tag": "G1"
-   }
-  },
-  "examples/rejections/g4_spawn_widens_budget.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)",
-    "tag": "G4"
-   }
-  },
-  "examples/rejections/g4_spawn_widens_parameter.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` \u2014 a spawn may narrow a child's capabilities, never widen them",
-    "tag": "G4"
    }
   },
   "examples/rejections/t13_unknown_match_case.rvl": {
