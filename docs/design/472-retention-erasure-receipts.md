@@ -308,6 +308,70 @@ correction 3 above, which is the reason it is recorded here at length.
    proof", so a `residue` row naming a check that in fact held stays formally
    well formed here and is left to the report side.
 
+## Corrections after the third review
+
+The third review asked what happens to the persistence refusal when the sink is
+not in the unit that holds the value — and found that the guarantee stopped at
+the seam. It is recorded here because the doc above claimed the opposite.
+
+1. **The persistence refusal was argument-blind across a service seam.** The
+   `### What is still open` list asserted that an operation persisting through a
+   provider's extern "is refused at that extern, which is where the capability is
+   declared." That is true of the DECLARATION half — the provider's own body is
+   checked against the extern's declared capability, and a `Retained[T, P]`
+   parameter declared on the operation is refused by name. It was not true of the
+   FLOW half. The refusal that follows a value (`_refuse_retention`, the
+   `load() -> sink` path) was reached only from a call the caller NAMES, and the
+   caller never names the provider's extern. So:
+
+   ```
+   extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+   extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+   service Vault { emission fn stash(row: Str) -> Int }
+   component Store provides vault: Vault {
+     provide vault { fn stash(row) { let n = db_put(row) return n } }
+   }
+   component Caller requires vault: Vault provides ops: Ops {
+     provide ops { fn go(k) { let row = load(k); let n = emit vault.stash(row); return n } }
+   }
+   ```
+
+   was ADMITTED. The caller held a value past its deadline, handed it across the
+   boundary, and the provider wrote it to durable storage, with no diagnostic —
+   which is the whole of what G-RETAIN says cannot happen. The interface
+   parameter cannot carry the qualifier that would have caught it (nothing else
+   can cross a unit boundary, so a qualifier there is a promise the caller could
+   not check), and the side that knows about the store is not the side that holds
+   the value.
+
+   The fix is the same shape the return half already used: the provider's body
+   walk records which of its parameters reaches a persistence sink, and the
+   caller's crossing consults that reach. `_Signature` gains `persists_at`
+   (`parameter index -> (sink, scope, via)`), the sibling of the existing
+   `reaches_sink`; `_on_persistence` populates it from the same inference walk
+   that already computes the return taint, so the reach is INTERPROCEDURAL for
+   free — a provider that reaches the sink through a helper fn carries the reach
+   out too. The caller then refuses with the same `_refuse_retention`, gaining a
+   `via` chain that names the seam rather than only the sink:
+   `load() -> Store.stash -> db_put`.
+
+   The two rules that were already true are what bound the fix. A provider whose
+   body only receives the value is not a sink and admits (the reach is a reach,
+   not a verdict); a provider whose body only logs admits (a log is a disclosure
+   sink, and retention is about durable storage); a declared legal hold still
+   overrides the deadline, because the hold is a property of the policy and
+   crosses the seam with it; and the reach is per-parameter, so a value at
+   argument 2 of a two-argument operation is refused exactly as one at argument
+   1. `tests/test_retention_472.py` section 1b pins all of it, four of its tests
+   red before the change and the four controls green either way.
+
+   This correction is scoped to G-RETAIN. The same body-walk blindness affects
+   the G-SECRET-FLOW argument direction — a `Secret[T]` handed to an operation
+   whose provider discloses it — but that is a different guarantee with a
+   different rule (a crossing refuses where the receiver does not DECLARE
+   `Secret[T]`, not where a policy's deadline has passed), so it is sequenced
+   separately rather than folded in here.
+
 ## What a receipt proves and what it does not
 
 The scope is a member of the signed document rather than a note beside it, so
@@ -466,9 +530,11 @@ member, so an over-claim is refused even with an intact MAC.
   * No inferred derivative relation (prerequisite 4).
   * No derived residence: a replica's region is what the caller says it is.
   * The persistence refusal covers a crossing declared through an `extern` with
-    a durable-storage capability. A service operation carries no capability of
-    its own, so an operation that persists through a provider's extern is
-    refused at that extern, which is where the capability is declared.
+    a durable-storage capability, and — since the seam-reach correction above —
+    a crossing reached through a service operation whose PROVIDER's body holds
+    that extern. An operation carries no capability of its own, so the refusal
+    names the extern, which is where the capability is declared, and reports the
+    path that got there (`load() -> Store.stash -> db_put`).
   * No CLI verb yet: the receipt is a library surface
     (`revl.retention.make_receipt` / `verify_receipt`), the way
     `erasure_receipt` was before `erase-report --receipt-key`.
