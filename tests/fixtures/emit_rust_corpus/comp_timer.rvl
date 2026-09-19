@@ -1,0 +1,54 @@
+// The activation-body `timer` step (issue 1153, item 57, docs/time-coeffect.md):
+// the revertible schedule and the clock coeffect its firing runs on.
+//
+// No corpus document armed a timer before this one, so the whole surface was
+// measured VACUOUSLY: the port emitted `<<DEFER-comp-step:timer>>` for the step,
+// emitted no `revl_schedule_*`/`revl_cancel` scheduler at all, and the oracle
+// agreed because nothing it compiled ever scheduled anything.
+//
+// The shapes this document forces:
+//
+//   * both modes — `every` lowers to `revl_schedule_every`, `after` to
+//     `revl_schedule_after`, each with its interval in milliseconds;
+//   * the per-timer required-service clone (`log_t1`, `log_t2`): the firing
+//     closure is `move`, so a second timer and every later step still hold
+//     their own handle (the E0382 the un-cloned shape would be);
+//   * the derived inverse — cancellation registered on the SAME `ctx.effect`
+//     ledger a Pool or a provision reverts through, so unloading the component
+//     cancels the timer with no orphaned interval;
+//   * the per-COMPONENT counter: `Pulse`'s single timer is `_revl_timer_1`
+//     again, not `_revl_timer_3`;
+//   * the `uses_timer` gate on the module preamble — arming takes a live
+//     resource slot, so the R1 counter rides along with the scheduler even
+//     though this document declares no host object;
+//   * a component with no timer in the same module, so the gate is proved to
+//     be a module-level preamble and a per-component step, not a blanket.
+service Log {
+  fn mark(line: Str) -> Int
+  emission fn write(msg: Str)
+}
+
+// Both modes, two timers, one required service: the `_t<n>` clone per firing
+// closure and the `.timer.undo` cancellation for each.
+component Heartbeat requires log: Log {
+  every 30s {
+    emit log.write("tick")
+  }
+  after 5m {
+    emit log.write("warmup done")
+  }
+}
+
+// A timer beside an ordinary revertible effect: the bracket and the schedule
+// land on one disposer stack, and the timer counter restarts at 1 here.
+component Pulse requires log: Log {
+  effect log.mark("open") undo log.mark("close")
+  every 1s {
+    emit log.write("beat")
+  }
+}
+
+// No timer: the same module, no schedule, no cancellation.
+component Quiet requires log: Log {
+  effect log.mark("quiet") undo log.mark("hush")
+}

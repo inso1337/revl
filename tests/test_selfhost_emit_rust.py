@@ -124,8 +124,6 @@ from revl import compile_files  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
-from _boundary_witness import assert_boundary_witness  # noqa: E402
-
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
 CORPUS = [
     "arith.rvl",     # bounded int/int32, / widening, %, comparisons, unary, ??
@@ -243,6 +241,34 @@ CORPUS = [
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
+    "comp_await_job.rvl",    # the activation-body `await` step and the
+                             #   `plugin_async` + `|ctx, config| async move {`
+                             #   lowering it forces on BOTH component paths, the
+                             #   host async seam (`Job::run(..).await`) vs the
+                             #   erased awaitable (a required-service call, item
+                             #   131), the `host` component-dialect expression
+                             #   kind, and the `Job` host stub — whose emitted
+                             #   block was missing `pub struct Job;` itself.
+                             #   No document awaited anything before this one.
+    "comp_stream.rvl",       # the `Stream[T]` surface (item 130): the ~950-line
+                             #   stream host runtime, the `subscribe` acquisition
+                             #   with its policy/buffer operands, the `merge`
+                             #   fan-in, the `filter`/`map`/`take` derived chain,
+                             #   the blocking `await sub.next()`, and the
+                             #   `every .. in` loop. No document subscribed to a
+                             #   stream before this one, so all three were
+                             #   measured vacuously at once. The typed-event
+                             #   handler rides along: its contract line renders
+                             #   the derived schema through python `json.dumps`
+                             #   DEFAULTS, reproduced in pure revl.
+    "comp_timer.rvl",       # the activation-body `timer` step (item 57): both
+                             #   modes (`revl_schedule_every` / `_after`), the
+                             #   per-timer required-service clone the `move`
+                             #   firing closure needs, the derived cancellation
+                             #   on the same `ctx.effect` ledger, the
+                             #   per-COMPONENT counter, and the `uses_timer` gate
+                             #   on the clock/scheduler preamble. No document
+                             #   armed a timer before this one.
     "comp_body_steps.rvl",   # the activation-body steps other than `provide`:
                              #   the bare `effect`/`undo` bracket over a required
                              #   service, the fire-and-forget `emit`, and the
@@ -917,33 +943,43 @@ def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_rust_src"](ir)
 
 
-# item 130 (issue #81): the stream surface this port does not carry
+# item 130 (issue #81): the stream surface this port NOW carries — the two
+# markers this section used to pin are CLOSED by issue 1153.
 # ---------------------------------------------------------------------------
 #
-# The reference emitter lowers the whole `Stream[T]` surface on this tier; the
-# Path B port does not, and `tests/fixtures/selfhost_blind_spots.json` carries
-# that as a named `unported` baseline. The baseline records the GAP. What was
-# never checked is that the port is LOUD about it: the ledger is satisfied by a
-# port that silently emits a module with the subscription missing, which is the
-# section-level silence issue #1123 found for the in-file test section and the
-# worst answer item 130 admits for a stream. So the marker is pinned here,
-# where it runs.
+# `<<DEFER-stream-host>>` and `<<DEFER-comp-step:stream-iter>>` stood in for the
+# stream HOST RUNTIME and the iteration step: the reference lowered the whole
+# `Stream[T]` surface and the Path B port named what it did not carry, so a crate
+# agreeing with the oracle could never be agreeing vacuously. Issue 1153 ported
+# both, so the witness cannot stand any more ("the port no longer emits
+# `<<DEFER-stream-host>>`: the boundary has moved") — and it is not deleted
+# quietly, because the reason it existed is the reason it is now replaced by a
+# STRONGER claim rather than a weaker one: the port does not merely emit
+# something, it emits the reference's bytes. If either marker ever comes back,
+# this reddens.
 
 
-def test_the_stream_surface_is_named_not_dropped(emitted, reference):
-    """The rust port already gates the stream HOST RUNTIME behind
-    `<<DEFER-stream-host>>` (it is the one host block not ported, and the byte
-    oracle would otherwise agree vacuously on a crate with no stream runtime in
-    it). The body steps that USE that runtime are pinned here beside it."""
+def test_the_stream_surface_is_carried_byte_for_byte(emitted, reference):
+    """The tree's own stream scenario agrees with the reference byte for byte —
+    `Stream::subscribe(`, `Stream::contract(` and the `revl_stream_record` host
+    sink among the bytes — where the port used to emit the two DEFER markers
+    above instead. The corpus document for the same surface, `comp_stream.rvl`,
+    reaches only the EMITTER half of this oracle (the native frontend refuses it
+    — see `NATIVE_GATE_GAPS` in tests/test_selfhost_compile.py), so this document
+    stays pinned here, beside the enumerated corpus."""
     ir = compile_files([str(ROOT / "backends" / "go" / "testdata"
                             / "stream_event_130.rvl")])
     want = reference.emit(ir)
     got = emitted["emit_rust_src"](ir)
-    for reference_token, port_token in (
-        ("Stream::subscribe(", "<<DEFER-stream-host>>"),
-        ("Stream::contract(", "<<DEFER-comp-step:stream-iter>>"),
-    ):
-        assert_boundary_witness(want, got, reference_token, port_token)
+    for token in ("Stream::subscribe(", "Stream::contract(",
+                  "revl_stream_record"):
+        assert token in want, f"the reference no longer emits {token}"
+        assert token in got, f"the port dropped {token}"
+    assert got == want
+    for marker in ("<<DEFER-stream-host>>", "<<DEFER-comp-step:stream-iter>>"):
+        assert marker not in got, f"{marker} is back: the boundary reopened"
+
+
 # --------------------------------------------------------------------------
 # item 146 / issue #98 Stage 4 — the rust EMITTER RUNS as rust, and its output
 # is the reference's, byte for byte.
