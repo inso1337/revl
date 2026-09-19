@@ -381,7 +381,7 @@ fn arity_example(h: Str) -> Str {
 // mirrors the reference flag (async fn type permitted as a module `fn`
 // parameter). Result carried in a struct because revl's pure stratum has no
 // exceptions.
-type WfR = { ok: Bool, msg: Str }
+pub type WfR = { ok: Bool, msg: Str }
 
 pub fn check_type_wellformed(name: Str, allow_async_param: Bool) -> WfR {
   return wf_walk(name, name, allow_async_param, false)

@@ -521,6 +521,85 @@ records, `Never`/`Any`/`Value`, marked `?T`) for `compatible`, `join`,
 fuzz draw; IR byte-exactness unchanged; `test_three_way_composition_co_
 compiles` green; drift gate green. ~600 lines.
 
+**T1 LANDED** (the composition half, plus the declared-type phase it exists
+for). `selfhost/types.rvl` landed on its own first, as a leaf module with its
+own oracle and an explicit note in its header that the checker/lower `use` was
+deferred. That deferral is closed: `selfhost/lower.rvl` now carries
+
+    use "./types.rvl" { WfR, check_type_wellformed }
+
+and `tools/build_gate_crate.py`'s `SELFHOST_CLOSURE` (and therefore
+`DIGEST_INPUTS`) names `stdlib/str.rvl`, `stdlib/list.rvl` and
+`selfhost/types.rvl` ahead of the three files it named before. Both crates are
+regenerated and `tests/test_gate_crate_admit.py` builds the result with cargo.
+
+Read this before the next slice, because two of the three findings are about
+the COMPOSITION and not about types:
+
+1. **A private record type can silently eat an ADT case constructor.** Item 228
+   keeps each file's private `Bind`/`Stmt`/`Prog` from colliding, and section
+   3.4 assumed that covers the merge. It does not cover a CASE NAME.
+   `types.rvl` declared `type Field = { name: Str, ty: Str }`; `parser.rvl`
+   declares the expression node `| Field(FieldN)`. The merged program compiles
+   with no diagnostic, the record wins, and every `Field(...)` the gate builds
+   becomes a call to a two-field record constructor: 415 of the 761 census
+   programs faulted with `Field() takes no arguments`, and NOTHING but the
+   census showed it (every unit oracle was green, because each file's own tests
+   run the file alone). `types.rvl`'s type is now `TyField`. Before adding a
+   `use` edge into `lower.rvl`, diff the new module's type names against
+   `parser.rvl`'s `Expr` cases, and run the census rather than a unit suite.
+2. **The `use` is cheap; the closure is the cost.** Adding `types.rvl` pulled
+   `stdlib/str.rvl` and `stdlib/list.rvl` into the crate's emitted rust. That
+   built and passed `test_gate_crate_admit.py` unchanged, so the remaining
+   `use`-and-drop work (checker.rvl, and deleting lower.rvl's private
+   `parse_head`/`type_args`/`split_top_type_commas`/`struct_field`/
+   `fn_param_types` and checker.rvl's `split_type`/`expand_ty`/`compatible`) has
+   no crate-shaped obstacle left in front of it. It is deliberately NOT in this
+   change: it moves no census document and it rewrites call sites inside the IR
+   walk, where the guard is byte-exactness rather than a verdict.
+3. **`false-admit/T1` is the reference CODE T1, not this slice.** The 31
+   documents in that census bucket are what the reference's type checker refuses
+   with `code="T1"`; slice T1 is the spelling algebra. Exactly one of the 31 is
+   a declared-type question (`t6_bare_generic`), and it is the one that moved.
+   The other 30 are T2a/T2b/T3a/T3b work and no amount of T1 reaches them.
+
+The phase this slice added is `_validate_declared_types` itself, ported far
+enough to be worth having: `declared_types_refusal` runs
+`check_type_wellformed` over every module `fn` and `extern` signature
+(parameters then return, fns before externs — the reference's own loop order),
+and `config_data_refusal` now asks the wellformed question per config field
+ahead of the is-data question, which is where `_check_config` asks it. It is a
+FAIL-FAST phase at the head of `collect_nonlink`, because the reference RAISES
+inside `_validate_declared_types` before its collect-all sink exists — so a
+declared-type refusal beats an earlier-LINE link refusal and rides alone. That
+is checked and not assumed: three programs in `_MULTI_REFUSAL_PROGRAMS` pair it
+with a duplicate provider (on an earlier line and on a later one) and with a
+config-is-data refusal in the same component.
+
+What the phase does NOT carry, and why:
+
+* **service-method and type-declaration sites.** `_validate_declared_types`
+  also walks service method params/returns and type-decl fields/case payloads.
+  No census document turns on them, so they are fail-open surface rather than a
+  measured divergence, and each needs its own line-bearing token scan. They are
+  the obvious next few lines of this file, not of a later slice.
+* **the `Async` ARITY refusal.** ```Async` takes 1 type argument, got N``
+  is singular, so it misses `_classify`'s code-less ``type argument(s), got``
+  marker and has no tag in the gate vocabulary. `wf_tag` returns `""` there and
+  the site is left unrefused: withholding is the safe direction, and refusing
+  under a tag the oracle cannot compare is not.
+* **`Delegate[S]` and `Criterion`/`Guard`.** `types.rvl`'s
+  `check_type_wellformed` predates both reference branches and does not model
+  them. That makes it strictly more permissive than the reference, never less,
+  which is why no false-reject appeared; porting them is a `types.rvl` change
+  with its own oracle.
+
+Census: `false-admit/T1` 31 -> 30, `agree-refuse/T1` 0 -> 1, every other bucket
+byte-identical (no new `false-reject`, no `gate-fault`). The one document moved
+is `examples/rejections/t6_bare_generic.rvl`, struck from `TYPE_LAYER_GAP`
+(42 -> 41) and from `KNOWN_BYPASSES`, and folded into `REJECTED_PROGRAMS` with
+eight neighbours covering the other declared-type sites.
+
 **T2a. Expression typing with messages: operators, fields, index, ternary,
 lists, records.** checker.rvl `infer_t`/`check_t` over those kinds with the
 `Infer.tag`/`msg` channel; Int/Float literal range. Oracle:

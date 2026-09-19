@@ -2471,6 +2471,57 @@ component C provides cache: Cache {
     *[(f"{label} does not swallow the next operation",
        _sop(clause, _SOP_PLAIN_PUT, impl), "G4")
       for label, clause, impl in _SOP_CLAUSES],
+    # ---- docs/design/457 slice T1: the DECLARED-TYPE validation ------------
+    # `lower.py::_validate_declared_types` -> `typecheck.check_type_wellformed`,
+    # now decided natively: `selfhost/lower.rvl` `use`s the shared spelling
+    # algebra in `selfhost/types.rvl` and runs it over every module `fn` and
+    # `extern` signature and every config field, at the phase position the
+    # reference gives it (the head of the same function that closes with the
+    # config-is-data walk). `t6_bare_generic` was pinned in TYPE_LAYER_GAP
+    # below and has been struck from it.
+    ("a bare builtin generic as a fn return",
+     _fixture("t6_bare_generic"), "T1"),
+    ("a bare builtin generic as a fn parameter", """
+fn f(x: List) -> Int {
+  return 1
+}
+""", "T1"),
+    # the walk recurses into type ARGUMENTS, so a well-formed head does not
+    # excuse a malformed argument.
+    ("a bare builtin generic nested in a type argument", """
+fn f(x: Map[Str, Opt]) -> Int {
+  return 1
+}
+""", "T1"),
+    # the arity is checked in both directions, not just against zero.
+    ("a builtin generic given too few arguments", """
+fn f() -> Map[Str] {
+  return Map.empty()
+}
+""", "T1"),
+    ("a bare builtin generic as an extern parameter",
+     'extern pure fn e(x: Result) -> Int = @py { return 1 }\n', "T1"),
+    ("a bare builtin generic as an extern return",
+     'extern pure fn e(x: Int) -> List = @py { return [] }\n', "T1"),
+    # the POSITION-restricted heads. `Async[T]` is a value type nowhere, and an
+    # async function type is a module `fn` parameter only (item 92) — so the
+    # same spelling is refused on an extern and admitted on a module fn, which
+    # is the pair that proves the flag is threaded and not hard-coded.
+    ("a bare Async as a value type", """
+fn f(x: Async[Str]) -> Int {
+  return 1
+}
+""", "A1"),
+    ("an async function type outside a module fn parameter",
+     'extern pure fn e(cb: (Str) -> Async[Str]) -> Int = @py { return 1 }\n',
+     "A1"),
+    # a config field asks the WELLFORMED question before the is-data one.
+    ("a bare builtin generic as a config field", """service S { fn q(a: Str) -> Int }
+component C provides s: S {
+  config { n: Opt }
+  provide s { fn q(a) { return 0 } }
+}
+""", "T1"),
     # ---- docs/design/457 §2.4: the component header's service-existence rule -
     # The reference resolves every `requires`/`provides` annotation against its
     # service table (`Env.__init__` for the requirements, `_lower_component`'s
@@ -3204,6 +3255,39 @@ fn holder() -> Int { let f = tick   return 0 }
 service Bus { emission fn publish(topic: Str) }
 component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
 """),
+    # docs/design/457 slice T1: the DECLARED-TYPE validation is FAIL-FAST on
+    # both sides — the reference raises it inside `_validate_declared_types`,
+    # before its collect-all sink exists — so it beats an EARLIER-LINE link
+    # refusal and the full list is a singleton. This is the case a phase order
+    # that merely appended the new refusal into the collected sink would get
+    # wrong: the sink orders by line, and the bare generic is on line 4 while
+    # the duplicate provider is on line 3.
+    ("bare generic after an earlier-line duplicate provider",
+     """service D { fn q(s: Str) -> Int }
+component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+fn late() -> Opt { return Some(1) }
+"""),
+    # the same two refusals with the declared-type one FIRST in the file, so the
+    # winner is not evidence of the phase order on its own. Both variants must
+    # name the bare generic, and both lists must be singletons.
+    ("bare generic before the duplicate provider",
+     """fn early() -> Opt { return Some(1) }
+service D { fn q(s: Str) -> Int }
+component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+"""),
+    # the declared-type question and the config-is-data question live in the
+    # SAME reference function, per field, wellformed first: the component's
+    # config declares an arrow field (is-data, G4) and a bare generic
+    # (wellformed, T1), and the wellformed one wins on both sides.
+    ("bare generic beside an arrow config field",
+     """service S { fn q(a: Str) -> Int }
+component C provides s: S {
+  config { h: (Str) -> Str, n: Opt }
+  provide s { fn q(a) { return 0 } }
+}
+"""),
 ]
 
 
@@ -3429,7 +3513,7 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 40. The self-declared async-colour
+# `examples/rejections/`; it now stands at 18. The self-declared async-colour
 # arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
 # binding-discipline slice) moved OUT of the gap into gate/reference agreement,
 # and two slices have moved fixtures IN by making the gate READ a body it used
@@ -3507,10 +3591,17 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
-    # declarations: alias cycles, bare generics, non-record destructuring.
+    # declarations: alias cycles and non-record destructuring. The DECLARED-TYPE
+    # half of this family has LANDED (slice T1): `selfhost/lower.rvl` `use`s the
+    # spelling algebra in `selfhost/types.rvl` and runs `check_type_wellformed`
+    # over every module `fn`/`extern` signature and every config field, so
+    # `t6_bare_generic` now refuses with the reference's tag and message and has
+    # moved into REJECTED_PROGRAMS above. What stays pinned here is decided
+    # elsewhere: the alias cycle in `_resolve_type_aliases` and the destructuring
+    # rule in `_lower_let_pattern_stmt`, neither of which is a declared-type
+    # question.
     "declarations": [
         ("t18_type_alias_cycle", "TYPE"),
-        ("t6_bare_generic", "T1"),
         ("t5_destructure_nonrecord", "TYPE"),
     ],
     # provide-method and component bodies: method params take the service
@@ -3731,18 +3822,19 @@ def test_an_alias_mentioning_async_is_refused_at_its_declaration(name, src):
         (name, ref_msg)
 
 
-def test_the_type_layer_gap_is_exactly_19_fixtures():
+def test_the_type_layer_gap_is_exactly_18_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
-    41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
+    42 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
     two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
-    rows for the module-`fn` surface, and the call-and-signature layer (T2b)
-    nine more; the twelfth document that moved with T3a,
-    `dynamic_reserved_key`, never had a row here because this pin addresses its
-    fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
+    rows for the module-`fn` surface, the call-and-signature layer (T2b) nine
+    more, and the declared-type slice (T1) `t6_bare_generic`; the twelfth
+    document that moved with T3a, `dynamic_reserved_key`, never had a row here
+    because this pin addresses its fixtures by bare name under
+    `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 18, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 19, "a fixture is listed twice"
+    assert len(set(names)) == 18, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
