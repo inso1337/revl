@@ -1291,6 +1291,37 @@ component C provides cache: Cache {
   }
 }
 """),
+    # ---- the transparent alias, across every declaration site the
+    # provide-method type layer reads (docs/design/457) ----------------------
+    # The corpus had no document that spelled `type X = <scalar>` and then used
+    # X in a signature, so nothing held the gate to ERASING it. The reference
+    # does erase it, which makes every position below an ordinary `Int`/`Str`
+    # and the whole component legal; a gate that reads the alias as a type of
+    # its own refuses all of them at once. This is an ACCEPTED program for that
+    # reason — it is the false rejection, written down.
+    ("a transparent alias through a service, a config field and a body", """
+type Slot = Int
+type Label = Str
+
+service Shelf {
+  fn at(i: Slot) -> Label
+  fn width() -> Slot
+}
+
+component Rack provides shelf: Shelf {
+  config { size: Slot = 3 }
+
+  let rows = effect Map.new() undo rows.drop()
+
+  provide shelf {
+    fn at(i: Slot) -> Label {
+      let names: List[Str] = ["a", "b", "c"]
+      return names[i]
+    }
+    fn width() -> Slot { return 3 }
+  }
+}
+"""),
     # ---- docs/design/457 T3b: returns on every path, the ADMITTING side ----
     # The direction this rule may not err in is the false alarm, so each shape
     # the reference ACCEPTS is here beside the refusal it neighbours. The
@@ -3363,22 +3394,16 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t6_bare_generic", "T1"),
         ("t5_destructure_nonrecord", "TYPE"),
     ],
-    # provide-method and component bodies: method params take the service
-    # signature, the body checks against its return, required-service call
-    # argument typing, config defaults, a method-local shadowing a component name.
-    # The member-EXISTENCE half of this family has landed (docs/design/457 T4b);
-    # what is left here all needs the expression algebra T1-T3 build.
-    "provide-method and component bodies": [
-        ("t1_service_arg_type", "T1"),
-        ("t4_field_arg_type", "T1"),
-        ("t7_provide_param_annotation_mismatch", "T1"),
-        ("t16_provide_method_missing_return", "T1"),
-        ("t31_index_non_int_provide_method", "T1"),
-        ("t3_config_default_type", "T1"),
-        # the t29 field-read-on-`Any` shape inside a provide method, pinned for
-        # the same reason: the `pub extern` parse refusal used to hide it.
-        ("t30_field_read_on_any_provide_method", "T1"),
-    ],
+    # provide-method and component bodies: EMPTY. This family has landed
+    # (docs/design/457, the provide-method slice). All seven of its documents —
+    # `t1_service_arg_type`, `t4_field_arg_type`,
+    # `t7_provide_param_annotation_mismatch`, `t16_provide_method_missing_return`,
+    # `t30_field_read_on_any_provide_method`, `t31_index_non_int_provide_method`
+    # and `t3_config_default_type` — moved into
+    # `_PROVIDE_FIXTURES` below, where tag AND message are compared. The key is
+    # kept rather than deleted so the family's name stays attached to the slice
+    # that closed it.
+    "provide-method and component bodies": [],
 }
 
 _TYPE_LAYER_CASES = [
@@ -3508,18 +3533,20 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_19_fixtures():
+def test_the_type_layer_gap_is_exactly_12_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
     two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
-    rows for the module-`fn` surface, and the call-and-signature layer (T2b)
-    nine more; the twelfth document that moved with T3a,
-    `dynamic_reserved_key`, never had a row here because this pin addresses its
-    fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
+    rows for the module-`fn` surface, the call-and-signature layer (T2b) nine
+    more, and the provide-method / component slice the whole
+    `provide-method and component bodies` family, all seven of it; the twelfth
+    document that moved with T3a, `dynamic_reserved_key`, never had a row here
+    because this pin addresses its fixtures by bare name under
+    `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 12, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 19, "a fixture is listed twice"
+    assert len(set(names)) == 12, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -5760,3 +5787,368 @@ def test_the_type_layer_stays_silent_where_it_cannot_decide(admit):
     for src in admitted:
         assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
         assert admit(src) == "", src
+
+
+# ============ the provide-method / component TYPE layer (docs/design/457)
+#
+# The half the fn-body slice above deliberately left empty: a component body and
+# a provide-method body resolve their names through the component's own header —
+# the requirement handles, the service signature, the config fields, the
+# activation locals — and none of those was in the type environment, so every
+# expression in one was answered with silence.
+#
+# The corpus documents this closes, each drawing the reference's own sentence:
+_PROVIDE_FIXTURES = [
+    # the service is the source of truth for a provider's signature (A6): a
+    # restated parameter annotation is compared against the declaration
+    ("t7_provide_param_annotation_mismatch",
+     "T1|parameter `sql` of `query` (from service `Db`) expects `Str`, "
+     "got `Int`"),
+    # ... and a provider must produce what its service promises
+    ("t16_provide_method_missing_return",
+     "T1|`get` implements `Store.get`, which returns `Str`, but this body "
+     "never returns a value"),
+    # the method's own body, typed from the service signature and its
+    # annotated locals
+    ("t30_field_read_on_any_provide_method",
+     "T1|field read `.kind` on a value of type `Any` — an erased value has "
+     "no known fields"),
+    ("t31_index_non_int_provide_method", "T1|index expects `Int`, got `Str`"),
+    # a call through a requirement handle, held to the declared signature
+    ("t1_service_arg_type",
+     "T1|`db.query` argument `sql` expects `Str`, got `Int`"),
+    # ... with the activation local typed from the operation it binds
+    ("t4_field_arg_type",
+     "T1|`s.take` argument `s` expects `Str`, got `Int`"),
+    # the config block's own rule
+    ("t3_config_default_type",
+     "T1|config field `n` default expects `Int`, got `Str`"),
+]
+
+
+@pytest.mark.parametrize("name,expected", _PROVIDE_FIXTURES)
+def test_the_provide_method_documents_draw_the_reference_sentence(
+        admit, name, expected):
+    src = _fixture(name)
+    tag, msg = _ref(src)
+    assert f"{tag}|{msg}" == expected, "the reference moved: " + name
+    assert admit(src) == expected, name
+
+
+# --------------------------------------------------- the differential fuzz
+#
+# `_provide_program` draws a component around ONE service: the operation's
+# parameter and return types, the method's own (optional) restatement of them,
+# a body of the statement forms a provide method takes, and an activation body
+# that calls through a requirement handle. It is a differential draw — the
+# reference is the ground truth on every input and the two are compared on TAG
+# and MESSAGE.
+
+_PV_TYPES = ["Int", "Int32", "Float", "Str", "Bool", "Opt[Int]", "List[Int]",
+             "Any", "PvRow", "Map[Str, Int]"]
+# `k` and `v` are the drawn method's own parameters. A config field is NOT in
+# the pool: the reference spells one `config.<name>`, and a bare `cfg` is an
+# undeclared name the wiring walk refuses, which would make the draw measure G1.
+_PV_LITS = ["1", "0", "3.5", '"s"', "true", "[]", "[1]", '{ h: "x", n: 1 }',
+            "None", "k", "v"]
+_PV_CFG_DEFAULTS = ["1", '"s"', "true", "3.5"]
+_PV_HEAD = ("type PvRow = { h: Str, n: Int }\n"
+            "extern pure fn pv_any(s: Str) -> Any\n"
+            "  = @py { return s }\n"
+            "  = @ts { return s }\n"
+            "extern emission fn down_log(m: Str) -> Int\n"
+            "  = @py { return 0 }\n"
+            "  = @ts { return 0 }\n\n")
+
+
+def _pv_expr(rng) -> str:
+    k = rng.randrange(8)
+    if k < 3:
+        return rng.choice(_PV_LITS)
+    if k == 3:
+        return f"{rng.choice(_PV_LITS)}.{rng.choice(['h', 'n', 'missing'])}"
+    if k == 4:
+        return f"{rng.choice(_PV_LITS)}[{rng.choice(_PV_LITS)}]"
+    if k == 5:
+        op = rng.choice(["+", "-", "*", "==", "<", "&&", "??"])
+        return f"({rng.choice(_PV_LITS)} {op} {rng.choice(_PV_LITS)})"
+    if k == 6:
+        return f"pv_any({rng.choice(_PV_LITS)})"
+    return f"{rng.choice(['!', '-', '~'])}{rng.choice(_PV_LITS)}"
+
+
+def _pv_stmt(rng, n: int) -> str:
+    """One statement of a provide-method body. The forms are the ones the
+    reference's parser takes THERE — a bare expression and an `assert` are
+    statements in a `fn` body and parse errors in a provide method, so drawing
+    one would measure the parser rather than the type layer.
+
+    Each binding gets a FRESH name. A repeated one is a `_check_rebind` G6, and
+    a body carrying both that and a type refusal measures the ORDERING question
+    pinned in `test_a_wiring_refusal_outranks_an_earlier_type_one` rather than
+    the type layer this draw is for."""
+    k = rng.randrange(4)
+    if k == 0:
+        return f"let w{n} = {_pv_expr(rng)}"
+    if k == 1:
+        return f"let w{n}: {rng.choice(_PV_TYPES)} = {_pv_expr(rng)}"
+    if k == 2:
+        return f"let w{n} = emit down_log({_pv_expr(rng)})"
+    return f"return {_pv_expr(rng)}"
+
+
+def _provide_program(rng) -> str:
+    pty, vty, rty = (rng.choice(_PV_TYPES) for _ in range(3))
+    ann = "" if rng.randrange(2) else f": {rng.choice(_PV_TYPES)}"
+    ret = "" if rng.randrange(2) else f" -> {rng.choice(_PV_TYPES)}"
+    body = "\n      ".join(_pv_stmt(rng, n)
+                           for n in range(rng.randrange(1, 4)))
+    setup = ""
+    if rng.randrange(2):
+        setup = (f"  let got = effect up.read({rng.choice(_PV_LITS)})"
+                 f" undo up.read(\"x\")\n")
+    return (
+        f"{_PV_HEAD}"
+        f"service PvUp {{ fn read(a: {rng.choice(_PV_TYPES)}) -> "
+        f"{rng.choice(_PV_TYPES)} }}\n"
+        f"service PvDown {{ fn put(k: {pty}, v: {vty}) -> {rty} }}\n\n"
+        f"component PvC requires up: PvUp provides down: PvDown {{\n"
+        f"  config {{ cfg: {rng.choice(_PV_TYPES)} = "
+        f"{rng.choice(_PV_CFG_DEFAULTS)} }}\n"
+        f"{setup}"
+        f"  provide down {{\n"
+        f"    fn put(k{ann}, v){ret} {{\n"
+        f"      {body}\n"
+        f"    }}\n"
+        f"  }}\n}}\n")
+
+
+# The reference messages whose family the provide-method slice leaves to a later
+# one, exactly as `_TFB_LATER_SLICES` does for the fn-body one.
+_PV_LATER_SLICES = _TFB_LATER_SLICES + (
+    # T2b: the unified signature of a generic / builtin receiver, and the
+    # arity and existence halves of the A6 provision rules the gate steps over
+    "is not a method of service",
+    "params but service",
+    # the missing-return rule's sibling, which needs the control-flow shape
+    # `span_may_return` deliberately refuses to guess at
+    "control can reach the end",
+    # G1/G6 name discipline over a component body, decided by the wiring walk
+    "is not declared in",
+    "is already bound in",
+    # the CHECK-position record rules over a component body (T2c/T3b)
+    "record update",
+)
+
+_PV_TAGS = ("T1", "T2", "TYPE")
+
+
+@pytest.mark.parametrize("seed", [5, 41, 83])
+def test_provide_program_fuzz_never_refuses_what_the_reference_admits(
+        admit, seed):
+    """THE BOUND over 300 drawn components per seed, in the order the two claims
+    matter:
+
+      * the gate NEVER refuses a program the reference admits. Absolute, no
+        allowance — a false rejection is the one direction a gate may not err in;
+      * where both sides' minimum refusal is in this slice's vocabulary
+        (`_PV_TAGS`) and outside the families a later slice owns, the gate's
+        verdict is the reference's TAG AND SENTENCE, byte for byte."""
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(300):
+        src = _provide_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _PV_TAGS:
+            continue
+        if any(m in ref_msg for m in _PV_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 280, drawn
+    assert compared >= 20, compared
+
+
+def test_a_transparent_alias_is_not_a_type_of_its_own(admit):
+    """THE REGRESSION THE FUZZ COULD NOT DRAW, in both bodies and at every
+    declaration site the slice reads.
+
+    `type Idx = Int` is ERASED by the reference before it compares anything, so
+    `xs[i]` with `i: Idx` is an `Int` index and is admitted. A gate that reads
+    the alias as a type of its own refuses all eight of these — a false
+    rejection, and one that reaches every rule at once rather than a single
+    position. The fuzz draws only declared spellings, so it never wrote an
+    alias and never saw it; these are hand-written for that reason.
+
+    Until alias erasure lands (it is its own slice), a spelling mentioning a
+    DECLARED name whose shape this walk does not carry decides nothing. The
+    `decl <Name>` row is what bounds that to the alias question — see
+    `test_an_undeclared_type_name_is_still_decided` for the other side of it."""
+    admitted = [
+        # a service parameter, reaching the method body's index rule
+        "type Idx = Int\nservice S { fn at(xs: List[Int], i: Idx) -> Int }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn at(xs, i) { return xs[i] } }\n}\n",
+        # the A6 parameter-annotation rule: the alias and its expansion are the
+        # same type to the reference
+        "type Idx = Int\nservice S { fn at(i: Idx) -> Int }\n"
+        "component C provides s: S { provide s { fn at(i: Int) = i } }\n",
+        # ... and the return-annotation twin
+        "type Idx = Int\nservice S { fn at(i: Int) -> Idx }\n"
+        "component C provides s: S { provide s { fn at(i: Int) -> Int = i } }\n",
+        # a requirement call's argument
+        "type Idx = Int\nservice S { fn at(i: Idx) -> Idx }\n"
+        "component C requires s: S {\n"
+        "  let n = effect s.at(3) undo s.at(4)\n}\n",
+        # a config field's declared type
+        "type Idx = Int\nservice S { fn ping() -> Int }\n"
+        "component C provides s: S {\n  config { n: Idx = 3 }\n"
+        "  provide s { fn ping() = 0 }\n}\n",
+        # the module-`fn` twin, on the surface the fn-body slice reads
+        "type Idx = Int\nfn f(i: Idx, xs: List[Int]) -> Int {\n"
+        "  return xs[i]\n}\n",
+        # a condition position, where the alias hides a `Bool`
+        "type Flag = Bool\nfn f(b: Flag) -> Int {\n  assert b\n  return 0\n}\n",
+        # ... and through a declared record's FIELD type
+        "type Row = { id: Idx }\ntype Idx = Int\n"
+        "fn f(r: Row, xs: List[Int]) -> Int {\n  return xs[r.id]\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+
+
+def test_the_provide_method_layer_reaches_each_position(admit):
+    """NON-VACUITY, spelled out: each name family the environment carries draws
+    the reference's own sentence, and a body that names NOTHING is untouched."""
+    cases = [
+        # the method parameter, at the service's declared type
+        ("service S { fn put(k: Str) -> Int }\n"
+         "component C provides s: S {\n"
+         "  provide s { fn put(k) { return k } }\n}\n",
+         "T1|`put` returns expects `Int`, got `Str`"),
+        # the annotated local
+        # a body binding, at the INFER position the reference runs there (an
+        # ANNOTATED one is not a checking position in a provide method — the
+        # reference records the annotation and compares nothing)
+        ("service S { fn put(k: Str) -> Int }\n"
+         "component C provides s: S {\n"
+         "  provide s { fn put(k) {\n    let n = k + 1\n    return 0\n"
+         "  } }\n}\n",
+         "T1|operand of string `+` expects `Str`, got `Int`"),
+        # the activation local, typed from the operation it binds
+        ("type Row = { id: Int }\n"
+         "service S { fn get() -> Row\n  fn take(s: Str) -> Int }\n"
+         "component C requires s: S {\n"
+         "  let r = effect s.get() undo s.get()\n"
+         "  let z = effect s.take(r.id) undo s.get()\n}\n",
+         "T1|`s.take` argument `s` expects `Str`, got `Int`"),
+        # the config default
+        ("service S { fn ping() -> Int }\n"
+         "component C provides s: S {\n  config { n: Bool = 1 }\n"
+         "  provide s { fn ping() = 0 } }\n",
+         "T1|config field `n` default expects `Bool`, got `Int`"),
+    ]
+    for src, expected in cases:
+        ref_tag, ref_msg = _ref(src)
+        assert f"{ref_tag}|{ref_msg}" == expected, "the reference moved: " + src
+        assert admit(src) == expected, src
+
+
+def test_a_wiring_refusal_outranks_an_earlier_type_one(admit):
+    """THE ORDERING CLASS THIS SLICE DOES NOT CLOSE, pinned rather than
+    described, so a slice that closes it has to come here and delete it.
+
+    The reference lowers a provide-method body STATEMENT BY STATEMENT and both
+    rules fire during that walk — `_check_rebind` on a binding that collides
+    with a name already in scope, and `_sweep`'s type oracle on the value — so
+    on a body carrying both the EARLIER SOURCE LINE wins. This gate runs the
+    wiring walk (G1/G4/A1/G6) over the whole body first and the type layer after
+    it, the placement the fn-body statement layer chose, so a wiring refusal is
+    reported even when a type refusal stands on an earlier line.
+
+    It is an under-refusal, never a false rejection: both refusals are true of
+    the program and the gate names the later one. Closing it is the ordering
+    question item 419c owns — interleaving the two walks per statement rather
+    than running them in sequence.
+    """
+    src = ("service S { fn put(k: Str) -> Int }\n"
+           "component C provides s: S {\n"
+           "  provide s {\n"
+           "    fn put(k) {\n"
+           "      let w = ~[]\n"          # the TYPE refusal, line 5
+           "      let w = 2\n"            # the REBIND, line 6
+           "      let z = undeclared\n"   # the G1 that makes the walk refuse
+           "    }\n  }\n}\n")
+    ref_tag, ref_msg = _ref(src)
+    assert (ref_tag, ref_msg) == (
+        "T1", "`~` requires an `Int32` operand, got `List[Never]`"), ref_msg
+    assert admit(src) == "G6|`w` is already bound in `put`"
+    # ... and with the wiring refusal gone the gate reports the reference's own
+    # verdict, so the divergence is the ORDERING and not a missing rule.
+    clean = src.replace("      let z = undeclared\n", "")
+    assert _ref(clean) == (ref_tag, ref_msg)
+    assert admit(clean) == f"{ref_tag}|{ref_msg}"
+
+
+def test_an_undeclared_type_name_is_still_decided(admit):
+    """THE OTHER SIDE of the alias launder, so the narrowing is a decision
+    rather than a leftover.
+
+    A name the document never DECLARES is not an alias: the reference has no
+    type for it either and refuses the document for that. Laundering it as well
+    would trade a divergent refusal for a no-objection on a program the
+    reference refuses — the bypass direction — so it keeps the reading it has.
+    The two sides disagree on WHICH refusal (the reference reaches the undeclared
+    type first), which is a message mismatch and not a bypass; both refuse."""
+    src = ("fn put(m: Map[Str, Int], k: Str) -> Ma[Str, Int] {\n"
+           "  return m.set(k, \"one\")\n}\n")
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "T1" and ref_msg != ""
+    assert admit(src).startswith("T1|"), "an undeclared head must still decide"
+
+
+def test_a_bare_return_in_a_provide_method_is_not_typed(admit):
+    """The component-body twin of the module-`fn` rule (`fb_walk`'s `bare` op):
+    a `return` that writes no value is a `return` for a totality question and
+    NOT an expression to type.
+
+    The second case is the one the statement reader makes possible. Its
+    expression grammar does not stop at the end of a line, so `return` alone,
+    followed by a statement that begins with an identifier, would read that next
+    statement as this return's operand and hold the body to ITS type — a refusal
+    the reference never issues, on a program it admits.
+
+    The reference's own bare-return refusal ("`m` returns `Int` but this
+    `return` carries no value") is the totality slice's and is not spelled here;
+    leaving it is a no-objection, the direction this gate may take."""
+    admitted = [
+        # an operation that declares no result: a bare `return` is ordinary
+        "service S { fn put(k: Str) }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn put(k) { return } }\n}\n",
+        # ... and the next line is not the return's operand
+        "service S { fn put(k: Str) }\n"
+        "component C provides s: S {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide s {\n    fn put(k) {\n      return\n"
+        "      store.insert(k, \"v\")\n    }\n  }\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+    # ... while a return that DOES carry a value is still checked against the
+    # service's declared result, so the fence is not a hole.
+    typed = ("service S { fn put(k: Str) -> Int }\n"
+             "component C provides s: S {\n"
+             "  provide s { fn put(k) { return k } }\n}\n")
+    assert admit(typed) == "T1|`put` returns expects `Int`, got `Str`"
