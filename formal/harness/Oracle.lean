@@ -117,7 +117,14 @@ Fact rows in (tab-separated, one fact per line):
                                              the boundary spelling only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
-  U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context
+  U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context:
+                                             `emit` for the head call an emit
+                                             marks, `emitarg` for a call
+                                             evaluated inside that head's
+                                             argument list (the region the
+                                             marker admits, whatever the
+                                             method declares), `plain`
+                                             elsewhere
   HA <file> <comp> <verb> <bracket|plain|emit|undo|fn>
                                              a host-family acquisition and the
                                              POSITION that decides its legality
@@ -1340,12 +1347,18 @@ declaration — every call to a declared emission method must be `emit`
 -marked, and an `emit`-marked call to a non-emission method is refused.
 Receivers include spawn handles (the exporter resolves them).
 
+The marker is a REGION marker in the checker (`lower._expr_mode` is
+"emit" for the whole marked expression): it judges the HEAD call and
+admits every call evaluated under it, emission or not, so an `emitarg`
+fact is never a violation. Whether it should be per-site is revl issue
+1175, the checker's question; the model follows the checker.
+
 PRIVATE RESTATEMENT (see the header): the G4 model is indexed by
 statement syntax, and the export carries call facts. -/
 def g4OK (ems : List (String × String)) (calls : List URow) : Bool :=
   !calls.any fun u =>
     let em := ems.any fun e => e.1 == u.svc && e.2 == u.meth
-    (u.ctx == "emit") != em
+    u.ctx != "emitarg" && ((u.ctx == "emit") != em)
 
 /-- The host acquisition verb table — the model's copy of the checker's
 `_HOST_ACQUIRE_VERBS` (`src/revl/typecheck.py`). Each opens a host resource
