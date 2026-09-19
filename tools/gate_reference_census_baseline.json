@@ -10,7 +10,6 @@
    "examples/rejections/t32_arrow_value_result_flows.rvl",
    "examples/rejections/t33_arrow_value_arity.rvl",
    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-   "examples/rejections/t6_bare_generic.rvl",
    "examples/rejections/v2_match_nonexhaustive.rvl"
   ],
   "false-admit/TYPE": [
@@ -203,18 +202,6 @@
    "reference": {
     "message": "record destructuring requires a record, but `List[Int]` is not a record",
     "tag": "TYPE"
-   }
-  },
-  "examples/rejections/t6_bare_generic.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Opt` takes 1 type argument(s), got 0 (`Opt`)",
-    "tag": "T1"
    }
   },
   "examples/rejections/v2_match_nonexhaustive.rvl": {
