@@ -235,6 +235,11 @@ use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
                     is_bad, expr_at, params_at, type_at, nesting_limit,
                     is_record_key }
+// The shared type-SPELLING algebra (docs/design/457-selfhost-type-layer.md
+// §3.1, slice T1). It is a leaf module with no AST dependency and its own
+// differential oracle against `src/revl/typecheck.py`, so the refusing walk
+// consumes the rule rather than carrying a second copy of it.
+use "./types.rvl" { WfR, check_type_wellformed }
 
 // ================================================================ IR model
 //
@@ -7971,11 +7976,207 @@ fn config_data_refusal(ts: List[Token], pg: Prog) -> Verd {
     var fi = 0
     while (fi < o.flds.length()) {
       let f = o.flds[fi]
+      // `_check_config` asks the WELLFORMED question first and the is-data
+      // question second, per field — so a config field declared `Opt` is the
+      // bare-generic refusal, not the opaque-type one.
+      let wf = wf_site_verd({ ty: f.fty, line: f.line, asyncOk: false })
+      if (wf.v != "") { return wf }
       let r = cfg_walk(f.fname, o.owner, f.fty, f.fty, svcs, decls, [], [])
       if (r != "") { return mk_verd(r, f.line) }
       fi += 1
     }
     oi += 1
+  }
+  return no_verd()
+}
+
+// ========================================== declared types (_validate_declared_types)
+//
+// The reference validates every DECLARED type annotation before checking
+// begins (`lower.py::_validate_declared_types` -> `typecheck.check_type_
+// wellformed`), and it does so ahead of the config-is-data walk above — the two
+// live in the same function, with the wellformed pass running first over the
+// `fn`/`extern` signatures. A bare builtin generic (`fn f() -> Opt`) is the
+// canonical case: it is not a type, and before this phase the gate waved it
+// through while the reference refused it (`examples/rejections/t6_bare_generic
+// .rvl`, docs/design/457-selfhost-type-layer.md slice T1).
+//
+// The decision itself is NOT restated here. `selfhost/types.rvl` carries the
+// type-SPELLING algebra as a shared leaf module with its own differential
+// oracle (tests/test_selfhost_types.py), and this phase is its first consumer
+// inside the gate: the `use` above brings `check_type_wellformed` in, so there
+// is one implementation of the rule rather than a second copy that is free to
+// drift from the first.
+//
+// WHAT IS REFUSED, and what is deliberately not. `check_type_wellformed`
+// returns the reference's message byte for byte, but the gate wire is
+// "<TAG>|<message>" and the TAG has to be the one
+// `tests/test_selfhost_lower.py::_classify` derives from the reference error,
+// or the oracle compares a refusal against a differently-tagged twin. Three of
+// the four refusal shapes have a tag in that vocabulary; the fourth (`Async`
+// ARITY, "takes 1 type argument, got N" — singular, and so not the code-less
+// `type argument(s), got` marker `_classify` routes to T1) has none, so it is
+// left unrefused rather than refused under a tag the oracle could not compare.
+// That direction is the safe one: the gate withholds instead of admitting, and
+// nothing downstream reads a no-objection as an admission.
+
+type WfSite = { ty: Str, line: Int, asyncOk: Bool }
+
+fn wf_has(msg: Str, sub: Str) -> Bool { return msg.indexOf(sub) != 0 - 1 }
+
+// The gate tag for one wellformed refusal, routed exactly as `_classify` routes
+// the reference's own error: `Approval` written as a type carries `code="G4"`,
+// the two `Async` POSITION refusals carry `code="A1"`, and the generic-arity
+// refusal is code-less and classified `T1` by its `type argument(s), got`
+// marker. "" means "no tag in this vocabulary" — see the note above.
+fn wf_tag(msg: Str) -> Str {
+  if (wf_has(msg, "cannot be written as a type")) { return "G4" }
+  if (wf_has(msg, "is not a value type (")) { return "A1" }
+  if (wf_has(msg, "only supported as a module `fn` parameter in v1")) { return "A1" }
+  if (wf_has(msg, "type argument(s), got")) { return "T1" }
+  return ""
+}
+
+fn wf_site_verd(s: WfSite) -> Verd {
+  let r = check_type_wellformed(s.ty, s.asyncOk)
+  if (r.ok) { return no_verd() }
+  let tg = wf_tag(r.msg)
+  if (tg == "") { return no_verd() }
+  return mk_verd(tagged(tg, r.msg), s.line)
+}
+
+// The `<name>: <Type>` rows of a parameter list whose FIRST PARAMETER TOKEN is
+// `p0` (the index `fn_params_i` and `params_at` take, i.e. one past the `(`),
+// each with its own source line — `params_at` renders the types but drops the
+// line the reference anchors a parameter diagnostic at (`p.line`).
+//
+// A parameter DEFAULT is stepped over by `type_at` landing past the type; a
+// record literal default (`a: R = {x: 1}`) puts a second `ident :` pair inside
+// the span, which reads here as a parameter whose "type" is a literal. That
+// spelling is not a wellformed type and `check_type_wellformed` says nothing
+// about it, so the misread is inert rather than a false refusal.
+fn wf_params_from(ts: List[Token], p0: Int, asyncOk: Bool,
+                  acc: List[WfSite]) -> List[WfSite] {
+  let e = close_paren(ts, p0 - 1)
+  let hi = e == 0 - 1 ? p0 : e - 1
+  var k = p0
+  var out = acc
+  while (k < hi) {
+    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+      let tr = type_at(ts, k + 2)
+      out = out.push({ ty: tr.ty, line: tkc(ts, k).line, asyncOk: asyncOk })
+      k = tr.i > k ? tr.i : k + 1
+    } else { k += 1 }
+  }
+  return out
+}
+
+// The declared return of a signature whose `->` would sit at `i`, anchored at
+// the DECLARATION's line (the reference reports it against `fn.line`/`ext.line`,
+// not against the return spelling). `allow_async_param` is False at a return
+// position on both sides.
+fn wf_ret_from(ts: List[Token], i: Int, line: Int, acc: List[WfSite]) -> List[WfSite] {
+  if (!atk(ts, i, "arrow")) { return acc }
+  let tr = type_at(ts, i + 1)
+  return acc.push({ ty: tr.ty, line: line, asyncOk: false })
+}
+
+// Module `fn`s and `extern`s collected apart, because the reference walks ALL
+// the fn declarations and only then all the externs, while the token stream
+// interleaves them in source order.
+type WfAcc = { fns: List[WfSite], exts: List[WfSite] }
+
+// A module `fn` parameter is the one v1 position that admits an async function
+// type (item 92): the reference passes `allow_async_param=not fn.verified`.
+// A `verified fn` heads its declaration with the `verified` keyword, which this
+// walk steps over with every other unrecognised head, so such a declaration
+// contributes no site at all and the gate withholds there.
+fn wf_fn_sites(ts: List[Token], i: Int) -> List[WfSite] {
+  let p0 = fn_params_i(ts, i)
+  let ps = wf_params_from(ts, p0, true, [])
+  let pe = close_paren(ts, p0 - 1)
+  if (pe == 0 - 1) { return ps }
+  return wf_ret_from(ts, pe, tkc(ts, i).line, ps)
+}
+
+fn wf_extern_sites(ts: List[Token], i: Int) -> List[WfSite] {
+  var j = i + 1
+  while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")
+         && !atk(ts, j, "{")) {
+    if (atk(ts, j, "[")) {
+      var k = j + 1
+      while (k < ts.length() && !atk(ts, k, "]")) { k += 1 }
+      j = k + 1
+    } else if (atk(ts, j, "(")) {
+      let c = close_paren(ts, j)
+      j = c == 0 - 1 ? j + 1 : c
+    } else { j += 1 }
+  }
+  if (!atw(ts, j, "fn")) { return [] }
+  let p0 = j + 3
+  let ps = wf_params_from(ts, p0, false, [])
+  let pe = close_paren(ts, p0 - 1)
+  if (pe == 0 - 1) { return ps }
+  return wf_ret_from(ts, pe, tkc(ts, i).line, ps)
+}
+
+fn wf_sites_concat(xs: List[WfSite], ys: List[WfSite]) -> List[WfSite] {
+  var out = xs
+  var i = 0
+  while (i < ys.length()) { out = out.push(ys[i])  i += 1 }
+  return out
+}
+
+// The top-level declaration walk, in the shape `cfg_owners_walk` established:
+// every non-`fn`/`extern` declaration is stepped WHOLE by the reader that owns
+// it, so a `fn` inside a component (a provide method) is never mistaken for a
+// module function — `_validate_declared_types` reads `program.fn_decls` and
+// `program.externs` and nothing else at this phase.
+fn wf_decls_walk(ts: List[Token], i: Int, a: WfAcc) -> WfAcc {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return a }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return wf_decls_walk(ts, i + 1, a) }
+  if (at_event(ts, i)) { return wf_decls_walk(ts, event_decl_end(ts, i), a) }
+  if (t.kind != "kw") { return wf_decls_walk(ts, skip_line(ts, i), a) }
+  if (at_pub_prefix(ts, i)) { return wf_decls_walk(ts, i + 1, a) }
+  if (t.text == "use") { return wf_decls_walk(ts, skip_line(ts, i), a) }
+  if (t.text == "test") {
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return wf_decls_walk(ts, e, a) }
+    return wf_decls_walk(ts, skip_line(ts, i), a)
+  }
+  if (t.text == "type") { return wf_decls_walk(ts, cfg_one_type(ts, i).i, a) }
+  if (t.text == "extern") {
+    let step = p_extern(ts, i, empty_prog())
+    let a2 = { fns: a.fns, exts: wf_sites_concat(a.exts, wf_extern_sites(ts, i)) }
+    return wf_decls_walk(ts, step.i > i ? step.i : skip_line(ts, i), a2)
+  }
+  if (t.text == "fn") {
+    let a2 = { fns: wf_sites_concat(a.fns, wf_fn_sites(ts, i)), exts: a.exts }
+    let step = p_fn(ts, i, empty_prog())
+    return wf_decls_walk(ts, step.i > i ? step.i : skip_line(ts, i), a2)
+  }
+  if (t.text == "service") {
+    return wf_decls_walk(ts, p_service(ts, i, empty_prog()).i, a)
+  }
+  if (t.text == "component") {
+    return wf_decls_walk(ts, p_component(ts, i, empty_prog()).i, a)
+  }
+  return wf_decls_walk(ts, skip_line(ts, i), a)
+}
+
+// The declared-type verdict for a whole program: every module `fn` signature
+// first (parameters, then the return, in declaration order), then every
+// `extern`'s — the reference's own loop order inside `_validate_declared_types`,
+// which is what makes the FIRST offending site the reference's first.
+fn declared_types_refusal(ts: List[Token]) -> Verd {
+  let acc = wf_decls_walk(ts, 0, { fns: [], exts: [] })
+  let sites = wf_sites_concat(acc.fns, acc.exts)
+  var i = 0
+  while (i < sites.length()) {
+    let v = wf_site_verd(sites[i])
+    if (v.v != "") { return v }
+    i += 1
   }
   return no_verd()
 }
@@ -11275,6 +11476,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // `_validate_declared_types`, the earliest of all), then cache-purity,
   // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
   // the component loop.
+  // the DECLARED-TYPE validation runs at the head of `_validate_declared_types`,
+  // ahead of the config-is-data walk that closes the same function, so a
+  // malformed annotation on a `fn`/`extern` signature is decided before it.
+  let wfv = declared_types_refusal(ts)
+  if (wfv.v != "") { return { done: true, refs: [wfv] } }
   // the program-wide declared-type table (the `field <Type>.<name>` rows, the
   // case/payload rows, the module `fn` and extern SIGNATURE rows), built ONCE:
   // it reads the whole token stream, so rebuilding it per component would be

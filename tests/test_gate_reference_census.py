@@ -170,8 +170,14 @@ KNOWN_BYPASSES = {
     "examples/rejections/t13_unknown_match_case.rvl",
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --
+    # `t6_bare_generic` LEFT this list with the type layer's slice T1:
+    # `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
+    # `selfhost/types.rvl` and runs `check_type_wellformed` over every module
+    # `fn`/`extern` signature and every config field, at the phase position
+    # `_validate_declared_types` gives it. What stays here is decided somewhere
+    # else entirely: the alias cycle in `_resolve_type_aliases`, the
+    # destructuring rule in `_lower_let_pattern_stmt`.
     "examples/rejections/t18_type_alias_cycle.rvl",
-    "examples/rejections/t6_bare_generic.rvl",
     "examples/rejections/t5_destructure_nonrecord.rvl",
     # -- provide-method and component bodies: NONE --
     # The whole family closed with the provide-method slice (docs/design/457).
