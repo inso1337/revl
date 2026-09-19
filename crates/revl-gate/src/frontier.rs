@@ -17,11 +17,7 @@
 
 /// The identifier `gate_version().frontier` reports. Two gates with different
 /// ids cover different surfaces and their agreement means nothing.
-<<<<<<< HEAD
-pub const FRONTIER_ID: &str = "selfhost-admit:0a22038394108e2e";
-=======
-pub const FRONTIER_ID: &str = "selfhost-admit:967e854e348efe3d";
->>>>>>> edcd77ac (self-host: drive the emitted rust emitter over the corpus (item 146))
+pub const FRONTIER_ID: &str = "selfhost-admit:5e774c36de7679ab";
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no
