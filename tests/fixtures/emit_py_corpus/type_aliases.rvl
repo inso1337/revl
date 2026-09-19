@@ -1,0 +1,64 @@
+// A TRANSPARENT TYPE ALIAS at a declaration site (issue #1148). `type Count =
+// Int` is TypeScript's alias spelling and means what TypeScript means: the
+// reference erases it before anything downstream runs (`lower.py`'s
+// `_resolve_type_aliases`), so the IR, the checker and every backend see `Int`
+// and never `Count`. Before this document no corpus document declared one at
+// all, so the byte-agreement projections agreed trivially on the construct and
+// the self-host producer could carry the alias name through untouched.
+//
+// Every declaration site the reference's declaration sweep substitutes at is
+// written here: a fn parameter and return, a nested type argument, a record
+// field, a variant case payload, an extern parameter and return, and an alias
+// whose right-hand side is itself an alias (the chain is expanded to its fixed
+// point, not one step).
+//
+// The erasure is not only a spelling: the checker types the body against the
+// ERASED type, so `a + b` over two `Count` parameters carries `operands: "Int"`,
+// a `Ratio` annotation widens an Int literal to a Float, an `Ids` annotation
+// pins an empty list literal, and a `Reg` subscript is a keyed read with
+// `key_type`/`value_type`. A producer that erased the spelling but not the type
+// environment would still miss all four.
+type Count = Int
+type Sku = Str
+type Ratio = Float
+type Ids = List[Int]
+type Reg = Map[Str, Int]
+type Tally = Count
+type Handler = (Count) -> Sku
+type Row = { id: Count, name: Sku }
+type Found = Hit(Count) | Missing
+
+// NOT an alias: `Pending` names no declared type and no builtin, which is
+// TypeScript's TS2304 — so revl keeps the one-case-variant reading and the name
+// survives into the `types` section. The erasure must not fire on it.
+type Status = Pending
+
+extern pure fn bump(n: Count) -> Count = @py { return n + 1 }
+
+fn add(a: Count, b: Count) -> Count { return a + b }
+fn label(s: Sku) -> Sku { return s }
+fn through_an_application(xs: Ids) -> Count { return xs[0] }
+fn inside_an_argument(xs: List[Count]) -> Count { return xs[0] }
+fn chained(n: Tally) -> Tally { return n }
+fn read_a_field(r: Row) -> Count { return r.id }
+fn scale(r: Ratio) -> Ratio { return r * 2.0 }
+fn keyed(m: Reg, k: Sku) -> Count { return m[k] }
+fn case_payload(f: Found) -> Count { return match f { Hit(n) => n, Missing => 0 } }
+fn calls_the_extern(n: Count) -> Count { return bump(n) }
+fn annotated_let() -> Count { let c: Count = 1 return c }
+fn widened_let() -> Ratio { let r: Ratio = 1 return r }
+fn pinned_let() -> Ids { let xs: Ids = [] return xs }
+
+// The arrow's OWN annotations, which live inside a body and so are reached by
+// the reference's second sweep (`_subst_body_annotations`) rather than its
+// declaration sweep. The resolved `returns` follows from the same substitution.
+fn annotated_arrow() -> Sku { let f = (v: Count): Sku => "x" return f(1) }
+fn takes_a_handler(h: Handler) -> Sku { return h(1) }
+fn passes_an_arrow() -> Sku { return takes_a_handler((v: Count): Sku => "y") }
+
+// NEGATIVE CONTROLS in the same document: a declared type that is NOT an alias
+// (a record and a variant keep their own names everywhere), and the builtin
+// spellings the aliases expand to, written directly.
+fn build_a_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
+fn plain(a: Int, b: Int) -> Int { return a + b }
+fn nominal(s: Status) -> Status { return s }
