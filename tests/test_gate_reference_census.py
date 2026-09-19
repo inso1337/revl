@@ -171,8 +171,14 @@ KNOWN_BYPASSES = {
     "examples/rejections/t13_unknown_match_case.rvl",
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --
+    # `t6_bare_generic` LEFT this list with the type layer's slice T1:
+    # `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
+    # `selfhost/types.rvl` and runs `check_type_wellformed` over every module
+    # `fn`/`extern` signature and every config field, at the phase position
+    # `_validate_declared_types` gives it. What stays here is decided somewhere
+    # else entirely: the alias cycle in `_resolve_type_aliases`, the
+    # destructuring rule in `_lower_let_pattern_stmt`.
     "examples/rejections/t18_type_alias_cycle.rvl",
-    "examples/rejections/t6_bare_generic.rvl",
     "examples/rejections/t5_destructure_nonrecord.rvl",
     # -- provide-method and component bodies --
     "examples/rejections/t1_service_arg_type.rvl",
@@ -181,31 +187,20 @@ KNOWN_BYPASSES = {
     "examples/rejections/t16_provide_method_missing_return.rvl",
     "examples/rejections/t31_index_non_int_provide_method.rvl",
     "examples/rejections/t3_config_default_type.rvl",
-    # -- NOT the type layer, and pre-dating this design --
-    # `_check_spawn_attenuation`'s PARAMETERIZED capability-widening refusal
-    # (item 294): `fs.write(path="/etc")` is not within the held
-    # `fs.write(path="/tmp")` cone. The gate's capability model is token-level
-    # (`fs`, `*`), so a same-token narrower/wider valuation is invisible to it.
-    # Closing it needs the `cap_order` (T,P)-pair cone/ceiling algebra ported
-    # into the gate, a much larger change than a `with { ... }` reader.
-    "examples/rejections/g4_spawn_widens_parameter.rvl",
-    # Its BUDGET twin, under the same missing algebra: `net(calls=1000)` is not
-    # within the held `net(calls=100)` ceiling, and a token-level model sees the
-    # bare `net` on both sides.
-    #
-    # It is NEW HERE and not newly admitted. It was a `tag-mismatch/G4->BAD`:
-    # both components spell an annotated provide method (`fn go() -> Int`), the
-    # gate's `p_prov_methods` could not parse one, and the whole component
-    # failed with `BAD|bad provide block in component Child` BEFORE any spawn
-    # check ran. The census read that as a refusal with the wrong tag, which
-    # flattered the gate — it was not deciding the guarantee at all. With the
-    # parse fixed the program reaches the attenuation fold and the gate's real
-    # state shows: the same token-level blindness its parameter twin above has
-    # had since item 294. t29/t30 (a `pub extern` parse refusal) and t25 (a
-    # type-parameter list) are the same story from earlier slices, and the
-    # accepted twin `examples/budget_attenuation.rvl` left `false-reject/BAD`
-    # in the same change.
-    "examples/rejections/g4_spawn_widens_budget.rvl",
+    # -- NOT the type layer --
+    # `_check_spawn_attenuation`'s two parameterized rows —
+    # `g4_spawn_widens_parameter` (a `path` cone) and `g4_spawn_widens_budget`
+    # (a `calls` ceiling) — are STRUCK: `selfhost/lower.rvl` now carries the
+    # `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
+    # so both sides of the attenuation fold are spelled in the boundary's own
+    # namespace and both refuse with the reference's message byte-for-byte.
+    # `examples/rejections/g4_dotted_capability_key.rvl` is the corpus document
+    # for the shape that change caught and nothing spelled: a dotted item-343
+    # emission scope, which the old scope-list reader split into two
+    # capabilities so that the wiring key landed in the declared scope by
+    # accident. The other shape it caught -- a widening laundered through a key
+    # SPELLED the same on both sides -- is pinned by an in-file test in
+    # `selfhost/lower.rvl` instead; see the capability-order header there.
 }
 
 

@@ -7,6 +7,7 @@ import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.R4_NoResidue
 import RevL.Theorems.A9_ProvideKeyDeclared
+import RevL.Theorems.A2_NoAcquisitionAfterProvision
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -38,10 +39,12 @@ L0 definition and these verdicts move.
 
 ### What is still a private restatement, and why
 
-Three verdicts have no counterpart in the model, and are computed here by
-hand. They are listed so the gate's reach is not overstated:
+Three groups of verdicts have no counterpart in the model, and are
+computed here by hand. They are listed so the gate's reach is not
+overstated:
 
-1. `g4OK` and `hostAcquireOK` (the `G` row). Two rules under the G4
+1. `g4OK` and `hostAcquireOK` (the `G` row), and `configDataOK` (the `CD`
+   row). Three rules under the G4
    guarantee. `g4OK` is the MARKER rule; the G4 model
    (`RevL.Theorems.G4_InverseOrEmit` over `RevL.Syntax.Stmt`) is indexed
    by statement syntax, and the export carries call FACTS — receiver,
@@ -50,7 +53,14 @@ hand. They are listed so the gate's reach is not overstated:
    verb is legal only as an `effect … undo …` bracket's acquisition. Its
    verb table (`hostAcquireVerbs`) is the model's copy of the checker's
    `_HOST_ACQUIRE_VERBS`, and it decides over the `HA` position facts the
-   export carries.
+   export carries. `configDataOK` (issue 1161) is the CONFIG-IS-DATA rule
+   (item 378): a config value is injected as static data, so its declared
+   type must be built, transitively, out of data. It judges a
+   DECLARATION rather than a body, so nothing in the crossing facts the
+   other two read could express it — which is why it is a row of its own
+   rather than a case in `g4OK`, and why a refusal of that class was
+   reported as `missed-G4` wherever a fixture for it was placed until
+   this row existed.
 2. `methodBoundOK` (the `P` row, a provide method against its service's
    `emission[...]` declaration). The model has no definition of that
    rule at all; `RevL.Boundary.bodyBoundary` enumerates a body's crossing
@@ -107,7 +117,14 @@ Fact rows in (tab-separated, one fact per line):
                                              the boundary spelling only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
-  U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context
+  U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context:
+                                             `emit` for the head call an emit
+                                             marks, `emitarg` for a call
+                                             evaluated inside that head's
+                                             argument list (the region the
+                                             marker admits, whatever the
+                                             method declares), `plain`
+                                             elsewhere
   HA <file> <comp> <verb> <bracket|plain|emit|undo|fn>
                                              a host-family acquisition and the
                                              POSITION that decides its legality
@@ -115,6 +132,17 @@ Fact rows in (tab-separated, one fact per line):
                                              an `effect … undo …` (legal); any
                                              other site acquires irreversibly
                                              (G4, category `acquire`)
+  CF <file> <component|extern> <owner> <field> <type>
+                                             a declared config field
+  CN <file> <component|extern> <owner> <field> <ord> <form> <type>
+                                             one node that field's declared
+                                             type reaches, in walk order, with
+                                             the SHIPPED config-data tables'
+                                             classification of its head:
+                                             scalar / container / record /
+                                             variant / struct / tparam are
+                                             data; arrow / service / erased /
+                                             opaque are not
   I <file> <comp> <index> <pure|effect|emit|raw> <heads-csv> <inverse-csv>
                                               reconstructed RevL.Syntax.Stmt
   T <file> <comp> <kind>                     statement class (census)
@@ -140,6 +168,15 @@ Fact rows in (tab-separated, one fact per line):
                                              re-issued. Not a WAL record — a
                                              property of the world the
                                              reference drives.
+  AQ <file> <comp> <ord> <acquire|provide|other>
+                                             one activation-body statement,
+                                             at body index `ord`, as the A2
+                                             rule sees it (issue 1166):
+                                             `acquire` is a `let … = effect`,
+                                             a bare `effect`, a timer or an
+                                             `every … in` iteration — the four
+                                             forms `lower._dispatch_action`
+                                             refuses after a provision
 
 Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 — the checker's own parser. Nothing here re-reads the capability grammar.
@@ -150,6 +187,8 @@ Verdict rows out:
                                                    AND host-acquisition rule
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
   W <file> <comp> <child> <atten=ok|fail>          spawn attenuation
+  CD <file> <component|extern> <owner> <field> <data=ok|fail>
+                                                   config-is-data rule
   X <file> <refused=CODE>                          refusal of record
   A9 <file> <comp> <a9=ok|fail>                    every installed block key
                                                    is declared (RevL.A9);
@@ -157,6 +196,9 @@ Verdict rows out:
                                                    that installs a block
   D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
   O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a>   A8/R4 recovery
+  A2 <file> <comp> <a2=ok|fail>                    no acquisition after a
+                                                   provision: `RevL.A2.a2B`
+                                                   over the body's `AQ` steps
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -929,6 +971,35 @@ structure HARow where
   verb : String
   pos : String
 
+/-- A declared config field (`CF` row). `kind` is `component` or `extern`,
+the two owners `lower._check_config` is called for; `spelling` is the type
+as the author wrote it and is carried for legibility only — the judgment
+reads the `CN` nodes. -/
+structure CFRow where
+  path : String
+  kind : String
+  owner : String
+  field : String
+  spelling : String
+
+/-- One node a config field's declared type reaches (`CN` row), classified
+by the SHIPPED config-data tables (`typecheck._CONFIG_DATA_SCALARS` /
+`_CONFIG_DATA_CONTAINERS` / `_CONFIG_ERASED`, the declared service names,
+and the lightweight type table a nominal head resolves through).
+
+This is the only fact row in the export that describes a declared TYPE
+rather than something a body does, which is why config-is-data needed a row
+of its own rather than a case in `g4OK` (issue 1161): both crossing rules
+judge a call, and there is nothing about a call to read here. -/
+structure CNRow where
+  path : String
+  kind : String
+  owner : String
+  field : String
+  ord : String
+  form : String
+  spelling : String
+
 structure IRow where
   path : String
   comp : String
@@ -1187,6 +1258,18 @@ def parseHA (f : List String) : Option HARow :=
   | ["HA", path, comp, verb, pos] => some ⟨path, comp, verb, pos⟩
   | _ => none
 
+def parseCF (f : List String) : Option CFRow :=
+  match f with
+  | ["CF", path, kind, owner, field, spelling] =>
+      some ⟨path, kind, owner, field, spelling⟩
+  | _ => none
+
+def parseCN (f : List String) : Option CNRow :=
+  match f with
+  | ["CN", path, kind, owner, field, ord, form, spelling] =>
+      some ⟨path, kind, owner, field, ord, form, spelling⟩
+  | _ => none
+
 /-- One entry of a teardown scenario's LIFO stack, in registration order
 (G7). `ord` is the corpus's label for the entry, carried through the
 model's `inverse` slot; `kind` is one of the three the model names.
@@ -1264,12 +1347,18 @@ declaration — every call to a declared emission method must be `emit`
 -marked, and an `emit`-marked call to a non-emission method is refused.
 Receivers include spawn handles (the exporter resolves them).
 
+The marker is a REGION marker in the checker (`lower._expr_mode` is
+"emit" for the whole marked expression): it judges the HEAD call and
+admits every call evaluated under it, emission or not, so an `emitarg`
+fact is never a violation. Whether it should be per-site is revl issue
+1175, the checker's question; the model follows the checker.
+
 PRIVATE RESTATEMENT (see the header): the G4 model is indexed by
 statement syntax, and the export carries call facts. -/
 def g4OK (ems : List (String × String)) (calls : List URow) : Bool :=
   !calls.any fun u =>
     let em := ems.any fun e => e.1 == u.svc && e.2 == u.meth
-    (u.ctx == "emit") != em
+    u.ctx != "emitarg" && ((u.ctx == "emit") != em)
 
 /-- The host acquisition verb table — the model's copy of the checker's
 `_HOST_ACQUIRE_VERBS` (`src/revl/typecheck.py`). Each opens a host resource
@@ -1288,6 +1377,42 @@ PRIVATE RESTATEMENT (see the header, beside `g4OK`): the acquisition-position
 fact is carried by the export, and the verb table and rule are stated here. -/
 def hostAcquireOK (has : List HARow) : Bool :=
   !has.any fun h => hostAcquireVerbs.contains h.verb && h.pos != "bracket"
+
+/-- The forms a config field's declared type may reach. A scalar; a
+container (`Opt`/`List`/`Map`/`Result`); a declared record, variant or
+alias; a structural record literal; and a type parameter, whose binding is
+the type argument at the use site and is walked in its own right.
+
+An ALLOWLIST, and deliberately so — the checker's own rule is
+"a head that is not *provably* data is refused", written that way because
+enumerating the forbidden heads left `Any`, `Value`, `Never` and every
+opaque nominal passing (item 378). Stating it as a denylist here would
+reintroduce exactly that, one layer out: a classification neither side had
+heard of would be admitted by default. With the allowlist, an unknown form
+REFUSES, so the model can only become stricter than the checker — the safe
+direction, reported as `formal-strict` — and never blind to one of its
+refusals. -/
+def configDataForms : List String :=
+  ["scalar", "container", "record", "variant", "struct", "tparam"]
+
+/-- Config-is-data rule (G4-shaped, category `config-data`, item 378): a
+config value is injected as static data at plug/spawn/load time, so its
+declared type must be built, TRANSITIVELY, out of data. An arrow field is a
+live callable invoked past every authority fold — no ticket, no reach
+attribution, no `emission[...]` bound to exceed — and a `service` field is a
+capability handed over with no wiring at all.
+
+The two other rules under this guarantee (`g4OK`, `hostAcquireOK`) judge
+what a body does, over crossing facts. This one judges a DECLARATION, so
+nothing in the crossing facts could express it and a config refusal was
+invisible to the model — reported as `missed-G4`, fatal, wherever a fixture
+for it was placed (issue 1161).
+
+PRIVATE RESTATEMENT (see the header, beside `g4OK`): the type nodes arrive
+decomposed and classified by the shipped tables, the way `Z`/`Y` carry a
+capability, and the judgment over them is stated here. -/
+def configDataOK (ns : List CNRow) : Bool :=
+  ns.all fun n => configDataForms.contains n.form
 
 /-- Provide-method bound: the reached emission tokens must be within the
 declared bound (plain => none; any => free; scoped => the declared
@@ -1341,6 +1466,71 @@ def closeN (n : Nat) (edges : List (String × String)) (closed : CapMap) : CapMa
   | 0 => closed
   | n + 1 => closeN n edges (oneStep edges closed)
 
+/-! ## Deciding A2: no acquisition after a provision (issue 1166)
+
+The `AQ` rows are one component's activation body in order, each statement
+as the rule sees it. The verdict is `RevL.A2.a2B` — the checker's own fold
+(`lower._dispatch_action`: a flag set at the first `provide`, an acquisition
+refused while it is set) — and `a2OKB_iff` below is the bridge to the
+declarative rule `RevL.A2.A2OK`, the hypothesis of
+`RevL.A2.withdrawals_precede_releases`: under it the Phase-1 proof pass of
+the body's stack runs every withdrawal before every release. So an `A2 …
+a2=ok` row is a component whose teardown cannot revert an acquisition while a
+provision is still callable, and the reference recomputes the same fold
+independently from the TSV (`diff_corpus.reference_from_tsv`). -/
+
+section A2Ordering
+
+/-- One activation-body statement of one component, at body index `ord`. -/
+structure AQRow where
+  path : String
+  comp : String
+  ord : Nat
+  kind : String
+
+def parseAQ (f : List String) : Option AQRow :=
+  match f with
+  | ["AQ", path, comp, ord, kind] => ord.toNat?.map fun n => ⟨path, comp, n, kind⟩
+  | _ => none
+
+/-- The exporter's spelling of a step, read back as the model's `Step`. -/
+def parseStep : String → Option RevL.A2.Step
+  | "acquire" => some .acquire
+  | "provide" => some .provide
+  | "other" => some .other
+  | _ => none
+
+/-- The exporter's spelling of a step (`diff_corpus._a2_step`). -/
+def stepName : RevL.A2.Step → String
+  | .acquire => "acquire"
+  | .provide => "provide"
+  | .other => "other"
+
+/-- **The spelling round-trips**: every step the model names is read back
+as itself, so no body step is silently dropped between the two sides. -/
+theorem parseStep_stepName : ∀ s : RevL.A2.Step, parseStep (stepName s) = some s := by
+  intro s; cases s <;> rfl
+
+/-- Insertion by body index, so the steps are folded in body order whatever
+order the rows arrived in. -/
+def insertByOrd (r : AQRow) : List AQRow → List AQRow
+  | [] => [r]
+  | x :: xs => if r.ord ≤ x.ord then r :: x :: xs else x :: insertByOrd r xs
+
+def sortByOrd (rs : List AQRow) : List AQRow := rs.foldr insertByOrd []
+
+/-- **A2 decider**: the model's fold over the body's steps. -/
+def a2OKB (steps : List RevL.A2.Step) : Bool := RevL.A2.a2B steps
+
+/-- **The A2 verdict is the model's rule**: the printed Bool is `true`
+exactly when no `provide` is followed by an `acquire`
+(`RevL.A2.a2B_iff`). -/
+theorem a2OKB_iff (steps : List RevL.A2.Step) :
+    a2OKB steps = true ↔ RevL.A2.A2OK steps :=
+  RevL.A2.a2B_iff steps
+
+end A2Ordering
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1370,6 +1560,8 @@ def main (args : List String) : IO UInt32 := do
     let xrows := fields.filterMap parseX
     let pbrows := fields.filterMap parsePB
     let harows := fields.filterMap parseHA
+    let cfrows := fields.filterMap parseCF
+    let cnrows := fields.filterMap parseCN
     let irows := fields.filterMap parseI
     let pgrows := fields.filterMap parsePG
     let exrows := fields.filterMap parseEX
@@ -1379,6 +1571,7 @@ def main (args : List String) : IO UInt32 := do
     let lrecs := fields.filterMap parseL
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
+    let aqrows := fields.filterMap parseAQ
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
@@ -1482,6 +1675,14 @@ def main (args : List String) : IO UInt32 := do
         if !blocks.isEmpty then
           let av := if a9RowB (toLComponent r) blocks then "ok" else "fail"
           out := out ++ s!"A9\t{p}\t{r.name}\ta9={av}\n"
+      -- CD verdicts (G4 config-is-data) per DECLARED config field, not per
+      -- component: a file's externs declare config too and are held to the
+      -- same bar, and naming the field is what makes a refusal legible.
+      for cf in cfrows.filter (fun r => r.path == p) do
+        let ns := cnrows.filter (fun r => r.path == p && r.kind == cf.kind
+                                  && r.owner == cf.owner && r.field == cf.field)
+        let cdv := if configDataOK ns then "ok" else "fail"
+        out := out ++ s!"CD\t{p}\t{cf.kind}\t{cf.owner}\t{cf.field}\tdata={cdv}\n"
       -- P verdicts (provide-method bound) per method reach group
       let fkeys := (uf.map (fun r => (r.comp, r.key, r.svc, r.meth))).eraseDups
       for k in fkeys do
@@ -1545,6 +1746,19 @@ def main (args : List String) : IO UInt32 := do
           else
             let n := registrationsB prog fuel (bodyOfHeads r.inverse)
             out := out ++ s!"U5\t{p}\t{r.comp}\t{r.index}\tteardown={n}\n"
+      -- A2 verdicts (no acquisition after a provision, issue 1166), one per
+      -- component, decided by the model's own fold over the body's ordered
+      -- steps — the component's `AQ` rows, sorted by body index. An unknown
+      -- step kind is a hard error, never a silently shorter body.
+      let uaq := aqrows.filter (fun r => r.path == p)
+      for cn in fm.map (·.name) do
+        let mine := sortByOrd (uaq.filter (fun r => r.comp == cn))
+        if mine.any (fun r => (parseStep r.kind).isNone) then
+          IO.eprintln s!"oracle: unknown body step kind in {p} {cn}"
+          return 1
+        let steps := mine.filterMap (fun r => parseStep r.kind)
+        let av := if a2OKB steps then "ok" else "fail"
+        out := out ++ s!"A2\t{p}\t{cn}\ta2={av}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1602,3 +1816,5 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.declared_idempotent_reissued
 #print axioms RevLOracle.reportedSeqLabels_nil_iff_clean
 #print axioms RevLOracle.a9RowB_iff
+#print axioms RevLOracle.parseStep_stepName
+#print axioms RevLOracle.a2OKB_iff
