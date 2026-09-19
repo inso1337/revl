@@ -1165,6 +1165,11 @@ class _Signature:
     * `reaches_sink`: parameter index -> `(sink_name, sink_kind, via)`, the sinks
       an argument reaches transitively through any chain of calls, with the
       cross-body naming chain for the G9 diagnostic.
+    * `persists_at`: parameter index -> `(sink_name, scope, via)`, the PERSISTENCE
+      sinks an argument reaches the same way (item 472 follow-up). The retention
+      sibling of `reaches_sink`, and the reason the G-RETAIN refusal does not stop
+      at a service seam: a caller that hands a `Retained[T, P]` value to a service
+      operation never names the sink, the PROVIDER's body does.
     * `clears`: parameter index -> the set of concrete origins a body-internal
       `endorse[<origin>]` on that parameter's flow-to-return path downgrades
       (item 249, Finding 1). Origin-precise: a call site subtracts exactly these
@@ -1176,10 +1181,12 @@ class _Signature:
     flows_to_return: set = field(default_factory=set)
     mints: set = field(default_factory=set)
     reaches_sink: dict = field(default_factory=dict)
+    persists_at: dict = field(default_factory=dict)
     clears: dict = field(default_factory=dict)
 
     def merge(self, flows: set, mints: set, sink_hits: dict,
-              clears: dict | None = None) -> bool:
+              clears: dict | None = None,
+              persistence_hits: dict | None = None) -> bool:
         """Fold one body-walk's findings in. Returns whether the monotone part
         (the parameter sets, the per-parameter cleared-origin sets, and the sink
         key set) grew — the fixed point's `changed` signal. A shorter `via` for an
@@ -1205,6 +1212,13 @@ class _Signature:
                 changed = True
             elif len(hit[2]) < len(prev[2]):
                 self.reaches_sink[index] = hit  # shorter chain, not a growth
+        for index, hit in (persistence_hits or {}).items():
+            prev = self.persists_at.get(index)
+            if prev is None:
+                self.persists_at[index] = hit
+                changed = True
+            elif len(hit[2]) < len(prev[2]):
+                self.persists_at[index] = hit  # shorter chain, not a growth
         return changed
 
 
@@ -1316,6 +1330,12 @@ class _FlowChecker:
         # the naming chain behind it.
         self.return_taint: Taint = CLEAN
         self.sink_hits: dict[int, tuple] = {}
+        # inference-mode accumulator (item 472 follow-up): per parameter index,
+        # the PERSISTENCE sink an argument reaches with the naming chain behind
+        # it — the retention sibling of `sink_hits`, and the reason a refusal can
+        # follow a retained value through a service seam whose interface says
+        # nothing. See `_on_persistence`.
+        self.persistence_hits: dict[int, tuple] = {}
         # inference-mode accumulator (item 249, Finding 1): per parameter index,
         # the concrete origins a body-internal `endorse[<origin>]` on that
         # parameter downgrades. Folded into the callable's `_Signature.clears` so
@@ -1374,7 +1394,10 @@ class _FlowChecker:
     def _check_sinks(self, callee: str, arg_taints: list, node) -> None:
         """Both sink tiers at a call site: a directly-declared `Trusted[T]`
         parameter (landed), and a parameter the callee's inferred signature
-        proves reaches a sink transitively (Slice B)."""
+        proves reaches a sink transitively (Slice B). The signature's
+        `persists_at` reach is carried the same way (item 472 follow-up), so a
+        persistence sink one hop further out — through a helper fn — is recorded
+        on the enclosing body and refuses at the caller that named neither."""
         sink_params = self.model.sinks.get(callee)
         if sink_params:
             kind = self.model.sink_kind.get(callee, f"the trusted sink `{callee}`")
@@ -1392,6 +1415,10 @@ class _FlowChecker:
                     # a transitive sink: the callee's inferred cross-body chain.
                     self._on_sink(sink_name, kind, index, arg_taints[index],
                                   node, via)
+            for index, (sink_name, scope, via) in sig.persists_at.items():
+                if index < len(arg_taints):
+                    self._on_persistence(sink_name, scope,
+                                         [arg_taints[index]], node, via)
 
     def _on_sink(self, sink_name: str, kind: str, index: int, arg_taint: Taint,
                  node, internal_via: tuple) -> None:
@@ -1429,6 +1456,31 @@ class _FlowChecker:
             code="G9", category="taint-flow",
             navigate=self._sink_navigate(sink_name, kind, concrete_origins),
         )
+
+    def _on_persistence(self, sink_name: str, scope: str, arg_taints: list,
+                        node, internal_via: tuple) -> None:
+        """A parameter of this body reaches a PERSISTENCE sink (item 472
+        follow-up). Inference mode only: the refusal needs the concrete retention
+        origin and the deadline, and neither exists while a body is being walked
+        for its shape — the symbolic parameter marker is what is in hand here.
+
+        The retention sibling of `_on_sink`, and the reason G-RETAIN survives a
+        service seam. A caller that hands a `Retained[T, P]` value to a service
+        operation names no sink: the interface parameter is unqualified (the only
+        shape a caller across a unit boundary ever sees) and the PROVIDER's body
+        is what writes. Recording the reach on the operation's signature is what
+        lets the refusal happen at the caller's crossing instead of nowhere."""
+        if not self.infer:
+            return
+        for at in arg_taints:
+            for origin in at.origins:
+                pidx = _param_index(origin)
+                if pidx is None:
+                    continue
+                via = (self.qualname,) + internal_via if self.qualname else internal_via
+                prev = self.persistence_hits.get(pidx)
+                if prev is None or len(via) < len(prev[2]):
+                    self.persistence_hits[pidx] = (sink_name, scope, via)
 
     def _refuse_secret(self, sink_name: str, kind: str, index: int | None,
                        arg_taint: Taint, node) -> None:
@@ -1490,7 +1542,8 @@ class _FlowChecker:
         )
 
     def _refuse_retention(self, sink_name: str, scope: str, index: int,
-                          policy, arg_taint: Taint, node) -> None:
+                          policy, arg_taint: Taint, node,
+                          internal_via: tuple | None = None) -> None:
         """A `Retained[T, P]` value has reached a PERSISTENCE SINK past P's
         deadline (G-RETAIN, item 472).
 
@@ -1501,10 +1554,16 @@ class _FlowChecker:
         `Retained[T, P]`-returning extern is refused at a sink whose own
         parameter carries no qualifier.
 
+        `internal_via` is the cross-body naming chain when the sink is reached
+        THROUGH a call the caller never named — a service seam, where the
+        provider's body holds the sink. Absent, the chain ends at the sink
+        itself, exactly as before.
+
         A declared legal hold has already been applied by `policy.expired`, so a
         held policy never reaches here: keeping the data is the hold's whole
         instruction, and overriding the deadline is what it is for."""
-        chain_parts = arg_taint.via + (sink_name,)
+        chain_parts = arg_taint.via + (tuple(internal_via) if internal_via
+                                       else (sink_name,))
         chain = " -> ".join(chain_parts) if chain_parts else "a Retained value"
         as_of = self.model.retention_as_of
         raise RevlError(
@@ -1947,19 +2006,46 @@ class _FlowChecker:
         # one. Only an EXPIRED policy refuses; a declared legal hold overrides
         # the deadline inside `RetentionPolicy.expired`.
         _scope = self.model.persistence_sinks.get(callee)
-        if (not self.infer and self.enforce and _scope is not None
-                and self.model.retention_as_of is not None):
-            for index, at in enumerate(arg_taints):
-                for _name in _retention_origins(at):
-                    _pol = self.model.retention_policies.get(_name)
-                    if _pol is not None and _pol.expired(
-                            self.model.retention_as_of):
-                        self._refuse_retention(callee, _scope, index, _pol, at,
-                                               node)
+        if _scope is not None and self.model.retention_as_of is not None:
+            if self.infer:
+                # record the reach on the ENCLOSING callable's signature, so a
+                # caller that never names this sink — a service operation whose
+                # provider body owns it — is still refused (item 472 follow-up).
+                self._on_persistence(callee, _scope, arg_taints, node, (callee,))
+            elif self.enforce:
+                for index, at in enumerate(arg_taints):
+                    for _name in _retention_origins(at):
+                        _pol = self.model.retention_policies.get(_name)
+                        if _pol is not None and _pol.expired(
+                                self.model.retention_as_of):
+                            self._refuse_retention(callee, _scope, index, _pol,
+                                                   at, node)
 
         # sink checks (both tiers): a directly-declared `Trusted[T]` parameter,
         # and a parameter a callee's inferred signature reaches transitively.
         self._check_sinks(callee, arg_taints, node)
+
+        # item 472 follow-up: the same retention refusal THROUGH a call. The
+        # direct lookup above finds a sink the CALLER names; this finds one the
+        # CALLEE's body reaches. A service operation is the case that matters: its
+        # interface parameter is unqualified (nothing else can cross a unit
+        # boundary) and its provider owns the store, so without this the guarantee
+        # is argument-blind at exactly the boundary it exists to police. The
+        # `via` chain names the seam so the diagnostic shows where it went.
+        if (not self.infer and self.enforce
+                and self.model.retention_as_of is not None):
+            _sig = self.signatures.get(callee)
+            for _index, (_sink, _sscope, _via) in (
+                    _sig.persists_at.items() if _sig else ()):
+                if _index >= len(arg_taints):
+                    continue
+                _at = arg_taints[_index]
+                for _name in _retention_origins(_at):
+                    _pol = self.model.retention_policies.get(_name)
+                    if _pol is not None and _pol.expired(
+                            self.model.retention_as_of):
+                        self._refuse_retention(_sink, _sscope, _index, _pol, _at,
+                                               node, internal_via=_via)
 
         # a taint source (declared `Untrusted[T]` return): mint its origin
         if callee in self.model.sources:
@@ -2496,7 +2582,8 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
             mints = {o for o in checker.return_taint.origins
                      if _param_index(o) is None}
             if signatures[key].merge(flows, mints, checker.sink_hits,
-                                     checker.endorse_clears):
+                                     checker.endorse_clears,
+                                     checker.persistence_hits):
                 changed = True
     return signatures
 

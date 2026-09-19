@@ -4,10 +4,6 @@
    "examples/rejections/g1_template_undeclared.rvl",
    "examples/rejections/v2_undeclared_fn_var.rvl"
   ],
-  "false-admit/G4": [
-   "examples/rejections/g4_spawn_widens_budget.rvl",
-   "examples/rejections/g4_spawn_widens_parameter.rvl"
-  ],
   "false-admit/T1": [
    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
    "examples/rejections/t16_provide_method_missing_return.rvl",
@@ -20,7 +16,6 @@
    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
    "examples/rejections/t3_config_default_type.rvl",
    "examples/rejections/t4_field_arg_type.rvl",
-   "examples/rejections/t6_bare_generic.rvl",
    "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
    "examples/rejections/v2_match_nonexhaustive.rvl"
   ],
@@ -119,30 +114,6 @@
    "reference": {
     "message": "`nobody` is not declared in this function",
     "tag": "G1"
-   }
-  },
-  "examples/rejections/g4_spawn_widens_budget.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)",
-    "tag": "G4"
-   }
-  },
-  "examples/rejections/g4_spawn_widens_parameter.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` \u2014 a spawn may narrow a child's capabilities, never widen them",
-    "tag": "G4"
    }
   },
   "examples/rejections/t13_unknown_match_case.rvl": {
@@ -311,18 +282,6 @@
    "reference": {
     "message": "record destructuring requires a record, but `List[Int]` is not a record",
     "tag": "TYPE"
-   }
-  },
-  "examples/rejections/t6_bare_generic.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Opt` takes 1 type argument(s), got 0 (`Opt`)",
-    "tag": "T1"
    }
   },
   "examples/rejections/t7_provide_param_annotation_mismatch.rvl": {

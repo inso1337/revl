@@ -17,7 +17,13 @@ Pipeline (formal/STATUS.md, "differential oracle"):
        (`w.task.run` reads the child's `task` provision), emission externs
        and the transitively-emitting named functions;
      - a component's activation emit-step surface, the capabilities its
-       `requires` bindings grant it, and its activation-body spawn edges.
+       `requires` bindings grant it, and its activation-body spawn edges;
+     - a config field's declared TYPE, decomposed into the nodes it
+       reaches and each node's data classification. That one is not
+       about a crossing at all: the G4 guarantee also forbids a config
+       field whose type can carry a live callable or a capability (item
+       378), and with no type-shape fact the model could not see such a
+       refusal at all (issue 1161).
 
    That is what lets the shaped model see a provider exceeding its
    declaration and a spawn widening a child's authority, not just a missing
@@ -49,10 +55,12 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    A mismatch is therefore drift between the machine-checked model and
    what revl actually does, and it fails `make formal`.
 4. report checker alignment: compile each file with the real checker
-   (`revl.compiler.compile_source`) and compare its refusal codes against
-   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`
-   and `missed-A9` (`FATAL_BUCKETS`) — the checker refusing where the
-   model sees nothing is the dangerous direction and fails the gate.
+   (`revl.compiler.compile_files`, the path the CLI takes, so a `use`
+   resolves) and compare its refusal codes against
+   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`,
+   `missed-A9` and `missed-A2` (`FATAL_BUCKETS`) — the checker refusing
+   where the model sees nothing is the dangerous direction and fails the
+   gate.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -83,11 +91,23 @@ sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
 from revl import recovery
-from revl.compiler import compile_source
+from revl.compiler import compile_files
 from revl.diagnostics import classify
 from revl.errors import RevlError
 from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
 from revl.typecheck import parse_type  # the shipped type-head splitter
+# The config-is-data tables (item 378), imported rather than restated: the
+# classification a `CN` node carries is the SHIPPED checker's, so the harness
+# cannot drift from it by spelling a head into the wrong bucket.
+from revl.typecheck import (
+    _CONFIG_DATA_CONTAINERS,
+    _CONFIG_DATA_SCALARS,
+    _CONFIG_ERASED,
+    FN_HEAD,
+    _is_type_expression,
+    structural_fields,
+)
+from revl.taint import strip_qualifiers  # the shipped qualifier normalization
 from revl.wal import WAL_GUARANTEE, WAL_VERSION
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
@@ -103,6 +123,8 @@ from revl.parser import (
     Parser,
     ProvideStmt,
     SpawnExpr,
+    StreamIterStmt,
+    TimerStmt,
 )
 
 
@@ -660,9 +682,52 @@ def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
         apply_bindings(stmt)
 
 
+def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
+                requires: dict, handles: dict, psvc: dict, bounds: dict,
+                em_set: set, emitting: set, aliases: dict | None,
+                externs: "set[str] | None") -> None:
+    """The crossing ONE call head contributes (see `walk_reach`). The
+    arguments are the caller's to walk, under whatever region encloses them:
+    a call evaluated to produce an argument is not the marked crossing."""
+    rt = _route(node.callee)
+    if not rt:
+        return
+    root, chain = rt
+    res = _resolve_emission(root, chain, requires, handles, psvc, aliases)
+    if res is not None and region == "all":
+        svc, meth = res
+        if (svc, meth) in em_set:
+            if root in handles or (aliases and root in aliases):
+                out.add(("*", "*"))
+            else:
+                mode, entries = bounds[(svc, meth)]
+                if mode == "any":
+                    # No declared token: the wiring key names the
+                    # boundary, in its own namespace for the fold and
+                    # bare for the bound.
+                    out.add((_wire_cap(root), root))
+                else:
+                    for e in entries:
+                        out.add((_declared_cap(e), _canon_cap(root, e)))
+    elif res is None and region == "all" and root in emitting:
+        # A host emission. The two namespaces part company here (#1169 F3):
+        # the attenuation fold gives it the unnameable `*` whatever the
+        # extern is called (`_emit_step_caps_pairs`: a non-`req` target is
+        # `Cap("*")`), but the provide-method BOUND names a DIRECT emission
+        # extern by the extern — `_emitting_capabilities` seeds the fixed
+        # point with `{wire}` for `extern emission fn wire`, and
+        # `_method_emissions` measures that name against the declared
+        # `emission[...]` entries, which is why `Db.execute` can be declared
+        # `emission[wire, ...]` at all. A transitively-emitting named fn
+        # stays `*` on both sides (STATUS.md, "known fidelity limits").
+        bound = root if externs is not None and root in externs else "*"
+        out.add(("*", bound))
+
+
 def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
                handles: dict, psvc: dict, bounds: dict, em_set: set,
-               emitting: set, aliases: dict | None = None) -> None:
+               emitting: set, aliases: dict | None = None,
+               externs: "set[str] | None" = None) -> None:
     """Collect the emission caps `node` crosses, each as the PAIR
     `(attenuation spelling, bound spelling)` — the two namespaces a crossing
     has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
@@ -672,53 +737,44 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     surface, like `_collect_emit_caps_pairs`) or "all" (also count any
     resolved emission call — a provide method's reach for the bound, like
     `_method_emissions.walk`). A spawn-handle emission is the unnameable
-    `*`; an emission extern / emitting-fn call contributes `*` too. `*` is
-    unnameable in BOTH namespaces, so it is its own spelling on both sides."""
+    `*` in both namespaces; an emitting-fn call too; a DIRECT emission-extern
+    call is `*` for the fold and the extern's name for the bound
+    (`_reach_call`). `externs` is the file's emission-extern name set.
+
+    An `emit` marks its HEAD call only: `_emit_step_caps_pairs` reads the
+    step's `expr.target` and nothing beneath it, so the arguments (and a
+    `compensate` slot or `with` clause) keep the ENCLOSING region. For the
+    F row that region is already "all" and nothing moves; for the A surface
+    it stops a call evaluated inside an emit's argument list from counting
+    as a marked crossing (#1169 F2, the `walk_calls` leak's twin)."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
+    args = (requires, handles, psvc, bounds, em_set, emitting, aliases, externs)
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
+        expr = getattr(node, "expr", None)
+        if isinstance(expr, ExprCall):
+            _reach_call(expr, out, "all", *args)
+            for a in expr.args:
+                walk_reach(a, out, region, *args)
+        else:
+            walk_reach(expr, out, "all", *args)
         if dataclasses.is_dataclass(node):
             for f in dataclasses.fields(node):
-                walk_reach(getattr(node, f.name), out, "all", requires,
-                           handles, psvc, bounds, em_set, emitting, aliases)
+                if f.name != "expr":
+                    walk_reach(getattr(node, f.name), out, region, *args)
         return
     if isinstance(node, ExprCall):
-        rt = _route(node.callee)
-        if rt:
-            root, chain = rt
-            res = _resolve_emission(root, chain, requires, handles, psvc,
-                                    aliases)
-            if res is not None and region == "all":
-                svc, meth = res
-                if (svc, meth) in em_set:
-                    if root in handles or (aliases and root in aliases):
-                        out.add(("*", "*"))
-                    else:
-                        mode, entries = bounds[(svc, meth)]
-                        if mode == "any":
-                            # No declared token: the wiring key names the
-                            # boundary, in its own namespace for the fold and
-                            # bare for the bound.
-                            out.add((_wire_cap(root), root))
-                        else:
-                            for e in entries:
-                                out.add((_declared_cap(e),
-                                         _canon_cap(root, e)))
-            elif res is None and region == "all" and root in emitting:
-                out.add(("*", "*"))
+        _reach_call(node, out, region, *args)
         for a in node.args:
-            walk_reach(a, out, region, requires, handles, psvc, bounds,
-                       em_set, emitting, aliases)
+            walk_reach(a, out, region, *args)
         return
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
-            walk_reach(getattr(node, f.name), out, region, requires, handles,
-                       psvc, bounds, em_set, emitting, aliases)
+            walk_reach(getattr(node, f.name), out, region, *args)
         return
     if isinstance(node, (list, tuple)):
         for x in node:
-            walk_reach(x, out, region, requires, handles, psvc, bounds,
-                       em_set, emitting, aliases)
+            walk_reach(x, out, region, *args)
 
 
 def collect_spawns(node, handles: dict, rows: list) -> None:
@@ -748,7 +804,8 @@ def collect_spawns(node, handles: dict, rows: list) -> None:
 def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
     """Collect (receiver-root, method, marker-context) call facts.
 
-    ctx is 'emit' under an emit marker, 'plain' everywhere else — including
+    ctx is 'emit' for the HEAD call an emit marks, 'emitarg' for a call
+    evaluated inside that head's argument list, 'plain' everywhere else — including
     under `effect ... undo ...`: the g4_unmarked_emission fixture shows the
     checker refuses an emission call whose pairing is an inverse, because a
     boundary crossing cannot be reverted by pairing. Only `emit` legalizes
@@ -758,8 +815,31 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
         return
     if isinstance(node, (EmitStmt, EmitExpr)):
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            # The marker JUDGES the head call (`_lower_emit_step` asks
+            # `_is_emission_call` of the lowered expression's own node) and
+            # ADMITS the region under it: `_expr_mode` is "emit" for the whole
+            # marked expression, so a call evaluated to build an argument is
+            # neither demanded a marker (an unmarked `b.fetch()` emission
+            # inside `emit a.send(...)` compiles) nor refused for lacking an
+            # emission to mark (`ranking.strategy()` inside NotesConsole's
+            # `emit webui.add_entry(...)` compiles). Handing `emit` to the
+            # whole subtree made the model refuse the second (#1169 F2);
+            # handing it `plain` would make it refuse the first. `emitarg`
+            # is that region: the rule admits it whatever the method
+            # declares. Whether the marker should be per-site is #1175, the
+            # checker's question; the model follows the checker.
+            expr = getattr(node, "expr", None)
+            if isinstance(expr, ExprCall):
+                route = _route(expr.callee)
+                if route is not None:
+                    out.append((*route, "emit"))
+                for a in expr.args:
+                    walk_calls(a, out, "emitarg")
+            else:
+                walk_calls(expr, out, "emit")
             for f in dataclasses.fields(node):
-                walk_calls(getattr(node, f.name), out, "emit")
+                if f.name != "expr":
+                    walk_calls(getattr(node, f.name), out, "emit")
         return
     if isinstance(node, ExprCall):
         route = _route(node.callee)
@@ -977,6 +1057,188 @@ def _host_acquire_facts(comp, fns: dict) -> list[tuple[str, str]]:
     return out
 
 
+
+# ---------------------------------------------------------------- config-data
+#
+# The THIRD rule under the G4 guarantee, and the first that is not about a
+# crossing at all. `g4OK` (the marker rule) and `hostAcquireOK` (the acquire
+# rule) both judge something a body DOES; config-is-data (item 378,
+# `typecheck.check_config_field_is_data`) judges a config field's declared
+# TYPE — a config value is injected as static data at plug/spawn/load time, so
+# its type must be built, transitively, out of data. An arrow field is a live
+# callable invoked past every authority fold; a `service` field is a capability
+# handed over with no wiring at all.
+#
+# The model had no type-shape facts, so a refusal of this class was invisible
+# to it and reported as `missed-G4` — fatal — wherever a fixture for it was
+# placed (issue 1161). The export now decomposes a config field's declared type
+# the way `Z`/`Y` decompose a capability: the SHIPPED tables and the shipped
+# splitter classify each node the type reaches, and the JUDGMENT — that every
+# reached node is a data form — is stated on both verdict sides.
+#
+# The classification is an ALLOWLIST on both sides, matching the checker's own
+# discipline (`_walk_config_type` refuses a head that is not *provably* data
+# rather than denying two known-bad ones). A form neither side has heard of is
+# therefore refused, which is the SAFE direction: the model can only become
+# stricter than the checker, never blind to one of its refusals.
+CONFIG_DATA_FORMS = frozenset(
+    {"scalar", "container", "record", "variant", "struct", "tparam"})
+
+
+def config_type_defs(prog) -> dict[str, dict]:
+    """The lightweight type table `check_config_field_is_data` resolves nominal
+    heads through — `lower._check_config`'s own construction, clause for
+    clause, so a record/ADT/alias resolves here exactly as it does there."""
+    out: dict[str, dict] = {}
+    for decl in prog.type_decls:
+        if decl.fields:
+            out.setdefault(
+                decl.name,
+                {"kind": "record", "params": list(decl.params or ()),
+                 "fields": {f.name: f.type for f in decl.fields}})
+        else:
+            out.setdefault(
+                decl.name,
+                {"kind": "variant", "params": list(decl.params or ()),
+                 "cases": [{"name": c.name, "payload": c.payload}
+                           for c in decl.cases]})
+    return out
+
+
+def config_shape(type_name: str | None, *, service_names: set[str],
+                 type_defs: dict, visited: frozenset = frozenset(),
+                 tparams: frozenset = frozenset(),
+                 out: "list[tuple[str, str]] | None" = None
+                 ) -> list[tuple[str, str]]:
+    """Every node `type_name` reaches, as `(form, spelling)` in walk order.
+
+    A transcription of `typecheck._walk_config_type` with one difference: the
+    checker RAISES at the first offender, and this walk records it and carries
+    on with its siblings. The two are equivalent for the verdict — "some node
+    is not a data form" is exactly "the checker's descent raises somewhere" —
+    and recording all of them makes the fact set independent of the order the
+    descent happens to take.
+
+    An offender is never descended into, which the checker does not do either
+    (it has already raised), so the walk terminates on the same `visited`
+    guard the checker uses for a recursive type."""
+    if out is None:
+        out = []
+    # `taint.extract_and_normalize` runs before the checker and STRIPS every
+    # `Secret[T]`/`Untrusted[T]`/`Trusted[T]`/`Retained[T, p]` qualifier off a
+    # declared type in place, so `check_config_field_is_data` is handed the
+    # bare type and `config { api_key: Secret[Str] }` is a `Str` field by the
+    # time it is judged. This export parses the corpus and does NOT run the
+    # taint pass, so it applies that ONE normalization with the shipped
+    # function — idempotent, and byte-identical on a type carrying no
+    # qualifier. Without it, every `Secret[T]` config field in the tree would
+    # read as an opaque head and the model would refuse three files revl
+    # accepts.
+    type_name = strip_qualifiers(type_name)
+    if not type_name:
+        return out
+    type_name = type_name.strip()
+
+    def walk(target, *, visited=visited, tparams=tparams):
+        config_shape(target, service_names=service_names, type_defs=type_defs,
+                     visited=visited, tparams=tparams, out=out)
+
+    sfields = structural_fields(type_name)
+    if sfields is not None:
+        out.append(("struct", type_name))
+        for ftype in sfields.values():
+            walk(ftype)
+        return out
+    head, args = parse_type(type_name)
+    if head == FN_HEAD:
+        out.append(("arrow", type_name))
+        return out
+    if head in service_names:
+        out.append(("service", type_name))
+        return out
+    if head in tparams:
+        out.append(("tparam", type_name))
+        return out
+    if head in _CONFIG_DATA_CONTAINERS:
+        out.append(("container", type_name))
+        for arg in args:
+            walk(arg)
+        return out
+    if head in _CONFIG_DATA_SCALARS:
+        out.append(("scalar", type_name))
+        for arg in args:
+            walk(arg)
+        return out
+    info = type_defs.get(head or "")
+    if info is None:
+        # Nothing here proves the field is data. The checker splits the
+        # diagnostic between an erased head (`Any`/`Value`/`Never`, each a
+        # `compatible` wildcard in some direction) and any other unresolvable
+        # one; both refuse, and the two forms are kept apart so the fact says
+        # WHICH shape reopened the hole.
+        out.append(("erased" if head in _CONFIG_ERASED else "opaque",
+                    type_name))
+        return out
+    out.append((info.get("kind") or "variant", type_name))
+    if head not in visited:
+        child_visited = visited | {head}
+        child_tparams = frozenset(info.get("params") or ())
+        if info.get("kind") == "record":
+            for ftype in (info.get("fields") or {}).values():
+                walk(ftype, visited=child_visited, tparams=child_tparams)
+        else:
+            for case in info.get("cases") or []:
+                payload = case.get("payload")
+                if payload is not None:
+                    walk(payload, visited=child_visited, tparams=child_tparams)
+                    continue
+                name = case.get("name")
+                if _is_type_expression(name, type_defs, child_tparams):
+                    walk(name, visited=child_visited, tparams=child_tparams)
+    # A user generic head carries data in its type arguments too; walked with
+    # the OUTER type-parameter scope, since they are written at this use site.
+    for arg in args:
+        walk(arg)
+    return out
+
+
+def config_rows(prog, rel: str) -> list[str]:
+    """`CF` (a config field is declared) + `CN` (one node its type reaches)
+    for every config field in the file — a component's and an extern's, the
+    two `lower._check_config` is called for."""
+    svc_names = {svc.name for svc in prog.services}
+    tdefs = config_type_defs(prog)
+    owners = [("component", c.name, c.config) for c in prog.components]
+    owners += [("extern", e.name, e.config or ()) for e in prog.externs]
+    rows: list[str] = []
+    for kind, owner, fields in owners:
+        for cfg in fields:
+            rows.append("\t".join(
+                ["CF", rel, kind, owner, cfg.name, cfg.type or "-"]))
+            nodes = config_shape(cfg.type, service_names=svc_names,
+                                 type_defs=tdefs)
+            for i, (form, spelling) in enumerate(nodes):
+                rows.append("\t".join(
+                    ["CN", rel, kind, owner, cfg.name, str(i), form,
+                     spelling]))
+    return rows
+
+
+def _a2_step(stmt: object) -> str:
+    """One activation-body statement as the A2 rule sees it (issue 1166):
+    the four statement forms `lower._dispatch_action` refuses once
+    `provide_seen_line` is set are `acquire`; a `provide` block is what sets
+    it; everything else moves nothing. A component `if` arm admits only
+    `fail` and nested `if` (`_lower_component_guard_stmts`), so the body is
+    flat for this rule and no acquisition can hide inside an arm."""
+    if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt, StreamIterStmt)):
+        return "acquire"
+    if isinstance(stmt, ProvideStmt):
+        return "provide"
+    return "other"
+
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
     tsv: list[str] = []
@@ -1018,6 +1280,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for e in sorted(entries):
                 tsv.append("\t".join(["Q", rel, svc, meth, e]))
         emitting = _fn_emitting(prog)
+        # The DIRECT emission externs, for the F row's bound column: the one
+        # host crossing the reference can name (`_reach_call`).
+        emission_externs = {e.name for e in prog.externs
+                            if getattr(e, "classification", "") == "emission"}
         templates = _spawn_templates(prog)
         fns_by_name = {fn.name: fn for fn in prog.fn_decls}
         # provide-key -> service, file-wide (children resolve handle receivers).
@@ -1051,6 +1317,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             tsv.append("\t".join([
                 "FN", rel, fn.name, ",".join(fn_calls[fn.name]),
                 "star" if star_fns.get(fn.name) else "plain"]))
+
+        # config-is-data facts (CF/CN), file-wide: the declared config fields
+        # and, decomposed by the shipped tables, the type nodes each one
+        # reaches. An extern's config is judged at the same bar as a
+        # component's, so both owners ship rows (issue 1161).
+        tsv.extend(config_rows(prog, rel))
 
         ff: dict = {"components": {}}
         for c in prog.components:
@@ -1145,7 +1417,8 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             act_reach: "set[tuple[str, str]]" = set()
             for stmt in c.body:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
-                           psvc, bounds, em_set, emitting, aliases)
+                           psvc, bounds, em_set, emitting, aliases,
+                           emission_externs)
             act_caps = {cap for cap, _bound in act_reach}
             caps_seen.update(act_caps)
             for cap in sorted(act_caps):
@@ -1174,7 +1447,8 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         reach: "set[tuple[str, str]]" = set()
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
-                                       psvc, bounds, em_set, emitting, aliases)
+                                       psvc, bounds, em_set, emitting, aliases,
+                                       emission_externs)
                         for cap, bound in sorted(reach):
                             caps_seen.add(cap)
                             caps_seen.add(bound)
@@ -1240,7 +1514,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                     if meth not in services.get(svc, {}):
                         continue  # unknown method: the checker's business
                     em = services[svc][meth]
-                    bad = (ctx == "emit") != em
+                    # `emitarg` is admitted either way: the region under an
+                    # emit head is the checker's `_expr_mode == "emit"`.
+                    bad = ctx != "emitarg" and (ctx == "emit") != em
                     calls.append((root, svc, meth, ctx))
                     tsv.append(
                         "\t".join(["U", rel, c.name, ctx, root, svc, meth]))
@@ -1265,6 +1541,13 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for idx, kind, heads, inverse in terms:
                 tsv.append("\t".join(["I", rel, c.name, str(idx), kind,
                                        ",".join(heads), ",".join(inverse)]))
+            # body-step facts (AQ, issue 1166): the activation body in
+            # order, one row per statement, each as the A2 rule sees it. The
+            # oracle folds `RevL.A2.a2B` over them and the reference folds
+            # the checker's rule over the same rows.
+            for ord_, stmt in enumerate(c.body):
+                tsv.append("\t".join(["AQ", rel, c.name, str(ord_),
+                                       _a2_step(stmt)]))
             ff["components"][c.name] = {"calls": calls, "kinds": kinds}
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
@@ -2035,6 +2318,52 @@ def prog_coverage() -> list[str]:
     return findings
 
 
+#: non-vacuity ratchet for the A2 row (issue 1166). Filled by
+#: `reference_from_tsv`, read by `a2_coverage`: `(file, comp) ->
+#: (admitted, acquisitions, provisions)` for every component's body.
+_A2_BODIES: dict = {}
+
+
+def a2_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A2` row (issue 1166).
+
+    Same discipline as the ratchets above: a row that says `ok` over bodies
+    with no provision, or no acquisition, certifies nothing about the
+    ordering — the fold's flag is never set, or never tested. So the corpus
+    must EXERCISE the rule on the reference's own fold:
+
+      * some body is ADMITTED with at least one provision AND at least one
+        acquisition — the ordinary `let x = effect … undo …; provide k { … }`
+        shape, where the flag is set and every acquisition sits above it;
+      * some body is REFUSED — an acquisition after the first `provide`
+        (`examples/rejections/a2_acquire_after_provide.rvl`).
+
+    A refused body is a `fail` on both sides (the oracle's `a2OKB` and this
+    fold are the same rule), so the row bites through
+    `RevL.A2.a2_not_vacuous` / `RevL.A2.fixture_refused`: the verdict flips
+    between the two shapes, and a reference that drifted to accept the
+    second would diverge from the Lean row here. Returns findings, treated
+    as gate failures."""
+    admitted = refused = None
+    for key, (ok, n_acq, n_prov) in _A2_BODIES.items():
+        if ok and n_acq > 0 and n_prov > 0:
+            admitted = admitted or key
+        if not ok:
+            refused = refused or key
+    findings: list[str] = []
+    for label, witness in (
+            ("an admitted body with both a provision and an acquisition",
+             admitted),
+            ("a body refused for an acquisition after a provision", refused)):
+        if witness is None:
+            findings.append(f"a2 coverage: NO witness of {label} — "
+                            "the A2 row would agree vacuously")
+    if not findings:
+        print(f"a2 coverage: {len(_A2_BODIES)} bodies; "
+              f"admitted={admitted} refused={refused}")
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -2061,7 +2390,12 @@ class Verdicts(NamedTuple):
     within its component's declared context), `g8surface` S8 rows (G8: a
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
     rows (G5: an effect's teardown registration count), `a9` A9 rows (every
-    installed provide block's key is declared in the `provides` clause)."""
+    installed provide block's key is declared in the `provides` clause),
+
+    `configs` CD rows (G4 config-is-data: a config field's declared type is
+    built out of data). `a2` A2 rows (A2: no acquisition after a provision in
+    a component's activation body)."""
+
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2074,12 +2408,19 @@ class Verdicts(NamedTuple):
     g5reg: dict[tuple[str, str, str], object]
     a9: dict[tuple[str, str], str]
 
+    configs: dict[tuple[str, str, str, str], str]
+    a2: dict[tuple[str, str], str]
+
+
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
                 + len(self.dispositions) + len(self.recoveries)
                 + len(self.confinements) + len(self.g8surface)
-                + len(self.g5reg) + len(self.a9))
+
+                + len(self.g5reg) + len(self.a9) + len(self.configs)
+                + len(self.a2))
+
 
 
 def _cols(field: str) -> list[str]:
@@ -2101,6 +2442,10 @@ def parse_verdicts(text: str) -> Verdicts:
     g8surface: dict[tuple[str, str, str], object] = {}
     g5reg: dict[tuple[str, str, str], object] = {}
     a9: dict[tuple[str, str], str] = {}
+
+    configs: dict[tuple[str, str, str, str], str] = {}
+    a2: dict[tuple[str, str], str] = {}
+
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -2159,10 +2504,20 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "A9" and len(parts) == 4:
             # A9 provide-block declaration: (file, comp) -> ok|fail.
             a9[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
+
+        elif parts[0] == "CD" and len(parts) == 6:
+            # G4 config-is-data: (file, owner kind, owner, field) -> ok|fail.
+            configs[(parts[1], parts[2], parts[3], parts[4])] = \
+                parts[5].split("=", 1)[1]
+        elif parts[0] == "A2" and len(parts) == 4:
+            # A2 ordering: (file, comp) -> ok|fail.
+            a2[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg, a9)
+                    recoveries, confinements, g8surface, g5reg, a9, configs,
+                    a2)
+
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -2216,7 +2571,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     declaration is an upper bound — the method's reached emission tokens
     must be within its declared bound (plain => none; any => free; scoped
     => the declared entries). W rows are PER-SPAWN-EDGE attenuation
-    (item 66/294). X rows carry a parse refusal through."""
+    (item 66/294). CD rows are PER-CONFIG-FIELD config-is-data: every node
+    the field's declared type reaches must be a data form (item 378).
+    X rows carry a parse refusal through."""
     rows = [r.split("\t") for r in tsv]
     mrows = [r for r in rows if r and r[0] == "M" and len(r) == 7]
     xrows = [r for r in rows if r and r[0] == "X" and len(r) == 3]
@@ -2232,6 +2589,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
     fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
     pbrows = [r for r in rows if r and r[0] == "PB" and len(r) == 4]
+    cfrows = [r for r in rows if r and r[0] == "CF" and len(r) == 6]
+    cnrows = [r for r in rows if r and r[0] == "CN" and len(r) == 8]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -2274,9 +2633,13 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     for r in mrows:
         rel, compn = r[1], r[2]
         ems = ems_by_file.get(rel, set())
-        # U row: [U, file, comp, ctx, root, svc, meth]
+        # U row: [U, file, comp, ctx, root, svc, meth]. A call inside an emit
+        # head's argument list (`emitarg`) is admitted whatever the method
+        # declares: the checker's marker admits the whole region it covers
+        # (`_expr_mode == "emit"`) and judges the head alone (#1169 F2).
         raw = any(
-            u[2] == compn and ((u[3] == "emit") != ((u[5], u[6]) in ems))
+            u[2] == compn and u[3] != "emitarg"
+            and ((u[3] == "emit") != ((u[5], u[6]) in ems))
             for u in urows if u[1] == rel
         )
         # HA row: [HA, file, comp, verb, position]. The same G4 guarantee over
@@ -2456,6 +2819,22 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                 g5reg[(rel, compn, index)] = n
                 _G5_REGS[(rel, compn, index)] = n
 
+    # CD verdicts (G4 config-is-data, issue 1161). The rule is the ALLOWLIST
+    # and nothing else: a config field is data iff every node its declared type
+    # reaches is a data form. The decomposition is the exporter's (the shipped
+    # tables did the classifying); the judgment is stated here and, separately,
+    # in `Oracle.configDataOK`.
+    config_nodes: dict[tuple[str, str, str, str], list[str]] = {}
+    for r in cnrows:
+        config_nodes.setdefault((r[1], r[2], r[3], r[4]), []).append(r[6])
+    configs: dict[tuple[str, str, str, str], str] = {}
+    for r in cfrows:
+        key = (r[1], r[2], r[3], r[4])
+        forms = config_nodes.get(key, [])
+        configs[key] = ("ok" if all(f in CONFIG_DATA_FORMS for f in forms)
+                        else "fail")
+        _CONFIG_FIELDS[key] = (configs[key], tuple(forms))
+
     # A9 rows (issue 1167): every installed provide BLOCK's key is declared
     # in the `provides` CLAUSE. The clause comes off the M row and the blocks
     # off the PB rows — the two facts the exporter reads off two different
@@ -2476,8 +2855,76 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         a9[key] = "ok" if not undeclared else "fail"
         _A9_ROWS[key] = (not undeclared, len(blocks))
 
+    # A2 rows (no acquisition after a provision, issue 1166), recomputed
+    # INDEPENDENTLY from the AQ rows: the checker's own rule
+    # (`lower._dispatch_action`) folded over the body in index order — a flag
+    # set at the first `provide`, an `acquire` refused while it is set. One
+    # verdict per component the M rows name, so a body with no statements is
+    # a (vacuous) `ok` on both sides rather than a missing row.
+    aqrows = [r for r in rows if r and r[0] == "AQ" and len(r) == 5]
+    bodies: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    for r in aqrows:
+        bodies.setdefault((r[1], r[2]), []).append((int(r[3]), r[4]))
+    _A2_BODIES.clear()
+    a2: dict[tuple[str, str], str] = {}
+    for r in mrows:
+        key = (r[1], r[2])
+        seen = False
+        ok = True
+        n_acq = n_prov = 0
+        for _ord, kind in sorted(bodies.get(key, [])):
+            if kind == "provide":
+                seen = True
+                n_prov += 1
+            elif kind == "acquire":
+                n_acq += 1
+                if seen:
+                    ok = False
+        a2[key] = "ok" if ok else "fail"
+        _A2_BODIES[key] = (ok, n_acq, n_prov)
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg, a9)
+
+                    recoveries, confinements, g8surface, g5reg, a9,
+                    configs, a2)
+
+
+#: What the REFERENCE decided for each config field, for the CD row's
+#: non-vacuity ratchet: (verdict, the forms its type reached). Filled by
+#: `reference_from_tsv`, read by `config_coverage`. Evidence that the row
+#: BITES, not a claim either side makes — so it is kept beside the compared
+#: verdict rather than inside it, the same way `_CONFINEMENTS` is.
+_CONFIG_FIELDS: dict = {}
+
+
+def config_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `CD` row (G4 config-is-data, 1161).
+
+    Every config field in the corpus belongs to a file somebody wrote to
+    compile, so a row that only ever said `ok` would agree over nothing — the
+    same vacuity `attenuation_coverage` and `confinement_coverage` guard. This
+    states, and enforces, that the corpus exercises BOTH verdicts, and that the
+    admitting side is not trivial either: an `ok` over an empty node list would
+    certify nothing about the walk."""
+    findings: list[str] = []
+    if not _CONFIG_FIELDS:
+        return ["config coverage: no CD rows at all — the row is vacuous"]
+    admitted = [k for k, (v, _f) in _CONFIG_FIELDS.items() if v == "ok"]
+    refused = [k for k, (v, _f) in _CONFIG_FIELDS.items() if v == "fail"]
+    nonempty = [k for k, (v, f) in _CONFIG_FIELDS.items() if v == "ok" and f]
+    if not refused:
+        findings.append("config coverage: NO refused config field — the CD "
+                        "row would agree vacuously")
+    if not nonempty:
+        findings.append("config coverage: NO admitted config field whose type "
+                        "reaches a node — the walk is never exercised")
+    if not findings:
+        forms = sorted({f for _v, fs in _CONFIG_FIELDS.values() for f in fs})
+        print(f"config coverage: {len(_CONFIG_FIELDS)} config fields, "
+              f"{len(admitted)} data / {len(refused)} refused; "
+              f"forms={','.join(forms)}")
+    return findings
+
 
 
 #: What the REFERENCE computed for each A9 row, for the non-vacuity ratchet:
@@ -2522,7 +2969,7 @@ def a9_coverage() -> list[str]:
     return findings
 
 
-# The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
+# The buckets that are GATE FAILURES, not findings (item 418 step 7). All
 # are the DANGEROUS direction: the real checker REFUSES a file and the model
 # sees nothing wrong with it, so the model is weaker than what revl enforces
 # and the "the model agrees with the checker" claim would be false.
@@ -2531,7 +2978,29 @@ def a9_coverage() -> list[str]:
 # `missed-A9` (issue 1167) is the same direction for the provide-block rule:
 # the checker refuses an undeclared block key and the model's A9 row says
 # `ok`.
-FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9")
+# `missed-A2` (issue 1166): the checker's A2 refusal with the A2 row `ok`.
+FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9", "missed-A2")
+
+
+def checker_code(rel: str) -> tuple[str, str]:
+    """The shipped checker's verdict on one corpus file: `("accept", "")`, or
+    the refusal's `(code, category)`.
+
+    Asked through `compile_files`, the path `revl check` and every other CLI
+    verb take, so a `use "stdlib/http.rvl"` resolves against the file's own
+    directory and the search path. `compile_source(text, rel)` reads a bare
+    string and refuses ANY `use` before checking a thing (`REVL`: "`use`
+    declarations need `modules=` ... or compile_files"), so a use-bearing
+    file was filed under a refusal that says nothing about its composition,
+    and whatever the model said about it sank into `formal-found-other`
+    (#1169 F1). The same door resolves an extern body file, a `ref` and an
+    `asset`, which the bare-string door refuses for the same reason."""
+    try:
+        compile_files([str(REPO / rel)])
+        return "accept", ""
+    except RevlError as e:
+        info = classify(e)
+        return (info.get("code") or "UNCODED"), (info.get("category") or "")
 
 
 def checker_alignment(file_facts: dict, componentless: list[str],
@@ -2540,7 +3009,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     against the formal verdicts. Returns the fatal-bucket findings.
 
     Requirement CLOSURE (and hence linkability, which subsumes it) is
-    deliberately NOT part of `formal_clean`. `compile_source` type-checks
+    deliberately NOT part of `formal_clean`. `checker_code` type-checks
     and links ONE file: a requirement no in-file component provides is
     resolved against the rest of the composition at `revl link` time, and
     `lower._link` reports nothing for it. Reading the V row's `closed`
@@ -2555,37 +3024,48 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         align[key] = align.get(key, 0) + 1
         samples.setdefault(key, []).append(rel)
 
-    # The model covers BOTH G4 rules now. The MARKER rule — a classified
+    # The model covers ALL THREE G4 rules now. The MARKER rule — a classified
     # statement's marker presence against the interface's declared emission,
     # over crossings resolved to a (service, method) — is `Oracle.g4OK`. The
     # ACQUIRE rule — a HOST acquire verb (`Pool.open`) legal only as the
     # acquisition of an `effect … undo …` bracket, where its release is
     # registered — is `Oracle.hostAcquireOK` over the `HA` position facts
-    # (issue 334). So a G4 refusal is fatal in EVERY category again: there is
+    # (issue 334). The CONFIG-IS-DATA rule — a config field's declared type
+    # must be built, transitively, out of data, so it can carry neither a live
+    # callable nor a capability (item 378) — is `Oracle.configDataOK` over the
+    # `CN` type-shape facts (issue 1161); it is the one G4 rule that judges a
+    # declaration rather than a body, which is why it needed facts of a new
+    # kind rather than a case in an existing rule.
+    # So a G4 refusal is fatal in EVERY category again: there is
     # no out-of-fragment exemption. The two G4-coded refusals the model still
     # cannot see — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` —
     # never reach this loop: one is refused at PARSE and one declares no
     # component, so both are reported by the no-manifest census below, not
     # bucketed here.
 
-    def checker_code(rel: str) -> tuple[str, str]:
-        try:
-            compile_source((REPO / rel).read_text(encoding="utf-8"), rel)
-            return "accept", ""
-        except RevlError as e:
-            info = classify(e)
-            return (info.get("code") or "UNCODED"), (info.get("category") or "")
-
     for rel in file_facts:
         comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
         prov_rows = [(k, x) for k, x in v.providers.items() if k[0] == rel]
         spawn_rows = [(k, x) for k, x in v.spawns.items() if k[0] == rel]
         a9_rows = [(k, x) for k, x in v.a9.items() if k[0] == rel]
+
+        # The CD row is the third rule under the G4 guarantee (issue 1161), so
+        # it joins the two crossing rules in BOTH directions: it can clear a
+        # G4 refusal the model would otherwise have missed, and a CD failure
+        # over a file the checker accepts is `formal-strict` like any other.
+        cfg_rows = [(k, x) for k, x in v.configs.items() if k[0] == rel]
+        g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows
+        # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
+        # refuses the shape with code A2, so a model `fail` on an accepted
+        # file is `formal-strict` and a checker A2 with the row `ok` is the
+        # fatal `missed-A2`.
+        a2_rows = [(k, x) for k, x in v.a2.items() if k[0] == rel]
         vrow = v.files.get(rel, ("ok", "ok", "ok"))
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows + a9_rows)
-        raw_found = any(x == "fail"
-                        for _, x in comp_rows + prov_rows + spawn_rows)
+            x == "ok" for _, x in g4_rows + a9_rows + a2_rows)
+        a2_found = any(x == "fail" for _, x in a2_rows)
+        raw_found = any(x == "fail" for _, x in g4_rows)
+
         code, category = checker_code(rel)
         if code == "accept":
             # `formal-strict`: the checker ACCEPTS the file but the shaped
@@ -2603,6 +3083,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # is the model being weaker than what revl enforces, and fatal.
             a9_fail = any(x == "fail" for _, x in a9_rows)
             record("agree-A9" if a9_fail else "missed-A9", rel)
+        elif code == "A2":
+            record("agree-A2" if a2_found else "missed-A2", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -2693,7 +3175,11 @@ def main() -> int:
             ("confinement", ref.confinements, formal.confinements),
             ("g8_surface", ref.g8surface, formal.g8surface),
             ("g5_registration", ref.g5reg, formal.g5reg),
-            ("a9", ref.a9, formal.a9)):
+            ("a9", ref.a9, formal.a9),
+
+            ("config_data", ref.configs, formal.configs),
+            ("a2", ref.a2, formal.a2)):
+
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2711,7 +3197,11 @@ def main() -> int:
         f"{len(ref.confinements)} confinements + "
         f"{len(ref.g8surface)} surfaces + "
         f"{len(ref.g5reg)} teardowns + "
-        f"{len(ref.a9)} provide-block components) — "
+        f"{len(ref.a9)} provide-block components + "
+
+        f"{len(ref.configs)} config fields + "
+        f"{len(ref.a2)} a2 bodies) — "
+
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
@@ -2720,6 +3210,10 @@ def main() -> int:
     mismatches.extend(confinement_coverage())
     mismatches.extend(prog_coverage())
     mismatches.extend(a9_coverage())
+
+    mismatches.extend(config_coverage())
+    mismatches.extend(a2_coverage())
+
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:
