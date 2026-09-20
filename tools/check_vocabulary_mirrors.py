@@ -324,6 +324,7 @@ def check(sites: list[Site], entries: list[dict] | None,
             "class. This tree has always had some; the comparison is broken.")
         return problems
 
+    grown: set[frozenset] = set()
     by_key = {tuple(c["sites"]): c for c in found}
     recorded = {tuple(sorted(e["sites"])): e for e in entries}
     live = {s.sid: s for s in sites}
@@ -350,6 +351,11 @@ def check(sites: list[Site], entries: list[dict] | None,
 
         # The entry is stale. Say WHY, because the fix differs.
         missing = [sid for sid in key if sid not in live]
+        if not missing and len({live[sid].tokens for sid in key}) == 1:
+            # The recorded copies still agree; the class grew a new copy. That
+            # is a NEW MIRROR joining a recorded one, reported once, below.
+            grown.add(frozenset(key))
+            continue
         if missing:
             problems.append(
                 f"NAMED MIRROR NO LONGER OBSERVED: {' + '.join(key)}\n"
@@ -375,6 +381,18 @@ def check(sites: list[Site], entries: list[dict] | None,
 
     for key, got in sorted(by_key.items()):
         if key in recorded:
+            continue
+        joined = next((g for g in grown if g < set(key)), None)
+        if joined is not None:
+            problems.append(
+                f"A RECORDED MIRROR GREW A COPY: {' + '.join(sorted(joined))}\n"
+                f"    now also declared by: "
+                f"{', '.join(sorted(set(key) - joined))}\n"
+                f"    vocabulary ({len(got['tokens'])}): {got['tokens']}\n"
+                "    The recorded copies still agree, so nothing has drifted "
+                "YET; a third copy is a third thing to keep in step.\n"
+                "    Import one of the existing ones, or re-record the class "
+                "with `--write` and say in the `note` why a third is needed.")
             continue
         problems.append(
             f"NEW MIRROR: {' + '.join(key)}\n"
@@ -461,6 +479,15 @@ def self_test() -> int:
     new_mirror["d.py"] = 'ADMIT = ("web", "net", "fs", "model", "input")\n'
     cases.append(("a NEW mirror of the taint-origin vocabulary reds",
                   _sites_from(new_mirror), base_ledger, None, False))
+
+    # A recorded class gaining a THIRD copy, still in step. Nothing has
+    # drifted yet, which is exactly when it is cheap to stop.
+    grew = dict(base)
+    grew["d.py"] = ('def normalize2(ir):\n'
+                    '    return (ir["components"], ir["manifest"],\n'
+                    '            ir["source"], ir["file"])\n')
+    cases.append(("a recorded mirror GROWING a third copy reds",
+                  _sites_from(grew), base_ledger, None, False))
 
     # issue #1195: one side gains a token, the other does not.
     drift = dict(base)
