@@ -6132,7 +6132,7 @@ name = "revl-gate"
 version = "@CRATE_VERSION@"
 edition = "2021"
 description = "The revl admission gate as an embeddable library (layer 1, admit-only, frontier-limited)"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "revl_gate"
