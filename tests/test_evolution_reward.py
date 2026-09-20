@@ -142,10 +142,153 @@ def test_no_scalar_reward_is_exported(reward):
 
 
 def test_every_component_of_item_536_is_present(reward):
-    assert set(reward.COMPONENTS) == {
-        "compiles", "tests", "no-new-false-admits", "conformance",
-        "artifact-stability", "formal", "scope", "documentation"}
+    assert {"compiles", "tests", "no-new-false-admits", "conformance",
+            "artifact-stability", "formal", "scope", "documentation"} \
+        <= set(reward.COMPONENTS)
     assert set(reward.PROBES) == set(reward.COMPONENTS)
+
+
+def test_the_ninth_component_is_the_one_no_other_can_supply(reward):
+    """`held-out` comes from item 537 (issue #1207), not from item 536.
+
+    Item 536's eight components all read artifacts that are in the tree the
+    candidate was handed, so a candidate that read the repository read
+    everything they score it on. This one scores it on a draw that does not
+    exist until score time, and it is registered rather than optional because
+    `Scorecard.retained` iterates `COMPONENTS`: a scorer that did not ask this
+    question cannot produce a retained scorecard.
+    """
+    assert "held-out" in reward.COMPONENTS
+    assert reward.PROBES["held-out"] is reward.probe_held_out
+
+
+def test_the_held_out_seed_is_not_a_candidate_record_key(reward):
+    """A candidate that could name its own seed would choose its own draw.
+
+    `RECORD_KEYS` is the whitelist that keeps a candidate from reaching a
+    probe, and the seed stays outside it: it arrives in the environment, where
+    the operator holds it.
+    """
+    assert reward.HELDOUT_SEED_ENV not in reward.RECORD_KEYS
+    assert "seed" not in reward.RECORD_KEYS
+    candidate = reward.load_candidate(
+        {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"],
+         "seed": "a-seed-the-candidate-chose"})
+    assert "seed" in candidate.prose_ignored
+
+
+def test_an_unset_held_out_seed_fails_the_component_rather_than_skipping_it(
+        reward, monkeypatch):
+    """The fail-open shape item 537 exists to prevent, held at the reward.
+
+    A promotion pipeline that drops this check when nobody configured a seed
+    scores the candidate on nothing it could not read, which is exactly the
+    state the item was opened about. There is no `skipped` verdict here and
+    this must not invent one.
+    """
+    monkeypatch.delenv(reward.HELDOUT_SEED_ENV, raising=False)
+    candidate = reward.load_candidate(
+        {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"]})
+    verdict = reward.probe_held_out(candidate)
+    assert not verdict.verified
+    assert reward.HELDOUT_SEED_ENV in verdict.reason
+
+
+def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
+                                                    tmp_path):
+    """A refusal is not a finding, and it is still not a pass.
+
+    `tools/heldout_scoring.py` spends a whole exit status on telling "the gate
+    found something" apart from "the gate declined to run". The reward keeps
+    the distinction in the reason and collapses both to `failed`, because
+    `verified` means somebody's artifact said yes.
+    """
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    candidate = reward.load_candidate(
+        {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
+
+    tool = tmp_path / "tools"
+    tool.mkdir()
+    (tool / "heldout_scoring.py").write_text(
+        "import json, sys\n"
+        "path = sys.argv[sys.argv.index('--json') + 1]\n"
+        "json.dump({'verdict': 'refused', "
+        "'refusal': 'diff-reaches-fence:tools/heldout_scoring.py'}, "
+        "open(path, 'w'))\n"
+        "raise SystemExit(2)\n",
+        encoding="utf-8")
+
+    verdict = reward.probe_held_out(candidate)
+    assert not verdict.verified
+    assert "REFUSED" in verdict.reason
+    assert "diff-reaches-fence" in verdict.reason
+
+
+def test_a_held_out_run_that_writes_no_record_fails(reward, monkeypatch,
+                                                    tmp_path):
+    """A tool that exits 0 and says nothing has verified nothing."""
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    candidate = reward.load_candidate(
+        {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
+    tool = tmp_path / "tools"
+    tool.mkdir()
+    (tool / "heldout_scoring.py").write_text("pass\n", encoding="utf-8")
+
+    verdict = reward.probe_held_out(candidate)
+    assert not verdict.verified
+    assert "wrote no verdict record" in verdict.reason
+
+
+def test_a_clean_held_out_run_verifies_the_component(reward, monkeypatch,
+                                                     tmp_path):
+    """The control: the only path on which this component passes."""
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    candidate = reward.load_candidate(
+        {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
+    tool = tmp_path / "tools"
+    tool.mkdir()
+    (tool / "heldout_scoring.py").write_text(
+        "import json, sys\n"
+        "path = sys.argv[sys.argv.index('--json') + 1]\n"
+        "json.dump({'verdict': 'clean', 'refusal': None, 'size': 200,\n"
+        "  'draw_digest': 'sha256:deadbeef',\n"
+        "  'liveness': {'issued_admissions': 102,\n"
+        "               'near_miss_reference_refusals': 35},\n"
+        "  'zero_tolerance': {'false-admission': [], 'gate-fault': []},\n"
+        "  'bypass': {'new_families': {}}}, open(path, 'w'))\n",
+        encoding="utf-8")
+
+    verdict = reward.probe_held_out(candidate)
+    assert verdict.verified, verdict.reason
+    assert "200 programs the candidate could not read" in verdict.reason
+
+
+def test_a_held_out_run_that_writes_no_file_into_the_candidate_tree(
+        reward, monkeypatch, tmp_path):
+    """The verdict record must not land in the tree the next candidate reads.
+
+    It carries `draw_digest`, and the tool spends an entire enforcement on the
+    draw never becoming a file. The probe writes it to a scratch directory it
+    deletes, so a promotion run leaves the candidate tree as it found it.
+    """
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    candidate = reward.load_candidate(
+        {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
+    tool = tmp_path / "tools"
+    tool.mkdir()
+    (tool / "heldout_scoring.py").write_text(
+        "import json, sys\n"
+        "path = sys.argv[sys.argv.index('--json') + 1]\n"
+        "assert not path.startswith(sys.argv[0].rsplit('/tools/', 1)[0]), path\n"
+        "json.dump({'verdict': 'clean', 'size': 4, 'liveness': {},\n"
+        "  'zero_tolerance': {}, 'bypass': {'new_families': {}}},\n"
+        "  open(path, 'w'))\n",
+        encoding="utf-8")
+
+    before = sorted(p.name for p in tmp_path.rglob("*"))
+    verdict = reward.probe_held_out(candidate)
+    assert verdict.verified, verdict.reason
+    assert sorted(p.name for p in tmp_path.rglob("*")) == before
 
 
 # --------------------------------------------------------------------------
