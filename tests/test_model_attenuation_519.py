@@ -212,6 +212,27 @@ def test_a_narrower_parameter_on_the_role_is_admitted():
     assert rows[0]["reaches"] == ['fs.write(path="/tmp/jobs")']
 
 
+def test_every_named_role_is_folded_in_not_only_the_first():
+    """Design note decision 4: slice 1 folds every role the block NAMES, so a
+    block whose SECOND arm reaches too far is refused too. Which role a given
+    crossing actually reaches is slice 2."""
+    src = """
+model role local on_device reaches [model.complete]
+model role wide  on_device reaches [shell.exec]
+
+service Completions { emission[model.complete] fn complete(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Completions provides out: Answer {
+  route model on classify { confidential -> local, * -> wide }
+  provide out { fn classify(text) = emit llm.complete(text) }
+}
+"""
+    record, text = _refusal(src)
+    assert record["code"] == CODE
+    assert "wide" in text and "shell.exec" in text
+
+
 # ----------------------------------------------------------------- the surface
 
 
@@ -252,7 +273,8 @@ def test_no_new_guarantee_code_is_invented():
     """Section 3.2: the refusal reuses item 512's registered code, so item
     523's generated tier matrix needs no new ACKNOWLEDGED entry."""
     assert CODE in GUARANTEES
-    assert "reach" in GUARANTEES[CODE]
+    assert ("a role reaches no capability the component routing through it "
+            "holds") in GUARANTEES[CODE]
 
 
 def test_the_module_reads_silence_as_the_unnameable_boundary():
