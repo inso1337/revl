@@ -45,6 +45,7 @@ to the diagnostic; see docs/why-traces.md.
 | G-SECRET | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) |
 | G-SECRET-FLOW | a Secret[T] value never reaches a disclosure sink (a log, a serialization, an LLM prompt, an MCP return, an unapproved realm or an undeclared receiver); it crosses only at a declared Secret[T] receiver and downgrades only at a declared endorse[confidential] | lower (taint flow) |
 | G-RETAIN | a Retained[T, P] value past P's retention deadline never reaches a persistence sink (a db/fs/store/kv/blob/archive/index/cache/queue/wal crossing), unless P declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) |
+| G-MODEL-PLACE | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration) |
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |
@@ -149,7 +150,7 @@ the same code (`import cycle:`, v2_use_cycle.rvl).
 ## G4 — inverse or emit
 
 Every mutation carries an inverse, or admits irreversibility with `emit`.
-Four distinct programs violate it, all in `examples/rejections/`.
+Five distinct shapes violate it, all in `examples/rejections/`.
 
 **A bare acquisition** — `effect` without `undo` where the callee is not
 pure (g4_missing_undo.rvl):
@@ -185,6 +186,57 @@ component Auditor requires db: Database {
 ```
 call to emission `db.execute` must be marked `emit` (G4)
 ```
+
+**A crossing nested in an `emit`'s arguments** — one `emit` marks one
+boundary crossing. The marker covers the head call it is written on, and the
+head's arguments are judged in the position the `emit` itself sits in, so an
+emission evaluated to build an argument draws the refusal it would draw one
+statement earlier (g4_nested_unmarked_emission.rvl):
+
+```revl reject G4
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+
+component C requires a: A, b: B {
+  emit a.send(b.fetch())
+}
+```
+
+```
+call to emission `b.fetch` must be marked `emit` (G4)
+```
+
+Marking the inner crossing where it stands is refused too. `compensate`
+binds per `emit`, and every per-step check reads the step's head, so a
+crossing marked inside an argument list would have no step of its own
+(g4_nested_emit_expression.rvl, `emit a.send(emit b.fetch())`):
+
+```
+`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)
+```
+
+The fix is to hoist the inner crossing into its own `emit`. A provide method
+binds its value with `let r = emit …`; an activation body has no value
+binding (an `emit` step there discards its result), so a pair whose result
+flows from one crossing into the next lives in a provide method:
+
+```revl
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+service Relay { emission fn once() -> Int }
+
+component C requires a: A, b: B provides relay: Relay {
+  provide relay {
+    fn once() {
+      let r = emit b.fetch()
+      return emit a.send(r)
+    }
+  }
+}
+```
+
+A plain (non-emission) call in argument position needs no marker and is
+admitted as before.
 
 **A provider that exceeds a plain declaration** — a service declaration is
 an *upper bound* on its providers' effects, because consumers bind to the
@@ -356,9 +408,19 @@ Fix, when the collision was deliberate: rename the source binding.
 
 No refusing example: `compensate` is an *optional* slot (DESIGN.md §3.5 —
 an emission "may declare" one) that the grammar binds only to an `emit`,
-and `emit` requires a declared `emission` (G4). There is no
-"compensation required but missing" program; the guarantee is by
-construction. The lowering test is `test_a5_compensate_lowering`.
+and `emit` requires a declared `emission` (G4). For every ordinary
+capability there is no "compensation required but missing" program; the
+guarantee is by construction. The lowering test is
+`test_a5_compensate_lowering`.
+
+One family is the exception, and it refuses under G4 rather than here
+(roadmap item 522, `docs/design/538-ui-transactions.md`). A computer-use
+verb carries a reversibility class that the registry owns, not the
+author, so the `compensate` slot is no longer free: `ui.text` is
+compensatable and must declare one, while `ui.click` (unknown) and
+`ui.download` (irreversible) may not, because the declared slot is what
+the residue and erase reports read and a transaction over a step with no
+inverse has to report `uncompensated` rather than a clean teardown.
 
 ## A6 — provide-methods match the service signature
 
@@ -599,6 +661,60 @@ nominal name is reported this way. A scalar meeting a name that does not
 resolve is still `T1`, because the opaque-name contract of
 [docs/generics.md](generics.md) and the arrow-annotation hygiene rule
 (`examples/rejections/t35_...`) depend on that reading.
+
+## G-MODEL-PLACE — a model placement is declared, and checked
+
+Roadmap item 512, `docs/design/531-model-placement.md`. A **model role** is a
+declared placement, a name plus where a call to it runs:
+
+```revl
+model role local on_device
+model role cloud off_device
+```
+
+A `route model on <action>` block is a component-prelude clause, the sibling of
+`isolate` and `intercept`: it places one action's model calls by the ORIGIN
+CLASS of what the action is given, reusing the lattice of item 249 rather than
+a second vocabulary.
+
+```revl reject G-MODEL-PLACE
+model role local on_device
+model role cloud off_device
+
+service Answer { fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> cloud
+  }
+  provide out { fn classify(text) = text }
+}
+```
+
+    action `classify` (Classifier) routes the `confidential` origin to model
+    role `cloud`, which is declared `off_device` on line 2: a confidential
+    input may not leave the device (G-MODEL-PLACE)
+
+Every rule the code carries refuses when it is unsure: an unknown residence, a
+role declared twice, an unknown origin class, an UNDECLARED role (which has no
+residence, so the placement cannot be checked), an origin routed twice, an
+empty block, an action routed twice, and a block naming no action the component
+declares. That last one is the shape worth naming: a route keyed to a method
+that has since been renamed protects nothing while still reading as a
+placement.
+
+The catch-all `*` covers the origin classes no other arm names AND no
+confidentiality origin. `* -> cloud` therefore cannot be the sentence that
+sends a confidential input off the device: such an input is placed by an arm
+that names `confidential`, or it is not placed at all. Routing the `secret`
+origin is refused at every residence, and that refusal cites `G-SECRET-FLOW`,
+which already names an LLM prompt as a disclosure sink for a capability-bound
+secret.
+
+The block is a permission checked at admission, not a runtime selection, so it
+writes no IR: an admitted program is byte-identical to the same program without
+it. Scheduling inside the boundary it draws is roadmap item 515, and the flow
+rule that refuses a confidential VALUE reaching an unrouted role is item 514.
 
 ## Everything else
 

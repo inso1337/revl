@@ -698,6 +698,51 @@ class RouteStmt:
 
 
 @dataclass
+class ModelRouteArm:
+    """One arm of a `route model` block: `<origin> -> <role>`.
+
+    `origin` is an origin class from the item-249 lattice, or `"*"` for the
+    catch-all. `role` names a `model role` declaration. SYNTAX ONLY — every
+    rule over the pair lives in `revl.model_route`."""
+    origin: str
+    role: str
+    line: int
+
+
+@dataclass
+class ModelRouteStmt:
+    """`route model on <action> { <origin> -> <role>, ... }` (roadmap item 512).
+
+    A component-prelude declaration, the sibling of `isolate`/`intercept`: it
+    places the model calls an action may reach, by the origin class of what the
+    action is given. `route` and `model` are CONTEXTUAL identifiers recognised
+    only in this exact head position, so the lexer's KEYWORDS table — and the
+    self-hosted lexer that mirrors it — needs no sync.
+
+    This node is SYNTAX ONLY. The origin vocabulary, the residence rule and the
+    action-exists rule are `revl.model_route`'s, so each refusal sits beside the
+    rule it enforces (the `retention` discipline)."""
+    action: str
+    arms: list
+    line: int
+
+
+@dataclass
+class ModelRoleDecl:
+    """`model role <name> <residence>` (roadmap item 512).
+
+    A model role is a DECLARED PLACEMENT: a name an action routes to, plus
+    where a call to it executes. `residence` is checked against the closed
+    vocabulary in `revl.model_route`, never here.
+
+    `model` is a CONTEXTUAL keyword on the `retention`/`secret` discipline — it
+    heads a declaration only in the shape `model role NAME <residence>`."""
+    name: str
+    residence: str
+    line: int
+
+
+@dataclass
 class InterceptStmt:
     key: str
     metadata: dict
@@ -2055,6 +2100,10 @@ class Program:
     # `taint.extract_and_normalize`, which mints the retention origin. Empty for
     # every program that declares none, so those programs are byte-identical.
     retentions: list[RetentionDecl] = field(default_factory=list)
+    # item 512: the model roles a `route model` arm names. Read by
+    # `revl.model_route` (validated there). Empty for every program that
+    # declares none, so those programs are byte-identical.
+    model_roles: list[ModelRoleDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
     prop_tests: list[PropTestDecl] = field(default_factory=list)
@@ -2539,6 +2588,17 @@ class Parser:
                 # table needs no sync.
                 program.retentions.append(self.retention_decl())
 
+            elif self.at("ident", "model") \
+                    and self.peek_ahead(1).kind == "ident" \
+                    and self.peek_ahead(1).value == "role":
+                # item 512: `model role NAME <residence>`. `model` is a
+                # *contextual* keyword on the `retention`/`secret` discipline —
+                # it heads a declaration ONLY in this shape, so a program that
+                # already uses `model` as an ordinary identifier (the common
+                # `requires model: Model` spelling does) keeps parsing and the
+                # self-hosted lexer's KEYWORDS table needs no sync.
+                program.model_roles.append(self.model_role_decl())
+
             elif self.at("ident", "prop") and self.peek_ahead(1).kind == "kw" \
                     and self.peek_ahead(1).value == "test":
                 # `prop` is a *contextual* keyword: like `fault`, it only heads a
@@ -2663,6 +2723,55 @@ class Parser:
                 fields.append((key_tok.value, tuple(values), False, key_tok.line))
         self.expect("}")
         return RetentionDecl(name, fields, line)
+
+    def model_role_decl(self) -> ModelRoleDecl:
+        """`model role NAME <residence>` (roadmap item 512).
+
+        The parser reads the two names and validates NEITHER: the residence
+        vocabulary, the duplicate rule and the re-declaration rule are
+        `revl.model_route`'s, so the refusal and the rule it enforces sit in
+        one file (the `retention` discipline)."""
+        line = self.expect("ident", value="model").line
+        self.expect("ident", value="role")
+        name = self.expect("ident", what="a model role name").value
+        residence = self.expect(
+            "ident", what="a residence for the role (`on_device` or `off_device`)").value
+        return ModelRoleDecl(name, residence, line)
+
+    def model_route_stmt(self) -> ModelRouteStmt:
+        """`route model on <action> { <origin> -> <role>, ... }` (item 512).
+
+        The grammar is closed and small: one arm per line or comma, each an
+        origin class (or `*`) on the left of an arrow and a role name on the
+        right. A trailing comma is allowed, exactly as `realms(...)` allows one.
+        Nothing here checks what the names MEAN — that is `revl.model_route`."""
+        line = self.expect("ident", value="route").line
+        self.expect("ident", value="model")
+        self.expect("ident", value="on",
+                    what="`on <action>` naming the action this route places")
+        action = self.expect(
+            "ident", what="the name of the action this route places").value
+        self.expect("{")
+        arms: list = []
+        while not self.at("}"):
+            self._skip_semis()
+            if self.at("}"):
+                break
+            if self.at("*"):
+                origin_tok = self.next()
+                origin = "*"
+            else:
+                origin_tok = self.expect(
+                    "ident", what="an origin class, or `*`, on the left of `->`")
+                origin = origin_tok.value
+            self.expect("arrow", what=f"`->` after `{origin}`")
+            role = self.expect(
+                "ident", what=f"a model role name after `{origin} ->`").value
+            arms.append(ModelRouteArm(origin, role, origin_tok.line))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return ModelRouteStmt(action, arms, line)
 
     def extern_decl(self, public: bool) -> ExternDecl:
         line = self.expect("kw", "extern").line
@@ -2846,6 +2955,21 @@ class Parser:
             self.expect("ident", "approval",
                         what="`approval` after `requires` (item 246)")
             requires_approval = True
+        # item 522: the computer-use reversibility classes. A UI verb's class
+        # is registry-owned (revl.ui_family), and the declaration's
+        # `compensate` slot has to agree with it: a verb with no inverse may
+        # not declare one, and a compensatable verb must. This is the one
+        # point where the capability scope, the extern NAME and the
+        # `compensate` clause are all in hand, which is why the check sits
+        # here rather than in `_capability_list` (a service method's scope
+        # parses there and declares an interface, not a crossing).
+        for token in capabilities:
+            teardown = ui_family.teardown_refusal(
+                token, classification, name, compensate is not None)
+            if teardown is not None:
+                message, hint = teardown
+                raise RevlError(self.filename, line, message, hint,
+                                code="G4", category="reversibility")
         # item 379: an optional typed `config { ... }` block, reusing the same
         # `config_block()` a component uses (parser.py:1352-1365). It sits after
         # the teardown/approval clauses and before the `= @backend` bodies, the
@@ -5504,6 +5628,21 @@ class Parser:
                 realms, strategy = self.realms_route()
                 return RouteStmt(key, realms, strategy, tok.line)
             return IsolateStmt(key, self.realm_label(), tok.line)
+        if tok.kind == "ident" and tok.value == "route" \
+                and self.peek_ahead(1).kind == "ident" \
+                and self.peek_ahead(1).value == "model":
+            # item 512: `route model on <action> { … }`. `route` heads a clause
+            # only in this exact two-token position, the same contextual
+            # discipline `realms`/`strategy` use inside `isolate` — so a program
+            # that uses `route` as an ordinary name is untouched, and the
+            # KEYWORDS table (and the self-hosted lexer mirroring it) is unchanged.
+            if in_method:
+                raise self.err(
+                    tok.line, "`route model` is not allowed inside a method body",
+                    hint="a model placement is a component-prelude declaration, "
+                         "like `isolate`/`intercept`: it names what the action may "
+                         "reach before any dependency access (item 512)")
+            return self.model_route_stmt()
         if tok.kind == "kw" and tok.value == "intercept":
             if in_method:
                 raise self.err(tok.line, "`intercept` is not allowed inside a method body")
