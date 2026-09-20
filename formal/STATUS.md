@@ -56,12 +56,12 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
 | **A1** iteration boundaries only during activation | **none** | 0 | no | not modelled at all: L0 has no `await` and no iteration boundary. **Unbuilt work**, and it needs L0 to grow first |
-| **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (310 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
+| **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (317 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
 | **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
 | **A6** provide-methods match the service signature | **none** | 0 | partial | the oracle's P row is a *capability bound* check, not the signature match, and `methodBoundOK` is a private restatement. **Unbuilt work** |
 | **A8** mid-body failure reverts and contains | full over the WAL model | 18 | **yes** (1620 O rows) | the row WRITES each scenario's records as a real JSON-Lines WAL and runs `src/revl/recovery.py` over it, diffing recover's own verdict, the set it actually applied to the `World`, and its reported residue against the model's `outcome` / `replayed` / `reported`. It found the legacy-`effect` family's item-309 fence branch missing from `RevL.Lemmas.dispose` (see below). Crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
-| **A9** provide key declared in `provides` | full over the installed blocks | 9 | **yes** (235 A9 rows, 1 agree-A9) | the installed `provide k { … }` block keys are modelled beside the L0 `LComponent` (`RevL.A9.Installed`, no L0 edit); `A9OK` is membership of every block key in the `provides` clause, and `installed_block_is_slot` is the bridge to G2/G3: under A9 every block answers a `(key, realm)` slot of the universe `LinkOK` reasons over, and `undeclared_block_is_no_slot` is the refused fixture's shape. The oracle exports the blocks as `PB` facts (the `C` row reads the clause, not the block) and decides `a9B` per installing component; `a9_coverage` fails the gate unless the corpus carries both an admitted provider and the refused shape (`examples/rejections/a9_provide_key_not_declared.rvl`, `agree-A9`; `missed-A9` is FATAL). The double install ("provision `k` is installed twice", uncoded) is `NoDoubleInstall`, proved distinct from A9 and not under the row: no corpus file installs twice and the refusal carries no code. **Not enforced by the checker and so not stated**: a declared key with no block |
+| **A9** provide key declared in `provides`, both directions | full over the installed blocks and routes | 16 | **yes** (242 A9 rows, 2 agree-A9) | the installed `provide k { … }` block keys and the `isolate k in realms(...)` routed keys are modelled beside the L0 `LComponent` (`RevL.A9.Installed`, no L0 edit); `A9OK` is `BlocksDeclared` (every block key is in the clause, issue 1167) AND `DeclaredInstalled` (every clause key has a block or a route, issue #1172 / PR #1184). `installed_block_is_slot` is the bridge to G2/G3: under A9 every block answers a `(key, realm)` slot of the universe `LinkOK` reasons over; `undeclared_block_is_no_slot` and `declared_uninstalled_refused` are the two fixtures' shapes, `unrouted_needs_a_block` the converse as stated for an ordinary provider, `routed_installs_without_block` the exemption (`stdlib/router.rvl`'s `RoundRobin`). The oracle exports the blocks as `PB` facts and the routes as `PR` facts (the `C` row reads the clause, not the body) and decides `a9B` per component that declares or installs anything; `a9_coverage` fails the gate unless the corpus carries an admitted provider, both refused shapes (`examples/rejections/a9_provide_key_not_declared.rvl`, `examples/rejections/a9_provides_without_block.rvl`, both `agree-A9`; `missed-A9` is FATAL) and the routed shape admitted (`tests/formal_corpus/a9_routes_installs_key.rvl`). The double install ("provision `k` is installed twice", uncoded) is `NoDoubleInstall`, proved distinct from A9 and not under the row: no corpus file installs twice and the refusal carries no code. **Not modelled**: the checker's skip of the converse for a body that recovered past a refused statement (item 386), which can only land in `formal-found-other`; and the route's realm legs, elided from the V row (see the fidelity limits) |
 | **T1/T2/T3** typing, `Opt[T]`, holes | **none** | 0 | no | the type checker is outside the guarantee backbone. **Out of scope by kind** |
 | **R4** no residue | full for the **abort path** | 9 | **yes** (the residue column of the 1620 O rows) | the column is the model's `reported`, diffed against `recover`'s `residue.outstanding`; it is printed only under `outcome = rolledBack`, which is R4's own scope condition. Stated over the abort; the roll-forward window's `flush-residue` surface is still not modelled and the column says `n/a` there rather than agreeing about a claim neither side makes. **Unbuilt work** |
 | items 66/294/260 capability ceilings | full, with the held/reach sets **derived** from component shapes | 23 | **yes** (8 W rows) | the ceiling half is now EXERCISED: `examples/budget_attenuation.rvl` (50 ≤ 100, admitted) and `examples/rejections/g4_spawn_widens_budget.rvl` (1000 > 100, refused by the ceiling half alone — strip the ceilings and the resource fold finds nothing uncovered), with `attenuation_coverage` failing the gate if the corpus stops containing both. Before those two files the row agreed over 6 edges with `ceilingOKB` never entered. Also unmodelled: parse-time canonicalization and `cap_order.disjoint`'s D2 same-token clause |
@@ -271,15 +271,22 @@ Three summary readings of that map:
 | `RevL.G9.g9_context_hypotheses_are_inhabited` | G9 + G6, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | a `TypedIn` crossing with a non-empty head list, an untrusted-free scope and an untrusted one |
 | `RevL.R4.r4_side_conditions_are_inhabited` | R4, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | freshness and disjointness hold at both traces, with the emitted set empty on one and not the other |
 | `RevL.A8.a8_hypotheses_are_inhabited` | A8, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | `SemLog`, a fork-free log, a discharged seq, and a `WAFrom` run that really fires an undeclared inverse under a unique seq space |
-| `RevL.A9.a9B_iff` | A9 — the oracle's decision (issue 1167) | **proved** | `propext, Quot.sound` | `a9B i = true ↔ A9OK i`: the `A9` row prints the model's judgment |
+| `RevL.A9.a9B_iff` | A9 — the oracle's decision (issues 1167 / #1172) | **proved** | `propext, Quot.sound` | `a9B i = true ↔ A9OK i`, both directions: the `A9` row prints the model's judgment |
 | `RevL.A9.noDoubleInstallB_iff` | A9 — the uncoded sibling ("installed twice") | **proved** | `propext` | `noDoubleInstallB i = true ↔ NoDoubleInstall i` |
 | `RevL.A9.installed_block_is_slot` | A9 — the bridge to G2/G3 | **proved** | `propext, Quot.sound` | under `A9OK` every installed block's `(key, realm key)` is a `slots` member of its component |
-| `RevL.A9.undeclared_block_is_no_slot` | A9 — the refused shape | **proved** | `propext, Classical.choice, Quot.sound` | without `A9OK` some installed block is a slot of the component in NO realm |
+| `RevL.A9.undeclared_block_is_no_slot` | A9 — the refused shape | **proved** | `propext, Classical.choice, Quot.sound` | without `BlocksDeclared` (direction 1) some installed block is a slot of the component in NO realm |
 | `RevL.A9.installed_block_uniquely_provided` | A9 + `LinkOK` | **proved** | `propext, Quot.sound` | in an admitted composition an installed block's slot is provided by its own component and by no deeper one |
 | `RevL.A9.installed_slots_nodup` | A9 — no double install | **proved** | `propext, Quot.sound` | one block per slot: `NoDoubleInstall` makes the installed slots pairwise distinct |
-| `RevL.A9.a9_not_vacuous` | A9, non-vacuity | **proved** | `propext, Quot.sound` | the fixture refused; both of its hint's fixes admitted, the renamed one also linking |
+| `RevL.A9.a9_not_vacuous` | A9, non-vacuity (direction 1) | **proved** | `propext, Quot.sound` | the first fixture refused; the renamed twin admitted and linking; the hint's second fix admitted once the orphan `skin1` is dropped, and refused by the converse when taken literally |
 | `RevL.A9.a9_rules_are_distinct` | A9, anti-tautology | **proved** | `propext, Quot.sound` | `A9OK` and `NoDoubleInstall` separated in both directions |
-| `RevL.A9.a9_row_not_vacuous` | A9, oracle row non-vacuity | **proved** | none | same manifest, different block, different verdict: the row reads the `PB` fact, not the `C` fact |
+| `RevL.A9.a9_row_not_vacuous` | A9, oracle row non-vacuity | **proved** | none | three same-manifest pairs with different verdicts (renamed block, added block, dropped route): the row reads the `PB` and `PR` facts, not the `C` fact |
+| `RevL.A9.blocksDeclaredB_iff` | A9 — direction 1's decider (issue #1172) | **proved** | `propext` | `blocksDeclaredB i = true ↔ BlocksDeclared i` |
+| `RevL.A9.declaredInstalledB_iff` | A9 — direction 2's decider (issue #1172) | **proved** | `propext` | `declaredInstalledB i = true ↔ DeclaredInstalled i` |
+| `RevL.A9.declared_uninstalled_refused` | A9 — the converse (issue #1172, PR #1184) | **proved** | `propext` | a declared key that neither a block nor a route installs refuses the component |
+| `RevL.A9.unrouted_needs_a_block` | A9 — the converse as stated for an ordinary provider | **proved** | `propext` | with no route, `A9OK` says exactly that every declared key has a block |
+| `RevL.A9.routed_installs_without_block` | A9 — the `realms(...)` exemption | **proved** | `propext` | a component whose every declared key is routed satisfies A9 with no block (`RoundRobin`) |
+| `RevL.A9.a9_converse_not_vacuous` | A9, non-vacuity (direction 2) | **proved** | none | the second fixture refused; `RoundRobin` admitted with no block; a backend with a block admitted |
+| `RevL.A9.a9_directions_are_distinct` | A9, anti-tautology | **proved** | none | the two directions separated in both directions |
 
 | `RevL.A2.a2Fold_iff` | A2 — the checker's fold (issue 1166) | **proved** | `propext, Quot.sound` | `lower._dispatch_action`'s fold with its flag SET is "no acquisition at all" plus the rule; the induction-friendly form behind the bridge |
 | `RevL.A2.a2B_iff` | A2 — the bridge | **proved** | `propext, Quot.sound` | `a2B body = true ↔ A2OK body`: the printed `A2` verdict is exactly "no `provide` is followed by an `acquire`" |
@@ -711,7 +718,8 @@ Facts exported: component manifests (M — with the component's `isolate`
 realm map and a `member`/`template` role), require-binding resolutions
 (R), provide-key resolutions (C — off the `provides` clause), the
 installed provide blocks (PB — off the `provide k { … }` bodies, one row
-per block; issue 1167), per-statement classifications (T), call
+per block; issue 1167) and the routed keys (PR — off the `isolate k in
+realms(...)` binds; issue #1172), per-statement classifications (T), call
 facts with marker context (U), service-method emission bounds (B) and a
 scoped bound's declared entries (Q), the **reachability** facts that let
 the model see past the marker — the capabilities a component's `requires`
@@ -820,19 +828,25 @@ Verdicts:
   flips when a leaking head is accepted. Host builtins and let-bound locals
   count as reach, so a component that uses them is a faithful `fail`, not a
   claim it is unsafe.
-- **A9 rows (per installing component, issue 1167)**: `RevLOracle.a9RowB`,
-  which IS `RevL.A9.a9B` over the component's `LComponent` (from M) beside
-  its installed block keys (from PB); `a9RowB_iff` proves the printed Bool
-  is exactly `RevL.A9.A9OK`. The reference recomputes membership of every
-  PB key in the M row's clause independently. One row per component that
-  installs at least one block — a block-less component would agree
-  vacuously and gets none. The fixture is a `fail` on both sides and files
-  under `agree-A9`; `a9_coverage` fails the gate unless the corpus carries
-  both an admitted provider and the refused shape, and
-  `RevL.A9.a9_row_not_vacuous` proves the verdict moves with the block
-  alone (same manifest, renamed block, different verdict). Blinding the
-  printed verdict on the fixture yields one `a9` mismatch and a FATAL
-  `missed-A9`; blinding `a9RowB` itself breaks the `a9RowB_iff` proof.
+- **A9 rows (per declaring or installing component, issues 1167 / #1172)**:
+  `RevLOracle.a9RowB`, which IS `RevL.A9.a9B` over the component's
+  `LComponent` (from M) beside its installed block keys (from PB) and its
+  routed keys (from PR); `a9RowB_iff` proves the printed Bool is exactly
+  `RevL.A9.A9OK`, both directions. The reference recomputes both
+  memberships independently: every PB key in the M row's clause, and every
+  clause key in PB or PR. One row per component that declares or installs
+  anything — a component with neither would agree vacuously and gets none,
+  and a component that declares and installs nothing (the converse
+  fixture's `S`) is under the row although it has no PB row at all. Both
+  fixtures are a `fail` on both sides and file under `agree-A9`;
+  `a9_coverage` fails the gate unless the corpus carries an admitted
+  provider, both refused shapes and the routed shape admitted, and
+  `RevL.A9.a9_row_not_vacuous` proves the verdict moves with the block and
+  with the route alone (same manifest, different body fact, different
+  verdict). Blinding the printed verdict on a fixture yields one `a9`
+  mismatch and a FATAL `missed-A9`; blinding `a9RowB` itself breaks the
+  `a9RowB_iff` proof. A decider blind to direction 2 is exactly what PR
+  #1184 found on CI: the converse fixture in `missed-A9`.
 - **A2 rows (per component, A2, issue 1166)**: `Oracle.a2OKB` —
   `RevL.A2.a2B`, the checker's own fold — over the component's `AQ` body
   steps in body order, with `a2OKB_iff` proving the printed Bool is exactly
@@ -1011,16 +1025,18 @@ only the closure is local, the judgment it feeds is the model's).
 ### Census
 
 Nothing is dropped and nothing is counted without being named. Over the
-corpus as of the A9 and A2 rows (issues 1167, 1166): **454 .rvl files →
-310 components → 849 statements = 216 modeled + 210 componentless + 28
-refused at parse**, and **5071 verdicts compared (216 files + 310
-components + 64 provide methods + 18 spawn edges + 28 parse refusals + 267
-teardown scenarios + 1620 recoveries + 849 confinements + 849 surfaces +
-305 teardowns + 235 provide-block components + 310 A2 bodies), 5071
-agree, 0 mismatches**. (The corpus grows; the shape of the census does
-not. The step-6 numbers were 296 / 182 / 403 and 371 verdicts; the 387
-before the G7 row; 654 as of `chore/formal-review`; 4526 before the A9 and
-A2 rows; 4761 with A9 alone.)
+corpus as of the A9 converse and the A2 rows (issues 1167, 1166, #1172):
+**457 .rvl files -> 317 components -> 860 statements = 219 modeled + 210
+componentless + 28 refused at parse**, and **5119 verdicts compared (219
+files + 317 components + 65 provide methods + 18 spawn edges + 28 parse
+refusals + 267 teardown scenarios + 1620 recoveries + 860 confinements +
+860 surfaces + 306 teardowns + 242 provide-clause components + 317 A2
+bodies), 5119 agree, 0 mismatches**. (The corpus grows; the shape of the
+census does not. The step-6 numbers were 296 / 182 / 403 and 371 verdicts;
+the 387 before the G7 row; 654 as of `chore/formal-review`; 4526 before
+the A9 and A2 rows; 4761 with A9 alone; 4794 with the A9 converse and
+5071 with the A2 rows, each measured on its own branch before the two
+landed on one corpus.)
 
 - The 28 parse refusals are LISTED by name and code, not counted. The
   previous "(28 parse-error skips, loud)" parenthesis hid
@@ -1043,14 +1059,19 @@ step 7; issues 1167 and 1166), not findings: the checker refusing where the mode
 nothing is the model being weaker than what revl enforces.
 `formal-strict` — the model refusing what the checker accepts — stays
 informational; it is the safe direction and names fragment gaps. Current
-buckets: 141 agree-accept, 2 agree-G2, 1 agree-G3, 15 agree-G4, 1
-agree-A9, 1 agree-A2, 52 out-of-fragment, 1 formal-strict, 2
-formal-found-other, and **0 missed-G4, 0 missed-G2, 0 missed-A9, 0
-missed-A2**. The A9 row moved
-`examples/rejections/a9_provide_key_not_declared.rvl` and the A2 row
+buckets: 142 agree-accept, 2 agree-G2, 1 agree-G3, 16 agree-G4, 2
+agree-A9, 1 agree-A2, 52 out-of-fragment, and **0 missed-G4, 0 missed-G2,
+0 missed-A9, 0 missed-A2**, with 1 formal-strict and 2 formal-found-other
+carried as informational findings -- 167 aligned plus the 52
+out-of-fragment is the 219 modeled files. The A9 row moved
+`examples/rejections/a9_provide_key_not_declared.rvl` from out-of-fragment
+to agree-A9 and nothing else; its converse added
+`examples/rejections/a9_provides_without_block.rvl` to agree-A9 (it was
+`missed-A9` FATAL under the one-direction row, which is how PR #1184 found
+the gap) and `tests/formal_corpus/a9_routes_installs_key.rvl` to
+agree-accept. The A2 row moved
 `examples/rejections/a2_acquire_after_provide.rvl` from out-of-fragment
-(54 before either) to their agree buckets; the three informational rows
-predate both.
+(54 before either) to agree-A2. The three informational rows predate both.
 
 Movements from the pre-step-6 buckets (52 agree-accept, 2 agree-G2, 6
 agree-G4, 36 formal-strict, 13 formal-found-other, 21 out-of-fragment),
@@ -1107,6 +1128,13 @@ Known fidelity limits of the shaped model, deliberately not papered over:
   `CeilingOK`, the checker's `split_ceilings`), but the corpus exercises
   neither: no file declares an integer-valued capability parameter, so
   the two agree on it vacuously.
+- A **routed** key (`isolate k in realms(...)`, item 162) is modelled in
+  the shared realm for the V row: `_isolate_map` ignores `RouteStmt`, the
+  routed REQUIREMENT is elided from the V-row manifest on both sides
+  (`Oracle.toLComponent`, `reference_from_tsv`) because the linker resolves
+  it per leg and `LComponent.realm` places a key in one realm, and the
+  route reaches the model only as the A9 installation fact (`PR`). Item
+  162's "every routed realm needs a provider" check is not under the row.
 - The `closed` column of the V row is `RevL.Manifest.RequiresClosed` over
   the file's own components. It is a real model predicate and a real
   question about a composition, but a single `.rvl` is not necessarily a

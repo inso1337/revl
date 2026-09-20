@@ -1,0 +1,23 @@
+// REJECTED — A9, the converse: every key the `provides` clause declares must be
+// installed by a `provide <key> { … }` block in the body. `S` declares
+// `provides skin: Skin` and installs nothing. Before this rule the linker read
+// the CLAUSE, so `S` was admitted as the provider of `skin`, `User` linked
+// against it, and at run time `User` stayed PENDING (R2) with the failure
+// reported one hop away — "no provider for key `out`" — from its cause. The
+// one form that installs a declared key without a block is the multi-realm
+// bind `isolate <key> in realms(...)` (the routes-only Router of
+// stdlib/router.rvl), which is exempt by that syntax. The hint names both
+// fixes: add the block, or drop the key from the clause.
+//
+// expected error:
+//   a9_provides_without_block.rvl:17: `skin` is declared in the `provides` clause of S but no `provide skin { … }` block installs it (A9)
+
+service Skin { fn name() -> Str }
+
+component S provides skin: Skin {
+  let x = effect Map.new() undo x.drop()
+}
+
+component User requires skin: Skin provides out: Skin {
+  provide out { fn name() = skin.name() }
+}
