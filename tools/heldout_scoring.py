@@ -288,10 +288,15 @@ _SCALARS = ("Int", "Int32", "Float", "Str", "Bool", "Bytes")
 # invites a candidate to recognise the shape rather than to be correct over it;
 # that is not a defence and the design doc says so, but there is no reason to
 # hand the recognition away for free either.
+# Every one is checked against `revl.lexer.KEYWORDS` by the test suite: the
+# first draft of this list carried `emit`, and eight of two hundred programs
+# that claimed to be inside the admission surface were parse errors instead --
+# a generator that quietly emits programs outside its own surface shrinks the
+# guard without saying so.
 _WORDS = (
     "store", "clock", "log", "cache", "queue", "meter", "vault", "index",
     "router", "ledger", "probe", "relay", "spool", "tally", "warden",
-    "beacon", "cursor", "digest", "emit", "fold", "shard", "anchor",
+    "beacon", "cursor", "digest", "signal", "fold", "shard", "anchor",
     "ripple", "gantry", "lantern", "kernel", "pilot", "quay",
 )
 _SUFFIXES = ("", "_a", "_b", "_c", "_hi", "_lo", "2", "3", "x")
@@ -484,6 +489,7 @@ def score(cases, census, engine=None, reference=None):
     issued = 0
     refused_by_reference = 0
     near_miss_refused = 0
+    inside_refused = []
     for (case_id, source), verdict in zip(cases, engine.verdicts(sources)):
         ref = reference(source)
         name = census.bucket(ref, verdict)
@@ -494,10 +500,13 @@ def score(cases, census, engine=None, reference=None):
             refused_by_reference += 1
             if case_id.startswith("near:"):
                 near_miss_refused += 1
+            else:
+                inside_refused.append(case_id)
     liveness = {
         "issued_admissions": issued,
         "reference_refusals": refused_by_reference,
         "near_miss_reference_refusals": near_miss_refused,
+        "inside_reference_refusals": len(inside_refused),
     }
     return buckets, liveness
 
@@ -567,6 +576,11 @@ def run(*, argv_seed, env, count, changed, root=ROOT, census=None,
             raise Refusal("draw-reached-no-admission-arm")
         if liveness["near_miss_reference_refusals"] == 0:
             raise Refusal("draw-carries-no-refused-near-miss")
+        # A program the generator labelled `inside:` that the reference refuses
+        # is a generator defect, not a gate finding: the draw is not the set it
+        # says it is, so it does not get to score anything.
+        if liveness["inside_reference_refusals"] != 0:
+            raise Refusal("draw-inside-refused-by-reference")
     except Refusal as exc:
         return refusal_record(exc.reason), REFUSED
     record = verdict_record(
