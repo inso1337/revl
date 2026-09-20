@@ -1,0 +1,37 @@
+{
+  "_about": [
+    "The corpus files the checker refuses G5 or G6 and the model has NO",
+    "fact about: `out-of-fragment-G5` and `out-of-fragment-G6` in",
+    "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
+    "",
+    "Both buckets record an absence, so neither can disagree with anything",
+    "and neither could fail the gate on its own (issue #1169). This ledger",
+    "is what makes them fire: MEMBERSHIP is checkable even when the",
+    "contents are not. A file that joins a bucket without a line here is a",
+    "gate failure, and a line that is no longer in its bucket is a gate",
+    "failure that must be DELETED -- so the lists shrink only, and every",
+    "name left is a hole someone still owes the model a row for.",
+    "",
+    "Regenerate with `python3 formal/harness/diff_corpus.py --write-ledger`",
+    "and read the diff: a new name is a new hole, not a formality.",
+    "`--write-status` deliberately does not touch this file.",
+    "",
+    "It records NAMES only -- never counts, totals or line numbers -- so it",
+    "is identical under CI's python 3.11 and a 3.14 developer venv."
+  ],
+  "out-of-fragment-G5": [
+    "examples/rejections/g5_undo_arrow_emission.rvl",
+    "examples/rejections/g5_undo_fn_value_emission.rvl",
+    "examples/rejections/g5_undo_handle_ref_arg.rvl",
+    "examples/rejections/g5_undo_handle_ref_let.rvl",
+    "examples/rejections/g5_undo_method_ref_alias.rvl",
+    "examples/rejections/g5_undo_method_ref_if_arm.rvl",
+    "examples/rejections/g5_undo_method_ref_let.rvl",
+    "examples/rejections/g5_undo_method_ref_list.rvl",
+    "examples/rejections/g5_undo_method_ref_match_arm.rvl",
+    "examples/rejections/g5_undo_method_ref_record.rvl"
+  ],
+  "out-of-fragment-G6": [
+    "examples/rejections/g6_method_local_shadows_component.rvl"
+  ]
+}
