@@ -240,6 +240,24 @@ second kind.
 that our gate refuses attacks we wrote for it, which is a regression test rather
 than an escape rate.
 
+### What a live run costs
+
+The injection run's eight attempts took roughly nine minutes each against a 35B
+model at around 24 t/s on a contended machine. A full 30-spec admission run at
+that rate is several hours, and an attempt at one here exceeded `run.py`'s
+1800-second per-call timeout on the first spec and was abandoned. Size
+`--timeout` for your endpoint before starting one, and expect `--specs` to be
+the knob you actually use.
+
+Two caps matter and they trade against each other. `--max-tokens` has to clear
+the model's reasoning channel or the answer is deleted rather than truncated;
+raising it past what the answers need makes every call proportionally slower.
+8192 was the measured operating point here: the plain spec needs about 3700
+completion tokens, and three of the eight injection attempts still exhausted
+8192 on reasoning alone and produced no answer. Those three are excluded from
+the run's denominators and counted separately rather than scored off the draft
+their reasoning contained.
+
 ### What the committed report does not contain
 
 `bench/results/framework-bench/report.md` lists its own remaining gates: the
