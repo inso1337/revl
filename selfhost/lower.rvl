@@ -14414,6 +14414,153 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
   return mk_irres(false, "")
 }
 
+// ------------------------------------------------ the effect BLOCK's setup
+//
+// `let <bind> = effect { <setup> … <acquisition> }` runs stratum-1 PURE code
+// before the acquisition (`_lower_component_setup_stmt`). Its statements are a
+// different family from an activation step and from a provide-method step: a
+// setup `let` carries no `mutable` key, a reassignment is its own `assign`
+// step, and `if`/`assert`/bare-expression statements are steps here and
+// nowhere else.
+
+// One setup statement. `e`/`isExpr` carry the bare-expression case, because the
+// LAST statement of an effect block is the acquisition rather than a step.
+type SetupOne = { ok: Bool, js: Str, e: Expr, isExpr: Bool,
+                  sc: List[Bind], muts: List[Str], i: Int }
+type SetupR   = { ok: Bool, js: Str, sc: List[Bind], muts: List[Str] }
+
+fn bad_setup() -> SetupOne {
+  return { ok: false, js: "", e: Bad(""), isExpr: false, sc: [], muts: [], i: 0 }
+}
+
+fn cir_setup_stmt(ts: List[Token], lo: Int, cx: CCtx, sc: List[Bind],
+                  hostSc: List[Str], muts: List[Str]) -> SetupOne {
+  if (atw(ts, lo, "let") || atw(ts, lo, "var")) {
+    let mutable = atw(ts, lo, "var")
+    let name = tkc(ts, lo + 1).text
+    var j = lo + 2
+    if (atk(ts, j, ":")) { j = type_at(ts, j + 1).i }
+    if (!atk(ts, j, "=")) { return bad_setup() }
+    let r = expr_at(ts, j + 1)
+    if (is_bad(r.e) || r.i <= j + 1) { return bad_setup() }
+    let ve = cir_expr(r.e, sc, hostSc, cx)
+    if (!ve.ok) { return bad_setup() }
+    // a setup `let` carries NO `mutable` key: the reference records mutability
+    // on the block's own scope, not on the step (`_lower_component_setup_stmt`)
+    return { ok: true,
+             js: "{\"step\": \"let\", \"name\": ".concat(jstr(name))
+                   .concat(", \"value\": ").concat(ve.js).concat("}"),
+             e: Bad(""), isExpr: false,
+             sc: sc.push({ name: name, ty: infer(r.e, cenv(cx, sc)) }),
+             muts: mutable ? muts.push(name) : muts, i: r.i }
+  }
+  if (atw(ts, lo, "assert")) {
+    let r = expr_at(ts, lo + 1)
+    if (is_bad(r.e) || r.i <= lo + 1) { return bad_setup() }
+    let ae = cir_expr(r.e, sc, hostSc, cx)
+    if (!ae.ok) { return bad_setup() }
+    return { ok: true,
+             js: "{\"step\": \"assert\", \"expr\": ".concat(ae.js).concat("}"),
+             e: Bad(""), isExpr: false, sc: sc, muts: muts, i: r.i }
+  }
+  if (atw(ts, lo, "if")) {
+    let c = expr_at(ts, lo + 1)
+    if (is_bad(c.e)) { return bad_setup() }
+    let ce = cir_expr(c.e, sc, hostSc, cx)
+    if (!ce.ok || !atk(ts, c.i, "{")) { return bad_setup() }
+    let tend = close_brace(ts, c.i)
+    if (tend == 0 - 1) { return bad_setup() }
+    let tr = cir_setup_stmts(ts, c.i + 1, tend - 1, cx, sc, hostSc, muts, "")
+    if (!tr.ok) { return bad_setup() }
+    var js = "{\"step\": \"if\", \"cond\": ".concat(ce.js)
+      .concat(", \"then\": [").concat(tr.js).concat("]")
+    var nexti = tend
+    var sc2 = tr.sc
+    var muts2 = tr.muts
+    if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
+      let eend = close_brace(ts, tend + 1)
+      if (eend == 0 - 1) { return bad_setup() }
+      let er = cir_setup_stmts(ts, tend + 2, eend - 1, cx, sc2, hostSc, muts2, "")
+      if (!er.ok) { return bad_setup() }
+      js = js.concat(", \"else\": [").concat(er.js).concat("]")
+      nexti = eend
+      sc2 = er.sc
+      muts2 = er.muts
+    }
+    return { ok: true, js: js.concat("}"), e: Bad(""), isExpr: false,
+             sc: sc2, muts: muts2, i: nexti }
+  }
+  // a reassignment, admitted only for a name the block declared `var` — the
+  // reference refuses a `let` rebind outright, so guessing here would admit a
+  // program it rejects
+  if (atk(ts, lo, "ident") && atk(ts, lo + 1, "=")) {
+    let name = tkc(ts, lo).text
+    if (!contains(muts, name)) { return bad_setup() }
+    let r = expr_at(ts, lo + 2)
+    if (is_bad(r.e) || r.i <= lo + 2) { return bad_setup() }
+    let ve = cir_expr(r.e, sc, hostSc, cx)
+    if (!ve.ok) { return bad_setup() }
+    return { ok: true,
+             js: "{\"step\": \"assign\", \"name\": ".concat(jstr(name))
+                   .concat(", \"value\": ").concat(ve.js).concat("}"),
+             e: Bad(""), isExpr: false, sc: sc, muts: muts, i: r.i }
+  }
+  let r = expr_at(ts, lo)
+  if (is_bad(r.e) || r.i <= lo) { return bad_setup() }
+  let ee = cir_expr(r.e, sc, hostSc, cx)
+  if (!ee.ok) { return bad_setup() }
+  return { ok: true, js: "{\"step\": \"expr\", \"expr\": ".concat(ee.js).concat("}"),
+           e: r.e, isExpr: true, sc: sc, muts: muts, i: r.i }
+}
+
+fn cir_setup_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
+                   hostSc: List[Str], muts: List[Str], acc: Str) -> SetupR {
+  var j = lo
+  var out = acc
+  var scope = sc
+  var mu = muts
+  while (j < hi && !atk(ts, j, "}")) {
+    let st = cir_setup_stmt(ts, j, cx, scope, hostSc, mu)
+    if (!st.ok) { return { ok: false, js: "", sc: sc, muts: muts } }
+    out = out == "" ? st.js : out.concat(", ").concat(st.js)
+    scope = st.sc
+    mu = st.muts
+    j = st.i
+  }
+  return { ok: true, js: out, sc: scope, muts: mu }
+}
+
+// The whole block: every statement but the LAST is setup, and the last is the
+// acquisition expression itself. `wit` records whether that acquisition names a
+// witnessed extern, which is what decides whether the step may carry no `undo`.
+type BlkR = { ok: Bool, setup: Str, acq: Str, wit: Bool }
+
+fn cir_effect_block(ts: List[Token], lo: Int, hi: Int, cx: CCtx,
+                    sc: List[Bind], hostSc: List[Str]) -> BlkR {
+  var j = lo
+  var setup = ""
+  var scope = sc
+  var mu: List[Str] = []
+  while (j < hi && !atk(ts, j, "}")) {
+    let st = cir_setup_stmt(ts, j, cx, scope, hostSc, mu)
+    if (!st.ok) { return { ok: false, setup: "", acq: "", wit: false } }
+    if (st.i >= hi || atk(ts, st.i, "}")) {
+      // the tail of an effect block is the acquisition, so it must be a bare
+      // expression — a `let`/`assign`/`if`/`assert` tail acquires nothing
+      if (!st.isExpr) { return { ok: false, setup: "", acq: "", wit: false } }
+      let ae = cir_expr(st.e, scope, hostSc, cx)
+      if (!ae.ok) { return { ok: false, setup: "", acq: "", wit: false } }
+      return { ok: true, setup: setup, acq: ae.js,
+               wit: is_witnessed_acq(st.e, cx) }
+    }
+    setup = setup == "" ? st.js : setup.concat(", ").concat(st.js)
+    scope = st.sc
+    mu = st.muts
+    j = st.i
+  }
+  return { ok: false, setup: "", acq: "", wit: false }
+}
+
 // A component activation body -> its `body` step list. `config` is a header
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
@@ -14443,6 +14590,34 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   if (atw(ts, i, "let") && atk(ts, i + 2, "=") && atw(ts, i + 3, "effect")) {
     let name = tkc(ts, i + 1).text
     if (atw(ts, i + 4, "spawn")) { return mk_irres(false, "") }
+    // the effect BLOCK form: pure setup runs before the acquisition, and the
+    // acquisition is the block's tail expression
+    if (atk(ts, i + 4, "{")) {
+      let bend = close_brace(ts, i + 4)
+      if (bend == 0 - 1) { return mk_irres(false, "") }
+      let blk = cir_effect_block(ts, i + 5, bend - 1, cx, sc, hostSc)
+      if (!blk.ok) { return mk_irres(false, "") }
+      let bsc = sc.push({ name: name, ty: "" })
+      var bstep = "{\"step\": \"let-effect\", \"acquire\": ".concat(blk.acq)
+      var bnext = bend
+      if (atw(ts, bend, "undo")) {
+        let bund = expr_at(ts, bend + 1)
+        if (is_bad(bund.e)) { return mk_irres(false, "") }
+        let bue = cir_expr(bund.e, bsc, hostSc, cx)
+        if (!bue.ok) { return mk_irres(false, "") }
+        bstep = bstep.concat(", \"undo\": ").concat(bue.js)
+        bnext = bund.i
+      } else {
+        if (!blk.wit) { return mk_irres(false, "") }
+      }
+      bstep = bstep.concat(", \"bind\": ").concat(jstr(name))
+      if (blk.setup != "") {
+        bstep = bstep.concat(", \"setup\": [").concat(blk.setup).concat("]")
+      }
+      bstep = bstep.concat("}")
+      let bacc = acc == "" ? bstep : acc.concat(", ").concat(bstep)
+      return cir_body(ts, bnext, end, cx, provs, bsc, hostSc, bacc)
+    }
     let acq = expr_at(ts, i + 4)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
     let ae = cir_expr(acq.e, sc, hostSc, cx)
