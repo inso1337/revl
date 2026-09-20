@@ -86,16 +86,55 @@ _ORIGIN_VOCABULARY = ", ".join(sorted(ORIGIN_CLASSES) + ["*"])
 _RESIDENCE_VOCABULARY = ", ".join(RESIDENCES)
 
 
+# The reach of a role that declares none. UNDECLARED IS NOT EMPTY: a model is
+# an authority surrogate, so the question "how far does this role reach" always
+# has an answer, and the answer a declaration does not give is the unnameable
+# `*` - the one token no `requires` key can name and that `cap_order.covers`
+# therefore covers with nothing (item 519).
+#
+# This is the whole failure direction of the item. Reading an undeclared reach
+# as EMPTY would make an unknown model inert in the product, which is the
+# fail-open shape: the component that consults a model it has said nothing
+# about is exactly the one whose effective ceiling is unknown, and an unknown
+# ceiling is refused here rather than assumed to be zero. It is the same choice
+# `_spawn_emission_surface` already makes for a service method that declares
+# `emission` with no capability list, where `None` becomes `*` and not `set()`.
+UNDECLARED_REACH = ("*",)
+
+
 @dataclass(frozen=True)
 class Role:
-    """A validated `model role` declaration."""
+    """A validated `model role` declaration.
+
+    `reach` is the `reaches [...]` clause of item 519, as declared: a tuple of
+    capability tokens, `("*",)` for `reaches [*]`, `()` for `reaches []`, and
+    `None` when the clause was omitted. Read it through `reach_tokens` rather
+    than directly, which is what resolves `None` to `UNDECLARED_REACH`.
+    """
     name: str
     residence: str
     line: int
+    reach: tuple | None = None
 
     @property
     def off_device(self) -> bool:
         return self.residence == "off_device"
+
+    @property
+    def reach_declared(self) -> bool:
+        """Whether the role wrote a `reaches [...]` clause at all.
+
+        The diagnostic reads this so it can say `declares no reach` instead of
+        claiming the author wrote `reaches [*]`, which they did not."""
+        return self.reach is not None
+
+    @property
+    def reach_tokens(self) -> tuple:
+        """The capability tokens a call to this role can reach.
+
+        `UNDECLARED_REACH` when the clause is absent. Every consumer goes
+        through here, so the fail-closed reading of silence is decided once."""
+        return UNDECLARED_REACH if self.reach is None else self.reach
 
 
 def roles(program, filename: str | None = None) -> dict[str, Role]:
@@ -132,7 +171,8 @@ def roles(program, filename: str | None = None) -> dict[str, Role]:
                      "its own role name",
                 code=CODE, category=CATEGORY,
             )
-        table[decl.name] = Role(decl.name, decl.residence, decl.line)
+        table[decl.name] = Role(decl.name, decl.residence, decl.line,
+                                getattr(decl, "reach", None))
     return table
 
 
@@ -274,8 +314,13 @@ def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
                              f"(docs/design/531-model-placement.md)",
                         code=CODE, category=CATEGORY,
                     )
+                # `line` is additive (item 519): the attenuation refusal
+                # points at the ARM that routes through the role, not at the
+                # component head. A consumer reading `role`/`residence` is
+                # unaffected.
                 arms[arm.origin] = {"role": role.name,
-                                    "residence": role.residence}
+                                    "residence": role.residence,
+                                    "line": arm.line}
             actions[stmt.action] = arms
         if actions:
             placed[comp.name] = actions
