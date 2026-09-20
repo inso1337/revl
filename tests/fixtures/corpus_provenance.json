@@ -721,6 +721,7 @@
    "tests/fixtures/emit_py_corpus/services_basic.rvl",
    "tests/fixtures/emit_py_corpus/services_body.rvl",
    "tests/fixtures/emit_py_corpus/services_config.rvl",
+   "tests/fixtures/emit_py_corpus/services_control_flow.rvl",
    "tests/fixtures/emit_py_corpus/services_interp.rvl",
    "tests/fixtures/emit_py_corpus/services_match.rvl",
    "tests/fixtures/emit_py_corpus/services_method_effects.rvl",

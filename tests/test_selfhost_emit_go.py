@@ -410,17 +410,46 @@ def test_a_components_only_document_names_every_component(emitted, reference):
     assert_boundary_witness(want, got, "stc-go", "<<UNSUPPORTED-COMPONENT:Consumer>>")
 
 
+def test_an_observable_component_on_the_pure_path_is_refused_by_name(reference,
+                                                                     tmp_path):
+    """The pure path's component drop is a REFUSAL now, not a silent agreement.
+
+    This case used to assert the opposite: the reference's pure typed-core path
+    routes PAST the components of a document that also carries top-level
+    declarations, so both sides dropped the same thing and agreed byte-for-byte,
+    and the port was told not to mark what the reference also omitted.
+
+    That agreement was two implementations of a fail-open. A module `fn` beside
+    a component with provide methods is the ordinary shape of real revl code —
+    every revl-harness component file is exactly it — and go answered it with a
+    compiling package that had no services, no component and no routes, with no
+    error on either side of the fork. Issue #721 reached it by migrating the
+    harness's ternary dispatch to a provide-method if-chain: the reference
+    emitted 6185 bytes of stdlib preamble and two free functions, and nothing
+    that could serve a request.
+
+    The reference refuses by name now (`_refuse_pure_path_component_drop`), so
+    there is no reference output left for the port to agree with. The boundary
+    that remains is the genuinely incidental component, below.
+    """
+    path = tmp_path / "observable.rvl"
+    path.write_text("fn f() -> Int { return 1 }\n"
+                    "service S { fn g() -> Int }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+    ir = compile_files([str(path)])
+    with pytest.raises(Exception, match="refuses by name"):
+        reference.emit(ir)
+
+
 def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, reference,
                                                                 tmp_path):
     """The boundary of the rule above, so it is not read as wider than it is.
 
     The rule is to name every `components` entry the port does not carry EXCEPT
     where naming it would break a byte agreement the reference itself produces.
-    This is that exception: the reference's PURE typed-core path routes PAST the
-    components of a document that also carries top-level declarations and emits
-    ordinary Go for those alone, so both sides drop the same thing and agree
-    byte-for-byte. 38 documents in the tree are in exactly that state, and a
-    marker here would name a gap that is not there and cost every one of them.
+    That exception survives for a component with nothing to drop: no activation
+    body and no provide method, so routing past it loses nothing anyone could
+    have called and both sides still agree byte-for-byte.
 
     The suppression needs BOTH halves: pure declarations present, and no in-file
     `test` section. A document with a test section already diverges (this slice
@@ -430,8 +459,7 @@ def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, referen
     """
     path = tmp_path / "incidental.rvl"
     path.write_text("fn f() -> Int { return 1 }\n"
-                    "service S { fn g() -> Int }\n"
-                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+                    "component C { }\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
     assert "<<UNSUPPORTED-COMPONENT" not in got
