@@ -704,6 +704,13 @@ def select(changed, root) -> dict:
             # is where a drift would land, not in either file alone.
             pytest_nodes.add("tests/test_gate_reference_census.py")
             pytest_nodes.add("tests/test_corpus_provenance.py")
+            # item 560: the published artifact reads BOTH of these, and its
+            # tests hold the committed report against what they now say. A
+            # change here that moves the allowance or the NEVER_BASELINED
+            # mechanism has to red the artifact's suite, or the published
+            # table goes stale silently, which is the whole defect it exists
+            # to prevent.
+            pytest_nodes.add("tests/test_census_artifact.py")
             reasons.append(f"{f} (census/provenance coupling)")
             continue
         if f == "tools/check_site_wheel.py":

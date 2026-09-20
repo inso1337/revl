@@ -926,6 +926,39 @@ def false_admissions(buckets: dict[str, list[str]]) -> list[str]:
     return sorted(buckets.get(ADMISSION, []))
 
 
+BASELINE_NOTE = (
+    "Recorded by `python3 tools/gate_reference_census.py --record`. Every "
+    "entry is a KNOWN gate/reference divergence over the census corpus; "
+    "`--check` fails on one that is not here, and on one here that no longer "
+    "diverges, so the allowance can only shrink in a diff somebody reads. A "
+    "`false-admit` entry is an OPEN GATE BYPASS, not an accepted state: the "
+    "list is capped by name in tests/test_gate_reference_census.py so it "
+    "cannot grow quietly while it is worked down."
+)
+
+
+def record_payload(buckets: dict[str, list[str]], details: dict) -> dict:
+    """Exactly what `--record` writes to the baseline.
+
+    Split out of `main` so the NEVER_BASELINED filter is reachable without
+    rewriting the committed baseline. It is the half of the zero-tolerance
+    mechanism `compare` does not hold: `compare` fails on a `false-admission`
+    however the baseline reads, and this drops one on the way in, so no
+    `--record` run can ever produce a baseline that grants one tolerance.
+    `tools/census_artifact.py` drives both halves with a synthetic member and
+    publishes the result, rather than asserting the property in prose.
+    """
+    return {
+        "note": BASELINE_NOTE,
+        "corpus_dirs": list(CORPUS_DIRS),
+        "buckets": {k: sorted(v) for k, v in sorted(buckets.items())
+                    if k.split("/", 1)[0] in TRACKED
+                    and k.split("/", 1)[0] not in NEVER_BASELINED},
+        "details": {cid: d for cid, d in details.items()
+                    if d["bucket"].split("/", 1)[0] not in NEVER_BASELINED},
+    }
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--engine", choices=sorted(ENGINES), default="selfhost")
@@ -973,22 +1006,7 @@ def main(argv: list[str]) -> int:
 
     if args.record:
         BASELINE.write_text(json.dumps(
-            {"note": ("Recorded by `python3 tools/gate_reference_census.py "
-                      "--record`. Every entry is a KNOWN gate/reference "
-                      "divergence over the census corpus; `--check` fails on "
-                      "one that is not here, and on one here that no longer "
-                      "diverges, so the allowance can only shrink in a diff "
-                      "somebody reads. A `false-admit` entry is an OPEN GATE "
-                      "BYPASS, not an accepted state: the list is capped by "
-                      "name in tests/test_gate_reference_census.py so it "
-                      "cannot grow quietly while it is worked down."),
-             "corpus_dirs": list(CORPUS_DIRS),
-             "buckets": {k: sorted(v) for k, v in sorted(buckets.items())
-                         if k.split("/", 1)[0] in TRACKED
-                         and k.split("/", 1)[0] not in NEVER_BASELINED},
-             "details": {cid: d for cid, d in details.items()
-                         if d["bucket"].split("/", 1)[0] not in NEVER_BASELINED}},
-            indent=1, sort_keys=True) + "\n")
+            record_payload(buckets, details), indent=1, sort_keys=True) + "\n")
         print(f"\nrecorded {BASELINE.relative_to(ROOT)}")
         return 0
 
