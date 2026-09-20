@@ -283,7 +283,7 @@ name = "revl-gate-wasm"
 version = "%(crate_version)s"
 edition = "2021"
 description = "The revl admission gate as a WASI-P2 component (layer 1, refusal-only, empty imports)"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [lib]
 name = "revl_gate_wasm"
