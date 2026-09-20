@@ -9,7 +9,9 @@ under "What is left" with how to measure it.
 Related and read before designing this: `docs/design/480-verifiable-private-peer-pool.md`
 (the three kernels this sits on), `src/revl/peer_offer.py`,
 `src/revl/peer_authority.py`, `src/revl/lawful_retry.py`, `src/revl/attest.py`,
-`src/revl/model_evidence.py` (item 517's signing discipline).
+`src/revl/model_evidence.py` (item 517's signing discipline), and
+`docs/design/540-shadow-promotion.md` (item 518, the authority diff as a
+structural precondition).
 
 ## What was missing, precisely
 
