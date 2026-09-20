@@ -17,6 +17,7 @@ rows joined by ``;``, the kind of each row set by its leading marker
                            composition's service declarations, exhaustively
     :S        service:     the running composition declares service S
     :S,a,b    service:     ... and its operations are exactly `a` and `b`
+    :S,a(k:Str) service:   ... and `a`'s declared parameters are exactly those
 
 `manifest_wire(ir)` renders `IR(M)` — the manifest of an already-compiled
 composition `M` — into exactly that wire, so a differential oracle can construct
@@ -90,8 +91,67 @@ def _declared_services(ir: dict) -> list[tuple[str, list[str]]] | None:
     return [(name, _operations(entry)) for name, entry in services.items()]
 
 
+#: The characters that carry STRUCTURE on the wire, and so may not appear
+#: inside an operation signature's own text: the row separator, the operation
+#: separator, the parameter separator, and the pair of brackets that opens and
+#: closes a parameter list. A signature needing one of them is WITHHELD (the
+#: bare operation name is rendered instead), never escaped: a reader that sees
+#: no parameter list decides nothing about the operation's arguments, which is
+#: the direction this wire is allowed to err in.
+_WIRE_STRUCTURE = ";,|()"
+
+
+def _wire_name(text: object) -> bool:
+    """Is `text` a bare identifier — the same shape the gate's `bare_ident`
+    accepts for every name on the wire?"""
+    return isinstance(text, str) and text.isidentifier() and text.isascii()
+
+
+def _signature(params: object) -> str | None:
+    """``(name:Type|name:Type)`` for a method's declared parameter list, or
+    None when the list cannot be spelled on the wire.
+
+    The parameter TYPES are the half that makes a candidate's
+    ``store.bump(key)`` decidable against the RUNNING `Store` rather than only
+    against its operation names (docs/design/457 section 4.5, "its call sites
+    are typed against the RUNNING signature"). The NAMES are rendered because
+    the reference's own diagnostic names the parameter, and a gate that agrees
+    on the refusal but not on its sentence is a `msg-mismatch`, not agreement.
+
+    None is returned — and the caller then renders the bare operation name —
+    for a parameter whose name is not an identifier, whose type is missing, or
+    whose type spelling needs one of `_WIRE_STRUCTURE`. That last case is real
+    (``Map[Str, Int]`` carries the operation separator) and it is why this
+    returns an option rather than a best effort: a signature that lost a
+    parameter, or gained one by splitting a type, would refuse calls the
+    reference admits."""
+    if not isinstance(params, list):
+        return None
+    rendered = []
+    for param in params:
+        if not isinstance(param, dict):
+            return None
+        name, ty = param.get("name"), param.get("type")
+        if not _wire_name(name) or not isinstance(ty, str) or not ty:
+            return None
+        if any(ch in ty for ch in _WIRE_STRUCTURE):
+            return None
+        rendered.append(f"{name}:{ty}")
+    return "(" + "|".join(rendered) + ")"
+
+
+def _operation(name: str, method: object) -> str:
+    """One operation token: the bare name, or the name followed by its declared
+    parameter list. The parameter list is the claim; its absence is silence."""
+    if not _wire_name(name):
+        return name
+    signature = _signature(method.get("params")) if isinstance(method, dict) \
+        else None
+    return name if signature is None else f"{name}{signature}"
+
+
 def _operations(entry: object) -> list[str]:
-    """One service's declared operation names, in declaration order. An entry
+    """One service's declared operation tokens, in declaration order. An entry
     with no readable ``methods`` table renders as the empty surface: the IR's
     service table always carries one, and a service with no operation is a
     legal (if idle) declaration."""
@@ -99,9 +159,10 @@ def _operations(entry: object) -> list[str]:
         return []
     methods = entry.get("methods")
     if isinstance(methods, dict):
-        return list(methods)
+        return [_operation(name, method) for name, method in methods.items()]
     if isinstance(methods, list):
-        return [m.get("name", "") for m in methods if isinstance(m, dict)]
+        return [_operation(m.get("name", ""), m)
+                for m in methods if isinstance(m, dict)]
     return []
 
 
