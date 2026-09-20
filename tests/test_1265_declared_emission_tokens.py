@@ -161,7 +161,8 @@ _DECLARED = {
         ("Gate", "admit_all", ("host_admit_all",)),
     ],
     "src/revl/truc/components/cli.rvl": [("Cli", "run", ("asm", "ship"))],
-    "examples/user_cache.rvl": [("Cache", "put", ("db",))],
+    "demo/components/services.rvl": [("Cache", "put", ("db",)),
+                                    ("Database", "execute", ("db",))],
 }
 
 

@@ -4,7 +4,7 @@
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission[db] fn execute(sql: Str) -> Int
+  emission fn execute(sql: Str) -> Int
 }
 
 component Migrator requires db: Database {
