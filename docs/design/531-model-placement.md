@@ -1,7 +1,8 @@
 # 531: Model placement as a checked route condition (`route model`)
 
-Roadmap: item 512 (issue #1186), from the 2026-09-19 external review. Slice 1
-is LANDED with this note; slices 2 to 5 are designed here and not written.
+Roadmap: item 512 (issue #1186), from the 2026-09-19 external review, and
+item 514 (issue #1188), which is slice 2 of the same design. Slices 1 and 2
+are LANDED; slices 3 to 5 are designed here and not written.
 
 This is the foundation of the eight-item model cluster (512 to 519, issues
 \#1186 to \#1193). Every one of the other seven presupposes that a model call is
@@ -127,11 +128,11 @@ and `* -> cloud` can never be the sentence that leaks one.
 
 Slice 1 pins the reading in the checker's own terms (an arm naming a
 confidentiality origin is the only way to place one, and such an arm is checked
-against the role's residence). Slice 2 is what makes it bite on a VALUE rather
-than on a written arm: until the flow walk lands, a confidential value reaching
-an action with a `* -> cloud` route is not yet refused. That is stated here as
-a limit of slice 1 rather than implied by silence, and it is why slice 2 is the
-next one and not an optional extra.
+against the role's residence). Slice 2, item 514, is what makes it bite on a
+VALUE rather than on a written arm, and it is LANDED: a value whose taint
+carries `confidential`, reaching a `model.*` crossing from an action routed
+`* -> cloud`, is refused naming the origin and the role that `*` points at.
+Section 3.2 is that rule.
 
 ---
 
@@ -204,6 +205,93 @@ The diagnostic names the action, the origin and the role, which is what the
 exit test asks for, and it names the residence and the line that made it a
 refusal, which is what makes it fixable without reading this note.
 
+### 3.2 The value side: the origin ceiling (item 514, slice 2)
+
+Section 3 decides what an author WRITES. This decides what a program DOES, and
+it is the half a confidential input can actually be lost through.
+
+`check()` returns `{component: {action: {origin: {role, residence}}}}`, which
+is the shape this slice was given (section 9). `revl.taint` hands that table to
+the flow walk, and at every crossing whose DECLARED capability has the `model`
+scope head - the `retention.persistence_sink_of` derivation, on
+`model_route.MODEL_SCOPE` - it asks `model_route.admits()` whether the origin
+the value actually carries may cross. A crossing is a model call because of the
+capability the granting side declared, never because of its name.
+
+`admits()` has ONE admitting path for a confidential value: an arm names the
+`confidential` origin and that arm's role is declared `on_device`. The other
+three verdicts all refuse, and each is a placement the checker could not
+determine rather than one it determined to be bad:
+
+| verdict | when | what it means |
+| ------- | ---- | ------------- |
+| `unrouted` | the component routes some action and not this one | the author made placement a property of this component and this action escaped it |
+| `unplaced` | the block names no arm for `confidential` | `*` does not cover a confidentiality origin (section 2.1), so `* -> cloud` places nothing here |
+| `off_device` | an arm names it and the role leaves the device | `check()` refuses writing that arm, so this is the braces: a later slice that admitted the arm must not thereby admit the value |
+
+There is no fourth path on which an undetermined placement admits. That is the
+whole point of the slice: the failure this repository keeps finding is state
+keyed to a thing that outlived the thing meant to bound it, failing open, and a
+ceiling that admits when it cannot place a value is exactly that shape.
+
+**What it fires on is the residue item 256 admits.** A `confidential` value
+crossing to a receiver that did not declare `Secret[T]` was already refused,
+with `G-SECRET-FLOW`, before this slice existed. What reaches the ceiling is
+the value a DECLARED receiver lets through - and that declaration says the
+crossing may RECEIVE a confidential value while saying nothing whatever about
+where the model behind it runs. That is the join the issue asks for, stated as
+the one program it changes:
+
+```revl reject G-MODEL-PLACE
+model role local on_device
+model role cloud off_device
+
+extern emission[model.complete] fn prompt(p: Secret[Str]) -> Int = @py { return 0 }
+
+service Answer { emission fn summarize(d: Str) -> Int }
+
+component Summarizer provides out: Answer {
+  config { doc: Secret[Str] }
+  route model on summarize { * -> cloud }
+  provide out {
+    fn summarize(d) {
+      let r = prompt(config.doc)
+      return 0
+    }
+  }
+}
+```
+
+    a `confidential` value reaches the model crossing argument 1 of `prompt`
+    (`model.complete`) in action `summarize` (Summarizer), whose `route model`
+    block places it through no arm: the catch-all `*` routes to model role
+    `cloud` (declared `off_device`) and `*` never covers a confidentiality
+    origin (G-MODEL-PLACE)
+
+**The `secret` origin is deliberately NOT judged here.** `CEILING_ORIGINS`
+holds `confidential` alone. Item 256 already refuses a bound provider key at
+every crossing kind but one, and that one - the section-4b re-entry into the
+same bound capability's own extern body - is the provider making its own call.
+A first draft of this slice judged `secret` too and turned that admitted
+re-entry into a `G-MODEL-PLACE` refusal, which contradicts a landed guarantee
+to no purpose; the spec run caught it. The DECLARATION half is untouched: an
+arm naming `secret` is still refused, still citing `G-SECRET-FLOW`.
+
+**The reach survives a seam.** `_Signature.models_at` is the placement sibling
+of item 472's `persists_at`: the `route model` block is keyed to an ACTION, and
+the crossing is very often one hop further in, inside a helper `fn` or a
+provider body that declares no route of its own. Without the transitive record
+the ceiling would stop at the seam and refuse nothing, which is the shape item
+472's own follow-up had to fix for the same reason.
+
+**What it does not do, stated rather than implied.** A component that declares
+NO `route model` block anywhere is unmoved: it declared no placement, which is
+the state of the world before item 512, and item 256's fence is the whole rule
+there. Making an unrouted program refuse would be a different item - it would
+make `route model` mandatory rather than a permission - and it is not this one.
+An origin that is not `confidential` is also unmoved: which roles an action's
+`web`, `fs` or `input` origins reach is the crossing side, slice 4.
+
 ---
 
 ## 4. Why this is a permission and not a scheduler
@@ -250,7 +338,8 @@ author would look.
   item 515's problem, and item 538 records the decision that the profile is
   published by the provider rather than asserted by configuration for that
   reason.
-* **The flow half.** See slice 2. Slice 1 checks the declaration.
+* **A run-time placement.** Slice 2 refuses a value at admission; it does not
+  route one at run time, and nothing in either slice writes IR.
 * **Widening anything.** The item adds refusals and removes none. No program
   that compiles today stops compiling, and no role can grant a component a
   capability it does not hold; that direction is item 519's, and until it lands
@@ -334,16 +423,20 @@ against `52fb8ef` (18 failed, 1 passed, the one being the control) and 19
 passed on the branch; census `--check` unmoved; `build_gate_crate.py --check`
 in sync. Fixtures inline (section 6.1).
 
-**S2. The value side: the origin ceiling.** This is roadmap item 514 and it is
-listed here because it is what makes section 2.1 bite. The taint flow walk
-learns the route table `check()` already returns, and refuses a value whose
-origin the arm for that origin does not place, naming the value's origin and
-the role. This is the slice that makes `* -> cloud` a real confinement
-statement rather than a defined one. Oracle: a flow test in the shape of
-`tests/test_secret_flow.py`, over a component whose provide-method threads a
-`Secret[Str]` config field into a model emission; the refusal must fire with no
-arm naming `confidential` present, which is the vacuity trap for this slice.
-Owner: issue \#1188.
+**S2. The value side: the origin ceiling. LANDED (roadmap item 514, issue
+\#1188).** Section 3.2. The flow walk reads the route table `check()` already
+returns - it does not re-derive one from the AST - and refuses a confidential
+value whose origin the action's block does not place on the device, naming the
+origin and the role. This is what makes `* -> cloud` a confinement statement
+about a value rather than a definition about an arm. Oracle:
+`tests/test_model_ceiling_514.py`, 24 tests, measured non-vacuous against
+`fe6d747` (13 failed, 11 passed there, the 11 being the controls) and 24 passed
+on the branch. Census unmoved: `false-admit` 9, `false-reject` empty.
+`build_gate_crate.py --check` in sync, so this slice is not a digest input
+either. Fixtures inline, for section 6.1's reason. The vacuity trap named in
+the original plan was real and is what the measurement shows: the refusal fires
+with no arm naming `confidential` present, on a program that compiled on the
+tree before it.
 
 **S3. The self-host port.** Two halves, and the first is worth landing alone: a
 named `MODEL` marker in `selfhost/parser.rvl` so the gate says which construct
@@ -380,10 +473,10 @@ Stated so the next agent on each does not redesign the seam.
   The one seam is that a role may eventually declare whether its member
   supports constrained decoding at all, which belongs to 515's profile and not
   to `residence`.
-* **514, the origin ceiling.** Inherits `check()`'s return value, which is
-  `{component: {action: {origin: {role, residence}}}}` for exactly this reason,
-  and inherits section 2.1 as the rule it must enforce on values. 514 is S2
-  above. It should NOT re-derive the route table from the AST.
+* **514, the origin ceiling. LANDED, as S2.** It inherited `check()`'s return
+  value, which is `{component: {action: {origin: {role, residence}}}}` for
+  exactly this reason, and it does not re-derive the table from the AST. See
+  section 3.2 for what it refuses and section 10 for what it does not.
 * **515, the portfolio.** Schedules inside the boundary. It owns the device
   profile, the load and unload cost, the shared provision, and the question of
   which of two admissible roles to use. It must not be able to widen a
@@ -413,7 +506,19 @@ Stated so the next agent on each does not redesign the seam.
 * That `on_device` corresponds to any physical fact. It is a declared claim,
   checked only against the arms that name it (section 5).
 * That the eleven decisions are complete. They are the ones a declaration can
-  be wrong in; the value side is open until S2 and the crossing side until S4.
+  be wrong in; the crossing side is open until S4.
+* That every path by which a confidential value can reach a model crossing is
+  covered by section 3.2. What is exercised is a value that reaches the
+  crossing directly, one that reaches it through a top-level helper `fn`, a
+  `Secret[T]` config field and a `Secret[T]` operation parameter. The origin
+  lattice is an over-approximation biased to refusing, so a value the walk
+  cannot name arrives tainted rather than clean, but that is item 249's
+  argument being relied on here rather than a measurement of this slice.
+* That the `unrouted` verdict is the right scope line. It refuses an action a
+  routed component did not route, and admits every action of a component that
+  routed nothing. The second half is a deliberate limit and not a proof that
+  nothing is lost there: a program that declares no placement is judged by item
+  256's fence alone, exactly as it was before item 512.
 * Any claim about tiers other than the reference. Nothing in this slice reaches
   an emitter, so there is nothing tier-specific to be right or wrong about, but
   that is an argument and not a measurement.

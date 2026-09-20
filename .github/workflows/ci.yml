@@ -1563,6 +1563,7 @@ jobs:
           tests/test_crypto_stdlib.py
           tests/test_insert_if_absent.py
           tests/test_json_cross_tier_bytes.py
+          tests/test_model_evidence_517.py
           tests/test_run_go.py
           tests/test_run_ts_stdlib_fs_root.py
           tests/test_stdlib_version.py
