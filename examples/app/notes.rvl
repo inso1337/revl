@@ -58,7 +58,7 @@ service NoteStore {
   fn get(id: Str) -> Opt[Note]
   fn all() -> List[Note]
   fn size() -> Int
-  emission fn create(row: Note)
+  emission[store] fn create(row: Note)
 }
 
 // The memory driver. Any other driver (sqlite, postgres) would provide this same
@@ -303,7 +303,7 @@ service NotesConsoleRpc {
 type Asset = { path: Str, sha256: Str }
 
 service WebUI {
-  emission fn add_entry(
+  emission[webui] fn add_entry(
     dev_source: Asset,
     prod_manifest: Str,
     routes: List[Str],
