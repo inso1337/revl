@@ -528,9 +528,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # whole-program documents combining several of the shapes below
         "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
         "../emit_ts_corpus/services_async.rvl",
-        # component branch shapes / map inference
+        # component branch shapes
         "component_branches.rvl",
-        "map_inference.rvl",
+        # (`map_inference.rvl` left this list when lower.rvl grew the component
+        # dialect's record literal, which was the last shape its activation
+        # body spelled that the walk could not read.)
         # (the stdlib builtin surface — `stdlib_builtins.rvl` and the borrowed
         # `../emit_ts_corpus/property_edges.rvl` — left this list with the
         # `sized_length` property form.)
