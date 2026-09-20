@@ -45,6 +45,7 @@ to the diagnostic; see docs/why-traces.md.
 | G-SECRET | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) |
 | G-SECRET-FLOW | a Secret[T] value never reaches a disclosure sink (a log, a serialization, an LLM prompt, an MCP return, an unapproved realm or an undeclared receiver); it crosses only at a declared Secret[T] receiver and downgrades only at a declared endorse[confidential] | lower (taint flow) |
 | G-RETAIN | a Retained[T, P] value past P's retention deadline never reaches a persistence sink (a db/fs/store/kv/blob/archive/index/cache/queue/wal crossing), unless P declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) |
+| G-MODEL-PLACE | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration) |
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |
@@ -599,6 +600,60 @@ nominal name is reported this way. A scalar meeting a name that does not
 resolve is still `T1`, because the opaque-name contract of
 [docs/generics.md](generics.md) and the arrow-annotation hygiene rule
 (`examples/rejections/t35_...`) depend on that reading.
+
+## G-MODEL-PLACE — a model placement is declared, and checked
+
+Roadmap item 512, `docs/design/531-model-placement.md`. A **model role** is a
+declared placement, a name plus where a call to it runs:
+
+```revl fragment
+model role local on_device
+model role cloud off_device
+```
+
+A `route model on <action>` block is a component-prelude clause, the sibling of
+`isolate` and `intercept`: it places one action's model calls by the ORIGIN
+CLASS of what the action is given, reusing the lattice of item 249 rather than
+a second vocabulary.
+
+```revl reject G-MODEL-PLACE
+model role local on_device
+model role cloud off_device
+
+service Answer { fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> cloud
+  }
+  provide out { fn classify(text) = text }
+}
+```
+
+    action `classify` (Classifier) routes the `confidential` origin to model
+    role `cloud`, which is declared `off_device` on line 2: a confidential
+    input may not leave the device (G-MODEL-PLACE)
+
+Every rule the code carries refuses when it is unsure: an unknown residence, a
+role declared twice, an unknown origin class, an UNDECLARED role (which has no
+residence, so the placement cannot be checked), an origin routed twice, an
+empty block, an action routed twice, and a block naming no action the component
+declares. That last one is the shape worth naming: a route keyed to a method
+that has since been renamed protects nothing while still reading as a
+placement.
+
+The catch-all `*` covers the origin classes no other arm names AND no
+confidentiality origin. `* -> cloud` therefore cannot be the sentence that
+sends a confidential input off the device: such an input is placed by an arm
+that names `confidential`, or it is not placed at all. Routing the `secret`
+origin is refused at every residence, and that refusal cites `G-SECRET-FLOW`,
+which already names an LLM prompt as a disclosure sink for a capability-bound
+secret.
+
+The block is a permission checked at admission, not a runtime selection, so it
+writes no IR: an admitted program is byte-identical to the same program without
+it. Scheduling inside the boundary it draws is roadmap item 515, and the flow
+rule that refuses a confidential VALUE reaching an unrouted role is item 514.
 
 ## Everything else
 
