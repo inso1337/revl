@@ -749,11 +749,20 @@ def test_no_declared_link_is_unreachable():
 
 def test_every_declared_link_is_reached_by_a_test_or_the_corpus():
     """Reachable in the source is weaker than reached in a run. The corpus plus
-    the named tests above must together produce every link."""
+    the named tests above must together produce every link.
+
+    The identity links (issue #1278) are produced by
+    ``tests/test_peer_pool_identity.py``'s own corpus, which this unions in by
+    IMPORTING the set that corpus builds rather than re-listing the names here.
+    A list would go stale silently; the import fails loudly if that file stops
+    producing them, and a link produced by neither file still fails."""
+    from test_peer_pool_identity import IDENTITY_CORPUS_LINKS
+
     reached = {link for _, link, _, _ in CORPUS}
     reached |= {pp.LINK_CHARTER_SIGNATURE, pp.LINK_ADMITTING_AUTHORITY,
                 pp.LINK_PROMOTION_EVIDENCE, pp.LINK_NOT_A_MEMBER,
                 pp.LINK_UNKNOWN_TIER}
+    reached |= IDENTITY_CORPUS_LINKS
     assert set(pp.REFUSAL_LINKS) == reached, (
         f"never exercised: {sorted(set(pp.REFUSAL_LINKS) - reached)}")
 
