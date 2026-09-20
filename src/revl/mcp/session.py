@@ -7202,7 +7202,7 @@ class Session:
         over-approximation (`ClassMap.static_taint`, post-endorsement) is the floor
         on a tier with the audit; a session flagged as having no runtime/static
         value taint (`_runtime_taint_available = False`) returns None, and the
-        caller substitutes ALL FIVE origins (fail-closed, over-prompt is safe),
+        caller substitutes EVERY taint-fold origin (fail-closed, over-prompt is safe),
         NEVER an empty set a `{} subset admitting` test would wave through."""
         if getattr(self, "_runtime_taint_available", True) is False:
             return None
@@ -7295,7 +7295,7 @@ class Session:
                 return False
         # the taint-subset gate with the H2 floor (§2.2, §6 A2 H2 corollary): an
         # UNKNOWN admission taint (None - a tier with no honest source) is treated
-        # as ALL FIVE origins (fail-closed, over-prompt is safe), NEVER an empty
+        # as EVERY taint-fold origin (fail-closed, over-prompt is safe), NEVER an empty
         # set a `{} subset admitting` test would wave through. A KNOWN set (from the
         # static over-approximation, possibly empty for a clean crossing) is used
         # as-is, so a genuinely untainted send still auto-approves.
