@@ -182,7 +182,7 @@ class _Parser:
 
 def _parse_grammar(text):
     toks = [t for t in _tokenize(text) if t[0] != "nl"]
-    rules, i = {}, 0
+    rules = {}
     parser = _Parser(toks)
     while parser.i < len(toks):
         kind, name = parser.peek()
