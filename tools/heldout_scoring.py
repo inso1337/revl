@@ -19,7 +19,7 @@ run uses. It does not exist until score time, it is never written to the tree,
 and its identity is fixed by a seed that is proved absent from the repository
 before a single program is generated.
 
-See `docs/design/531-held-out-scoring.md` for the options that were rejected
+See `docs/design/535-held-out-scoring.md` for the options that were rejected
 and the attacks each one left open.
 
 THE THREE ENFORCEMENTS
