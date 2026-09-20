@@ -139,6 +139,13 @@ pub struct AwOperand {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SubHead {
+    es: Vec<Expr>,
+    i: i64,
+    ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SRun {
     ss: Vec<Stmt>,
     i: i64,
@@ -1608,6 +1615,10 @@ fn int_lit0() -> Expr {
     return Expr::IntLit(String::from("0"));
 }
 
+fn expr_bind_only() -> Expr {
+    return Expr::Hole(HoleN { ty: String::from(""), msg: String::from(""), hasMsg: false, line: 0i64 });
+}
+
 fn operand_at(ts: Vec<Token>, k: i64) -> AwOperand {
     if atw(&ts, k, "await") {
         let r = expr_at(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"));
@@ -1615,6 +1626,71 @@ fn operand_at(ts: Vec<Token>, k: i64) -> AwOperand {
     }
     let r2 = expr_at(ts.clone(), k);
     return AwOperand { e: r2.e.clone(), i: r2.i, aw: false };
+}
+
+fn p_sub_head(ts: Vec<Token>, k: i64, acc: Vec<Expr>) -> SubHead {
+    if ((atk(&ts, k, "ident") && (tkc(&ts, k).text == "merge")) && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "(")) {
+        let ops = p_sub_ops(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"), acc.clone());
+        if (!ops.ok) {
+            return ops;
+        }
+        return p_sub_chain(ts.clone(), ops.i, ops.es.clone());
+    }
+    let r = expr_at(ts.clone(), k);
+    if is_bad(r.e.clone()) {
+        return SubHead { es: acc.clone(), i: k, ok: false };
+    }
+    return SubHead { es: acc.revl_push(r.e.clone()), i: r.i, ok: true };
+}
+
+fn p_sub_ops(ts: Vec<Token>, k: i64, acc: Vec<Expr>) -> SubHead {
+    let one = p_sub_head(ts.clone(), k, acc.clone());
+    if (!one.ok) {
+        return one;
+    }
+    if atk(&ts, one.i, ",") {
+        return p_sub_ops(ts.clone(), (one.i).checked_add(1i64).expect("revl: Int overflow"), one.es.clone());
+    }
+    if atk(&ts, one.i, ")") {
+        return SubHead { es: one.es.clone(), i: (one.i).checked_add(1i64).expect("revl: Int overflow"), ok: true };
+    }
+    return SubHead { es: one.es.clone(), i: one.i, ok: false };
+}
+
+fn p_sub_chain(ts: Vec<Token>, k: i64, acc: Vec<Expr>) -> SubHead {
+    if (((!atk(&ts, k, ".")) || (!atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "ident"))) || (!atk(&ts, (k).checked_add(2i64).expect("revl: Int overflow"), "("))) {
+        return SubHead { es: acc.clone(), i: k, ok: true };
+    }
+    let ar = p_sub_args(ts.clone(), (k).checked_add(3i64).expect("revl: Int overflow"), acc.clone());
+    if (!ar.ok) {
+        return ar;
+    }
+    return p_sub_chain(ts.clone(), ar.i, ar.es.clone());
+}
+
+fn p_sub_args(ts: Vec<Token>, k: i64, acc: Vec<Expr>) -> SubHead {
+    if atk(&ts, k, ")") {
+        return SubHead { es: acc.clone(), i: (k).checked_add(1i64).expect("revl: Int overflow"), ok: true };
+    }
+    let r = expr_at(ts.clone(), k);
+    if is_bad(r.e.clone()) {
+        return SubHead { es: acc.clone(), i: k, ok: false };
+    }
+    let nx = acc.revl_push(r.e.clone());
+    if atk(&ts, r.i, ",") {
+        return p_sub_args(ts.clone(), (r.i).checked_add(1i64).expect("revl: Int overflow"), nx.clone());
+    }
+    if atk(&ts, r.i, ")") {
+        return SubHead { es: nx.clone(), i: (r.i).checked_add(1i64).expect("revl: Int overflow"), ok: true };
+    }
+    return SubHead { es: nx.clone(), i: r.i, ok: false };
+}
+
+fn skip_sub_quals(ts: &[Token], k: i64, hi: i64) -> i64 {
+    if ((k >= hi) || atw(ts, k, "undo")) {
+        return k;
+    }
+    return skip_sub_quals(ts, (k).checked_add(1i64).expect("revl: Int overflow"), hi);
 }
 
 fn mk_srun(ss: Vec<Stmt>, i: i64) -> SRun {
@@ -1647,6 +1723,27 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
                 kd = String::from("effect");
                 j = (j).checked_add(1i64).expect("revl: Int overflow");
             }
+        }
+        if atw(&ts, j.clone(), "subscribe") {
+            let sh = p_sub_head(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), vec![]);
+            if ((!sh.ok) || (sh.es.revl_length() == 0i64)) {
+                return mk_srun(vec![mkstmt(String::from("skip"), int_lit0())], hi);
+            }
+            let q = skip_sub_quals(&ts, sh.i, hi);
+            let mut subs = vec![mkstmt_aw(String::from("effect"), (sh.es)[(0i64) as usize].clone(), bn.clone(), false, String::from(""))];
+            let mut si = 1i64;
+            while (si < sh.es.revl_length()) {
+                subs.push(mkstmt(String::from("expr"), (sh.es)[(si) as usize].clone()));
+                si = (si).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atw(&ts, q, "undo") {
+                let su = operand_at(ts.clone(), (q).checked_add(1i64).expect("revl: Int overflow"));
+                if (!is_bad(su.e.clone())) {
+                    return mk_srun(subs.revl_push(mkstmt_aw(String::from("undo"), su.e.clone(), String::from(""), su.aw, String::from(""))), su.i);
+                }
+                return mk_srun(subs.clone(), hi);
+            }
+            return mk_srun(subs.clone(), q);
         }
         if ((kd == "effect") && atw(&ts, j.clone(), "spawn")) {
             let tgt = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
@@ -1745,6 +1842,29 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
             return mk_srun(vec![mkstmt_spawn_unbound(tgt.clone())], hi);
         }
         return mk_srun(vec![mkstmt_spawn_unbound(tgt.clone())], sk);
+    }
+    if ((((t.kind == "kw") && (t.text == "every")) && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (lo).checked_add(2i64).expect("revl: Int overflow"), "in")) {
+        if (atk(&ts, (lo).checked_add(3i64).expect("revl: Int overflow"), "ident") && atk(&ts, (lo).checked_add(4i64).expect("revl: Int overflow"), "{")) {
+            let iend = close_brace(&ts, (lo).checked_add(4i64).expect("revl: Int overflow"));
+            if (iend != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                let ihead = vec![mkstmtb(String::from("expr"), expr_bind_only(), tkc(&ts, (lo).checked_add(1i64).expect("revl: Int overflow")).text)];
+                return mk_srun(append_stmts(ihead.clone(), p_stmts(ts.clone(), (lo).checked_add(5i64).expect("revl: Int overflow"), (iend).checked_sub(1i64).expect("revl: Int overflow"), vec![])), iend);
+            }
+        }
+    }
+    if (((((t.kind == "ident") && (t.text == "on")) && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (lo).checked_add(2i64).expect("revl: Int overflow"), "as")) && atk(&ts, (lo).checked_add(3i64).expect("revl: Int overflow"), "ident")) {
+        let ebn = tkc(&ts, (lo).checked_add(3i64).expect("revl: Int overflow")).text;
+        let ehead = vec![mkstmtb(String::from("expr"), expr_bind_only(), ebn.clone())];
+        let mut eb = (lo).checked_add(4i64).expect("revl: Int overflow");
+        if (atw(&ts, eb.clone(), "in") && atk(&ts, (eb).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+            eb = (eb).checked_add(2i64).expect("revl: Int overflow");
+        }
+        if atk(&ts, eb.clone(), "{") {
+            let eend = close_brace(&ts, eb.clone());
+            if (eend != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return mk_srun(append_stmts(ehead.clone(), p_stmts(ts.clone(), (eb).checked_add(1i64).expect("revl: Int overflow"), (eend).checked_sub(1i64).expect("revl: Int overflow"), vec![])), eend);
+            }
+        }
     }
     if ((t.kind == "kw") && ((t.text == "every") || (t.text == "after"))) {
         let mut b = (lo).checked_add(1i64).expect("revl: Int overflow");
@@ -12204,13 +12324,14 @@ fn ir_component(ts: Vec<Token>, i: i64, fname: &str, al: std::collections::HashM
         let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
         while (((((k < ts.revl_length()) && (!atk(&ts, k.clone(), "{"))) && (!atk(&ts, k.clone(), "eof"))) && (!atw(&ts, k.clone(), "requires"))) && (!atw(&ts, k.clone(), "provides"))) {
             if ((atk(&ts, k.clone(), "ident") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) && atk(&ts, (k).checked_add(2i64).expect("revl: Int overflow"), "ident")) {
-                let pair = Bind { name: tkc(&ts, k.clone()).text, ty: tkc(&ts, (k).checked_add(2i64).expect("revl: Int overflow")).text };
+                let rt = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
+                let pair = Bind { name: tkc(&ts, k.clone()).text, ty: if rt.ok { rt.ty } else { tkc(&ts, (k).checked_add(2i64).expect("revl: Int overflow")).text } };
                 if isReq {
                     reqs.push(pair.clone());
                 } else {
                     provs.push(pair.clone());
                 }
-                k = (k).checked_add(3i64).expect("revl: Int overflow");
+                k = if rt.ok { rt.i } else { (k).checked_add(3i64).expect("revl: Int overflow") };
             } else {
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
             }
@@ -19653,6 +19774,54 @@ fn the_async_colour_reaches_the_fn_entries_transitively() {
 fn a_destructuring_let_is_read__not_refused() {
     let v = admit_src(String::from("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_subscription_bracket_binds_its_name() {
+    let v = admit_src(String::from("component Parked {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  await sub.next()\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_undeclared_stream_in_a_subscribe_head_is_refused__g1_() {
+    let v = admit_src(String::from("component C {\n  let sub = subscribe nostream undo sub.close()\n}"));
+    assert!((v == "G1|`nostream` is not a declared requirement of C"));
+}
+
+#[test]
+fn a_fan_in_operand_is_resolved_even_though__merge__is_not__g1_() {
+    let v = admit_src(String::from("component C {\n  let a = effect Stream.source() undo a.close()\n  let sub = subscribe merge(a, nob) undo sub.close()\n}"));
+    assert!((v == "G1|`nob` is not a declared requirement of C"));
+}
+
+#[test]
+fn an__every___in__body_still_refuses_an_undeclared_name__g1_() {
+    let v = admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(nope) }\n}"));
+    assert!((v == "G1|`nope` is not a declared requirement of C"));
+}
+
+#[test]
+fn an__on___as__body_still_refuses_an_undeclared_name__g1_() {
+    let v = admit_src(String::from("event E(key: k) { k: Str }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  on E as e in sub { emit sink.write(nope) }\n}"));
+    assert!((v == "G1|`nope` is not a declared requirement of C"));
+}
+
+#[test]
+fn an__every___in__body_is_not_pruned_the_way_a_timer_body_is__a1_() {
+    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(hf(o)) }\n}"));
+    assert!((v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"));
+}
+
+#[test]
+fn the_timer_body_s_prune_survives_the_iteration_branch() {
+    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  every 15s { emit sink.write(hf(\"x\")) }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_unmarked_emission_inside_an_iteration_body_is_still_g4() {
+    let v = admit_src(String::from("service Sink { emission fn write(v: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires sink: Sink provides api: Api {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(o) }\n  provide api { fn go() { return sink.write(\"x\") } }\n}"));
+    assert!((v == "G4|call to emission `sink.write` must be marked `emit` (G4)"));
 }
 
 #[test]
