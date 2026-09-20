@@ -410,6 +410,8 @@ pub struct AliasScan {
     declared: Vec<String>,
     names: Vec<String>,
     targets: Vec<String>,
+    lines: Vec<i64>,
+    tps: Vec<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -12696,6 +12698,8 @@ fn alias_scan(ts: Vec<Token>) -> AliasScan {
     let mut declared: Vec<String> = vec![];
     let mut names: Vec<String> = vec![];
     let mut targets: Vec<String> = vec![];
+    let mut lines: Vec<i64> = vec![];
+    let mut tps: Vec<bool> = vec![];
     let mut i = 0i64;
     while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
         if at_event(&ts, i) {
@@ -12715,9 +12719,11 @@ fn alias_scan(ts: Vec<Token>) -> AliasScan {
                 let mut end = cfg_decl_end(&ts, j);
                 if atk(&ts, j, "=") {
                     end = cfg_decl_end(&ts, (j).checked_add(1i64).expect("revl: Int overflow"));
-                    if (((!tparams) && (!atk(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "{"))) && (!cfg_is_variant_rhs(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), end))) {
+                    if ((!atk(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "{")) && (!cfg_is_variant_rhs(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), end))) {
                         names.push(nm.clone());
                         targets.push(type_at(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow")).ty);
+                        lines.push(tkc(&ts, i).line);
+                        tps.push(tparams);
                     }
                 }
                 i = if (end > i) { end } else { skip_line(&ts, i) };
@@ -12726,7 +12732,7 @@ fn alias_scan(ts: Vec<Token>) -> AliasScan {
             }
         }
     }
-    return AliasScan { declared: declared.clone(), names: names.clone(), targets: targets.clone() };
+    return AliasScan { declared: declared.clone(), names: names.clone(), targets: targets.clone(), lines: lines.clone(), tps: tps.clone() };
 }
 
 fn alias_at(al: std::collections::HashMap<String, String>, name: String) -> String {
@@ -12772,7 +12778,7 @@ fn alias_map(ts: Vec<Token>) -> std::collections::HashMap<String, String> {
     let mut raw = std::collections::HashMap::new();
     let mut i = 0i64;
     while (i < sc.names.revl_length()) {
-        if is_alias_target((sc.targets)[(i) as usize].clone(), &sc.declared) {
+        if ((!(sc.tps)[(i) as usize].clone()) && is_alias_target((sc.targets)[(i) as usize].clone(), &sc.declared)) {
             raw.insert((sc.names)[(i) as usize].clone(), (sc.targets)[(i) as usize].clone());
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -13095,6 +13101,28 @@ fn wf_sites_concat(xs: Vec<WfSite>, ys: Vec<WfSite>) -> Vec<WfSite> {
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
+}
+
+fn alias_decl_refusal(ts: Vec<Token>) -> Verd {
+    let sc = alias_scan(ts.clone());
+    let mut i = 0i64;
+    while (i < sc.names.revl_length()) {
+        if is_alias_target((sc.targets)[(i) as usize].clone(), &sc.declared) {
+            if (sc.tps)[(i) as usize].clone() {
+                return no_verd();
+            }
+            let r = check_type_wellformed((sc.targets)[(i) as usize].clone(), false);
+            if (!r.ok) {
+                let tg = wf_tag(&r.msg);
+                if (tg == "") {
+                    return no_verd();
+                }
+                return mk_verd(tagged(&tg, &r.msg), (sc.lines)[(i) as usize].clone());
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
 }
 
 fn wf_decls_walk(ts: Vec<Token>, i: i64, a: WfAcc) -> WfAcc {
@@ -16184,6 +16212,10 @@ fn closure_assign_scan(ts: &[Token]) -> Verd {
 
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
     let base = ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone())), amb_ops_map(&ambOps, 0i64, std::collections::HashMap::new()));
+    let adv = alias_decl_refusal(ts.clone());
+    if (adv.v != "") {
+        return NoLink { done: true, refs: vec![adv.clone()] };
+    }
     let wfv = declared_types_refusal(ts.clone());
     if (wfv.v != "") {
         return NoLink { done: true, refs: vec![wfv.clone()] };
