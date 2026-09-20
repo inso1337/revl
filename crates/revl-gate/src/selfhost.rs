@@ -8688,6 +8688,70 @@ fn walk_stmts(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> Ac {
     return walk_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), walk_one_stmt((ss)[(i) as usize].clone(), cx.clone(), a.clone()));
 }
 
+fn is_fn_label(l: &str) -> bool {
+    return l.revl_ends_with("()");
+}
+
+fn is_value_label(l: &str) -> bool {
+    return l.revl_ends_with(" (passed as a function value)");
+}
+
+fn ac_labels(a: Ac, ls: Vec<String>) -> Ac {
+    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: ls.clone(), ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
+}
+
+fn order_stmt_labels(before: Vec<String>, grown: Vec<String>, step: bool) -> Vec<String> {
+    let mut out = before.clone();
+    let mut fns: Vec<String> = vec![];
+    let mut vals: Vec<String> = vec![];
+    let mut rest: Vec<String> = vec![];
+    let mut i = before.revl_length();
+    if (((step && (i < grown.revl_length())) && (!is_fn_label(&(grown)[(i) as usize]))) && (!is_value_label(&(grown)[(i) as usize]))) {
+        out.push((grown)[(i) as usize].clone());
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    while (i < grown.revl_length()) {
+        let l = (grown)[(i) as usize].clone();
+        if is_fn_label(&l) {
+            fns.push(l.clone());
+        } else {
+            if is_value_label(&l) {
+                vals.push(l.clone());
+            } else {
+                rest.push(l.clone());
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return union_into(union_into(union_into(out.clone(), sort_strs(&fns)), sort_strs(&vals)), rest.clone());
+}
+
+fn walk_span(ss: &[Stmt], i: i64, j: i64, cx: Ctx__m2, a: Ac) -> Ac {
+    if ((i >= j) || (a.msg != "")) {
+        return a;
+    }
+    return walk_span(ss, (i).checked_add(1i64).expect("revl: Int overflow"), j, cx.clone(), walk_one_stmt((ss)[(i) as usize].clone(), cx.clone(), a.clone()));
+}
+
+fn group_end(ss: &[Stmt], i: i64) -> i64 {
+    if ((((ss)[(i) as usize].kind == "emit") && ((i).checked_add(1i64).expect("revl: Int overflow") < ss.revl_length())) && ((ss)[((i).checked_add(1i64).expect("revl: Int overflow")) as usize].kind == "compensate")) {
+        return (i).checked_add(2i64).expect("revl: Int overflow");
+    }
+    return (i).checked_add(1i64).expect("revl: Int overflow");
+}
+
+fn walk_method_stmts(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> Ac {
+    if ((i >= ss.revl_length()) || (a.msg != "")) {
+        return a;
+    }
+    let j = group_end(ss, i);
+    let b = walk_span(ss, i, j, cx.clone(), a.clone());
+    if (b.msg != "") {
+        return b;
+    }
+    return walk_method_stmts(ss, j, cx.clone(), ac_labels(b.clone(), order_stmt_labels(a.labels.clone(), b.labels.clone(), ((ss)[(i) as usize].kind == "emit"))));
+}
+
 fn walk_exprs(xs: &[Expr], i: i64, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
     if ((i >= xs.revl_length()) || (a.msg != "")) {
         return a;
@@ -10395,7 +10459,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind]) -> Verd {
             }
             let mcx = ctx_arrows(ctx_alias(pcx.clone(), alias_in(&pm.body, 0i64, pcx.handles.clone(), setupAlias.clone())), arrows_in(&pm.body, 0i64, setupArrows.clone()));
             let rb = mth_rebind(pm.clone(), &union_into(pm.params.clone(), compLocals.clone()), 0i64);
-            let a = walk_stmts(&pm.body, 0i64, mcx.clone(), empty_ac());
+            let a = walk_method_stmts(&pm.body, 0i64, mcx.clone(), empty_ac());
             if (a.msg != "") {
                 let rl = refusal_line(&pm.body, 0i64, mcx.clone(), empty_ac());
                 if ((rb.v != "") && ((rl == 0i64) || (rb.line < rl))) {
