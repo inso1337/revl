@@ -542,11 +542,32 @@ compiles; section 2 now carries the post-slice-4 spelling. The fixtures in
 their verdicts are unmoved, because a taint role is read off the declared
 capability token and never off an argument type.
 
-**Slice 5: the receipt.** One recorded action carrying application, window,
-target role, target name, target evidence hash, action, capability, session,
-comparable to item 517's model decision. Oracle: the receipt for a refused
-step is as complete as the receipt for a successful one, which is item 525's
-"refusals as legibly as successes" applied to one step.
+**Slice 5: the receipt. LANDED.** `src/revl/ui_action.py`: one recorded
+action carrying the crossing key (item 517's `component`/`step_index` pair,
+reused rather than re-invented), the declared capability token, the outcome,
+and the WHOLE target binding rather than the eight members this entry
+originally listed. The eight are all there; carrying only them would
+recreate, at audit time, the "which field got dropped" question slice 4
+removed at compile time.
+
+Oracle: `tests/test_ui_action_receipt_521.py`, 25 tests, with
+`test_the_receipt_for_a_refused_step_is_as_complete_as_for_a_performed_one`
+as the named one, generalised over all four arms by
+`test_every_arm_is_as_complete_as_every_other`. `OUTCOMES` is
+`performed | refused | unresolved | failed`, and `unresolved` is the arm that
+matters most: §4.2 refuses the descent inside one call, so an `unresolved`
+receipt is the POSITIVE evidence that a click which could not bind its target
+did not become a `ui.click.pixel`.
+
+Not signed, and the absence is pinned rather than left to be noticed. Item
+517 carries a MAC because the producer and the consumer are both inside revl's
+world; a UI step is performed by the substrate, which §7 and item 539 put
+outside this repository, so revl holds no key for it. What the module bounds
+is COMPLETENESS, which is a property of the record rather than of the
+recorder. `docs/design/565-ui-target-binding.md` §12 has the argument, and
+§12.5 the list of what nothing here verifies - starting with the fact that no
+revl surface emits a receipt yet, which is where `revl.model_evidence` also
+started.
 
 **Not in this item:** the transaction phases, the five-way reversibility
 classification and `uncompensated` are item 522's; the end-to-end

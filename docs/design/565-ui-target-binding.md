@@ -1,10 +1,13 @@
-# Design: the computer-use target binding
+# Design: the computer-use target binding and the recorded action
 
-Design-doc id 565. Roadmap item served: 521 (issue #1195), slice 4 of the
-plan in `docs/design/532-typed-computer-use.md` §10. 532 stays the item's
+Design-doc id 565. Roadmap item served: 521 (issue #1195), slices 4 and 5 of
+the plan in `docs/design/532-typed-computer-use.md` §10. 532 stays the item's
 design note; this one exists because slice 4 is the first slice that decides
 anything about a computer-use program's DATA rather than its authority, and
-532 §5 records the binding in one sentence and then moves on.
+532 §5 records the binding in one sentence and then moves on. Slice 5 is here
+rather than in a note of its own because the receipt it defines is the target
+binding plus one member (§12), and splitting them would put one table's
+justification two files away from the other's.
 
 Adjacent and deliberately not restated: 522 (issue #1196, UI transactions,
 whose postcondition problem this slice is the named blocker for), 249 (taint
@@ -302,7 +305,7 @@ declared token), and the reason that is worth saying out loud is that it means
 slice 5 invents no vocabulary: a receipt member that the target does not carry
 and the declaration does not name would be a member nothing can fill.
 
-## 11. What is not verified
+## 11. What is not verified about slice 4
 
 - **No step executes.** No `@py` body in the oracle is ever run. revl checks
   the signature and the record; a target is resolved by a substrate this
@@ -317,3 +320,119 @@ and the declaration does not name would be a member nothing can fill.
 - **Multi-file programs** were not measured. The record is looked up in the
   program's own type table, which is what `compile_files` merges into, but no
   fixture declares `UiTarget` in one file and the family in another.
+
+## 12. The recorded action (slice 5)
+
+`src/revl/ui_action.py`. The gap it closes, stated as the asymmetry rather
+than as a feature: slice 1 put a UI verb on the G8 audit surface, so `revl
+audit` says a component CAN reach `ui.click`, and nothing anywhere says what
+was clicked. Every other revl step has an answer. An effect carries a WAL
+record with an inverse, an emission carries a deferred record and a flush
+proof, a boundary crossing carries a receipt, and a model completion carries
+item 517's decision object. A computer-use step carried nothing.
+
+### 12.1 What the receipt carries, and why it is the whole binding
+
+532 §10 asks for eight members: application, window, target role, target name,
+target evidence hash, action, capability, session. All eight are here. The
+receipt carries the REST of the target binding too (`bounds`, `expiry`,
+`confirm`) plus the crossing key, and that is a decision rather than a
+widening.
+
+A receipt carrying a SUBSET of the target's binding recreates, at audit time,
+exactly the "which field got dropped" question slice 4 removed at compile
+time, and it recreates it at the moment somebody is looking. `expiry` is the
+sharpest case: it exists so staleness is noticeable, and a receipt that omits
+it makes the staleness unnoticeable again in the one artifact an auditor
+reads.
+
+The crossing key is item 517's pair (`component`, `step_index`), reused rather
+than re-invented, so a UI receipt and a model decision index a component's
+steps the same way. A receipt with no crossing key indexes to nothing and
+cannot be lined up against the audit surface that named the reach.
+
+The target half of the member list is READ from `ui_family.TARGET_FIELDS`
+rather than copied. A field added to the binding is a member of the receipt in
+the same change, which is the only way two tables in two modules stay in step.
+
+### 12.2 The one rule
+
+**Every outcome carries every member.** Four arms, none of which may thin the
+record. That is 532 §10's named oracle for this slice, which is item 525's
+"refusals as legibly as successes" applied to one step.
+
+| arm | what it records |
+| --- | --- |
+| `performed` | the substrate performed the step. It says nothing about whether the control did what the author expected: that is a postcondition, and postconditions are item 522's |
+| `refused` | something refused the step before it ran: an approval rule, a capability bound, a budget or deadline |
+| `unresolved` | the target did not bind |
+| `failed` | the step ran and the substrate reported it did not complete |
+
+`unresolved` is the arm a thinning producer would drop first and the one that
+matters most. 532 §4.2 refuses the ladder's descent inside one call, so an
+`unresolved` receipt is the POSITIVE evidence that a `ui.click` which could
+not bind its target did not become a `ui.click.pixel`. Its members are all
+fillable: `role`, `name` and `action` record what was SOUGHT, and `evidence`
+records the observation that was searched. A producer that thinned it would be
+dropping facts it had.
+
+`unresolved` and `failed` are separate because a target that bound and then
+failed is a different fact from one that never bound, and the residue a UI
+transaction must assume differs between them.
+
+### 12.3 Present is not enough
+
+`verify` refuses three things a presence check admits, and each is a record
+that looks complete and is not.
+
+1. **An empty member.** A member filled with `""` passes "is it there" and
+   answers nothing. The one exception is `role`, and it is an exception for
+   slice 4's own reason: not every platform publishes an accessibility tree,
+   `""` says none was available, and an ABSENT `role` would leave a reader
+   unable to tell "there was no tree" from "nobody looked". `EMPTY_ALLOWED` is
+   that one name and a test pins that it is the only one.
+2. **An outcome outside the closed arm set.** An arm nobody declared is an arm
+   no consumer branches on.
+3. **A member nobody named.** A producer adding one has an extra fact that
+   reaches no consumer while looking as though it did.
+
+Point 3 is the OPPOSITE call from slice 4's record check, which admits an
+unknown field (§3), and the two differ because they bound different things: a
+record is the author's own data structure, and a receipt is a wire shape
+between a substrate and an auditor. Saying so here is what stops the next
+reader from calling one of them a mistake.
+
+The verdict collects every reason rather than stopping at the first, because a
+caller repairing a record wants the whole list; one member per attempt turns a
+malformed record into a sequence of round trips during which the operator
+learns the shape one field at a time.
+
+### 12.4 Not signed, deliberately
+
+Item 517's model decision carries a MAC. This does not, and the absence is
+pinned by `test_no_member_claims_authenticity` so a later slice cannot add one
+without arguing for it.
+
+517 signs because the producer (the model host) and the consumer (the
+promoter) are both inside revl's world. A UI step is performed by the
+computer-use substrate, which 532 §7 and item 539 put outside this repository:
+revl builds no key for it and holds none. A `signature` member revl defined
+and nobody could fill would read as an attestation and would not be one, which
+is worse than no field at all. What this module bounds is COMPLETENESS, which
+is a property of the record rather than of the recorder.
+
+### 12.5 What is not verified about slice 5
+
+- **Nothing produces a receipt.** The module defines the shape and checks it;
+  no revl surface emits one, because the thing that performs a UI step is the
+  substrate. That is the same position item 517's module was in when it landed
+  (`revl.model_evidence` was a vocabulary and a `verify` before
+  `shadow_promotion` consumed it), and the same reason: the shape has to exist
+  before a consumer can require it.
+- **The fields are not checked for truth.** `evidence` is a hash the host
+  computed; revl never sees a screen. `verify` checks presence, type,
+  inhabitation and vocabulary.
+- **Nothing lines a receipt up against a compiled program.** A receipt naming
+  a `capability` the component's reach does not contain is admitted here. That
+  cross-check is possible (the reach is on the G8 audit surface) and is not
+  done, because the consumer that would run it does not exist yet.
