@@ -6768,7 +6768,7 @@ fn at_model_role(ts: &[Token], i: i64) -> bool {
 
 fn model_role_end(ts: &[Token], i: i64) -> i64 {
     let mut j = (i).checked_add(4i64).expect("revl: Int overflow");
-    while ((((j < ts.revl_length()) && (!atk(ts, j.clone(), "eof"))) && (!atk(ts, j.clone(), "}"))) && (!at_top_decl(ts, j.clone()))) {
+    while (((((j < ts.revl_length()) && (!atk(ts, j.clone(), "eof"))) && (!atk(ts, j.clone(), "}"))) && (tkc(ts, j.clone()).kind != "kw")) && (!at_top_decl(ts, j.clone()))) {
         if atk(ts, j.clone(), "[") {
             let e = match_bracket(ts, j.clone());
             j = if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { (e).checked_add(1i64).expect("revl: Int overflow") };
