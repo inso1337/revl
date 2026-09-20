@@ -7764,7 +7764,15 @@ type CfgCaseD = { cname: Str, payload: Str }
 type CfgTy    = { name: Str, kind: Str, fields: List[Bind], cases: List[CfgCaseD],
                   params: List[Str], rhs: Str }
 type CfgFld   = { fname: Str, fty: Str, line: Int }
-type CfgOwner = { owner: Str, flds: List[CfgFld] }
+// `erase` is whether the reference has ALREADY substituted this owner's field
+// types by the time its config walk runs (item 1151). It has for a COMPONENT —
+// `_resolve_type_aliases` lists `comp.config` among the declaration sites it
+// substitutes at — and it has NOT for an EXTERN, whose `config` block is not on
+// that list. The two therefore ask the walk a different question about the same
+// spelling, and the difference is visible in the diagnostic: a component's names
+// the ERASED type, an extern's names the alias and finds it OPAQUE, because the
+// alias declaration itself was dropped from the type table.
+type CfgOwner = { owner: Str, flds: List[CfgFld], erase: Bool }
 type CfgAcc   = { comps: List[CfgOwner], exts: List[CfgOwner] }
 
 fn cfg_data_scalar(h: Str) -> Bool {
@@ -7881,21 +7889,12 @@ fn cfg_walk(fname: Str, owner: Str, tyname: Str, root: Str, svcs: List[Str],
       : "the opaque type `".concat(p.head).concat("`")
     return cfg_data_msg(fname, owner, root, offender)
   }
-  // A declared alias `type X = RHS`: follow it (the reference inlines aliases
-  // before this walk, so following the RHS reaches the same decision).
-  if (d.kind == "alias") {
-    let r = cfg_walk(fname, owner, d.rhs, root, svcs, decls, visited, d.params)
-    if (r != "") { return r }
-    var i = 0
-    while (i < p.args.length()) {
-      let r2 = cfg_walk(fname, owner, p.args[i], root, svcs, decls, visited, tparams)
-      if (r2 != "") { return r2 }
-      i += 1
-    }
-    return ""
-  }
   // A nominal record/ADT: resolve it and walk its component types, guarding a
-  // recursive type (`type Tree = Node(Tree)`) with the visited set.
+  // recursive type (`type Tree = Node(Tree)`) with the visited set. There is no
+  // ALIAS arm: `cfg_erase_decls` has already removed every transparent alias
+  // from `decls` and re-read every remaining single-RHS declaration as the
+  // one-case variant the reference parses it as, so the only heads that resolve
+  // here are the ones that resolve for the reference (item 1151).
   if (!contains(visited, p.head)) {
     let v2 = visited.push(p.head)
     let tp2 = d.params
@@ -8262,7 +8261,7 @@ fn cfg_comp_owner(ts: List[Token], i: Int) -> CfgOwner {
   let lo = j + 1
   let hi = end == 0 - 1 ? j + 1 : end - 1
   return { owner: "component `".concat(nm).concat("`"),
-           flds: cfg_fields_in(ts, lo, hi) }
+           flds: cfg_fields_in(ts, lo, hi), erase: true }
 }
 
 fn cfg_extern_owner(ts: List[Token], i: Int, endi: Int) -> CfgOwner {
@@ -8271,7 +8270,7 @@ fn cfg_extern_owner(ts: List[Token], i: Int, endi: Int) -> CfgOwner {
          || atw(ts, j, "async")) { j += 1 }
   let nm = atw(ts, j, "fn") ? tkc(ts, j + 1).text : ""
   return { owner: "extern `".concat(nm).concat("`"),
-           flds: cfg_fields_in(ts, i, endi) }
+           flds: cfg_fields_in(ts, i, endi), erase: false }
 }
 
 fn cfg_owners_walk(ts: List[Token], i: Int, a: CfgAcc) -> CfgAcc {
@@ -8324,31 +8323,116 @@ fn cfg_svc_names(svcs: List[SvcD]) -> List[Str] {
   return out
 }
 
-// The config-is-data verdict for a whole program: components first, then
-// externs (the reference's `_check_config` order), the FIRST offending field.
-fn config_data_refusal(ts: List[Token], pg: Prog) -> Verd {
-  let svcs = cfg_svc_names(pg.svcs)
-  let decls = cfg_collect_types(ts)
-  let acc = cfg_owners_walk(ts, 0, { comps: [], exts: [] })
-  let owners = cfg_owner_concat(acc.comps, acc.exts)
+// The declared-type table this walk resolves against, ERASED (item 1151). The
+// reference asks the config question of a program `_resolve_type_aliases` has
+// already rewritten, so the table it reads differs from the one the tokens
+// spell in two ways, and BOTH are load bearing here:
+//
+//   * a transparent alias is GONE from it. `program.type_decls` drops every
+//     alias, so a head that is one resolves to nothing — which is why an
+//     EXTERN config field written `Cb` (an extern's block is not a substitution
+//     site) is refused as "the opaque type `Cb`" and not for whatever `Cb`
+//     aliases. Following the alias, as this walk did, answered a question the
+//     reference never asks.
+//   * a one-case declaration whose right-hand side is NOT an alias target is a
+//     VARIANT, not an alias. `type Sv = Ops` naming a service and
+//     `type O = Unknown` naming nothing both parse into a single NULLARY case,
+//     which carries no type to walk, so the reference reads them as data and
+//     ADMITS. This reader classified by RHS SHAPE and called both aliases, then
+//     followed the right-hand side into the service and into the unresolvable
+//     head and refused a clean program — a false rejection in a FAIL-FAST phase,
+//     so nothing after it ran either. `is_alias_target` is the reference's own
+//     classifier and decides it here.
+//
+// A declaration that survives keeps its own annotations erased, exactly as the
+// reference substitutes `decl.fields[].type` and `case.payload` (a case NAME is
+// not on that list, and the declarations whose case name is a type spelling are
+// the aliases, which are dropped).
+fn cfg_erase_binds(bs: List[Bind], al: Map[Str, Str]) -> List[Bind] {
+  var out: List[Bind] = []
+  var i = 0
+  while (i < bs.length()) {
+    out = out.push({ name: bs[i].name, ty: alias_subst(bs[i].ty, al) })
+    i += 1
+  }
+  return out
+}
+
+fn cfg_erase_cases(cs: List[CfgCaseD], al: Map[Str, Str]) -> List[CfgCaseD] {
+  var out: List[CfgCaseD] = []
+  var i = 0
+  while (i < cs.length()) {
+    out = out.push({ cname: cs[i].cname, payload: alias_subst(cs[i].payload, al) })
+    i += 1
+  }
+  return out
+}
+
+fn cfg_erase_decls(ds: List[CfgTy], al: Map[Str, Str]) -> List[CfgTy] {
+  var out: List[CfgTy] = []
+  var i = 0
+  while (i < ds.length()) {
+    let d = ds[i]
+    // a transparent alias contributes NO entry: the reference drops it.
+    if (!al.has(d.name)) {
+      if (d.kind == "alias") {
+        // not one: the single right-hand side is this variant's ONE case name,
+        // and `cfg_is_type_expr` decides whether it carries a type to walk.
+        out = out.push({ name: d.name, kind: "variant", fields: [],
+                         cases: [{ cname: d.rhs, payload: "" }],
+                         params: d.params, rhs: "" })
+      } else {
+        out = out.push({ name: d.name, kind: d.kind,
+                         fields: cfg_erase_binds(d.fields, al),
+                         cases: cfg_erase_cases(d.cases, al),
+                         params: d.params, rhs: d.rhs })
+      }
+    }
+    i += 1
+  }
+  return out
+}
+
+// One owner's fields, the FIRST offending one. `al` is the substitution to apply
+// to the field's own spelling before the walk — the component table for a
+// component, and EMPTY for an extern, whose config block the reference does not
+// substitute at. It is applied to the walked type and to `root` together, so the
+// diagnostic names the type the reference names.
+fn cfg_owner_verdict(os: List[CfgOwner], al: Map[Str, Str], svcs: List[Str],
+                     decls: List[CfgTy]) -> Verd {
   var oi = 0
-  while (oi < owners.length()) {
-    let o = owners[oi]
+  while (oi < os.length()) {
+    let o = os[oi]
     var fi = 0
     while (fi < o.flds.length()) {
       let f = o.flds[fi]
       // `_check_config` asks the WELLFORMED question first and the is-data
       // question second, per field — so a config field declared `Opt` is the
-      // bare-generic refusal, not the opaque-type one.
+      // bare-generic refusal, not the opaque-type one. The wellformed question
+      // is asked on the DECLARED spelling; the is-data walk then sees what the
+      // reference's `_config_field_types` hands it, with a transparent alias
+      // erased and a non-transparent one left in place.
       let wf = wf_site_verd({ ty: f.fty, line: f.line, asyncOk: false })
       if (wf.v != "") { return wf }
-      let r = cfg_walk(f.fname, o.owner, f.fty, f.fty, svcs, decls, [], [])
+      let t = o.erase ? alias_subst(f.fty, al) : f.fty
+      let r = cfg_walk(f.fname, o.owner, t, t, svcs, decls, [], [])
       if (r != "") { return mk_verd(r, f.line) }
       fi += 1
     }
     oi += 1
   }
   return no_verd()
+}
+
+// The config-is-data verdict for a whole program: components first, then
+// externs (the reference's `_check_config` order), the FIRST offending field.
+fn config_data_refusal(ts: List[Token], pg: Prog) -> Verd {
+  let svcs = cfg_svc_names(pg.svcs)
+  let al = alias_map(ts)
+  let decls = cfg_erase_decls(cfg_collect_types(ts), al)
+  let acc = cfg_owners_walk(ts, 0, { comps: [], exts: [] })
+  return cfg_owner_verdict(cfg_owner_concat(acc.comps, acc.exts), al, svcs,
+                           decls)
 }
 
 // ========================================== declared types (_validate_declared_types)
