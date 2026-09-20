@@ -378,17 +378,20 @@ def test_a_rung_token_inherits_its_verbs_role_by_prefix() -> None:
     than the verb it descends from. Resolution is by longest registered prefix,
     so admitting the spelling in `refusal()` cannot silently drop the role.
 
-    These tokens are NOT admissible today: slice 1 refuses them at the
-    declaration site and slice 3 owns the check that replaces that refusal.
-    What is pinned here is which way they fall if they are ever admitted."""
+    These tokens were NOT admissible when this was written: slice 1 refused
+    them at the declaration site. Slice 3 landed the prefix-closure check that
+    replaces that refusal, so they are admissible now and the resolution below
+    is doing real work rather than pinning a hypothetical."""
     assert ui_family.is_taint_sink("ui.click.selector")
     assert ui_family.is_taint_sink("ui.click.pixel")
     assert ui_family.is_taint_sink("ui.text.pixel")
     assert not ui_family.is_taint_sink("ui.find.selector")
     assert ui_family.source_origin("ui.find.selector") == "screen"
-    # still refused at the declaration site, by slice 1's own message
-    assert "not admissible yet" in ui_family.refusal(
-        "ui.click.pixel", "emission")[0]
+    # Slice 3 landed the check slice 1 was holding the spelling back for, so
+    # the rung is admissible now and the prefix resolution above is what makes
+    # that safe: `ui.click.pixel` arrives carrying `ui.click`'s sink role
+    # rather than none, which is what an exact-match table would have given it.
+    assert ui_family.refusal("ui.click.pixel", "emission") is None
 
 
 def test_an_unresolvable_ui_token_falls_to_the_sink_side() -> None:
