@@ -155,14 +155,22 @@ purpose. The change makes the gap a refusal rather than a silent substitution.
 
 `Opt[Opt[T]]` and `Opt[Unit]` were previously admitted at a validated
 emission, an `event` declaration and a routed endpoint. Both spellings are now
-refused there. Neither appears in `examples/`, in any backend fixture corpus,
-or in any test that reaches one of those three surfaces: the full slice of the
-suite matching `schema or model or boundary or type or opt or validator` is
-green unchanged, and the reference census is unmoved. Nothing else about `Opt`
-moves: a single-layer `Opt[T]` over a non-null-admitting `T` renders and
-validates exactly as before, and the type system is untouched, so `?.`
-chaining, the rust boxing pass and the self-host type grammar all keep the
-nested type they depend on.
+refused at those three, and nowhere else.
+
+The distinction matters because `Opt[Opt[Int]]` is already in the tree. Four
+fixture-corpus programs carry it: `tests/fixtures/emit_py_corpus/branches.rvl`
+(twice, once as a plain `fn` and once as a service method declaration),
+`tests/fixtures/emit_ts_corpus/optionals.rvl` and
+`tests/fixtures/emit_wasm_corpus/variants.rvl`. None of the four reaches a
+validated boundary, an `event` or a `route`, so none is refused and all three
+self-host emit corpora stay byte-identical (211 checks, green). `examples/`
+carries neither spelling. The reference census reports no change from the
+baseline.
+
+Nothing else about `Opt` moves: a single-layer `Opt[T]` over a
+non-null-admitting `T` renders and validates exactly as before, and the type
+system is untouched, so `?.` chaining, the rust boxing pass and the self-host
+type grammar all keep the nested type they depend on.
 
 ## What this does not do
 
