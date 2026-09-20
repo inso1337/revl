@@ -241,7 +241,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `T1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/t1_service_arg_type.rvl`](../examples/rejections/t1_service_arg_type.rvl) |
 | `T2` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/t2_null_in_expression.rvl`](../examples/rejections/t2_null_in_expression.rvl) |
 | `T3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/gate.py`](../src/revl/gate.py) |
-| `G-MODEL-PLACE` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/model_route.py`](../src/revl/model_route.py) |
+| `G-MODEL-PLACE` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/lower.py`](../src/revl/lower.py) |
 | `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_expired_at_persistence_sink.rvl`](../examples/rejections/gretain_expired_at_persistence_sink.rvl) |
 | `G-SECRET` | **div** | **div** | no repro | **div** | **div** | **div** | no repro | [`src/revl/taint.py`](../src/revl/taint.py) |
 | `G-SECRET-FLOW` | **div** | **div** | proved | **div** | **div** | **div** | unimpl | [`examples/rejections/gsecret_service_return_discloses.rvl`](../examples/rejections/gsecret_service_return_discloses.rvl) |
