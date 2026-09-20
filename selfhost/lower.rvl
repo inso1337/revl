@@ -580,13 +580,59 @@ fn qual_test_end(ts: List[Token], i: Int) -> Int {
   return close_brace(ts, j)
 }
 
+// item 512: `model role NAME <residence>` is a CONTEXTUAL top-level
+// declaration, on the `boot`/`event`/`lifecycle test` discipline — `model` and
+// `role` are both ordinary identifiers, so `requires model: Model` (the common
+// spelling for the very key this construct places) keeps parsing and neither
+// lexer's KEYWORDS table moves. The reference recognises the head only in the
+// four-token shape its `model_role_decl` reads, and so does this: anything
+// looser would swallow a parameter, a record field or a requirement named
+// `model`.
+//
+// Without this the gate answered `BAD|unexpected token at top level` for every
+// program that declares a model role, which is the generic parse refusal
+// `docs/design/531-model-placement.md` section 7 measured and slice 3 replaces
+// with a named one.
+fn at_model_role(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (!(t.kind == "ident" && t.text == "model")) { return false }
+  let r = tkc(ts, i + 1)
+  if (!(r.kind == "ident" && r.text == "role")) { return false }
+  return atk(ts, i + 2, "ident") && atk(ts, i + 3, "ident")
+}
+
+// Index just past a `model role` declaration. The reference reads four tokens
+// today, `model role NAME <residence>`; anything written between the residence
+// and the next top-level declaration is stepped over STRUCTURALLY rather than
+// by line, so a clause a later item adds in that slot (roadmap items 515 and
+// 519 both propose one) is skipped whole instead of leaving the cursor
+// mid-clause and turning a shipped program into `unexpected token at top
+// level`. The gate carries no verdict for such a clause, which is the answer
+// it gives every construct it does not decide.
+fn model_role_end(ts: List[Token], i: Int) -> Int {
+  var j = i + 4
+  while (j < ts.length() && !atk(ts, j, "eof") && !atk(ts, j, "}")
+         && !at_top_decl(ts, j)) {
+    if (atk(ts, j, "[")) {
+      let e = match_bracket(ts, j)
+      j = e == 0 - 1 ? j + 1 : e + 1
+    } else {
+      if (atk(ts, j, "{")) {
+        let e = close_brace(ts, j)
+        j = e == 0 - 1 ? j + 1 : e
+      } else { j += 1 }
+    }
+  }
+  return j
+}
+
 // Whether a token starts a TOP-LEVEL declaration — where a `type` declaration's
 // token span ends. Kept next to `type_ctors`, its only reader.
 fn at_top_decl(ts: List[Token], i: Int) -> Bool {
   return atw(ts, i, "type") || atw(ts, i, "fn") || atw(ts, i, "extern")
       || atw(ts, i, "service") || atw(ts, i, "component") || atw(ts, i, "use")
       || atw(ts, i, "test") || at_boot(ts, i) || at_event(ts, i)
-      || at_qual_test(ts, i)
+      || at_qual_test(ts, i) || at_model_role(ts, i)
 }
 
 // `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
@@ -2602,6 +2648,37 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
                        setup, iso, rts, icept.push(key), hoff, action)
   }
+  // `route model on <action> { <origin> -> <role>, ... }` (item 512) is a
+  // component-prelude clause, the sibling of `isolate`/`intercept`: it names
+  // what an action may reach before any dependency access, so it must precede
+  // every action. Exactly two things happen here. The PRELUDE ordering rule,
+  // which is lower.py's `ModelRouteStmt` branch and carries the same wording
+  // every other prelude declaration carries; and stepping over the block
+  // structurally, because 512 is a PERMISSION checked at admission and writes
+  // no IR, so there is nothing in the block for the body walk to read.
+  //
+  // The ARMS are decided program-wide by `model_place_refusal`, which runs
+  // where the reference runs `model_route.check` — ahead of every component —
+  // so a block that is both misplaced and wrong is reported by its arm here
+  // too, and a valid block is not an action (the reference `continue`s).
+  if (ati(ts, i, "route") && ati(ts, i + 1, "model")) {
+    if (action) {
+      return mk_provr(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("route model")),
+                      skip_line(ts, i), true)
+    }
+    var rk = i + 2
+    while (rk < end && !atk(ts, rk, "{")) { rk += 1 }
+    if (atk(ts, rk, "{")) {
+      let rce = close_brace(ts, rk)
+      if (rce != 0 - 1) {
+        return p_comp_body(ts, rce, end, provh, reqh, cname, provs, setup, iso,
+                           rts, icept, hoff, action)
+      }
+    }
+    return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+                       setup, iso, rts, icept, hoff, action)
+  }
   // `config { <field>: <Type> ... }` is a component-level declaration, not a
   // body action (the reference reads it off the component header, never the
   // statement stream) — so it neither gates as setup nor trips the prelude
@@ -2804,6 +2881,12 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
     let qe = qual_test_end(ts, i)
     if (qe != 0 - 1) { return p_top(ts, qe, pg) }
   }
+  // item 512: `model role NAME <residence>`, stepped over WHOLE. The roles are
+  // read off the token stream by `model_place_refusal`, which is where the
+  // reference reads them too (`model_route.roles` walks `Program.model_roles`
+  // before any component is lowered), so nothing about a role rides in `Prog`
+  // and every program that declares none is byte-identical through here.
+  if (at_model_role(ts, i)) { return p_top(ts, model_role_end(ts, i), pg) }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
@@ -12152,6 +12235,418 @@ type NoLink = { done: Bool, refs: List[Verd] }
 // instead, so a LINE TIE between a withdrawal and one of those two fell the
 // opposite way on the two sides. `admit_src` passes `[]`, so the single-source
 // path is byte-identical.
+// ========================================================== model placement
+//
+// item 512, `docs/design/531-model-placement.md`. The reference half is
+// `src/revl/model_route.py`, run from `check_and_lower` BEFORE
+// `_validate_declared_types` and before any component is lowered, because a
+// `route model` arm reads a `model role` declared anywhere in the compilation.
+// This is that phase, and it is the design note's slice 3.
+//
+// WHAT THE GATE DECIDES AND WHAT IT DOES NOT. The DECLARATION half — the ten
+// refusals `model_route.check` raises over the written arms, plus the prelude
+// ordering rule `p_comp_body` carries — is decided here, spelled byte for byte
+// as the reference spells it and tagged "MODEL" so the oracle compares tag AND
+// message. The VALUE half (item 514's origin ceiling) is NOT: it walks taint
+// through a component body to a `model.*` crossing, this gate has no flow
+// walk, and its messages all open "a `<origin>` value reaches the model
+// crossing", which is why the oracle's classifier excludes exactly that
+// opening. A program the ceiling refuses is one this gate raises no objection
+// to, which is a no-objection and not an admission.
+//
+// WHICH WAY IT FAILS. Every unknown is a refusal. A role with a residence
+// outside the closed pair, an arm keyed by an origin the lattice does not
+// name, an arm naming a role nobody declared — each is refused rather than
+// treated as an arm that never matches, because the shape this item exists to
+// remove is a placement that quietly admits "any model" for an input nobody
+// thought about. The one place that reading could go wrong is the catch-all,
+// and it is narrowed by definition rather than by warning: `*` never covers a
+// confidentiality origin, so `* -> cloud` can never be the sentence that sends
+// a confidential input off the device. Nothing in THIS file needs that rule —
+// it bites on a value, which is item 514's — but the arm-level refusals below
+// are what make it true of what an author can WRITE.
+
+type MRole = { rname: Str, rres: Str, rline: Int }
+
+type MArm = { aorig: Str, arole: Str, aline: Int }
+
+// One `route model on <action> { ... }` block. `bok` is false when the block
+// is not in the arm form this gate reads; see `model_blocks_in`.
+type MBlock = { bact: Str, barms: List[MArm], bline: Int, bok: Bool }
+
+type MArmR = { xarms: List[MArm], xok: Bool }
+
+// One component's name and the token span of its body, the two facts every
+// block-level refusal below names.
+type MSpan = { sname: Str, slo: Int, shi: Int }
+
+// The closed residence vocabulary (`model_route.RESIDENCES`): validated at
+// compile time so a typo is a refusal and never a silent placement, the same
+// reason `known_strategies` is closed for `isolate ... in realms(...)`.
+fn model_residences() -> List[Str] { return ["on_device", "off_device"] }
+
+// The item-249 origin lattice an arm may be keyed by (`taint.ORIGIN_CLASSES`,
+// the public frozen view the declaration surface reads so a new origin class
+// cannot reach the checker without reaching this surface too).
+fn model_origin_classes() -> List[Str] {
+  return ["confidential", "fs", "input", "model", "net", "secret", "web"]
+}
+
+// The origins a role may never receive off the device
+// (`model_route.CONFIDENTIALITY_ORIGINS`). `secret` is refused at EVERY
+// residence one rule further down and cites `G-SECRET-FLOW`, which already
+// named an LLM prompt a disclosure sink for a capability-bound key.
+fn model_confidentiality_origins() -> List[Str] {
+  return ["confidential", "secret"]
+}
+
+fn mres_msg(res: Str, name: Str) -> Str {
+  return "unknown residence `".concat(res).concat("` for model role `")
+    .concat(name).concat("`")
+}
+
+fn mrole_twice_msg(name: Str, fline: Int, fres: Str, res: Str) -> Str {
+  return "model role `".concat(name)
+    .concat("` is declared twice (first on line ").concat(fline.to_str())
+    .concat(", as `").concat(fres).concat("`; here as `").concat(res)
+    .concat("`)")
+}
+
+fn maction_twice_msg(act: Str, cname: Str) -> Str {
+  return "action `".concat(act).concat("` is routed twice in ").concat(cname)
+}
+
+fn mempty_block_msg(act: Str, cname: Str) -> Str {
+  return "`route model on ".concat(act).concat("` in ").concat(cname)
+    .concat(" names no role")
+}
+
+fn mno_action_msg(act: Str, cname: Str) -> Str {
+  return "`route model on ".concat(act).concat("` names no action of ")
+    .concat(cname)
+}
+
+fn morigin_msg(orig: Str, act: Str) -> Str {
+  return "unknown origin class `".concat(orig)
+    .concat("` in `route model on ").concat(act).concat("`")
+}
+
+fn morigin_twice_msg(orig: Str, act: Str, cname: Str) -> Str {
+  return "origin `".concat(orig).concat("` is routed twice in `route model on ")
+    .concat(act).concat("` (").concat(cname).concat(")")
+}
+
+fn mundeclared_role_msg(orig: Str, role: Str, act: Str, cname: Str) -> Str {
+  return "`".concat(orig).concat(" -> ").concat(role)
+    .concat("` in `route model on ").concat(act).concat("` (").concat(cname)
+    .concat(") names no declared model role")
+}
+
+fn msecret_arm_msg(act: Str, cname: Str, role: Str) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `secret` origin to model role `").concat(role)
+    .concat("`: a capability-bound secret never reaches a model prompt, on ")
+    .concat("the device or off it (G-SECRET-FLOW)")
+}
+
+fn moff_device_msg(act: Str, cname: Str, orig: Str, role: Str, res: Str,
+                   rline: Int) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `").concat(orig)
+    .concat("` origin to model role `").concat(role)
+    .concat("`, which is declared `").concat(res).concat("` on line ")
+    .concat(rline.to_str()).concat(": a ").concat(orig)
+    .concat(" input may not leave the device (G-MODEL-PLACE)")
+}
+
+// The block this gate cannot read. It is a REFUSAL and not a silent step-over,
+// because the alternative is the only genuinely dangerous answer available
+// here: a block whose arms the gate skipped is a block whose arms it did not
+// decide, and raising no objection to one would let a placement the reference
+// refuses through a gate that claims to decide placements. The crate is
+// allowed to err toward refusing and is not allowed to err the other way, so
+// an unreadable block errs toward refusing, BY NAME.
+fn mundecided_msg(act: Str, cname: Str) -> Str {
+  return "`route model on ".concat(act).concat("` in ").concat(cname)
+    .concat(" is written in a form this gate does not decide")
+}
+
+fn mverd(msg: Str, line: Int) -> Verd { return mk_verd(tagged("MODEL", msg), line) }
+
+// ---------------------------------------------------------------- the roles
+//
+// Every `model role NAME <residence>` declared at top level, in declaration
+// order, which is the order `model_route.roles` refuses in. Brace-structural
+// and ITERATIVE, the `boot_names` discipline: an extern's verbatim `@py { ... }`
+// body is one `hostbody` token, so its braces cannot perturb the depth.
+fn model_roles_of(ts: List[Token]) -> List[MRole] {
+  var i = 0
+  var depth = 0
+  var out: List[MRole] = []
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atk(ts, i, "{")) { depth += 1 }
+    if (atk(ts, i, "}")) { depth -= 1 }
+    if (depth == 0 && at_model_role(ts, i)) {
+      out = out.push({ rname: tkc(ts, i + 2).text, rres: tkc(ts, i + 3).text,
+                       rline: tkc(ts, i).line })
+    }
+    i += 1
+  }
+  return out
+}
+
+fn mrole_at(rs: List[MRole], n: Str, i: Int) -> Int {
+  if (i >= rs.length()) { return 0 - 1 }
+  if (rs[i].rname == n) { return i }
+  return mrole_at(rs, n, i + 1)
+}
+
+// `model_route.roles`: the residence vocabulary and the one-declaration rule,
+// in that order, per declaration. A program that declares no role walks an
+// empty list and is byte-identical through here.
+fn model_roles_refusal(rs: List[MRole]) -> Verd {
+  var i = 0
+  while (i < rs.length()) {
+    let r = rs[i]
+    if (!contains(model_residences(), r.rres)) {
+      return mverd(mres_msg(r.rres, r.rname), r.rline)
+    }
+    let p = mrole_at(rs, r.rname, 0)
+    if (p != i) {
+      return mverd(mrole_twice_msg(r.rname, rs[p].rline, rs[p].rres, r.rres),
+                   r.rline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// ----------------------------------------------------------- the components
+//
+// Component NAME and body span, read off the token stream the way
+// `p_component` reads them: the header runs to the first `{`, and the body is
+// that brace's match. A component whose braces do not balance is a parse
+// refusal `p_top` already carries, so the walk simply stops there.
+fn model_comp_spans(ts: List[Token]) -> List[MSpan] {
+  var i = 0
+  var depth = 0
+  var out: List[MSpan] = []
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (depth == 0 && atw(ts, i, "component") && atk(ts, i + 1, "ident")) {
+      var j = i + 2
+      while (j < ts.length() && !atk(ts, j, "{") && !atk(ts, j, "eof")) { j += 1 }
+      if (!atk(ts, j, "{")) {
+        i = j
+      } else {
+        let e = close_brace(ts, j)
+        if (e == 0 - 1) {
+          i = ts.length()
+        } else {
+          out = out.push({ sname: tkc(ts, i + 1).text, slo: j + 1, shi: e - 1 })
+          i = e
+        }
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+// The `fn` names declared directly inside one `provide` block.
+fn model_fn_names_in(ts: List[Token], lo: Int, hi: Int,
+                     acc: List[Str]) -> List[Str] {
+  var i = lo
+  var depth = 0
+  var out = acc
+  while (i < hi) {
+    if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      let n = tkc(ts, i + 1).text
+      if (!contains(out, n)) { out = out.push(n) }
+    }
+    if (atk(ts, i, "{")) { depth += 1 }
+    if (atk(ts, i, "}")) { depth -= 1 }
+    i += 1
+  }
+  return out
+}
+
+// `model_route._action_names`: every provide-method name the component
+// declares. Read straight off the tokens, because a `route model` clause is a
+// PRELUDE declaration validated before any provide block is lowered — the
+// reference reads the same set off the AST for the same reason.
+fn model_action_names(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
+  var i = lo
+  var depth = 0
+  var out: List[Str] = []
+  while (i < hi) {
+    if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 2, "{")) {
+      let e = close_brace(ts, i + 2)
+      if (e == 0 - 1) {
+        i = hi
+      } else {
+        out = model_fn_names_in(ts, i + 3, e - 1, out)
+        i = e
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+// The arms of one block: `<origin> -> <role>` separated by `,` or `;`, with a
+// trailing separator allowed exactly as the reference allows one. `xok` is
+// false for anything else, which is what `mundecided_msg` then refuses by name
+// rather than stepping over — see that function for why the direction matters.
+fn model_arms_in(ts: List[Token], lo: Int, hi: Int) -> MArmR {
+  var i = lo
+  var out: List[MArm] = []
+  while (i < hi) {
+    if (atk(ts, i, ",") || atk(ts, i, ";")) {
+      i += 1
+    } else {
+      var orig = ""
+      if (atk(ts, i, "*")) {
+        orig = "*"
+      } else if (atk(ts, i, "ident")) {
+        orig = tkc(ts, i).text
+      } else {
+        return { xarms: out, xok: false }
+      }
+      if (!atk(ts, i + 1, "arrow")) { return { xarms: out, xok: false } }
+      if (!atk(ts, i + 2, "ident")) { return { xarms: out, xok: false } }
+      out = out.push({ aorig: orig, arole: tkc(ts, i + 2).text,
+                       aline: tkc(ts, i).line })
+      i += 3
+    }
+  }
+  return { xarms: out, xok: true }
+}
+
+// Every `route model on <action> { ... }` written directly in one component
+// body, in declaration order — the order `model_route.check` refuses in. A
+// clause whose head is not `route model on IDENT {` is a reference PARSE
+// refusal this gate carries no verdict for, so it is left out entirely rather
+// than reported as an undecided block.
+fn model_blocks_in(ts: List[Token], lo: Int, hi: Int) -> List[MBlock] {
+  var i = lo
+  var depth = 0
+  var out: List[MBlock] = []
+  while (i < hi) {
+    if (depth == 0 && ati(ts, i, "route") && ati(ts, i + 1, "model")
+        && ati(ts, i + 2, "on") && atk(ts, i + 3, "ident")
+        && atk(ts, i + 4, "{")) {
+      let e = close_brace(ts, i + 4)
+      if (e == 0 - 1) {
+        i = hi
+      } else {
+        let r = model_arms_in(ts, i + 5, e - 1)
+        out = out.push({ bact: tkc(ts, i + 3).text, barms: r.xarms,
+                         bline: tkc(ts, i).line, bok: r.xok })
+        i = e
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+fn marm_origin_at(as_: List[MArm], o: Str, i: Int) -> Int {
+  if (i >= as_.length()) { return 0 - 1 }
+  if (as_[i].aorig == o) { return i }
+  return marm_origin_at(as_, o, i + 1)
+}
+
+// One block's arms, in the reference's own order: the origin vocabulary, then
+// one arm per origin, then the role's existence, then `secret` at any
+// residence, then a confidentiality origin against an `off_device` role.
+fn model_arms_refusal(b: MBlock, cname: Str, rs: List[MRole]) -> Verd {
+  var i = 0
+  while (i < b.barms.length()) {
+    let a = b.barms[i]
+    if (a.aorig != "*" && !contains(model_origin_classes(), a.aorig)) {
+      return mverd(morigin_msg(a.aorig, b.bact), a.aline)
+    }
+    if (marm_origin_at(b.barms, a.aorig, 0) != i) {
+      return mverd(morigin_twice_msg(a.aorig, b.bact, cname), a.aline)
+    }
+    let ri = mrole_at(rs, a.arole, 0)
+    if (ri == 0 - 1) {
+      return mverd(mundeclared_role_msg(a.aorig, a.arole, b.bact, cname),
+                   a.aline)
+    }
+    if (a.aorig == "secret") {
+      return mverd(msecret_arm_msg(b.bact, cname, a.arole), a.aline)
+    }
+    if (contains(model_confidentiality_origins(), a.aorig)
+        && rs[ri].rres == "off_device") {
+      return mverd(moff_device_msg(b.bact, cname, a.aorig, a.arole,
+                                   rs[ri].rres, rs[ri].rline), a.aline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+fn mblock_action_at(bs: List[MBlock], a: Str, i: Int) -> Int {
+  if (i >= bs.length()) { return 0 - 1 }
+  if (bs[i].bact == a) { return i }
+  return mblock_action_at(bs, a, i + 1)
+}
+
+// One component's blocks, in the reference's own order: routed-once per
+// action, a block that names no role, the action's existence, then the arms.
+fn model_comp_refusal(ts: List[Token], sp: MSpan, rs: List[MRole]) -> Verd {
+  let bs = model_blocks_in(ts, sp.slo, sp.shi)
+  if (bs.length() == 0) { return no_verd() }
+  let acts = model_action_names(ts, sp.slo, sp.shi)
+  var i = 0
+  while (i < bs.length()) {
+    let b = bs[i]
+    if (mblock_action_at(bs, b.bact, 0) != i) {
+      return mverd(maction_twice_msg(b.bact, sp.sname), b.bline)
+    }
+    if (!b.bok) { return mverd(mundecided_msg(b.bact, sp.sname), b.bline) }
+    if (b.barms.length() == 0) {
+      return mverd(mempty_block_msg(b.bact, sp.sname), b.bline)
+    }
+    if (!contains(acts, b.bact)) {
+      return mverd(mno_action_msg(b.bact, sp.sname), b.bline)
+    }
+    let av = model_arms_refusal(b, sp.sname, rs)
+    if (av.v != "") { return av }
+    i += 1
+  }
+  return no_verd()
+}
+
+// The whole phase: the role table first (`model_route.check` calls `roles()`
+// before it looks at a single component), then every component in declaration
+// order. Returns the reference's first refusal, tagged "MODEL", or the empty
+// verdict for a program that declares no role and no block — which is every
+// program on the tree that predates item 512, and which walks two empty lists.
+fn model_place_refusal(ts: List[Token]) -> Verd {
+  let rs = model_roles_of(ts)
+  let rv = model_roles_refusal(rs)
+  if (rv.v != "") { return rv }
+  let sps = model_comp_spans(ts)
+  var i = 0
+  while (i < sps.length()) {
+    let cv = model_comp_refusal(ts, sps[i], rs)
+    if (cv.v != "") { return cv }
+    i += 1
+  }
+  return no_verd()
+}
+
 fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
                    wrefs: List[Verd], ambSvcs: List[Str],
                    ambSvcsKnown: Bool, ambOps: List[SvcOps]) -> NoLink {
@@ -12171,6 +12666,14 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // the DECLARED-TYPE validation runs at the head of `_validate_declared_types`,
   // ahead of the config-is-data walk that closes the same function, so a
   // malformed annotation on a `fn`/`extern` signature is decided before it.
+  // MODEL PLACEMENT (item 512) is the earliest phase of all: `check_and_lower`
+  // runs `model_route.check(program)` before `_validate_declared_types`,
+  // because a `route model` arm reads a `model role` declared anywhere in the
+  // compilation and a placement is resolved before anything that names one.
+  // See the model-placement section above for what it decides and what it
+  // deliberately leaves to the reference's flow walk.
+  let mdlv = model_place_refusal(ts)
+  if (mdlv.v != "") { return { done: true, refs: [mdlv] } }
   let wfv = declared_types_refusal(ts)
   if (wfv.v != "") { return { done: true, refs: [wfv] } }
   // the program-wide declared-type table (the `field <Type>.<name>` rows, the
@@ -12374,8 +12877,9 @@ fn fmt_all(rs: List[Verd]) -> Str {
 }
 
 // The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "G6" | "A1" |
-// "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "BAD") — the coarse
-// oracle. "G6" is the fn-body binding discipline (item 391).
+// "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "MODEL" | "BAD") — the
+// coarse oracle. "G6" is the fn-body binding discipline (item 391); "MODEL" is
+// the model-placement declaration half (item 512, slice 3).
 pub fn admit_tag(src: Str) -> Str {
   let v = admit_src(src)
   if (v == "") { return "" }
