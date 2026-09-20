@@ -298,7 +298,7 @@ def test_every_fenced_path_exists_in_this_tree(path):
     "src/revl/taint.py",
     "src/revl/retention.py",
     "crates/revl-gate/src/session.rs",
-    "formal/Oracle.lean",
+    "formal/harness/Oracle.lean",
     "tools/gate_reference_census_baseline.json",
 ])
 def test_a_diff_reaching_the_admission_kernel_is_refused(tmp_path, path):
@@ -334,7 +334,7 @@ def test_a_path_that_only_prefixes_a_kernel_path_is_not_a_hit(tmp_path):
     under-matches is a hole; this pins the boundary."""
     tree = make_tree(tmp_path / "prefix", {"formalities.py": "changed\n"})
     assert run(proposal_record(tree)).decision == "PROMOTE"
-    assert ec.kernel_hits(["formal/Oracle.lean"]) == ["formal/Oracle.lean"]
+    assert ec.kernel_hits(["formal/RevL.lean"]) == ["formal/RevL.lean"]
     assert ec.kernel_hits(["formalities.py"]) == []
 
 
