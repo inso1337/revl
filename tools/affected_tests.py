@@ -651,7 +651,19 @@ def select(changed, root) -> dict:
             continue
         if f == "tools/docgen.py":
             gates.add("docs")
+            pytest_nodes.add("tests/test_check_vision_claims.py")
             reasons.append("tools/docgen.py")
+            continue
+        # issue #1204: the vision gate rides in the `docs` gate step, and its
+        # `vision-tiers` block lives in docgen, so each file re-runs the other's
+        # covering test. Without the gate here the generic tools/*.py rule below
+        # would select the pytest module and skip the gate that actually runs
+        # against the committed document.
+        if f == "tools/check_vision_claims.py":
+            gates.add("docs")
+            pytest_nodes.add("tests/test_check_vision_claims.py")
+            pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
+            reasons.append("tools/check_vision_claims.py")
             continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
@@ -734,6 +746,11 @@ def select(changed, root) -> dict:
             gates.add("conformance")
             gates.add("docs")
             pytest_nodes.add("tests/test_doc_examples.py")
+            # issue #1204: and the vision gate, which resolves docs/vision.md's
+            # commands and re-checks its generated tier block. Its module holds
+            # the REAL document against the REAL tree, so a doc edit that moves
+            # a cited path has to re-run it.
+            pytest_nodes.add("tests/test_check_vision_claims.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 

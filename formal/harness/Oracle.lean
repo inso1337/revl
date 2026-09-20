@@ -131,10 +131,13 @@ Fact rows in (tab-separated, one fact per line):
                                              `emit` for the head call an emit
                                              marks, `emitarg` for a call
                                              evaluated inside that head's
-                                             argument list (the region the
-                                             marker admits, whatever the
-                                             method declares), `plain`
-                                             elsewhere
+                                             argument list (judged as a plain
+                                             position: one marker covers one
+                                             crossing, revl issue 1175),
+                                             `emitnested` for the head of an
+                                             `emit` expression written inside
+                                             that argument list (refused
+                                             outright), `plain` elsewhere
   HA <file> <comp> <verb> <bracket|plain|emit|undo|fn>
                                              a host-family acquisition and the
                                              POSITION that decides its legality
@@ -1370,18 +1373,20 @@ declaration — every call to a declared emission method must be `emit`
 -marked, and an `emit`-marked call to a non-emission method is refused.
 Receivers include spawn handles (the exporter resolves them).
 
-The marker is a REGION marker in the checker (`lower._expr_mode` is
-"emit" for the whole marked expression): it judges the HEAD call and
-admits every call evaluated under it, emission or not, so an `emitarg`
-fact is never a violation. Whether it should be per-site is revl issue
-1175, the checker's question; the model follows the checker.
+The marker covers the HEAD call alone (revl issue 1175,
+`lower._emit_head_args`): the head's arguments lower in the mode the
+`emit` sits in, so an `emitarg` fact is judged exactly as a `plain` one.
+An emission there needs a marker of its own, and a plain method there is
+admitted. A marker written inside the argument list (`emitnested`) is a
+violation whatever the method declares: the marker admits one crossing,
+so the inner one is hoisted into its own step first.
 
 PRIVATE RESTATEMENT (see the header): the G4 model is indexed by
 statement syntax, and the export carries call facts. -/
 def g4OK (ems : List (String × String)) (calls : List URow) : Bool :=
   !calls.any fun u =>
     let em := ems.any fun e => e.1 == u.svc && e.2 == u.meth
-    u.ctx != "emitarg" && ((u.ctx == "emit") != em)
+    u.ctx == "emitnested" || ((u.ctx == "emit") != em)
 
 /-- The host acquisition verb table — the model's copy of the checker's
 `_HOST_ACQUIRE_VERBS` (`src/revl/typecheck.py`). Each opens a host resource
