@@ -30,6 +30,7 @@ import contextlib
 import re
 import sys
 
+from . import ui_family
 from .errors import RevlError
 from .lexer import Token, lex
 
@@ -2999,11 +3000,26 @@ class Parser:
         line = self.expect("[").line
         names: list[str] = []
         while not self.at("]"):
+            tok_line = self.peek().line
             parts = [self.expect("ident", what="a capability name").value]
             while self.at("."):
                 self.next()
                 parts.append(self.expect("ident").value)
-            names.append(self._capability_params(".".join(parts)))
+            dotted = ".".join(parts)
+            # item 521: the reserved computer-use namespace. This is the
+            # DECLARATION site for a capability token (an `extern
+            # emission[...]`/`witnessed[...]` scope and a service method's
+            # `emission[...]` scope both funnel here), which is where a
+            # program states what it may reach. A `capability <glob>` policy
+            # rule and a `secret K for C` binding parse elsewhere and are
+            # SELECTORS rather than reach, so a policy written against
+            # `ui.click` keeps working while `emission[ui]` does not parse.
+            ui_refusal = ui_family.refusal(dotted, kind)
+            if ui_refusal is not None:
+                message, hint = ui_refusal
+                raise RevlError(self.filename, tok_line, message, hint,
+                                code="G8", category="boundary")
+            names.append(self._capability_params(dotted))
             if self.at(","):
                 self.next()
         self.expect("]")
