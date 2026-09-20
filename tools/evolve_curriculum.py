@@ -34,9 +34,9 @@ decides whether the task is done:
            tuned to the sample.
 
 and the ladder over that triple is five lines (`tier`), each line carrying the
-review's own words for the rung it produces. See docs/design/531-evolution-
-curriculum.md for the argument, the measured populations, and the cases the
-signal gets wrong.
+review's own words for the rung it produces. See
+docs/design/533-evolution-curriculum.md for the argument, the measured
+populations, and the cases the signal gets wrong.
 
 SOURCES. The review names eight. This module reads four of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
