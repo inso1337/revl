@@ -705,6 +705,19 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_gate_reference_census.py")
             pytest_nodes.add("tests/test_corpus_provenance.py")
             reasons.append(f"{f} (census/provenance coupling)")
+            if f == "tools/gate_reference_census.py":
+                # issue #1215: the `gate_census` row of
+                # tools/oracle_construct_reach.py imports this file for its
+                # corpus walk and its fast engine, so a change to the census
+                # moves what that row measures and what its ledger records.
+                # This clause used to be a second `if f == ...` rule further
+                # down, which the `continue` above made unreachable -- the
+                # census kept selecting the coupling pair and never the
+                # construct-reach ledger the rule was added to cover.
+                pytest_nodes.add("tests/test_oracle_construct_reach.py")
+                reasons.append(
+                    "tools/gate_reference_census.py (construct-reach ledger)"
+                )
             continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
@@ -725,16 +738,6 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_check_vision_claims.py")
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
-            continue
-        # issue #1215: the `gate_census` row of tools/oracle_construct_reach.py
-        # imports this file for its corpus walk and its fast engine, so a change
-        # to either moves what that row measures and what its ledger records.
-        # The generic `tools/*.py` rule below matches on the file STEM and would
-        # select tests/test_gate_reference_census.py alone.
-        if f == "tools/gate_reference_census.py":
-            pytest_nodes.add("tests/test_gate_reference_census.py")
-            pytest_nodes.add("tests/test_oracle_construct_reach.py")
-            reasons.append("tools/gate_reference_census.py")
             continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
