@@ -2141,7 +2141,28 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
               out = out.concat(er.lines)
               c = er.counter
             } else {
+            if (kind == "break") {
+              out = out.push(`${pad}break`)
+            } else {
+            if (kind == "continue") {
+              out = out.push(`${pad}continue`)
+            } else {
+            if (kind == "if" || kind == "while" || kind == "for") {
+              // issue #548, ported for issue #721 / item 458: control flow over
+              // the method's value computation. The arms hold ordinary method
+              // steps (registration inside a branch is refused at lowering), so
+              // they recurse through this same renderer at one more level of
+              // indent — byte-for-byte the fn-grammar shape. The condition /
+              // iterable expression is rendered BEFORE the arms so the
+              // await-seed counter advances in the reference's order.
+              let cr = method_control(step, level, c, acx, frame_var, provide_name, method_name)
+              out = out.concat(cr.lines)
+              c = cr.counter
+            } else {
               out = out.push(`${pad}<<UNSUPPORTED-METHOD-STEP:${kind}>>`)
+            }
+            }
+            }
             }
           }
           }
@@ -2149,6 +2170,45 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
       }
     }
   }
+  return { lines: out, counter: c }
+}
+
+// `_method_control`: an `if`/`while`/`for` step in a provide-method body
+// (issue #548, ported for issue #721 / item 458). `else` is rendered only for a
+// NON-EMPTY else arm — the reference tests the arm for truth, not for presence,
+// so an `if` whose else arm lowered to nothing emits no `} else {` at all.
+fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str) -> StmtOut {
+  let pad = ind(level)
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "while") {
+    let r = expr(value_field(step, "cond"), counter, acx)
+    var out = [`${pad}while (${r.text}) {`]
+    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
+    out = out.concat(b.lines)
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: b.counter }
+  }
+  if (kind == "for") {
+    let r = expr(value_field(step, "iterable"), counter, acx)
+    var out = [`${pad}for (const ${ident(value_str(value_field(step, "bind")))} of ${r.text}) {`]
+    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
+    out = out.concat(b.lines)
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: b.counter }
+  }
+  let r = expr(value_field(step, "cond"), counter, acx)
+  var out = [`${pad}if (${r.text}) {`]
+  let t = method_body(value_list(value_field(step, "then")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
+  out = out.concat(t.lines)
+  var c = t.counter
+  let els = value_list(value_field(step, "else"))
+  if (els.length() > 0) {
+    out = out.push(`${pad}} else {`)
+    let e = method_body(els, level + 1, c, acx, frame_var, provide_name, method_name)
+    out = out.concat(e.lines)
+    c = e.counter
+  }
+  out = out.push(`${pad}}`)
   return { lines: out, counter: c }
 }
 

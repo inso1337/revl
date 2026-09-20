@@ -5499,11 +5499,23 @@ class Parser:
 
     def stmt(self, in_method: bool, in_async_method: bool = False):
         tok = self.peek()
-        # `y = expr` — assignment to a `var` bound earlier in this method
-        if in_method and tok.kind == "ident" and self.peek_ahead(1).kind == "=":
+        # `y = expr` — assignment to a `var` bound earlier in this method, and
+        # (issue #721) the compound forms `y += expr` / `-=` / `*=` / `/=` / `%=`.
+        # The method grammar carries `var`, assignment, `if`, `while` and `for`
+        # (items 548 and 681), so a loop that accumulates is ordinary code here;
+        # only the compound spelling of the same assignment was missing, and it
+        # failed as "expected a statement … found 'i'", which reads as though
+        # assignment itself were out of bounds. `_assign_ahead` is the same
+        # lookahead the fn grammar uses, so the two strata admit one spelling.
+        if in_method and tok.kind == "ident" and self._assign_ahead():
             self.next()
-            self.next()
-            return AssignStmt(tok.value, self.pure_expr(), tok.line)
+            op = "="
+            if self.at("="):
+                self.next()
+            else:
+                op = self.next().value + "="
+                self.next()
+            return AssignStmt(tok.value, self.pure_expr(), tok.line, op)
         if tok.kind == "kw" and tok.value in ("let", "var"):
             mutable = tok.value == "var"
             self.next()
