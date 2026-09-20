@@ -217,6 +217,13 @@ a semantic change to the scorer, and item 537's own list says a semantic change
 is the case that routes to human review. `REFUSED` is that routing, which is
 why it is exit status 2 and not exit status 1.
 
+The change that introduces this tool is itself such a change, and the tool says
+so. Run with `--diff-base origin/main` on the branch that adds it, the verdict
+is `diff-reaches-fence:tests/test_heldout_scoring.py,tools/heldout_scoring.py`
+and no score. That is the mechanism behaving correctly on the first diff it was
+ever pointed at, and it is also the reason the evidence in section 4 is a
+mutation of the subject rather than a score of this diff.
+
 ### 3.3 The grammar: `admission-surface/v1`
 
 The draw alternates two halves.
