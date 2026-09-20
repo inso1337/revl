@@ -11769,6 +11769,37 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             recovered = True
             continue
 
+    # A9, the converse (issue #1172): every key the `provides` clause declares
+    # must be installed by some form in the body. `_lower_provide` bounds the
+    # BLOCKS against the clause (a block keyed outside it is A9); nothing bounded
+    # the CLAUSE against the blocks, so a component could declare `provides k: S`,
+    # install nothing, and still be the linker's provider of `k` (G2's closure and
+    # G3 read the clause), leaving every consumer of `k` PENDING at run time (R2)
+    # one hop away from the cause. Two body forms install a declared key: a
+    # `provide k { … }` block (`provided_keys`), and the multi-realm bind
+    # `isolate k in realms(...)` (`routes`), whose key is realized as a routing
+    # proxy at load and never plugged as a fiber (the routes-only Router of
+    # stdlib/router.rvl, docs/router.md), for which item 449 refuses a block
+    # above. Nothing else does: `handoff`/`isolate`/`intercept` decorate a key
+    # they do not install, and spawn templates and hole-bearing providers carry
+    # blocks like any other provider. Skipped for a body that recovered past a
+    # refused statement (item 386, Stage 2): the component is already failing on
+    # what its walk did reach, and the refused statement may have been the block.
+    if not recovered:
+        for key, _svc, line in comp.provides:
+            if key in provided_keys or key in routes:
+                continue
+            raise RevlError(
+                filename, line,
+                f"`{key}` is declared in the `provides` clause of {comp.name} "
+                f"but no `provide {key} {{ … }}` block installs it (A9)",
+                hint=f"add a `provide {key} {{ … }}` block to the body of "
+                     f"{comp.name}, or drop `{key}` from its `provides` clause; "
+                     f"as declared, {comp.name} would link as the provider of "
+                     f"`{key}` and every consumer of `{key}` would stay PENDING "
+                     f"(R2) at run time",
+            )
+
     lowered = {
         "name": comp.name,
         "source": comp.source or filename,

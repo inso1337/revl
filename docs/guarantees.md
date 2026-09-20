@@ -57,7 +57,7 @@ source docs. A4 and A7 are not assigned. Definitions are quoted from the
 | [A5](rejections.md#a5--compensation-accompanies-an-emission) | compensation accompanies an emission | by construction | revl emission/compensation design (DESIGN.md section 3.5); origin unconfirmed |
 | [A6](rejections.md#a6--provide-methods-match-the-service-signature) | provide-methods match the service signature | lower / compat gate | other (standard signature checking, revl service model); origin unconfirmed |
 | [A8](rejections.md#a8--mid-body-failure-reverts-and-contains) | mid-body failure reverts and contains (L-Raise) | lower (+ runtime) | Cordis paradigm (L-Raise failure transition) |
-| A9 | a provide key is declared in the component's `provides` clause | lower | origin: unconfirmed (declared-provision rule; see rejections.md "families") |
+| A9 | a provide key is declared in the component's `provides` clause | lower | origin: unconfirmed (declared-provision rule, both directions: a block's key is in the clause, and every clause key has a block or a `realms(...)` route, issue #1172; see rejections.md "A9") |
 
 ## Type-layer rejections (T1 to T4)
 
