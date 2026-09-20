@@ -156,8 +156,12 @@ def _walk(surface, inline, openapi, path, observed, exporter):
         return
 
     if head == "Opt" and len(args) == 1:
-        assert inline.get("nullable") is True, \
-            f"{path}: inline `{surface}` carries no `nullable`: {inline!r}"
+        assert inline.get("nullable") is True, (
+            f"{path}: the inline mapping no longer spells `{surface}` with "
+            f"`nullable`: {inline!r}. If 257's open question was settled and "
+            "the two mappings now agree on `Opt`, drop "
+            "OPT_NULLABLE_VS_ONEOF from the divergence table here and from "
+            "docs/design/1272-two-type-to-schema-mappings.md.")
         assert set(openapi) == {"oneOf"}, f"{path}: openapi {openapi!r}"
         assert len(openapi["oneOf"]) == 2, f"{path}: openapi {openapi!r}"
         assert openapi["oneOf"][1] == {"type": "null"}, \
