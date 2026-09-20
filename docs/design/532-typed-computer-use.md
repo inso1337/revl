@@ -88,13 +88,32 @@ Submit in the Billing application) is auditable; a coordinate pair is not.
 
 A program that declares the family and reaches three of its verbs:
 
+Slice 4 landed the target record, so the program below is the spelling the
+language admits today: `ui.find` returns a `UiTarget` and the actuation verbs
+receive one. Section 5 and `docs/design/565-ui-target-binding.md` say why the
+bare-string version this program used to carry is no longer writable.
+
 ```revl
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
 extern emission[screen.observe] fn screen_observe(region: Str) -> Str
   = @py { return "" }
-extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> Str
-  = @py { return "" }
-extern emission[ui.click] fn ui_click(target: Str) -> Int = @py { return 0 }
-extern emission[ui.download] fn ui_download(target: Str) -> Str
+extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> UiTarget
+  = @py { return None }
+extern emission[ui.click] fn ui_click(target: UiTarget) -> Int
+  = @py { return 0 }
+extern emission[ui.download] fn ui_download(target: UiTarget) -> Str
   = @py { return "" }
 
 service Worker { emission fn approve(region: Str) -> Int }
@@ -302,6 +321,13 @@ screenshot/DOM/AX evidence hash, the allowed action type, the user/session/
 task identity, a region or coordinate bound, an expiry, and whether a
 confirmation is required.
 
+Slice 4 turned that sentence into a checked record, `UiTarget`, whose field
+set is registry-owned and whose absence is a G8 refusal.
+`docs/design/565-ui-target-binding.md` is its note: which half of
+`Untrusted[UiTarget]` each slice owns, why the field check is a floor rather
+than a ceiling, and why a bare-string target is the thing that makes item
+522's postcondition verdict positional.
+
 ## 6. What `revl audit` reports, measured
 
 Run against the program in section 2:
@@ -410,6 +436,22 @@ No `selfhost/*.rvl` file is touched by slice 1, and
 `tools/build_gate_crate.py --check` reports in-sync, so no crate is
 regenerated.
 
+**Corrected in slice 4, by measurement.** The paragraph above places the
+obligation at "a later slice" and slice 3's entry in section 10 repeats it.
+Both are wrong about the date, and the error is the one this section warns
+about. Slice 1 ALREADY decides admission on a UI token: it raises three G8
+refusals over one. Run through the harness `tests/test_selfhost_lower.py`
+uses, `admit_src` returns `""` on all three, and `""` is NO OBJECTION, which
+is agreement by silence. It is not a false admission (the native gate has no
+`admitted` arm, so the fail-closed claim above holds), but it is a gap nothing
+reports: a G8 refusal classifies OUT-OF-SLICE in the differential corpus, so
+every oracle stays green over a check the self-host does not run. The
+obligation has been outstanding since slice 1. It is pinned by
+`test_the_selfhost_gate_does_not_decide_a_ui_program` and discharged by slice
+3, whose crate regeneration it shares.
+`docs/design/565-ui-target-binding.md` §8 has the table and the mechanism (a
+third frontier-table axis derived from `ui_family.ROOTS`).
+
 ## 10. Slice plan
 
 Each slice is closable on its own and carries the oracle that makes it a
@@ -473,10 +515,32 @@ rung is a strictly weaker way to name the same target, and an exact-match
 table would have given a rung no taint role at all - the fail-open direction,
 reached by adding a spelling in a different file.
 
-**Slice 4: the target type.** `UiTarget` as a record carrying the binding of
-section 5, and `ui.find` returning `Untrusted[UiTarget]` rather than a bare
-string. Oracle: the evidence fields are present in the IR and in the recorded
-action, and a target with no expiry is refused. Depends on slice 2.
+**Slice 4: the target type. LANDED.** `UiTarget` as a record carrying the
+binding of section 5, with the field set registry-owned in
+`ui_family.TARGET_FIELDS`; `ui.find` returns it and `ui.click`, `ui.text` and
+`ui.download` each take one, checked in `lower._check_ui_target_binding`.
+Three refusals, all `code="G8"`, `category="boundary"`: a target-carrying verb
+with no record, a record missing or mis-typing a registry field, and a
+signature that does not carry the target. Oracle:
+`tests/test_ui_target_binding_521.py`, 44 tests. Non-vacuity measured on
+`4cfc8f32` with `ui_family.py` present (it is data) and the `lower.py` pass
+absent (it is the check): 21 fail, 23 pass. Here: 44 pass.
+`docs/design/565-ui-target-binding.md` is the note.
+
+Two things it deliberately does NOT do. It does not ask the author to write
+`Untrusted[...]`: that half is slice 2's derivation and stays profile-gated on
+`taint_strict`, while the `UiTarget` half is unconditional, and §4 of the note
+has the separation. And it does not check a field's VALUE - an expiry in the
+past is admitted - because a value check has no home in a compiler that never
+sees a screen.
+
+Failure direction: this WIDENS what is refused. The family's own canonical
+program, as section 2 of this note spelled it before slice 4, no longer
+compiles; section 2 now carries the post-slice-4 spelling. The fixtures in
+`tests/test_ui_capability_namespace_521.py` and
+`tests/test_ui_taint_classes_521.py` were moved to it in the same change, and
+their verdicts are unmoved, because a taint role is read off the declared
+capability token and never off an argument type.
 
 **Slice 5: the receipt.** One recorded action carrying application, window,
 target role, target name, target evidence hash, action, capability, session,
@@ -503,10 +567,13 @@ demonstration is item 525's; the substrate is upstream.
 Written down so a reader does not infer more than was measured.
 
 - The ladder's rung tokens (section 4.2) are a design, not code. Nothing in
-  the tree admits or checks them today; slice 1 refuses them.
-- The taint classes of section 5 are a proposal. `screen` and `ui` are not in
-  `_SOURCE_CLASS_SCOPES` or `_SINK_CLASS_SCOPES` today, so nothing yet refuses
-  an observed string flowing into a click.
+  the tree admits or checks them today; slice 1 refuses them. Still true.
+- The taint classes of section 5 were a proposal when this was written and
+  are not one now: slice 2 put `screen` in `_SOURCE_CLASS_SCOPES` and `ui` in
+  `_SINK_CLASS_SCOPES`, and an observed value flowing into a click is a G9
+  refusal under `taint_strict`. The bullet is corrected rather than deleted,
+  because what it says about the pre-slice-2 tree is the measurement slice 2's
+  non-vacuity is stated against.
 - The audit output in section 6 was produced by running `revl audit` on the
   program in section 2 and is reproduced from that run. It enumerates DECLARED
   tokens. It does not and cannot verify that a host body reaches only the
