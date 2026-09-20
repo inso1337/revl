@@ -606,7 +606,7 @@ resolve is still `T1`, because the opaque-name contract of
 Roadmap item 512, `docs/design/531-model-placement.md`. A **model role** is a
 declared placement, a name plus where a call to it runs:
 
-```revl fragment
+```revl
 model role local on_device
 model role cloud off_device
 ```
