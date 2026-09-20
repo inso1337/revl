@@ -918,6 +918,15 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "model_role", index) not in emitted_keys:
                 merged.model_roles.append(decl)
                 emitted_keys.add(declaration_key(module, "model_role", index))
+        # item 516: a `model council` rides with the same closure, and for the
+        # sharper version of the same reason - it NAMES model roles, so a
+        # council carried without its roles, or roles carried without the
+        # council that binds them, would make the single-source path and the
+        # CLI path disagree about whether a member can be placed.
+        for index, decl in enumerate(getattr(module.program, "model_councils", ())):
+            if declaration_key(module, "model_council", index) not in emitted_keys:
+                merged.model_councils.append(decl)
+                emitted_keys.add(declaration_key(module, "model_council", index))
         for index, decl in enumerate(module.program.tests):
             if declaration_key(module, "test", index) not in emitted_keys:
                 merged.tests.append(decl)
