@@ -103,7 +103,47 @@ is the placement item 514's ceiling reads, and is exactly what the arm meant
 before this surface existed. The tail is what a scheduler may fall back to,
 in the order written.
 
-### 2.1 Demand and supply are two different objects
+### 2.1 The slot after the residence is shared
+
+Item 519 (`docs/design/541-model-in-attenuation.md`) adds a
+`reaches [...]` clause in the same position, so a role may carry two
+optional clauses after its residence:
+
+```revl
+model role fast on_device device gpu memory 6144 quant q4_k_m
+                          reaches [model.complete]
+```
+
+The order is fixed, `device` first and `reaches` second, and each clause is
+independently omittable: a role may write neither, either or both. The other
+order is a refusal rather than a second accepted spelling, because one
+declaration with two spellings makes every later reader of this slot carry the
+permutation.
+
+The order follows the reading. `device` refines the residence in front of it,
+since both answer where the call runs, so the placement facts stay together.
+The bracketed capability list reads last, in the position `requires` and
+`emission` have already taught a reader to expect one.
+
+The two clauses also fail in opposite directions, which is why neither stands
+in for the other. An omitted `device` clause is a role making no resource
+claim, refused only where a claim is needed, which is an ordered candidate
+set. An omitted `reaches` clause is a reach nobody wrote down, refused
+wherever it is read.
+
+`ModelRoleDecl` and `model_route.Role` carry both clauses as keyword-defaulted
+fields, so neither owns a positional slot and `Role(name, residence, line)` is
+still the whole declaration for a role that writes neither. Item 516 reads a
+role through `model_route.roles()` and is unaffected by either.
+
+The two items meet once more past the grammar: the item-519 reach fold runs
+over every candidate of an item-515 ordered set and not only the head, because
+a fallback the scheduler may pick is a role the component routes through, and
+a fold that read only the head would let the first fallback widen a ceiling
+the head respects. `tests/test_model_role_clauses.py` is the executable spec
+for the whole shared slot.
+
+### 2.2 Demand and supply are two different objects
 
 This is the reading the rest of the note depends on, and it is the seam item
 538 drew.
@@ -242,9 +282,11 @@ MAY reach is enumerated. Both are needed, and this one is available now.
 
 Every refusal above cites `G-MODEL-PLACE`, whose published text is already
 "a model role declared `off_device` never receives a confidentiality origin,
-and an action reaches only the roles its `route model` block names". The second
+an action reaches only the roles its `route model` block names, and a role
+reaches no capability the component routing through it holds". The second
 clause is decisions 4 to 10 verbatim; nothing here is a guarantee that text
-does not make.
+does not make. (The third clause is item 519's, added to the same sentence
+for the same reason.)
 
 Registering a second code would also have meant a row in the generated tier
 matrix of item 523, which needs a reproducer under `examples/rejections/` or an
