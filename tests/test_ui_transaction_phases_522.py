@@ -77,19 +77,41 @@ from revl.policy import approval_admission, parse_policy  # noqa: E402
 # `tests/test_model_placement_512.py` keeps its programs inline for the same
 # reason.
 
+#: Item 521 slice 4's target record. A program declaring `ui.find` or any
+#: actuation verb must carry it, and `ui.find` must RETURN it while
+#: `ui.click`, `ui.text` and `ui.download` must each TAKE one. Nothing in this
+#: file measures the record: it is here because the programs below would not
+#: compile without it, which is what slice 4 set out to make true. Keeping the
+#: fixtures on the bare `Str` spelling would have left this file measuring the
+#: transaction phases of programs the compiler no longer admits.
+UI_TARGET = """
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+"""
+
 #: A computer-use agent whose loop lives in a `provide` method — the shape the
 #: item is about, and the shape that cannot acquire an `Approval[C]`.
-AGENT = """
+AGENT = UI_TARGET + """
 service Ledger { emission[db.invoice] fn adjust(invoice: Str) -> Str }
 
 extern emission[screen.observe] fn read_pane(region: Str) -> Str = @py { return "" }
-extern emission[ui.find] fn locate(hint: Str) -> Str = @py { return "" }
+extern emission[ui.find] fn locate(hint: Str) -> UiTarget = @py { return None }
 extern pure fn clear_field() = @py { return None }
-extern emission[ui.text] fn type_amount(target: Str, amount: Str)
+extern emission[ui.text] fn type_amount(target: UiTarget, amount: Str)
   compensate clear_field()
   = @py { return None }
-extern emission[ui.click] fn actuate(target: Str) = @py { return None }
-extern emission[ui.download] fn fetch_receipt(target: Str) -> Str = @py { return "" }
+extern emission[ui.click] fn actuate(target: UiTarget) = @py { return None }
+extern emission[ui.download] fn fetch_receipt(target: UiTarget) -> Str = @py { return "" }
 
 service Refund { emission fn settle(invoice: Str) -> Str }
 
@@ -99,9 +121,9 @@ component UiAgent requires ledger: Ledger provides refund: Refund {
     fn settle(invoice) {
       let pane = emit read_pane("detail")
       let field = emit locate("amount")
-      emit type_amount("amount", invoice)
-      emit actuate("Apply")
-      let receipt = emit fetch_receipt("receipt.pdf")
+      emit type_amount(field, invoice)
+      emit actuate(field)
+      let receipt = emit fetch_receipt(field)
       let posted = emit ledger.adjust(invoice)
       return posted
     }
@@ -130,22 +152,34 @@ component PlainAgent requires ledger: Ledger provides refund: Refund {
 
 #: A click in the ACTIVATION body, with a covering `Approval[ui.click]` edge.
 #: The only shape in which a computer-use crossing is confirmable today.
-CONFIRMED = """
-extern emission[ui.click] fn actuate(target: Str) = @py { return None }
+#:
+#: The target comes from a `pure` extern rather than from `ui.find`, which is
+#: the one place in this file where that is the right call. Item 521 slice 4
+#: constrains the SIGNATURES of the computer-use verbs and deliberately does
+#: not constrain who mints the record ("floor, not ceiling"), and an
+#: activation body cannot bind an emission result at all — `let t = emit …`
+#: there is a G6 refusal, because an activation body records effects. Using
+#: `ui.find` would therefore have meant restructuring the only shape in which
+#: a crossing is confirmable today, to add a step that is not what these
+#: assertions measure.
+CONFIRMED = UI_TARGET + """
+extern pure fn a_target() -> UiTarget = @py { return None }
+extern emission[ui.click] fn actuate(target: UiTarget) = @py { return None }
 service Ops { fn ping() -> Int }
 component Clicker provides ops: Ops {
   let a = await approval["ui.click"] { target: 1 }
-  emit actuate("Apply") with a
+  emit actuate(a_target()) with a
   provide ops { fn ping() = 1 }
 }
 """
 
 #: The same activation-body click with NO edge.
-UNCONFIRMED = """
-extern emission[ui.click] fn actuate(target: Str) = @py { return None }
+UNCONFIRMED = UI_TARGET + """
+extern pure fn a_target() -> UiTarget = @py { return None }
+extern emission[ui.click] fn actuate(target: UiTarget) = @py { return None }
 service Ops { fn ping() -> Int }
 component Clicker provides ops: Ops {
-  emit actuate("Apply")
+  emit actuate(a_target())
   provide ops { fn ping() = 1 }
 }
 """
@@ -161,6 +195,16 @@ def _crossing(report: dict, name: str) -> dict:
         if entry["name"] == name:
             return entry
     raise AssertionError(f"no crossing named {name!r}")
+
+
+def _step(plan: dict, extern: str) -> dict:
+    """The plan step for one extern, by name. Selecting by name rather than by
+    position is what keeps an assertion about the ACTUATION pointing at the
+    actuation when item 521 slice 4 puts a `ui.find` in front of it."""
+    for step in plan["steps"]:
+        if step["extern"] == extern:
+            return step
+    raise AssertionError(f"no step for extern {extern!r}")
 
 
 # ------------------------------------------------------- the phase decision
@@ -466,19 +510,19 @@ def test_an_activation_body_edge_is_read_as_confirmed_per_crossing() -> None:
     gate that can only ever report one value is not a measurement."""
     plan = uitx.plans(compile_source(CONFIRMED, "c.rvl"))[0]
     assert plan["key"] == "<activation>"
-    assert plan["steps"][0]["confirmation"] == uitx.PER_CROSSING
+    assert _step(plan, "actuate")["confirmation"] == uitx.PER_CROSSING
     assert plan["unconfirmedIrreversibleSteps"] == []
 
 
 def test_the_same_crossing_without_an_edge_is_unconfirmed() -> None:
     plan = uitx.plans(compile_source(UNCONFIRMED, "c.rvl"))[0]
-    assert plan["steps"][0]["confirmation"] == uitx.UNCONFIRMED
+    assert _step(plan, "actuate")["confirmation"] == uitx.UNCONFIRMED
 
 
 def test_a_policy_raise_is_read_as_a_session_gate() -> None:
     plan = uitx.plans(compile_source(UNCONFIRMED, "c.rvl"),
                       frozenset({"ui.click"}))[0]
-    assert plan["steps"][0]["confirmation"] == uitx.PER_SESSION
+    assert _step(plan, "actuate")["confirmation"] == uitx.PER_SESSION
 
 
 # ------------------------------------------- agreement with item 546
@@ -614,13 +658,18 @@ def test_the_provide_method_cannot_acquire_the_approval_the_gate_wants(
     from revl.errors import RevlError
     with pytest.raises(RevlError) as in_method:
         compile_source(
-            "extern emission[ui.click] fn actuate(t: Str) = @py { return None }\n"
+            UI_TARGET
+            + "extern emission[ui.find] fn locate(h: Str) -> UiTarget\n"
+              "  = @py { return None }\n"
+            "extern emission[ui.click] fn actuate(t: UiTarget)\n"
+            "  = @py { return None }\n"
             "service Ops { emission fn go() }\n"
             "component C provides ops: Ops {\n"
             "  provide ops {\n"
             "    fn go() {\n"
             "      let a = await approval[\"ui.click\"] { t: 1 }\n"
-            "      emit actuate(\"Apply\") with a\n"
+            "      let t = emit locate(\"Apply\")\n"
+            "      emit actuate(t) with a\n"
             "      return\n"
             "    }\n"
             "  }\n"

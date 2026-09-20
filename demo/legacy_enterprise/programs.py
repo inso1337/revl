@@ -47,29 +47,49 @@ service PeerLedger {
   emission[net.ledger] fn adjust(invoice: Str, cents: Int) -> Str
 }
 
-// rung 3. `Untrusted[Str]` is the author's declaration, not revl's derivation.
-// See `docs/design/551-flagship-demo.md` section 4: on this tree `screen` is
-// not a source class, so the qualifier below is load-bearing and removable.
+// Item 521 slice 4's target record. A program declaring `ui.find` or any
+// actuation verb must carry it, and every field is required: a field the
+// registry names and the author omits is a binding no later reader can
+// recover. `ui.find` RETURNS it and the three actuation verbs each TAKE one,
+// so the actuation is bound to the observation that justified it rather than
+// naming its target by a string that is re-resolved at every use.
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
+// rung 3. `Untrusted[...]` is the author's declaration AND, since item 521
+// slice 2, revl's own derivation: `screen` and `ui.find` are source classes,
+// so removing the qualifier below changes nothing about whether the value is
+// untrusted. See `docs/design/551-flagship-demo.md` section 4.
 extern emission[screen.observe] fn read_pane(region: Str) -> Untrusted[Str]
   = @py { return "" }
 
-extern emission[ui.find] fn locate(hint: Str) -> Untrusted[Str]
-  = @py { return "" }
+extern emission[ui.find] fn locate(hint: Str) -> Untrusted[UiTarget]
+  = @py { return None }
 
 extern pure fn clear_amount_field()
   = @py { return None }
 
 // `ui.text` is compensatable, so the registry REQUIRES an inverse (item 522).
-extern emission[ui.text] fn type_amount(target: Str, amount: Str)
+extern emission[ui.text] fn type_amount(target: UiTarget, amount: Str)
   compensate clear_amount_field()
   = @py { return None }
 
 // `ui.click` is unknown and `ui.download` is irreversible. Neither may carry
-// a `compensate`; both therefore report bare in the erasure report.
-extern emission[ui.click] fn actuate(target: Str)
+// a `compensate`; both therefore report UNCOMPENSATED in the erasure report.
+extern emission[ui.click] fn actuate(target: UiTarget)
   = @py { return None }
 
-extern emission[ui.download] fn fetch_receipt(target: Str) -> Str
+extern emission[ui.download] fn fetch_receipt(target: UiTarget) -> Str
   = @py { return "" }
 
 service Refund {
@@ -92,9 +112,9 @@ component LegacyAgent
     fn settle(invoice, cents) {
       let pane = emit read_pane("invoice-detail")
       let field = emit locate("amount")
-      emit type_amount("amount", invoice)
-      emit actuate("Apply")
-      let receipt = emit fetch_receipt("receipt.pdf")
+      emit type_amount(field, invoice)
+      emit actuate(field)
+      let receipt = emit fetch_receipt(field)
       let posted = emit ledger.adjust(invoice, cents)
       let mirrored = emit peer.adjust(invoice, cents)
       return posted
@@ -183,10 +203,14 @@ component Reader provides ops: Ops {
 }
 """
 
-#: The SAME program with the author's qualifier removed. It admits. That is
-#: the measurement behind section 4 of the design doc, not a control that is
-#: expected to pass.
-ADMITS_SCREEN_TO_SINK_UNQUALIFIED = REFUSE_SCREEN_TO_SINK.replace(
+#: The SAME program with the author's qualifier removed. It is refused too,
+#: and that is the point: item 521 slice 2 made `screen` a source class, so
+#: the containment is revl's derivation rather than something the author has
+#: to remember to write. Before slice 2 this program ADMITTED, which is the
+#: measurement section 4 of the design doc was built on; the demo now asserts
+#: the refusal for BOTH spellings, because a qualifier an author can remove to
+#: turn the check off is not a containment.
+REFUSE_SCREEN_TO_SINK_UNQUALIFIED = REFUSE_SCREEN_TO_SINK.replace(
     "-> Untrusted[Str]", "-> Str")
 
 #: A confidential input may not be placed on an off-device model role

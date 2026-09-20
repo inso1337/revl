@@ -107,9 +107,10 @@ def _check(condition: bool, what: str) -> None:
     print(f"     ok: {what}")
 
 
-def _refuses(name: str, filename: str, cwd: Path) -> str:
+def _refuses(name: str, filename: str, cwd: Path,
+             flags: list[str] | None = None) -> str:
     """Compile a program that must NOT admit, and return the diagnostic."""
-    proc = _revl(["compile", filename], cwd)
+    proc = _revl(["compile", *(flags or []), str(filename)], cwd)
     _check(proc.returncode != 0, f"`revl compile` refuses {name}")
     return proc.stdout
 
@@ -133,7 +134,7 @@ def main() -> int:
         "click_compensate.rvl": programs.REFUSE_CLICK_COMPENSATE,
         "text_no_compensate.rvl": programs.REFUSE_TEXT_WITHOUT_COMPENSATE,
         "screen_to_sink.rvl": programs.REFUSE_SCREEN_TO_SINK,
-        "screen_unqualified.rvl": programs.ADMITS_SCREEN_TO_SINK_UNQUALIFIED,
+        "screen_unqualified.rvl": programs.REFUSE_SCREEN_TO_SINK_UNQUALIFIED,
         "confidential_off_device.rvl": programs.REFUSE_CONFIDENTIAL_OFF_DEVICE,
         "floor.rvlpolicy": programs.POLICY,
     }
@@ -198,19 +199,35 @@ def main() -> int:
     out = _refuses("screen content reaching a shell sink",
                    work / "screen_to_sink.rvl", work)
     _artifact("revl compile screen_to_sink.rvl", out)
-    _check("screen.observe" in out,
-           "the refusal names the ORIGIN of the untrusted value")
+    _check("(screen)" in out and "read_pane()" in out,
+           "the refusal names the ORIGIN CLASS `screen` and the tainting path")
     _check("endorse" in out or "verified fn" in out,
            "the refusal names the declared declassification points")
 
-    # The honest half of this step. The qualifier above is the AUTHOR's, and
-    # removing it admits the same program: `screen` is not yet a source class.
+    # The other half of this step, and the half that moved. The qualifier
+    # above is the AUTHOR's. Item 521 slice 2 made `screen` a SOURCE class and
+    # a UI actuation a SINK, so the containment is now revl's derivation and
+    # not something an author has to remember to write - under `taint_strict`,
+    # which is where every item-249 derived class lives, so that a program
+    # compiled without it is unchanged. Both halves are asserted, because a
+    # qualifier an author can delete to turn a check off is not a containment
+    # and a derivation nobody can see fire is not a measurement.
+    out = _refuses("the same program with `Untrusted[Str]` dropped, "
+                   "under `--taint-strict`",
+                   work / "screen_unqualified.rvl", work,
+                   flags=["--taint-strict"])
+    _check("(screen)" in out,
+           "the derivation refuses it on the origin class alone, with no "
+           "qualifier anywhere in the program")
     proc = _revl(["compile", "screen_unqualified.rvl"], work)
     _check(proc.returncode == 0,
-           "MEASURED GAP: the same program with `Untrusted[Str]` dropped ADMITS")
-    print("     gap: on this tree the untrustedness of a screen read is")
-    print("          AUTHOR-DECLARED, not derived from `screen.observe`.")
-    print("          Deriving it is item 521 slice 2 (docs/design/532 section 5).")
+           "and WITHOUT `--taint-strict` the same program still admits - the "
+           "derived classes are profile-gated, exactly as item 249's are")
+    print("     note: the untrustedness of a screen read is DERIVED from the")
+    print("           `screen` origin class under `--taint-strict`, so there")
+    print("           is no qualifier to remove to turn the check off. At the")
+    print("           default profile the author's qualifier is still what")
+    print("           carries it (item 521 slice 2, docs/design/532 §5).")
 
     # ---------------------------------------------------------------- step 6
     _step("6", "an irreversible step may not claim an inverse",
