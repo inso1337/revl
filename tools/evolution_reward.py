@@ -13,7 +13,10 @@ explanation of its own work. It has two halves.
     that partially passed is evidence about the engine, not a training example.
 
 Eight components already had machinery in this tree. Nothing folded them into a
-verdict and nothing stated the retention criterion. This module is that fold.
+verdict and nothing stated the retention criterion. This module is that fold. A
+ninth, `progress`, was added by issue #1224: the eight are all PRESERVATION
+checks, so their maximum is attained by the empty diff, and the ninth is the
+conjunct that is not. It is still a conjunct and still not a weight.
 
 THE REWARD IS A CONJUNCTION, NOT A SCALAR
 -----------------------------------------
@@ -57,20 +60,40 @@ outcome is `failed`:
 There is no `unknown` verdict and no `skipped` verdict, because a third value is
 where a fail-open default hides. `verified` means somebody's artifact said yes.
 
-WHAT IS IMPLEMENTED (slice 1)
------------------------------
-Four of the eight components read their real artifacts:
+WHAT EACH COMPONENT READS
+------------------------
+Every component names a tool or a committed artifact the repository already
+owns. None of them is a new gate, and none of them reads a candidate's prose:
 
+    compiles              `cargo check --offline` on crates/revl-gate, PLUS
+                          tools/conformance.py --json with zero REAL gaps (a
+                          crash, as against a named tier limit) on all six tiers
+    tests                 tools/affected_tests.py's own selection, then that
+                          selection RUN, with a non-zero collected count
     no-new-false-admits   tools/gate_reference_census.py --check, PLUS a read of
                           the baseline diff that refuses a grown allowance
+    conformance           tools/tier_guarantees.py --json, which is the only
+                          consumer of the two divergence registers, ratcheted
+                          against the committed matrix at `base`
     artifact-stability    tools/regen_goldens.py --all --check
-    documentation         tools/docgen.py --check, tools/check_roadmap_claims.py
+    formal                formal/scripts/{nonvacuity,layering}_gate.py, PLUS a
+                          read of the theorem ledger against `base`
     scope                 the changed-file set against the declared scope
+    documentation         tools/docgen.py --check, tools/check_roadmap_claims.py
+    progress              tools/evolution_progress.py's counter ledger
 
-The other four (`compiles`, `tests`, `conformance`, `formal`) have no probe and
-therefore FAIL. That is the honest state: until they are implemented, nothing is
-retained, and the scorecard names them as the blockers. See
-`docs/design/534-evolution-reward.md` for the slice plan.
+THE TOOL ITEM 536 NAMED FOR `conformance` HAS NEVER EXISTED
+-----------------------------------------------------------
+Item 536 and issue #1206 both mapped this component to
+`tools/gate_verdict_parity.py`. That file has never been in this tree; its only
+occurrence anywhere was the roadmap sentence itself, which passed the citation
+gate every day because that gate judges `path:line` citations only (issue
+#1233, roadmap item 547). Slice 1 failed the component by name rather than
+awarding it, which is how the absence was made to block. The decision taken
+here is NOT to build the tool: `probe_conformance` reads the registers that
+actually record cross-tier divergence in this tree, which is what the roadmap
+now says, and inventing a ninth tool to wrap two existing registers would add a
+gate rather than read one.
 
 USAGE
 -----
@@ -94,8 +117,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -111,6 +136,9 @@ COMPONENTS = (
     "formal",
     "scope",
     "documentation",
+    # The ninth, and the only one that is not a preservation check. It is a
+    # conjunct like the other eight, NOT a weight: see `probe_progress`.
+    "progress",
 )
 
 # The census baseline. `probe_no_new_false_admits` reads this file on both sides
@@ -439,35 +467,540 @@ def _in_scope(path: str, scope) -> bool:
     return False
 
 
-def _unimplemented(component: str, note: str):
-    def probe(candidate: Candidate) -> Verdict:
-        return failed(component, f"no probe implemented: {note}")
-    return probe
+# --------------------------------------------------- compiles, and its bounds
+
+#: The crate whose build is the crate half of `compiles`. The gate crate only:
+#: `crates/revl-gate-wasm` needs a `wasm32-wasip2` target installed and
+#: `crates/revl-lsp` needs its dependencies fetched, so requiring either would
+#: make the component unverifiable rather than strict, and a component that can
+#: never verify is one nobody reads. Their BYTES are held by
+#: `artifact-stability`; what is uncovered here is that they compile, and
+#: section 9 of the design doc says so.
+GATE_CRATE = "crates/revl-gate"
+CARGO_TIMEOUT = 1800
+
+#: The six host tiers `tools/conformance.py` walks. Named here rather than read
+#: off the report, so a tier that silently STOPS being walked fails the
+#: component instead of shrinking the matrix it is measured against.
+SIX_TIERS = ("python", "typescript", "rust", "java", "wasm", "go")
 
 
-# The registry. A component with no probe FAILS; it is never absent from the
-# scorecard and never defaults to pass.
+def run_cargo(candidate: Candidate, args, cwd: Path,
+              timeout: int = CARGO_TIMEOUT) -> Run:
+    """`Run` for a cargo invocation in the candidate tree. Fail-closed.
+
+    `CARGO_TARGET_DIR` is a scratch directory, never `crates/*/target` inside
+    the candidate. A scorer that writes into the tree it is scoring can change
+    that tree's own `scope` verdict, and a measurement that perturbs its subject
+    is not a measurement. It costs a cold build every run, which is the right
+    trade for a component whose whole claim is that this source compiles.
+    """
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        return Run(False, "cargo is not on PATH, so nothing verified that the "
+                          "gate crate compiles")
+    env = dict(os.environ)
+    with tempfile.TemporaryDirectory(prefix="evolution-reward-cargo-") as raw:
+        env["CARGO_TARGET_DIR"] = raw
+        try:
+            proc = subprocess.run(
+                [cargo] + [str(a) for a in args], cwd=str(cwd), env=env,
+                timeout=timeout, capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            return Run(False, f"cargo {args[0]} timed out after {timeout}s")
+        except OSError as exc:
+            return Run(False, f"cargo {args[0]} could not be run: {exc}")
+    if proc.returncode != 0:
+        tail = (proc.stdout + proc.stderr).strip().splitlines()[-4:]
+        return Run(False, f"cargo {args[0]} exited {proc.returncode}: "
+                          + " | ".join(tail), proc.stdout)
+    return Run(True, f"cargo {args[0]} exited 0", proc.stdout)
+
+
+def probe_compiles(candidate: Candidate) -> Verdict:
+    """Item 536's two readings of `compiles`: the crate build and the matrix.
+
+    Half one is the gate crate. `cargo check --offline` on
+    `crates/revl-gate` compiles the candidate's own `selfhost.rs`, which is the
+    largest generated artifact in the tree and the one a digest gate cannot
+    speak for: `tools/build_gate_crate.py --check` compares BYTES, so a
+    regenerated crate can be byte-correct and not compile. That has happened
+    here. No cargo on the machine is a FAILURE, not a skip, and it is the exact
+    case the module docstring's 7-of-8 argument is about.
+
+    Half two is the six-tier matrix. `tools/conformance.py --json` walks every
+    construct through all six emitters and labels each refusal `deliberate`
+    (the emitter raised its own `EmitError`, a named tier limit) or not (the
+    emitter had no case and crashed). A deliberate limit is the toolchain
+    working as designed; anything else is a REAL GAP, and the bar is zero real
+    gaps on every tier, which is where `origin/main` sits. A tier missing from
+    a case row fails too, so the matrix cannot shrink its way to green.
+    """
+    name = "compiles"
+    crate = candidate.tree / GATE_CRATE
+    if not (crate / "Cargo.toml").is_file():
+        return failed(name,
+                      f"{GATE_CRATE}/Cargo.toml is not present in the candidate tree")
+    run = run_cargo(candidate, ["check", "--offline", "--quiet"], cwd=crate)
+    if not run.ok:
+        return failed(name, run.detail, [f"cargo check --offline in {GATE_CRATE}"])
+
+    walk = run_tool(candidate, ["tools/conformance.py", "--json"])
+    if not walk.ok:
+        return failed(name, walk.detail,
+                      [f"cargo check --offline in {GATE_CRATE}"])
+    try:
+        report = json.loads(walk.stdout)
+    except ValueError as exc:
+        return failed(name, f"tools/conformance.py --json did not print a report: {exc}")
+    cases = report.get("cases")
+    if not cases:
+        return failed(name, "the six-tier matrix walked no construct at all")
+    for row in cases:
+        missing = [t for t in SIX_TIERS if t not in (row.get("tiers") or {})]
+        if missing:
+            return failed(
+                name,
+                f"the matrix case {row.get('case')!r} carries no verdict for "
+                + ", ".join(missing) + ", so that tier was not walked")
+    real = []
+    for tier in SIX_TIERS:
+        for item in report.get("gaps", {}).get(tier, []):
+            if not item.get("deliberate"):
+                real.append(f"{tier}: {item.get('case')} ({item.get('message', '')[:60]})")
+    if real:
+        return failed(
+            name,
+            f"{len(real)} real emitter gap(s) in the six-tier matrix (a crash, "
+            "not a named tier limit): " + "; ".join(real[:4]),
+            ["tools/conformance.py --json"])
+    return verified(
+        name,
+        f"the gate crate compiles and all six tiers emit {len(cases)} construct(s) "
+        "with no real gap",
+        [f"cargo check --offline in {GATE_CRATE}", "tools/conformance.py --json"])
+
+
+# ------------------------------------------------------ tests, actually run
+
+#: `tools/affected_tests.py`'s `BACKENDS` keys mapped to the pytest files
+#: `tools/pre_merge.sh` runs for them. `python` and `typescript` are absent ON
+#: PURPOSE: their suites need `backends/python/.venv` and a vitest install, and
+#: `pre_merge.sh` SKIPS them when those are missing. A skip is the fail-open
+#: shape, so a selection that names them fails this component by name instead.
+BACKEND_SUITES = {
+    "go": ("backends/go/test_emit_go.py",),
+    "rust": ("backends/rust/test_emit_rust.py",),
+    "wasm": ("backends/wasm/test_v3_emit.py", "backends/wasm/test_canonical_abi.py"),
+    "java": ("backends/java/test_emit_java.py",),
+}
+
+#: A FULL selection is the whole `tests/` tree, which is what the selector means
+#: by falling safe.
+FULL_SELECTION = ("tests/",)
+
+TESTS_TIMEOUT = 3600
+
+#: `N passed` in a `-q` summary. A run with NO count collected nothing, and a
+#: pytest that collected nothing exits 5 on modern pytest but exits 0 under
+#: `--ignore` shapes that empty the selection. Both are failures here.
+_PASSED = re.compile(r"(\d+) passed")
+
+
+def _selection(candidate: Candidate):
+    """`(ok, selection_or_error)` from `tools/affected_tests.py --format machine`.
+
+    The selector's own output is READ, never assumed. It falls safe to FULL on
+    an unmapped path, and a probe that guessed a narrow selection would run less
+    than the repository's own gate asks for.
+    """
+    run = run_tool(candidate, ["tools/affected_tests.py", "--base", candidate.base,
+                               "--format", "machine"], timeout=600)
+    if not run.ok:
+        return False, run.detail
+    keys = {}
+    for line in run.stdout.splitlines():
+        if line.startswith("# ") or not line.strip():
+            continue
+        head, _, rest = line.partition(" ")
+        keys[head] = rest.strip()
+    if "FULL" not in keys or "PYTEST" not in keys:
+        return False, ("tools/affected_tests.py printed no FULL/PYTEST line, so "
+                       "the selection could not be read")
+    return True, keys
+
+
+def probe_tests(candidate: Candidate) -> Verdict:
+    """The affected suite, selected by the repository's selector and then RUN.
+
+    Two failure directions the design doc names, both closed here:
+
+      * a selection that was GUESSED. `tools/affected_tests.py` is run in the
+        candidate tree and its machine output is parsed; a FULL selection means
+        the whole `tests/` tree, because that is what falling safe means.
+      * a run that collected NOTHING. A pytest summary with no test count is a
+        suite that did not run, and it is indistinguishable from a green one by
+        exit status alone. The probe requires a parsed `N passed` with N > 0.
+
+    The per-backend emit suites are added for every tier the selector names,
+    because `pytest tests/` does not contain them -- that is the wave gap this
+    repository has already paid for twice. A tier whose suite this probe cannot
+    run (`python`, `typescript`) fails the component rather than being skipped.
+    """
+    name = "tests"
+    ok, keys = _selection(candidate)
+    if not ok:
+        return failed(name, f"the affected selection could not be read: {keys}")
+
+    full = keys["FULL"].strip() == "1"
+    targets = list(FULL_SELECTION) if full else keys["PYTEST"].split()
+    backends = [t for t in keys.get("BACKENDS", "").split() if t]
+    unrunnable = sorted(t for t in backends if t not in BACKEND_SUITES)
+    if unrunnable:
+        return failed(
+            name,
+            "the selector asked for the " + ", ".join(unrunnable)
+            + " backend suite(s), which need a toolchain this probe does not "
+              "set up; `tools/pre_merge.sh` SKIPS them and a skip is not a pass",
+            [f"tools/affected_tests.py --base {candidate.base}"])
+    for tier in backends:
+        targets += [t for t in BACKEND_SUITES[tier] if t not in targets]
+    if not targets:
+        return failed(
+            name,
+            f"the selection named no test at all (reason: {keys.get('REASON', '?')})",
+            [f"tools/affected_tests.py --base {candidate.base}"])
+
+    missing = [t for t in targets if not (candidate.tree / t.split("::")[0]).exists()]
+    if missing:
+        return failed(name, "the selection names path(s) not in the tree: "
+                            + ", ".join(missing[:4]))
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = (str(candidate.tree / "src") + os.pathsep
+                         + env.get("PYTHONPATH", "")).rstrip(os.pathsep)
+    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"] + targets
+    try:
+        proc = subprocess.run(cmd, cwd=str(candidate.tree), env=env,
+                              timeout=TESTS_TIMEOUT, capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return failed(name, f"the affected suite timed out after {TESTS_TIMEOUT}s")
+    except OSError as exc:
+        return failed(name, f"the affected suite could not be run: {exc}")
+    out = proc.stdout + proc.stderr
+    match = _PASSED.search(out)
+    if proc.returncode != 0:
+        tail = out.strip().splitlines()[-3:]
+        return failed(name, f"the affected suite exited {proc.returncode}: "
+                            + " | ".join(tail),
+                      [f"pytest {' '.join(targets[:4])}"])
+    if match is None or int(match.group(1)) == 0:
+        return failed(
+            name,
+            "the affected suite exited 0 with no test count in its summary, so "
+            "it collected nothing; a suite that ran zero tests is not a pass",
+            [f"pytest {' '.join(targets[:4])}"])
+    return verified(
+        name,
+        f"{match.group(1)} test(s) passed over the selection the repository's "
+        f"own selector made ({'FULL' if full else str(len(targets)) + ' target(s)'})",
+        [f"tools/affected_tests.py --base {candidate.base}",
+         f"pytest {' '.join(targets[:4])}"])
+
+
+# --------------------------------------------- conformance, the two registers
+
+CONFORMANCE_DOC = "docs/conformance.md"
+GUARANTEE_START = "<!-- GUARANTEE-TIER-MATRIX:START -->"
+GUARANTEE_END = "<!-- GUARANTEE-TIER-MATRIX:END -->"
+
+#: `tools/tier_guarantees.py`'s verdicts, STRONGEST FIRST. The order is the
+#: whole content of the ratchet: a cell may move up it, never down.
+CELL_STRENGTH = ("proved", "divergence", "no reproducer", "unimplemented")
+
+#: The committed block renders the same four verdicts as glyphs.
+CELL_GLYPHS = {"proved": "proved", "**div**": "divergence",
+               "no repro": "no reproducer", "unimpl": "unimplemented"}
+
+
+def _committed_matrix(text: str):
+    """`(ok, cells_or_error)`: (code, tier) -> verdict from the committed block.
+
+    The block is `tools/conformance.py --write-readme`'s rendering of
+    `tools/tier_guarantees.py`, whose fourth source IS the divergence registers:
+    `check_roadmap_markers.py --check-tier-parity`'s records and
+    `tests/test_cross_tier_execution.py::DIVERGENCES`. Reading the committed
+    block at `base` is how the candidate's fresh measurement gets something to
+    be a ratchet against without checking out a second tree.
+    """
+    start = text.find(GUARANTEE_START)
+    end = text.find(GUARANTEE_END)
+    if start < 0 or end < 0:
+        return False, f"{CONFORMANCE_DOC} carries no GUARANTEE-TIER-MATRIX block"
+    block = text[start:end].splitlines()
+    header = None
+    cells = {}
+    for line in block:
+        if not line.startswith("|"):
+            continue
+        parts = [c.strip() for c in line.strip().strip("|").split("|")]
+        if header is None:
+            if parts and parts[0] == "guarantee":
+                header = parts[1:-1]          # tiers, dropping `evidence`
+            continue
+        if len(parts) != len(header) + 2 or not parts[0].startswith("`"):
+            continue
+        code = parts[0].strip("`")
+        for tier, glyph in zip(header, parts[1:-1]):
+            verdict = CELL_GLYPHS.get(glyph)
+            if verdict is not None:
+                cells[(code, tier)] = verdict
+    if header is None or not cells:
+        return False, (f"the GUARANTEE-TIER-MATRIX block in {CONFORMANCE_DOC} "
+                       "holds no readable guarantee x tier table")
+    return True, cells
+
+
+def probe_conformance(candidate: Candidate) -> Verdict:
+    """Cross-tier divergence, read off the two registers that record it.
+
+    ITEM 536 NAMED `tools/gate_verdict_parity.py` FOR THIS COMPONENT AND THAT
+    FILE HAS NEVER EXISTED (issue #1233, roadmap item 547). Slice 1 failed the
+    component by name and asserted the file's absence so the decision could not
+    be skipped. The decision, taken here: do NOT build it. The roadmap sentence
+    now names what actually records cross-tier divergence in this tree, the
+    `--check-tier-parity` records plus `tests/test_cross_tier_execution.py`'s
+    `DIVERGENCES`, and inventing a ninth tool to wrap two registers that already
+    exist would add a gate rather than read one, which section 7 forbids.
+
+    Both registers are read through `tools/tier_guarantees.py`, which is their
+    only consumer and is TOTAL over them: a `--check-tier-parity` subject with
+    no guarantee mapping and a `DIVERGENCES` entry with no code mapping each
+    raise `MatrixError` rather than being dropped, so a register that grows
+    without a decision exits the tool non-zero and FAILS this component.
+
+    The ratchet: no `(guarantee, tier)` cell may be weaker than it is at `base`.
+    Weaker is `CELL_STRENGTH`'s order, so `proved -> divergence` fails, while
+    `unimplemented -> divergence` (a partial port arriving) passes -- a tier
+    LOSING a guarantee is the promotion-bar entry "no weakened refusal", and a
+    tier gaining part of one is the work. A cell absent at `base` is a new
+    guarantee, which `tools/tier_guarantees.py` already refuses to render blank.
+    """
+    name = "conformance"
+    run = run_tool(candidate, ["tools/tier_guarantees.py", "--json"], timeout=1800)
+    if not run.ok:
+        return failed(name, run.detail, ["tools/tier_guarantees.py --json"])
+    try:
+        matrix = json.loads(run.stdout)
+    except ValueError as exc:
+        return failed(name, f"tools/tier_guarantees.py --json printed no matrix: {exc}")
+    head = {}
+    for row in matrix.get("rows", []):
+        for tier, cell in (row.get("cells") or {}).items():
+            head[(row.get("code"), tier)] = cell.get("verdict")
+    if not head:
+        return failed(name, "the guarantee x tier matrix came back with no cell, "
+                            "so no register was read")
+
+    ok, base_text = run_git(candidate, ["show", f"{candidate.base}:{CONFORMANCE_DOC}"])
+    if not ok:
+        return failed(name,
+                      f"cannot read {CONFORMANCE_DOC} at {candidate.base}: {base_text}")
+    ok, base_cells = _committed_matrix(base_text)
+    if not ok:
+        return failed(name, f"at {candidate.base}: {base_cells}")
+
+    weakened = []
+    for key, before in sorted(base_cells.items()):
+        after = head.get(key)
+        if after is None:
+            weakened.append(f"{key[0]} on {key[1]}: the row is gone")
+        elif (before in CELL_STRENGTH and after in CELL_STRENGTH
+              and CELL_STRENGTH.index(after) > CELL_STRENGTH.index(before)):
+            weakened.append(f"{key[0]} on {key[1]}: {before} -> {after}")
+    if weakened:
+        return failed(
+            name,
+            f"{len(weakened)} guarantee x tier cell(s) weaker than at "
+            + candidate.base + ": " + "; ".join(weakened[:6]),
+            ["tools/tier_guarantees.py --json",
+             f"{CONFORMANCE_DOC}@{candidate.base}"])
+    return verified(
+        name,
+        f"{len(head)} guarantee x tier cell(s) measured from the divergence "
+        f"registers, none weaker than at {candidate.base}",
+        ["tools/tier_guarantees.py --json (--check-tier-parity records + "
+         "tests/test_cross_tier_execution.py::DIVERGENCES)",
+         f"{CONFORMANCE_DOC}@{candidate.base}"])
+
+
+# ----------------------------------------------------- formal, from the ledger
+
+FORMAL_AXIOMS = "formal/CheckAxioms.lean"
+FORMAL_NONVACUITY = "formal/scripts/nonvacuity.tsv"
+_AXIOM_LINE = re.compile(r"^\s*#print axioms\s+(\S+)\s*$", re.M)
+
+#: A `contentless` row is a FINDING in `nonvacuity_gate.py`'s own words: the
+#: theorem is true by definition. A theorem DOWNGRADED to it has lost content
+#: without losing its row, which a set comparison alone would not see.
+CONTENTLESS = "contentless"
+
+
+def _formal_ledger(text_axioms: str, text_tsv: str):
+    """`(theorems, kinds)` from the two committed ledger files."""
+    theorems = set(_AXIOM_LINE.findall(text_axioms))
+    kinds = {}
+    for line in text_tsv.splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            kinds[parts[0].strip()] = parts[1].strip()
+    return theorems, kinds
+
+
+def probe_formal(candidate: Candidate) -> Verdict:
+    """`formal/`, read as a ledger and compared against `base`.
+
+    Item 536's promotion bar states this one negatively: "no reduced formal
+    coverage". So the component is not "the proofs are green" -- building Lean
+    is `make formal`'s job and needs a toolchain -- it is that the LEDGER the
+    proofs are registered in did not shrink, plus the two gates over that ledger
+    that are pure python and can therefore always run.
+
+    Two gates, both fail-closed, neither needing Lean:
+
+      * `formal/scripts/nonvacuity_gate.py`: every registered theorem carries a
+        row naming the evidence its hypotheses can hold at once, every witness
+        is itself registered, no theorem witnesses itself, and `CheckAxioms.lean`
+        and `run_gate.sh` register the SAME set. A theorem deleted from one and
+        not the other fails here.
+      * `formal/scripts/layering_gate.py`: L0/L1/L2 import discipline.
+
+    Then the coverage read against `base`: no registered theorem may disappear,
+    and no theorem may be downgraded to `contentless`, which is the shape that
+    keeps a row while losing what the row was worth. A theorem ADDED is the work
+    and passes.
+    """
+    name = "formal"
+    evidence = []
+    for argv in (["formal/scripts/nonvacuity_gate.py"],
+                 ["formal/scripts/layering_gate.py"]):
+        run = run_tool(candidate, argv, timeout=600)
+        if not run.ok:
+            return failed(name, run.detail, evidence + [argv[0]])
+        evidence.append(argv[0])
+
+    head_files = {}
+    for rel in (FORMAL_AXIOMS, FORMAL_NONVACUITY):
+        path = candidate.tree / rel
+        if not path.is_file():
+            return failed(name, f"{rel} is not present in the candidate tree")
+        try:
+            head_files[rel] = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return failed(name, f"{rel} is unreadable: {exc}")
+    base_files = {}
+    for rel in (FORMAL_AXIOMS, FORMAL_NONVACUITY):
+        ok, text = run_git(candidate, ["show", f"{candidate.base}:{rel}"])
+        if not ok:
+            return failed(name, f"cannot read {rel} at {candidate.base}: {text}")
+        base_files[rel] = text
+
+    head_theorems, head_kinds = _formal_ledger(
+        head_files[FORMAL_AXIOMS], head_files[FORMAL_NONVACUITY])
+    base_theorems, base_kinds = _formal_ledger(
+        base_files[FORMAL_AXIOMS], base_files[FORMAL_NONVACUITY])
+    if not base_theorems:
+        return failed(name, f"{FORMAL_AXIOMS} at {candidate.base} registers no "
+                            "theorem, so there is nothing to compare against")
+
+    dropped = sorted(base_theorems - head_theorems)
+    if dropped:
+        return failed(
+            name,
+            f"formal coverage SHRANK against {candidate.base}: "
+            f"{len(dropped)} registered theorem(s) removed from {FORMAL_AXIOMS}: "
+            + ", ".join(dropped[:6]),
+            evidence + [FORMAL_AXIOMS])
+    downgraded = sorted(
+        t for t, kind in head_kinds.items()
+        if kind == CONTENTLESS and base_kinds.get(t) not in (None, CONTENTLESS))
+    if downgraded:
+        return failed(
+            name,
+            f"{len(downgraded)} theorem(s) downgraded to `{CONTENTLESS}` against "
+            + candidate.base + " (the row survives, the content does not): "
+            + ", ".join(downgraded[:6]),
+            evidence + [FORMAL_NONVACUITY])
+    return verified(
+        name,
+        f"{len(head_theorems)} registered theorem(s), none removed and none "
+        f"downgraded against {candidate.base}; both ledger gates clean",
+        evidence + [f"{FORMAL_AXIOMS}@{_sha256(candidate.tree / FORMAL_AXIOMS)}"])
+
+
+# ------------------------------------------------------------ the ninth term
+
+PROGRESS_TOOL = "tools/evolution_progress.py"
+
+
+def probe_progress(candidate: Candidate) -> Verdict:
+    """The progress conjunct (issue #1224, roadmap item 545), read as a tool.
+
+    `tools/evolution_progress.py` builds a `ProgressVerdict` with this module's
+    four fields and the same single truth value, so it registers in `PROBES`
+    with no adaptation and retention stays `all()` over `COMPONENTS`. It is run
+    as a subprocess in the candidate tree like every other component's tool,
+    rather than imported, so a candidate's copy of it cannot take the scorer
+    down and cannot outrun `run_tool`'s timeout.
+
+    The tool is the conservation half only: `verified` iff every counter was
+    read on BOTH sides and none regressed. Whether a candidate ADVANCED a
+    counter is deliberately not a component -- it is a generation-level
+    existential over the already-retained candidates, which is what keeps
+    progress out of any trade against the eight conservation components. That
+    quantifier lives in `evolution_progress.promote`, not here.
+
+    Until that tool is in the tree the component FAILS with the file named,
+    which is the same answer `run_tool` gives any missing tool.
+    """
+    name = "progress"
+    with tempfile.TemporaryDirectory(prefix="evolution-reward-progress-") as raw:
+        out = Path(raw) / "progress.json"
+        run = run_tool(candidate, [PROGRESS_TOOL, "--tree", str(candidate.tree),
+                                   "--base", candidate.base, "--json", str(out)],
+                       timeout=1800)
+        payload = None
+        if out.is_file():
+            try:
+                payload = json.loads(out.read_text())
+            except ValueError:
+                payload = None
+    block = (payload or {}).get("progress", {})
+    verdict = block.get("verdict") or {}
+    if verdict.get("component") == name:
+        # The tool's own verdict, used verbatim in both directions.
+        return Verdict(name, verdict.get("verdict") == "verified",
+                       str(verdict.get("reason", "")),
+                       tuple(verdict.get("evidence", ())) or (PROGRESS_TOOL,))
+    return failed(name, run.detail if not run.ok else
+                  f"{PROGRESS_TOOL} exited 0 but wrote no progress verdict",
+                  [PROGRESS_TOOL])
+
+
+# The registry. A component with no probe FAILS (see `score`); it is never
+# absent from the scorecard and never defaults to pass.
 PROBES = {
-    "compiles": _unimplemented(
-        "compiles",
-        "the crate build and the six-tier matrix are slice 2 "
-        "(docs/design/534-evolution-reward.md)"),
-    "tests": _unimplemented(
-        "tests",
-        "the affected suite is slice 2 (docs/design/534-evolution-reward.md)"),
+    "compiles": probe_compiles,
+    "tests": probe_tests,
     "no-new-false-admits": probe_no_new_false_admits,
-    "conformance": _unimplemented(
-        "conformance",
-        "roadmap item 536 names tools/gate_verdict_parity.py, which does not "
-        "exist anywhere in this tree; slice 3 has to build the parity read "
-        "before the component can carry a verdict"),
+    "conformance": probe_conformance,
     "artifact-stability": probe_artifact_stability,
-    "formal": _unimplemented(
-        "formal",
-        "the formal/ ledger read is slice 3 "
-        "(docs/design/534-evolution-reward.md)"),
+    "formal": probe_formal,
     "scope": probe_scope,
     "documentation": probe_documentation,
+    "progress": probe_progress,
 }
 
 
