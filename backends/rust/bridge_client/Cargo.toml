@@ -2,6 +2,7 @@
 name = "revl_bridge_client"
 version = "0.0.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 serde_json = "1"

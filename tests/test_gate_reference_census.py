@@ -223,6 +223,37 @@ def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):
         "re-record the census baseline:\n  " + "\n  ".join(fixed))
 
 
+def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
+    """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
+    calls its reference set is read STATICALLY out of `_classify`, so that the
+    report stays a `python3 tools/...` script with no pytest on the path. This
+    holds that reading to a real census run: every guarantee the classifier
+    actually produced over the corpus has to be a construct the row surveys, or
+    the row has a blind family and the ratchet cannot see it go unreached.
+
+    Here rather than beside the report because the run is already paid for."""
+    spec = importlib.util.spec_from_file_location(
+        "oracle_construct_reach", ROOT / "tools" / "oracle_construct_reach.py")
+    reach = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = reach
+    spec.loader.exec_module(reach)
+    surveyed = reach._census_guarantees()
+
+    _, (buckets, _) = measured
+    named = set()
+    for name in buckets:
+        head, _, tail = name.partition("/")
+        if head in ("agree-refuse", "false-admit", "msg-mismatch"):
+            named.add(tail)
+        elif head == "tag-mismatch":
+            named.add(tail.split("->", 1)[0])
+    assert named, "the census classified nothing; the corpus or the reference moved"
+    assert named <= surveyed, (
+        "the census named these guarantees over its corpus and the "
+        "construct-reach row does not survey them:\n  "
+        + "\n  ".join(sorted(named - surveyed)))
+
+
 # --- the false-admission guard (docs/design/457, issue #346) -----------------
 #
 # The gate HAS an admission arm now (`revl_gate::issue_admission`): it upgrades a
