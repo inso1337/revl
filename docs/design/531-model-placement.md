@@ -318,6 +318,116 @@ declaration alone is a program that does not compile. What is genuinely absent
 until slice 2 is the value side, and section 2.1 states it in the one place an
 author would look.
 
+### 4.1 What a consumer of the artifact gets, and what it does not
+
+Issue #1311 asked the question section 4 answers only from the compiler's
+side: a consumer holding a LINKED COMPOSITION cannot check an action against
+that composition's own route block, because the block is not in the artifact.
+That is the intended state and this section is where it is written down, so
+that the next consumer reaches for the supported channel rather than inventing
+one.
+
+**Measured on the linked IR of a routed program** (two actions, one of them
+routed with `confidential -> local, * -> cloud`), by
+`tests/test_1311_model_routes_not_in_ir.py`:
+
+| the consumer wants | in the IR |
+| ------------------ | --------- |
+| the component's declared ACTIONS | yes: the provide block's method names |
+| which actions are routed | no |
+| an arm, an origin, a role name | no |
+| a residence (`on_device` / `off_device`) | no |
+| that a `model role` was declared at all | no |
+
+Not one of the route vocabulary's words appears anywhere in the document, at
+any depth, and the test scans for them rather than comparing two compilations,
+so it fails on a partial section as well as on a complete one.
+
+**The supported channel is by value, not through the artifact.** The table
+`check()` returns is passed to the consumer that needs it, and that is how both
+landed consumers already read it:
+
+* item 517's decision object binds `role` and `residence` by value
+  (`revl.model_evidence`, section 9 of this note). Both are DECLARED, so it
+  asks no host and reads no IR.
+* item 518's promotion gate binds the whole table by value as
+  `shadow_promotion.ShadowPlan.route_table`, `model_route.check()`'s return
+  value verbatim, and `_precondition_route` reads it rather than re-deriving a
+  placement.
+
+The only producer of that table is `model_route.check(program)` over a parsed
+program, so a consumer that holds no source must be HANDED one. An offline
+gate is handed it with the plan. A seam that holds only a linked composition
+is not, and the honest thing for such a seam to do is to say which fact it is
+actually using: the declared action set, which the artifact does carry, is not
+a route, and a check against it is a check that the action exists rather than
+a check that it is placed.
+
+**Why a `modelRoutes` section is not the fix for that.** Three reasons, in the
+order they bite:
+
+1. It would be a second place the placement is written, with nothing keeping
+   the two in step. This repository's recurring defect is one fact kept by
+   hand in several places; the answer to it is one producer, not a second
+   copy in a second format.
+2. It would buy no decision that has not already been made. Everything the
+   route forbids is refused at admission (section 3) or at the value (section
+   3.2). A consumer re-reading the arms from the artifact could only restate a
+   verdict the compiler reached, and a restatement that could disagree with
+   the original is worse than no restatement at all.
+3. It would put a section in front of all six emitters, each of which would
+   have to carry it or refuse it by name, for a construct that no emitted
+   program can act on. The permission has no runtime meaning to emit.
+
+**What would justify one, so a later item does not re-litigate this.** Two
+things in section 8's own plan, and neither has landed:
+
+* **S4, the crossing side.** Once a crossing carries its role, the role is
+  part of what the program DOES rather than of what it may do, and a consumer
+  reading placement out of the artifact is reading behaviour. That is a
+  section with a reason.
+* **S5, the role in the manifest.** A role declared in the composition
+  manifest is already an artifact-level declaration, and it is what item 515
+  needs to bind a role to a provision by key.
+
+Until one of those lands, the thing that is genuinely owed to a consumer is
+not a section: it is that the attestation a consumer verifies should identify
+the rules it was admitted under. Section 4.2 is that, and it was the one real
+defect #1311 turned up.
+
+### 4.2 The ruleset digest covers this module
+
+`attest.ruleset_digest()` is the identity an attestation publishes for the
+checker that admitted the composition: a sha256 over the source bytes of every
+module in `attest.RULESET_MODULES`. Its membership rule is the one issue #989
+settled and roadmap item 506 records: a module whose BYTES move the set of
+programs the frontend refuses is a rule, whether or not it raises a refusal
+under its own name.
+
+`model_route.py` meets that rule twice over. It raises ten of section 3's
+eleven refusals itself, under `G-MODEL-PLACE` and `G-SECRET-FLOW` (the
+eleventh, decision 11's prelude ordering rule, is raised in `lower.py` and
+cites this module's `CODE`), and `CEILING_ORIGINS` is read
+by `taint.py` at every model crossing to decide whether the value-level
+refusal of section 3.2 fires at all, the exact relationship
+`retention.PERSISTENCE_SINK_SCOPES` has with the same file, which is why
+`retention` is in the list. `model_council.py` is in the same position for
+item 516: `lower.py` calls its `check()`, and it refuses under
+`model_route.CODE`.
+
+Both were absent, so editing either one moved which programs the frontend
+refuses while the digest that identifies the ruleset sat still: two checkers
+that disagree about where a confidential input may be sent could publish the
+same ruleset identity. That is the drift the digest exists to make visible,
+and it is #989's finding on a second module.
+
+Adding the two names is a digest input and not a cited code: neither file
+carries a `(Gn)` tag, so `discharged_guarantees()` is unchanged, exactly as it
+was for `retention`. Nothing stores a ruleset digest (`docs/revl-attest.md`
+carries truncated illustrative values and `cert.py` shape-checks `_HEX64`), so
+the digest moving breaks no consumer.
+`tests/test_1311_model_routes_not_in_ir.py` pins both halves.
+
 ---
 
 ## 5. Non-goals
