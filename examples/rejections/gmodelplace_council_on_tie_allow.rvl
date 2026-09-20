@@ -1,0 +1,43 @@
+// REJECTED — G-MODEL-PLACE: an aggregation written to ADMIT when the council's
+// members disagree does not compile. This is roadmap item 516's exit test
+// (`docs/design/543-model-council.md`).
+//
+// `on_tie allow` PARSES. That is deliberate, and it is the same discipline item
+// 512 uses for `*` on the right of an arrow: the author who reaches for
+// "proceed anyway" gets the reason rather than a syntax complaint. A tie is the
+// case where `unanimous` names no value, and a council that answers anyway has
+// told its caller that several models agreed when they did not.
+//
+// The two outcomes that are admitted are `split`, the default, which carries
+// the members' differing answers as evidence, and `deny`, a permitted
+// narrowing, because a council may decide that inconclusive means refuse. There
+// is no admitting outcome, and `quorum answered` — a floor counted over the
+// members that answered rather than the members declared — is refused for the
+// same reason one rule over.
+//
+// This file is also the self-host's reproducer. The gate built from
+// `selfhost/lower.rvl` answered every council program `BAD|unexpected token at
+// top level`, the generic top-level parse marker, until the declaration was
+// ported; it now spells the refusal below byte for byte and tags it `COUNCIL`.
+//
+// expected error:
+//   admits when the members disagree
+
+model role edge on_device
+model role vast off_device
+
+service Answer {
+  fn classify(text: Str) -> Str
+}
+
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie allow
+}
+
+component Classifier provides out: Answer {
+  provide out {
+    fn classify(text) = text
+  }
+}

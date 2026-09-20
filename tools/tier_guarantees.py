@@ -97,7 +97,15 @@ SELFHOST_TIER = "revl"
 #: "nothing checked it" and "it passed" being different answers cuts both ways.
 #: Kept as a table rather than a prefix rule so a new tag has to be DECIDED
 #: here: a tag that silently matched a code would be the fail-open direction.
-SELFHOST_TAG_CODES: dict[str, str] = {"MODEL": "G-MODEL-PLACE"}
+#:
+#: Item 516's council is the second row and the first to SHARE a code with an
+#: existing one: a council raises under `model_route.CODE`, and the gate tags it
+#: `COUNCIL` because it is a second construct with a second reference module
+#: (`src/revl/model_council.py`), so a consumer reading the wire learns which of
+#: the two was refused. Two tags mapping to one code is the normal case here,
+#: not an ambiguity: the map is read tag-first.
+SELFHOST_TAG_CODES: dict[str, str] = {"MODEL": "G-MODEL-PLACE",
+                                      "COUNCIL": "G-MODEL-PLACE"}
 
 #: The verdicts a cell may carry, strongest first.
 PROVED = "proved"
