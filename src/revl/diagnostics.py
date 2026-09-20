@@ -45,6 +45,11 @@ GUARANTEES = {
     "G-MODEL-PLACE": "a model role declared `off_device` never receives a "
                      "confidentiality origin, and an action reaches only the "
                      "roles its `route model` block names",
+    "G-COUNCIL-SPLIT": "a model council never resolves disagreement toward "
+                       "allow: its aggregation is written down, is total over "
+                       "the DECLARED members, and names no value rather than "
+                       "admitting when the members disagree or one of them is "
+                       "silent",
     "A1": "iteration boundaries exist only during activation",
     "A2": "no acquisition after a provision",
     "A3": "host-safe identifiers",
@@ -100,6 +105,14 @@ FIXES = {
                      "the role the arm names, or drop the arm (`*` never covers "
                      "a confidentiality origin, so an unrouted confidential "
                      "input is not placed at all)",
+    "G-COUNCIL-SPLIT": "write the aggregation down and let it name no value: a "
+                       "rule from `unanimous`, `majority` or `veto`, a floor "
+                       "counted over the declared members (`quorum declared`, "
+                       "the default), and `on_tie split` or `on_tie deny` - "
+                       "there is no admitting tie outcome, a rule that picks "
+                       "one member's answer is not an aggregation, and a "
+                       "member that cannot answer abstains rather than "
+                       "shrinking the council into a quorum",
     "A1": "`await` is an iteration boundary and exists only during activation — "
           "move it into the component body",
     "A2": "acquire everything before the first `provide`",

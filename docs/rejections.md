@@ -46,6 +46,7 @@ to the diagnostic; see docs/why-traces.md.
 | G-SECRET-FLOW | a Secret[T] value never reaches a disclosure sink (a log, a serialization, an LLM prompt, an MCP return, an unapproved realm or an undeclared receiver); it crosses only at a declared Secret[T] receiver and downgrades only at a declared endorse[confidential] | lower (taint flow) |
 | G-RETAIN | a Retained[T, P] value past P's retention deadline never reaches a persistence sink (a db/fs/store/kv/blob/archive/index/cache/queue/wal crossing), unless P declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) |
 | G-MODEL-PLACE | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration) |
+| G-COUNCIL-SPLIT | a model council never resolves disagreement toward allow: its aggregation is written down, is total over the DECLARED members, and names no value rather than admitting when the members disagree or one of them is silent | checker (declaration) |
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |
@@ -715,6 +716,75 @@ The block is a permission checked at admission, not a runtime selection, so it
 writes no IR: an admitted program is byte-identical to the same program without
 it. Scheduling inside the boundary it draws is roadmap item 515, and the flow
 rule that refuses a confidential VALUE reaching an unrouted role is item 514.
+
+## G-COUNCIL-SPLIT — a council never answers for members that disagreed
+
+Roadmap item 516, `docs/design/543-model-council.md` and
+`docs/design/557-council-disagreement.md`. A **model council** binds several
+model roles under declared functions and one written-down aggregation:
+
+```revl
+model role edge on_device
+model role vast off_device
+
+model council Release {
+  proposer  -> vast,
+  adversary -> edge,
+  aggregate unanimous
+}
+```
+
+The members are placed SEPARATELY, by item 512's rules, which is what the
+construct is for: the local adversary above may read an origin the cloud
+proposer may not. The code refuses every way the declaration could let a
+council report agreement it does not have. The two to know by name are the tie
+that admits and the floor counted over the wrong set:
+
+```revl reject G-COUNCIL-SPLIT
+model role edge on_device
+model role vast off_device
+
+model council Release {
+  proposer  -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie allow
+}
+```
+
+    `on_tie allow` in model council `Release` admits when the members disagree
+    (G-COUNCIL-SPLIT)
+
+`on_tie` has exactly two outcomes, `split` (the default, which carries the
+members' differing answers) and `deny`. There is no admitting one, and the six
+spellings an author reaches for (`allow`, `admit`, `proceed`, `accept`,
+`first`, `any`) all parse, so the refusal can give the reason rather than a
+syntax complaint. `aggregate first` and its siblings are refused the same way:
+a rule that picks a member is not an aggregation.
+
+`quorum answered` is the other half. A member that fails or times out ABSTAINS,
+and the rule's floor is counted over the members the program DECLARED, so an
+abstention counts against the floor rather than disappearing from it. Counting
+over the members that answered would let a council shrink until its survivors
+agree, and two of three agreeing while the third is silent is not agreement.
+The bases `answered`, `reachable`, `available` and `responding` are all refused
+by name.
+
+The rest of the rules close the same door from other sides: an aggregation that
+is missing or doubled, a member function outside the closed vocabulary or
+declared twice, a council with fewer than two members or no `proposer`, an
+`aggregate veto` with no `adversary`, and two members sharing one `model role`
+(one model answering twice under two names is correlated error, not a second
+opinion). Two council refusals cite `G-MODEL-PLACE` instead: a member naming
+an undeclared role, and a council claiming a declared role's name. In both the
+subject is a `model role`, and item 512's fix line is already the right
+rewrite.
+
+Council votes come from MODELS and carry no identity. Multi-party HUMAN
+approval (`require N of {...}`, roadmap items 471 and 509) is a different
+family with different machinery, and the two share no code.
+
+Like `route model`, the declaration is checked at admission and writes no IR:
+an admitted program is byte-identical to the same program without it.
 
 ## Everything else
 

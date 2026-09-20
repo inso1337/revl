@@ -1,0 +1,41 @@
+// REJECTED — G-MODEL-PLACE: an action that routes the `confidential` origin to
+// a role declared `off_device` does not compile, and the diagnostic names the
+// action, the origin and the role. This is roadmap item 512's exit test
+// verbatim (`docs/design/531-model-placement.md` section 3.1).
+//
+// A `model role` is a DECLARED PLACEMENT: a name plus where a call to it runs.
+// `route model on <action>` places one action's model calls by the origin class
+// of what the action is given, reusing item 249's lattice rather than inventing
+// a second vocabulary. The arm below is the one sentence the item exists to
+// refuse — it says, in the program, that a confidential input leaves the
+// device.
+//
+// The fix the hint offers is not "drop the arm and write `*`". Dropping it
+// works, but for the reason section 2.1 of the design note gives rather than
+// the one an author expects: `*` is DEFINED not to cover a confidentiality
+// origin, so an unnamed `confidential` is not placed at all. `* -> cloud` can
+// therefore never be the sentence that sends a confidential input off the
+// device.
+//
+// This file is also the self-host's reproducer. Before slice 3 the gate built
+// from `selfhost/lower.rvl` answered every `route model` program
+// `BAD|unexpected token at top level`, a generic parse refusal, which is why
+// item 512 shipped with an `ACKNOWLEDGED` entry in `tools/tier_guarantees.py`
+// instead of a fixture here. The gate now spells the refusal below byte for
+// byte and tags it `MODEL`, so the fixture belongs in the corpus and the
+// acknowledgement is gone.
+//
+// expected error:
+//   routes the `confidential` origin to model role `cloud`
+
+model role local on_device
+model role cloud off_device
+
+service Answer { fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> cloud
+  }
+  provide out { fn classify(text) = text }
+}
