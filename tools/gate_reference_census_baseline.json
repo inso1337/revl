@@ -1,11 +1,6 @@
 {
  "buckets": {
   "false-admit/T1": [
-   "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-   "examples/rejections/t17_arrow_body_unchecked.rvl",
-   "examples/rejections/t32_arrow_value_result_flows.rvl",
-   "examples/rejections/t33_arrow_value_arity.rvl",
-   "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
    "examples/rejections/v2_match_nonexhaustive.rvl"
   ],
   "false-admit/TYPE": [
@@ -37,30 +32,6 @@
     "tag": "TYPE"
    }
   },
-  "examples/rejections/t14_optional_chain_on_nonoptional.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`?.` needs an optional on the left, got `Row`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t17_arrow_body_unchecked.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "field access `.name` on `Opt[Row]`: the optional wrapper has no such member \u2014 `T` flows into `Opt[T]`, never silently back out",
-    "tag": "T1"
-   }
-  },
   "examples/rejections/t18_type_alias_cycle.rvl": {
    "bucket": "false-admit/TYPE",
    "gate": {
@@ -71,42 +42,6 @@
    "reference": {
     "message": "type alias cycle: Handle -> Ref -> Handle",
     "tag": "TYPE"
-   }
-  },
-  "examples/rejections/t32_arrow_value_result_flows.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "argument 1 of `takes_int(...)` expects `Int`, got `Str`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t33_arrow_value_arity.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`f` is a `(Any) -> Str` and takes 1 argument(s), 2 given",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t35_arrow_annotation_not_quantified.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "argument 1 of `f` expects `Q`, got `Int`",
-    "tag": "T1"
    }
   },
   "examples/rejections/t5_destructure_nonrecord.rvl": {
