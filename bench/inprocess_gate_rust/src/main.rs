@@ -137,15 +137,17 @@ use std::time::Instant;
 /// provides `store`, `App` provides `app` and requires `store`, and the item-346
 /// service block names the two services the composition declares (`Store`,
 /// `AppSvc`) behind the `!services` header that says the list is the whole one,
-/// each with the operations it declares. Those operation names are what let a
-/// candidate's call through `requires store: Store` be resolved against the
-/// RUNNING declaration rather than only against its name.
+/// each with the operations it declares AND each operation's declared parameter
+/// list. Those operation names are what let a candidate's call through
+/// `requires store: Store` be RESOLVED against the RUNNING declaration rather
+/// than only against its name; the parameter lists are what let it be TYPED
+/// against it (issue #346).
 /// `tests/test_inprocess_gate_rust.py` recomputes that wire from the py
 /// harness's own `base_manifest()`, so a py-side change to the running
 /// composition reds here instead of leaving the two tiers admitting into
 /// different worlds.
-const HELD_MANIFEST: &str =
-    "Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping";
+const HELD_MANIFEST: &str = "Kv/store/;App/app/;App<store;!services;\
+:Store,get(key:Str),bump(n:Int),put(key:Str|value:Str);:AppSvc,ping()";
 
 /// `bench/admission_latency.py::CANDIDATE_STANDALONE`, the py harness's
 /// `standalone_twin`: standalone-valid, `Store` inlined. py ADMITS it.
