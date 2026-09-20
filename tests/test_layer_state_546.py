@@ -156,6 +156,16 @@ def test_no_compensation_lifts_an_undeclared_part():
     assert "no compensation lifts" in refusal.detail
 
 
+def test_untouched_is_a_declaration_and_not_a_state_class():
+    """A layer this promotion does not write is declared so, and `untouched`
+    is outside the class order: it contributes nothing to an aggregate and
+    gets its own list on the report."""
+    plan = _plan()
+    assert classify(plan, "memory") == UNTOUCHED
+    assert UNTOUCHED not in STATE_CLASSES
+    assert not at_or_below(UNTOUCHED, "revertible")
+
+
 def test_a_layer_declaring_no_part_and_not_untouched_is_refused():
     plan = _plan(routing=LayerDeclaration("routing", ()))
     refusal = check(plan)
