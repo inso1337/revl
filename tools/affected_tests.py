@@ -645,6 +645,24 @@ def select(changed, root) -> dict:
             }
             reasons.append(f"{f}")
             continue
+        if f in ("tools/tier_guarantees.py", "tools/check_roadmap_markers.py"):
+            # Both feed the GUARANTEE-TIER-MATRIX block in docs/conformance.md:
+            # `tier_guarantees.py` generates it, and `check_roadmap_markers.py`
+            # supplies the parity records that decide its divergence cells. The
+            # generic tools/ rule below matches `test_<stem>.py`, which neither
+            # of these has, so without this rule the selector fell all the way
+            # through to a FULL run for a file whose covering tests are three
+            # named modules. Naming them keeps the gate that checks the block
+            # (`conformance --check-readme`) in the selection too.
+            gates.add("conformance")
+            pytest_nodes.add("tests/test_tier_guarantee_matrix.py")
+            pytest_nodes.add("tests/test_roadmap_gate_bites.py")
+            pytest_nodes |= {
+                _node(p) for p in _test_files(root)
+                if p.name.startswith("test_conformance")
+            }
+            reasons.append(f"{f} (guarantee x tier matrix + roadmap gate)")
+            continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
             reasons.append("tools/check_site_wheel.py")
