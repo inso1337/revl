@@ -671,6 +671,18 @@ def select(changed, root) -> dict:
             }
             reasons.append(f"{f} (guarantee x tier matrix + roadmap gate)")
             continue
+        if f in ("tools/gate_reference_census.py", "tools/corpus_provenance.py"):
+            # The two are coupled in both directions (roadmap item 542): the
+            # census prints the provenance table, and `corpus_provenance.py`
+            # enumerates its scoring corpus with the census's own
+            # `load_corpus`, so its case ids are the census's. The generic
+            # tools/ rule below matches only `test_<stem>.py`, which would run
+            # one side of that coupling and not the other -- and the coupling
+            # is where a drift would land, not in either file alone.
+            pytest_nodes.add("tests/test_gate_reference_census.py")
+            pytest_nodes.add("tests/test_corpus_provenance.py")
+            reasons.append(f"{f} (census/provenance coupling)")
+            continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
             reasons.append("tools/check_site_wheel.py")
