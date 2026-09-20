@@ -114,8 +114,8 @@ def test_an_unknown_crossing_states_nothing():
 
 
 def test_reading_is_not_claiming():
-    """A provider that inspects the grammar — to log it, to decide whether it
-    can honour it, to cache a compiled artifact under its digest — has not
+    """A provider that inspects the grammar -- to log it, to decide whether it
+    can honour it, to cache a compiled artifact under its digest -- has not
     promised anything, so the verdict is unchanged."""
     revl_decode_grammar(KEY)
     assert validate_response(REORDERED, SCHEMA, "w", None, KEY) == REORDERED
@@ -360,7 +360,7 @@ def test_the_two_dialects_have_different_digests():
 def test_the_json_schema_dialect_promises_no_member_order():
     """And is therefore NOT held to one. JSON Schema does not describe member
     order, so refusing a provider that honoured exactly what it was handed would
-    be a false reject — the same mistake §5 refuses on the GBNF side."""
+    be a false reject -- the same mistake §5 refuses on the GBNF side."""
     revl_constrain(KEY, ("json-schema",))
     assert validate_response(REORDERED, SCHEMA, "w", None, KEY) == REORDERED
 

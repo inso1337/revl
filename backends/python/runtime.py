@@ -349,8 +349,8 @@ class GrammarNotHonouredError(ResponseValidationError):
     returned a completion outside it.
 
     A subclass of :class:`ResponseValidationError` on purpose. It is a response
-    fault of the same kind and the same retryability — a re-issued completion may
-    well be honoured — so it rides item 257's existing retry loop and the body
+    fault of the same kind and the same retryability -- a re-issued completion may
+    well be honoured -- so it rides item 257's existing retry loop and the body
     observes the same terminal typed fault on exhaustion. What the subclass adds
     is a NAME: "the provider said it constrained this decode and it did not" is a
     different operational problem from "the model answered badly", and a
@@ -402,8 +402,8 @@ def revl_constrain(key: str, dialects=("gbnf",)):
     having constrained with the other is detectable rather than believed.
 
     A provider that cannot honour ANY dialect must not call this. Ignoring the
-    grammar is a legitimate answer — constraining a decode is a host concern and
-    revl does not require a host to be able to — and the cost of ignoring it is
+    grammar is a legitimate answer -- constraining a decode is a host concern and
+    revl does not require a host to be able to -- and the cost of ignoring it is
     only that the crossing is no better off than it was before this item.
     """
     grammar = _revl_grammars.get(key)
@@ -438,7 +438,7 @@ def grammar_honoured_error(value, schema, path: str = "$"):
     Why this and not a grammar recogniser. The provider hands revl a decoded
     value, not the bytes it decoded, so whitespace, number spelling and string
     escaping are already gone and no recogniser can see them. What is NOT gone is
-    member order, because Python preserves a JSON object's key order on load —
+    member order, because Python preserves a JSON object's key order on load --
     and member order is exactly the thing the GBNF derivation pins (§5) and the
     thing item 257's validator is blind to. So this check is precisely the DELTA
     between the two derivations, which makes it the only part worth checking

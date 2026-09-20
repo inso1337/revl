@@ -1,7 +1,9 @@
 # 542: Compiling the typed model boundary into a decoding grammar
 
-Roadmap: item 513 (issue #1187), from the 2026-09-19 external review. Slice 1
-is LANDED with this note; slices 2 to 4 are designed here and not written.
+Roadmap: item 513 (issue #1187), from the 2026-09-19 external review. Slices 1,
+2 and 4 are LANDED. Slice 3 is designed here and not written, and section 6 says
+what it costs. Sections 0 to 8 are slice 1's note, revised only where slice 2
+measured something it had listed as unverified; sections 9 to 11 are new.
 
 Reconciles with: item 257 and `docs/design/257-typed-model-boundary.md` (the
 typed boundary, whose schema this compiles a second time), item 260 (the
@@ -87,6 +89,12 @@ the same rule from opposite sides: the compiler states, the provider performs.
 
 It constrains the decode, or it does not. revl does not model that, call it, or
 verify it.
+
+> Slice 2 refined the last clause and section 9.2 is the refinement. revl still
+> does not model or call a decode. It does now verify one thing, and only one:
+> a provider that *claims* to have honoured the stated grammar is held to the
+> claim. A provider that claims nothing is still not verified and still not
+> refused, for the reason the rest of this section gives.
 
 This is the boundary the item turns on, and getting it wrong in either
 direction breaks the feature. Pushing further, so that revl owns a decoder
@@ -312,7 +320,7 @@ is a provider question this note still does not answer. Section 11 observed one
 provider's ordering behaviour on one model, which is an observation and not an
 answer.
 
-**That the honoured-check is sufficient.** Section 9.4 states the opposite
+**That the honoured-check is sufficient.** Section 9.5 states the opposite
 outright: it is necessary and not sufficient, and says exactly what it cannot
 see.
 
@@ -410,14 +418,41 @@ cannot tell them apart sends the reader to the wrong place.
 The schema check runs first. A provider that took the constraint and returned
 prose has two problems, and naming the second one first would be unhelpful.
 
-### 9.3 A claim is spent by the completion it was made for
+### 9.3 What a provider integration looks like
+
+A provider is the host object bound to the crossing's require key. Constraining
+a decode is three added lines, and *not* constraining it is zero:
+
+```python
+from runtime import revl_constrain
+
+class OllamaModel:
+    def complete(self, prompt):
+        body = {"model": self.tag, "messages": [...], "stream": False}
+        taken = revl_constrain("Model.complete", ("json-schema", "gbnf"))
+        if taken:
+            dialect, artifact, _digest = taken
+            body["format" if dialect == "json-schema" else "grammar"] = artifact
+        return self.post("/api/chat", body)
+```
+
+`dialects` is in the provider's order of preference, and the seam hands back the
+first one this crossing can supply. A provider that cannot honour any of them
+passes a tuple the crossing does not match, or does not call `revl_constrain` at
+all, and is verified exactly as it was before.
+
+The trap the seam is shaped to avoid is the third line being written and the
+fourth not: taking the artifact and then failing to attach it to the request.
+That is precisely the case section 9.2 turns into a named refusal.
+
+### 9.4 A claim is spent by the completion it was made for
 
 The claim register is fiber-local and cleared unconditionally when the response
 settles, on the success path and on the schema-failure path alike. A claim
 cannot outlive the crossing it was made for and be spent on the next one, and in
 a retry loop each attempt makes its own.
 
-### 9.4 What the check can see, and what it cannot
+### 9.5 What the check can see, and what it cannot
 
 The provider hands revl a **decoded value**, not the bytes it decoded.
 Whitespace, number spelling and string escaping are gone before the seam runs,
@@ -437,6 +472,21 @@ The note states that rather than letting "the grammar was honoured" read as a
 proof. Closing it means the provider handing back the raw completion bytes
 alongside the decoded value, which is a change to the provider contract in all
 six tiers and is not made here.
+
+Two smaller limits, both of which fail in the safe direction and neither of
+which is fixed:
+
+* **A claim made in another task is lost.** The claim register is a contextvar,
+  and a provider that sets it inside a task it spawned rather than in the one the
+  crossing runs in leaves the parent seeing no claim. The completion is then
+  verified exactly as an unclaimed one, so a claim is dropped rather than
+  invented.
+* **The registry is per process, not per document.** `register_grammars` merges,
+  so two emitted modules loaded into one process that both declare
+  `Model.complete` share the key and the later registration wins. The digest
+  check catches a provider that then honours the wrong one, but the provider was
+  handed the wrong artifact to begin with. A document-scoped key is the fix and
+  is not made here.
 
 ---
 
