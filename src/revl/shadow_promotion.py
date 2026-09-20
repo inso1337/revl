@@ -1,7 +1,7 @@
 """Shadow routing: the agreement accumulator and the promotion predicate
 (roadmap item 518, issue #1192).
 
-Design note: `docs/design/539-shadow-promotion.md`.
+Design note: `docs/design/540-shadow-promotion.md`.
 
 WHAT IS MISSING, AND WHAT THIS IS
 ---------------------------------
@@ -380,7 +380,7 @@ class ShadowPlan:
 
         Item 517's record is keyed by `(component, step_index)` and does NOT
         name the action, so the ACTION half is declared here and the step half
-        comes from the records. `docs/design/539-shadow-promotion.md` section 7
+        comes from the records. `docs/design/540-shadow-promotion.md` section 7
         records that as the one correlation this slice does not derive."""
         return (self.component, self.action)
 

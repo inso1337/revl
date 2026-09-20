@@ -1,12 +1,15 @@
-# 539: Shadow routing, accumulated agreement, and a promotion no measurement can buy
+# 540: Shadow routing, accumulated agreement, and a promotion no measurement can buy
 
 Roadmap: item 518 (issue #1192), from the 2026-09-19 external review. Slice 1
 is LANDED with this note; slices 2 and 3 are designed here and not written.
 
-Design number: 539. 531 to 538 were claimed on 2026-09-19 and 2026-09-20 (531
+Design number: 540. 531 to 538 were claimed on 2026-09-19 and 2026-09-20 (531
 merged as PR #1220, 532 as #1228 and #1242, 533 as #1232, 534 as #1231, 535 as
-#1230, 536 as #1239, 537 as #1241, 538 as #1242), so this note takes the next
-free number after a scan of the open pull requests rather than of main alone.
+#1230, 536 as #1239, 537 as #1241, 538 as #1242). A scan of the open pull
+requests is not enough between lanes that run at the same time: three of them
+read 539 as free before any of the three pull requests existed. 539 went to
+PR #1252, and this note took 540 when the collision was resolved in issue
+order.
 
 Reconciles with: item 512 and `docs/design/531-model-placement.md` (the role
 table this reads, and section 9 of that note, which assigns this gate its
