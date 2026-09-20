@@ -360,8 +360,8 @@ decide whether it can honour it, to cache a compiled artifact under its digest
 -- calls `revl_decode_grammar` and has promised nothing. A provider that calls
 `revl_constrain` is saying something much stronger: *I constrained this decode
 with exactly this artifact*. There is no separate declaration API and no
-capability flag, because taking the artifact is the only way to use it and is
-therefore the only place a claim can be made by accident-proof construction.
+capability flag, and that is deliberate: taking the artifact is the only way to
+use it, so the claim cannot drift away from the thing it is a claim about.
 
 A validated **extern** is deliberately not registered. Its `@py` body is the
 provider, so registering it would let that body take the constraint -- but this
@@ -383,9 +383,9 @@ anything. The caller's guarantee was never "the decoder was constrained"; it was
 "a response that is not of this shape does not reach the body", and refusing
 that response would break the second guarantee in order to pretend to the first.
 
-What the sharp version of the question is really asking is different: *once a
-seam exists, can the IR claim a constraint nobody enforced?* It can, and that is
-where the answer is fail-closed rather than fail-open:
+The sharp version of the question is a different one: *once a seam exists, can
+the IR come to claim a constraint nobody enforced?* That is where the answer is
+fail-closed:
 
 **A claim that was made is checked.** A provider that took the constraint and
 returned a completion outside it is a named refusal, `GrammarNotHonouredError`,
@@ -403,7 +403,7 @@ Two claims are refused, and they are different failures:
   crossing as pinned would be reading it as pinned to a type it was not pinned
   to.
 * **the stated grammar, not honoured.** The provider names this crossing's
-  digest and the completion is outside the language. Section 9.4 is what "outside"
+  digest and the completion is outside the language. Section 9.5 is what "outside"
   means in practice.
 
 `GrammarNotHonouredError` subclasses item 257's `ResponseValidationError`, which
