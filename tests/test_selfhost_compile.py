@@ -502,9 +502,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "components_await.rvl",
         "async_effects.rvl",
         "async_arrow_emission.rvl",
-        # spawn / instance-get
-        "spawn.rvl",
-        "instance_get.rvl",
+        # (spawn / instance-get left this list when `selfhost/lower.rvl` grew
+        # the instance surface: the `spawn <C> with { … }` acquire node, the
+        # handle's own verb tail, and the `<handle>.<key>` provision read that
+        # lowers to `instance-get`. `spawn.rvl` and `instance_get.rvl` now
+        # compile byte-exact through the fully-native chain.)
         # (realm placement metadata — isolate / intercept / routes — left this
         # list when lower.rvl grew the component-header prelude; the four ts
         # realm documents now compile byte-exact through the native chain.)
