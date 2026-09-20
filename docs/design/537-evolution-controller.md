@@ -1,10 +1,9 @@
 # Design: the evolution controller, and an authority the loop may not evolve
 
-Design-doc id **536**. 531 through 535 are all claimed on open branches at the
-time of writing, so 536 is the next genuinely free number: 531 on
+Design-doc id **537**. 531 through 536 are claimed: 531 on
 `agent/1186-route-model`, 532 on `agent/1195-typed-computer-use`, 533 on
 `agent/1205-evolution-curriculum`, 534 on `agent/1206-evolution-reward`, 535 on
-`agent/1207-held-out-scoring`. The number was taken against the open pull
+`agent/1207-held-out-scoring`, and 536 on `agent/1191-model-decision-evidence`. The number was taken against the open pull
 requests rather than against `main`, because four lanes collided on 531 in one
 day by each taking "next free" against the same `main`. The roadmap item of the
 same number is unrelated, which is the established convention here.
