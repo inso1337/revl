@@ -193,13 +193,31 @@ def test_every_verb_names_an_emission_class() -> None:
 # on the extern table and NOT on the reach: the audit reports what a component
 # can reach, not what the file mentions.
 
+# The target record is item 521 slice 4's: a computer-use program that
+# declares `ui.find` or an actuation verb must carry it, so the fixture below
+# is the post-slice-4 spelling of the same program. Nothing in THIS file
+# measures the record - it is here because the program would not compile
+# without it, which is exactly what slice 4 set out to make true.
 CUA_WORKER = """
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
 extern emission[screen.observe] fn screen_observe(region: Str) -> Str
   = @py { return "" }
-extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> Str
-  = @py { return "" }
-extern emission[ui.click] fn ui_click(target: Str) -> Int = @py { return 0 }
-extern emission[ui.download] fn ui_download(target: Str) -> Str
+extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> UiTarget
+  = @py { return None }
+extern emission[ui.click] fn ui_click(target: UiTarget) -> Int = @py { return 0 }
+extern emission[ui.download] fn ui_download(target: UiTarget) -> Str
   = @py { return "" }
 
 service Worker { emission fn approve(region: Str) -> Int }
