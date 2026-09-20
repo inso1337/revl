@@ -29,7 +29,12 @@ from revl.diagnostics import GUARANTEES, classify  # noqa: E402
 # non-vacuity run readable: on the tree without this change the controls pass
 # and every council test fails, instead of the whole file erroring at import
 # time. `test_the_module_constants_match` is the tie-back.
-CODE = "G-MODEL-PLACE"
+# Item 1190 / `docs/design/557-council-disagreement.md` split the council's
+# refusals across two codes. `CODE` is the disagreement family, which is almost
+# all of them; `PLACE_CODE` is the two whose subject is a `model role` and whose
+# rewrite is therefore item 512's.
+CODE = "G-COUNCIL-SPLIT"
+PLACE_CODE = "G-MODEL-PLACE"
 FUNCTIONS = ("proposer", "adversary", "verifier")
 AGGREGATIONS = ("unanimous", "majority", "veto")
 
@@ -263,7 +268,8 @@ def test_a_member_with_no_declared_role_is_refused():
     assert "names no action" not in str(err)
     assert "model role `nowhere`, which is not declared" in str(err)
     assert "edge" in str(err) and "vast" in str(err)  # the known roles
-    assert classify(err)["code"] == CODE
+    # A `model role` is the subject, so the rewrite is item 512's: declare it.
+    assert classify(err)["code"] == PLACE_CODE
 
 
 def test_an_unknown_council_function_is_refused():
@@ -335,7 +341,8 @@ def test_a_council_named_after_a_role_is_refused():
               + TAIL)
     err = refusal(source)
     assert "has the name of the model role" in str(err)
-    assert classify(err)["code"] == CODE
+    # Two placement tables would both answer the word, so this one is 512's too.
+    assert classify(err)["code"] == PLACE_CODE
 
 
 # ---------------------------------------------------------------------------
@@ -354,13 +361,19 @@ def test_an_admitted_council_writes_no_ir():
     assert with_council == without
 
 
-def test_no_new_guarantee_code_is_registered():
-    """The council is the placement family's second construct, not a second
-    family. A new code would need a reproducer under `examples/rejections/` or
-    an `ACKNOWLEDGED` entry for item 523's generated tier matrix, and this
-    slice adds no new class of refusal."""
+def test_the_guarantee_codes_are_registered():
+    """Slice 1 filed every council refusal under `G-MODEL-PLACE`, on the
+    reading that the council is the placement family's second construct.
+
+    Item 1190 reversed that for the disagreement rules and
+    `docs/design/557-council-disagreement.md` section 2 gives the reason:
+    `classify()` hands an agent a `fix` line, item 512's says to route the
+    origin to an `on_device` role, and that is not the rewrite for `on_tie
+    allow`. Both codes are registered; which refusal carries which is
+    `tests/test_council_disagreement_1190.py`.
+    """
     assert CODE in GUARANTEES
-    assert "G-MODEL-COUNCIL" not in GUARANTEES
+    assert PLACE_CODE in GUARANTEES
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +384,7 @@ def test_the_module_constants_match():
     from revl import model_council
 
     assert model_council.CODE == CODE
+    assert model_council.PLACE_CODE == PLACE_CODE
     assert model_council.FUNCTIONS == FUNCTIONS
     assert model_council.AGGREGATIONS == AGGREGATIONS
     assert model_council.QUORUM_BASES == ("declared",)

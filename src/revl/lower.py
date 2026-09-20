@@ -7745,6 +7745,14 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # calls are declared to go. A program with no block hands over `{}` and
     # every lookup in the walk misses, so nothing moves.
     taint_model.model_routes = _model_route.check(program)
+    # item 512 slice 4: the role TABLE, which is what makes a `model.<tail>`
+    # capability token readable as a placement rather than as an operation
+    # name. `check()` validated it on the line above (it calls `roles()` first
+    # and refuses there); this asks for it again rather than threading it back
+    # out, which keeps `check()`'s return shape the one section 9 of the design
+    # note promised item 514. An empty table leaves every `model.*` crossing
+    # the operation token it has always been.
+    taint_model.model_roles = _model_route.roles(program)
 
     # Model councils (roadmap item 516). After the routes, because a council's
     # members are `model role` declarations and `roles()` is the table both

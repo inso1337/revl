@@ -534,6 +534,13 @@ class TaintModel:
     # program that declares no `route model` block, and a component absent from
     # it declared none, which is the fact the `unrouted` verdict reads.
     model_routes: dict = field(default_factory=dict)
+    # item 512 slice 4: the program's validated `model role` table, as
+    # `{name: Role}`, from the same `revl.model_route` pass. It is what makes a
+    # `model.<tail>` capability token readable as a PLACEMENT rather than as an
+    # operation name: the tail names a role only when a role by that name was
+    # declared, so a program that declares none leaves every `model.*` crossing
+    # exactly the operation token it has always been.
+    model_roles: dict = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
@@ -544,11 +551,23 @@ class TaintModel:
         through `secret_receivers` (item 256 Slice 3); a `route` clause engages it
         through `untrusted_params` (item 457 — a routed operation's parameters are
         request values, so the operation carries an `input` origin whether or not
-        the author wrote a qualifier)."""
+        the author wrote a qualifier).
+
+        A `route model` block engages it too, through `model_routes` (item 512
+        slice 4). That entry is NOT a taint surface and is the odd one here, so
+        the reason is worth writing down: the crossing side asks where a call
+        GOES, which is a property of the capability token and the block, and no
+        value has to be tainted for the question to have an answer. Gating it
+        behind a qualifier would make a placement rule that fires only on the
+        programs that happen to carry one - a rule silently inactive over most
+        of its own surface, which is the fail-open shape the item exists to
+        remove. A program with no block is unaffected, so nothing that compiles
+        today starts walking."""
         return bool(self.sources or self.sinks or self.untrusted_params
                     or self.declassifiers or self.declared_endorse
                     or self.secret_receivers or self.secret_config
-                    or self.retained_params or self.retention_policies)
+                    or self.retained_params or self.retention_policies
+                    or self.model_routes)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
@@ -1574,6 +1593,7 @@ class _FlowChecker:
                                             node, via)
                     self._check_model_ceiling(cross, cap, [arg_taints[index]],
                                               node, via, first_index=index)
+                    self._check_model_reach(cross, cap, node)
 
     def _on_sink(self, sink_name: str, kind: str, index: int, arg_taint: Taint,
                  node, internal_via: tuple) -> None:
@@ -1721,6 +1741,52 @@ class _FlowChecker:
                     self.filename, self._line_of(node), message,
                     hint=hint, code=_mr.CODE, category=_mr.CATEGORY,
                 )
+
+    def _check_model_reach(self, crossing: str, capability: str, node) -> None:
+        """The crossing side of the model placement (item 512, slice 4).
+
+        `check()` decided which roles the action MAY reach; this decides which
+        it DOES. A crossing whose declared capability is `model.<R>`, with `R`
+        a declared `model role`, is placed on `R`, and an action that wrote a
+        `route model` block reaches exactly the roles that block names. A
+        crossing on any other role is refused.
+
+        WHICH WAY IT FAILS. Toward refusing, and it never widens: the block is
+        the complete list, so the answer to "this crossing goes somewhere the
+        block does not name" is a refusal and not an added arm. That is the
+        property item 515's own inheritance note asks for - a scheduler must
+        not be able to pick a role no arm names - and a permission that a later
+        item can widen from the outside is not a permission.
+
+        WHAT IT DELIBERATELY DOES NOT DO. An action with NO block is untouched,
+        the same line `admits()` draws for an unrouted component: a program
+        that declared no placement is judged by the rules that judged it before
+        item 512, and making `route model` mandatory is a different item. A
+        program that declares no `model role` is untouched twice over, because
+        `role_of_crossing` then reads every `model.*` token as the operation
+        name it has always been.
+
+        It runs AFTER the origin ceiling at both call sites, on purpose. A
+        crossing can be both misplaced and carrying a confidential value, and
+        the value side is the half a confidential input can actually be lost
+        through, so its diagnostic is the one the author should see first.
+        """
+        from . import model_route as _mr  # noqa: PLC0415 - import cycle
+
+        if self.infer or not self.enforce:
+            return
+        if not self.action or self.route_arms is None:
+            return
+        role = _mr.role_of_crossing(capability, self.model.model_roles)
+        if role is None or role in _mr.reach_of(self.route_arms):
+            return
+        message, hint = _mr.reach_refusal(
+            role, self.action, self.component or "this component", crossing,
+            capability, self.route_arms)
+        raise RevlError(
+            self.filename, self._line_of(node), message,
+            hint=hint, code=_mr.CODE, category=_mr.CATEGORY,
+        )
 
     def _refuse_secret(self, sink_name: str, kind: str, index: int | None,
                        arg_taint: Taint, node) -> None:
@@ -2255,6 +2321,7 @@ class _FlowChecker:
         if _mcap is not None:
             self._on_model_crossing(callee, _mcap, arg_taints, node, (callee,))
             self._check_model_ceiling(callee, _mcap, arg_taints, node)
+            self._check_model_reach(callee, _mcap, node)
 
         # item 472: a retained value reaching a PERSISTENCE SINK. Checked in the
         # same position as the disclosure crossing above, and before the
