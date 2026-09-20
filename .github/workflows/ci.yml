@@ -369,6 +369,34 @@ jobs:
       # rewriting turns every stale claim into a fresh-looking claim with
       # nobody having read the diff.
       - run: python3 tools/check_roadmap_claims.py --check
+      # issue #1204: the third half of "keep the roadmap/vision/status claims
+      # automatically synchronized". The two lines above gate the roadmap and
+      # `docgen --check` gates the generated blocks; `docs/vision.md` was read
+      # by no tool at all (`git grep -niE 'vision\.md' -- tools/` was empty),
+      # while carrying the table that tells readers "a claim in this project
+      # gets a command or it gets softened" -- seven backticked commands, every
+      # one of them falsifiable by a rename and none of them checked.
+      #
+      # This resolves them against the tree: the directory a `cd` names, the
+      # files a `pytest` line lists, the make target, the script a `sh` line
+      # runs, the package a tool comes from. It does NOT run them -- those
+      # suites are the per-backend jobs in this same workflow, which are
+      # required checks, and a `lint` job that provisioned cargo, a JDK, Go,
+      # node, wasmtime and elan to re-buy that answer would be narrowed the
+      # first time it got slow.
+      #
+      # It also re-checks the generated six-tier block. That block is
+      # `docgen`'s, but `docgen --check` runs in `frontend`, which a docs-only
+      # pull request skips -- so the document that moved would be the one whose
+      # gate did not run. Reading the committed bytes needs no revl install, so
+      # it belongs here too.
+      #
+      # The self-test runs FIRST and plants a rename per rule in a synthetic
+      # tree, so the gate's teeth are exercised on every PR rather than
+      # asserted in a comment. Never add `|| true`, and never narrow a rule to
+      # make a red line pass: fix the document, or soften the claim.
+      - run: python3 tools/check_vision_claims.py --self-test
+      - run: python3 tools/check_vision_claims.py --check
 
   frontend:
     runs-on: ubuntu-latest
@@ -413,6 +441,14 @@ jobs:
       # committed block drifts from a fresh generation — the same contract as
       # the other generated-artifact gates. Emit-only + self-host are pure
       # Python, so this needs no backend toolchain and runs here.
+      #
+      # Roadmap item 523 / issue #1197 put a THIRD block under this same check:
+      # the guarantee x tier support matrix (`GUARANTEE-TIER-MATRIX`), derived
+      # by `tools/tier_guarantees.py` from `revl.diagnostics.GUARANTEES`, the
+      # rejection corpus, the self-host gate and the two divergence registers.
+      # It fails here for a hand edit to the block AND for a guarantee that
+      # arrives with no row on some tier — the case a hand-written support
+      # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
       - run: python3 tools/selfhost_coverage.py --check
       # Issue #301: differential oracles only prove the constructs their corpus

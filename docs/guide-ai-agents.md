@@ -232,10 +232,15 @@ service Cache {
 A provider may be purer than declared, never less pure. Skipping this is the
 single most common rejection when a component writes anywhere.
 
-**`emit` yields a value.** Use it in value position when you need the result:
+**`emit` yields a value.** Use it in value position when you need the result.
+One marker covers one crossing, so a crossing whose result feeds another gets
+its own `emit` first:
 
 ```revl fragment
-fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+fn once(goal) {
+  let draft = emit assistant.complete(goal)
+  return emit compiler.propose(draft)
+}
 ```
 
 **Provide-methods take plain `fn`, no purity modifiers.** You cannot restate

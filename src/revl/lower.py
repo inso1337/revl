@@ -71,6 +71,7 @@ from .taint import (
     splice_declassifiers,
     strip_qualifiers,
 )
+from . import model_route as _model_route
 from .mcp.schema import (
     _parse_type as _schema_parse_type,
     expressibility_reason,
@@ -141,6 +142,7 @@ from .parser import (
     LoadStmt,
     ListPattern,
     Lit,
+    ModelRouteStmt,
     Postfix,
     Program,
     ProvideStmt,
@@ -7551,6 +7553,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # (`check_taint`, below) runs once every component body is lowered.
     taint_model = extract_and_normalize(program, taint_strict=taint_strict)
 
+    # Model placement (roadmap item 512). Checked over the whole program before
+    # any component is lowered, because a `route model` arm reads a `model role`
+    # declared anywhere in the compilation — the `retention` discipline, and the
+    # same reason a policy is resolved before the flow walk that names it. A
+    # program declaring no role and no route walks two empty lists and is
+    # byte-identical through here; nothing is written to the IR either way
+    # (docs/design/531-model-placement.md).
+    _model_route.check(program)
+
     ambient_services = {
         name: _service_from_ir(name, spec)
         for name, spec in (ambient.get("services") or {}).items()
@@ -8344,12 +8355,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
 
     if isinstance(expr, EmitExpr):
         # the value of an irreversible call; the marker stays at the call site
+        # and covers that call alone: its arguments lower in the enclosing
+        # mode, and a marker inside another marker's argument list is refused
+        # (issue #1175, see `_emit_head_args`)
+        _refuse_nested_emit(env, expr.line)
         saved_mode = getattr(env, "_expr_mode", "setup")
+        saved_arg_mode = getattr(env, "_emit_arg_mode", None)
         env._expr_mode = "emit"
+        env._emit_arg_mode = _enclosing_mode(env, saved_mode)
         try:
             node = _lower_component_pure_expr(expr.expr, env, scope, callables, pure_only)
         finally:
             env._expr_mode = saved_mode
+            env._emit_arg_mode = saved_arg_mode
         if not _is_emission_call(node, env):
             raise RevlError(
                 filename, expr.line,
@@ -8498,8 +8516,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             node["opt"] = True
         return node
     if isinstance(expr, ExprCall):
-        args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
-                for a in expr.args]
+        # under an emit head the arguments leave the marked region (#1175)
+        with _emit_head_args(env):
+            args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
+                    for a in expr.args]
         # A spawn-handle provision flowing in as an ARGUMENT to a local arrow
         # whose parameter carries the service type is the same boundary crossing
         # as calling the provision directly; follow it across the parameter
@@ -8833,11 +8853,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             "name": expr.name,
         }
     if isinstance(expr, ExprOptCall):
+        opt_target = _lower_component_pure_expr(expr.target, env, scope, callables, pure_only)
+        with _emit_head_args(env):
+            opt_args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
+                        for a in expr.args]
         return {
             "kind": "optcall",
-            "target": _lower_component_pure_expr(expr.target, env, scope, callables, pure_only),
+            "target": opt_target,
             "method": expr.method,
-            "args": [_lower_component_pure_expr(a, env, scope, callables, pure_only) for a in expr.args],
+            "args": opt_args,
         }
     raise RevlError(filename, line, "unsupported expression in component effect block",
                     hint="block-effect setup is stratum-1 pure code (G6)")
@@ -11702,6 +11726,27 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 )
             routes[stmt.key] = {"realms": list(stmt.realms), "strategy": stmt.strategy}
             continue
+        if isinstance(stmt, ModelRouteStmt):
+            # model placement (item 512): `route model on <action> { … }`. A
+            # prelude declaration like `isolate`/`intercept` — it names what an
+            # action may reach before the action exists, so it must precede
+            # every action. The rules over the arms are `revl.model_route`'s and
+            # already ran over the whole program in `_check_and_lower`; what is
+            # left here is the ordering rule and the decision NOT to lower it:
+            # 512 is a PERMISSION checked at admission, not a runtime selection
+            # (that is item 515), so the block contributes no IR and every
+            # emitter is untouched. See docs/design/531-model-placement.md §6.
+            if action_seen:
+                raise RevlError(
+                    filename, stmt.line,
+                    "`route model` must precede every effect, emit, await, and "
+                    "provide statement",
+                    hint="a model placement declares what an action may reach "
+                         "before any dependency access (prelude rule, the "
+                         "`isolate`/`intercept` discipline; item 512)",
+                    code=_model_route.CODE, category=_model_route.CATEGORY,
+                )
+            continue
         if isinstance(stmt, (IsolateStmt, InterceptStmt)):
             # prelude rule: realm/metadata declarations derive the resolution
             # context (Def. 27/29) and must precede every dependency access
@@ -13991,6 +14036,67 @@ def _lower_instance_get(target: dict, key: str, line: int,
     }
 
 
+# ---------------------------------------------------------- issue #1175 ---
+#
+# One `emit` marker per boundary crossing. The marker judges the HEAD call an
+# `emit` step (or an `emit` expression) is written on and admits that one
+# crossing. The head's ARGUMENTS lower in the mode the `emit` itself sits in
+# ("setup" for a body statement, "undo" inside a teardown slot), so a call
+# evaluated to build an argument is judged exactly as it would be one
+# statement earlier: an unmarked emission draws the G4 marker refusal and a
+# plain call is admitted as before. `compensate` binds per `emit`, and the
+# per-step checks (`_lower_emit_approval`, `_check_intent_refinement`, the
+# cardinality bound) read the step's head, so a crossing under the head with
+# no marker of its own had no step to bind to. An inner `emit` written there
+# is refused as well: the marker admits one crossing, so the inner one is
+# hoisted into its own step first (`_refuse_nested_emit`).
+
+
+def _enclosing_mode(env: Env, saved: str | None) -> str:
+    """The mode an emit head's arguments lower in: the mode the `emit` sits
+    in. A marked head is one call deep, so "emit" itself never is that mode;
+    a marker written directly under another marker inherits the outer one's
+    enclosing mode."""
+    if saved == "emit":
+        return getattr(env, "_emit_arg_mode", None) or "setup"
+    return saved or "setup"
+
+
+@contextlib.contextmanager
+def _emit_head_args(env: Env, mode: str | None = None):
+    """The argument list of a call. Under an emit head (`_expr_mode` is
+    "emit", or `mode` says so on the postfix path) the arguments leave the
+    marked region: they lower in the enclosing mode, inside the head's
+    argument list, where a nested `emit` is refused. Anywhere else this is a
+    no-op. Yields the mode the arguments lower in."""
+    current = mode if mode is not None else getattr(env, "_expr_mode", "setup")
+    if current != "emit":
+        yield current
+        return
+    saved = getattr(env, "_expr_mode", None), getattr(env, "_in_emit_args", False)
+    env._expr_mode = getattr(env, "_emit_arg_mode", None) or "setup"
+    env._in_emit_args = True
+    try:
+        yield env._expr_mode
+    finally:
+        env._expr_mode, env._in_emit_args = saved
+
+
+def _refuse_nested_emit(env: Env, line: int) -> None:
+    """An `emit` expression inside the argument list of an `emit` (G4)."""
+    if not getattr(env, "_in_emit_args", False):
+        return
+    raise RevlError(
+        env.filename, line,
+        "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+        hint="hoist the inner crossing into its own `emit` first. A provide method "
+             "binds its value with `let r = emit …`; an activation body has no value "
+             "binding (an `emit` step there discards its result), so move the pair "
+             "into a provide method to pass the value along",
+        code="G4", category="emission",
+    )
+
+
 def _lower_expr(expr, env: Env, mode: str):
     """mode: 'setup' | 'undo' | 'emit'.
 
@@ -13999,7 +14105,20 @@ def _lower_expr(expr, env: Env, mode: str):
     v0 exception — permitted bare in 'undo', where the expression position
     leaves no room for a marker (DESIGN §3.5 note; the compensate slot
     arrives with IR v1/A5).
+
+    'emit' covers the head call only (issue #1175): the head's arguments
+    lower in the enclosing mode, recorded here as `env._emit_arg_mode`.
     """
+    saved_arg_mode = getattr(env, "_emit_arg_mode", None)
+    if mode == "emit":
+        env._emit_arg_mode = _enclosing_mode(env, getattr(env, "_expr_mode", None))
+    try:
+        return _lower_expr_in_mode(expr, env, mode)
+    finally:
+        env._emit_arg_mode = saved_arg_mode
+
+
+def _lower_expr_in_mode(expr, env: Env, mode: str):
     if isinstance(expr, SpawnExpr):
         return _lower_spawn(expr, env, mode)
     if isinstance(expr, Lit):
@@ -14080,11 +14199,13 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                 if op.args is None:
                     raise RevlError(env.filename, expr.line,
                                     "field access `.{}` is not supported in v0 — only method calls".format(op.name))
+                with _emit_head_args(env, mode) as amode:
+                    bargs = [_lower_expr(a, env, amode) for a in op.args]
                 node = {"kind": "builtin", "method": op.name,
-                        "target": node,
-                        "args": [_lower_expr(a, env, mode) for a in op.args]}
+                        "target": node, "args": bargs}
             return node
-        host_args = [_lower_expr(a, env, mode) for a in call.args]
+        with _emit_head_args(env, mode) as amode:
+            host_args = [_lower_expr(a, env, amode) for a in call.args]
         host_check(f"{head}.{call.name}",
                    [infer_ir(a, env.type_env, env.types, env.services)
                     for a in host_args],
@@ -14131,7 +14252,8 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                     hint="an emission crosses the system boundary and cannot be reverted; "
                          "`emit` makes that visible at the call site",
                 )
-            lowered = [_lower_expr(a, env, mode) for a in op.args]
+            with _emit_head_args(env, mode) as amode:
+                lowered = [_lower_expr(a, env, amode) for a in op.args]
             for arg, (pname, ptype) in zip(lowered, decl.params):
                 actual = infer_ir(arg, env.type_env, env.types, env.services)
                 if ptype and actual and not compatible(ptype, actual, env.types):
@@ -14147,7 +14269,8 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
         # instead of lowering to a call that only crashes at the host runtime,
         # the item-84 shape. Only the FIRST verb off the host local is checked;
         # a host verb's RESULT is opaque, so a chained call reads no family.
-        host_args = [_lower_expr(a, env, mode) for a in op.args]
+        with _emit_head_args(env, mode) as amode:
+            host_args = [_lower_expr(a, env, amode) for a in op.args]
         if node.get("kind") == "name" and node.get("id") in env.host_locals:
             _check_host_verb(
                 env.host_locals[node["id"]], op.name, len(host_args),
