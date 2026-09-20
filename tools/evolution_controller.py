@@ -29,8 +29,9 @@ rather than a rule a later generation can propose a change to. That is correct
 and it is item 544's work, not this module's. What a controller can contribute,
 and what is implemented here, is the other half of the same argument:
 
-  * the kernel set is ENUMERATED in one place (`KERNEL_PATHS` below) instead of
-    being understood, which is the precondition issue #1223 lists first;
+  * the kernel set is ENUMERATED in one place, `KERNEL_PATHS` in
+    `src/revl/kernel_boundary.py`, which this module IMPORTS rather than
+    restates, which is the precondition issue #1223 lists first;
   * the enumeration and the stage table are themselves FENCED
     (`AUTHORITY_FENCE`), so a proposal whose diff reaches the rules that judge
     it is refused BY NAME rather than judged by the rules it just edited. That
@@ -140,6 +141,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from revl.kernel_boundary import KERNEL_PATHS  # noqa: E402
 
 # Exit statuses. REFUSE is distinct from ROLL_BACK for the same reason
 # `tools/heldout_scoring.py` separates REFUSED from DIVERGENT: a reader has to
@@ -210,17 +214,11 @@ AUTHORITY_FENCE = (
 # policies" as ordinary behaviour tuning can extend its own `Retained[T, P]`
 # deadline, which is an authority change wearing the clothes of a cache
 # setting, and G-RETAIN is the guarantee it quietly relaxes.
-KERNEL_PATHS = (
-    "src/revl/admission.py",
-    "src/revl/admit_profile.py",
-    "src/revl/attest.py",
-    "src/revl/taint.py",
-    "src/revl/retention.py",
-    "crates/revl-gate",
-    "formal",
-    "tools/gate_reference_census.py",
-    "tools/gate_reference_census_baseline.json",
-)
+# KERNEL_PATHS is IMPORTED, not restated. It used to be copied here, and the
+# copy had already drifted: `src/revl/kernel_boundary.py` itself was in the
+# definition and missing from this one, so the diff-side check did not defend
+# the file that says what the kernel is. A loop permitted to edit that file
+# could widen the boundary and then pass the widened check.
 
 # Services whose grant is the non-extern path to the decider. The first two are
 # `_DECIDER_SERVICES` in `src/revl/gate.py`, where `Gate.propose` refuses a
