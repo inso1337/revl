@@ -265,3 +265,126 @@ def teardown_refusal(token: str, kind: str, name: str,
             f"docs/design/538-ui-transactions.md)",
         )
     return None
+
+
+# ------------------------------------------------------- the taint roles
+#
+# Roadmap item 521 (issue #1195), docs/design/532-typed-computer-use.md §5,
+# Slice 2.
+#
+# Item 249's derived classes read a capability token's dotted HEAD, which is
+# why a reserved root is the granularity those tables want: `screen` joins the
+# SOURCE classes and `ui` the SINK classes in `revl.taint`. But the head alone
+# is too coarse for this family by exactly one verb, and the exception is the
+# design's own reading rather than a convenience:
+#
+#   `ui.find` SITS ON BOTH SIDES. It consumes observed content and produces a
+#   target, so it is a source whose output is a claim (design §5). If the head
+#   rule made it a sink too, the family's canonical program - observe, find,
+#   click - could not be written at all without endorsing the observation
+#   BEFORE anything examined it, which is the opposite of what the item wants:
+#   a target must stay `Untrusted` all the way to the actuation, and the
+#   endorsement belongs at the actuation, where an operator can see what is
+#   being claimed about it.
+#
+# So the taint role is REGISTRY-OWNED, per verb, exactly as the reversibility
+# class above is, and for the same reason: a classification an author can
+# lower is a classification a careless author lowers.
+
+#: The return is attacker-influenced content. Under `taint_strict` the crossing
+#: mints `SOURCE_ORIGIN` on its return with no author qualifier.
+SOURCE = "source"
+
+#: EVERY argument is a position where a value IS authority. A capability token
+#: carries no parameter roles - item 294's parameters narrow the capability,
+#: they do not name the parameters - so revl cannot tell `ui.text`'s target
+#: from its value, and the honest derivation is all-arguments. That is the same
+#: shape `shell`/`exec`/`terminal` already have, and per-parameter precision
+#: remains available only through an explicit `Trusted[T]` annotation, which is
+#: author-side and therefore never the derivation.
+SINK = "sink"
+
+#: token -> the roles it carries. Every admissible spelling appears exactly
+#: once; the exhaustiveness is a test, not a convention.
+#:
+#: `screen.observe` reads pixels: pure source, and the one the item's premise
+#: names ("a target discovered by looking at pixels is untrusted input").
+#: `ui.find` derives a target from that content: source, not sink, per the
+#: paragraph above. `ui.click` actuates: the target IS the authority, the same
+#: position a shell string occupies. `ui.text` generates KEY INPUT, which is
+#: not inert text - a newline submits, a tab moves focus, a shortcut is a
+#: command - so observed content reaching it chooses what happens and not only
+#: what is written. `ui.download` names what gets fetched onto the host, and an
+#: untrusted name there is the file-on-the-host decision made by the screen.
+TAINT_ROLES: dict[str, frozenset[str]] = {
+    "screen.observe": frozenset({SOURCE}),
+    "ui.find": frozenset({SOURCE}),
+    "ui.click": frozenset({SINK}),
+    "ui.text": frozenset({SINK}),
+    "ui.download": frozenset({SINK}),
+}
+
+#: The coarse origin class a computer-use SOURCE verb mints. Both source verbs
+#: mint `screen` rather than one minting `ui`: what makes a resolved target
+#: untrusted is that it was derived by looking at a screen, and a second origin
+#: name for the same provenance would let a policy rule written against one
+#: spelling miss the other. `ui` names the SINK side of this family and is
+#: deliberately not an origin.
+SOURCE_ORIGIN = "screen"
+
+
+def _bare(token: str) -> str:
+    """The token with any item-294 parameter valuation stripped. A narrowed
+    `ui.click(host="a")` is the same operation as `ui.click`; a valuation that
+    could change a taint role would be an author-side opt-out."""
+    return token.split("(", 1)[0]
+
+
+def taint_roles(token: str) -> frozenset[str]:
+    """The taint roles of a computer-use token; empty for anything else.
+
+    Resolved by the LONGEST REGISTERED PREFIX, not by exact match, and that is
+    the forward-safety this table owes the ladder. Slice 3 will admit the rung
+    tokens (`ui.click.selector`, `ui.click.pixel`), and a rung is a strictly
+    WEAKER way to name the same target - a selector may match a different
+    control that satisfies it, a pixel always hits something - so a rung must
+    never carry a weaker taint role than the verb it descends from. An exact
+    match would have given `ui.click.pixel` no role at all, which is the
+    fail-open direction, reached by adding a spelling in a different file.
+    """
+    segments = _bare(token).split(".")
+    for depth in range(len(segments), 0, -1):
+        roles = TAINT_ROLES.get(".".join(segments[:depth]))
+        if roles:
+            return roles
+    return frozenset()
+
+
+def is_taint_sink(token: str) -> bool:
+    """Is every argument of this computer-use verb a taint sink?
+
+    False for a token outside the family, so a caller may ask about any
+    capability token. `revl.taint._sink_of` consults this for a token under a
+    reserved root INSTEAD OF its head rule, which is what keeps `ui.find` off
+    the sink side.
+
+    A token under the `ui` root that this table cannot resolve at all is
+    treated as a SINK. Such a token cannot be declared today (the verb set is
+    closed and `refusal()` rejects it), so this is not a live path; it is the
+    default that decides which way an unrecognised spelling falls if one ever
+    reaches here - through an ambient manifest, say - and the default has to be
+    the side that refuses.
+    """
+    bare = _bare(token)
+    roles = taint_roles(bare)
+    if roles:
+        return SINK in roles
+    return bare.split(".", 1)[0] == "ui"
+
+
+def source_origin(token: str) -> str | None:
+    """The origin class this computer-use verb mints on its return, or `None`
+    when the verb is not a source. `revl.taint._origin_of` consults this before
+    its head rule, because `ui.find`'s head is the SINK root and the head rule
+    would otherwise mint the literal token as an origin nothing matches."""
+    return SOURCE_ORIGIN if SOURCE in taint_roles(token) else None
