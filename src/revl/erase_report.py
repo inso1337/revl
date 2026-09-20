@@ -801,7 +801,7 @@ def _render_transactions(plans: list[dict]) -> list[str]:
                 f"        {step['extern']}() [{step['token']}] "
                 f"{step['class']} | residue {step['residue']} | "
                 f"{step['confirmation']} | {step['postcondition']}")
-            out.append(f"            eligible phases: "
+            out.append("            eligible phases: "
                        + ", ".join(step["eligiblePhases"]))
         unconfirmed = plan.get("unconfirmedIrreversibleSteps") or []
         if unconfirmed:
