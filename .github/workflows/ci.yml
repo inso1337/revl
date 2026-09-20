@@ -413,6 +413,14 @@ jobs:
       # committed block drifts from a fresh generation — the same contract as
       # the other generated-artifact gates. Emit-only + self-host are pure
       # Python, so this needs no backend toolchain and runs here.
+      #
+      # Roadmap item 523 / issue #1197 put a THIRD block under this same check:
+      # the guarantee x tier support matrix (`GUARANTEE-TIER-MATRIX`), derived
+      # by `tools/tier_guarantees.py` from `revl.diagnostics.GUARANTEES`, the
+      # rejection corpus, the self-host gate and the two divergence registers.
+      # It fails here for a hand edit to the block AND for a guarantee that
+      # arrives with no row on some tier — the case a hand-written support
+      # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
       - run: python3 tools/selfhost_coverage.py --check
       # Issue #301: differential oracles only prove the constructs their corpus
