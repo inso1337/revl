@@ -11,11 +11,12 @@ criterion would have produced a dishonest column. This module does the check.
 
 The first version of this file searched a vocabulary (`remove`, `dispose`,
 `unregister`, ...) across each package and reported a boolean. That version was
-deleted because it does not work, and the way it failed is worth recording:
-across six frameworks it returned true for all six, on hits like a graph builder
-calling `list.remove()` and an HTTP client's `aclose()`. A boolean that is true
-for everything discriminates nothing, and publishing it as "these frameworks
-have an unload path" would have been false.
+deleted because it does not work, and the way it failed is worth recording
+precisely rather than roughly: it reported a de-registration symbol for **six of
+the eight packages**, including all four python ones, on hits like a flow-graph
+builder calling `list.remove()`, a callback manager calling `list.remove()`, and
+the word "unregistered" inside a comment. Two of those six were genuine. The
+other four were not, and nothing in the output distinguished them.
 
 So the data below is a set of **named, falsifiable claims** about each
 framework's published API, and this module's job is to try to falsify them. A
@@ -82,6 +83,7 @@ DEREGISTRATION_NAMES = [
 CANDIDATES = [
     {
         "id": "modelcontextprotocol-sdk",
+        "category": "tool-host",
         "name": "@modelcontextprotocol/sdk",
         "ecosystem": "npm",
         "version": "1.30.0",
@@ -112,6 +114,7 @@ CANDIDATES = [
     },
     {
         "id": "pydantic-ai-slim",
+        "category": "agent-framework",
         "name": "pydantic-ai-slim",
         "ecosystem": "pypi",
         "version": "2.46.0",
@@ -138,6 +141,7 @@ CANDIDATES = [
     },
     {
         "id": "semantic-kernel",
+        "category": "agent-framework",
         "name": "semantic-kernel",
         "ecosystem": "pypi",
         "version": "1.44.1",
@@ -171,6 +175,7 @@ CANDIDATES = [
     },
     {
         "id": "langchain-js",
+        "category": "agent-framework",
         "name": "langchain",
         "ecosystem": "npm",
         "version": "1.5.11",
@@ -186,6 +191,7 @@ CANDIDATES = [
     },
     {
         "id": "langchain-core-py",
+        "category": "agent-framework",
         "name": "langchain-core",
         "ecosystem": "pypi",
         "version": "1.6.3",
@@ -201,6 +207,7 @@ CANDIDATES = [
     },
     {
         "id": "openai-agents",
+        "category": "agent-framework",
         "name": "@openai/agents",
         "ecosystem": "npm",
         "version": "0.18.0",
@@ -215,6 +222,7 @@ CANDIDATES = [
     },
     {
         "id": "crewai",
+        "category": "agent-framework",
         "name": "crewai",
         "ecosystem": "pypi",
         "version": "1.15.22",
@@ -233,6 +241,7 @@ CANDIDATES = [
     },
     {
         "id": "cordis",
+        "category": "plugin-runtime",
         "name": "cordis",
         "ecosystem": "npm",
         "version": "4.0.0-rc.10",
@@ -413,7 +422,7 @@ def survey(fetch: bool) -> dict:
     try:
         for spec in CANDIDATES:
             row = {k: spec[k] for k in
-                   ("id", "name", "ecosystem", "version", "role",
+                   ("id", "name", "ecosystem", "version", "role", "category",
                     "registration_api", "note")}
             try:
                 fetcher = fetch_npm if spec["ecosystem"] == "npm" else fetch_pypi
@@ -495,7 +504,20 @@ def render(doc: dict) -> str:
         lines.append(f"| `{row['name']}` | {row['version']} | "
                      f"{row['registration_api']} | {verdict_for(row)} "
                      f"| {'; '.join(evidence)} |")
+    frameworks = [r for r in doc["frameworks"]
+                  if r.get("category") == "agent-framework" and r.get("fetched")]
+    none_published = [r for r in frameworks if verdict_for(r) == "none published"]
+    per_reg = [r for r in frameworks
+               if verdict_for(r).startswith("publishes one (per-registration)")]
     lines += ["",
+              f"Of the {len(frameworks)} agent frameworks here, {len(per_reg)} "
+              f"publish a way to retire an individual registered tool and "
+              f"{len(none_published)} publish no unload path at all. The tool "
+              f"host and the control are outside that denominator: the tool "
+              f"host is the one package with a per-registration retirement, and "
+              f"the control was chosen because its unload path was known to "
+              f"exist.",
+              "",
               "A confirmed `present` claim says a symbol exists in a published file. "
               "It does not say what calling it releases, which is what the residue "
               "probe measures and what nothing in this table may be quoted as."]
@@ -518,6 +540,12 @@ def check(doc: dict) -> list:
                 f"control {row['name']} shows no unload path; the search is finding "
                 f"nothing rather than the ecosystem having nothing")
     for row in rows:
+        if row.get("category") not in ("agent-framework", "tool-host",
+                                       "plugin-runtime"):
+            problems.append(
+                f"{row.get('id')}: category {row.get('category')!r} is not one "
+                f"the report knows how to count; a denominator that mixes an "
+                f"agent framework with a tool host means nothing")
         if row.get("fetched") is False and "not_measured_reason" not in row:
             problems.append(f"{row['id']}: unfetched row with no reason")
         for claim in row.get("claims") or []:
