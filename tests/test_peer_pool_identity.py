@@ -619,7 +619,7 @@ def test_a_revoked_peer_that_rejoins_starts_at_the_entry_tier_with_no_evidence()
     assert receipt["verdict"] == pp.WITHDRAW
     assert receipt["retained"]["evidence"] == 7
     assert receipt["retained"]["signatures_verifiable"] is True
-    assert receipt["key_revoked"] == IDENTITIES[peer].key_id
+    assert receipt["keys_revoked"] == [IDENTITIES[peer].key_id]
 
     # Its key is revoked, so it cannot rejoin under it at all, and the ledger it
     # signed is still checkable.
@@ -933,3 +933,31 @@ def test_the_pool_publishes_no_asymmetric_primitive_to_revl_programs():
                  for line in text.splitlines()
                  if line.startswith("pub extern") and "fn " in line}
     assert published == {"sha256", "hmac_sha256", "ct_equal", "random_token"}
+
+
+@pytest.mark.parametrize("hostile", [
+    {"peer_id": "peer-0", "sign_alg": {"nested": "object"}},
+    {"peer_id": "peer-0", "sign_alg": ["a", "list"]},
+    {"peer_id": "peer-0", "sign_alg": None},
+    {"peer_id": "peer-0", "sign_alg": pi.SIGN_ALG, "key_id": {"not": "a string"}},
+    {"peer_id": "peer-0", "sign_alg": pi.SIGN_ALG, "key_id": "0" * 16,
+     "signature": 17},
+    {"peer_id": ["not", "a", "string"]},
+    {"sign_alg": pi.SIGN_ALG},
+    [],
+    "a string",
+    None,
+])
+def test_a_hostile_record_is_refused_not_raised(hostile):
+    """The gate never raises on peer-supplied input, and the identity checks do
+    not become the one place it does.
+
+    An unhashable `sign_alg` is the specific shape worth naming: a dict lookup
+    keyed on a record member would raise on it, and it would raise on the
+    REFUSAL path, which is the path that exists for hostile input."""
+    record = make_charter(pp.MODE_MIXED)
+    receipt = admit(record, hostile, directory=pinned_directory())
+    assert receipt["verdict"] == pp.REFUSE
+    assert receipt["link"] in pp.REFUSAL_LINKS
+    assert pp.identity_backing(hostile) in (None, pi.IDENTITY_ASYMMETRIC,
+                                            pi.IDENTITY_SHARED_KEY)
