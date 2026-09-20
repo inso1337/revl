@@ -542,6 +542,13 @@ def matrix() -> dict:
 START = "<!-- GUARANTEE-TIER-MATRIX:START -->"
 END = "<!-- GUARANTEE-TIER-MATRIX:END -->"
 
+#: How the explanation list says each verdict, in the issue's own vocabulary.
+_PHRASE = {
+    DIVERGENCE: "is a **recorded divergence**.",
+    NO_REPRODUCER: "has **no reproducer**.",
+    UNIMPLEMENTED: "is **unimplemented**.",
+}
+
 _CELL = {
     PROVED: "proved",
     DIVERGENCE: "**div**",
@@ -618,7 +625,10 @@ def markdown(data: dict | None = None) -> str:
             why = cell["why"].rstrip(".")
             seen.setdefault(f"{cell['verdict']}: {why}", []).append(tier)
         for why, where in seen.items():
-            explained.append(f"- `{row['code']}` on {', '.join(where)} — {why}.")
+            verdict, _, detail = why.partition(": ")
+            explained.append(f"- `{row['code']}` on {', '.join(where)} "
+                             f"{_PHRASE[verdict]} "
+                             f"{detail[:1].upper()}{detail[1:]}.")
     if explained:
         out.append("")
         out.append("**Why a cell is not `proved`.** Every non-`proved` cell "

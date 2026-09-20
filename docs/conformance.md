@@ -256,27 +256,27 @@ The six host columns share their verdict wherever a register does not separate t
 
 **Why a cell is not `proved`.** Every non-`proved` cell above, with the register or the reason that decided it:
 
-- `G1` on revl — divergence: the self-host gate agrees on 5 of 6 G1 reproducers; the rest it admits.
-- `G2` on revl — divergence: the self-host gate agrees on 2 of 3 G2 reproducers; the rest it admits.
-- `G3` on revl — divergence: the self-host gate agrees on 1 of 2 G3 reproducers; the rest it admits.
-- `G4` on revl — divergence: the self-host gate agrees on 16 of 17 G4 reproducers; the rest it admits.
-- `G5` on revl — unimplemented: the self-host gate answers every G5 reproducer under G4 (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `G6` on revl — divergence: the self-host gate agrees on 5 of 6 G6 reproducers; the rest it admits.
-- `G7` on revl — unimplemented: the self-host gate answers every G7 reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `G9` on revl — unimplemented: the self-host gate raises no objection to any G9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `A2` on revl — unimplemented: the self-host gate raises no objection to any A2 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `A3` on py, ts, rust, java, wasm, go, revl — no reproducer: A3 renames rather than refusing (`docs/guarantees.md`: "renames, never refuses"), so no program is rejected under it and there is no reproducer to run. The rename transform itself is pinned by the per-tier reserved-word suites (`backends/*/test_reserved_word_idents_*.py`).
-- `A5` on py, ts, rust, java, wasm, go, revl — no reproducer: compensation accompanies an emission by construction: the grammar attaches `compensate` to the `emit` that carries it, so a violating program is not expressible and cannot be written as a fixture.
-- `A8` on revl — unimplemented: the self-host gate raises no objection to any A8 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `A9` on revl — unimplemented: the self-host gate raises no objection to any A9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `T1` on revl — divergence: the self-host gate agrees on 24 of 30 T1 reproducers; the rest it admits.
-- `T3` on py, ts, rust, java, wasm, go, revl — no reproducer: an open hole is refused at the ADMISSION gate rather than by `compile_files`, so a hole fixture compiles here and is refused one stage later; the reproducers live with the gate (`src/revl/holes.py`, `docs/holes.md`).
-- `G-RETAIN` on revl — unimplemented: the self-host gate answers every G-RETAIN reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `G-SECRET` on py, ts, java, wasm, go — divergence: roadmap item 421 F6 claims closure citing only `backends/rust/` and never names this tier (`--check-tier-parity`, subjects: redact, secret); and the confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
-- `G-SECRET` on rust, revl — no reproducer: the confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
-- `G-SECRET-FLOW` on py, ts, java, wasm, go — divergence: roadmap item 421 F6 claims closure citing only `backends/rust/` and never names this tier (`--check-tier-parity`, subjects: redact, secret).
-- `G-SECRET-FLOW` on revl — unimplemented: the self-host gate raises no objection to any G-SECRET-FLOW reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `T-UNRESOLVED` on py, ts, rust, java, wasm, go, revl — no reproducer: refused by the checker (`src/revl/typecheck.py`) for a type the compilation does not declare, which is a multi-file condition a single-file fixture in this corpus cannot set up; the reproducers are the doc fences tagged `revl reject T-UNRESOLVED`, compiled by `tests/test_doc_examples.py`.
+- `G1` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G1 reproducers; the rest it admits.
+- `G2` on revl is a **recorded divergence**. The self-host gate agrees on 2 of 3 G2 reproducers; the rest it admits.
+- `G3` on revl is a **recorded divergence**. The self-host gate agrees on 1 of 2 G3 reproducers; the rest it admits.
+- `G4` on revl is a **recorded divergence**. The self-host gate agrees on 16 of 17 G4 reproducers; the rest it admits.
+- `G5` on revl is **unimplemented**. The self-host gate answers every G5 reproducer under G4 (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `G6` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G6 reproducers; the rest it admits.
+- `G7` on revl is **unimplemented**. The self-host gate answers every G7 reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `G9` on revl is **unimplemented**. The self-host gate raises no objection to any G9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `A2` on revl is **unimplemented**. The self-host gate raises no objection to any A2 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `A3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. A3 renames rather than refusing (`docs/guarantees.md`: "renames, never refuses"), so no program is rejected under it and there is no reproducer to run. The rename transform itself is pinned by the per-tier reserved-word suites (`backends/*/test_reserved_word_idents_*.py`).
+- `A5` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Compensation accompanies an emission by construction: the grammar attaches `compensate` to the `emit` that carries it, so a violating program is not expressible and cannot be written as a fixture.
+- `A8` on revl is **unimplemented**. The self-host gate raises no objection to any A8 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `A9` on revl is **unimplemented**. The self-host gate raises no objection to any A9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `T1` on revl is a **recorded divergence**. The self-host gate agrees on 24 of 30 T1 reproducers; the rest it admits.
+- `T3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. An open hole is refused at the ADMISSION gate rather than by `compile_files`, so a hole fixture compiles here and is refused one stage later; the reproducers live with the gate (`src/revl/holes.py`, `docs/holes.md`).
+- `G-RETAIN` on revl is **unimplemented**. The self-host gate answers every G-RETAIN reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `G-SECRET` on py, ts, java, wasm, go is a **recorded divergence**. Roadmap item 421 F6 claims closure citing only `backends/rust/` and never names this tier (`--check-tier-parity`, subjects: redact, secret); and the confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
+- `G-SECRET` on rust, revl has **no reproducer**. The confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
+- `G-SECRET-FLOW` on py, ts, java, wasm, go is a **recorded divergence**. Roadmap item 421 F6 claims closure citing only `backends/rust/` and never names this tier (`--check-tier-parity`, subjects: redact, secret).
+- `G-SECRET-FLOW` on revl is **unimplemented**. The self-host gate raises no objection to any G-SECRET-FLOW reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
+- `T-UNRESOLVED` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Refused by the checker (`src/revl/typecheck.py`) for a type the compilation does not declare, which is a multi-file condition a single-file fixture in this corpus cannot set up; the reproducers are the doc fences tagged `revl reject T-UNRESOLVED`, compiled by `tests/test_doc_examples.py`.
 <!-- GUARANTEE-TIER-MATRIX:END -->
 
 `docs/vision.md`'s hand-written six-tier "what it proves" table is the prose
