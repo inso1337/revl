@@ -326,17 +326,28 @@ admission, the five preconditions, the accumulator, the three-shape verdict,
 the restoration report and the renderer. 79 tests on a tree without item 517
 and 83 with it.
 
-**Slice 2, the scheduler.** Serve a declared fraction of an action in shadow:
-the incumbent's answer is used, both worlds are recorded, and each pair is
-appended to the window. This needs a runtime seam at the model boundary per
-tier and is where the `revl canary` machinery is actually reused, since the
-recorded worlds are `replay.Step` timelines. It also needs the action
-correlation of section 7.
+**Slice 2, the scheduler. LANDED, see
+[558-shadow-scheduling.md](558-shadow-scheduling.md).**
+`src/revl/shadow_routing.py` serves a declared fraction of an action in
+shadow: the incumbent's answer is used, both worlds are recorded, and each
+pair is appended to the window. The runtime seam at the model boundary is two
+callables, one per role, so the module is tier-independent and no tier is
+wired to it yet. The `revl canary` machinery IS reused there: a pair may carry
+two `replay.Timeline` recorded worlds and `accumulate` compares them with
+`canary.compare_timelines`, item 496's own function with item 496's own key.
 
-**Slice 3, the CLI and the lifecycle wiring.** `revl promote --plan` reporting
-a verdict, and the adapter that hands this verdict to item 520's controller as
-its `shadow` stage record. The controller already has the stage; what it does
-not have is a producer.
+Section 7's action correlation is closed for a SCHEDULED window: the scheduler
+stamps each observation with the action and realm it scheduled it for, and a
+window whose stamps do not match the plan refuses (`action-mismatched`). The
+stamp is trusted rather than derived, for the reason section 7 gives, and note
+558 section 3.1 states that plainly.
+
+**Slice 3, the CLI and the lifecycle wiring. OPEN.** `revl promote --plan`
+reporting a verdict, and the adapter that hands this verdict to item 520's
+controller as its `shadow` stage record. The controller already has the stage;
+what it does not have is a producer. Wiring a tier's model boundary to
+`shadow_routing.serve`, and checking the declared realm against a composition
+the way `revl canary` does, belong with it.
 
 ---
 
