@@ -446,7 +446,7 @@ def cardinality(ir: dict) -> dict:
     # load would cycle.
     from .boundary import (  # noqa: PLC0415
         _UNKNOWN_DISPATCH, _extern_reachability, _fn_call_names)
-    from .emission_analysis import _calls_in, _emitting_capabilities  # noqa: PLC0415
+    from .emission_analysis import _calls_in, _emitting_extern_names  # noqa: PLC0415
     from .lower import _find_loop_step  # noqa: PLC0415
 
     reach = _extern_reachability(ir)
@@ -457,7 +457,10 @@ def cardinality(ir: dict) -> dict:
         fns = list(fns.values())
     fn_names = {fn.get("name") for fn in fns}
     fn_by_name = {fn.get("name"): fn for fn in fns}
-    fn_caps_map = _emitting_capabilities(fns, ir.get("externs") or [])
+    # keyed by EXTERN NAME: a ceiling row names the host code whose crossing
+    # multiplicity is unchecked, not the authority token beside it (item 343,
+    # "cardinality's per-capability ceilings stay keyed by extern name").
+    fn_caps_map = _emitting_extern_names(fns, ir.get("externs") or [])
 
     # --- the fn call graph over the IR, for recursion and loop classification.
     # `_fn_call_names` records both component-body (`{kind: fn, name}`) and

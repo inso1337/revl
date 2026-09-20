@@ -71,6 +71,7 @@ from .taint import (
     splice_declassifiers,
     strip_qualifiers,
 )
+from . import model_council as _model_council
 from . import model_route as _model_route
 from .mcp.schema import (
     _parse_type as _schema_parse_type,
@@ -7560,8 +7561,24 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # program declaring no role and no route walks two empty lists and is
     # byte-identical through here; nothing is written to the IR either way
     # (docs/design/531-model-placement.md).
+    # item 514: the VALUE side reads this table rather than re-deriving one from
+    # the AST (`docs/design/531-model-placement.md` section 9 built `check()`'s
+    # return shape for it). Handing it to the taint model here is what makes the
+    # flow walk able to ask, at a `model.*` crossing, where this action's model
+    # calls are declared to go. A program with no block hands over `{}` and
+    # every lookup in the walk misses, so nothing moves.
     model_routes = _model_route.check(program)
     model_roles = _model_route.roles(program)
+    taint_model.model_routes = model_routes
+
+    # Model councils (roadmap item 516). After the routes, because a council's
+    # members are `model role` declarations and `roles()` is the table both
+    # read; before any component is lowered, for the reason above. A council is
+    # a DECLARATION checked at admission and writes no IR, exactly as a route
+    # does: slice 1 binds a council to no action, so an admitted program is
+    # byte-identical to the same program with the declaration deleted
+    # (docs/design/543-model-council.md).
+    _model_council.check(program)
 
     ambient_services = {
         name: _service_from_ir(name, spec)
@@ -7961,6 +7978,17 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         manifest["named_instances"] = sorted(
             spawn_reg["named_instances"],
             key=lambda r: (r["spawner"], r["name"]))
+
+    # THE ADMISSION KERNEL as a capability (item 544): the kernel's own held
+    # set on the left, a component's effective ceiling on the right, and no
+    # intersection admitted. Runs after the manifest is assembled so it reads
+    # item 519's `model_reach` product rather than re-deriving reach from the
+    # AST, and so the per-edge `effective` statement is the one the product
+    # recorded. Inert for a composition that declares no kernel capability and
+    # is not admitted under an untrusted-author profile, which is every program
+    # on the tree (docs/design/545-kernel-boundary-capability.md).
+    _collect(_check_kernel_boundary, live_components, services,
+             program.filename, untrusted=untrusted, manifest=manifest)
 
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
@@ -15074,6 +15102,153 @@ def _ceiling_attenuation_check(held: set, child_reach: set) -> "list[dict]":
         if closest:
             violations.extend(closest)
     return violations
+
+
+def _check_kernel_boundary(components: list[dict], services: dict,
+                           filename: str, untrusted: bool = False,
+                           manifest: dict | None = None) -> list[dict]:
+    """The ADMISSION KERNEL in the capability attenuation product (item 544).
+
+    Item 520 states the invariant: a system may evolve its behaviour, never the
+    rules that govern its authority. `tools/evolution_controller.py` enforces
+    the half it can - a candidate whose CHANGED FILES reach `kernel_boundary.
+    KERNEL_PATHS` is refused - and its own design says why that is not enough:
+    a diff check is answered against a changed-file set, so a route that
+    reaches the same state without editing an enumerated file is not refused by
+    it and cannot be. This is the other half, and it is the one the product
+    already knows how to state:
+
+        held(kernel)  n  effective(C)  =  {}   -> admit
+        held(kernel)  n  effective(C) !=  {}   -> REFUSE, naming both sets
+
+    which is item 66's rule with the KERNEL on the left instead of a spawner,
+    folded by `cap_order.disjoint` rather than `cap_order.covers` because the
+    question is intersection, not coverage. A component does not have to
+    NARROW its way to the kernel; it has to be unable to touch it.
+
+    WHICH WAY IT FAILS. Toward refusing, at both unknowns, and the reading of
+    each is `kernel_boundary`'s rather than this function's: the unnameable `*`
+    is disjoint from nothing (`cap_order.disjoint`'s own rule), and a `key:`
+    element - a boundary whose declaration names no capability token - is an
+    UNDECLARED reach, which is not an empty one. That second reading is scoped
+    to a candidate admitted under the untrusted-author profile (`untrusted`),
+    which is what "a generated component" means here; the first-party tree is
+    the subject of the loop, not a candidate passing through admission, and a
+    DECLARED kernel token is refused on both sides.
+
+    `manifest` is item 519's product record if it is present. Its
+    `model_reach[].effective` is the per-edge ceiling statement, consumed
+    rather than re-derived, and its `reach_declared` is what keeps an absent
+    `reaches [...]` clause from reading as a proof of narrowness.
+
+    Returns the per-component disjointness record for the audit surface; raises
+    on an intersection. Inert for a composition that declares no kernel token
+    and is not admitted under an untrusted-author profile, which is every
+    program on the tree."""
+    from . import kernel_boundary as _kb  # noqa: PLC0415 - lazy, avoids a cycle
+    # A cheap gate first, so the ordinary compile pays a scan of the service
+    # declarations rather than a second walk of every component body. The
+    # kernel namespace reaches a component through exactly three doors: a
+    # service that DECLARES a `kernel.*` emission token, the untrusted-author
+    # profile (which is what opens the unnameable arm), and item 519's product
+    # record. None of them present means there is nothing for the fold to find,
+    # and the pass is skipped rather than run to an empty answer.
+    if not untrusted and not (manifest or {}).get("model_reach"):
+        declared = any(
+            _kb.is_kernel_token(token.split("(", 1)[0])
+            for svc in services.values()
+            for method in getattr(svc, "methods", {}).values()
+            for token in (getattr(method, "capabilities", None) or ()))
+        if not declared:
+            return []
+    base = _spawn_reached_surface_pairs(components, services)
+    record: list[dict] = []
+    for comp in components:
+        own = base.get(comp["name"], set())
+        held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
+        effective = set(held) | set(
+            _strip_ceilings(set(_kb.effective_from_model_reach(
+                comp["name"], manifest))))
+        where = comp.get("source") or filename
+        line = comp.get("line", 1)
+
+        # a DECLARED claim on the namespace that the enumeration has no member
+        # for. Refused before the fold, because there is nothing to fold it
+        # against and reading it as an ordinary boundary is the fail-open shape.
+        stray = _kb.unenumerated(effective)
+        if stray:
+            names = ", ".join(f"`{_cap_render(c)}`" for c in stray)
+            known = ", ".join(f"`{c.token}`" for c in _kb.KERNEL_CAPS)
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` holds {names}, a capability in the reserved "
+                f"`{_kb.KERNEL_NAMESPACE}` namespace that the admission "
+                f"kernel's own enumeration has no member for - a claim on the "
+                f"kernel the compiler cannot check is refused, never admitted "
+                f"(G8)",
+                hint=f"the kernel capability set is enumerated in "
+                     f"`src/revl/kernel_boundary.py` and holds {known}. The "
+                     f"`{_kb.KERNEL_NAMESPACE}` namespace names the rules that "
+                     f"govern authority, so nothing outside the kernel may "
+                     f"declare into it: rename the capability into the "
+                     f"boundary's own namespace, or drop it (item 520/544)",
+                code="G8", category="capability-attenuation",
+            )
+
+        hits = _kb.offending(effective,
+                             undeclared_reaches_kernel=bool(untrusted))
+        if hits:
+            first_member, first_element = hits[0]
+            members = []
+            seen_tokens: set = set()
+            for member, _element in hits:
+                if member.token in seen_tokens:
+                    continue
+                seen_tokens.add(member.token)
+                members.append(member)
+            named = ", ".join(f"`{m.token}`" for m in members)
+            paths = ", ".join(sorted({p for m in members for p in m.paths}))
+            held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held))                 or "no capabilities"
+            if _kb._undeclared(first_element):
+                why = (f"`{comp['name']}` reaches an unnameable host boundary, "
+                       f"and an unnameable reach is not an empty one: nothing "
+                       f"in this composition states that it stops short of the "
+                       f"kernel, so it is not provably disjoint from it. An "
+                       f"authority surrogate that declares no reach lands here "
+                       f"too, because an omitted declaration is not a proof of "
+                       f"narrowness (item 519)")
+                fix = ("name the boundary - give the crossing a declared "
+                       "capability, or give the model role it routes through "
+                       "a `reaches [...]` clause - so the reach can be "
+                       "compared with the kernel's, or drop the crossing")
+            else:
+                why = (f"`{comp['name']}` holds "
+                       f"`{_cap_render(first_element)}`, which is the kernel's "
+                       f"own authority")
+                fix = ("drop the capability; kernel authority is not delegable "
+                       "and no grant confers it, because a grant that could "
+                       "would be the rule this refusal defends")
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` is inside the admission kernel's authority: "
+                f"its effective ceiling meets {named}, which the kernel holds "
+                f"and nothing else may. A component may evolve its behaviour, "
+                f"never the rules that govern its authority "
+                f"({first_member.guarantee})",
+                hint=f"{why}. {first_member.why} The kernel capability set is "
+                     f"enumerated in `src/revl/kernel_boundary.py` and stands "
+                     f"for {paths}; `{comp['name']}` holds {held_str}. "
+                     f"{fix} (attenuation, item 520/544 - "
+                     f"docs/capability-attenuation.md)",
+                code=first_member.guarantee, category="capability-attenuation",
+            )
+        record.append({
+            "component": comp["name"],
+            "holds": _cap_sorted_strs(held),
+            "kernel": [c.token for c in _kb.KERNEL_CAPS],
+            "disjoint": True,
+        })
+    return record
 
 
 def _model_reach_caps(role) -> set:

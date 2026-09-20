@@ -147,7 +147,15 @@ SELFHOST_ORACLE_TESTS = {
     "emit_ts": ("tests/test_selfhost_emit_ts.py",),
     "emit_wasm": ("tests/test_selfhost_emit_wasm.py",),
     "lexer": ("tests/test_selfhost_lexer.py",),
-    "lower": ("tests/test_selfhost_lower_ir.py",),
+    # tests/test_oracle_construct_reach.py rides with lower.rvl because the
+    # `gate_census` row of tools/oracle_construct_reach.py RUNS `admit_src`
+    # over the census corpus and reports the guarantee families no document
+    # draws (issue #1215). A refusal this file stops issuing is a construct
+    # that becomes unreached, which is the ratchet's RED — and the dependents
+    # walk below carries the same selection to lexer/parser/types.rvl, the
+    # rest of `admit_src`'s `use` closure.
+    "lower": ("tests/test_selfhost_lower_ir.py",
+              "tests/test_oracle_construct_reach.py"),
     "parser": ("tests/test_selfhost_parser.py",),
     "types": ("tests/test_selfhost_types.py",),
 }
@@ -192,6 +200,15 @@ REFERENCE_EMITTER_ORACLE = {
 # inner-loop selector would not have selected
 # tests/test_selfhost_differential_survey.py.
 REFERENCE_EMITTER_ALWAYS = ("tests/test_selfhost_differential_survey.py",)
+
+# Files `tools/evolution_progress.py` reads a counter out of WITHOUT importing
+# them, so no import graph reaches them (issue #1224). Each one is a repository
+# artifact whose shape the progress counters depend on.
+PROGRESS_COUNTER_SOURCES = {
+    "tests/test_selfhost_compile.py",   # the LOWER_GAP_DOCS residual table
+    "tools/selfhost_coverage.py",       # reference_constructs / TIERS
+    "tools/gate_reference_census.py",   # CORPUS_DIRS / _SKIP_DIRS
+}
 
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
@@ -500,6 +517,20 @@ def select(changed, root) -> dict:
     reasons: list[str] = []
 
     for f in changed:
+        # --- the self-evolution progress counters (issue #1224) ------------ #
+        # `tools/evolution_progress.py` reads its counters out of artifacts
+        # other files own, by AST and by JSON key, and NOT by importing them.
+        # So no import graph reaches the dependency: renaming `LOWER_GAP_DOCS`,
+        # or changing `reference_constructs`, reds
+        # tests/test_evolution_progress.py from a file that never mentions it.
+        # First in the loop because every file named here also has its own rule
+        # further down that ends in `continue`. The census baseline and the
+        # reach ledger need no entry: a non-python `tools/` change and any
+        # `tests/fixtures/**` change are already FULL.
+        if f in PROGRESS_COUNTER_SOURCES:
+            pytest_nodes.add("tests/test_evolution_progress.py")
+            reasons.append(f"{f} (self-evolution progress counter input)")
+
         # --- structural: always FULL --------------------------------------- #
         if f == "Makefile":
             return _full("Makefile changed -> full")
@@ -663,6 +694,18 @@ def select(changed, root) -> dict:
             }
             reasons.append(f"{f} (guarantee x tier matrix + roadmap gate)")
             continue
+        if f in ("tools/gate_reference_census.py", "tools/corpus_provenance.py"):
+            # The two are coupled in both directions (roadmap item 542): the
+            # census prints the provenance table, and `corpus_provenance.py`
+            # enumerates its scoring corpus with the census's own
+            # `load_corpus`, so its case ids are the census's. The generic
+            # tools/ rule below matches only `test_<stem>.py`, which would run
+            # one side of that coupling and not the other -- and the coupling
+            # is where a drift would land, not in either file alone.
+            pytest_nodes.add("tests/test_gate_reference_census.py")
+            pytest_nodes.add("tests/test_corpus_provenance.py")
+            reasons.append(f"{f} (census/provenance coupling)")
+            continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
             reasons.append("tools/check_site_wheel.py")
@@ -682,6 +725,16 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_check_vision_claims.py")
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
+            continue
+        # issue #1215: the `gate_census` row of tools/oracle_construct_reach.py
+        # imports this file for its corpus walk and its fast engine, so a change
+        # to either moves what that row measures and what its ledger records.
+        # The generic `tools/*.py` rule below matches on the file STEM and would
+        # select tests/test_gate_reference_census.py alone.
+        if f == "tools/gate_reference_census.py":
+            pytest_nodes.add("tests/test_gate_reference_census.py")
+            pytest_nodes.add("tests/test_oracle_construct_reach.py")
+            reasons.append("tools/gate_reference_census.py")
             continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
