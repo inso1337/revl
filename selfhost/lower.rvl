@@ -626,13 +626,49 @@ fn model_role_end(ts: List[Token], i: Int) -> Int {
   return j
 }
 
+// item 516: `model council NAME { <function> -> <role>, ..., aggregate <rule> }`
+// is the SECOND contextual shape `model` heads, on exactly the discipline
+// `at_model_role` above records — the pair `model council` is what makes this a
+// declaration, so `model` alone stays an ordinary identifier and neither
+// lexer's KEYWORDS table moves. The brace is part of the recogniser because it
+// is what separates this shape from `model role`: `model role NAME <residence>`
+// has an ident in the fourth slot and a council has its body brace.
+//
+// Without this the gate answered `BAD|unexpected token at top level` for every
+// program that declares a council — the generic top-level parse marker, which
+// says only that something did not parse and not which construct the gate
+// declined.
+fn at_model_council(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (!(t.kind == "ident" && t.text == "model")) { return false }
+  let c = tkc(ts, i + 1)
+  if (!(c.kind == "ident" && c.text == "council")) { return false }
+  return atk(ts, i + 2, "ident") && atk(ts, i + 3, "{")
+}
+
+// Index just past a `model council` declaration: the match of its body brace.
+// STRUCTURAL, not a token count, for the reason `model_role_end` is — the
+// clauses inside a council body are an open surface (items 517 and 519 both
+// propose reading one) and a brace match steps over whatever is written there
+// whole, instead of leaving the cursor mid-clause and turning a shipped program
+// back into `unexpected token at top level`.
+//
+// A body whose braces do not balance is a reference PARSE refusal this gate
+// carries no verdict for, so the cursor advances one token and the ordinary
+// top-level refusal stands rather than a verdict being invented — the
+// `event_decl_end` discipline.
+fn model_council_end(ts: List[Token], i: Int) -> Int {
+  let e = close_brace(ts, i + 3)
+  return e == 0 - 1 ? i + 1 : e
+}
+
 // Whether a token starts a TOP-LEVEL declaration — where a `type` declaration's
 // token span ends. Kept next to `type_ctors`, its only reader.
 fn at_top_decl(ts: List[Token], i: Int) -> Bool {
   return atw(ts, i, "type") || atw(ts, i, "fn") || atw(ts, i, "extern")
       || atw(ts, i, "service") || atw(ts, i, "component") || atw(ts, i, "use")
       || atw(ts, i, "test") || at_boot(ts, i) || at_event(ts, i)
-      || at_qual_test(ts, i) || at_model_role(ts, i)
+      || at_qual_test(ts, i) || at_model_role(ts, i) || at_model_council(ts, i)
 }
 
 // `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
@@ -2887,6 +2923,15 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   // before any component is lowered), so nothing about a role rides in `Prog`
   // and every program that declares none is byte-identical through here.
   if (at_model_role(ts, i)) { return p_top(ts, model_role_end(ts, i), pg) }
+  // item 516: `model council NAME { ... }`, stepped over WHOLE for the same
+  // reason. The councils are read off the token stream by
+  // `model_council_refusal`, which is where the reference reads them too
+  // (`model_council.check` walks `Program.model_councils` after the routes and
+  // before any component is lowered), so nothing about a council rides in
+  // `Prog` and every program that declares none is byte-identical through here.
+  if (at_model_council(ts, i)) {
+    return p_top(ts, model_council_end(ts, i), pg)
+  }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
@@ -12647,6 +12692,435 @@ fn model_place_refusal(ts: List[Token]) -> Verd {
   return no_verd()
 }
 
+// ============================================================ model councils
+//
+// item 516, `docs/design/543-model-council.md`. The reference half is
+// `src/revl/model_council.py`, run from `check_and_lower` right AFTER
+// `model_route.check` and before any component is lowered, because a council's
+// members are `model role` declarations and the role table is the one both
+// read. This is that phase, and it runs in the same place for the same reason.
+//
+// WHAT A COUNCIL IS FOR, and therefore which way every rule fails. A council
+// that degrades to "whichever member answered" is STRICTLY WORSE than one
+// model, because the caller believes several agreed. So the two spellings that
+// would resolve disagreement toward an answer — `aggregate first` and
+// `on_tie allow` — parse and are refused BY NAME, and the rule's floor is
+// counted over the DECLARED members and never over the ones that answered:
+// `quorum answered` is refused for the same reason. This gate spells each of
+// those refusals byte for byte as the reference spells it.
+//
+// WHAT THE GATE DECIDES AND WHAT IT DOES NOT. The DECLARATION half — the
+// seventeen refusals `model_council._check_one` raises over what is written —
+// is decided here under the tag "COUNCIL". Everything a council does with a
+// VALUE is not: slice 2 binds a council to an action and item 517 records what
+// its members answered, both of which read a flow position this gate has no
+// walk for. It raises no objection to either, which is a no-objection and not
+// an admission, and the oracle's classifier names neither so the gap stays a
+// measured out-of-slice row rather than a claimed agreement.
+//
+// THE TAG IS ITS OWN. `MODEL` is the model-PLACEMENT family (item 512,
+// `src/revl/model_route.py`); a council is a second construct with its own
+// reference module and its own seventeen sentences, so a consumer reading the
+// wire learns which of the two was refused instead of having to parse the
+// message to find out. Both tags stand for the registered code `G-MODEL-PLACE`
+// — councils raise under `model_route.CODE` — which is one decided row each in
+// `SELFHOST_TAG_CODES` (`tools/tier_guarantees.py`).
+
+type CMem = { cfun: Str, crole: Str, cmline: Int }
+
+// One `aggregate <rule> [quorum <basis>] [on_tie <outcome>]` clause. `cquorum`
+// and `ctie` are "" when the clause was OMITTED, which is not the same as
+// writing the default: the reference records the omission rather than filling
+// it in (`None`), because a written word is validated and an omission defaults
+// to the fail-closed reading. Only a written one can be refused, so "" is the
+// one value the two rules below skip.
+type CAgg = { crule: Str, cquorum: Str, ctie: Str, caline: Int }
+
+// One `model council NAME { ... }` declaration. `cok` is false when the body
+// is not in the form this gate reads; see `ccl_undecided_msg`.
+type CDecl = { ccname: Str, cmems: List[CMem], caggs: List[CAgg],
+               ccline: Int, cok: Bool }
+
+type CBody = { ymems: List[CMem], yaggs: List[CAgg], yok: Bool }
+
+// What a member is FOR (`model_council.FUNCTIONS`). A CLOSED vocabulary, for
+// the same reason the residence vocabulary is closed: a typo is a refusal
+// rather than a member with no job in the aggregation.
+fn council_functions() -> List[Str] {
+  return ["proposer", "adversary", "verifier"]
+}
+
+// The rules that turn the members' answers into one outcome
+// (`model_council.AGGREGATIONS`). None of the three resolves a disagreement:
+// each either names one value or names none, and naming none is `split`.
+fn council_aggregations() -> List[Str] {
+  return ["unanimous", "majority", "veto"]
+}
+
+// The spellings that resolve disagreement toward whichever member answered
+// (`model_council.PICK_ONE_AGGREGATIONS`). They PARSE so that the refusal can
+// give the reason rather than a syntax complaint — the `*`-on-the-right
+// discipline item 512 already uses.
+fn council_pick_one() -> List[Str] {
+  return ["first", "any", "fastest", "cheapest", "best", "random"]
+}
+
+// What the rule's floor is counted over (`model_council.QUORUM_BASES` and
+// `REFUSED_QUORUM_BASES`). `declared` is the only admitted reading and the
+// default; the four refused spellings parse so the refusal can say why a floor
+// over the answering set lets an unreachable member disappear.
+fn council_quorum_bases() -> List[Str] { return ["declared"] }
+
+fn council_refused_quorums() -> List[Str] {
+  return ["answered", "reachable", "available", "responding"]
+}
+
+// What happens when the rule names no value (`model_council.TIE_OUTCOMES` and
+// `ADMITTING_TIE_OUTCOMES`). There is no admitting outcome, and the spellings
+// for one parse so that the refusal can be roadmap item 516's exit test.
+fn council_tie_outcomes() -> List[Str] { return ["split", "deny"] }
+
+fn council_admitting_ties() -> List[Str] {
+  return ["allow", "admit", "proceed", "accept", "first", "any"]
+}
+
+// ------------------------------------------------------------ the sentences
+
+fn ccl_twice_msg(name: Str, fline: Int) -> Str {
+  return "model council `".concat(name)
+    .concat("` is declared twice (first on line ").concat(fline.to_str())
+    .concat(")")
+}
+
+fn ccl_role_name_msg(name: Str, rline: Int) -> Str {
+  return "model council `".concat(name)
+    .concat("` has the name of the model role declared on line ")
+    .concat(rline.to_str())
+}
+
+fn ccl_unknown_fn_msg(fun: Str, name: Str) -> Str {
+  return "unknown council function `".concat(fun)
+    .concat("` in model council `").concat(name).concat("`")
+}
+
+fn ccl_fn_twice_msg(fun: Str, name: Str, fline: Int, frole: Str) -> Str {
+  return "council function `".concat(fun)
+    .concat("` is declared twice in model council `").concat(name)
+    .concat("` (first on line ").concat(fline.to_str()).concat(", as `")
+    .concat(frole).concat("`)")
+}
+
+fn ccl_no_role_msg(fun: Str, name: Str, role: Str) -> Str {
+  return "member `".concat(fun).concat("` of model council `").concat(name)
+    .concat("` names model role `").concat(role)
+    .concat("`, which is not declared")
+}
+
+fn ccl_same_role_msg(ffun: Str, fun: Str, name: Str, role: Str) -> Str {
+  return "members `".concat(ffun).concat("` and `").concat(fun)
+    .concat("` of model council `").concat(name)
+    .concat("` are both placed on model role `").concat(role).concat("`")
+}
+
+fn ccl_too_few_msg(name: Str, have: Int) -> Str {
+  return "model council `".concat(name).concat("` declares ")
+    .concat(have.to_str()).concat(" member")
+    .concat(have == 1 ? "" : "s")
+}
+
+fn ccl_no_proposer_msg(name: Str) -> Str {
+  return "model council `".concat(name).concat("` declares no `proposer`")
+}
+
+fn ccl_no_agg_msg(name: Str) -> Str {
+  return "model council `".concat(name)
+    .concat("` declares no `aggregate` rule")
+}
+
+fn ccl_two_agg_msg(name: Str, frule: Str, fline: Int, srule: Str) -> Str {
+  return "model council `".concat(name)
+    .concat("` declares two `aggregate` rules (`").concat(frule)
+    .concat("` on line ").concat(fline.to_str()).concat(", `").concat(srule)
+    .concat("` here)")
+}
+
+fn ccl_pick_one_msg(rule: Str, name: Str) -> Str {
+  return "`aggregate ".concat(rule).concat("` in model council `")
+    .concat(name)
+    .concat("` resolves disagreement toward one member's answer")
+}
+
+fn ccl_unknown_rule_msg(rule: Str, name: Str) -> Str {
+  return "unknown aggregation rule `".concat(rule)
+    .concat("` in model council `").concat(name).concat("`")
+}
+
+fn ccl_veto_msg(name: Str) -> Str {
+  return "`aggregate veto` in model council `".concat(name)
+    .concat("`, which declares no `adversary`")
+}
+
+fn ccl_quorum_answered_msg(q: Str, name: Str) -> Str {
+  return "`quorum ".concat(q).concat("` in model council `").concat(name)
+    .concat("` counts the rule's floor over the members that answered")
+}
+
+fn ccl_unknown_quorum_msg(q: Str, name: Str) -> Str {
+  return "unknown quorum basis `".concat(q).concat("` in model council `")
+    .concat(name).concat("`")
+}
+
+fn ccl_tie_admits_msg(o: Str, name: Str) -> Str {
+  return "`on_tie ".concat(o).concat("` in model council `").concat(name)
+    .concat("` admits when the members disagree")
+}
+
+fn ccl_unknown_tie_msg(o: Str, name: Str) -> Str {
+  return "unknown tie outcome `".concat(o).concat("` in model council `")
+    .concat(name).concat("`")
+}
+
+// The body this gate cannot read. A REFUSAL and not a silent step-over, for the
+// reason `mundecided_msg` records one construct up: a body whose items the gate
+// skipped is a body whose members and aggregation it did not decide, and
+// raising no objection to one would let a council the reference refuses — an
+// `on_tie allow`, say — through a gate that claims to decide councils. The
+// crate is allowed to err toward refusing and is not allowed to err the other
+// way.
+//
+// That arm is not hypothetical. Roadmap item 517 proposes recording what each
+// member answered and item 519 proposes a clause on a role; either may put a
+// word in this body the reader below does not know. The gate then refuses the
+// council by name until the port is extended, which is visible in the census
+// the moment a corpus file uses the form, rather than silently admitting it.
+fn ccl_undecided_msg(name: Str) -> Str {
+  return "model council `".concat(name)
+    .concat("` is written in a form this gate does not decide")
+}
+
+fn cverd(msg: Str, line: Int) -> Verd {
+  return mk_verd(tagged("COUNCIL", msg), line)
+}
+
+// ---------------------------------------------------------------- the reader
+//
+// The body items, in the reference parser's own shape (`model_council_decl`):
+// `,` and `;` are separators that carry no meaning, an item whose first token
+// is the contextual `aggregate` is a clause, and anything else is a member arm
+// `<function> -> <role>`. A trailing separator is allowed exactly as the
+// reference allows one. `yok` is false for anything else, which
+// `ccl_undecided_msg` then refuses by name.
+fn council_body(ts: List[Token], lo: Int, hi: Int) -> CBody {
+  var i = lo
+  var mems: List[CMem] = []
+  var aggs: List[CAgg] = []
+  while (i < hi) {
+    if (atk(ts, i, ",") || atk(ts, i, ";")) {
+      i += 1
+    } else if (ati(ts, i, "aggregate")) {
+      if (!atk(ts, i + 1, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      let aline = tkc(ts, i).line
+      let rule = tkc(ts, i + 1).text
+      var j = i + 2
+      var q = ""
+      if (ati(ts, j, "quorum")) {
+        if (!atk(ts, j + 1, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+        q = tkc(ts, j + 1).text
+        j += 2
+      }
+      var ot = ""
+      if (ati(ts, j, "on_tie")) {
+        if (!atk(ts, j + 1, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+        ot = tkc(ts, j + 1).text
+        j += 2
+      }
+      aggs = aggs.push({ crule: rule, cquorum: q, ctie: ot, caline: aline })
+      i = j
+    } else {
+      if (!atk(ts, i, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      if (!atk(ts, i + 1, "arrow")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      if (!atk(ts, i + 2, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      mems = mems.push({ cfun: tkc(ts, i).text, crole: tkc(ts, i + 2).text,
+                         cmline: tkc(ts, i).line })
+      i += 3
+    }
+  }
+  return { ymems: mems, yaggs: aggs, yok: true }
+}
+
+// Every `model council` declared at top level, in declaration order, which is
+// the order `model_council.check` refuses in. Brace-structural and ITERATIVE,
+// the `model_roles_of` discipline: an extern's verbatim `@py { ... }` body is
+// one `hostbody` token, so its braces cannot perturb the depth.
+fn model_councils_of(ts: List[Token]) -> List[CDecl] {
+  var i = 0
+  var depth = 0
+  var out: List[CDecl] = []
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (depth == 0 && at_model_council(ts, i)) {
+      let e = close_brace(ts, i + 3)
+      if (e == 0 - 1) {
+        i = ts.length()
+      } else {
+        let b = council_body(ts, i + 4, e - 1)
+        out = out.push({ ccname: tkc(ts, i + 2).text, cmems: b.ymems,
+                         caggs: b.yaggs, ccline: tkc(ts, i).line,
+                         cok: b.yok })
+        i = e
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+fn ccl_at(cs: List[CDecl], n: Str, i: Int) -> Int {
+  if (i >= cs.length()) { return 0 - 1 }
+  if (cs[i].ccname == n) { return i }
+  return ccl_at(cs, n, i + 1)
+}
+
+fn cmem_fn_at(ms: List[CMem], f: Str, i: Int) -> Int {
+  if (i >= ms.length()) { return 0 - 1 }
+  if (ms[i].cfun == f) { return i }
+  return cmem_fn_at(ms, f, i + 1)
+}
+
+fn cmem_role_at(ms: List[CMem], r: Str, i: Int) -> Int {
+  if (i >= ms.length()) { return 0 - 1 }
+  if (ms[i].crole == r) { return i }
+  return cmem_role_at(ms, r, i + 1)
+}
+
+// One council's members, in the reference's own order per member: the function
+// vocabulary, then one member per function, then the role's existence, then one
+// member per role. A duplicate names the EARLIER member, which is what the
+// reference's `by_function` / `by_role` tables hold when the second is read.
+fn council_members_refusal(c: CDecl, rs: List[MRole]) -> Verd {
+  var i = 0
+  while (i < c.cmems.length()) {
+    let m = c.cmems[i]
+    if (!contains(council_functions(), m.cfun)) {
+      return cverd(ccl_unknown_fn_msg(m.cfun, c.ccname), m.cmline)
+    }
+    let pf = cmem_fn_at(c.cmems, m.cfun, 0)
+    if (pf != i) {
+      return cverd(ccl_fn_twice_msg(m.cfun, c.ccname, c.cmems[pf].cmline,
+                                    c.cmems[pf].crole), m.cmline)
+    }
+    if (mrole_at(rs, m.crole, 0) == 0 - 1) {
+      return cverd(ccl_no_role_msg(m.cfun, c.ccname, m.crole), m.cmline)
+    }
+    let pr = cmem_role_at(c.cmems, m.crole, 0)
+    if (pr != i) {
+      return cverd(ccl_same_role_msg(c.cmems[pr].cfun, m.cfun, c.ccname,
+                                     m.crole), m.cmline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// One council's aggregation clause, in the reference's own order: exactly one
+// clause written down, then the rule itself (the pick-one spellings before the
+// vocabulary check, so an author who reaches for one gets the REASON rather
+// than "unknown"), then `veto` needing an adversary to be the veto of, then the
+// quorum basis, then the tie outcome. A clause omitted is not a clause written
+// with the default, so only a written `quorum` / `on_tie` is judged.
+fn council_aggregate_refusal(c: CDecl) -> Verd {
+  if (c.caggs.length() == 0) {
+    return cverd(ccl_no_agg_msg(c.ccname), c.ccline)
+  }
+  if (c.caggs.length() > 1) {
+    return cverd(ccl_two_agg_msg(c.ccname, c.caggs[0].crule,
+                                 c.caggs[0].caline, c.caggs[1].crule),
+                 c.caggs[1].caline)
+  }
+  let cl = c.caggs[0]
+  if (contains(council_pick_one(), cl.crule)) {
+    return cverd(ccl_pick_one_msg(cl.crule, c.ccname), cl.caline)
+  }
+  if (!contains(council_aggregations(), cl.crule)) {
+    return cverd(ccl_unknown_rule_msg(cl.crule, c.ccname), cl.caline)
+  }
+  if (cl.crule == "veto" && cmem_fn_at(c.cmems, "adversary", 0) == 0 - 1) {
+    return cverd(ccl_veto_msg(c.ccname), cl.caline)
+  }
+  if (cl.cquorum != "") {
+    if (contains(council_refused_quorums(), cl.cquorum)) {
+      return cverd(ccl_quorum_answered_msg(cl.cquorum, c.ccname), cl.caline)
+    }
+    if (!contains(council_quorum_bases(), cl.cquorum)) {
+      return cverd(ccl_unknown_quorum_msg(cl.cquorum, c.ccname), cl.caline)
+    }
+  }
+  if (cl.ctie != "") {
+    if (contains(council_admitting_ties(), cl.ctie)) {
+      return cverd(ccl_tie_admits_msg(cl.ctie, c.ccname), cl.caline)
+    }
+    if (!contains(council_tie_outcomes(), cl.ctie)) {
+      return cverd(ccl_unknown_tie_msg(cl.ctie, c.ccname), cl.caline)
+    }
+  }
+  return no_verd()
+}
+
+// One council, in `model_council._check_one`'s own order: the name (declared
+// once, and not a role's), then the members, then the two counting rules over
+// the member set, then the aggregation clause.
+fn council_one_refusal(cs: List[CDecl], i: Int, rs: List[MRole]) -> Verd {
+  let c = cs[i]
+  let p = ccl_at(cs, c.ccname, 0)
+  if (p != i) {
+    return cverd(ccl_twice_msg(c.ccname, cs[p].ccline), c.ccline)
+  }
+  let ri = mrole_at(rs, c.ccname, 0)
+  if (ri != 0 - 1) {
+    return cverd(ccl_role_name_msg(c.ccname, rs[ri].rline), c.ccline)
+  }
+  let mv = council_members_refusal(c, rs)
+  if (mv.v != "") { return mv }
+  // two members at least, and a proposer among them. One member wearing a
+  // council's name is the misrepresentation the item exists to remove, and with
+  // no member to make a proposal the aggregation has nothing to name.
+  if (c.cmems.length() < 2) {
+    return cverd(ccl_too_few_msg(c.ccname, c.cmems.length()), c.ccline)
+  }
+  if (cmem_fn_at(c.cmems, "proposer", 0) == 0 - 1) {
+    return cverd(ccl_no_proposer_msg(c.ccname), c.ccline)
+  }
+  return council_aggregate_refusal(c)
+}
+
+// The whole phase. The UNREADABLE bodies are refused first, all of them ahead
+// of any rule, because in the reference an unreadable body is a PARSE refusal
+// and parsing precedes every check in this module. Then every council in
+// declaration order. A program that declares none walks an empty list and is
+// byte-identical through here, which is every program on the tree that predates
+// item 516.
+fn model_council_refusal(ts: List[Token]) -> Verd {
+  let cs = model_councils_of(ts)
+  if (cs.length() == 0) { return no_verd() }
+  var i = 0
+  while (i < cs.length()) {
+    if (!cs[i].cok) {
+      return cverd(ccl_undecided_msg(cs[i].ccname), cs[i].ccline)
+    }
+    i += 1
+  }
+  let rs = model_roles_of(ts)
+  i = 0
+  while (i < cs.length()) {
+    let v = council_one_refusal(cs, i, rs)
+    if (v.v != "") { return v }
+    i += 1
+  }
+  return no_verd()
+}
+
 fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
                    wrefs: List[Verd], ambSvcs: List[Str],
                    ambSvcsKnown: Bool, ambOps: List[SvcOps]) -> NoLink {
@@ -12674,6 +13148,14 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // deliberately leaves to the reference's flow walk.
   let mdlv = model_place_refusal(ts)
   if (mdlv.v != "") { return { done: true, refs: [mdlv] } }
+  // MODEL COUNCILS (item 516) run right after the routes and before anything
+  // else, which is where `check_and_lower` runs `model_council.check`: a
+  // council's members are `model role` declarations and the role table is the
+  // one both read, so the routes validate it and the councils index it. See the
+  // model-council section above for what it decides and what it leaves to the
+  // slices that bind a council to an action.
+  let cclv = model_council_refusal(ts)
+  if (cclv.v != "") { return { done: true, refs: [cclv] } }
   let wfv = declared_types_refusal(ts)
   if (wfv.v != "") { return { done: true, refs: [wfv] } }
   // the program-wide declared-type table (the `field <Type>.<name>` rows, the
@@ -12877,9 +13359,12 @@ fn fmt_all(rs: List[Verd]) -> Str {
 }
 
 // The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "G6" | "A1" |
-// "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "MODEL" | "BAD") — the
-// coarse oracle. "G6" is the fn-body binding discipline (item 391); "MODEL" is
-// the model-placement declaration half (item 512, slice 3).
+// "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "MODEL" | "COUNCIL" |
+// "BAD") — the coarse oracle. "G6" is the fn-body binding discipline (item
+// 391); "MODEL" is the model-placement declaration half (item 512, slice 3) and
+// "COUNCIL" the model-council declaration (item 516). Both stand for the
+// registered code `G-MODEL-PLACE`, under two names because they are two
+// constructs with two reference modules.
 pub fn admit_tag(src: Str) -> Str {
   let v = admit_src(src)
   if (v == "") { return "" }
