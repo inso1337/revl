@@ -189,6 +189,83 @@ def _canonical_bytes(obj) -> bytes:
             f"the document has no canonical JSON spelling: {error}") from error
 
 
+def path_normalized_ir(ir):
+    """A compiled IR with every cwd-dependent source path reduced to its
+    basename — THE definition, called by everything that hashes a composition.
+
+    The compiler stamps each component with the path it was compiled from
+    (`components[*].source`, mirrored into `manifest.components[*].file`), and
+    that path is spelled relative to the WORKING DIRECTORY, not to the
+    composition. So the same file compiled from two directories, or named by
+    two different spellings of its own path, produced two different IR
+    documents and therefore two different composition hashes. Measured on
+    `dfecba2a`: one unchanged file attested from its own directory did not
+    verify `--against` itself named from the parent directory, and the reason
+    printed was "the composition changed since it was attested" — a false
+    statement about the file, and the worst possible one to print, because it
+    teaches a consumer to ignore hash mismatches.
+
+    The composition hash is the identity of a composition, and where a checkout
+    happens to sit is not part of what a composition IS. The ordinary consumer
+    shape — sign in CI at one checkout path, verify against the same source at
+    another — could not work while it was.
+
+    This is not a new decision. `revl bundle`, `registry.build_evidence` and
+    `truc reproduce` each already normalized these exact fields for exactly
+    this reason, and each did it in its own copy; two of those copies drifted
+    apart and left `truc reproduce`'s attestation tier structurally dead
+    against every attestation the publisher signed (`truc/reproduce.py`
+    `_normalized_ir`). What was missing was the normalization at the boundary
+    where the hash is actually taken, so the plain `revl attest` path — the one
+    with no bundle around it — never got it. One definition, one hash.
+
+    Returns the document UNCHANGED (the same object, not a copy) when it
+    carries none of these fields, so the non-composition documents that also
+    take their identity from `canonical_hash` (a TEE bundle or result, a
+    retention report, a conformance corpus) are hashed over exactly the bytes
+    they always were.
+    """
+    if not isinstance(ir, dict):
+        return ir
+    components = ir.get("components")
+    manifest_components = (ir.get("manifest") or {}).get("components") \
+        if isinstance(ir.get("manifest"), dict) else None
+
+    def _needs(rows, fields) -> bool:
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for name in fields:
+                value = row.get(name)
+                if isinstance(value, str) and value != os.path.basename(value):
+                    return True
+        return False
+
+    if not (_needs(components, ("source", "file"))
+            or _needs(manifest_components, ("file",))):
+        return ir
+
+    import copy  # noqa: PLC0415 — lazy: only on the path that rewrites
+
+    out = copy.deepcopy(ir)
+    for comp in out.get("components") or []:
+        if not isinstance(comp, dict):
+            continue
+        for name in ("source", "file"):
+            value = comp.get(name)
+            if isinstance(value, str) and value:
+                comp[name] = os.path.basename(value)
+    for comp in (out.get("manifest") or {}).get("components") or []:
+        if not isinstance(comp, dict):
+            continue
+        value = comp.get("file")
+        if isinstance(value, str) and value:
+            comp["file"] = os.path.basename(value)
+    return out
+
+
 def canonical_hash(ir: dict) -> str:
     """The content hash of an admitted IR document — its stable identity.
 
@@ -196,8 +273,16 @@ def canonical_hash(ir: dict) -> str:
     is post-lowering) always yields the same hex digest. This is the value the
     attestation binds a verdict to, and the value `--verify` recomputes to
     detect that the composition changed.
+
+    "Stable" is measured against the composition, not against the filesystem:
+    the document is passed through `path_normalized_ir` first, so two copies of
+    the same bytes at two paths, and one file named by two spellings of its own
+    path, hash the same. Nothing in the IR itself moves — the normalization is
+    at the hashing boundary, and the canonical IR spelling
+    (`formatter._canonical_ir`, which `selfhost/*.rvl` must reproduce byte for
+    byte) is untouched.
     """
-    return hashlib.sha256(_canonical_bytes(ir)).hexdigest()
+    return hashlib.sha256(_canonical_bytes(path_normalized_ir(ir))).hexdigest()
 
 
 def key_id(key: bytes) -> str:

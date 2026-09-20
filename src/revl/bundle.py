@@ -151,16 +151,17 @@ def _canonical_ir(ir: dict) -> dict:
     so unless these paths are normalized the recompiled IR, and the attestation
     hash taken over it, would differ by location alone. Everything the bundle
     derives comes from this form, so a bundle built in one directory verifies
-    from another."""
-    out = copy.deepcopy(ir)
-    for comp in out.get("components") or []:
-        for field in ("source", "file"):
-            if comp.get(field):
-                comp[field] = os.path.basename(comp[field])
-    for comp in (out.get("manifest") or {}).get("components") or []:
-        if comp.get("file"):
-            comp["file"] = os.path.basename(comp["file"])
-    return out
+    from another.
+
+    The rewriting itself is `attest.path_normalized_ir`, called rather than
+    re-implemented: `attest.canonical_hash` applies the same normalization at
+    the hashing boundary, and a bundle that normalized differently from the
+    hash it signs would be back to two definitions of one identity (issue
+    #1276). The deep copy stays HERE because callers hand this document to
+    `registry._audit_document`, which rewrites file paths IN PLACE; the shared
+    normalizer returns its argument untouched when there is nothing to rewrite,
+    which would otherwise expose the caller's own IR to that mutation."""
+    return attest.path_normalized_ir(copy.deepcopy(ir))
 
 
 def _ir_text(norm_ir: dict) -> str:
