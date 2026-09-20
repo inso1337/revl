@@ -1,0 +1,72 @@
+// The activation-body `await` surface (issue 1153): the A1 ordering boundary a
+// component draws mid-activation, and the `plugin_async` lowering it forces.
+//
+// No corpus document carried an `await` step before this one, so the whole
+// surface was measured VACUOUSLY: the port emitted `<<DEFER-comp-step:await>>`
+// for the step and `<<DEFER-await:<Comp>>>` for the component, kept the
+// `plugin_sync` factory and the blocking `|ctx, config| {` closure, and the
+// oracle agreed because no document it compiled ever awaited anything. The
+// `Job` host stub was vacuous in the same way twice over: the block the port
+// emitted was missing the `pub struct Job;` declaration and its doc comment,
+// so the emitted crate named `Job::run` with no `Job` type in it.
+//
+// The shapes this document forces:
+//
+//   * `_component_uses_await` -> `cordis::plugin_async::<C, _, _>` and the
+//     `|ctx, config| async move {` closure, on BOTH component paths — the
+//     SIMPLE one (`Beacon`, pure methods) and the effectful one (`Ledger`,
+//     whose provision method emits);
+//   * the `await` step's two lowered arms: the host async seam
+//     (`Job::run(..).await`, the only awaitable this tier does NOT erase) and
+//     the erased one (`sink.write(..)` returns a plain value here, so a
+//     blanket `.await` on it would be a rustc error — item 131);
+//   * the `host` component-dialect expression kind (`Job.run` -> `Job::run`),
+//     which no corpus document rendered before;
+//   * the `Job` host stub riding along with the host root the document uses;
+//   * a component with NO await in the same document keeps `plugin_sync` and
+//     the blocking closure, so the gate is per-component and not per-module.
+fn seed() -> Int {
+  return 0
+}
+
+service Sink {
+  emission fn send(msg: Str)
+  fn write(line: Str) -> Int
+}
+
+service Ledger {
+  emission fn total() -> Int
+}
+
+// SIMPLE path: pure methods, an activation body that brackets an effect either
+// side of the await boundary, and a fire-and-forget emission after it.
+component Beacon requires sink: Sink {
+  effect sink.write("open") undo sink.write("close")
+  await Job.run("boundary")
+  emit sink.send("after")
+}
+
+// The erased arm: awaiting a required-service call is an ordering boundary, not
+// a future — it lowers to the plain call and the statement position keeps A1.
+component Drain requires sink: Sink {
+  await sink.write("drain")
+  emit sink.send("drained")
+}
+
+// EFFECTFUL path (`_emit_component_new`): the provision method emits, so the
+// component carries the `ctx` field and routes away from the simple path, and
+// the async gate has to hold there too.
+component Books requires sink: Sink provides ledger: Ledger {
+  await Job.run("books")
+  provide ledger {
+    fn total() {
+      emit sink.send("read")
+      return 1
+    }
+  }
+}
+
+// No await: `plugin_sync` and the blocking closure stay, in the same module.
+component Quiet requires sink: Sink {
+  effect sink.write("quiet") undo sink.write("hush")
+}
