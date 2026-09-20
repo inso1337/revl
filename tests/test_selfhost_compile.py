@@ -497,14 +497,16 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # composite service dispatch and component expressions
         "services_composite.rvl",
         "component_exprs.rvl",
-        # async coloring (async methods / async arrows). `components_await.rvl`
-        # left this list when lower.rvl grew the `await` activation step: the
-        # colouring is a whole-program property the producer already stamps, and
-        # what was missing was the STEP — the body walk refused at the first
-        # `await` and the component lost its body with it.
-        "services_async.rvl",
-        "async_effects.rvl",
-        "async_arrow_emission.rvl",
+        # (async coloring left this list entirely. `components_await.rvl` went
+        # with the `await` activation STEP — the colouring itself is a
+        # whole-program property the producer already stamped, and what was
+        # missing was the step, so the body walk refused at the first `await`
+        # and the component lost its body with it. `services_async.rvl`,
+        # `async_effects.rvl`, `async_arrow_emission.rvl` and the two
+        # backends/typescript async fixtures went with the three remaining
+        # pieces: the `async fn` provide method, the `"async": true` stamp an
+        # `effect await`/`await emit` step carries, and the item-92 coercion
+        # that colours an arrow passed into an `(…) -> Async[T]` parameter.)
         # spawn / instance-get
         "spawn.rvl",
         "instance_get.rvl",
@@ -514,8 +516,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # whole-program documents combining several of the above
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         "../../../examples/java_match.rvl",
-        "../../../backends/typescript/tests/fixtures/async_http.rvl",
-        "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
         # property/component edge shapes and the CAS runtime surface
         "property_edges.rvl",
         "component_edges.rvl",
@@ -524,11 +524,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
     "java": (
-        # async coloring. (`comp_await.rvl` and the two bench documents left
-        # this list with the `await` activation step; `component_format.rvl`
-        # and `component_branches.rvl` left it with the component `format`
-        # node, the bare-name `fn` call and the `index` node.)
-        "../emit_ts_corpus/services_async.rvl",
+        # (async coloring left this list entirely. `comp_await.rvl` and the two
+        # bench documents went with the `await` activation step;
+        # `component_format.rvl` and `component_branches.rvl` with the
+        # component `format` node, the bare-name `fn` call and the `index`
+        # node; `../emit_ts_corpus/services_async.rvl` with the `async fn`
+        # provide method.)
         # map inference
         "map_inference.rvl",
         # the stdlib builtin surface
