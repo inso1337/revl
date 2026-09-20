@@ -285,10 +285,14 @@ silence is never read as "declares nothing". The operation list is the same clai
 one level down, and it is what lets the fold resolve a candidate's call through
 `requires k: S` against the RUNNING declaration and refuse a call to an operation
 that service does not declare; a `:S` row with no list says nothing about the
-surface and decides no member. Two things the block does not buy. A
-redeclaration stays withheld, because the block carries the service's operation
-names and not their signatures, and the compatibility relation is decided on
-those. And a wire carrying a WITHDRAWAL row (`-C`, the replacement wave) is
+surface and decides no member. An operation token may carry its declared
+PARAMETER LIST (`:S,op(k:Str)`, issue #346), the same claim one level further
+down again, and that is what lets the fold TYPE the call's arguments against the
+running declaration rather than only resolve its name. Two things the block does
+not buy. A redeclaration stays withheld: the compatibility relation of
+`_admit_service_replacement` is not ported, and the parameter lists the block
+carries are a partial source anyway - they are withheld for a spelling the wire
+cannot carry, and they carry no return type, emission or async marking. And a wire carrying a WITHDRAWAL row (`-C`, the replacement wave) is
 declined outright: the fold decides a withdrawal in full, and re-deriving which
 provisions survive it on this side would be a second implementation of that
 reasoning.
