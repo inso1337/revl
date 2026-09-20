@@ -737,7 +737,7 @@ refused the same way; `reaches []` declares a role that reaches nothing and is
 admitted, with what it does not reach recorded as the attenuation. The question
 is only asked of a component that holds a boundary which could be a model call,
 because a role can only steer an action that reaches a boundary. See
-`docs/design/539-model-in-attenuation.md`.
+`docs/design/541-model-in-attenuation.md`.
 
 ## Everything else
 

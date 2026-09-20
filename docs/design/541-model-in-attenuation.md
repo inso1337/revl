@@ -1,13 +1,16 @@
-# 539: The model role in the capability attenuation product
+# 541: The model role in the capability attenuation product
 
 Roadmap: item 519 (issue #1193), from the 2026-09-19 external review. Slice 1
 is LANDED with this note; slices 2 to 4 are designed here and not written.
 
-Design-doc number: 539. Numbers 531 to 538 were already taken on 2026-09-20,
+Design-doc number: 541. Numbers 531 to 538 were already taken on 2026-09-20,
 531 on main and the rest in open pull requests (532 in #1228 and #1242, 533 in
 #1232, 534 in #1231, 535 in #1230, 536 in #1239, 537 in #1241, 538 in #1242),
 which is checked against `gh pr list` diffs and not only against main, because
-four lanes collided on 531 and three on 536 the same day.
+four lanes collided on 531 and three on 536 the same day. That scan is still
+not enough between lanes that run at the same time: three of them read 539 as
+free before any of the three pull requests existed. Resolved in issue order,
+539 went to PR #1252, 540 to PR #1250, and this note took 541.
 
 Reconciles with: item 66 and `docs/capability-attenuation.md` (the product this
 extends), item 512 and `docs/design/531-model-placement.md` (the `model role`

@@ -1,6 +1,6 @@
 """The model role in the capability attenuation product (item 519, issue #1193).
 
-The executable spec for slice 1 of `docs/design/539-model-in-attenuation.md`:
+The executable spec for slice 1 of `docs/design/541-model-in-attenuation.md`:
 the `reaches [...]` clause on `model role`, the effective-ceiling fold, and the
 one refusal it carries.
 
