@@ -5056,13 +5056,13 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
 /// the crate now REFUSES it with the reference's own code and sentence. That is
 /// an agreement, and it is asserted by
 /// `a_body_that_never_returns_is_refused_with_the_reference_message` below
-/// rather than pinned here. The rest of the type layer is still a gap.
+/// rather than pinned here. `"fn f() -> Int { return undefined_name }"` left
+/// the same way when the name-RESOLUTION rule landed (docs/design/457 §2.3):
+/// it is asserted by `an_undeclared_name_read_is_refused_with_its_guarantee_tag`
+/// below. The rest of the type layer is still a gap.
 #[test]
 fn type_layer_programs_are_not_refused_here_and_must_not_read_as_admitted() {
     let reference_refuses_all_of_these = [
-        // an undeclared name in a function body: resolving a name READ needs
-        // the whole callable universe, which no slice has built yet
-        "fn f() -> Int { return undefined_name }",
         // a return arrow with no return type at all
         "fn f() -> { }",
     ];
@@ -5119,6 +5119,32 @@ of its body without a `return`"
     // and the accepting side, which is the direction this rule may not err in
     assert!(!admit("fn f(c: Bool) -> Int { if (c) { return 1 } else { return 2 } }")
         .is_refused());
+}
+
+/// The name-RESOLUTION half of G1 (docs/design/457 §2.3): a name READ must land
+/// in the fn's scope or in the callable universe. This is what took the
+/// undeclared-name row out of the gap list above.
+#[test]
+fn an_undeclared_name_read_is_refused_with_its_guarantee_tag() {
+    match admit("fn f() -> Int { return undefined_name }") {
+        Verdict::Refused { code, message } => {
+            assert_eq!(code, "G1");
+            assert_eq!(message, "`undefined_name` is not declared in this function");
+        }
+        other => panic!("expected a G1 refusal, got {:?}", other),
+    }
+    // The direction this rule may not err in, one member of the universe per
+    // line: a parameter, a module `fn`, a host root and a nullary ADT case.
+    assert!(!admit(
+        "type Shape = Circle | Square\n\
+fn g(n: Int) -> Int { return n }\n\
+fn f(p: Int) -> Int {\n\
+  let m = Map.new()\n\
+  let s = Circle\n\
+  return g(p)\n\
+}\n"
+    )
+    .is_refused());
 }
 
 // ------------------------------------------------------------- fail closed
@@ -5233,9 +5259,18 @@ fn a_manifest_under_the_row_bound_is_still_folded() {
 /// Nothing else sits at that level, so the count is the count.
 fn flat_body(items: usize) -> String {
     // `items` siblings on one line, no nesting worth counting: the shape whose
-    // frames are one per item. The count at the argument level is exactly
+    // frames are one per item. The count at the list-literal level is exactly
     // `items`, so the two tests below sit on either side of the bound.
-    format!("fn f() -> Int {{ return g({}) }}", vec!["1"; items].join(", "))
+    //
+    // A LIST literal and not a call to `g(...)`: the level counter sees the two
+    // identically (it counts separators inside one bracket level), and this
+    // shape reads no name the program does not declare, so the under-the-bound
+    // case below stays a statement about the BOUND rather than about the G1
+    // read rule (docs/design/457 §2.3), which would otherwise refuse it.
+    format!(
+        "fn f() -> Int {{ return [{}].length() }}",
+        vec!["1"; items].join(", ")
+    )
 }
 
 #[test]
