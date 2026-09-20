@@ -11349,15 +11349,59 @@ fn fb_host_value(e: Expr, scope: List[Bind]) -> Bool {
   }
 }
 
+// `_record_pattern`: `{ a, b }`, names only — the grammar has no renaming form.
+// `i` is the index just past the opening brace; `ok` is false for anything this
+// reader cannot spell in full, and for the two shapes the reference refuses with
+// a sentence this slice does not carry (an empty pattern, a repeated name), so
+// such a statement stays the undecidable bail it has always been rather than
+// drawing some other refusal in their place. On success `i` is the closing
+// brace.
+type FbPat = { names: List[Str], i: Int, ok: Bool }
+
+fn fb_rec_pattern(ts: List[Token], i: Int) -> FbPat {
+  var k = i
+  var names: List[Str] = []
+  var ok = true
+  var go = true
+  while (go) {
+    if (atk(ts, k, "}")) { go = false }
+    else {
+      if (!atk(ts, k, "ident")) { go = false  ok = false }
+      else {
+        let nm = tkc(ts, k).text
+        if (contains(names, nm)) { ok = false }
+        names = names.push(nm)
+        k += 1
+        if (atk(ts, k, ",")) { k += 1 }
+        else { if (!atk(ts, k, "}")) { go = false  ok = false } }
+      }
+    }
+  }
+  if (names.length() == 0) { ok = false }
+  return { names: names, i: k, ok: ok }
+}
+
 // One statement of a fn body. Mirrors `own_one`'s reader token for token, so the
 // two cannot disagree about where a statement ends; what differs is the payload.
 fn fb_one(ts: List[Token], i: Int, hi: Int, al: Map[Str, Str]) -> FbStepR {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
-    // a destructuring pattern binds names this reader does not enumerate
-    if (atk(ts, i + 1, "{") || atk(ts, i + 1, "[")) {
-      return { step: fb_bail(), i: hi }
+    // a RECORD destructuring pattern is read far enough to ask the one question
+    // `_lower_let_pattern_stmt` asks before it binds anything — is the value a
+    // record — and no further: the step still ENDS the block (`i: hi`), exactly
+    // as the bail it replaces did, so nothing after it is judged and every
+    // consumer of this tree that treated the bail as "undecidable" still does
+    // (`rp_has_bail`, `csh_binders`). A LIST pattern keeps the plain bail: its
+    // own rule is a different message this slice does not port.
+    if (atk(ts, i + 1, "{")) {
+      let pr = fb_rec_pattern(ts, i + 2)
+      if (!pr.ok || !atk(ts, pr.i + 1, "=")) { return { step: fb_bail(), i: hi } }
+      let r = expr_at(ts, pr.i + 2)
+      if (is_bad(r.e) || r.i <= pr.i + 2) { return { step: fb_bail(), i: hi } }
+      return { step: fb_step7("letpat", pr.names.join(","), t.text == "var",
+                              t.line, r.e, "", ""), i: hi }
     }
+    if (atk(ts, i + 1, "[")) { return { step: fb_bail(), i: hi } }
     let name = tkc(ts, i + 1).text
     var j = i + 2
     var dty = ""
@@ -11473,6 +11517,35 @@ fn fb_scan(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[FbStep]
   return out
 }
 
+// The first destructured name already bound in this function, else "".
+fn fb_pat_scope(names: List[Str], i: Int, scope: List[Bind]) -> Str {
+  if (i >= names.length()) { return "" }
+  if (tenv_get(scope, names[i]) != "") { return names[i] }
+  return fb_pat_scope(names, i + 1, scope)
+}
+
+fn tk_destructure_msg(ty: Str) -> Str {
+  return "record destructuring requires a record, but `".concat(tk_render(ty))
+    .concat("` is not a record")
+}
+
+// `_BUILTIN_NONRECORD`: the builtin heads a record pattern can never destructure.
+fn tk_nonrecord_head(h: Str) -> Bool {
+  return h == "Str" || h == "Int" || h == "Int32" || h == "Bool" || h == "Float"
+      || h == "Bytes" || h == "Unit" || h == "List" || h == "Map" || h == "Opt"
+      || h == "Result" || h == "Criterion" || h == "Guard"
+}
+
+// Is this value's type one the reference PROVES is not a record? A declared
+// VARIANT is (`types[value_type]["kind"] != "record"`); a builtin non-record
+// head is. Everything else — a structural spelling, a nominal record, a type
+// this walk could not infer — answers no, which is the silent direction.
+fn tk_nonrecord_value(ty: Str, env: List[Bind]) -> Bool {
+  if (ty == "") { return false }
+  if (tenv_get(env, "cases ".concat(ty)) != "") { return true }
+  return tk_nonrecord_head(parse_head(ty))
+}
+
 fn fb_clean(scope: List[Bind], tys: List[Bind]) -> FbR {
   return { v: no_verd(), scope: scope, tys: tys }
 }
@@ -11503,6 +11576,27 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
   if (i >= steps.length()) { return fb_clean(scope, tys) }
   let s = steps[i]
   if (s.kind == "bail") { return fb_clean(scope, tys) }
+  // docs/design/457 T3b: `_lower_let_pattern_stmt`'s RECORD branch, in its own
+  // order — the per-name scope guard first, then the value's type. Only the two
+  // arms that spell "requires a record" are ported: a DECLARED type whose
+  // `types` entry is not a record (the variant rows `adt_case_row` builds), and
+  // a builtin non-record head (`_BUILTIN_NONRECORD`). The unknown-field and
+  // element-type arms need the field table at a precision this walk does not
+  // hold, so they stay silent. The block ends here either way: the binder is not
+  // threaded on, so no statement after it is judged.
+  if (s.kind == "letpat") {
+    let names = split_top_commas(s.name)
+    let g = fb_pat_scope(names, 0, scope)
+    if (g != "") {
+      return fb_refuse("G6", fb_already_msg(g), s.line, scope, tys)
+    }
+    let vt = infer(s.value, tys)
+    if (tk_nonrecord_value(vt, tys)) {
+      return fb_type_refuse(tagged("TYPE", tk_destructure_msg(vt)), s.line,
+                            scope, tys)
+    }
+    return fb_clean(scope, tys)
+  }
   if (s.kind == "let") {
     if (tenv_get(scope, s.name) != "") {
       return fb_refuse("G6", fb_already_msg(s.name), s.line, scope, tys)
@@ -11781,7 +11875,7 @@ fn rp_returns(steps: List[FbStep], i: Int) -> Bool {
 fn rp_has_bail(steps: List[FbStep], i: Int) -> Bool {
   if (i >= steps.length()) { return false }
   let s = steps[i]
-  if (s.kind == "bail") { return true }
+  if (s.kind == "bail" || s.kind == "letpat") { return true }
   if (rp_has_bail(s.then_, 0) || rp_has_bail(s.els, 0)
       || rp_has_bail(s.body, 0)) { return true }
   return rp_has_bail(steps, i + 1)
@@ -12100,7 +12194,7 @@ fn csh_binders(steps: List[FbStep], i: Int, acc: CshBs) -> CshBs {
   if (i >= steps.length()) { return acc }
   let s = steps[i]
   var out = acc
-  if (s.kind == "bail") { out = { bs: acc.bs, ok: false } }
+  if (s.kind == "bail" || s.kind == "letpat") { out = { bs: acc.bs, ok: false } }
   if (s.kind == "let") { out = csh_add(acc, s.name, s.line) }
   if (s.kind == "for") {
     out = csh_binders(s.body, 0, csh_add(acc, s.name, s.line))
