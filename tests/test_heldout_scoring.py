@@ -23,6 +23,7 @@ draw never reached the guard REFUSES instead of reporting clean.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -39,16 +40,24 @@ _spec = importlib.util.spec_from_file_location(
 heldout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(heldout)
 
-# A seed that is not in this tree, which is the point. It is on the command
-# line of a test in the tree, so it is NOT held out from anything -- a test
-# proves the mechanism, it does not perform a scoring run. The design doc
-# states that distinction; `seed_source` in the verdict is where a reader sees
-# which kind of run produced a record.
-TEST_SEED = "3f5b1d7c9a2e4086bd13"
+# The fixture seed, and the first thing this file has to be honest about.
+#
+# It is the DIGEST of a phrase rather than the phrase, for two reasons that
+# pull in opposite directions. Deterministic, so a red in CI is reproducible
+# from the source rather than from a number nobody kept. Absent from the
+# tracked tree, so `seed_is_in_tree` does not refuse it -- which is the whole
+# mechanism working on its own test suite, since a literal seed committed here
+# would be, correctly, refused.
+#
+# It is NOT held out from anything. A reader with this file recomputes it in a
+# line. A test proves the mechanism; it does not perform a scoring run, and the
+# `seed_source` field in the verdict record is where a reader tells the two
+# apart.
+TEST_SEED = hashlib.sha256(b"heldout-scoring slice 1 fixture").hexdigest()[:24]
 
 # A short, ordinary draw: large enough to carry near misses of several
 # families, small enough that the mutation cases below stay cheap.
-DRAW = 40
+DRAW = 60
 
 
 @pytest.fixture(scope="module")
@@ -94,6 +103,54 @@ def test_every_near_miss_family_is_reachable_from_some_seed():
             if case_id.startswith("near:"):
                 seen.add(case_id.split(":")[1])
     assert seen == set(heldout.NEAR_MISS_FAMILIES)
+
+
+def test_no_generated_word_is_a_keyword():
+    """A generated identifier that is a keyword is a parse error wearing the
+    label `inside:`.
+
+    The first draft of the word list carried `emit`, and eight of two hundred
+    programs that claimed to sit inside the admission surface were parse errors
+    instead. Held against the reference lexer's own table rather than a copy.
+    """
+    from revl.lexer import KEYWORDS
+
+    assert not set(heldout._WORDS) & set(KEYWORDS)
+
+
+def test_the_reference_admits_every_program_the_draw_calls_inside(reference):
+    """The grammar's claim, checked rather than asserted.
+
+    `inside:` means "inside the admission surface", and the admission surface
+    is a region the REFERENCE admits. A draw whose inside half the reference
+    refuses is measuring something other than what it says, and the tool
+    refuses such a draw -- this is the same property on a wider sample than a
+    single run pays for.
+    """
+    refused = []
+    for case_id, src in heldout.draw(TEST_SEED, 200):
+        if not case_id.startswith("inside:"):
+            continue
+        tag, message = reference(src)
+        if tag:
+            refused.append((case_id, tag, message))
+    assert not refused, refused[:5]
+
+
+def test_a_draw_whose_inside_half_is_refused_is_itself_refused(
+        engine, census, reference):
+    """The generator-defect direction is a refusal, not a finding.
+
+    A program the generator labelled `inside:` that the reference refuses says
+    the draw is not the set it claims to be. Mutating the reference into one
+    that refuses everything is the cheapest way to produce that shape.
+    """
+    record, status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW,
+        changed=["src/revl/lower.py"], census=census, engine=engine,
+        reference=lambda src: ("OUT:mutated reference", "mutated"))
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "draw-inside-refused-by-reference"
 
 
 def test_a_scoring_run_writes_nothing_into_the_tree(engine, census, reference):
@@ -143,6 +200,18 @@ def test_a_short_seed_refuses():
     record, status = _run(argv_seed="abc")
     assert status == heldout.REFUSED
     assert record["refusal"] == "seed-too-short"
+
+
+def test_the_fixture_seed_is_itself_absent_from_the_tree():
+    """The suite eats its own cooking.
+
+    A literal seed committed in this file would be refused by the tool, and
+    correctly so. The fixture seed is a digest of a phrase for exactly that
+    reason, and this holds the property rather than leaving it to a comment
+    somebody edits away.
+    """
+    assert len(TEST_SEED) >= heldout.MIN_SEED_CHARS
+    assert not heldout.seed_is_in_tree(TEST_SEED, ROOT)
 
 
 def test_a_seed_that_is_in_the_tree_refuses():
