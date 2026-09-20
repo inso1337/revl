@@ -104,8 +104,8 @@ def test_retention_requires_every_component(reward):
         assert one_bad.blockers == (victim,)
 
 
-def test_seven_of_eight_is_not_retained(reward):
-    """The case a weighted score would have kept: 7/8 is 0.875, and 0.875 is
+def test_all_but_one_is_not_retained(reward):
+    """The case a weighted score would have kept: 8 of 9 is 0.889, and 0.889 is
     above every threshold anybody would pick. The conjunction says no."""
     card = reward.Scorecard(
         _candidate(reward, "/nowhere"),
@@ -142,10 +142,24 @@ def test_no_scalar_reward_is_exported(reward):
 
 
 def test_every_component_of_item_536_is_present(reward):
+    """The eight item 536 enumerates, plus the ninth issue #1224 adds."""
     assert set(reward.COMPONENTS) == {
         "compiles", "tests", "no-new-false-admits", "conformance",
-        "artifact-stability", "formal", "scope", "documentation"}
+        "artifact-stability", "formal", "scope", "documentation", "progress"}
     assert set(reward.PROBES) == set(reward.COMPONENTS)
+
+
+def test_every_component_carries_a_probe_not_a_placeholder(reward):
+    """The close condition for issue #1206: nine components, nine probes, and
+    not one of them answering "no probe implemented". Slice 1 shipped four real
+    probes and four placeholders; a placeholder left behind here would make the
+    conjunction unsatisfiable while looking complete."""
+    for name in reward.COMPONENTS:
+        probe = reward.PROBES[name]
+        assert callable(probe), name
+        assert "no probe implemented" not in (probe.__doc__ or ""), name
+    assert not hasattr(reward, "_unimplemented"), \
+        "the placeholder factory is gone; every component reads an artifact"
 
 
 # --------------------------------------------------------------------------
@@ -241,22 +255,31 @@ def test_a_probe_answering_for_another_component_fails(reward):
     assert formal.verified is False
 
 
-def test_an_unimplemented_component_fails_rather_than_defaulting(reward):
-    for name in ("compiles", "tests", "conformance", "formal"):
-        verdict = reward.PROBES[name](_candidate(reward, "/nowhere"))
-        assert verdict.verified is False
-        assert "no probe implemented" in verdict.reason
+def test_every_component_fails_on_a_tree_that_is_not_there(reward, tiny_repo):
+    """The blanket fail-closed check. `tiny_repo` has a git history and nothing
+    else: no tools, no crate, no ledger, no doc. Every component must land on
+    `failed`, because "the artifact is missing" is never "nothing objected"."""
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("**",))
+    for name in reward.COMPONENTS:
+        verdict = reward.PROBES[name](candidate)
+        assert verdict.verified is False, f"{name}: {verdict.reason}"
+        assert verdict.component == name
 
 
-def test_the_conformance_component_names_the_tool_that_does_not_exist(reward):
-    """Item 536 maps this component to `tools/gate_verdict_parity.py`, which is
-    not in the tree. Fail-closed means the component says so rather than being
-    quietly dropped, and this test reds when the tool arrives, which is when the
-    probe has to be written."""
-    assert not (ROOT / "tools" / "gate_verdict_parity.py").exists()
-    verdict = reward.PROBES["conformance"](_candidate(reward, "/nowhere"))
-    assert verdict.verified is False
-    assert "gate_verdict_parity.py" in verdict.reason
+def test_the_conformance_component_does_not_wait_on_a_tool_that_never_existed(
+        reward):
+    """Item 536 mapped this component to `tools/gate_verdict_parity.py`, a file
+    that has never been in this tree (issue #1233, roadmap item 547). Slice 1
+    failed the component by name so the absence would block rather than be
+    awarded. The decision taken in slice 3 is to re-point the component at the
+    registers that DO record cross-tier divergence, so the scorer must no
+    longer depend on that name in either direction."""
+    source = (ROOT / "tools" / "evolution_reward.py").read_text()
+    assert "gate_verdict_parity" in source, \
+        "the decision not to build it is recorded in the module, not erased"
+    assert reward.PROBES["conformance"] is reward.probe_conformance
+    body = reward.probe_conformance.__doc__ or ""
+    assert "tier_guarantees" in body or "check-tier-parity" in body
 
 
 # --------------------------------------------------------------------------
@@ -502,4 +525,235 @@ def test_the_cli_exits_nonzero_while_anything_is_unverified(
     card = json.loads(out.read_text())
     assert card["retained"] is False
     assert "compiles" in card["blockers"]
+    assert "progress" in card["blockers"]
     assert card["prose_ignored"] == ["rationale"]
+
+
+# --------------------------------------------------------------------------
+# compiles: the gate crate through real cargo, the six-tier matrix through the
+# repository's own walk. Non-vacuity is a fixture that genuinely does not
+# compile and a fixture whose matrix genuinely has a gap.
+# --------------------------------------------------------------------------
+
+def _stub_tool(tree, rel, body):
+    path = tree / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def _matrix_report(gaps=(), tiers=None, cases=("expr/add",)):
+    """A `tools/conformance.py --json` report, in that tool's own shape."""
+    tiers = tuple(tiers if tiers is not None
+                  else ("python", "typescript", "rust", "java", "wasm", "go"))
+    report = {"cases": [{"case": c, "tiers": {t: "ok" for t in tiers},
+                         "emit_kind": {t: "ok" for t in tiers}} for c in cases],
+              "frontend_rejected": [], "gaps": {}}
+    for tier, case, deliberate in gaps:
+        report["gaps"].setdefault(tier, []).append(
+            {"case": case, "message": "no case for it", "deliberate": deliberate})
+    return report
+
+
+@pytest.fixture
+def crate_repo(tiny_repo):
+    """`tiny_repo` plus a real, minimal cargo crate at `crates/revl-gate`.
+
+    A real crate rather than a mocked `cargo`: the component's claim is that
+    rustc accepted this source, and a stubbed compiler would test the stub. It
+    has no dependencies, so `--offline` needs no registry and the check is about
+    a second, against twenty for the repository's own gate crate.
+    """
+    crate = tiny_repo / "crates" / "revl-gate"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text(
+        "[package]\nname = \"revl-gate\"\nversion = \"0.1.0\"\n"
+        "edition = \"2021\"\n\n[workspace]\n")
+    (crate / "src" / "lib.rs").write_text("pub fn admit(n: i64) -> i64 { n }\n")
+    return tiny_repo
+
+
+def _with_matrix(tree, report):
+    _stub_tool(tree, "tools/conformance.py",
+               "import json, sys\nprint(json.dumps(%r))\n" % (report,))
+    return tree
+
+
+def test_compiles_verifies_when_the_crate_builds_and_no_tier_has_a_real_gap(
+        reward, crate_repo):
+    _with_matrix(crate_repo, _matrix_report())
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+
+
+def test_compiles_fails_on_source_that_does_not_compile(reward, crate_repo):
+    """Non-vacuity for the crate half, with a real rustc refusal. This is the
+    case a digest gate cannot see: `tools/build_gate_crate.py --check` compares
+    BYTES, so a regenerated crate can be byte-correct and not compile."""
+    _with_matrix(crate_repo, _matrix_report())
+    (crate_repo / "crates" / "revl-gate" / "src" / "lib.rs").write_text(
+        "pub fn admit(n: i64) -> i64 { n + }\n")
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "cargo check" in verdict.reason
+
+
+def test_compiles_fails_on_a_real_emitter_gap_and_passes_a_deliberate_limit(
+        reward, crate_repo):
+    """The distinction the component turns on. An emitter that raised its own
+    `EmitError` declared a tier limit; an emitter that crashed had no case for a
+    construct it should express. `origin/main` carries eleven of the first and
+    zero of the second, so the bar is zero REAL gaps, not zero refusals."""
+    candidate = _candidate(reward, crate_repo, base="HEAD", scope=("**",))
+
+    _with_matrix(crate_repo, _matrix_report(
+        gaps=[("wasm", "expr/true division", True)]))
+    assert reward.probe_compiles(candidate).verified is True
+
+    _with_matrix(crate_repo, _matrix_report(
+        gaps=[("wasm", "expr/true division", True),
+              ("rust", "expr/add", False)]))
+    verdict = reward.probe_compiles(candidate)
+    assert verdict.verified is False
+    assert "rust" in verdict.reason and "real emitter gap" in verdict.reason
+
+
+def test_compiles_fails_when_a_tier_stops_being_walked(reward, crate_repo):
+    """The matrix cannot shrink its way to green. A tier absent from a case row
+    was not measured, and an unmeasured tier is not a passing one."""
+    _with_matrix(crate_repo, _matrix_report(
+        tiers=("python", "typescript", "rust", "java", "go")))
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "wasm" in verdict.reason
+
+
+def test_compiles_fails_when_the_matrix_prints_nothing_readable(
+        reward, crate_repo):
+    _stub_tool(crate_repo, "tools/conformance.py", "print('not json')\n")
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+
+
+def test_compiles_verifies_on_this_tree(reward, real_candidate):
+    """The real artifact: the real gate crate and the real six-tier walk. About
+    twenty seconds, almost all of it a cold `cargo check`."""
+    verdict = reward.probe_compiles(real_candidate)
+    assert verdict.verified is True, verdict.reason
+
+
+# --------------------------------------------------------------------------
+# tests: the repository's own selection, actually run, with a collected count.
+# --------------------------------------------------------------------------
+
+def _with_selection(tree, full="0", pytest_targets="", backends="",
+                    gates="", reason="stub"):
+    block = "\n".join([f"FULL {full}", f"REASON {reason}",
+                        f"PYTEST {pytest_targets}", f"BACKENDS {backends}",
+                        f"GATES {gates}"])
+    _stub_tool(tree, "tools/affected_tests.py", f"print({block!r})\n")
+    return tree
+
+
+@pytest.fixture
+def suite_repo(tiny_repo):
+    (tiny_repo / "tests").mkdir()
+    (tiny_repo / "tests" / "test_green.py").write_text(
+        "def test_a():\n    assert True\n\n\ndef test_b():\n    assert True\n")
+    return tiny_repo
+
+
+def test_tests_verifies_when_the_selected_suite_runs_green(reward, suite_repo):
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "2 test(s) passed" in verdict.reason
+
+
+def test_tests_fails_on_a_selected_suite_that_genuinely_fails(
+        reward, suite_repo):
+    """Non-vacuity: a real pytest process, a real assertion failure."""
+    (suite_repo / "tests" / "test_red.py").write_text(
+        "def test_c():\n    assert 1 == 2\n")
+    _with_selection(suite_repo,
+                    pytest_targets="tests/test_green.py tests/test_red.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "exited" in verdict.reason
+
+
+def test_a_suite_that_collected_nothing_is_not_a_pass(reward, suite_repo):
+    """The fail-open shape this probe exists to close. A pytest summary with no
+    test count means zero tests ran, and a run of zero tests exits 0 whenever
+    something else in the selection kept the exit status clean. The probe reads
+    the COUNT, not only the status."""
+    (suite_repo / "tests" / "test_all_skipped.py").write_text(
+        "import pytest\n\n\n@pytest.mark.skip(reason='stub')\n"
+        "def test_d():\n    assert True\n")
+    _with_selection(suite_repo, pytest_targets="tests/test_all_skipped.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "collected nothing" in verdict.reason
+
+
+def test_an_empty_selection_is_not_a_pass(reward, suite_repo):
+    _with_selection(suite_repo, pytest_targets="", reason="nothing mapped")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "named no test at all" in verdict.reason
+
+
+def test_a_full_selection_means_the_whole_tests_tree(reward, suite_repo):
+    """FULL is the selector falling safe, and falling safe must not be read as
+    "nothing to run"."""
+    _with_selection(suite_repo, full="1", pytest_targets="",
+                    reason="a core file changed")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "FULL" in verdict.reason
+
+
+def test_a_selected_backend_suite_is_added_to_the_run(reward, suite_repo):
+    """`pytest tests/` does not contain the per-backend emit suites; they live
+    outside `tests/` and run as their own CI jobs. A selection that names a tier
+    and a probe that ran only `tests/` is the wave gap this repository has
+    already paid for twice."""
+    (suite_repo / "backends" / "go").mkdir(parents=True)
+    (suite_repo / "backends" / "go" / "test_emit_go.py").write_text(
+        "def test_go_golden():\n    assert True\n")
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py",
+                    backends="go")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "3 test(s) passed" in verdict.reason
+
+
+def test_a_backend_whose_suite_this_probe_cannot_run_fails_it(
+        reward, suite_repo):
+    """`tools/pre_merge.sh` SKIPS the python and typescript backend suites when
+    their toolchain is absent. A skip is not a pass, so a selection that names
+    one fails the component by name instead."""
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py",
+                    backends="typescript")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "typescript" in verdict.reason
+
+
+def test_a_selector_that_cannot_run_fails_the_component(reward, suite_repo):
+    _stub_tool(suite_repo, "tools/affected_tests.py", "import sys\nsys.exit(2)\n")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "selection could not be read" in verdict.reason
