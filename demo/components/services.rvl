@@ -10,7 +10,7 @@
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
 }
 
 service Cache {
