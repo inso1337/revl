@@ -13824,6 +13824,8 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 //          which is what an arm's `payload_type` is read out of
 //   fns    the module callables (module `fn`s and externs) a component body may
 //          call by bare name, each bound to its declared ARITY
+//   fnps   the same callables bound to their declared PARAMETER TYPES, which
+//          only an `(…) -> Async[T]` slot reads (item 92's arrow coercion)
 //   wit    the `witnessed` externs — the ONLY callees whose `effect` site may
 //          spell no `undo` (item 243)
 //   al     the transparent type aliases, so a declared parameter's type is read
@@ -13889,11 +13891,17 @@ fn witnessed_extern_names(ts: List[Token]) -> List[Str] {
 // a `fn` nested in a service or a provide block is never mistaken for one.
 //
 // The arity is carried because the reference fills omitted trailing defaults
-// (`_with_default_args`) and coerces an arrow into an `Async[T]` slot
-// (`_coerce_async_args`) at a component-body call, and both are no-ops exactly
-// when every parameter is supplied and none is async. A callable with an async
-// parameter slot is left OUT of the table altogether, so a call to it refuses
-// rather than lowering to a `fn` node with a silently different argument list.
+// (`_with_default_args`) at a component-body call, which is a no-op exactly
+// when every parameter is supplied: a call whose argument count does not match
+// refuses rather than lowering to a `fn` node with a silently different
+// argument list.
+//
+// A callable with an async parameter slot used to be left OUT of this table
+// altogether, for the same fail-closed reason applied to the OTHER rewrite the
+// reference performs there (`_coerce_async_args`). It is in now, because that
+// coercion is performed: `module_callable_ptypes` below carries the declared
+// types the slot is judged against, and an async slot holding anything but an
+// arrow still refuses.
 fn module_callable_sigs(ts: List[Token]) -> List[Bind] {
   let fs = parse_prog_ts(ts).fns
   var out: List[Bind] = []
@@ -14683,9 +14691,6 @@ fn cir_effect_block(ts: List[Token], lo: Int, hi: Int, cx: CCtx,
   return { ok: false, setup: "", acq: "", wit: false }
 }
 
-// A component activation body -> its `body` step list. `config` is a header
-// declaration, skipped structurally; the accumulated `sc` threads `let-effect`
-// binds into later steps.
 // The additive `"async": true` flag on an activation step whose SURFACE spelled
 // `await` (item 131 §3: `effect await …`, `let x = effect await …`, `await emit
 // …`). The reference sets it from the parsed statement's `is_async` and from
@@ -14696,6 +14701,9 @@ fn step_async(js: Str) -> Str {
   return js.slice(0, js.length() - 1).concat(", \"async\": true}")
 }
 
+// A component activation body -> its `body` step list. `config` is a header
+// declaration, skipped structurally; the accumulated `sc` threads `let-effect`
+// binds into later steps.
 fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
             provs: List[Bind], sc: List[Bind], hostSc: List[Str],
             acc: Str) -> IrRes {
