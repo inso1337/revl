@@ -133,17 +133,62 @@ def _compile_corpus() -> list[Path]:
     literal in it, including the `"*.rvl"` glob and the paths its prose
     mentions, and then has to guess a directory for each name: the old spelling
     crossed 130 scraped names with three fixture subdirectories and surveyed
-    the 200-odd that happened to resolve, which is not the corpus this oracle
-    runs on and drifts from it silently.
+    the 200-odd that happened to resolve, which is neither the corpus this
+    oracle runs on nor a superset it can drift within quietly.
+
+    Read STATICALLY, so this stays a `python3 tools/...` script with no test
+    dependency; `tests/test_oracle_construct_reach.py` imports the oracle for
+    real and holds this reading to it, which is where a shape change is caught.
     """
-    spec = importlib.util.spec_from_file_location(
-        "selfhost_compile_oracle", ROOT / "tests" / "test_selfhost_compile.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    corpus = [*module.NATIVE_CORPUS, *module.COMPONENT_CORPUS]
-    return sorted({ROOT / "tests" / "fixtures" / subdir / name
-                   for _tier, subdir, name in corpus})
+    tree = ast.parse((ROOT / "tests" / "test_selfhost_compile.py").read_text())
+    lists: dict[str, list[str]] = {}
+    tables: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        if isinstance(node.value, ast.List) and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in node.value.elts):
+            lists[target.id] = [e.value for e in node.value.elts]
+        else:
+            tables[target.id] = node.value
+
+    def entries(node: ast.AST) -> list[tuple[str, str]]:
+        """`[(tier, "subdir", n) for n in NAMES]`, and `+` chains of those."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return entries(node.left) + entries(node.right)
+        if not isinstance(node, ast.ListComp) or len(node.generators) != 1:
+            raise SystemExit(
+                "tests/test_selfhost_compile.py: corpus table is no longer a "
+                "comprehension over a name list; teach _compile_corpus its shape")
+        generator = node.generators[0]
+        element = node.elt
+        if (not isinstance(element, ast.Tuple) or len(element.elts) != 3
+                or not isinstance(element.elts[1], ast.Constant)
+                or not isinstance(generator.target, ast.Name)
+                or not isinstance(generator.iter, ast.Name)
+                or generator.iter.id not in lists):
+            raise SystemExit(
+                "tests/test_selfhost_compile.py: corpus entry is no longer "
+                "(tier, subdir, name) over a literal name list")
+        subdir = element.elts[1].value
+        return [(subdir, name) for name in lists[generator.iter.id]]
+
+    corpus: list[tuple[str, str]] = []
+    for name in ("NATIVE_CORPUS", "COMPONENT_CORPUS"):
+        if name not in tables:
+            raise SystemExit(f"tests/test_selfhost_compile.py: no {name} table")
+        corpus += entries(tables[name])
+    documents = sorted({ROOT / "tests" / "fixtures" / subdir / document
+                        for subdir, document in corpus})
+    missing = [str(p.relative_to(ROOT)) for p in documents if not p.is_file()]
+    if missing:
+        raise SystemExit("compile oracle corpus names documents that do not "
+                         "exist: " + ", ".join(missing))
+    return documents
 
 
 def _section_reach(documents: list[Path]) -> dict[str, set[str]]:
