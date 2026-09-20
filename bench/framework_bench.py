@@ -388,7 +388,8 @@ def column_tokens_to_green(run: str | None, compiler_root: Path,
                       if c.get("recorded_tokens_to_green"))
     estimated = sorted(c["est_tokens_to_green"] for c in admitted
                        if c.get("est_tokens_to_green"))
-    values, source = ((recorded, "recorded by the provider") if recorded
+    values, source = ((recorded, "reported by the endpoint that served the run")
+                      if recorded
                       else (estimated, "estimated from the committed source"))
     if not values:
         return {"status": NOT_RUN,
@@ -400,11 +401,55 @@ def column_tokens_to_green(run: str | None, compiler_root: Path,
         "token_source": source,
         "median_output_tokens": values[len(values) // 2],
         "mean_output_tokens": sum(values) / len(values),
+        # The two sources are not two estimates of one quantity and must not be
+        # compared. A reported count is what the model actually emitted,
+        # including a reasoning channel the caller paid for and never saw; an
+        # estimated count is recounted from the source that survived, which
+        # cannot include reasoning. A reported figure will be several times the
+        # estimated one for the same work, and that is a difference in what is
+        # being counted rather than in the work.
+        **_retry_censoring(run, cells),
+        "sources_are_not_comparable": (
+            "a reported count includes the model's reasoning channel; an "
+            "estimated count is recounted from the emitted source and cannot. "
+            "Comparing a figure from one source with a figure from the other "
+            "compares two different quantities"),
         "admitted_cells": len(admitted),
         "total_cells": len(cells),
         **is_pinned_corpus(run, pin),
         "means": "output tokens spent per admitted component",
     }
+
+
+def _retry_censoring(run: str, cells: list) -> dict:
+    """Whether the corpus behind a tokens-to-green figure allowed retries.
+
+    tokens-to-green is the tokens spent until a component is admitted, and the
+    figure is taken over admitted cells only. In a corpus generated with one
+    attempt per spec there are no retried cells to average in, so every
+    component that would have needed a second attempt is missing from the
+    denominator rather than contributing a larger number to it. The median then
+    reads lower than the metric's definition for a reason that has nothing to
+    do with the model, and a reader comparing it with a three-attempt corpus is
+    comparing a censored sample with a complete one.
+    """
+    run_dir = BENCH / "results" / run
+    attempts = 0
+    if run_dir.is_dir():
+        for path in run_dir.rglob("attempt-*.rvl"):
+            try:
+                attempts = max(attempts, int(path.stem.split("-")[1]))
+            except (IndexError, ValueError):
+                continue
+    out = {"max_attempts_in_corpus": attempts or None}
+    if attempts == 1:
+        out["censored"] = (
+            "this corpus holds one attempt per spec, so the figure is taken "
+            "over the components that were admitted first time and the ones "
+            "that would have needed a retry are absent from it entirely. It is "
+            "a lower bound on tokens-to-green, not an estimate of it, and it is "
+            "not comparable with a figure from a corpus that allowed retries")
+    return out
 
 
 def column_injection_escape(run: str | None) -> dict:
@@ -977,6 +1022,15 @@ def render(report: dict) -> str:
              + ("**pinned model**" if tok.get("is_pinned_model")
                 else f"corpus {tok.get('corpus')}, NOT the pinned model") + ")"
              if tok.get("status") == "measured" else "not run")
+    if tok.get("status") == "measured":
+        lines_after_table = [
+            "", "### What the tokens-to-green figure counts", "",
+            tok["sources_are_not_comparable"] + ".", "",
+        ]
+        if tok.get("censored"):
+            lines_after_table += [tok["censored"] + ".", ""]
+    else:
+        lines_after_table = []
     lines.append(f"| tokens to green | not applicable | {fw()} | {tcell} |")
 
     lat = cols["admission-latency"]
@@ -986,6 +1040,7 @@ def render(report: dict) -> str:
              if lat.get("existing_artifact") else "not run")
     lines.append(f"| admission latency | no gate to time | {fw()} | {lcell} |")
 
+    lines += lines_after_table
     lines += ["",
               "### Why the raw-TypeScript row is not a compile-rate", "",
               "TypeScript always compiles. There is no first-pass compile",
