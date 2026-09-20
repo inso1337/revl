@@ -475,9 +475,8 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
 # covers all six, and the test recomputes the set rather than sampling it.
 LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     "py": (
-        # service dispatch and interpolation inside a component method
+        # service dispatch inside a component method
         "services_match.rvl",
-        "services_interp.rvl",
         # witnessed effects / secret marking on the activation path
         "witnessed.rvl",
         "witnessed_secret.rvl",
@@ -488,15 +487,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../examples/v3_step_scheduler.rvl",
         "../../../backends/typescript/tests/fixtures/conformance.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-        "../policy_agents.rvl",
-        "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
         "../../../examples/java_match.rvl",
         "../../../src/revl/truc/components/cli.rvl",
     ),
     "ts": (
-        # component expressions (host acquisition / interpolation / fn call /
-        # tagged constructor in a component body)
-        "component_exprs.rvl",
         # async coloring (async methods / await / async arrows)
         "services_async.rvl",
         "components_await.rvl",
@@ -511,7 +505,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # list when lower.rvl grew the component-header prelude; the four ts
         # realm documents now compile byte-exact through the native chain.)
         # whole-program documents combining several of the above
-        "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         "../../../examples/java_match.rvl",
         "../../../backends/typescript/tests/fixtures/async_http.rvl",
@@ -523,7 +516,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # on a sized receiver started carrying `sized_length`, and
         # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
         # bracket, the `assign` step and `undo_captures` landed in a provide
-        # method body.)
+        # method body. `component_exprs.rvl` left it with the component
+        # dialect's `format` template, `fn` call and tagged `adt` construction,
+        # which also closed documents on the py and java tiers.)
     ),
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
@@ -533,9 +528,7 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # whole-program documents combining several of the shapes below
         "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
         "../emit_ts_corpus/services_async.rvl",
-        "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
-        # component string interpolation / branch shapes / map inference
-        "component_format.rvl",
+        # component branch shapes / map inference
         "component_branches.rvl",
         "map_inference.rvl",
         # (the stdlib builtin surface — `stdlib_builtins.rvl` and the borrowed
