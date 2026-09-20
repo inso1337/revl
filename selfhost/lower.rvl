@@ -20343,3 +20343,147 @@ component C requires sink: Sink provides api: Api {
 }""")
   assert v == "G4|call to emission `sink.write` must be marked `emit` (G4)"
 }
+
+// ------------------------------------------------- model placement (item 512)
+//
+// `docs/design/531-model-placement.md` slice 3. Every program here rides
+// through the differential oracle in `tests/test_selfhost_lower.py`
+// (`test_in_file_test_programs_agree`), so a message eyeballed in this file
+// cannot drift from the reference's.
+
+test "a model placement that keeps a confidential input on the device admits" {
+  let v = admit_src("""model role local on_device
+model role cloud off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> local,
+    * -> cloud
+  }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+}
+
+test "routing a confidential origin off the device is refused by name" {
+  // roadmap item 512's exit test, verbatim: the diagnostic names the action,
+  // the origin and the role, and the tag is MODEL rather than the generic
+  // top-level parse marker this gate answered before the port.
+  let v = admit_src("""model role local on_device
+model role cloud off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> cloud }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"
+}
+
+test "the residence vocabulary is closed, so a typo is a refusal" {
+  let v = admit_src("""model role local on_devise
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|unknown residence `on_devise` for model role `local`"
+  assert admit_tag("""model role local on_devise
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "MODEL"
+}
+
+test "a role is declared once, and the refusal names both residences" {
+  let v = admit_src("""model role local on_device
+model role local off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|model role `local` is declared twice (first on line 1, as `on_device`; here as `off_device`)"
+}
+
+test "an arm names an origin from the lattice and a declared role" {
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidental -> local }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|unknown origin class `confidental` in `route model on classify`"
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> edge }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|`confidential -> edge` in `route model on classify` (Classifier) names no declared model role"
+}
+
+test "an origin is routed once, an action is routed once, a block names a role" {
+  assert admit_src("""model role local on_device
+model role cloud off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { web -> local, web -> cloud }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|origin `web` is routed twice in `route model on classify` (Classifier)"
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { web -> local }
+  route model on classify { net -> local }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` is routed twice in Classifier"
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|`route model on classify` in Classifier names no role"
+}
+
+test "a route keyed to an action the component renamed away protects nothing" {
+  // the shape this repository keeps finding on the wrong side: state keyed to
+  // a thing that outlived the thing meant to bound it, still READING as a
+  // placement. Refused, naming the component.
+  let v = admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify_text { web -> local }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|`route model on classify_text` names no action of Classifier"
+}
+
+test "the secret origin reaches no role, at either residence" {
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { secret -> local }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` (Classifier) routes the `secret` origin to model role `local`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"
+}
+
+test "a model placement is a prelude declaration" {
+  let v = admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+  route model on classify { web -> local }
+}""")
+  assert v == "PRELUDE|`route model` must precede every effect, emit, await, and provide statement"
+}
+
+test "`model` and `route` stay ordinary identifiers" {
+  // the contextual-keyword claim, measured rather than asserted: the very
+  // spelling item 512 is about (`requires model: Model`) still parses, and so
+  // does a parameter named `model`.
+  assert admit_src("""service Model { fn c(x: Str) -> Str }
+service M { fn go(x: Str) -> Str }
+component C requires model: Model provides out: M {
+  provide out { fn go(x) = x }
+}""") == ""
+  assert admit_src("""service M { fn go(model: Str) -> Str }
+component C provides out: M {
+  provide out { fn go(model) = model }
+}""") == ""
+}
