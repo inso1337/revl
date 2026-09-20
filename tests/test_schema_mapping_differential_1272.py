@@ -388,25 +388,27 @@ def test_a_nested_opt_reaches_the_openapi_mapping_through_the_RESPONSE(tmp_path)
 
 def test_a_nested_opt_is_refused_on_a_bound_input(tmp_path):
     """The other half: a null-ambiguous `Opt` reached through a BOUND INPUT is
-    refused before the second mapping sees it."""
-    pytest.importorskip(
-        "revl.mcp.schema",
-        reason="the surface-type null predicate ships with issue #1263")
+    refused before the second mapping ever sees it. That refusal ships with
+    issue #1263, so this skips with a reason on a tree that predates it."""
     from revl.mcp import schema as schema_mod
     if not hasattr(schema_mod, "admits_json_null"):
         pytest.skip("requires `admits_json_null` (issue #1263 / PR #1270); "
-                    "this tree predates the input gate")
+                    "this tree predates the bound-input gate")
     app = tmp_path / "app.rvl"
     app.write_text(
+        'use "stdlib/http.rvl" { ApiError }\n\n'
         'type Wrap = { deep: Opt[Opt[Str]] }\n\n'
         'service S {\n'
         '  route post "/w"\n'
-        '  emission fn put(w: Wrap) -> Unit\n'
+        '  emission fn put(w: Wrap) -> Result[Unit, ApiError]\n'
         '}\n\n'
         'component C provides s: S {\n'
-        '  provide s { fn put(w) = unit_of(w) }\n'
-        '}\n\n'
-        'fn unit_of(w: Wrap) -> Unit { return () }\n', encoding="utf-8")
+        '  provide s {\n'
+        '    fn put(w) = Ok(None)\n'
+        '  }\n'
+        '}\n', encoding="utf-8")
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(app)])
-    assert "Opt[Opt[Str]]" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "Opt[Opt[Str]]" in message
+    assert "binds `w`" in message
