@@ -92,7 +92,7 @@ groups "the `Secret` families" with G9 as the same no-paper-anchor family.
 | G9 | untrusted data cannot create authority without a declared declassification (`endorse`, or a `verified` checked parser) | lower (taint flow) | revl-original (no paper anchor; roadmap item 249) |
 | [G-SECRET](rejections.md#the-families) | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
 | [G-SECRET-FLOW](rejections.md#the-families) | a `Secret[T]` value never reaches a disclosure sink; it crosses only at a declared `Secret[T]` receiver and downgrades only at a declared `endorse[confidential]` | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
-| [G-MODEL-PLACE](rejections.md#the-families) | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration; `src/revl/model_route.py`) | revl-original (item 512); no paper anchor |
+| [G-MODEL-PLACE](rejections.md#the-families) | a model role declared `off_device` never receives a confidentiality origin, an action reaches only the roles its `route model` block names, and a role reaches no capability the component routing through it holds | checker (declaration; `src/revl/model_route.py`) | revl-original (items 512 / 519); no paper anchor |
 | [G-RETAIN](rejections.md#the-families) | a `Retained[T, P]` value past `P`'s retention deadline never reaches a persistence sink (a `db`/`fs`/`store`/`kv`/`blob`/`archive`/`index`/`cache`/`queue`/`wal` crossing), unless `P` declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) | revl-original (item 472); no paper anchor |
 
 `G-MODEL-PLACE` is the placement half of the same family. A model role is a
@@ -106,6 +106,16 @@ refusal cites `G-SECRET-FLOW` rather than this code, because an LLM prompt was
 already a disclosure sink for a bound secret. Today the code refuses the
 DECLARATION; the value side is roadmap item 514. See
 `docs/design/531-model-placement.md`.
+
+The code also carries the REACH half (item 519). A role may declare
+`reaches [...]`, the capabilities a call to it can itself reach, and a
+component that routes an action through a role has an effective ceiling of what
+it holds together with what the role reaches. A role reaching past its
+component is refused with both sets named. An omitted `reaches` clause leaves
+the reach UNDECLARED, which resolves to the unnameable `*` and not to an empty
+set: a model is an authority surrogate, so treating one nothing has been said
+about as inert would be the fail-open reading. See
+`docs/design/541-model-in-attenuation.md` and `docs/capability-attenuation.md`.
 
 A declared receiver is not a licence to RECORD. A `Secret[T]` declaration
 authorises disclosure to the receiver it names; it says nothing about a durable
