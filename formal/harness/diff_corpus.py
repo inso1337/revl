@@ -3413,6 +3413,15 @@ def _oof_ledger_path() -> Path:
     return OOF_LEDGER_PATH
 
 
+def _shown(path: Path) -> str:
+    """The path a finding names: repo-relative in the tree, and whatever it
+    is when a test has pointed the ledger at a scratch directory."""
+    try:
+        return str(path.relative_to(REPO))
+    except ValueError:
+        return str(path)
+
+
 def out_of_fragment_ledger(samples: dict[str, list[str]]) -> dict:
     """The ledger this run's buckets would produce, ready to serialize."""
     doc: dict = {"_about": list(OOF_LEDGER_ABOUT)}
@@ -3437,25 +3446,25 @@ def out_of_fragment_ratchet(samples: dict[str, list[str]],
     if write:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-        print(f"{path.relative_to(REPO)}: out-of-fragment ledger rewritten "
+        print(f"{_shown(path)}: out-of-fragment ledger rewritten "
               + " ".join(f"{b}={len(doc[b])}" for b in OOF_RATCHET_BUCKETS))
         return []
     try:
         committed = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return [f"{path.relative_to(REPO)} is missing — the out-of-fragment "
+        return [f"{_shown(path)} is missing — the out-of-fragment "
                 "buckets have no ratchet, so a file can join them silently; "
                 "regenerate with `python3 formal/harness/diff_corpus.py "
                 "--write-ledger`"]
     except json.JSONDecodeError as e:
-        return [f"{path.relative_to(REPO)} is not readable JSON ({e})"]
+        return [f"{_shown(path)} is not readable JSON ({e})"]
     findings: list[str] = []
     for bucket in OOF_RATCHET_BUCKETS:
         have = set(doc[bucket])
         listed = committed.get(bucket)
         if not isinstance(listed, list) or any(
                 not isinstance(x, str) for x in listed):
-            findings.append(f"{path.relative_to(REPO)} has no list of names "
+            findings.append(f"{_shown(path)} has no list of names "
                             f"under {bucket!r}")
             continue
         was = set(listed)
@@ -3473,7 +3482,7 @@ def out_of_fragment_ratchet(samples: dict[str, list[str]],
     if not findings:
         print("out-of-fragment ratchet: "
               + ", ".join(f"{b} {len(doc[b])}" for b in OOF_RATCHET_BUCKETS)
-              + f" — held to {path.relative_to(REPO)} (shrink-only)")
+              + f" — held to {_shown(path)} (shrink-only)")
     return findings
 
 
