@@ -125,19 +125,18 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # slice (T1..T4) refuses a family for real, at which point its fixtures leave
 # BOTH lists and the census baseline is re-recorded.
 KNOWN_BYPASSES = {
-    # -- fn-body binding rules (G1/G6) --
+    # -- fn-body binding rules (G1/G6): CLOSED, no row left --
     # The ASSIGNMENT half landed with item 391's binding-discipline slice (the
     # `let`/`var`/parameter scope walk over a module `fn` body, plus the
     # arrow-body write form): `v2_let_reassignment`,
     # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
-    # `g6_closure_mutates_capture` now refuse with the reference's message
-    # byte-for-byte and are struck from this list, and the callable-shadowing
-    # slice has since struck `shadowed_module_fn_call` the same way. What
-    # remains needs machinery neither slice builds: resolving a name READ
-    # against the whole callable universe, which is what both G1 rows below
-    # want.
-    "examples/rejections/g1_template_undeclared.rvl",
-    "examples/rejections/v2_undeclared_fn_var.rvl",
+    # `g6_closure_mutates_capture` refused with the reference's message
+    # byte-for-byte and were struck from this list, and the callable-shadowing
+    # slice struck `shadowed_module_fn_call` the same way. The name-RESOLUTION
+    # rule (docs/design/457 §2.3) took the last two, `g1_template_undeclared`
+    # and `v2_undeclared_fn_var`: a name READ now resolves against the fn's
+    # scope and the callable universe, so the gate refuses both under G1 in the
+    # reference's own sentence and this family has no open bypass.
     # -- expression typing (T1/T2) --
     # The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
     # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
