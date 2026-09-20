@@ -189,6 +189,55 @@ def _classify(e: RevlError) -> str:
                 and (m.endswith(" names no role")
                      or " names no action of " in m))):
         return "MODEL"
+    # ---- item 516: the model COUNCIL declaration ---------------------------
+    # `selfhost/lower.rvl`'s model-council section decides `model council` and
+    # tags every refusal "COUNCIL", a separate family from MODEL above: two
+    # constructs, two reference modules (`revl.model_route` and
+    # `revl.model_council`), so a consumer reading the wire learns which one was
+    # refused. Both stand for the same registered code, `G-MODEL-PLACE`, which
+    # is what `SELFHOST_TAG_CODES` records.
+    #
+    # Beside MODEL and not merged into it because two of these sentences share a
+    # marker with it if either is written loosely: "model role `" opens MODEL's
+    # declared-twice refusal and appears mid-sentence in two council ones, and
+    # both families end a sentence in "model role `<name>`". Each marker below
+    # is therefore SHAPED — an opening plus the phrase that fixes the rule — and
+    # POSITIVE, a substring the gate spells byte for byte.
+    #
+    # That is what keeps the slices this gate does NOT decide out. Binding a
+    # council to an action (slice 2) and recording what its members answered
+    # (item 517) both read a flow position the gate has no walk for; naming
+    # their sentences here would claim an agreement that does not exist and
+    # would report a no-objection the gate is entitled to as a bypass.
+    if ((m.startswith("model council `")
+         and (" is declared twice (first on line " in m
+              or " has the name of the model role declared on line " in m
+              or m.endswith(" declares no `proposer`")
+              or m.endswith(" declares no `aggregate` rule")
+              or " declares two `aggregate` rules (`" in m
+              or m.endswith(" member") or m.endswith(" members")))
+            or (" in model council `" in m
+                and (m.startswith("unknown council function `")
+                     or m.startswith("unknown aggregation rule `")
+                     or m.startswith("unknown quorum basis `")
+                     or m.startswith("unknown tie outcome `")
+                     or (m.startswith("`aggregate ")
+                         and (m.endswith(
+                                  " resolves disagreement toward one member's"
+                                  " answer")
+                              or m.endswith(", which declares no `adversary`")))
+                     or (m.startswith("`quorum ") and m.endswith(
+                         " counts the rule's floor over the members that"
+                         " answered"))
+                     or (m.startswith("`on_tie ") and m.endswith(
+                         " admits when the members disagree"))))
+            or (m.startswith("council function `")
+                and " is declared twice in model council `" in m)
+            or (m.startswith("member `") and " of model council `" in m
+                and m.endswith("`, which is not declared"))
+            or (m.startswith("members `") and " of model council `" in m
+                and " are both placed on model role `" in m)):
+        return "COUNCIL"
     if "provision conflict" in m and "(G2)" in m:
         return "G2"
     # item 186, the replacement wave: the unmet-consumer refusal of
