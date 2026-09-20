@@ -90,10 +90,10 @@ was not consulted. Exit status is 0 only when the trajectory is retained.
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -399,13 +399,42 @@ def probe_scope(candidate: Candidate) -> Verdict:
         [f"git diff --name-only {candidate.base}", "scope=" + ";".join(candidate.scope)])
 
 
+def _glob_to_regex(pattern: str):
+    """A path glob with the separator semantics a scope declaration needs.
+
+    `fnmatch` is not usable here: its `*` crosses `/`, so a scope of
+    `tools/*.py` would silently admit `tools/sub/deep.py`, which is a WIDER
+    scope than the candidate declared. A scope check that widens the scope is
+    the fail-open shape, so the translation is explicit:
+
+        ``**``  any number of segments      ``?``  one character, not ``/``
+        ``*``   one segment, not ``/``      rest   literal
+    """
+    out = []
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif ch == "*":
+            out.append("[^/]*")
+            i += 1
+        elif ch == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(ch))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
 def _in_scope(path: str, scope) -> bool:
-    """`fnmatch` with a `**` that crosses separators, which `fnmatch` does not."""
     for pattern in scope:
-        if fnmatch.fnmatch(path, pattern):
+        if _glob_to_regex(pattern).match(path):
             return True
-        if pattern.endswith("/**") and (
-                path == pattern[:-3] or path.startswith(pattern[:-2])):
+        # `tools/**` names the directory as well as everything under it.
+        if pattern.endswith("/**") and path == pattern[:-3]:
             return True
     return False
 
