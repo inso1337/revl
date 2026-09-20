@@ -112,6 +112,46 @@ component that reaches a model boundary now needs a `reaches [...]` clause. No
 program on the tree pays it (section 6), and a program that does pay it is
 being asked to write down the one fact the product needs.
 
+### 2.2 The slot after the residence is shared
+
+Item 515 (`docs/design/539-model-portfolio.md`) adds a `device` clause in
+the same position, so a role may carry two optional clauses after its
+residence:
+
+```revl
+model role fast on_device device gpu memory 6144 quant q4_k_m
+                          reaches [model.complete]
+```
+
+The order is fixed, `device` first and `reaches` second, and each clause is
+independently omittable: a role may write neither, either or both. The other
+order is a refusal rather than a second accepted spelling, because one
+declaration with two spellings makes every later reader of this slot carry the
+permutation.
+
+The order follows the reading. `device` refines the residence in front of it,
+since both answer where the call runs, so the placement facts stay together.
+The bracketed capability list reads last, in the position `requires` and
+`emission` have already taught a reader to expect one.
+
+The two clauses also fail in opposite directions, which is why neither stands
+in for the other. An omitted `device` clause is a role making no resource
+claim, refused only where a claim is needed, which is an ordered candidate
+set. An omitted `reaches` clause is a reach nobody wrote down, refused
+wherever it is read.
+
+`ModelRoleDecl` and `model_route.Role` carry both clauses as keyword-defaulted
+fields, so neither owns a positional slot and `Role(name, residence, line)` is
+still the whole declaration for a role that writes neither. Item 516 reads a
+role through `model_route.roles()` and is unaffected by either.
+
+The two items meet once more past the grammar: the item-519 reach fold runs
+over every candidate of an item-515 ordered set and not only the head, because
+a fallback the scheduler may pick is a role the component routes through, and
+a fold that read only the head would let the first fallback widen a ceiling
+the head respects. `tests/test_model_role_clauses.py` is the executable spec
+for the whole shared slot.
+
 ---
 
 ## 3. The product
