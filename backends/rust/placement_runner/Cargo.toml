@@ -2,6 +2,7 @@
 name = "revl_placement_runner"
 version = "0.0.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 cordis = { package = "cordis-rs", version = "0.6" }

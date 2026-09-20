@@ -463,4 +463,7 @@ violates a guarantee — do **not** open a public issue. Follow
 ## License
 
 By contributing, you agree that your contributions are licensed under the
-project's [MIT License](LICENSE).
+license that covers the path they touch: AGPL-3.0-only for the compiler, gate
+and tooling, MIT for the stdlib, runtime shims and examples. The map is
+[LICENSING.md](LICENSING.md). Copyright in the repository is held by Thomas
+Moussajee; the names and logo are covered by [TRADEMARK.md](TRADEMARK.md).
