@@ -1,10 +1,12 @@
 # Design: a scoring set the candidate cannot read
 
-Design-doc id 531 (next free number under `docs/design/`; the roadmap item of
-the same number is unrelated). Roadmap item served: 537 (issue #1207, the
-held-out scoring set). Siblings it must not contradict: 535 (issue #1205, the
-curriculum) and 536 (issue #1206, the reward). `docs/design/457-selfhost-type-
-layer.md` is the structure this follows.
+Design-doc id 535 (531 went to another design doc that landed in the same
+wave; design-doc ids are independent of roadmap item numbers, so roadmap
+item 535 is the curriculum named below and not this document's subject).
+Roadmap item served: 537 (issue #1207, the held-out scoring set). Siblings
+it must not contradict: 535 (issue #1205, the curriculum) and 536 (issue
+#1206, the reward). `docs/design/457-selfhost-type-layer.md` is the
+structure this follows.
 
 Sources studied, all at `52fb8ef3`: `tools/gate_reference_census.py`
 (`CORPUS_DIRS`, `ADMISSION_PROGRAMS`, `load_corpus`, `load_fuzz`,
