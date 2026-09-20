@@ -3067,27 +3067,6 @@ def checker_code(rel: str) -> tuple[str, str]:
         return (info.get("code") or "UNCODED"), (info.get("category") or "")
 
 
-def checker_code(rel: str) -> tuple[str, str]:
-    """The shipped checker's verdict on one corpus file: `("accept", "")`, or
-    the refusal's `(code, category)`.
-
-    Asked through `compile_files`, the path `revl check` and every other CLI
-    verb take, so a `use "stdlib/http.rvl"` resolves against the file's own
-    directory and the search path. `compile_source(text, rel)` reads a bare
-    string and refuses ANY `use` before checking a thing (`REVL`: "`use`
-    declarations need `modules=` ... or compile_files"), so a use-bearing
-    file was filed under a refusal that says nothing about its composition,
-    and whatever the model said about it sank into `formal-found-other`
-    (#1169 F1). The same door resolves an extern body file, a `ref` and an
-    `asset`, which the bare-string door refuses for the same reason."""
-    try:
-        compile_files([str(REPO / rel)])
-        return "accept", ""
-    except RevlError as e:
-        info = classify(e)
-        return (info.get("code") or "UNCODED"), (info.get("category") or "")
-
-
 def checker_alignment(file_facts: dict, componentless: list[str],
                       v: Verdicts) -> list[str]:
     """Compile each file with the real checker and compare refusal codes
