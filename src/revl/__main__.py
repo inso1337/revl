@@ -1243,6 +1243,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_trace(args)
     if args.command == "profile":
         return _run_profile(args)
+    if args.command == "pool":
+        from .peer_pool import pool_command  # noqa: PLC0415 — lazy
+        return pool_command(args)
     if args.command == "attest":
         return _run_attest(args)
     if args.command == "dash":
