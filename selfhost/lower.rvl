@@ -612,7 +612,7 @@ fn at_model_role(ts: List[Token], i: Int) -> Bool {
 fn model_role_end(ts: List[Token], i: Int) -> Int {
   var j = i + 4
   while (j < ts.length() && !atk(ts, j, "eof") && !atk(ts, j, "}")
-         && !at_top_decl(ts, j)) {
+         && tkc(ts, j).kind != "kw" && !at_top_decl(ts, j)) {
     if (atk(ts, j, "[")) {
       let e = match_bracket(ts, j)
       j = e == 0 - 1 ? j + 1 : e + 1
