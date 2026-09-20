@@ -143,3 +143,22 @@ def test_the_ledger_on_disk_is_the_one_spelling_the_tool_writes():
 
 def test_the_self_test_passes():
     assert _tool().self_test() == 0
+
+
+def test_the_gate_is_stdlib_only_and_starts_no_subprocess():
+    """CI's `lint` job installs no revl at all, and a tool that shells out can
+    be handed a different checkout by the dev venv's editable meta-path finder,
+    which outranks both `sys.path` and `PYTHONPATH`. This one parses source
+    text and imports nothing outside the standard library, so neither applies."""
+    import ast as _ast
+
+    source = (ROOT / "tools" / "check_vocabulary_mirrors.py").read_text(encoding="utf-8")
+    imported = set()
+    for node in _ast.walk(_ast.parse(source)):
+        if isinstance(node, _ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, _ast.ImportFrom) and node.module and node.level == 0:
+            imported.add(node.module.split(".")[0])
+    assert imported <= {"argparse", "ast", "dataclasses", "json", "pathlib", "sys",
+                        "__future__"}, imported
+    assert "subprocess" not in source and "os.system" not in source
