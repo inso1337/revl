@@ -2011,7 +2011,7 @@ class _ComponentEmitter:
         as-is); `retry` is the Slice-2 validation-retry budget (§5.2), `0` when no
         `retry` clause was declared (one attempt, the Slice-1 seam); `key` (item
         513 slice 2) is this crossing's key in the module's grammar registry,
-        `"Service.method"` — what a provider passes to `revl_constrain` and what
+        `"Service.method"` -- what a provider passes to `revl_constrain` and what
         the validate seam resolves the stated grammar through."""
         target = expr.get("target")
         if not (isinstance(target, dict) and target.get("kind") == "req"):
@@ -5148,7 +5148,7 @@ def _grammar_registry(services: dict) -> dict:
 
     A validated EXTERN is deliberately absent. Its `@py` body is the provider,
     so registering it would let that body take the constraint and claim to have
-    honoured it — but this tier never validates an extern's response (the
+    honoured it -- but this tier never validates an extern's response (the
     validate seam fires only at a service-method crossing), so the claim would
     never be judged. An unjudgeable claim is worse than no claim, so the seam
     offers none: `revl_constrain("extern:...")` finds nothing.
