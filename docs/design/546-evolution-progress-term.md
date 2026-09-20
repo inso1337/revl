@@ -28,7 +28,7 @@ Three counters, each read out of a checked-in artifact with `git show`, on both
 sides of a change. None of them reads a candidate's prose, a commit message or a
 self-report, which is item 536's first requirement.
 
-| counter | value | universe | on `origin/main` at d9816ee5 |
+| counter | value | universe | on `origin/main` at 9cf5e0ca |
 |---|---|---|---|
 | `census-allowance` | case ids in `tools/gate_reference_census_baseline.json` | `.rvl` documents in the census corpus | 9 over 557 |
 | `native-chain-residual` | entries in `LOWER_GAP_DOCS` (`tests/test_selfhost_compile.py`) | that residual plus every `*_DOCS` corpus table beside it | 41 over 179 |
