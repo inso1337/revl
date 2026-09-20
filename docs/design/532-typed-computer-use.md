@@ -1,14 +1,15 @@
 # Design: typed computer-use as a host-backed extern family
 
-Design-doc id 531 (next free number under `docs/design/`; the roadmap item of
-the same number is unrelated, and 457 established that convention). Roadmap
-item served: 521 (issue #1195), from the 2026-09-19 external review. Adjacent
-and deliberately not restated here: 522 (issue #1196, UI transactions and
-verified postconditions), 525 (issue #1200, the one runnable demonstration),
-539 (upstream `inso1337/revl-harness#11`, the computer-use substrate and the
-ladder's owner problem), 249 (taint and provenance), 257 (confinement), 294
-(parameterized capabilities), 247/343/344 (a declared capability token is the
-one spelling every authority surface reads).
+Design-doc id 532 (531 went to another design doc that landed in the same
+wave; the roadmap item of the same number is unrelated, and 457 established
+that convention). Roadmap item served: 521 (issue #1195), from the
+2026-09-19 external review. Adjacent and deliberately not restated here: 522
+(issue #1196, UI transactions and verified postconditions), 525 (issue
+#1200, the one runnable demonstration), 539 (upstream
+`inso1337/revl-harness#11`, the computer-use substrate and the ladder's
+owner problem), 249 (taint and provenance), 257 (confinement), 294
+(parameterized capabilities), 247/343/344 (a declared capability token is
+the one spelling every authority surface reads).
 
 Sources studied, all at `52fb8ef3`: `src/revl/parser.py`
 (`_capability_list`, `_capability_params`, `extern_decl`, `secret_decl`,

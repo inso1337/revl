@@ -1,5 +1,5 @@
 """The reserved computer-use capability namespace (roadmap item 521, issue
-#1195, Slice 1 of docs/design/531-typed-computer-use.md).
+#1195, Slice 1 of docs/design/532-typed-computer-use.md).
 
 The item's exit has two halves. This file covers the first one and the
 enumeration half of the second:
