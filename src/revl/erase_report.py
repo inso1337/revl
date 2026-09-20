@@ -566,6 +566,21 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
     }
     crossings = _crossings(index, members, compensation_residue)
     others = _others_untouched(ir, index, members, realm)
+    # item 522: the static transaction plan for each of the realm's provide
+    # methods that crosses a computer-use verb — the phase eligibility, the
+    # confirmation state and the postcondition state, per step, in source
+    # order. `[]` for every composition in the tree today, so a report without
+    # one is unchanged.
+    #
+    # `approval_tokens` is empty here ON PURPOSE. The erase report is not
+    # handed a policy, so it reports the state a crossing is in with NO
+    # operator rule raising it, which is `unconfirmed` for every actuating
+    # step. That is the state this item exists to make visible: the gap is not
+    # that revl allows the click, it is that nothing said the click was
+    # unconfirmed. Enumerating them by name is what stops the absence of a
+    # policy rule from being silence.
+    transactions = [plan for plan in uitx.plans(ir)
+                    if plan.get("component") in set(members)]
 
     return {
         "ok": True,
@@ -577,6 +592,8 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
         "components": components,
         "inProcessStateGone": state_gone,
         "boundaryCrossings": crossings,
+        # item 522 (issue #1196): absent for a realm with no computer-use verb.
+        **({"uiTransactions": transactions} if transactions else {}),
         "otherRealmsUntouched": others,
         "summary": {
             "components": len(members),
@@ -757,4 +774,59 @@ def render(report: dict) -> str:
         out.append(f"        realm `{label}`: {', '.join(names)}")
     out.append(f"      {others['guarantee']}")
 
+    # 4. the computer-use transaction plan (item 522). Printed only for a realm
+    # that crosses a computer-use verb, so every other report ends at [3].
+    out += _render_transactions(report.get("uiTransactions") or [])
+
     return "\n".join(out)
+
+
+def _render_transactions(plans: list[dict]) -> list[str]:
+    """Section [4]: the static phase plan, per provide method.
+
+    The word `PLAN` is load-bearing. Nothing here executes: revl does not run a
+    phase, does not run a compensation, and does not drive a desktop (the
+    substrate is roadmap item 539, upstream `inso1337/revl-harness#11`). This
+    section says which phases each step is ELIGIBLE for, what confirmed it, and
+    what its postcondition is worth — all decided at compile time."""
+    if not plans:
+        return []
+    out = ["", "  [4] COMPUTER-USE TRANSACTION PLAN (item 522) — a static "
+                "reading; revl executes no phase"]
+    for plan in plans:
+        out.append(f"      {plan['component']}.{plan['key']}."
+                   f"{plan['method']}()")
+        for step in plan["steps"]:
+            out.append(
+                f"        {step['extern']}() [{step['token']}] "
+                f"{step['class']} | residue {step['residue']} | "
+                f"{step['confirmation']} | {step['postcondition']}")
+            out.append(f"            eligible phases: "
+                       + ", ".join(step["eligiblePhases"]))
+        unconfirmed = plan.get("unconfirmedIrreversibleSteps") or []
+        if unconfirmed:
+            out.append(
+                "        UNCONFIRMED AND UNCOMPENSATED: "
+                + ", ".join(unconfirmed)
+                + " — each leaves residue no inverse describes and no "
+                  "authority required a human to see it. revl does not refuse "
+                  "these (see the note below); it refuses to let them go "
+                  "unnamed")
+        unverified = plan.get("unverifiedSteps") or []
+        if unverified:
+            out.append(
+                "        UNVERIFIED: " + ", ".join(unverified)
+                + " — no read follows the actuation. A return value says the "
+                  "actuation was delivered, which is not the claim that the "
+                  "business effect occurred")
+        out.append(
+            "        note: the strongest postcondition word available here is "
+            "`verified-against-untrusted-read`. The read came from the "
+            "application under test, so it raises confidence and does not "
+            "establish a fact. A confirmation is `confirmed-per-crossing` only "
+            "when the `emit` carries an `Approval[C]` edge, which today can be "
+            "minted only in a component activation body — a computer-use loop "
+            "in a `provide` method cannot acquire one, which is why the "
+            "unconfirmed steps above are named rather than refused "
+            "(docs/design/553-ui-transaction-phases.md §3)")
+    return out
