@@ -289,6 +289,20 @@ jobs:
       # teeth are exercised on every PR. Never add `|| true`.
       - run: python3 tools/check_runtime_seams.py --self-test
       - run: python3 tools/check_runtime_seams.py
+      # issue #1285: a closed vocabulary declared in more than one place is
+      # recorded, and every recorded copy still spells the same vocabulary.
+      # Three lanes found this defect in one day in three unrelated subsystems
+      # (a type-to-schema mapping, an IR path normalization two of whose three
+      # copies had already drifted, and a taint-origin set an auto-approve
+      # decision INTERSECTS against), and none of the three was found by a
+      # gate. `tests/fixtures/vocabulary_mirror_ledger.json` is the ratchet: a
+      # new copy, a recorded copy drifting, and a stale entry all red, and a
+      # missing ledger reds rather than reading as nothing to check. Stdlib
+      # only and no subprocess, so it runs in this job, which installs no revl.
+      # The self-test runs FIRST and reds the gate against the three instances
+      # themselves. Never add `|| true`.
+      - run: python3 tools/check_vocabulary_mirrors.py --self-test
+      - run: python3 tools/check_vocabulary_mirrors.py --check
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
