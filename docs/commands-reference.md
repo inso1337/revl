@@ -15,7 +15,7 @@ audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
 dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
-profile  attest  dash  repair  bundle  emit  verify  deploy
+profile  pool  attest  dash  repair  bundle  emit  verify  deploy
 deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -1168,6 +1168,53 @@ of [revl-attest.md](revl-attest.md) for the trust boundary.
 - `--signer NAME` - an optional signer label recorded in (and signed into) the
   record; falls back to the `REVL_ATTEST_SIGNER` env var.
 - `--json` - machine-readable output.
+
+### `revl pool`
+
+Stand up and operate a private peer pool (roadmap item 524): several
+independent operators running work for each other without trusting each other's
+machines. The verbs declare a pool, admit a peer that proves its identity and
+its artifact, read the roster, and withdraw a peer. See
+[design/550-private-peer-pool.md](design/550-private-peer-pool.md) for the trust
+progression and the failure direction of every step in it.
+
+The pool is a signed charter plus an append-only roster. A peer's identity is a
+key, not an address, and its join request pins the charter by digest, so a peer
+agrees to a set of terms rather than to a pool name. Every refusal names one
+lowercase link (`artifact-digest`, `replayed-join`, `grant-ceiling`, ...), and
+the verb exits nonzero on one.
+
+- `init` - declare a pool and sign its charter.
+  - `--dir DIR` - where `charter.json` and `roster.json` are written.
+  - `--pool-id ID` - the pool's name. A peer pins the charter by digest, so
+    renaming a pool does not let old terms be reused.
+  - `--ceiling CAP` - the most authority this pool will ever delegate to any
+    member at any tier. Repeatable. Every tier grant is diffed against it.
+  - `--entry-caps CAP` - the grant the entry tier hands a newly admitted peer.
+    Repeatable. Not covered by `--ceiling` means the pool admits nobody.
+  - `--artifact DIGEST` - an artifact digest this pool admits. Repeatable.
+  - `--trust-floor LEVEL` - the minimum attested trust a joining peer clears.
+  - `--key PATH` - the operator signing key (falls back to
+    `REVL_ATTEST_KEY_FILE` / `REVL_ATTEST_KEY`).
+- `request` - the peer side: sign a join request against a charter it was
+  given, carrying its signed peer offer and the artifact digest it will run.
+  - `--charter PATH`, `--peer-id ID`, `--artifact DIGEST`, `--out PATH`
+  - `--ceiling CAP` - the most authority this peer will accept. Repeatable. A
+    tier grant not covered by it is refused.
+  - `--trust LEVEL`, `--region NAME`, `--hardware NAME` - the facets this peer
+    attests.
+  - `--key PATH` - the peer's key, exchanged with the operator out of band.
+- `join` - the operator side: decide a peer's signed join request against the
+  charter. Admits at the entry tier or refuses, naming the link.
+  - `--dir DIR`, `--join PATH`, `--peer-key PATH`, `--key PATH`
+- `status` - members, tiers, what each holds, the effect class each tier
+  admits, and who may admit, revoke and attest. Needs no key.
+  - `--dir DIR`, `--json`
+- `withdraw` - remove a peer and report, in three disjoint sets, what that
+  revokes (an inverse exists), what it retains (no inverse: the work is done
+  and the ledger keeps it) and what it orphans (outstanding work, handed to the
+  lawful-retry dispatcher).
+  - `--dir DIR`, `--peer ID`, `--reason TEXT`, `--key PATH`
 
 ### `revl erase-report`
 
