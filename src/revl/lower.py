@@ -7547,10 +7547,14 @@ def _check_ui_target_binding(program: Program, types: dict, filename: str) -> No
     carriers = []
     for ext in program.externs:
         for cap in ext.capabilities or ():
-            bare = ui_family._bare(cap)
-            if bare in ui_family.TARGET_PRODUCERS or \
-                    bare in ui_family.TARGET_CONSUMERS:
-                carriers.append((ext, bare))
+            # The VERB, so a slice-3 ladder rung carries its verb's obligation:
+            # `emission[ui.click.pixel]` would otherwise be the spelling that
+            # takes a bare string target again, which is a fail-open path
+            # opened by adding a rung in a different file.
+            verb = ui_family.verb_of(cap) or ui_family._bare(cap)
+            if verb in ui_family.TARGET_PRODUCERS or \
+                    verb in ui_family.TARGET_CONSUMERS:
+                carriers.append((ext, cap))
                 break
     if not carriers:
         return
@@ -7571,13 +7575,61 @@ def _check_ui_target_binding(program: Program, types: dict, filename: str) -> No
         raise RevlError(filename, line, message, hint,
                         code="G8", category="boundary")
 
-    for ext, bare in carriers:
+    for ext, token in carriers:
         signature = ui_family.target_signature_refusal(
-            bare, ext.classification, ext.name, ext.returns,
+            token, ext.classification, ext.name, ext.returns,
             [p.type for p in ext.params])
         if signature is not None:
             message, hint = signature
             raise RevlError(filename, ext.line, message, hint,
+                            code="G8", category="boundary")
+
+
+def _check_ui_rung_prefix_closure(program: Program, ir: dict,
+                                  filename: str) -> None:
+    """The computer-use ladder's prefix-closure rule (roadmap item 521,
+    docs/design/532-typed-computer-use.md §4.2, Slice 3).
+
+    `ui.click.pixel` is admissible only in a component that also reaches
+    `ui.click`. A program that can reach pixels but not semantic targets has
+    no fallback ladder, it has a pixel driver, and the ordering a ladder
+    claims is vacuous for it. §4.2 calls this the strongest form of "never
+    inverts that order" revl can honestly check: a property of the
+    DECLARATION, not of the loop.
+
+    WHY IT RUNS HERE AND NOT AT THE DECLARATION SITE, which is the blocker
+    slices 1 and 2 recorded and could not clear. `parser._capability_list`
+    sees ONE token with no component context, and prefix-closure is a
+    per-component property over a SET of tokens. The set that matters is the
+    G8 AUDIT REACH - what a component can reach, not what its file mentions -
+    and that exists only once the IR is assembled. So the check runs over the
+    finished document, through `policy.component_reach`, which is the same
+    function `revl audit` and the `capability <glob>` policy rules read. One
+    reach definition, not a second copy: a component that declares
+    `ui.click.pixel` on an extern it never calls is not reaching a pixel, and
+    the audit already says so.
+
+    Inert for every program that declares no rung token: the pre-scan below is
+    one loop over the extern list, and the `_boundary` walk runs only when it
+    finds one.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    if not any(ui_family.rung_of(cap) is not None
+               for ext in program.externs for cap in ext.capabilities or ()):
+        return
+
+    from .boundary import _boundary  # noqa: PLC0415 - lazy, as plan/registry do
+    from .policy import component_reach  # noqa: PLC0415 - lazy, avoids a cycle
+
+    audit = {"boundary": _boundary(ir)}
+    lines = {comp.name: comp.line for comp in program.components}
+    for name in sorted(audit["boundary"]):
+        tokens = [reach.token for reach in component_reach(audit, name)]
+        refusal = ui_family.prefix_closure_refusal(name, tokens)
+        if refusal is not None:
+            message, hint = refusal
+            raise RevlError(filename, lines.get(name, 0), message, hint,
                             code="G8", category="boundary")
 
 
@@ -8232,6 +8284,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # does not qualify, so an IR document for a program with no in-place
     # accumulation is byte-identical to before. See src/revl/ownership.py.
     ownership.annotate_ir(result)
+    # item 521 slice 3: the computer-use ladder's prefix-closure rule, checked
+    # per component over the G8 audit reach. Runs last because the reach is a
+    # property of the assembled IR and not of any one declaration, which is
+    # exactly why slices 1 and 2 could not host this check. Inert (one loop
+    # over the extern list, no boundary walk) unless a rung token is declared.
+    _check_ui_rung_prefix_closure(program, result, program.filename)
     return result
 
 
