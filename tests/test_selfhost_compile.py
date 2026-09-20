@@ -475,31 +475,34 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
 # covers all six, and the test recomputes the set rather than sampling it.
 LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     "py": (
-        # service dispatch and interpolation inside a component method
-        "services_match.rvl",
-        "services_interp.rvl",
-        # witnessed effects / secret marking on the activation path
-        "witnessed.rvl",
-        "witnessed_secret.rvl",
-        # component branch shapes
+        # (component-method service dispatch and `${…}` interpolation, the
+        # witnessed activation/method acquisitions and their `Secret[T]`
+        # marking, and the effect block's pure setup all left this list when
+        # lower.rvl grew the `match`/`format`/`fn`/witnessed-`effect` surface.)
+        #
+        # component branch shapes. What is left here is ONE form: a
+        # statement-block match arm (`Some(n) => { let doubled = n * 2
+        # doubled + 1 }`), which the shared self-host PARSER has no node for at
+        # all — `selfhost/parser.rvl` reads an arm body as an expression. It is
+        # a parser gap reached through lower.rvl, and it withholds the whole
+        # component because one provide method of fourteen spells it.
         "branches.rvl",
         # whole-program documents combining several of the above
         "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
         "../../../examples/v3_step_scheduler.rvl",
-        "../../../backends/typescript/tests/fixtures/conformance.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-        "../policy_agents.rvl",
-        "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
-        "../../../examples/java_match.rvl",
         "../../../src/revl/truc/components/cli.rvl",
     ),
     "ts": (
         # composite service dispatch and component expressions
         "services_composite.rvl",
         "component_exprs.rvl",
-        # async coloring (async methods / await / async arrows)
+        # async coloring (async methods / async arrows). `components_await.rvl`
+        # left this list when lower.rvl grew the `await` activation step: the
+        # colouring is a whole-program property the producer already stamps, and
+        # what was missing was the STEP — the body walk refused at the first
+        # `await` and the component lost its body with it.
         "services_async.rvl",
-        "components_await.rvl",
         "async_effects.rvl",
         "async_arrow_emission.rvl",
         # spawn / instance-get
@@ -509,7 +512,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # list when lower.rvl grew the component-header prelude; the four ts
         # realm documents now compile byte-exact through the native chain.)
         # whole-program documents combining several of the above
-        "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         "../../../examples/java_match.rvl",
         "../../../backends/typescript/tests/fixtures/async_http.rvl",
@@ -522,15 +524,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
     "java": (
-        # async coloring
-        "comp_await.rvl",
-        # whole-program documents combining several of the shapes below
-        "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
+        # async coloring. (`comp_await.rvl` and the two bench documents left
+        # this list with the `await` activation step; `component_format.rvl`
+        # and `component_branches.rvl` left it with the component `format`
+        # node, the bare-name `fn` call and the `index` node.)
         "../emit_ts_corpus/services_async.rvl",
-        "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
-        # component string interpolation / branch shapes / map inference
-        "component_format.rvl",
-        "component_branches.rvl",
+        # map inference
         "map_inference.rvl",
         # the stdlib builtin surface
         "stdlib_builtins.rvl",
@@ -540,22 +539,21 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # component edge shapes; the host-root and realm-placement documents
         # left this list when lower.rvl grew those two surfaces.
         "component_edges.rvl",
-        # issue 1153's two component documents. Neither is an EMITTER residual:
+        # issue 1153's two component documents. Neither was an EMITTER residual:
         # the rust byte oracle in tests/test_selfhost_emit_rust.py holds both
         # byte-exact when it is handed the REFERENCE IR (host runtime and all),
-        # so what is left is the native IR producer. `comp_await_job.rvl`'s
-        # activation body awaits a host `Job`: the reference IR carries that
-        # host declaration's runtime block and `selfhost/lower.rvl` does not, so
-        # the native chain emits 7,067 bytes against the reference's 11,094 —
-        # the module with no `Job`/`JobHandle` runtime in it. `comp_stream.rvl`
-        # is no longer refused before any rust is built: the item-130 stream
-        # statement forms landed in `selfhost/lower.rvl` (#1139) and the native
-        # gate now ADMITS it, so its residual is measured in bytes by the same
-        # comparison as every document above. Both are `selfhost/lower.rvl`'s,
-        # and both are NAMED rather than skipped, so the day lower.rvl grows
-        # either surface this list shrinks instead of quietly keeping a waiver
-        # nobody rereads.
-        "comp_await_job.rvl",
+        # so what was left in each was the native IR producer.
+        # `comp_await_job.rvl` is now CLOSED: its activation body awaits a host
+        # `Job`, the body walk had no `await` step to carry that, and a refused
+        # step drops the WHOLE component `body` — so the native chain emitted
+        # 7,067 bytes against the reference's 11,094, the module with no
+        # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` is no longer
+        # refused before any rust is built either: the item-130 stream statement
+        # forms landed in `selfhost/lower.rvl` (#1139) and the native gate now
+        # ADMITS it, so its residual is measured in bytes by the same comparison
+        # as every document above. It is `selfhost/lower.rvl`'s, and it is NAMED
+        # rather than skipped, so the day lower.rvl grows that surface this list
+        # shrinks instead of quietly keeping a waiver nobody rereads.
         "comp_stream.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
