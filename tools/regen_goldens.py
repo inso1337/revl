@@ -38,11 +38,19 @@ memory on check. `commands` are for producers that need a shell (gofmt, a
 tier's own regen.sh); the driver snapshots and restores their files to check
 them, so they must be deterministic. A target must declare every file it owns:
 an undeclared file is an unchecked file.
+
+If a producer returns the SAME text for two paths — one emission committed at
+two places — say so in `twins`. That is an invariant of its own: one of the two
+files moving alone is a defect whichever version is right, and until issue #1288
+nothing said it out loud, so it surfaced as a generic one-file drift on an
+unrelated PR's gate instead of at the producer. The worker refuses an undeclared
+twin pair, so a new target cannot acquire the same silence by accident.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -209,6 +217,7 @@ class Target:
     commands: tuple[tuple[str, ...], ...] = ()   # argv, run from ROOT
     check_command: tuple[str, ...] | None = None  # its own drift gate, if any
     gate: str = ""                               # the test that reds on drift
+    twins: tuple[tuple[str, ...], ...] = ()      # path groups that are ONE emission
     unstable: tuple[str, ...] = ()               # declared, but not byte-reproducible
     requires: tuple[str, ...] = ()               # tools that must be on PATH
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -258,6 +267,15 @@ TARGETS: tuple[Target, ...] = (
         commands=(("bash", "backends/rust/scenarios/crashproof/regen.sh"),),
         requires=("bash",),
         gate="pytest tests/test_goldens.py backends/rust/test_emit_rust.py",
+        # One emission, committed twice (issue #1288). `produce_rust` binds the
+        # same string to both paths, so the ONLY way they can disagree is that
+        # one of them was written by something other than this producer — and
+        # that has happened: an `ir_version 3` emission of examples/outcome.rvl,
+        # left behind by the placement runner's per-composition codegen, was
+        # swept into components.rs alone by an unrelated docs commit. It was
+        # caught days later as a one-file drift on someone else's PR.
+        twins=(("backends/rust/golden/user_cache.rs",
+                "backends/rust/placement_runner/src/components.rs"),),
     ),
     Target(
         name="java",
@@ -338,6 +356,68 @@ TARGETS: tuple[Target, ...] = (
 )
 
 BY_NAME = {t.name: t for t in TARGETS}
+
+
+# ---------------------------------------------------------------- twin rules
+#
+# A producer may own one emission committed at more than one path. That is a
+# real invariant and it is not the same one `--check` already enforces: a
+# per-file comparison against a fresh generation says "components.rs differs",
+# which reads as ordinary staleness, and the reader regenerates whichever tree
+# they happen to be standing in. "These two files are one emission and one of
+# them moved alone" says what to do about it and, crucially, says it at the
+# producer rather than on the next PR to run the gate.
+#
+# The three functions below are pure and take their bytes from a callable, so
+# tests/test_emitted_artifacts_are_drift_gated.py can drive them off a
+# synthetic tree and show they catch the thing they exist for.
+
+
+def twin_mismatches(target: Target, read) -> list[str]:
+    """One report line per declared twin group that is NOT byte-identical.
+
+    `read(rel)` returns the file's bytes, or None when it is absent — a missing
+    member is a mismatch, not a pass."""
+    lines: list[str] = []
+    for group in target.twins:
+        by_digest: dict[str, list[str]] = {}
+        for rel in group:
+            blob = read(rel)
+            digest = "<missing>" if blob is None else hashlib.sha256(blob).hexdigest()[:12]
+            by_digest.setdefault(digest, []).append(rel)
+        if len(by_digest) < 2:
+            continue
+        shown = "  ".join(f"[{digest}] {', '.join(paths)}"
+                          for digest, paths in sorted(by_digest.items()))
+        lines.append(
+            f"{target.name}: these paths are ONE emission from one producer and one "
+            f"input, and they are not byte-identical. One of them moved alone, which "
+            f"is a defect whichever version is the right one.\n"
+            f"         {shown}")
+    return lines
+
+
+def undeclared_twins(target: Target, produced: dict[str, str]) -> list[tuple[str, ...]]:
+    """Path groups the producer returned identical text for that no `twins`
+    group covers. Declaring them is what lets the cheap on-disk gate see them
+    without running an emitter."""
+    declared = [frozenset(group) for group in target.twins]
+    by_text: dict[str, list[str]] = {}
+    for rel, text in produced.items():
+        by_text.setdefault(text, []).append(rel)
+    return [tuple(sorted(paths)) for paths in by_text.values()
+            if len(paths) > 1 and not any(frozenset(paths) <= group for group in declared)]
+
+
+def stale_twin_declarations(target: Target, produced: dict[str, str]) -> list[tuple[str, ...]]:
+    """Declared twin groups the producer does NOT in fact emit identically. The
+    declaration is then a claim nothing backs, which is worse than none."""
+    stale = []
+    for group in target.twins:
+        present = [rel for rel in group if rel in produced]
+        if len(present) > 1 and len({produced[rel] for rel in present}) > 1:
+            stale.append(tuple(group))
+    return stale
 
 
 # -------------------------------------------------------------------- worker
@@ -423,6 +503,24 @@ def worker(target: Target, check: bool) -> int:
             print(f"regen-goldens: {target.name} produces undeclared files: "
                   f"{', '.join(undeclared)}", file=sys.stderr)
             return BROKEN
+        stale = stale_twin_declarations(target, produced)
+        if stale:
+            for group in stale:
+                print(f"regen-goldens: {target.name} declares {', '.join(group)} as "
+                      f"twins, but its producer returns different bytes for them. "
+                      f"Either the producer changed or the declaration is wrong; do "
+                      f"not leave a claim nothing backs.", file=sys.stderr)
+            return BROKEN
+        extra = undeclared_twins(target, produced)
+        if extra:
+            for group in extra:
+                print(f"regen-goldens: {target.name} emits identical bytes to "
+                      f"{', '.join(group)} without declaring them as twins. Add "
+                      f"them to that target's `twins=` so one of them moving alone "
+                      f"is reported as what it is, instead of as a one-file drift "
+                      f"on whichever PR next runs the gate (issue #1288).",
+                      file=sys.stderr)
+            return BROKEN
         for rel, text in sorted(produced.items()):
             path = ROOT / rel
             current = path.read_text(encoding="utf-8") if path.exists() else None
@@ -466,6 +564,29 @@ def worker(target: Target, check: bool) -> int:
         if check:
             _restore(snap)
 
+    # The twin gate, read off DISK and therefore off the committed bytes on a
+    # check run (both producer arms above leave the tree as they found it).
+    # After a regen it reads the fresh bytes instead, where a mismatch can only
+    # mean the producer itself is inconsistent — a different fault, reported as
+    # one.
+    def _on_disk(rel: str) -> bytes | None:
+        path = ROOT / rel
+        return path.read_bytes() if path.exists() else None
+
+    mismatched = twin_mismatches(target, _on_disk)
+    if mismatched and not check:
+        for line in mismatched:
+            print(f"BROKEN {line}", file=sys.stderr)
+        print(f"       ...and this is AFTER regenerating {target.name}, so its "
+              f"producer is not writing one emission to both paths. Nothing to "
+              f"regenerate: fix the producer.", file=sys.stderr)
+        return BROKEN
+    if mismatched:
+        for line in mismatched:
+            print(f"TWIN   {line}")
+        print(f"       fix: python3 tools/regen_goldens.py {target.name}   "
+              f"(then review the diff and commit it)")
+
     if not check:
         if not drifted:
             print(f"  {target.name}: already current")
@@ -477,6 +598,7 @@ def worker(target: Target, check: bool) -> int:
             print(f"         {rel}")
         print(f"       fix: python3 tools/regen_goldens.py {target.name}   "
               f"(then review the diff and commit it)")
+    if drifted or mismatched:
         return 1
     print(f"ok     {target.name}")
     return 0
@@ -498,6 +620,11 @@ def do_list() -> int:
         for rel in target.files:
             mark = "  (regenerated, not drift-checked)" if rel in target.unstable else ""
             print(f"  {'':<11}   {rel}{mark}")
+        for group in target.twins:
+            print(f"  {'':<11} twins: one emission, committed at {len(group)} paths — "
+                  f"they must stay byte-identical:")
+            for rel in group:
+                print(f"  {'':<11}   = {rel}")
         for note in target.notes:
             print(f"  {'':<11} note:  {note}")
         print()
