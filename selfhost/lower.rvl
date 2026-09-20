@@ -13896,12 +13896,14 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 //          which is what an arm's `payload_type` is read out of
 //   fns    the module callables (module `fn`s and externs) a component body may
 //          call by bare name, each bound to its declared ARITY
+//   fnps   the same callables bound to their declared PARAMETER TYPES, which
+//          only an `(…) -> Async[T]` slot reads (item 92's arrow coercion)
 //   wit    the `witnessed` externs — the ONLY callees whose `effect` site may
 //          spell no `undo` (item 243)
 //   al     the transparent type aliases, so a declared parameter's type is read
 //          in the same erased spelling the reference's type table holds
 type CCtx = { reqs: List[Str], cases: List[Bind], fns: List[Bind],
-              wit: List[Str], al: Map[Str, Str] }
+              fnps: List[Bind], wit: List[Str], al: Map[Str, Str] }
 
 // Membership in a lexical scope, INDEPENDENT of whether the name's type is
 // known. `bind_has` answers "this header row declares `n`", where a type is
@@ -13961,23 +13963,66 @@ fn witnessed_extern_names(ts: List[Token]) -> List[Str] {
 // a `fn` nested in a service or a provide block is never mistaken for one.
 //
 // The arity is carried because the reference fills omitted trailing defaults
-// (`_with_default_args`) and coerces an arrow into an `Async[T]` slot
-// (`_coerce_async_args`) at a component-body call, and both are no-ops exactly
-// when every parameter is supplied and none is async. A callable with an async
-// parameter slot is left OUT of the table altogether, so a call to it refuses
-// rather than lowering to a `fn` node with a silently different argument list.
+// (`_with_default_args`) at a component-body call, which is a no-op exactly
+// when every parameter is supplied: a call whose argument count does not match
+// refuses rather than lowering to a `fn` node with a silently different
+// argument list.
+//
+// A callable with an async parameter slot used to be left OUT of this table
+// altogether, for the same fail-closed reason applied to the OTHER rewrite the
+// reference performs there (`_coerce_async_args`). It is in now, because that
+// coercion is performed: `module_callable_ptypes` below carries the declared
+// types the slot is judged against, and an async slot holding anything but an
+// arrow still refuses.
 fn module_callable_sigs(ts: List[Token]) -> List[Bind] {
   let fs = parse_prog_ts(ts).fns
   var out: List[Bind] = []
   var i = 0
   while (i < fs.length()) {
     let ps = decl_params_of(ts, fs[i].name)
-    if (async_slots_of(ps).length() == 0) {
-      out = out.push({ name: fs[i].name, ty: ps.length().to_str() })
-    }
+    out = out.push({ name: fs[i].name, ty: ps.length().to_str() })
     i += 1
   }
   return out
+}
+
+// The DECLARED parameter type spellings of every module callable, `|`-joined —
+// what the item-92 async coercion at a component-body call site reads. A type
+// spelling can carry a comma (`(Str, Int) -> Bool`) but never a `|`, so the
+// join is unambiguous; a zero-parameter callable maps to "".
+//
+// This is a second table rather than a wider `fns` row because `fns` answers
+// ARITY for every callable and is read on every call, while the types are read
+// only where a slot is declared async.
+fn module_callable_ptypes(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
+  let fs = parse_prog_ts(ts).fns
+  var out: List[Bind] = []
+  var i = 0
+  while (i < fs.length()) {
+    let ps = decl_params_of(ts, fs[i].name)
+    var tys = ""
+    var k = 0
+    while (k < ps.length()) {
+      let t = alias_subst(ps[k].ty, al)
+      tys = k == 0 ? t : tys.concat("|").concat(t)
+      k += 1
+    }
+    out = out.push({ name: fs[i].name, ty: tys })
+    i += 1
+  }
+  return out
+}
+
+fn split_pipes(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var cur = ""
+  var i = 0
+  while (i < s.length()) {
+    let c = s.charAt(i)
+    if (c == "|") { out = out.push(cur)  cur = "" } else { cur = cur.concat(c) }
+    i += 1
+  }
+  return out.push(cur)
 }
 
 // The declared parameters of `fn <nm>`, read off the first declaration that
@@ -14236,10 +14281,87 @@ fn cir_fncall(nm: Str, args: List[Expr], sc: List[Bind], hostSc: List[Str],
   if (tagged_case_adt(cx.cases, nm) != "") { return mk_irres(false, "") }
   let arity = bind_lookup(cx.fns, nm, 0)
   if (arity == "" || arity != args.length().to_str()) { return mk_irres(false, "") }
-  let a = cir_args(args, 0, sc, hostSc, cx, "")
+  let sig = bind_lookup(cx.fnps, nm, 0)
+  let ptypes = sig == "" ? [] : split_pipes(sig)
+  let a = ptypes.length() == args.length()
+    ? cir_fn_args(args, ptypes, 0, sc, hostSc, cx, "")
+    : cir_args(args, 0, sc, hostSc, cx, "")
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"fn\", \"name\": ".concat(jstr(nm))
     .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+// The argument list of a component-body call whose callee's DECLARED parameter
+// types are known. Identical to `cir_args` except in a slot declared
+// `(…) -> Async[T]`, where item 92's coercion applies.
+fn cir_fn_args(args: List[Expr], ptypes: List[Str], i: Int, sc: List[Bind],
+               hostSc: List[Str], cx: CCtx, acc: Str) -> IrRes {
+  if (i >= args.length()) { return mk_irres(true, acc) }
+  let want = ptypes[i]
+  let e = is_async_fn_ty(want)
+    ? cir_async_arrow(args[i], function_return_ty(want), sc, hostSc, cx)
+    : cir_expr(args[i], sc, hostSc, cx)
+  if (!e.ok) { return mk_irres(false, "") }
+  return cir_fn_args(args, ptypes, i + 1, sc, hostSc, cx,
+                     acc == "" ? e.js : acc.concat(", ").concat(e.js))
+}
+
+// An argument in a parameter slot declared `(…) -> Async[T]` (item 92).
+// `_coerce_async_args` admits ONLY an arrow there — a bare callable name or a
+// fn-typed local is refused, because it would need an `as_async` wrapper the
+// blocking tiers do not erase — so anything else is refused here too, rather
+// than lowered un-coloured.
+fn cir_async_arrow(e: Expr, ret: Str, sc: List[Bind], hostSc: List[Str],
+                   cx: CCtx) -> IrRes {
+  return match e {
+    Arrow(a) => cir_arrow_node(a, ret, sc, hostSc, cx),
+    _        => mk_irres(false, ""),
+  }
+}
+
+// The component-dialect arrow node. Two keys are fixed here rather than
+// computed, because that is what the reference computes on THIS path:
+//
+//   * `captures` is `[]`. The reference builds it with `_mutable_free_vars`
+//     against the COMPONENT scope, which maps a surface name to its SAFE NAME;
+//     that walk records a name only where `scope.get(name) is True`, and a
+//     string is never `True`, so a component-dialect arrow captures nothing.
+//     (The module path's `lir_arrow` does compute the set, because the `env` it
+//     walks carries `var`-ness under its own reserved key.)
+//   * `param_types`/`returns` are absent except for the coercion's own
+//     `returns`: a stratum-3 arrow is never resolved by the checker, so
+//     `_arrow_signature_known` is false however fully the author annotated it,
+//     which leaves `_coerce_async_args` the only writer of `returns` here.
+//
+// The arrow's parameters bind in its body scope with no declared type: the
+// component path resolves a name through `id`, and the emitted lambda binds
+// its parameters positionally, so the node for a parameter must render to
+// exactly the spelled name.
+fn cir_arrow_node(a: ArrowN, ret: Str, sc: List[Bind], hostSc: List[Str],
+                  cx: CCtx) -> IrRes {
+  let pnames = param_names(a.params)
+  let b = cir_expr(a.body, concat_binds(sc, arrow_param_binds(a.params, cx.al)),
+                   hostSc, cx)
+  if (!b.ok) { return mk_irres(false, "") }
+  return mk_irres(true,
+    "{\"kind\": \"arrow\", \"params\": [".concat(str_list_json(pnames))
+      .concat("], \"captures\": [], \"body\": ").concat(b.js)
+      .concat(", \"async\": true, \"returns\": ").concat(jstr(ret)).concat("}"))
+}
+
+// The arrow's parameters as scope binds. An annotation the author wrote is
+// kept (it is what `_lower_component_pure_expr` puts into `type_env`); an
+// unannotated parameter binds with no type, which `scope_has` still answers
+// for.
+fn arrow_param_binds(ps: List[ParamN], al: Map[Str, Str]) -> List[Bind] {
+  var out: List[Bind] = []
+  var i = 0
+  while (i < ps.length()) {
+    out = out.push({ name: ps[i].name,
+                     ty: ps[i].ty == "" ? "" : alias_subst(ps[i].ty, al) })
+    i += 1
+  }
+  return out
 }
 
 // `Map.new()` / `Pool.open(…)` — a HOST ACQUISITION. The reference lowers an
@@ -14454,10 +14576,18 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
 // `return`.
 fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], svc: Str, acc: Str) -> IrRes {
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
-  if (atw(ts, i, "async")) { return mk_irres(false, "") }
-  if (!atw(ts, i, "fn")) { return mk_irres(false, "") }
-  let nm = tkc(ts, i + 1).text
-  let ps = params_at(ts, i + 3)
+  // item 219 async coloring. `async fn <m>(…)` is the SAME method entry as the
+  // sync spelling: the reference lowers a provide method to `{name, params,
+  // body}` and stamps no colour on it, because the colour is already on the
+  // service operation the method implements
+  // (`services.<S>.methods.<m>.async`) — which is what every emitter reads to
+  // pick `async`/`Promise<…>`. So the modifier is CONSUMED here and
+  // contributes no key; the method table stays byte-identical to the
+  // reference's.
+  let head = atw(ts, i, "async") ? i + 1 : i
+  if (!atw(ts, head, "fn")) { return mk_irres(false, "") }
+  let nm = tkc(ts, head + 1).text
+  let ps = params_at(ts, head + 3)
   let pnames = param_names(ps.ps)
   let pjson = str_list_json(pnames)
   let pbinds = method_param_binds(pnames, svc_method_params(ts, svc, nm), cx.al)
@@ -14633,6 +14763,16 @@ fn cir_effect_block(ts: List[Token], lo: Int, hi: Int, cx: CCtx,
   return { ok: false, setup: "", acq: "", wit: false }
 }
 
+// The additive `"async": true` flag on an activation step whose SURFACE spelled
+// `await` (item 131 §3: `effect await …`, `let x = effect await …`, `await emit
+// …`). The reference sets it from the parsed statement's `is_async` and from
+// nothing else, and a sync spelling carries no key at all — which is why this
+// is an append onto an already-closed step object rather than a field every
+// step writer has to thread.
+fn step_async(js: Str) -> Str {
+  return js.slice(0, js.length() - 1).concat(", \"async\": true}")
+}
+
 // A component activation body -> its `body` step list. `config` is a header
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
@@ -14661,10 +14801,16 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   }
   if (atw(ts, i, "let") && atk(ts, i + 2, "=") && atw(ts, i + 3, "effect")) {
     let name = tkc(ts, i + 1).text
-    if (atw(ts, i + 4, "spawn")) { return mk_irres(false, "") }
+    // `let x = effect await <acq> undo <undo>`: the `await` marker sits between
+    // `effect` and the acquisition and colours the STEP, not the expression.
+    // The effect BLOCK form below is never spelled with one (`effect await {`
+    // is not a surface), so the marker only shifts the plain acquisition.
+    let isAsync = atw(ts, i + 4, "await")
+    let aq0 = isAsync ? i + 5 : i + 4
+    if (atw(ts, aq0, "spawn")) { return mk_irres(false, "") }
     // the effect BLOCK form: pure setup runs before the acquisition, and the
     // acquisition is the block's tail expression
-    if (atk(ts, i + 4, "{")) {
+    if (!isAsync && atk(ts, i + 4, "{")) {
       let bend = close_brace(ts, i + 4)
       if (bend == 0 - 1) { return mk_irres(false, "") }
       let blk = cir_effect_block(ts, i + 5, bend - 1, cx, sc, hostSc)
@@ -14690,7 +14836,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       let bacc = acc == "" ? bstep : acc.concat(", ").concat(bstep)
       return cir_body(ts, bnext, end, cx, provs, bsc, hostSc, bacc)
     }
-    let acq = expr_at(ts, i + 4)
+    let acq = expr_at(ts, aq0)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
     let ae = cir_expr(acq.e, sc, hostSc, cx)
     if (!ae.ok) { return mk_irres(false, "") }
@@ -14705,20 +14851,24 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (is_bad(und.e)) { return mk_irres(false, "") }
     let ue = cir_expr(und.e, sc2, hostSc2, cx)
     if (!ue.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
+    let step0 = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
       .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js).concat("}")
+    let step = isAsync ? step_async(step0) : step0
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc2, hostSc2, nacc)
   }
   if (atw(ts, i, "effect")) {
-    if (atw(ts, i + 1, "spawn")) { return mk_irres(false, "") }
-    let acq = expr_at(ts, i + 1)
+    let isAsync = atw(ts, i + 1, "await")
+    let aq0 = isAsync ? i + 2 : i + 1
+    if (atw(ts, aq0, "spawn")) { return mk_irres(false, "") }
+    let acq = expr_at(ts, aq0)
     if (is_bad(acq.e)) { return mk_irres(false, "") }
     let ae = cir_expr(acq.e, sc, hostSc, cx)
     if (!ae.ok) { return mk_irres(false, "") }
     if (!atw(ts, acq.i, "undo")) {
       if (!is_witnessed_acq(acq.e, cx)) { return mk_irres(false, "") }
-      let wstep = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js).concat("}")
+      let wstep0 = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js).concat("}")
+      let wstep = isAsync ? step_async(wstep0) : wstep0
       let wacc = acc == "" ? wstep : acc.concat(", ").concat(wstep)
       return cir_body(ts, acq.i, end, cx, provs, sc, hostSc, wacc)
     }
@@ -14726,8 +14876,9 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (is_bad(und.e)) { return mk_irres(false, "") }
     let ue = cir_expr(und.e, sc, hostSc, cx)
     if (!ue.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
+    let step0 = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat("}")
+    let step = isAsync ? step_async(step0) : step0
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc, hostSc, nacc)
   }
@@ -14758,6 +14909,17 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   // component reader as every other step, so a form it cannot read withholds
   // the body rather than dropping the suspension out of it.
   if (atw(ts, i, "await")) {
+    // `await emit <call> [compensate <e>]` is NOT an `await` step: the boundary
+    // marker sits outermost in the surface, but the reference parser returns
+    // the ordinary EMIT step with `is_async` set, so it lowers to the emit step
+    // carrying `"async": true` (item 131 §2).
+    if (atw(ts, i + 1, "emit")) {
+      let em = cir_emit_step(ts, i + 1, cx, sc, hostSc)
+      if (!em.ok) { return mk_irres(false, "") }
+      let js = step_async(em.js)
+      let eacc = acc == "" ? js : acc.concat(", ").concat(js)
+      return cir_body(ts, em.i, end, cx, provs, sc, hostSc, eacc)
+    }
     let r = expr_at(ts, i + 1)
     if (is_bad(r.e) || r.i <= i + 1) { return mk_irres(false, "") }
     let ae = cir_expr(r.e, sc, hostSc, cx)
@@ -14993,8 +15155,9 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
   let reqSet = bind_names(reqs, 0, [])
   // the program-global facts the body reader needs beyond its lexical scope
   let cx = { reqs: reqSet, cases: case_binds(ts, al),
-             fns: module_callable_sigs(ts), wit: witnessed_extern_names(ts),
-             al: al }
+             fns: module_callable_sigs(ts),
+             fnps: module_callable_ptypes(ts, al),
+             wit: witnessed_extern_names(ts), al: al }
   let sc0: List[Bind] = []
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")
