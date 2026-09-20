@@ -1744,7 +1744,7 @@ def _tiers_named(text: str) -> set[str]:
     return named
 
 
-def tier_parity_findings(text: str, backends: set[str]) -> list[str]:
+def tier_parity_records(text: str, backends: set[str]) -> list[dict]:
     """(D) A one-tier fix for a guarantee this project states language-wide.
 
     WHAT THIS CANNOT DO. It cannot decide semantic parity. Nothing textual
@@ -1778,8 +1778,12 @@ def tier_parity_findings(text: str, backends: set[str]) -> list[str]:
         with a strict xfail, and nothing here would have found it.
 
     This finds a SHAPE. Parity is still decided by reading.
+
+    Returns one record per finding: the item number, the finding label, the
+    line, the single tier the block cites, the language-wide subjects it
+    speaks about, and the sibling tiers it never names.
     """
-    findings: list[str] = []
+    records: list[dict] = []
     for it in items(text):
         if it["section"] in UNTRACKED_SECTIONS:
             continue
@@ -1806,20 +1810,42 @@ def tier_parity_findings(text: str, backends: set[str]) -> list[str]:
             if len(subjects) < MIN_TIER_SUBJECTS:
                 continue
             tier = next(iter(paths))
-            others = sorted(backends - {tier})
-            where = ("item %s's header" % it["number"] if unit["label"] == "header"
-                     else "item %s %s" % (it["number"], unit["label"]))
-            findings.append(
-                f"L{unit['line']}: {where} claims closure, cites only "
-                f"backends/{tier}/, and never names another tier.\n"
-                f"    subject(s) this project states language-wide: "
-                f"{', '.join(subjects[:6])}\n"
-                f"    sibling tiers not mentioned: {', '.join(others)}\n"
-                f"    This gate cannot decide parity and is not claiming a "
-                f"defect. It is claiming that the finding does not SAY. Check "
-                f"the sibling emitters; then either record the parity fix, or "
-                f"write in this finding which tiers are out of scope and why. "
-                f"Naming the other tier is the whole escape hatch.")
+            records.append({
+                "item": it["number"],
+                "label": unit["label"],
+                "line": unit["line"],
+                "tier": tier,
+                "subjects": subjects,
+                "others": sorted(backends - {tier}),
+            })
+    return records
+
+
+def tier_parity_findings(text: str, backends: set[str]) -> list[str]:
+    """(D) rendered for the report. `tier_parity_records` decides; this prints.
+
+    Split in two so a consumer that needs the finding as DATA does not have to
+    parse this prose back out. `tools/tier_guarantees.py` is that consumer: the
+    guarantee/tier matrix turns each record into a recorded-divergence cell, so
+    the matrix and this gate cannot disagree about which tiers a closure claim
+    left unspoken.
+    """
+    findings: list[str] = []
+    for record in tier_parity_records(text, backends):
+        where = ("item %s's header" % record["item"]
+                 if record["label"] == "header"
+                 else "item %s %s" % (record["item"], record["label"]))
+        findings.append(
+            f"L{record['line']}: {where} claims closure, cites only "
+            f"backends/{record['tier']}/, and never names another tier.\n"
+            f"    subject(s) this project states language-wide: "
+            f"{', '.join(record['subjects'][:6])}\n"
+            f"    sibling tiers not mentioned: {', '.join(record['others'])}\n"
+            f"    This gate cannot decide parity and is not claiming a "
+            f"defect. It is claiming that the finding does not SAY. Check "
+            f"the sibling emitters; then either record the parity fix, or "
+            f"write in this finding which tiers are out of scope and why. "
+            f"Naming the other tier is the whole escape hatch.")
     return findings
 
 
