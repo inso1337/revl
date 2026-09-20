@@ -137,7 +137,14 @@ def test_the_refusal_classifies_as_a_g8_boundary_finding() -> None:
 
 @pytest.mark.parametrize("token", sorted(ui_family.spellings()))
 def test_declared_ui_verbs_are_admitted(token: str) -> None:
-    _parse(f"extern emission[{token}] fn v(target: Str) = @py {{ pass }}\n")
+    # A `compensatable` verb (item 522) must carry its inverse at the
+    # declaration, so the fixture spells one. Both shapes parse on a tree
+    # without item 522's check as well, which keeps this a control.
+    inverse = ("compensate undo_v()"
+               if ui_family.reversibility(token) == ui_family.COMPENSATABLE
+               else "")
+    _parse(f"extern emission[{token}] fn v(target: Str) {inverse}"
+           f" = @py {{ pass }}\n")
 
 
 def test_ordinary_capability_untouched() -> None:
