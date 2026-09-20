@@ -184,11 +184,14 @@ needed evidence, and the first attempt at that evidence was wrong in a way worth
 recording.
 
 That attempt searched each published package for a vocabulary (`remove`,
-`dispose`, `unregister`) and reported a boolean. It returned true for all six
-frameworks, on hits like a flow-graph builder calling `list.remove()` and an
-HTTP client's `aclose()`. A boolean true for everything discriminates nothing,
-and publishing it as "these frameworks have an unload path" would have been
-false.
+`dispose`, `unregister`) and reported a boolean. It reported a de-registration
+symbol for six of the eight packages, including all four python ones, on hits
+like a flow-graph builder calling `list.remove()`, a callback manager calling
+`list.remove()`, and the word "unregistered" inside a comment about Azure agent
+threads. Two of those six were genuine. The other four were not, and nothing in
+the output distinguished them, so the version was deleted rather than tuned: a
+search that cannot tell a tool registry from a list is not measuring what the
+column needs.
 
 `bench/framework_unload_survey.py` is the replacement. It holds named,
 falsifiable claims about each candidate's published API and tries to falsify
@@ -214,8 +217,23 @@ narrows, and the host has `close()`.
 Two things about the pick are uncomfortable and are written into
 `bench/hosts.json` rather than left out. It is a tool host rather than an agent
 framework in the LangChain sense, which is a real difference from the criterion's
-wording. And the survey's other reading is a stronger finding than the pick: of
-six popular agent frameworks, none publishes a way to retire a registered tool.
+wording. And the survey's other reading is a stronger finding than the pick.
+
+That reading is now a headline section of the report rather than a footnote to a
+host selection: **of six popular agent frameworks surveyed at pinned versions,
+none publishes a way to retire an individual registered tool, and five publish
+no unload path at all.** It belongs at the top because it is a claim about the
+runtimes rather than about any model, an outsider can check it against published
+artifacts, and it is the reason the residue column is a legitimate axis rather
+than one picked to win: a column measuring what a host leaks on unload reads as
+benchmaxxing until somebody shows that most popular hosts have no unload to
+measure.
+
+The denominator is the agent frameworks alone, and both exclusions run against
+the finding rather than for it. `@modelcontextprotocol/sdk` is a tool host and is
+the one surveyed package with a per-registration retirement, so counting it among
+agent frameworks would inflate the result. `cordis` is the control and was chosen
+because its unload path was known to exist.
 
 `pydantic-ai-slim` is the runner-up and was rejected for a reason that is not a
 deficiency: `AbstractToolset.__aexit__` is a documented teardown, but it is

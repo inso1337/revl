@@ -188,9 +188,11 @@ nothing about the runtime comparison.
 `bench/framework_unload_survey.py` is how that criterion was discharged. It
 holds named, falsifiable claims about eight published packages, checks each one
 against the artifact the index serves, and fails when a claim is falsified. It
-is not a symbol search: the first version was, it returned "has an unload path"
-for all six frameworks on hits like a graph builder calling `list.remove()`, and
-the docstring records why that version was deleted.
+is not a symbol search. The first version was, and it reported a de-registration
+symbol for six of the eight packages, including all four python ones, on hits
+like a flow-graph builder calling `list.remove()` and the word "unregistered"
+inside a comment. Two of those six were genuine and four were not, with nothing
+in the output to tell them apart, so that version was deleted rather than tuned.
 
 ```bash
 python3 bench/framework_unload_survey.py              # the committed survey
@@ -198,11 +200,23 @@ python3 bench/framework_unload_survey.py --fetch      # download and re-check
 python3 bench/framework_unload_survey.py --check      # fail on a falsified claim
 ```
 
-The result that is worth more than the pick: of the six popular agent frameworks
-surveyed, none publishes a way to retire a registered tool. `semantic-kernel` is
-the near miss, and the instructive one, because it is the only one that calls its
-unit a plugin: it publishes `add_plugin` with no counterpart, and keeps the
-registry in a plain dict.
+The result that is worth more than the pick, and which the report carries as a
+headline rather than as a selection rationale: **of the six popular agent
+frameworks surveyed at pinned versions, none publishes a way to retire an
+individual registered tool, and five publish no unload path at all.** The sixth,
+`pydantic-ai-slim`, publishes a teardown at toolset scope rather than per
+registration, which is a weaker guarantee and a different question for the
+residue column, so it is counted apart rather than either way.
+
+`semantic-kernel` is the near miss and the instructive one, because it is the
+only one that calls its unit a plugin: it publishes `add_plugin` with no
+counterpart and keeps the registry in a plain dict.
+
+The denominator is the agent frameworks alone. `@modelcontextprotocol/sdk` is a
+tool host and is the one surveyed package with a per-registration retirement, so
+counting it among agent frameworks would be a category error in the direction
+that flatters the finding. `cordis` is the control and is excluded for the
+opposite reason: it was chosen because its unload path was known to exist.
 
 The framework's own cells are still `not-run`. Naming a host is not running one,
 and the report says which of the two happened.

@@ -452,6 +452,95 @@ def _retry_censoring(run: str, cells: list) -> dict:
     return out
 
 
+def column_unload_paths(survey: dict) -> dict:
+    """How many surveyed agent frameworks publish a way to retire a tool.
+
+    This started as the evidence behind a host selection and is reported as a
+    result, because it is a better one than the selection. It is about the
+    runtimes rather than the models, an outsider can check it against published
+    artifacts at pinned versions, and it is the reason the residue column exists
+    at all: a column measuring what a host leaks on unload looks like an axis
+    picked to win until somebody shows that most hosts have no unload.
+
+    The denominator excludes the control, which was chosen precisely because its
+    unload path was known to exist, and counting it would inflate the rate with
+    a package selected for its answer.
+    """
+    if not survey.get("present"):
+        return {"status": NOT_RUN, "blocked_on": survey.get("reason")}
+    import framework_unload_survey  # noqa: PLC0415
+
+    verdict_for = framework_unload_survey.verdict_for
+    rows = [r for r in survey.get("frameworks") or [] if r.get("role") != "control"]
+    measured = [r for r in rows if r.get("fetched")]
+    if not measured:
+        return {"status": NOT_RUN,
+                "blocked_on": "the survey fetched no candidate packages"}
+    verdicts = {r["name"]: verdict_for(r) for r in measured}
+    per_registration = [n for n, v in verdicts.items()
+                        if v.startswith("publishes one (per-registration)")]
+    none_published = [n for n, v in verdicts.items() if v == "none published"]
+    controls = [r for r in survey.get("frameworks") or [] if r.get("role") == "control"]
+    # The headline denominator is the agent frameworks alone. The surveyed set
+    # also holds a tool host, and counting it among "agent frameworks" would be
+    # a category error in the direction that flatters the finding, because it is
+    # the one package that publishes a per-registration retirement.
+    frameworks = [r for r in measured if r.get("category") == "agent-framework"]
+    fw_none = [r["name"] for r in frameworks
+               if verdicts[r["name"]] == "none published"]
+    fw_per_reg = [r["name"] for r in frameworks
+                  if verdicts[r["name"]].startswith("publishes one (per-registration)")]
+    return {
+        "status": "measured",
+        "n": len(measured),
+        "agent_frameworks_n": len(frameworks),
+        "agent_frameworks_none_published": fw_none,
+        "agent_frameworks_per_registration": fw_per_reg,
+        "denominator_note": (
+            "The headline denominator is the agent frameworks alone. The "
+            "surveyed set also holds a tool host, and it is the one package "
+            "that publishes a per-registration retirement, so counting it among "
+            "agent frameworks would be a category error in the direction that "
+            "flatters the finding"),
+        "surveyed": [{"name": r["name"], "version": r["version"],
+                      "category": r.get("category"),
+                      "registration": r.get("registration_api"),
+                      "verdict": verdicts[r["name"]]} for r in measured],
+        "publish_per_registration_unload": per_registration,
+        "publish_no_unload": none_published,
+        "controls": [{"name": r["name"], "version": r["version"],
+                      "verdict": verdict_for(r)} for r in controls],
+        "control_excluded_from_denominator": (
+            "The control was chosen because its unload path was known to exist; "
+            "counting it would inflate the rate with a package selected for its "
+            "answer"),
+        "method": (
+            "Named, falsifiable claims about each package's published API, "
+            "checked against the artifact the index serves at a pinned version. "
+            "A `present` claim fails when the symbol is absent; an `absent` "
+            "claim fails when any of the named symbols is found under the path "
+            "it names."),
+        "how_it_could_have_been_wrong": (
+            "It searched a vocabulary (`remove`, `dispose`, `unregister`) "
+            "across each package and reported a boolean, and it reported a "
+            "de-registration symbol for six of the eight packages, including "
+            "all four python ones, on hits like a flow-graph builder calling "
+            "`list.remove()`, a callback manager calling `list.remove()`, and "
+            "the word \"unregistered\" inside a comment. Two of those six were "
+            "genuine; the other four were not, and nothing in the output "
+            "distinguished them. That version was deleted rather than tuned, "
+            "because a search that cannot tell a tool registry from a list is "
+            "not measuring what the column needs."),
+        "what_it_does_not_say": (
+            "That a published symbol releases anything. Whether calling it gives "
+            "a resource back is the residue probe's question, and no number here "
+            "may be quoted as a residue result. An `absent` verdict is scoped to "
+            "the paths the claim names: several of these keep their registry in "
+            "a plain mutable dict a caller can reach into."),
+        "evidence": survey.get("path"),
+    }
+
+
 def column_injection_escape(run: str | None) -> dict:
     """The escape rate over a committed injection run, or not-run with a reason.
 
@@ -552,6 +641,8 @@ def build_report(args) -> dict:
     latency = column_admission_latency(args.measure_latency, args.latency_iters)
     tokens_col = column_tokens_to_green(args.tokens_from, compiler_root, pin)
     injection = column_injection_escape(args.injection_from)
+    survey = load_unload_survey()
+    unload = column_unload_paths(survey)
 
     briefs = briefs_from_admits(admits) + briefs_from_residue(residue, args.residue_from)
 
@@ -576,6 +667,21 @@ def build_report(args) -> dict:
             "rung": "measured",
             "public": True,
             "evidence": dict(evidence, run=head["gate"]),
+        })
+    if unload.get("status") == "measured":
+        claims.append({
+            "text": (f"of {unload['agent_frameworks_n']} popular agent "
+                     f"frameworks surveyed at pinned versions, "
+                     f"{len(unload['agent_frameworks_per_registration'])} "
+                     f"publish a way to retire an individual registered tool "
+                     f"and {len(unload['agent_frameworks_none_published'])} "
+                     f"publish no unload path at all "
+                     f"(n={unload['agent_frameworks_n']}, excluding the control "
+                     f"and the one surveyed tool host); the names and versions "
+                     f"are in the report"),
+            "rung": "measured",
+            "public": True,
+            "evidence": dict(evidence, run=unload["evidence"] or "unload-survey"),
         })
     if residue.get("status") == "measured":
         claims.append({
@@ -660,11 +766,12 @@ def build_report(args) -> dict:
         },
         "checker": checker,
         "model_pin": pin,
-        "unload_survey": load_unload_survey(),
+        "unload_survey": survey,
         "hosts": hosts["hosts"],
         "tasks": hosts["tasks"],
         "columns": {
             "refused": refused,
+            "unload-paths": unload,
             "admits": admits,
             "residue": residue,
             "injection-escape": injection,
@@ -783,6 +890,66 @@ def _escape_cell(inj: dict, host: str) -> str:
             f"{block.get('refused_on_the_injection', 0)} refused on the "
             f"injection, {block.get('refused_on_another_fault', 0)} refused on "
             f"an unrelated fault")
+
+
+def _unload_section(cell: dict) -> list:
+    """The survey, reported as a result rather than as a selection rationale.
+
+    It sits directly under the refused column because it is the finding that
+    makes the residue column legitimate. A column measuring what a host leaks
+    on unload reads as an axis picked to win, right up until somebody shows
+    that most popular hosts have no unload to measure.
+    """
+    if cell.get("status") != "measured":
+        return ["## Unload paths across the ecosystem", "",
+                f"Not measured: {cell.get('blocked_on', 'no survey')}.", ""]
+    fw_n = cell["agent_frameworks_n"]
+    fw_none = cell["agent_frameworks_none_published"]
+    fw_per_reg = cell["agent_frameworks_per_registration"]
+    lines = [
+        "## Unload paths across the ecosystem", "",
+        f"**Of {fw_n} popular agent frameworks surveyed at pinned versions "
+        f"(n={fw_n}), {len(fw_per_reg)} publish a way to retire an individual "
+        f"registered tool, and {len(fw_none)} publish no unload path at all.**",
+        "",
+        "The one that is neither publishes a teardown at toolset scope rather",
+        "than per registration, which is a weaker guarantee and a different",
+        "question for the residue column, so it is counted apart rather than",
+        "either way.", "",
+        "This is the reason the residue column exists, and it is a stronger",
+        "result than the host it selected. A column measuring what a host leaks",
+        "on unload reads as an axis picked to win, until somebody shows that",
+        "most popular hosts have no unload to measure. It is also a claim about",
+        "the runtimes rather than about any model, and a reader can check it",
+        "against published artifacts at the versions named below.", "",
+        "| package | kind | version | registration | unload path |",
+        "|---|---|---|---|---|",
+    ]
+    for row in cell["surveyed"]:
+        lines.append(f"| `{row['name']}` | {row.get('category', '?')} "
+                     f"| {row['version']} "
+                     f"| `{row['registration']}` | {row['verdict']} |")
+    for row in cell.get("controls") or []:
+        lines.append(f"| `{row['name']}` | control | {row['version']} "
+                     f"| excluded from the denominator | {row['verdict']} |")
+    lines += ["",
+              cell["denominator_note"] + ".", "",
+              cell["control_excluded_from_denominator"] + ".", "",
+              "### How it was measured, and how it could have been wrong", "",
+              cell["method"], "",
+              "The first version of this survey was wrong, and recording how",
+              "is part of the result. " + cell["how_it_could_have_been_wrong"], "",
+              "The checker earned its place before the survey was committed. It",
+              "falsified the `semantic-kernel` absence claim on the word",
+              "\"unregistered\" inside a comment about Azure agent threads, which",
+              "forced the claim to be scoped to the plugin registry's own",
+              "modules; and it caught a `crewai` claim pointing at a module that",
+              "version had moved into a package.", "",
+              "What it does not say. " + cell["what_it_does_not_say"], "",
+              f"Evidence, with the file and line of every symbol: "
+              f"`{cell['evidence']}`. Re-check it with "
+              f"`python3 bench/framework_unload_survey.py --fetch --check`.", ""]
+    return lines
 
 
 def _third_host_section(framework: dict | None, survey: dict) -> list:
@@ -958,6 +1125,8 @@ def render(report: dict) -> str:
     else:
         lines += ["The inventory could not be read. Sections unavailable: "
                   + ", ".join(sorted(refused.get("unavailable", {}))), ""]
+
+    lines += _unload_section(cols.get("unload-paths") or {})
 
     lines += ["## The table", "",
               "| column | raw Cordis / TypeScript | agent framework | revl |",
