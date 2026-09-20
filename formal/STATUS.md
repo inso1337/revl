@@ -49,10 +49,10 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G2** provision disjointness | full | 4 | **yes** (V rows, 2 agree-G2) | stated over `(key, realm)` slots from the incremental `LinkOK`, and the oracle bites: change `Manifest.needs` to ignore the realm and four corpus files mismatch |
 | **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
 | **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 | **yes** (182 G rows, 25 P rows, 6 agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits |
-| **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 15 | **yes** (209 U5 rows) | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. The oracle now reconstructs the file's `RevL.Lemmas.Prog` from the `EX`/`FN`/`PG` rows and decides `registrations` over each effect's inverse body (`Oracle.registrationsB`, `registrationsB_iff`); the reference recomputes the same reach fold independently from the TSV, and the two agree on all 209 teardowns. `prog_coverage` fails the gate unless the corpus carries a clean teardown (count 0) AND a caught crossing (`examples/rejections/g5_undo_fn_emission.rvl`, an `undo` reaching an emission through a `fn`), and `g5_row_not_vacuous` proves the count flips to 0 when the wrapping fn stops calling the emission. First-class dispatch (`star`) is `n/a` on both sides, outside the model as in G4 |
-| **G6** purity outside effect forms | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 | **yes** (596 C rows) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on all 596 statements. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe |
+| **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 15 | **yes** (one U5 row per effect statement; the generated census below carries the count) | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. The oracle now reconstructs the file's `RevL.Lemmas.Prog` from the `EX`/`FN`/`PG` rows and decides `registrations` over each effect's inverse body (`Oracle.registrationsB`, `registrationsB_iff`); the reference recomputes the same reach fold independently from the TSV, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries a clean teardown (count 0) AND a caught crossing (`examples/rejections/g5_undo_fn_emission.rvl`, an `undo` reaching an emission through a `fn`), and `g5_row_not_vacuous` proves the count flips to 0 when the wrapping fn stops calling the emission. First-class dispatch (`star`) is `n/a` on both sides, outside the model as in G4 |
+| **G6** purity outside effect forms | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 | **yes** (one C row per reconstructed statement; the generated census below carries the count) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on every one of them. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe |
 | **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
-| **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (598 S8 rows) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on all 598 surfaces. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
+| **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (one S8 row per reconstructed statement; the generated census below carries the count) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
 | **A1** iteration boundaries only during activation | **none** | 0 | no | not modelled at all: L0 has no `await` and no iteration boundary. **Unbuilt work**, and it needs L0 to grow first |
@@ -61,7 +61,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
 | **A6** provide-methods match the service signature | **none** | 0 | partial | the oracle's P row is a *capability bound* check, not the signature match, and `methodBoundOK` is a private restatement. **Unbuilt work** |
 | **A8** mid-body failure reverts and contains | full over the WAL model | 18 | **yes** (1620 O rows) | the row WRITES each scenario's records as a real JSON-Lines WAL and runs `src/revl/recovery.py` over it, diffing recover's own verdict, the set it actually applied to the `World`, and its reported residue against the model's `outcome` / `replayed` / `reported`. It found the legacy-`effect` family's item-309 fence branch missing from `RevL.Lemmas.dispose` (see below). Crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
-| **A9** provide key declared in `provides`, both directions | full over the installed blocks and routes | 16 | **yes** (242 A9 rows, 2 agree-A9) | the installed `provide k { … }` block keys and the `isolate k in realms(...)` routed keys are modelled beside the L0 `LComponent` (`RevL.A9.Installed`, no L0 edit); `A9OK` is `BlocksDeclared` (every block key is in the clause, issue 1167) AND `DeclaredInstalled` (every clause key has a block or a route, issue #1172 / PR #1184). `installed_block_is_slot` is the bridge to G2/G3: under A9 every block answers a `(key, realm)` slot of the universe `LinkOK` reasons over; `undeclared_block_is_no_slot` and `declared_uninstalled_refused` are the two fixtures' shapes, `unrouted_needs_a_block` the converse as stated for an ordinary provider, `routed_installs_without_block` the exemption (`stdlib/router.rvl`'s `RoundRobin`). The oracle exports the blocks as `PB` facts and the routes as `PR` facts (the `C` row reads the clause, not the body) and decides `a9B` per component that declares or installs anything; `a9_coverage` fails the gate unless the corpus carries an admitted provider, both refused shapes (`examples/rejections/a9_provide_key_not_declared.rvl`, `examples/rejections/a9_provides_without_block.rvl`, both `agree-A9`; `missed-A9` is FATAL) and the routed shape admitted (`tests/formal_corpus/a9_routes_installs_key.rvl`). The double install ("provision `k` is installed twice", uncoded) is `NoDoubleInstall`, proved distinct from A9 and not under the row: no corpus file installs twice and the refusal carries no code. **Not modelled**: the checker's skip of the converse for a body that recovered past a refused statement (item 386), which can only land in `formal-found-other`; and the route's realm legs, elided from the V row (see the fidelity limits) |
+| **A9** provide key declared in `provides`, both directions | full over the installed blocks and routes | 16 | **yes** (one A9 row per component that declares or installs anything; the generated census below carries the count) | the installed `provide k { … }` block keys and the `isolate k in realms(...)` routed keys are modelled beside the L0 `LComponent` (`RevL.A9.Installed`, no L0 edit); `A9OK` is `BlocksDeclared` (every block key is in the clause, issue 1167) AND `DeclaredInstalled` (every clause key has a block or a route, issue #1172 / PR #1184). `installed_block_is_slot` is the bridge to G2/G3: under A9 every block answers a `(key, realm)` slot of the universe `LinkOK` reasons over; `undeclared_block_is_no_slot` and `declared_uninstalled_refused` are the two fixtures' shapes, `unrouted_needs_a_block` the converse as stated for an ordinary provider, `routed_installs_without_block` the exemption (`stdlib/router.rvl`'s `RoundRobin`). The oracle exports the blocks as `PB` facts and the routes as `PR` facts (the `C` row reads the clause, not the body) and decides `a9B` per component that declares or installs anything; `a9_coverage` fails the gate unless the corpus carries an admitted provider, both refused shapes (`examples/rejections/a9_provide_key_not_declared.rvl`, `examples/rejections/a9_provides_without_block.rvl`, both `agree-A9`; `missed-A9` is FATAL) and the routed shape admitted (`tests/formal_corpus/a9_routes_installs_key.rvl`). The double install ("provision `k` is installed twice", uncoded) is `NoDoubleInstall`, proved distinct from A9 and not under the row: no corpus file installs twice and the refusal carries no code. **Not modelled**: the checker's skip of the converse for a body that recovered past a refused statement (item 386), which can only land in `formal-found-other`; and the route's realm legs, elided from the V row (see the fidelity limits) |
 | **T1/T2/T3** typing, `Opt[T]`, holes | **none** | 0 | no | the type checker is outside the guarantee backbone. **Out of scope by kind** |
 | **R4** no residue | full for the **abort path** | 9 | **yes** (the residue column of the 1620 O rows) | the column is the model's `reported`, diffed against `recover`'s `residue.outstanding`; it is printed only under `outcome = rolledBack`, which is R4's own scope condition. Stated over the abort; the roll-forward window's `flush-residue` surface is still not modelled and the column says `n/a` there rather than agreeing about a claim neither side makes. **Unbuilt work** |
 | items 66/294/260 capability ceilings | full, with the held/reach sets **derived** from component shapes | 23 | **yes** (8 W rows) | the ceiling half is now EXERCISED: `examples/budget_attenuation.rvl` (50 ≤ 100, admitted) and `examples/rejections/g4_spawn_widens_budget.rvl` (1000 > 100, refused by the ceiling half alone — strip the ceilings and the resource fold finds nothing uncovered), with `attenuation_coverage` failing the gate if the corpus stops containing both. Before those two files the row agreed over 6 edges with `ceilingOKB` never entered. Also unmodelled: parse-time canonicalization and `cap_order.disjoint`'s D2 same-token clause |
@@ -1024,19 +1024,79 @@ only the closure is local, the judgment it feeds is the model's).
 
 ### Census
 
-Nothing is dropped and nothing is counted without being named. Over the
-corpus as of the A9 converse and the A2 rows (issues 1167, 1166, #1172):
-**457 .rvl files -> 317 components -> 860 statements = 219 modeled + 210
-componentless + 28 refused at parse**, and **5119 verdicts compared (219
-files + 317 components + 65 provide methods + 18 spawn edges + 28 parse
-refusals + 267 teardown scenarios + 1620 recoveries + 860 confinements +
-860 surfaces + 306 teardowns + 242 provide-clause components + 317 A2
-bodies), 5119 agree, 0 mismatches**. (The corpus grows; the shape of the
-census does not. The step-6 numbers were 296 / 182 / 403 and 371 verdicts;
-the 387 before the G7 row; 654 as of `chore/formal-review`; 4526 before
-the A9 and A2 rows; 4761 with A9 alone; 4794 with the A9 converse and
-5071 with the A2 rows, each measured on its own branch before the two
-landed on one corpus.)
+Nothing is dropped and nothing is counted without being named. The block
+below is GENERATED by the gate that measures it
+(`python3 formal/harness/diff_corpus.py --write-status`), and `make formal`
+fails when the checked-in text is not what the run produced. It used to be
+prose: at issue #1169 this section claimed 654 verdicts over 305 files while
+the gate printed 4526 over 216, and claimed 0 formal-strict while the gate
+printed 1. Nothing compared the two, in either direction.
+
+<!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
+
+**468 .rvl files -> 339 components -> 917 statements = 225 modeled + 215
+componentless + 28 refused at parse**, and **5400 verdicts compared (225
+files + 339 components + 67 provide methods + 18 spawn edges + 28 parse
+refusals + 267 teardown scenarios + 1620 recoveries + 917 confinements +
+917 surfaces + 337 teardowns + 245 provide-clause components + 81 config
+fields + 339 A2 bodies), 5400 agree, 0 mismatches**.
+
+Checker alignment over the 225 modeled files. Every bucket recording a
+DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
+weaker than the checker, `formal-strict` and `formal-found-other` are
+the model stricter than the language that ships. `agree-*` and
+`out-of-fragment*` are informational, and `out-of-fragment*` means the
+model has no fact about the rule the checker refused under, not that it
+disagrees.
+
+| bucket | files | gate |
+| --- | --- | --- |
+| `agree-A2` | 1 | informational |
+| `agree-A9` | 2 | informational |
+| `agree-G2` | 2 | informational |
+| `agree-G3` | 1 | informational |
+| `agree-G4` | 17 | informational |
+| `agree-G5` | 2 | informational |
+| `agree-accept` | 151 | informational |
+| `formal-found-other` | 0 | **FATAL** |
+| `formal-strict` | 0 | **FATAL** |
+| `missed-A2` | 0 | **FATAL** |
+| `missed-A9` | 0 | **FATAL** |
+| `missed-G2` | 0 | **FATAL** |
+| `missed-G4` | 0 | **FATAL** |
+| `missed-G5` | 0 | **FATAL** |
+| `out-of-fragment` | 38 | informational |
+| `out-of-fragment-G5` | 10 | informational |
+| `out-of-fragment-G6` | 1 | informational |
+
+Nothing is counted without being named; the files in the non-`agree`
+buckets are:
+
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_arrow_emission.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_fn_value_emission.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_handle_ref_arg.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_handle_ref_let.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_alias.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_if_arm.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_let.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_list.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
+- `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
+- `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+
+`agree-G5` says which row saw the crossing: the `U5` registration count,
+or the `G` row refusing the component through the marker rule.
+
+- `U5`: `examples/rejections/g5_undo_fn_emission.rvl`
+- `G`: `examples/rejections/g5_undo_handle_emission.rvl`
+
+<!-- END GENERATED alignment -->
+
+(The corpus grows; the shape of the census does not. The step-6 numbers
+were 296 / 182 / 403 and 371 verdicts; the 387 before the G7 row; 654 as
+of `chore/formal-review`; 4526 before the A9 and A2 rows; 4761 with A9
+alone; 4794 with the A9 converse and 5071 with the A2 rows, each measured
+on its own branch before the two landed on one corpus.)
 
 - The 28 parse refusals are LISTED by name and code, not counted. The
   previous "(28 parse-error skips, loud)" parenthesis hid
@@ -1053,17 +1113,50 @@ landed on one corpus.)
   `harness/out/no_manifest.txt`.
 
 Checker alignment: each modeled file is compiled with the real checker
-and its refusal code compared against the formal verdicts. `missed-G4`,
-`missed-G2`, `missed-A9` and `missed-A2` are **gate failures** (item 418
-step 7; issues 1167 and 1166), not findings: the checker refusing where the model sees
-nothing is the model being weaker than what revl enforces.
-`formal-strict` — the model refusing what the checker accepts — stays
-informational; it is the safe direction and names fragment gaps. Current
-buckets: 142 agree-accept, 2 agree-G2, 1 agree-G3, 16 agree-G4, 2
-agree-A9, 1 agree-A2, 52 out-of-fragment, and **0 missed-G4, 0 missed-G2,
-0 missed-A9, 0 missed-A2**, with 1 formal-strict and 2 formal-found-other
-carried as informational findings -- 167 aligned plus the 52
-out-of-fragment is the 219 modeled files. The A9 row moved
+(`compile_files`, the door the CLI takes, so a `use` resolves against the
+file's own directory) and its refusal code compared against the formal
+verdicts. The bucket counts are in the generated block above; what the
+buckets MEAN is here.
+
+Every bucket recording a disagreement is a **gate failure**, in both
+directions. `missed-G4`, `missed-G2`, `missed-G5`, `missed-A9` and
+`missed-A2` are the checker refusing where the model sees nothing, which
+is the model weaker than what revl enforces (item 418 step 7; issues 1167, 1166,
+#1169). `formal-strict` (the model refusing a file the checker ACCEPTS)
+and `formal-found-other` (the model refusing a file the checker refuses
+for an unrelated reason) are the opposite direction, and were
+informational until issue #1169. That is exactly how three files sat in
+them unread: agreement failed loudly, strictness did not, so the two
+buckets could not fire. A model stricter than the checker is a model of a
+different language, and every theorem proved over it is proved about that
+other language, so both now fail the gate too.
+
+A genuine fragment gap does not land in either. It lands in
+`out-of-fragment` (the checker refused under a rule the model states
+nothing about) or, where the rule IS modelled but the facts stop short, in
+a named `out-of-fragment-G5` / `out-of-fragment-G6`:
+
+- **G5**: the U5 row is stated over the file's `Prog` — the extern table
+  plus the fn call graph, so it counts a teardown crossing only where the
+  `undo` reaches it through a declared fn or extern. `undo w.task.run(...)`
+  (a spawn handle), `undo store.drop()` (a host receiver), `undo f()` (an
+  arrow parameter) and `undo dispatch1(ref)` (a dispatched parameter) all
+  leave the `Prog` at the first hop, and the fold's zero there is an
+  absence of fact rather than a verdict. Those files are named, not
+  counted: ten of the twelve G5 fixtures. The two the model does see are
+  `agree-G5`, and the bucket says by which row. `missed-G5` is reserved
+  for an `undo` the `Prog` CAN resolve whose crossing the fold still
+  counts as zero, which is the model genuinely going blind.
+- **G6**: revl's G6 is "purity outside effect forms" and the
+  duplicate-binding refusal. The model's `C` row is the issue-276
+  confinement surface, a different judgment about a different thing: it
+  `fail`s on a hundred-odd corpus files the checker ACCEPTS, because a
+  host root like `Map.new` is not a declared require. An `agree-G6` keyed
+  on a `C` fail would therefore be an agreement that cannot fail, which is
+  the informational-bucket problem one level down, so the G6 refusal is
+  reported as out of fragment instead.
+
+The A9 row moved
 `examples/rejections/a9_provide_key_not_declared.rvl` from out-of-fragment
 to agree-A9 and nothing else; its converse added
 `examples/rejections/a9_provides_without_block.rvl` to agree-A9 (it was
@@ -1071,7 +1164,11 @@ to agree-A9 and nothing else; its converse added
 the gap) and `tests/formal_corpus/a9_routes_installs_key.rvl` to
 agree-accept. The A2 row moved
 `examples/rejections/a2_acquire_after_provide.rvl` from out-of-fragment
-(54 before either) to agree-A2. The three informational rows predate both.
+(54 before either) to agree-A2. The three files that used to sit in the
+two informational buckets were cleared by issue #1169: `notes.rvl` and
+`interpose_observe.rvl` by the `compile_files` door, the `emitarg` marker
+context and the direct-extern bound (PR #1174), and
+`g5_undo_handle_emission.rvl` by the G5 arm.
 
 Movements from the pre-step-6 buckets (52 agree-accept, 2 agree-G2, 6
 agree-G4, 36 formal-strict, 13 formal-found-other, 21 out-of-fragment),
