@@ -96,12 +96,12 @@ defect, not a design choice. So the decision is an enumeration of three
 terminal shapes, never a number:
 
     PROMOTE    every precondition satisfied and every measurement satisfied
-    ROLL_BACK  every precondition satisfied, a measurement failed. The
-               candidate was entitled to be activated, so the undo is the
-               verdict, not a refusal (this is item 334's `SWAP_REVERTED`
-               shape, at the lifecycle level).
-    REFUSE     a precondition is not satisfied. Nothing was activated, so
-               there is nothing to roll back.
+    ROLL_BACK  a measurement failed AND the candidate had gone live (a
+               `canary` record exists). The undo is the verdict. This is item
+               334's `SWAP_REVERTED` shape, at the lifecycle level.
+    REFUSE     a precondition is not satisfied, or a measurement failed while
+               the candidate was never activated. There is nothing to undo,
+               and reporting a rollback would claim an undo that never ran.
 
 TERMINATION IS A PROOF OBLIGATION
 ---------------------------------
@@ -895,21 +895,45 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
                 measurements_read=False, findings=findings)
 
     # Only now. Every precondition is satisfied, so the candidate was entitled
-    # to be activated and the measurements decide keep versus roll back.
-    failures = []
+    # to enter shadow, and the measurements decide keep versus undo.
+    #
+    # The measured stages are walked in their own order and stop at the first
+    # failure, for the same reason the preconditions do: nothing canaries a
+    # candidate that failed shadow.
+    findings = []
+    first_failure = None
+    unread = []
     for stage in MEASURED:
+        if first_failure is not None:
+            verdicts.append(not_reached(stage, first_failure.component))
+            unread.append(stage)
+            continue
         verdict = _judge(proposal, stage)
         verdicts.append(verdict)
         if not verdict.verified:
-            failures.append(verdict)
-    if failures:
-        return LifecycleVerdict(
-            proposal, verdicts, "ROLL_BACK", failures[0].code,
-            measurements_read=True,
-            findings=["measured stage(s) failed: "
-                      + ", ".join(v.component for v in failures)])
-    return LifecycleVerdict(proposal, verdicts, "PROMOTE", "",
-                            measurements_read=True)
+            first_failure = verdict
+    if first_failure is None:
+        return LifecycleVerdict(proposal, verdicts, "PROMOTE", "",
+                                measurements_read=True)
+    supplied_anyway = [s for s in unread if s in proposal.stages]
+    if supplied_anyway:
+        findings.append(
+            "OUT_OF_ORDER: " + ", ".join(supplied_anyway) + " evidence was "
+            "supplied although `" + first_failure.component + "` did not "
+            "verify.")
+
+    # ROLL_BACK versus REFUSE turns on one fact and not on severity: did the
+    # candidate go live. `canary` is the stage that puts it in front of real
+    # traffic, so a canary record is the evidence that there is something to
+    # undo. Without one nothing was activated, and calling that a rollback
+    # would claim an undo that never ran.
+    activated = "canary" in proposal.stages
+    findings.insert(0, f"`{first_failure.component}` did not verify "
+                       f"({first_failure.code})")
+    return LifecycleVerdict(
+        proposal, verdicts,
+        "ROLL_BACK" if activated else "REFUSE", first_failure.code,
+        measurements_read=True, findings=findings)
 
 
 def main(argv=None) -> int:
