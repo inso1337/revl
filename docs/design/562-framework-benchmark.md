@@ -170,14 +170,176 @@ the probe detects the leaks we planted. It is not a population rate, and it is
 exactly the kind of result the issue predicted would be dismissed, rightly,
 until somebody who is not us runs the harness.
 
-## 6. Files
+## 6. Second pass: the framework, the escape column, and a live run
+
+Section 5 lists what the first report left empty. This section records how three
+of those were closed and what each one cost, because the reasoning is the part a
+later reader needs and the numbers move.
+
+### 6.1 The framework, and the survey that chose it
+
+The criterion was already written down before any framework was named: a host
+with no unload path cannot fail the residue column honestly. Discharging it
+needed evidence, and the first attempt at that evidence was wrong in a way worth
+recording.
+
+That attempt searched each published package for a vocabulary (`remove`,
+`dispose`, `unregister`) and reported a boolean. It returned true for all six
+frameworks, on hits like a flow-graph builder calling `list.remove()` and an
+HTTP client's `aclose()`. A boolean true for everything discriminates nothing,
+and publishing it as "these frameworks have an unload path" would have been
+false.
+
+`bench/framework_unload_survey.py` is the replacement. It holds named,
+falsifiable claims about each candidate's published API and tries to falsify
+them against the artifact the index serves at a pinned version. Two claim kinds:
+`present` (this symbol is in this file) and `absent` (none of these names occurs
+under this path). A `present` claim is further tagged with what it proves,
+because an earlier version of the verdict counted `semantic-kernel`'s confirmed
+`add_plugin` as an unload path, which is a registration API and proves the
+opposite of what was printed.
+
+The checker earned its place twice before the survey was committed. It falsified
+the `semantic-kernel` absence claim on the word "unregistered" inside a comment
+about Azure agent threads, which forced the claim to be scoped to the plugin
+registry's own modules, where it belongs. And it caught the `crewai` claim
+pointing at `crewai/agent.py` in a version that had moved that module into a
+package.
+
+The result: **`@modelcontextprotocol/sdk` 1.30.0**. `registerTool` returns a
+handle whose `remove()` deletes the registration and sends
+`notifications/tools/list_changed`, so the surface a caller sees actually
+narrows, and the host has `close()`.
+
+Two things about the pick are uncomfortable and are written into
+`bench/hosts.json` rather than left out. It is a tool host rather than an agent
+framework in the LangChain sense, which is a real difference from the criterion's
+wording. And the survey's other reading is a stronger finding than the pick: of
+six popular agent frameworks, none publishes a way to retire a registered tool.
+
+`pydantic-ai-slim` is the runner-up and was rejected for a reason that is not a
+deficiency: `AbstractToolset.__aexit__` is a documented teardown, but it is
+scoped to the toolset rather than to a registration, so a residue number under
+it answers a different question and the two do not belong in one column.
+
+The framework's cells are still `not-run`. Naming a host is not running one.
+
+### 6.2 The escape column measures the model first
+
+The first report left this empty rather than fill it with
+`tests/test_adversarial_gate.py`, on the grounds that a suite of attacks we
+wrote, refused by the gate we wrote, is a regression test and not an escape
+rate. That still holds, so the column is filled by a new measurement.
+
+`bench/injection_escape.py` generates with the pinned model and puts the
+injected instruction in the material a component reads: a service doc comment,
+the brief, or the compiler output the retry loop feeds back. The third carrier
+is there because the retry loop is a real injection surface: the harness feeds
+compiler text back to the model, so a hostile toolchain has a channel, and one
+vector impersonates the compiler through it.
+
+The design decision that matters is that the column reports **two** numbers and
+refuses to collapse them:
+
+- **compliance**, how often the model wrote the undeclared thing at all. It is a
+  property of the model, identical across hosts, and it is reported first.
+- **containment**, whether a named hard gate then refused the artifact. Only
+  `compiles` and `pinnedInterfaces` are used, both from the frozen set, because
+  a column that invented its own gate would be scoring itself.
+
+A containment rate quoted without the compliance rate it was conditioned on is
+not interpretable: a model that ignores every injection makes every runtime look
+perfect. Zero compliance therefore reports that the gate was not exercised, and
+`check()` fails a run that reports a containment figure anyway.
+
+Compliance is detected from the source text by a detector that never consults
+the gate. If compliance were inferred from the gate rejecting something,
+containment would be 100% by construction and the column would measure nothing.
+The cost of that independence is a detector that misses paraphrases and fires on
+comments, so each attempt records the text its detector matched.
+
+A third distinction was added after the first live attempt, which is the reason
+to record it here rather than present the design as though it arrived whole. The
+model complied with the environment-variable injection, the compiler refused the
+document, and the diagnostic was a syntax error on an unrelated line: the
+document would have been refused with or without the injection. Counting that as
+containment credits the gate for a refusal that says nothing about injection
+resistance, and it is precisely how a column like this comes out flattering by
+accident.
+
+So a complying attempt lands in exactly one of three outcomes, and only the
+first is evidence about injections:
+
+- **refused on the injection**: the diagnostic names the injected reach, or the
+  pinned-interface gate fired, which can only fire on the declared surface;
+- **refused on another fault**: refused for something else. The injected
+  behaviour did not ship, so it is not an escape, but it is not evidence either
+  and it is counted apart;
+- **escaped**: admitted while complying.
+
+The split is computed from the stored attempt rows rather than at generation
+time, so a run committed before the distinction existed is classified by it too.
+
+The raw-TypeScript host has no declared surface to enforce and no gate to run.
+Its containment is not a measurement, it is the definition of the host, and the
+row says `not measured` rather than printing a rate that would read as an
+empirical win for the column beside it.
+
+### 6.3 The live run, and what run.py got wrong
+
+`bench/run.py`'s local runner read `choices[0].message.content` and raised on
+empty. The pinned model is a reasoning model: it emits a separate `reasoning`
+channel and spends the output cap on it first, so a small cap does not truncate
+the answer, it deletes it. Measured on spec `01-kv-provider`: 3693 completion
+tokens, of which the answer was 358 characters.
+
+Two changes, both narrow. The cap defaults to the pin's `max_output_tokens`
+rather than 4096. And the answer is read from `content`, falling back to the
+reasoning channel only when `content` is empty, with the fallback recorded on
+the row: when a server sends both, the fence in `content` is the answer and the
+one in the reasoning is a draft the model then revised, so a corpus scored off
+the draft is a different measurement.
+
+`run_local` has two call sites, both inside `run.py`. `bench/rescore.py` names
+it only to refuse it: its `assert_model_free` guard fails if the grader exposes
+a generation entrypoint.
+
+The run also records which compiler graded it, relative to the repository root.
+An editable install registers a meta-path finder consulted before `sys.path`, so
+a run launched from the wrong interpreter can score against a different checkout
+than the one it was pointed at and produce plausible, wrong numbers.
+
+### 6.4 Throughput, measured twice, reproduced neither time
+
+The first pass measured 18.5 t/s generation against a quoted 51.4, on a busy
+machine, and called it a weak refutation. The second pass measured again and got
+24.3 t/s (sd 1.0, n=5 warm), and 83.9 t/s prompt against a quoted 746.3.
+
+Rather than describe the machine with an adjective, the pin now measures it: the
+server accounts for load, prompt evaluation and generation separately from the
+request's wall clock, so the gap between them is a number. Over these samples
+the server accounted for 21% of each request's wall clock and the one-minute
+load average averaged 38.
+
+The report states the consequence in both directions. A contended measurement is
+a weak refutation of an idle one, so this does not settle whether the quoted
+figure is wrong; and it is not a licence to assume the quoted figure would
+reproduce, because nothing in this repository has reproduced it on any machine
+state. An idle-machine measurement is a named remaining gate, emitted
+automatically whenever the accounted fraction is below 0.8.
+
+## 7. Files
 
 - `bench/hosts.json`: the registry an outsider edits: hosts, pinned model, task
   set, columns, and a `who_wrote_what` block naming the prompts this repository
   authored.
 - `bench/refusal_inventory.py`: the refused column, recomputed from gated
   ledgers.
-- `bench/model_pin.py`: the pin, probed rather than asserted.
+- `bench/model_pin.py`: the pin, probed rather than asserted, with the
+  contention of the machine it was probed on recorded beside the figure.
+- `bench/framework_unload_survey.py`: the third host's selection evidence, as
+  falsifiable claims checked against published artifacts.
+- `bench/injection_escape.py`: the injection-escape column.
 - `bench/framework_bench.py`: assembles the report, emits EVAL-REPORT-1 JSON
   plus the markdown table, and validates itself with
   `tools/check_eval_report.py` under `--check`.
