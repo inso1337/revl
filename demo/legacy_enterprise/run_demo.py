@@ -139,7 +139,6 @@ def main() -> int:
     }
     for name, text in write.items():
         (work / name).write_text(text)
-    ladder = work / "ladder.rvl"
 
     print("THE FLAGSHIP DEMO - a legacy-enterprise agent, end to end")
     print("roadmap item 525, issue #1200, docs/design/551-flagship-demo.md")
