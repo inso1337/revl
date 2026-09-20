@@ -265,12 +265,14 @@ def test_a_blind_row_is_filed_under_missed_a2(quiet_alignment, verdicts, capsys)
 def test_a_model_refusal_on_an_accepted_file_is_formal_strict(
         quiet_alignment, verdicts, capsys):
     """`formal_clean` reads the row: a model `fail` where the checker
-    accepts is the informational `formal-strict`, not `agree-accept`."""
+    accepts is `formal-strict`, not `agree-accept`. Fatal since issue
+    #1169: the model refusing a program revl ships is a claim about a
+    different language."""
     strict = verdicts._replace(
         a2={**verdicts.a2, (ADMITTED, ADMITTED_COMP): "fail"})
     fatal = quiet_alignment.checker_alignment({ADMITTED: {}}, [], strict)
     out = capsys.readouterr().out
-    assert fatal == []
+    assert fatal == [f"formal-strict: {ADMITTED}"]
     assert f"ALIGN formal-strict: {ADMITTED}" in out
 
 

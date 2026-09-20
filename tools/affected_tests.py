@@ -645,13 +645,43 @@ def select(changed, root) -> dict:
             }
             reasons.append(f"{f}")
             continue
+        if f in ("tools/tier_guarantees.py", "tools/check_roadmap_markers.py"):
+            # Both feed the GUARANTEE-TIER-MATRIX block in docs/conformance.md:
+            # `tier_guarantees.py` generates it, and `check_roadmap_markers.py`
+            # supplies the parity records that decide its divergence cells. The
+            # generic tools/ rule below matches `test_<stem>.py`, which neither
+            # of these has, so without this rule the selector fell all the way
+            # through to a FULL run for a file whose covering tests are three
+            # named modules. Naming them keeps the gate that checks the block
+            # (`conformance --check-readme`) in the selection too.
+            gates.add("conformance")
+            pytest_nodes.add("tests/test_tier_guarantee_matrix.py")
+            pytest_nodes.add("tests/test_roadmap_gate_bites.py")
+            pytest_nodes |= {
+                _node(p) for p in _test_files(root)
+                if p.name.startswith("test_conformance")
+            }
+            reasons.append(f"{f} (guarantee x tier matrix + roadmap gate)")
+            continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
             reasons.append("tools/check_site_wheel.py")
             continue
         if f == "tools/docgen.py":
             gates.add("docs")
+            pytest_nodes.add("tests/test_check_vision_claims.py")
             reasons.append("tools/docgen.py")
+            continue
+        # issue #1204: the vision gate rides in the `docs` gate step, and its
+        # `vision-tiers` block lives in docgen, so each file re-runs the other's
+        # covering test. Without the gate here the generic tools/*.py rule below
+        # would select the pytest module and skip the gate that actually runs
+        # against the committed document.
+        if f == "tools/check_vision_claims.py":
+            gates.add("docs")
+            pytest_nodes.add("tests/test_check_vision_claims.py")
+            pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
+            reasons.append("tools/check_vision_claims.py")
             continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
@@ -697,6 +727,14 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_formal_a9_row.py")
             pytest_nodes.add("tests/test_formal_a2_row.py")
             pytest_nodes.add("tests/test_formal_alignment.py")
+            # `formal/STATUS.md` is not only prose: `revl.cert` PARSES it for
+            # the census the component certificate reports, and the alignment
+            # census is generated into it by the harness. Rewriting that
+            # section without this node reds `test_826_component_certificate`
+            # in CI while the selector says the change was covered (measured
+            # on issue #1169, where the rewrite dropped the agree/mismatch
+            # clause `cert.oracle_census` reads).
+            pytest_nodes.add("tests/test_826_component_certificate.py")
             reasons.append(f"{f} (formal gate)")
             continue
 
@@ -734,6 +772,11 @@ def select(changed, root) -> dict:
             gates.add("conformance")
             gates.add("docs")
             pytest_nodes.add("tests/test_doc_examples.py")
+            # issue #1204: and the vision gate, which resolves docs/vision.md's
+            # commands and re-checks its generated tier block. Its module holds
+            # the REAL document against the REAL tree, so a doc edit that moves
+            # a cited path has to re-run it.
+            pytest_nodes.add("tests/test_check_vision_claims.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 

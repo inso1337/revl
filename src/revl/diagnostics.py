@@ -42,6 +42,9 @@ GUARANTEES = {
                 "reaches a persistence sink (a db/fs/store/kv/blob/archive/"
                 "index/cache/queue/wal crossing), unless P declares a legal "
                 "hold, which overrides the deadline",
+    "G-MODEL-PLACE": "a model role declared `off_device` never receives a "
+                     "confidentiality origin, and an action reaches only the "
+                     "roles its `route model` block names",
     "A1": "iteration boundaries exist only during activation",
     "A2": "no acquisition after a provision",
     "A3": "host-safe identifiers",
@@ -92,6 +95,11 @@ FIXES = {
                 "erase-report`, and a signed receipt over what was reached), "
                 "extend `until` if the retention basis really has changed, or "
                 "declare the `hold` that keeps it",
+    "G-MODEL-PLACE": "a model placement is a declared permission, not a hint - "
+                     "route the origin to a role declared `on_device`, declare "
+                     "the role the arm names, or drop the arm (`*` never covers "
+                     "a confidentiality origin, so an unrouted confidential "
+                     "input is not placed at all)",
     "A1": "`await` is an iteration boundary and exists only during activation — "
           "move it into the component body",
     "A2": "acquire everything before the first `provide`",
