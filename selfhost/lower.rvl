@@ -14017,10 +14017,45 @@ fn comp_config_tenv(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str
   return out == "" ? "" : "{".concat(out).concat("}")
 }
 
+// The names a component body may call as a FUNCTION: this module's top-level
+// `fn` declarations and its `extern fn`s (`component_callables`, minus the host
+// and constructor families, which are dispatched by their own rules). Read at
+// brace depth ZERO so a service operation signature and a provide method are
+// not mistaken for one.
+fn decl_callables(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atk(ts, i, "{")) { depth += 1 }
+    else { if (atk(ts, i, "}")) { depth -= 1 }
+    else { if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      out = out.push(tkc(ts, i + 1).text)
+    } } }
+    i += 1
+  }
+  return out
+}
+
+fn callable_key(n: Str) -> Str { return "callable ".concat(n) }
+
+fn callables_into(env: List[Bind], xs: List[Str], i: Int) -> List[Bind] {
+  if (i >= xs.length()) { return env }
+  return callables_into(tenv_put(env, callable_key(xs[i]), "1"), xs, i + 1)
+}
+
+fn env_is_callable(env: List[Bind], n: Str) -> Bool {
+  return tenv_get(env, callable_key(n)) == "1"
+}
+
 fn comp_tenv(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[Bind] {
+  // the tagged-ADT case table and the callable names ride the same environment
+  // under their reserved (space-carrying) keys, which no identifier can spell,
+  // exactly as the module-fn producer carries them.
+  let base = callables_into(case_binds(ts, al), decl_callables(ts), 0)
   let cfg = comp_config_tenv(ts, lo, hi, al)
-  if (cfg == "") { return [] }
-  return [{ name: "config", ty: cfg }]
+  if (cfg == "") { return base }
+  return tenv_put(base, "config", cfg)
 }
 
 // The declared parameter types of `<svc>.<meth>`, read off the service
@@ -14090,8 +14125,50 @@ fn cir_expr(e: Expr, sc: List[Str], hostSc: List[Str], insts: List[Inst], tenv: 
     Emit(u)     => cir_expr(u.e, sc, hostSc, insts, tenv, ln, reqSet),
     // a list literal carries no type annotation in either dialect
     Lst(l)      => cir_list(l.items, sc, hostSc, insts, tenv, ln, reqSet),
+    // a `${…}` template. The component dialect renders it as a `format` node
+    // (template + positional args), NOT as the module-fn path's `interp`.
+    Templ(t)    => cir_format(t.parts, 0, sc, hostSc, insts, tenv, ln, reqSet, "", ""),
     _           => mk_irres(false, ""),
   }
+}
+
+// A4: a literal `$` in a text run doubles, so an argument slot is unambiguous.
+fn dollar_escape(t: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < t.length()) {
+    let c = t.charAt(i)
+    out = out.concat(c == "$" ? "$$" : c)
+    i += 1
+  }
+  return out
+}
+
+fn cir_format(parts: List[PartN], i: Int, sc: List[Str], hostSc: List[Str],
+              insts: List[Inst], tenv: List[Bind], ln: Int, reqSet: List[Str],
+              tmpl: Str, args: Str) -> IrRes {
+  if (i >= parts.length()) {
+    return mk_irres(true, "{\"kind\": \"format\", \"template\": ".concat(jstr(tmpl))
+      .concat(", \"args\": [").concat(args).concat("]}"))
+  }
+  let p = parts[i]
+  if (p.kind == "t") {
+    return cir_format(parts, i + 1, sc, hostSc, insts, tenv, ln, reqSet,
+                      tmpl.concat(dollar_escape(p.text)), args)
+  }
+  let v = cir_expr(p.e, sc, hostSc, insts, tenv, ln, reqSet)
+  if (!v.ok) { return mk_irres(false, "") }
+  let slot = count_slots(parts, 0, i, 0)
+  return cir_format(parts, i + 1, sc, hostSc, insts, tenv, ln, reqSet,
+                    tmpl.concat("$").concat(slot.to_str()),
+                    args == "" ? v.js : args.concat(", ").concat(v.js))
+}
+
+// how many EXPR parts precede `hi` — the slot index the reference stamps
+// (`$<len(fmt_args)>` at the moment the part is appended).
+fn count_slots(parts: List[PartN], i: Int, hi: Int, acc: Int) -> Int {
+  if (i >= hi) { return acc }
+  return count_slots(parts, i + 1, hi, parts[i].kind == "t" ? acc : acc + 1)
 }
 
 fn cir_list(items: List[Expr], sc: List[Str], hostSc: List[Str], insts: List[Inst],
@@ -14179,8 +14256,35 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Str], hostSc: List[Str], insts:
                     : mk_irres(false, ""))))),
       _ => mk_irres(false, ""),
     },
+    // a bare-name callee. A tagged ADT constructor beats every other shape (it
+    // is a case, not a callable, and the host runtimes define no function for
+    // it); a declared module `fn` or `extern fn` is the component dialect's
+    // `fn` node. Anything else — a host/constructor family name, a local
+    // holding a function value — is left refusing.
+    Var(nm)     => tagged_case_adt(tenv, nm) != ""
+      ? cir_adt(tagged_case_adt(tenv, nm), nm, args, sc, hostSc, insts, tenv, ln, reqSet)
+      : (env_is_callable(tenv, nm) && !contains(sc, nm)
+          ? cir_fncall(nm, args, sc, hostSc, insts, tenv, ln, reqSet)
+          : mk_irres(false, "")),
     _ => mk_irres(false, ""),
   }
+}
+
+fn cir_adt(adt: Str, case_: Str, args: List[Expr], sc: List[Str], hostSc: List[Str],
+           insts: List[Inst], tenv: List[Bind], ln: Int, reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, insts, tenv, ln, reqSet, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"adt\", \"type\": ".concat(jstr(adt))
+    .concat(", \"case\": ").concat(jstr(case_))
+    .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+fn cir_fncall(nm: Str, args: List[Expr], sc: List[Str], hostSc: List[Str],
+              insts: List[Inst], tenv: List[Bind], ln: Int, reqSet: List[Str]) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, insts, tenv, ln, reqSet, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"fn\", \"name\": ".concat(jstr(nm))
+    .concat(", \"args\": [").concat(a.js).concat("]}"))
 }
 
 // `Map.new()` / `Pool.open(…)` — a HOST ACQUISITION. The reference lowers an
