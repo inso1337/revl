@@ -3128,14 +3128,71 @@ fn not_a_method_msg(what: Str, svcName: Str) -> Str {
 // is what makes the exemption identity-shaped (see `acq_root_of`). Factored out
 // so the per-statement A1 rules and the setup async-name fence measure a
 // statement's reach the same way `walk_stmts` accumulates it.
+// ---- the `a host emission` reach label (issue #1254) -----------------------
+//
+// `_method_emissions` (emission_analysis.py) notes ONE label the walk below had
+// no counterpart for: for every `emit` STEP whose head is not a required-key
+// crossing it notes `a host emission`, ahead of whatever emitting NAMES the same
+// statement reaches. It is the part of the reach list that says the crossing
+// left the composition — `emit db.execute(q)` names the wiring key it went
+// through, `emit pg_write(row)` has no key to name, so the label stands in for
+// one — and without it the two engines refused the same program with different
+// text:
+//   reference:  … (reaching `a host emission`, `pg_write()`)
+//   this gate:  … (reaching `pg_write()`)
+// Same tag, same offending token, so nothing was admitted that should not be;
+// the divergence is on the MESSAGE half of item 391's oracle agreement, and no
+// corpus document had the shape, so no `msg-mismatch` measured it.
+//
+// The unit is the STEP, not the call, because that is the reference's own
+// condition (`node.get("step") == "emit"`):
+//   * `let r = emit pg_write(row)` is a BINDING whose value carries the marker.
+//     The reference lowers it through the expression path, never builds an
+//     `emit` step from it, and so notes no label — hence the `bind` guard;
+//   * a `compensate` slot is its own statement and is not an emit step either;
+//   * an ordinary statement that merely REACHES an emitting fn, with no marker
+//     at all, was never a host emission: it draws `f()` and nothing more.
+//
+// The head shapes carry the same split the reference reads off `expr.target`:
+// a required-key call (`root.meth`, `root` in `reqMap`) is the `req` arm and
+// takes no label, and everything else is a host crossing. What this gate
+// resolves as "everything else" is the bare-name call to an emitting fn or
+// extern; the spawn-handle head (`h.key.op`) is the reference's third arm, but
+// the gate decides that one through the spawn-emission bounds, which report a
+// different message entirely, so it is left where it is.
+fn host_emit_head(e: Expr, cx: Ctx) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Var(n) => contains(cx.emittingNames, n),
+      _      => false,
+    },
+    _ => false,
+  }
+}
+
+fn note_host_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
+  if (s.kind != "emit" || s.bind != "") { return a }
+  if (!host_emit_head(s.e, cx)) { return a }
+  // `union_into`, not `push`: `note` dedups on its `seen` set, so a body with
+  // two host emissions carries the label once — the same reason `req_call`
+  // unions its own evidence.
+  return { msg: a.msg, tag: a.tag,
+           labels: union_into(a.labels, ["a host emission"]),
+           ecaps: a.ecaps, areach: a.areach, aops: a.aops, avals: a.avals }
+}
+
 fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
   let scx = ctx_acq(cx, stmt_acq_where(s.kind))
+  // noted BEFORE the statement's own expression is walked: the reference sees
+  // the step node before it collects that step's emitting calls, so the label
+  // sits ahead of `pg_write()` and behind any earlier statement's evidence.
+  let na = note_host_emission(s, cx, a)
   let root = acq_root_of(s)
-  if (root.hit) { return walk_exprs(root.args, 0, marked, scx, a) }
+  if (root.hit) { return walk_exprs(root.args, 0, marked, scx, na) }
   // an `emit` step's marker covers its head call alone (issue #1175); a
   // compensate slot is a teardown region and stays marked throughout
-  return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, a)
+  return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, na)
 }
 
 // ---- one `emit` marker per crossing (issue #1175) --------------------------
