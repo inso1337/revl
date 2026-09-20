@@ -46,9 +46,10 @@ What each section proves, and why none of it is vacuous:
      from a dict written here. A run declaring a residence the program refutes
      is refused AT SEAL TIME, so the contradicting record never exists.
 
-This module drives no tier runner (`revl.test.run_*` / `RUNNERS[...]`), so it
-is not a tier-execution test and does not belong in the `conformance` job's
-list; it runs in the ordinary `frontend` suite.
+This module executes nothing on a non-py tier: it drives the py runtime and
+recorder directly and never reaches for a tier runner, so it is not a
+tier-execution test and does not belong in the `conformance` job's
+`REVL_REQUIRE_TIERS` list. It runs in the ordinary frontend suite.
 """
 
 from __future__ import annotations
