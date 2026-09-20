@@ -167,24 +167,27 @@ KNOWN_BYPASSES = {
     # never to a fresh one. All four remaining fixtures of this family now
     # refuse with the reference's own tag and sentence and are struck from this
     # list; `t34_arrow_self_declared_async` left it earlier with rule C1.
-    # -- return paths and match --
-    # The RETURN-PATH half landed with docs/design/457 T3b: `fb_function` runs
-    # `_check_returns_on_every_path` over the statement tree the fn-body walk
-    # already builds, so `t8_missing_return` and `t9_return_path_incomplete`
-    # now refuse with the reference's message AND its line and are struck from
-    # this list. What remains needs the variant table and the arm algebra.
-    "examples/rejections/t13_unknown_match_case.rvl",
-    "examples/rejections/v2_match_nonexhaustive.rvl",
-    # -- declarations --
+    # -- return paths and match: CLOSED, no row left --
+    # The RETURN-PATH half landed first (docs/design/457 T3b): `fb_function`
+    # runs `_check_returns_on_every_path` over the statement tree the fn-body
+    # walk already builds, so `t8_missing_return` and
+    # `t9_return_path_incomplete` refuse with the reference's message AND its
+    # line. The MATCH half closed the rest: the declaration scan now records
+    # each variant's ordered case list, and `_check_match_exhaustiveness` runs
+    # at the position `_lower_pure_expr` runs it, so `t13_unknown_match_case`
+    # and `v2_match_nonexhaustive` refuse with the reference's own sentence and
+    # are struck from this list.
+    # -- declarations: CLOSED, no row left --
     # `t6_bare_generic` LEFT this list with the type layer's slice T1:
     # `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
     # `selfhost/types.rvl` and runs `check_type_wellformed` over every module
     # `fn`/`extern` signature and every config field, at the phase position
-    # `_validate_declared_types` gives it. What stays here is decided somewhere
-    # else entirely: the alias cycle in `_resolve_type_aliases`, the
-    # destructuring rule in `_lower_let_pattern_stmt`.
-    "examples/rejections/t18_type_alias_cycle.rvl",
-    "examples/rejections/t5_destructure_nonrecord.rvl",
+    # `_validate_declared_types` gives it. The other two followed with T3b:
+    # `_resolve_type_aliases`' `expand` recursion is ported at the head of the
+    # declaration level (`t18_type_alias_cycle`), and
+    # `_lower_let_pattern_stmt`'s "requires a record" arms are read off a
+    # record destructuring pattern the fn-body walk used to step over
+    # (`t5_destructure_nonrecord`).
     # -- provide-method and component bodies: NONE --
     # The whole family closed with the provide-method slice (docs/design/457).
     # `t1_service_arg_type`, `t4_field_arg_type`,

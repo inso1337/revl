@@ -1,14 +1,5 @@
 {
- "buckets": {
-  "false-admit/T1": [
-   "examples/rejections/v2_match_nonexhaustive.rvl"
-  ],
-  "false-admit/TYPE": [
-   "examples/rejections/t13_unknown_match_case.rvl",
-   "examples/rejections/t18_type_alias_cycle.rvl",
-   "examples/rejections/t5_destructure_nonrecord.rvl"
-  ]
- },
+ "buckets": {},
  "corpus_dirs": [
   "examples",
   "tests/fixtures",
@@ -19,55 +10,6 @@
   "backends",
   "dogfood"
  ],
- "details": {
-  "examples/rejections/t13_unknown_match_case.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Pending` is not a case of `Status` (cases: `Active`, `Retired`)",
-    "tag": "TYPE"
-   }
-  },
-  "examples/rejections/t18_type_alias_cycle.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "type alias cycle: Handle -> Ref -> Handle",
-    "tag": "TYPE"
-   }
-  },
-  "examples/rejections/t5_destructure_nonrecord.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "record destructuring requires a record, but `List[Int]` is not a record",
-    "tag": "TYPE"
-   }
-  },
-  "examples/rejections/v2_match_nonexhaustive.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "non-exhaustive match: missing case `Invalid`",
-    "tag": "T1"
-   }
-  }
- },
+ "details": {},
  "note": "Recorded by `python3 tools/gate_reference_census.py --record`. Every entry is a KNOWN gate/reference divergence over the census corpus; `--check` fails on one that is not here, and on one here that no longer diverges, so the allowance can only shrink in a diff somebody reads. A `false-admit` entry is an OPEN GATE BYPASS, not an accepted state: the list is capped by name in tests/test_gate_reference_census.py so it cannot grow quietly while it is worked down."
 }
