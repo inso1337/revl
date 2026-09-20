@@ -101,14 +101,18 @@ def _boundary(ir: dict) -> dict:
     reach = _extern_reachability(ir)
     externs = reach["__externs__"]
     extern_class = {ext["name"]: ext for ext in ir.get("externs") or []}
-    # the capability fixed point (G4's own analysis) — see the note where it
-    # joins the walk below; without it a first-class dispatch is invisible
-    from .lower import _emitting_capabilities  # noqa: PLC0415 — lazy, like plan
+    # the emission fixed point (G4's own analysis) — see the note where it
+    # joins the walk below; without it a first-class dispatch is invisible.
+    # Keyed by EXTERN NAME: what this fold contributes is the `host` set, which
+    # `externs` below looks up in `extern_class` to print class and backends.
+    # The token-keyed twin would enumerate a scoped crossing reached through a
+    # helper `fn` as a host extern called `db` with no class and no bodies.
+    from .emission_analysis import _emitting_extern_names  # noqa: PLC0415 — lazy, like plan
 
     fns = ir.get("functions") or []
     if isinstance(fns, dict):
         fns = list(fns.values())
-    fn_caps_map = _emitting_capabilities(fns, ir.get("externs") or [])
+    fn_caps_map = _emitting_extern_names(fns, ir.get("externs") or [])
 
     def _collect_arrows(node, out):
         # every `let <name> = (…) => …` binding in scope, keyed by the safe IR
