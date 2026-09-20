@@ -193,6 +193,15 @@ REFERENCE_EMITTER_ORACLE = {
 # tests/test_selfhost_differential_survey.py.
 REFERENCE_EMITTER_ALWAYS = ("tests/test_selfhost_differential_survey.py",)
 
+# Files `tools/evolution_progress.py` reads a counter out of WITHOUT importing
+# them, so no import graph reaches them (issue #1224). Each one is a repository
+# artifact whose shape the progress counters depend on.
+PROGRESS_COUNTER_SOURCES = {
+    "tests/test_selfhost_compile.py",   # the LOWER_GAP_DOCS residual table
+    "tools/selfhost_coverage.py",       # reference_constructs / TIERS
+    "tools/gate_reference_census.py",   # CORPUS_DIRS / _SKIP_DIRS
+}
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -500,6 +509,20 @@ def select(changed, root) -> dict:
     reasons: list[str] = []
 
     for f in changed:
+        # --- the self-evolution progress counters (issue #1224) ------------ #
+        # `tools/evolution_progress.py` reads its counters out of artifacts
+        # other files own, by AST and by JSON key, and NOT by importing them.
+        # So no import graph reaches the dependency: renaming `LOWER_GAP_DOCS`,
+        # or changing `reference_constructs`, reds
+        # tests/test_evolution_progress.py from a file that never mentions it.
+        # First in the loop because every file named here also has its own rule
+        # further down that ends in `continue`. The census baseline and the
+        # reach ledger need no entry: a non-python `tools/` change and any
+        # `tests/fixtures/**` change are already FULL.
+        if f in PROGRESS_COUNTER_SOURCES:
+            pytest_nodes.add("tests/test_evolution_progress.py")
+            reasons.append(f"{f} (self-evolution progress counter input)")
+
         # --- structural: always FULL --------------------------------------- #
         if f == "Makefile":
             return _full("Makefile changed -> full")
