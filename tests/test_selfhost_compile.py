@@ -494,8 +494,8 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../src/revl/truc/components/cli.rvl",
     ),
     "ts": (
-        # composite service dispatch and component expressions
-        "services_composite.rvl",
+        # component expressions (host acquisition / interpolation / fn call /
+        # tagged constructor in a component body)
         "component_exprs.rvl",
         # async coloring (async methods / await / async arrows)
         "services_async.rvl",
@@ -516,10 +516,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../examples/java_match.rvl",
         "../../../backends/typescript/tests/fixtures/async_http.rvl",
         "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
-        # property/component edge shapes and the CAS runtime surface
-        "property_edges.rvl",
+        # component edge shapes (async coloring inside a provide method)
         "component_edges.rvl",
-        "cas_runtime.rvl",
+        # (`services_composite.rvl` left this list when lower.rvl grew the
+        # list literal, `property_edges.rvl` when the `.length` PROPERTY form
+        # on a sized receiver started carrying `sized_length`, and
+        # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
+        # bracket, the `assign` step and `undo_captures` landed in a provide
+        # method body.)
     ),
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
@@ -534,9 +538,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "component_format.rvl",
         "component_branches.rvl",
         "map_inference.rvl",
-        # the stdlib builtin surface
-        "stdlib_builtins.rvl",
-        "../emit_ts_corpus/property_edges.rvl",
+        # (the stdlib builtin surface — `stdlib_builtins.rvl` and the borrowed
+        # `../emit_ts_corpus/property_edges.rvl` — left this list with the
+        # `sized_length` property form.)
     ),
     "rust": (
         # component edge shapes; the host-root and realm-placement documents
