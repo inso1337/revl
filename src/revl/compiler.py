@@ -909,6 +909,15 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "retention", index) not in emitted_keys:
                 merged.retentions.append(decl)
                 emitted_keys.add(declaration_key(module, "retention", index))
+        # item 512: a `model role` rides with the DECLARATION CLOSURE for the
+        # same reason a `retention` policy does - the thing that names it is a
+        # `route model` arm inside a component, and components are imported.
+        # Dropping it here would make the single-source path admit a program the
+        # CLI path refuses for naming a role "this program does not declare".
+        for index, decl in enumerate(getattr(module.program, "model_roles", ())):
+            if declaration_key(module, "model_role", index) not in emitted_keys:
+                merged.model_roles.append(decl)
+                emitted_keys.add(declaration_key(module, "model_role", index))
         for index, decl in enumerate(module.program.tests):
             if declaration_key(module, "test", index) not in emitted_keys:
                 merged.tests.append(decl)

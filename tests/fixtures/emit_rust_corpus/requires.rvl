@@ -3,6 +3,10 @@
 // through the required capabilities (`compiler.propose(assistant.complete(..))`).
 // A `fn f() = emit ..` in return position is a plain observation of the emission,
 // NOT an `effect`/`emit` STEP, so this stays on `_emit_component` — but it forces
+// the requires surface. `Model.complete` is a PLAIN operation: one `emit` marks
+// one crossing (issue #1175), so the call evaluated to build the head's argument
+// must not be an emission, and a plain one there keeps this on the simple path.
+// It forces
 // the requires surface: the provider struct captures each `Arc<Box<dyn S>>`, the
 // closure gates them behind `Inject::new(["assistant", "compiler"])` and binds
 // each with `ctx.require::<Box<dyn S>>("key")?`, and the methods read them off
@@ -12,7 +16,7 @@ fn seed() -> Str {
 }
 
 service Model {
-  emission fn complete(prompt: Str) -> Str
+  fn complete(prompt: Str) -> Str
 }
 
 service Runtime {
@@ -26,6 +30,6 @@ service Evolve {
 
 component Evolver requires assistant: Model, compiler: Runtime provides evolve: Evolve {
   provide evolve {
-    fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+    fn once(goal) = emit compiler.propose(assistant.complete(goal))
   }
 }
