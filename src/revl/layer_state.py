@@ -101,7 +101,7 @@ is `uncompensated`, which is item 522's word for the same fact.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 __all__ = [
