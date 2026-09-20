@@ -515,7 +515,7 @@ component Tally provides counter: Counter {
     # LOOP, so any subset in any order has to parse.
     ("a scoped emission extern", """
 extern emission[net.edge] fn ship(body: Str) -> Int = @py { return 1 }
-service Sink { emission[ship] fn send(m: Str) }
+service Sink { emission[net.edge] fn send(m: Str) }
 component S provides sink: Sink {
   provide sink { fn send(m) { emit ship(m) } }
 }
