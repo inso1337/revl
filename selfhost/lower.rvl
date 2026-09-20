@@ -269,9 +269,19 @@ use "./types.rvl" { WfR, check_type_wellformed }
 // `line` (item 419c): the fn/extern DECLARATION line. A module-fn twin refusal
 // (`_refuse_leaky_pure_arrow`, the first-class async-value refusal) is anchored
 // here, matching the reference, which reports those against the declaration.
+// `caps` is the DECLARED capability scope of a boundary-crossing extern —
+// the `[db]` of `extern emission[db] fn pg_write`, the `[fs]` of
+// `extern witnessed[fs] fn stash` — and [] for everything else, an unscoped
+// extern and every module fn alike. It is what `emit_caps_reach` seeds the
+// emission fixed point with, because a scope REPLACES the name; it does not
+// join it (docs/capabilities.md §2). Seeding by name instead put the G4 subset
+// check in a namespace of its own: `emission[db]` implemented through
+// `extern emission[db] fn pg_write` was refused as emitting through `pg_write`,
+// and the repair widened a declaration that was already correct toward a token
+// no `capability <glob>` rule can select.
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
-             body: List[Stmt], cachePure: Bool, line: Int }
+             body: List[Stmt], cachePure: Bool, line: Int, caps: List[Str] }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -1104,10 +1114,10 @@ fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
 // every construction from mutable state goes through one of these, exactly as
 // checker.rvl does.
 fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
-          aps: List[Str], bd: List[Stmt], ln: Int) -> FnD {
+          aps: List[Str], bd: List[Stmt], ln: Int, cps: List[Str]) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
            asyncSlots: slots, asyncParams: aps, body: bd, cachePure: false,
-           line: ln }
+           line: ln, caps: cps }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
@@ -1946,16 +1956,34 @@ fn fn_params_i(ts: List[Token], i: Int) -> Int {
 //
 // A `witnessed[fs]` / `emission[gateway.send]` capability scope (item 343) and
 // the `(confined: <param>)` reach clause (item 373) sit between the class and
-// `fn`; admission reads neither structurally, so both are skipped over their
-// matching bracket. `witnessed` crosses the same boundary an `emission` does
+// `fn`. The reach clause is not a bound this slice decides, so it is stepped
+// over its matching paren; the capability scope IS one, and is READ.
+//
+// `witnessed` crosses the same boundary an `emission` does
 // (emission_analysis.py's `_emitting_capabilities` seeds both), so it seeds the
 // emission-reach set here too — an unregistered witnessed reach is held to the
-// same G4 bound as an emission call.
+// same G4 bound as an emission call. Both seed with the DECLARED SCOPE, falling
+// back to the extern's own name when it declares none: a scope replaces the
+// name, it does not join it (docs/capabilities.md §2). Stepping the bracket
+// without reading it, as this did, left `emit_caps_reach` nothing to seed with
+// but the name, so `witnessed[fs] fn stash` was called the capability `stash` —
+// which no service bound can name — and, once the reference keyed the emission
+// seed the same way, a provider exactly inside `emission[db]` was refused.
+//
+// `cap_list_at` is the reader BOTH halves of the capability namespace already
+// share with the service side (`p_methods`): a dotted token is ONE capability
+// (`net.edge`, not `net` and `edge`) and an item-294 parameter list
+// canonicalizes through the closed registry, so the extern's spelling and the
+// operation's compare in the same namespace. Only the FIRST bracket is the
+// scope — the reference refuses a second one at parse, and a type-parameter
+// bracket sits after `fn <name>`, never here.
 fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var j = i + 1
   var isEm = false
   var isAsync = false
   var isWit = false
+  var caps: List[Str] = []
+  var sawCaps = false
   while (atw(ts, j, "emission") || atw(ts, j, "acquire") || atw(ts, j, "pure")
          || atw(ts, j, "async") || ati(ts, j, "witnessed") || ati(ts, j, "deferred")
          || atk(ts, j, "[") || atk(ts, j, "(")) {
@@ -1963,9 +1991,16 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
     if (ati(ts, j, "witnessed")) { isWit = true }
     if (atw(ts, j, "async")) { isAsync = true }
     if (atk(ts, j, "[")) {
-      var k = j + 1
-      while (k < ts.length() && !atk(ts, k, "]")) { k += 1 }
-      j = k + 1
+      if (sawCaps) {
+        var k = j + 1
+        while (k < ts.length() && !atk(ts, k, "]")) { k += 1 }
+        j = k + 1
+      } else {
+        let cl = cap_list_at(ts, j, ts.length())
+        caps = cl.xs
+        sawCaps = true
+        j = cl.i
+      }
     } else if (atk(ts, j, "(")) {
       var k = j + 1
       while (k < ts.length() && !atk(ts, k, ")")) { k += 1 }
@@ -1998,9 +2033,13 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
       if (e == 0 - 1) { k = ts.length() } else { k = e }
     } else { k += 1 }
   }
+  // the scope is carried only for a crossing class. `pure`/`acquire` take no
+  // capability scope at all (the reference refuses the bracket on them), so
+  // this is the declaration's own set for every extern that can seed.
   return mk_step(push_fn(pg, mk_fnd(nm, isEm || isWit, isAsync, [],
                                     async_slots_of(ps.ps),
-                                    async_params_of(ps.ps), [], tkc(ts, i).line)), k)
+                                    async_params_of(ps.ps), [], tkc(ts, i).line,
+                                    isEm || isWit ? caps : [])), k)
 }
 
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -2023,7 +2062,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
                               asyncSlots: async_slots_of(ps.ps),
                               asyncParams: async_params_of(ps.ps),
                               body: body, cachePure: cachePure,
-                              line: tkc(ts, i).line }), bend)
+                              line: tkc(ts, i).line, caps: [] }), bend)
 }
 
 type MethsR = { xs: List[MSig], i: Int, ok: Bool }
@@ -2884,7 +2923,13 @@ fn emit_caps_reach(fs: List[FnD], include_values: Bool) -> CapsT {
   let names = fn_names_of(fs)
   var i = 0
   while (i < fs.length()) {
-    if (fs[i].isEmExtern) { caps = caps.set(fs[i].name, [fs[i].name]) }
+    // `capabilities or (name,)`, the reference's seed (`_emitting_capabilities`)
+    // and §2's rule written out: a DECLARED scope replaces the extern's name,
+    // and only an unscoped extern is its own capability.
+    if (fs[i].isEmExtern) {
+      caps = caps.set(fs[i].name,
+                      fs[i].caps.length() > 0 ? fs[i].caps : [fs[i].name])
+    }
     i += 1
   }
   var changed = true
