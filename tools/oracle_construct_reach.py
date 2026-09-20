@@ -30,10 +30,22 @@ not done by this file: this one only makes sure the number cannot grow.
 
 The VACUITY check stays, and is not redundant with the ratchet.  The ratchet
 compares unreached SETS, so it says exactly nothing about an oracle whose
-unreached set is empty: let `gate_census`'s reference table or corpus collapse
+unreached set is empty: let such an oracle's reference table or corpus collapse
 to nothing and its unreached set stays the empty set it already is, matching an
 empty ledger entry, green.  An empty report is the one failure the ratchet
 cannot see, so the two checks cover disjoint ground and both run.
+
+A ROW WHOSE GAP CANNOT EXIST is a third failure, and neither check sees it.
+`gate_census` used to take its reference set from the KEYS of the `buckets` map
+in `tools/gate_reference_census_baseline.json` and its reach from that same
+map's VALUES, so a construct was reached exactly when it was in the reference
+set: `0 unreached` on every tree, by construction rather than by evidence, and
+a ledger entry that could never change behind a ratchet that could never fire
+(issue #1215).  It reports the census's guarantee vocabulary now -- the tags
+`tests/test_selfhost_lower.py::_classify` can name, which is what the census
+buckets a divergence by -- against the documents the census's own fast engine
+actually refuses under each.  The two halves have no shared input, so the gap
+is a measurement; see `_census_guarantees` and `_census_reach`.
 
 Usage:
     python3 tools/oracle_construct_reach.py            # the report
@@ -213,6 +225,132 @@ def _section_reach(documents: list[Path]) -> dict[str, set[str]]:
     return reached
 
 
+# ------------------------------------------------------- gate_census oracle
+
+def _load_census():
+    spec = importlib.util.spec_from_file_location(
+        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _census_guarantees() -> set[str]:
+    """The guarantee tags the gate/reference census can NAME.
+
+    `tools/gate_reference_census.py` buckets a divergence by the guarantee the
+    reference refusal carries, and that vocabulary is one function:
+    `tests/test_selfhost_lower.py::_classify`, which the census imports rather
+    than copies.  Every tag it can return is a family the census is in a
+    position to compare a gate refusal against; a family no corpus document
+    elicits is one the census compares on nothing.
+
+    Read STATICALLY (`ast`, no import) for the reason `_compile_corpus` is:
+    this stays a `python3 tools/...` script that needs no pytest on the path,
+    and `tests/test_oracle_construct_reach.py` imports `_classify` for real and
+    holds this reading to the vocabulary the running function produces.
+
+    The returned constants are the tags; `"OUT:" + message` is the
+    out-of-slice fallback and names no guarantee, so it is excluded.
+    """
+    tree = ast.parse((ROOT / "tests" / "test_selfhost_lower.py").read_text())
+    classify = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == "_classify"),
+        None)
+    if classify is None:
+        raise SystemExit(
+            "tests/test_selfhost_lower.py: no `_classify`; the census's "
+            "guarantee vocabulary moved, teach _census_guarantees its shape")
+    found: set[str] = set()
+    for node in ast.walk(classify):
+        # `return "G4"` -- a tag the classifier names outright.
+        if (isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            found.add(node.value.value)
+        # `e.code in ("T1", "T2", ...)` -- a tag passed through from the
+        # reference's own code, returned by the arm below the test.
+        if (isinstance(node, ast.Compare)
+                and isinstance(node.left, ast.Attribute)
+                and node.left.attr == "code"):
+            for comparator in node.comparators:
+                values = (comparator.elts
+                          if isinstance(comparator, (ast.Tuple, ast.List, ast.Set))
+                          else [comparator])
+                for value in values:
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                        found.add(value.value)
+    found = {tag for tag in found if tag and not tag.startswith("OUT:")}
+    if not found:
+        raise SystemExit(
+            "tests/test_selfhost_lower.py: `_classify` names no guarantee tag; "
+            "teach _census_guarantees its shape")
+    return found
+
+
+def _census_documents(census) -> list[tuple[Path, str]]:
+    """`(path, source)` for every document the census runs over.
+
+    The census's own corpus walk -- its `CORPUS_DIRS`, its `_SKIP_DIRS`, its
+    reader -- so this row cannot survey a different tree from the one the
+    census measures.  Its hand-written `ACCEPTED_PROGRAMS` / `REJECTED_PROGRAMS`
+    / `ADMISSION_PROGRAMS` are deliberately NOT here: they are in-memory
+    strings, not documents, so they have no place in a `corpus` of paths.  A
+    guarantee only those programs elicit therefore reads UNREACHED, which is
+    the conservative direction -- the row can understate reach, never claim a
+    document that does not exist.
+    """
+    documents: list[tuple[Path, str]] = []
+    for sub in census.CORPUS_DIRS:
+        base = ROOT / sub
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.rvl")):
+            if census._SKIP_DIRS & set(path.parts):
+                continue
+            source = census._read(path)
+            if source is not None:
+                documents.append((path, source))
+    return documents
+
+
+def _census_reach(census, documents: list[tuple[Path, str]]) -> dict[str, set[str]]:
+    """Which corpus documents the census's gate actually refuses, by guarantee.
+
+    RUN, not read.  This row used to take both halves from the `buckets` map of
+    `tools/gate_reference_census_baseline.json` -- the reference set was its
+    keys and the reach was its values -- so a construct was reached exactly when
+    it was in the reference set and the unreached set was empty by construction
+    on any tree, including one where the census had stopped exercising a bucket
+    entirely (issue #1215).  The reach now comes from the census's own fast
+    engine, `selfhost/lower.rvl`'s `admit_src` behind the crate's frontier
+    guard, driven over the corpus above; the reference set comes from the
+    classifier.  Neither reads the baseline, so the gap is evidence.
+
+    A document the frontier declines, or one the gate faults or recurses on,
+    contributes no tag: those are the census's own buckets to report, and
+    counting them here would credit a refusal the gate never issued.
+    """
+    scan = census.build_frontier_scan()
+    admit = census.build_selfhost_admit()
+    reached: dict[str, set[str]] = {}
+    for path, source in documents:
+        if scan(source) is not None:
+            continue
+        try:
+            wire = admit(source)
+        except RecursionError:
+            continue
+        except Exception:  # a gate fault is the census's finding, not this one
+            continue
+        if "|" in wire:
+            tag = wire.split("|", 1)[0]
+            reached.setdefault(tag, set()).add(str(path.relative_to(ROOT)))
+    return reached
+
+
 def survey() -> dict[str, dict]:
     coverage = _load_coverage()
     result: dict[str, dict] = {}
@@ -251,14 +389,12 @@ def survey() -> dict[str, dict]:
         "unreached": sorted(compile_reference - set(compile_reached)),
     }
 
-    baseline = json.loads((ROOT / "tools" /
-                           "gate_reference_census_baseline.json").read_text())
-    gate_reference = set(baseline.get("buckets", {}))
-    gate_reached = {name: set(case_ids)
-                    for name, case_ids in baseline.get("buckets", {}).items()}
-    gate_docs = sorted((ROOT / "examples").rglob("*.rvl"))
+    census = _load_census()
+    gate_docs = _census_documents(census)
+    gate_reference = _census_guarantees()
+    gate_reached = _census_reach(census, gate_docs)
     result["gate_census"] = {
-        "corpus": [str(p.relative_to(ROOT)) for p in gate_docs],
+        "corpus": [str(p.relative_to(ROOT)) for p, _ in gate_docs],
         "reference": sorted(gate_reference),
         "reached": {name: sorted(gate_reached[name]) for name in sorted(gate_reference)
                     if name in gate_reached},
