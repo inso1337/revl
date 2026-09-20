@@ -241,6 +241,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `T1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/t1_service_arg_type.rvl`](../examples/rejections/t1_service_arg_type.rvl) |
 | `T2` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/t2_null_in_expression.rvl`](../examples/rejections/t2_null_in_expression.rvl) |
 | `T3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/gate.py`](../src/revl/gate.py) |
+| `G-COUNCIL-SPLIT` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/gcouncilsplit_on_tie_allow.rvl`](../examples/rejections/gcouncilsplit_on_tie_allow.rvl) |
 | `G-MODEL-PLACE` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/gmodelplace_confidential_off_device.rvl`](../examples/rejections/gmodelplace_confidential_off_device.rvl) |
 | `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_expired_at_persistence_sink.rvl`](../examples/rejections/gretain_expired_at_persistence_sink.rvl) |
 | `G-SECRET` | **div** | **div** | no repro | **div** | **div** | **div** | no repro | [`src/revl/taint.py`](../src/revl/taint.py) |
@@ -249,13 +250,13 @@ The six host columns share their verdict wherever a register does not separate t
 
 | tier | proved | div | no repro | unimpl |
 |---|---|---|---|---|
-| py | 18 | 2 | 4 | 0 |
-| ts | 18 | 2 | 4 | 0 |
-| rust | 19 | 0 | 5 | 0 |
-| java | 18 | 2 | 4 | 0 |
-| wasm | 18 | 2 | 4 | 0 |
-| go | 18 | 2 | 4 | 0 |
-| revl | 5 | 6 | 5 | 8 |
+| py | 19 | 2 | 4 | 0 |
+| ts | 19 | 2 | 4 | 0 |
+| rust | 20 | 0 | 5 | 0 |
+| java | 19 | 2 | 4 | 0 |
+| wasm | 19 | 2 | 4 | 0 |
+| go | 19 | 2 | 4 | 0 |
+| revl | 6 | 6 | 5 | 8 |
 
 **Why a cell is not `proved`.** Every non-`proved` cell above, with the register or the reason that decided it:
 

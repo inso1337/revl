@@ -12722,9 +12722,17 @@ fn model_place_refusal(ts: List[Token]) -> Verd {
 // `src/revl/model_route.py`); a council is a second construct with its own
 // reference module and its own seventeen sentences, so a consumer reading the
 // wire learns which of the two was refused instead of having to parse the
-// message to find out. Both tags stand for the registered code `G-MODEL-PLACE`
-// — councils raise under `model_route.CODE` — which is one decided row each in
-// `SELFHOST_TAG_CODES` (`tools/tier_guarantees.py`).
+// message to find out.
+//
+// A TAG IS NOT A CODE. Issue #1190 registered `G-COUNCIL-SPLIT` and moved
+// eleven of the reference's thirteen council refusals onto it, leaving the two
+// whose subject is a `model role` on `G-MODEL-PLACE`
+// (`docs/design/557-council-disagreement.md` section 3). The tag did not move,
+// because the construct did not. So `COUNCIL` stands for two registered codes
+// and `MODEL` for one, which is what `SELFHOST_TAG_CODES`
+// (`tools/tier_guarantees.py`) records, and which of the two a given refusal
+// is evidence for is decided by the SENTENCE, not by the tag. That is another
+// reason the messages here are the reference's byte for byte.
 
 type CMem = { cfun: Str, crole: Str, cmline: Int }
 

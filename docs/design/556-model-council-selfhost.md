@@ -42,7 +42,7 @@ After this branch:
 | ------- | --------- | ---- |
 | a component with no council (control) | admits | `''` (admits) |
 | a three-member council with a written `aggregate` | admits | `''` |
-| `aggregate unanimous on_tie allow` | refuses `G-MODEL-PLACE` | ``COUNCIL|`on_tie allow` in model council `Release` admits when the members disagree`` |
+| `aggregate unanimous on_tie allow` | refuses `G-COUNCIL-SPLIT` | ``COUNCIL|`on_tie allow` in model council `Release` admits when the members disagree`` |
 
 The message is the reference's, verbatim. That is the contract the crate
 promises and the reason the tag alone is not enough: a consumer acts on the
@@ -50,10 +50,10 @@ message.
 
 ## 1.1 Why the tag is `COUNCIL` and not `MODEL`
 
-Item 512's port introduced `MODEL` for the model-PLACEMENT family. A council
-raises under the same registered code, `G-MODEL-PLACE`, because
-`revl.model_council` imports `model_route.CODE`. It would therefore have been
-possible to widen `MODEL` to cover both.
+Item 512's port introduced `MODEL` for the model-PLACEMENT family. When this
+port was written a council raised under the same registered code,
+`G-MODEL-PLACE`, because `revl.model_council` imported `model_route.CODE`. It
+would therefore have been possible to widen `MODEL` to cover both.
 
 It is a separate tag because the gate tags by the FAMILY a refusal belongs to,
 and these are two constructs with two reference modules and two disjoint rule
@@ -62,18 +62,42 @@ sets: `src/revl/model_route.py` decides where an action's model calls run, and
 aggregation may say. A consumer reading `COUNCIL|...` off the wire learns which
 of the two was refused without parsing the sentence.
 
-`SELFHOST_TAG_CODES` in `tools/tier_guarantees.py` therefore gains a second
-row, `COUNCIL -> G-MODEL-PLACE`, and it is load-bearing rather than tidy.
-Measured with the row removed and the corpus fixture in place, the `revl`
-column of the guarantee x tier matrix reads:
+That reasoning survived issue #1190, which registered `G-COUNCIL-SPLIT` and
+moved eleven of the thirteen council refusals onto it, keeping the two whose
+subject is a `model role` under `G-MODEL-PLACE`
+(`docs/design/557-council-disagreement.md` section 3). The tag names the
+construct and the construct did not move. What changed is that the tag is no
+longer a name for one code.
 
-    divergence: the self-host gate agrees on 1 of 2 G-MODEL-PLACE
-                reproducers; the rest it answers under COUNCIL
+`SELFHOST_TAG_CODES` in `tools/tier_guarantees.py` therefore maps a tag to a
+SET, and `COUNCIL` maps to both codes. Measured on this branch, with the row
+removed and the corpus fixture in place, the `revl` column of the guarantee x
+tier matrix reads:
 
-for a reproducer the gate refuses with the reference's own sentence. With the
-row it reads `proved ... under COUNCIL, MODEL`. Two tags mapping to one code is
-the normal case in that table, not an ambiguity: it is read tag-first, and it
-is kept a TABLE rather than a prefix rule so a new tag has to be decided there.
+    unimplemented: the self-host gate answers every G-COUNCIL-SPLIT
+                   reproducer under COUNCIL
+
+for a reproducer the gate refuses with the reference's own sentence, which is
+the same false reading this row was added to fix, now on the other code. With
+the row it reads `proved ... under COUNCIL`.
+
+Writing `COUNCIL -> G-MODEL-PLACE` alone would not have fixed it, and on the
+tag-only test this port used it carried a second fault: it credits item 512's
+row for ANY refusal the gate tags `COUNCIL`. Eleven of the thirteen council
+rules are not item 512's, so a placement fixture the gate decided by one of
+them would still have read `proved` for `G-MODEL-PLACE`, on evidence that
+belongs to the other code. No corpus fixture exercises that today, which is
+why the rendered matrix is the same with that row and without it.
+
+Being in the set is not on its own enough to credit a cell. A refusal resolved
+through this table is credited only when the gate's MESSAGE is the reference's
+message byte for byte, which is the agreement test
+`tools/gate_reference_census.py` already applies to this same corpus. That is
+what keeps the set from being a guess: the tag says which family, the sentence
+says which of the family's guarantees, and `tools/tier_guarantees.py` never
+restates the rule that splits them. The table stays a TABLE rather than a
+prefix rule for the reason item 512 gave, so a new tag still has to be decided
+there.
 
 ## 1.2 What the port decides
 
@@ -189,13 +213,19 @@ possible:
 
 * `examples/model_council.rvl`, the admitting program, with the two optional
   clauses written at their admitted values.
-* `examples/rejections/gmodelplace_council_on_tie_allow.rvl`, item 516's exit
-  test verbatim: an aggregation written to admit when the members disagree.
+* `examples/rejections/gcouncilsplit_on_tie_allow.rvl`, item 516's exit test
+  verbatim: an aggregation written to admit when the members disagree. The
+  reference refuses it under `G-COUNCIL-SPLIT`, so it is that row's reproducer
+  rather than a second one for `G-MODEL-PLACE`.
 
-No `ACKNOWLEDGED` entry moved. `G-MODEL-PLACE`'s was already removed by item
-512 slice 3, and the code was already `proved` across every tier; what this
-branch changes is that the `revl` column stays `proved` now that a SECOND
-reproducer indexes the row.
+One `ACKNOWLEDGED` entry moved: `G-COUNCIL-SPLIT`'s. Issue #1190 wrote it with
+its own expiry ("remove this entry when the self-host port lands, issue
+#1291; a stale acknowledgement fails this gate"), and its second reason, that
+a fixture could not live in `examples/rejections/` because the self-host
+answered any `model council` program `BAD|unexpected token at top level`, is
+what this port retires. The fixture above is that reproducer, so the entry is
+gone and the row carries itself. `G-MODEL-PLACE`'s entry was already removed
+by item 512 slice 3.
 
 ---
 
