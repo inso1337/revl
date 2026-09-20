@@ -735,10 +735,17 @@ class ModelRoleDecl:
     vocabulary in `revl.model_route`, never here.
 
     `model` is a CONTEXTUAL keyword on the `retention`/`secret` discipline — it
-    heads a declaration only in the shape `model role NAME <residence>`."""
+    heads a declaration only in the shape `model role NAME <residence>`.
+
+    `reach` is the optional `reaches [...]` clause of roadmap item 519: the
+    capability tokens a call to this role can itself reach, which is what puts
+    the role in the attenuation product. `None` means the clause was OMITTED
+    and the reach is UNDECLARED, which is NOT the same as empty — the meaning
+    of an undeclared reach is `revl.model_route`'s, never the parser's."""
     name: str
     residence: str
     line: int
+    reach: tuple | None = None
 
 
 @dataclass
@@ -2735,7 +2742,50 @@ class Parser:
         name = self.expect("ident", what="a model role name").value
         residence = self.expect(
             "ident", what="a residence for the role (`on_device` or `off_device`)").value
-        return ModelRoleDecl(name, residence, line)
+        reach = None
+        if self.at("ident", "reaches"):
+            reach = self._model_role_reach()
+        return ModelRoleDecl(name, residence, line, reach)
+
+    def _model_role_reach(self) -> tuple:
+        """`reaches [<cap>, ...]` on a `model role` (roadmap item 519).
+
+        The capability tokens a call to this role can itself reach. Spelled
+        with the `emission [...]` / `witnessed [...]` bracket so a reader meets
+        one capability-list grammar, and funnelled through `_capability_params`
+        so `model.complete(calls=3)` validates and canonicalizes at the one
+        canonical point every other token list uses.
+
+        Two spellings the emission list does not carry, both meaningful here:
+        `reaches [*]` is the DECLARED unbounded role, and `reaches []` is the
+        role that declares it reaches nothing. Omitting the clause is neither —
+        it leaves the reach UNDECLARED, and what that means is decided in
+        `revl.model_route`, not here. `reaches` is a CONTEXTUAL identifier read
+        only in this slot, so the lexer's KEYWORDS table and the self-hosted
+        lexer that mirrors it need no sync."""
+        self.expect("ident", value="reaches")
+        self.expect("[", what="`[` after `reaches`")
+        names: list[str] = []
+        while not self.at("]"):
+            if self.at("*"):
+                tok = self.next()
+                names.append("*")
+            else:
+                tok = self.expect("ident", what="a capability name, or `*`")
+                parts = [tok.value]
+                while self.at("."):
+                    self.next()
+                    parts.append(self.expect("ident").value)
+                names.append(self._capability_params(".".join(parts)))
+            if names.count(names[-1]) > 1:
+                raise self.err(
+                    tok.line,
+                    f"duplicate capability `{names[-1]}` in `reaches [...]`",
+                    hint="a role's reach is a set; name each capability once")
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        return tuple(names)
 
     def model_route_stmt(self) -> ModelRouteStmt:
         """`route model on <action> { <origin> -> <role>, ... }` (item 512).
