@@ -125,6 +125,54 @@ record per lineage edge:
 additive and spawn-only: a composition with no spawns has no `instances` key,
 so its manifest is byte-identical to before.
 
+## The admission kernel (item 544)
+
+The product accounts for services, realms, taints and budgets, and item 519
+adds the model role. Item 544 adds the one authority that has **no legal
+holder**: the admission kernel.
+
+Item 520 states the invariant the self-evolution programme rests on: a system
+may evolve its behaviour, never the rules that govern its authority. Stated as
+a policy that is a rule some later generation can propose a change to, and the
+loop's proposal channel is exactly the mechanism for proposing changes to
+rules. So it is stated here instead, as a capability nothing may hold.
+
+`src/revl/kernel_boundary.py` enumerates the kernel once: a capability token
+per member (`kernel.admission`, `kernel.attest`, `kernel.taint`,
+`kernel.retention`, `kernel.gate`, `kernel.census`, `kernel.formal`), the tree
+paths each stands for, and the guarantee each refusal cites. The rule is item
+66's with the kernel on the left instead of a spawner, and the fold is
+intersection rather than coverage:
+
+```
+held(kernel)  n  effective(C)  =  {}   ->  admit
+held(kernel)  n  effective(C) !=  {}   ->  REFUSE, naming both sets
+```
+
+`effective(C)` is what the component holds, folded with what any authority
+surrogate it routes through can reach, which is the `model_reach[].effective`
+record item 519 writes, consumed rather than re-derived. A role that declared no
+`reaches [...]` clause contributes the unnameable `*`, because an absent
+declaration is not a proof of narrowness, and `*` is disjoint from nothing.
+
+The difference from a diff check is the whole item. A diff check asks whether a
+candidate touched a kernel path, which is answered after the fact against a
+changed-file set and is evaded by any route that reaches the same state without
+editing those files. This asks whether the component can hold the authority at
+all.
+
+**Retention is on the kernel side.** A loop permitted to update retention
+policies as ordinary behaviour tuning is a loop that can extend its own
+`Retained[T, P]` deadline, which is an authority change wearing the clothes of
+a cache setting; `G-RETAIN` is the guarantee it relaxes. So `kernel.retention`
+is a member of the set, and an untrusted author may not declare a `retention`
+policy at all (`admit_profile.check_no_retention_policy`). Naming a policy the
+trusted composition declares is unaffected: what an untrusted author may not
+do is mint the policy that bounds its own data.
+
+`docs/design/545-kernel-boundary-capability.md` carries the design, the
+non-vacuity measurement and the residuals.
+
 ## Soundness
 
 The check is a compile-time refusal, not codegen — an admitted program emits
