@@ -71,6 +71,7 @@ from .taint import (
     splice_declassifiers,
     strip_qualifiers,
 )
+from . import model_route as _model_route
 from .mcp.schema import (
     _parse_type as _schema_parse_type,
     expressibility_reason,
@@ -141,6 +142,7 @@ from .parser import (
     LoadStmt,
     ListPattern,
     Lit,
+    ModelRouteStmt,
     Postfix,
     Program,
     ProvideStmt,
@@ -7551,6 +7553,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # (`check_taint`, below) runs once every component body is lowered.
     taint_model = extract_and_normalize(program, taint_strict=taint_strict)
 
+    # Model placement (roadmap item 512). Checked over the whole program before
+    # any component is lowered, because a `route model` arm reads a `model role`
+    # declared anywhere in the compilation — the `retention` discipline, and the
+    # same reason a policy is resolved before the flow walk that names it. A
+    # program declaring no role and no route walks two empty lists and is
+    # byte-identical through here; nothing is written to the IR either way
+    # (docs/design/531-model-placement.md).
+    _model_route.check(program)
+
     ambient_services = {
         name: _service_from_ir(name, spec)
         for name, spec in (ambient.get("services") or {}).items()
@@ -11714,6 +11725,27 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                          f"`strategy(...)` for the router's default)",
                 )
             routes[stmt.key] = {"realms": list(stmt.realms), "strategy": stmt.strategy}
+            continue
+        if isinstance(stmt, ModelRouteStmt):
+            # model placement (item 512): `route model on <action> { … }`. A
+            # prelude declaration like `isolate`/`intercept` — it names what an
+            # action may reach before the action exists, so it must precede
+            # every action. The rules over the arms are `revl.model_route`'s and
+            # already ran over the whole program in `_check_and_lower`; what is
+            # left here is the ordering rule and the decision NOT to lower it:
+            # 512 is a PERMISSION checked at admission, not a runtime selection
+            # (that is item 515), so the block contributes no IR and every
+            # emitter is untouched. See docs/design/531-model-placement.md §6.
+            if action_seen:
+                raise RevlError(
+                    filename, stmt.line,
+                    "`route model` must precede every effect, emit, await, and "
+                    "provide statement",
+                    hint="a model placement declares what an action may reach "
+                         "before any dependency access (prelude rule, the "
+                         "`isolate`/`intercept` discipline; item 512)",
+                    code=_model_route.CODE, category=_model_route.CATEGORY,
+                )
             continue
         if isinstance(stmt, (IsolateStmt, InterceptStmt)):
             # prelude rule: realm/metadata declarations derive the resolution
