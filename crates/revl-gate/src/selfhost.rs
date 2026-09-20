@@ -389,6 +389,7 @@ pub struct CfgFld {
 pub struct CfgOwner {
     owner: String,
     flds: Vec<CfgFld>,
+    erase: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -12446,21 +12447,6 @@ fn cfg_walk(fname: &str, owner: &str, tyname: &str, root_: &str, svcs: &[String]
         let offender = if cfg_data_erased(&p.head) { (String::from("the erased type `").revl_concat(&p.head)).revl_concat("`") } else { (String::from("the opaque type `").revl_concat(&p.head)).revl_concat("`") };
         return cfg_data_msg(fname, owner, root_, &offender);
     }
-    if (d.kind == "alias") {
-        let r = cfg_walk(fname, owner, &d.rhs, root_, svcs, decls, visited, &d.params);
-        if (r != "") {
-            return r;
-        }
-        let mut i = 0i64;
-        while (i < p.args.revl_length()) {
-            let r2 = cfg_walk(fname, owner, &(p.args)[(i) as usize], root_, svcs, decls, visited, tparams);
-            if (r2 != "") {
-                return r2;
-            }
-            i = (i).checked_add(1i64).expect("revl: Int overflow");
-        }
-        return String::from("");
-    }
     if (!contains__m2(visited, &p.head)) {
         let v2 = visited.revl_push(p.head.clone());
         let tp2 = d.params;
@@ -12814,7 +12800,7 @@ fn cfg_comp_owner(ts: Vec<Token>, i: i64) -> CfgOwner {
     let end = close_brace(&ts, j.clone());
     let lo = (j).checked_add(1i64).expect("revl: Int overflow");
     let hi = if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { (end).checked_sub(1i64).expect("revl: Int overflow") };
-    return CfgOwner { owner: (String::from("component `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), lo, hi) };
+    return CfgOwner { owner: (String::from("component `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), lo, hi), erase: true };
 }
 
 fn cfg_extern_owner(ts: Vec<Token>, i: i64, endi: i64) -> CfgOwner {
@@ -12823,7 +12809,7 @@ fn cfg_extern_owner(ts: Vec<Token>, i: i64, endi: i64) -> CfgOwner {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     let nm = if atw(&ts, j.clone(), "fn") { tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text } else { String::from("") };
-    return CfgOwner { owner: (String::from("extern `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), i, endi) };
+    return CfgOwner { owner: (String::from("extern `").revl_concat(&nm)).revl_concat("`"), flds: cfg_fields_in(ts.clone(), i, endi), erase: false };
 }
 
 fn cfg_owners_walk(ts: Vec<Token>, i: i64, a: CfgAcc) -> CfgAcc {
@@ -12896,14 +12882,47 @@ fn cfg_svc_names(svcs: &[SvcD]) -> Vec<String> {
     return out;
 }
 
-fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
-    let svcs = cfg_svc_names(&pg.svcs);
-    let decls = cfg_collect_types(ts.clone());
-    let acc = cfg_owners_walk(ts.clone(), 0i64, CfgAcc { comps: vec![], exts: vec![] });
-    let owners = cfg_owner_concat(acc.comps.clone(), acc.exts.clone());
+fn cfg_erase_binds(bs: &[Bind], al: std::collections::HashMap<String, String>) -> Vec<Bind> {
+    let mut out: Vec<Bind> = vec![];
+    let mut i = 0i64;
+    while (i < bs.revl_length()) {
+        out.push(Bind { name: (bs)[(i) as usize].name.clone(), ty: alias_subst((bs)[(i) as usize].ty.clone(), al.clone()) });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn cfg_erase_cases(cs: &[CfgCaseD], al: std::collections::HashMap<String, String>) -> Vec<CfgCaseD> {
+    let mut out: Vec<CfgCaseD> = vec![];
+    let mut i = 0i64;
+    while (i < cs.revl_length()) {
+        out.push(CfgCaseD { cname: (cs)[(i) as usize].cname.clone(), payload: alias_subst((cs)[(i) as usize].payload.clone(), al.clone()) });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn cfg_erase_decls(ds: &[CfgTy], al: std::collections::HashMap<String, String>) -> Vec<CfgTy> {
+    let mut out: Vec<CfgTy> = vec![];
+    let mut i = 0i64;
+    while (i < ds.revl_length()) {
+        let d = (ds)[(i) as usize].clone();
+        if (!al.contains_key(&d.name)) {
+            if (d.kind == "alias") {
+                out.push(CfgTy { name: d.name.clone(), kind: String::from("variant"), fields: vec![], cases: vec![CfgCaseD { cname: d.rhs.clone(), payload: String::from("") }], params: d.params.clone(), rhs: String::from("") });
+            } else {
+                out.push(CfgTy { name: d.name.clone(), kind: d.kind.clone(), fields: cfg_erase_binds(&d.fields, al.clone()), cases: cfg_erase_cases(&d.cases, al.clone()), params: d.params.clone(), rhs: d.rhs.clone() });
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn cfg_owner_verdict(os: &[CfgOwner], al: std::collections::HashMap<String, String>, svcs: &[String], decls: &[CfgTy]) -> Verd {
     let mut oi = 0i64;
-    while (oi < owners.revl_length()) {
-        let o = (owners)[(oi) as usize].clone();
+    while (oi < os.revl_length()) {
+        let o = (os)[(oi) as usize].clone();
         let mut fi = 0i64;
         while (fi < o.flds.revl_length()) {
             let f = (o.flds)[(fi) as usize].clone();
@@ -12911,7 +12930,8 @@ fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
             if (wf.v != "") {
                 return wf;
             }
-            let r = cfg_walk(&f.fname, &o.owner, &f.fty, &f.fty, &svcs, &decls, &(vec![]), &(vec![]));
+            let t = if o.erase { alias_subst(f.fty.clone(), al.clone()) } else { f.fty };
+            let r = cfg_walk(&f.fname, &o.owner, &t, &t, svcs, decls, &(vec![]), &(vec![]));
             if (r != "") {
                 return mk_verd(r.clone(), f.line);
             }
@@ -12920,6 +12940,14 @@ fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
         oi = (oi).checked_add(1i64).expect("revl: Int overflow");
     }
     return no_verd();
+}
+
+fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
+    let svcs = cfg_svc_names(&pg.svcs);
+    let al = alias_map(ts.clone());
+    let decls = cfg_erase_decls(&cfg_collect_types(ts.clone()), al.clone());
+    let acc = cfg_owners_walk(ts.clone(), 0i64, CfgAcc { comps: vec![], exts: vec![] });
+    return cfg_owner_verdict(&cfg_owner_concat(acc.comps.clone(), acc.exts.clone()), al.clone(), &svcs, &decls);
 }
 
 fn wf_has(msg: &str, sub: &str) -> bool {
