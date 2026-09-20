@@ -1,7 +1,7 @@
 """Shadow routing: the agreement accumulator and the promotion gate
 (roadmap item 518, issue #1192).
 
-The executable spec for `docs/design/539-shadow-promotion.md`. Four things it
+The executable spec for `docs/design/540-shadow-promotion.md`. Four things it
 is here to establish, in the order the design note argues them:
 
 1. **Non-vacuity.** The gate refuses a promotion whose evidence is absent or
