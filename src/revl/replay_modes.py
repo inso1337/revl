@@ -303,6 +303,13 @@ def _reading(record: dict, key) -> dict:
     * **sealed, unverified** — a seal is present and no key was supplied, so
       nothing was checked and nothing is read out;
     * **sealed and verified** — the decision is reconstructed.
+
+    The reading keeps ``crossing`` as the key the WAL indexed the record BY,
+    not as the one the sealed body names, and hands the first to
+    :func:`~revl.model_evidence.reconstruct` as ``at`` so the two are compared.
+    A genuine, genuinely-signed record lifted onto another crossing is refused
+    there; keeping the WAL's key here is what lets a reader see WHERE it was
+    found while the refusal says what it named.
     """
     crossing = [record.get("component"), record.get("stepIndex")]
     refused = record.get(WAL_REFUSAL_MEMBER)
@@ -327,7 +334,9 @@ def _reading(record: dict, key) -> dict:
         entry["reason"] = ("a seal is present and no key was supplied, so it "
                            "was not checked and nothing is read out of it")
         return entry
-    entry.update(reconstruct(evidence, key))
+    reading = reconstruct(evidence, key, at=tuple(crossing))
+    reading["crossing"] = crossing
+    entry.update(reading)
     return entry
 
 
