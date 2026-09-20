@@ -82,6 +82,23 @@ ROADMAP = ROOT / "docs" / "v2.0-roadmap.md"
 
 SELFHOST_TIER = "revl"
 
+#: Gate verdict tags that stand for a REGISTERED guarantee code under another
+#: name. `selfhost/lower.rvl` tags a refusal by the FAMILY it belongs to, and
+#: almost every family it decides is code-less in the reference (`PRELUDE`,
+#: `ROUTE`, `SPAWN`, `HANDOFF`, `BOOT`), so none of them ever indexes a row in
+#: this matrix. Item 512's is the first that is not code-less: the gate decides
+#: the model-placement DECLARATION half and spells its refusals byte for byte,
+#: under the tag `MODEL` (`docs/design/554-route-model-remaining.md`).
+#:
+#: Without this row the cell below reads `unimplemented` — whose own definition
+#: is "the gate raises no objection at all, or refuses for an unrelated reason"
+#: — for a rule the gate demonstrably enforces with the reference's own
+#: sentence. That is the matrix reporting the opposite of what it measured, and
+#: "nothing checked it" and "it passed" being different answers cuts both ways.
+#: Kept as a table rather than a prefix rule so a new tag has to be DECIDED
+#: here: a tag that silently matched a code would be the fail-open direction.
+SELFHOST_TAG_CODES: dict[str, str] = {"MODEL": "G-MODEL-PLACE"}
+
 #: The verdicts a cell may carry, strongest first.
 PROVED = "proved"
 DIVERGENCE = "divergence"
@@ -300,6 +317,10 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]
     for code, paths in index.items():
         agreed = 0
         other_tags: set[str] = set()
+        # the tag the gate actually spelled, when it is not the code itself
+        # (`SELFHOST_TAG_CODES`), so the generated sentence names what a reader
+        # will see on the wire rather than the code it stands for.
+        under: set[str] = set()
         for rel in paths:
             answer = (ROOT / rel).read_text(encoding="utf-8")
             try:
@@ -307,13 +328,16 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]
             except Exception:  # noqa: BLE001 — a crash is a divergence, not a pass
                 verdict = ""
             tag = verdict.split("|", 1)[0] if verdict else ""
-            if tag == code:
+            if tag == code or SELFHOST_TAG_CODES.get(tag) == code:
                 agreed += 1
+                if tag != code:
+                    under.add(tag)
             elif tag:
                 other_tags.add(tag)
         if agreed == len(paths):
+            spelling = ", ".join(sorted(under)) or code
             out[code] = (PROVED, "the self-host gate refuses every reproducer "
-                                 f"for {code} under {code}")
+                                 f"for {code} under {spelling}")
         elif agreed:
             rest = ("answers under " + ", ".join(sorted(other_tags))
                     if other_tags else "admits")
