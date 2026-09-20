@@ -1630,7 +1630,8 @@ fn model_role_end(ts: List[Token], i: Int) -> Int {
   var j = i + 4
   while (j < ts.length() && !atk(ts, j, "eof") && !atk(ts, j, "}")
          && tkc(ts, j).kind != "kw" && !at_boot(ts, j) && !at_event(ts, j)
-         && !at_qual_test(ts, j) && !at_model_role(ts, j)) {
+         && !at_qual_test(ts, j) && !at_model_role(ts, j)
+         && !at_model_council(ts, j)) {
     if (atk(ts, j, "[")) {
       let e = close_square(ts, j)
       j = e == 0 - 1 ? j + 1 : e
@@ -1642,6 +1643,36 @@ fn model_role_end(ts: List[Token], i: Int) -> Int {
     }
   }
   return j
+}
+
+// item 516: `model council NAME { <function> -> <role>, ..., aggregate <rule> }`
+// is the SECOND contextual shape `model` heads, on the same discipline as
+// `model role` above: the pair `model council` is what makes this a
+// declaration, so `model` alone is still an ordinary identifier. The brace is
+// part of the recogniser because it is what tells the two shapes apart.
+//
+// Like `model role`, this carries no verdict this slice issues — what a council
+// DECLARES is `selfhost/lower.rvl`'s admission question, ported there as the
+// COUNCIL family — so it is a STEP, and the point of the step is that the
+// declarations after it are checked at all. Without it the whole document
+// failed at the parse stage with `(bad) unexpected token at top level`.
+fn at_model_council(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (!(t.kind == "ident" && t.text == "model")) { return false }
+  let c = tkc(ts, i + 1)
+  if (!(c.kind == "ident" && c.text == "council")) { return false }
+  return atk(ts, i + 2, "ident") && atk(ts, i + 3, "{")
+}
+
+// Index just past a `model council` declaration: the match of its body brace.
+// STRUCTURAL for the reason `model_role_end` is — the clauses inside a council
+// body are an open surface, and a brace match steps over whatever is written
+// there whole rather than leaving the cursor mid-clause. A body whose braces do
+// not balance is a reference parse refusal this slice carries no verdict for,
+// so the cursor advances one token and the ordinary top-level refusal stands.
+fn model_council_end(ts: List[Token], i: Int) -> Int {
+  let e = close_brace(ts, i + 3)
+  return e == 0 - 1 ? i + 1 : e
 }
 
 // ---------------------------------------------------------------- lists
@@ -2421,6 +2452,9 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
     if (qe != 0 - 1) { return p_top(ts, qe, pg) }
   }
   if (at_model_role(ts, i)) { return p_top(ts, model_role_end(ts, i), pg) }
+  if (at_model_council(ts, i)) {
+    return p_top(ts, model_council_end(ts, i), pg)
+  }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
