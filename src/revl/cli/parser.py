@@ -1629,6 +1629,123 @@ def build_parser() -> argparse.ArgumentParser:
              "Printed, never applied: apply it and re-run the gate. Combine "
              "with --json for an agent-consumable patch document")
 
+    pool_cmd = sub.add_parser(
+        "pool",
+        help="stand up and operate a private peer pool (item 524): declare a "
+             "pool and its authority view, admit a peer that proves its "
+             "identity and artifact, read the roster, withdraw a peer "
+             "(docs/design/550-private-peer-pool.md)")
+    pool_sub = pool_cmd.add_subparsers(dest="pool_command", required=True)
+
+    pool_init = pool_sub.add_parser(
+        "init",
+        help="declare a pool: sign a charter naming its ceiling, its entry "
+             "tier, the artifacts it admits and who may admit, revoke and "
+             "attest")
+    pool_init.add_argument("--dir", required=True, metavar="DIR",
+                           help="the pool directory to write charter.json and "
+                                "roster.json into")
+    pool_init.add_argument("--pool-id", required=True, metavar="ID",
+                           help="the pool's name. A peer pins the charter by "
+                                "DIGEST, not by this, so renaming a pool does "
+                                "not let old terms be reused")
+    pool_init.add_argument(
+        "--ceiling", action="append", metavar="CAP",
+        help="the MOST authority this pool will ever delegate to any member at "
+             "any tier, in the capability grammar. Repeatable. Every tier "
+             "grant is diffed against it")
+    pool_init.add_argument(
+        "--entry-caps", action="append", metavar="CAP",
+        help="the grant the entry tier hands a newly admitted peer. Repeatable. "
+             "Must be covered by --ceiling or the pool refuses to admit anyone")
+    pool_init.add_argument(
+        "--artifact", action="append", metavar="DIGEST",
+        help="an artifact digest this pool admits. Repeatable. A join pins one; "
+             "a digest not listed here is refused")
+    pool_init.add_argument(
+        "--trust-floor", default="verified",
+        choices=["verified", "attested", "local", "trusted"],
+        help="the minimum attested trust level a joining peer must clear "
+             "(default: verified)")
+    pool_init.add_argument("--key", metavar="PATH",
+                           help="the operator signing key (falls back to "
+                                "REVL_ATTEST_KEY_FILE / REVL_ATTEST_KEY)")
+
+    pool_request = pool_sub.add_parser(
+        "request",
+        help="the PEER side: sign a join request against a charter you were "
+             "given, carrying your signed peer offer and the artifact digest "
+             "you will run")
+    pool_request.add_argument("--charter", required=True, metavar="PATH",
+                              help="the pool's signed charter.json. The request "
+                                   "pins its DIGEST, so a charter re-signed "
+                                   "with different terms invalidates it")
+    pool_request.add_argument("--peer-id", required=True, metavar="ID",
+                              help="this peer's stable identity")
+    pool_request.add_argument("--artifact", required=True, metavar="DIGEST",
+                              help="the candidate artifact this peer will run")
+    pool_request.add_argument("--out", required=True, metavar="PATH",
+                              help="where to write the signed join request")
+    pool_request.add_argument("--ceiling", action="append", metavar="CAP",
+                              help="the MOST authority this peer will accept. "
+                                   "Repeatable. A pool tier grant not covered "
+                                   "by it is refused")
+    pool_request.add_argument("--trust", default="verified",
+                              choices=["verified", "attested", "local",
+                                       "trusted"],
+                              help="the trust level this peer attests "
+                                   "(default: verified)")
+    pool_request.add_argument("--region", default="", metavar="NAME",
+                              help="the placement region facet this peer "
+                                   "attests")
+    pool_request.add_argument("--hardware", default="", metavar="NAME",
+                              help="the hardware facet this peer attests")
+    pool_request.add_argument("--key", metavar="PATH",
+                              help="this peer's key, the one exchanged with the "
+                                   "operator out of band")
+
+    pool_join = pool_sub.add_parser(
+        "join",
+        help="decide a peer's signed join request against the charter. Prints "
+             "the receipt and exits 1 on a refusal, naming the link it refused "
+             "on")
+    pool_join.add_argument("--dir", required=True, metavar="DIR",
+                           help="the pool directory")
+    pool_join.add_argument("--join", required=True, metavar="PATH",
+                           help="the peer's signed join request (JSON)")
+    pool_join.add_argument("--peer-key", required=True, metavar="PATH",
+                           help="the key exchanged with this peer out of band, "
+                                "which its join request and its peer offer are "
+                                "both verified against")
+    pool_join.add_argument("--key", metavar="PATH",
+                           help="the operator signing key; its fingerprint must "
+                                "be in the charter's admit authority")
+
+    pool_status = pool_sub.add_parser(
+        "status",
+        help="the operator view: members, tiers, what each holds, the effect "
+             "class each tier admits, and who may admit, revoke and attest")
+    pool_status.add_argument("--dir", required=True, metavar="DIR",
+                             help="the pool directory")
+    pool_status.add_argument("--json", action="store_true",
+                             help="the charter and the full roster, including "
+                                  "the append-only event ledger")
+
+    pool_withdraw = pool_sub.add_parser(
+        "withdraw",
+        help="remove a peer and report, in three disjoint sets, what that "
+             "revokes, what it retains and what it orphans")
+    pool_withdraw.add_argument("--dir", required=True, metavar="DIR",
+                               help="the pool directory")
+    pool_withdraw.add_argument("--peer", required=True, metavar="ID",
+                               help="the peer to withdraw")
+    pool_withdraw.add_argument("--reason", default="operator withdrawal",
+                               metavar="TEXT",
+                               help="why, recorded in the event ledger")
+    pool_withdraw.add_argument("--key", metavar="PATH",
+                               help="the operator signing key; its fingerprint "
+                                    "must be in the charter's revoke authority")
+
     attest_cmd = sub.add_parser(
         "attest",
         help="cryptographic attestation of a verified composition (item 127): "
