@@ -2846,6 +2846,21 @@ class Parser:
             self.expect("ident", "approval",
                         what="`approval` after `requires` (item 246)")
             requires_approval = True
+        # item 522: the computer-use reversibility classes. A UI verb's class
+        # is registry-owned (revl.ui_family), and the declaration's
+        # `compensate` slot has to agree with it: a verb with no inverse may
+        # not declare one, and a compensatable verb must. This is the one
+        # point where the capability scope, the extern NAME and the
+        # `compensate` clause are all in hand, which is why the check sits
+        # here rather than in `_capability_list` (a service method's scope
+        # parses there and declares an interface, not a crossing).
+        for token in capabilities:
+            teardown = ui_family.teardown_refusal(
+                token, classification, name, compensate is not None)
+            if teardown is not None:
+                message, hint = teardown
+                raise RevlError(self.filename, line, message, hint,
+                                code="G4", category="reversibility")
         # item 379: an optional typed `config { ... }` block, reusing the same
         # `config_block()` a component uses (parser.py:1352-1365). It sits after
         # the teardown/approval clauses and before the `= @backend` bodies, the
