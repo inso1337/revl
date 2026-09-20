@@ -455,6 +455,14 @@ jobs:
       # spells. Keep a named reach report for every oracle, including lower_ir and
       # compile, so a new reference construct cannot hide behind a green oracle.
       - run: python3 tools/oracle_construct_reach.py --check
+      # Roadmap item 542 / issue #1221: the census corpus and the emit corpora
+      # are globbed, so a generated document enters them with no list to edit
+      # and reads as evidence indistinguishable from a hand-written one. This
+      # holds every scoring document to a declared authoring generation, fails
+      # on one that declares none (an unknown provenance is NEVER read as
+      # hand-written), on a manifest line that outlived its document, and on a
+      # scoring corpus below its declared independence floor.
+      - run: python3 tools/corpus_provenance.py --check
       # issue #255: five docs carried source-derived content (the MCP verb
       # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
       # inventory, a test count) with nothing to keep them honest, and the one
@@ -1563,6 +1571,7 @@ jobs:
           tests/test_crypto_stdlib.py
           tests/test_insert_if_absent.py
           tests/test_json_cross_tier_bytes.py
+          tests/test_model_evidence_517.py
           tests/test_run_go.py
           tests/test_run_ts_stdlib_fs_root.py
           tests/test_stdlib_version.py
