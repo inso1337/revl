@@ -362,7 +362,7 @@ guarantee is by construction. The lowering test is
 `test_a5_compensate_lowering`.
 
 One family is the exception, and it refuses under G4 rather than here
-(roadmap item 522, `docs/design/536-ui-transactions.md`). A computer-use
+(roadmap item 522, `docs/design/538-ui-transactions.md`). A computer-use
 verb carries a reversibility class that the registry owns, not the
 author, so the `compensate` slot is no longer free: `ui.text` is
 compensatable and must declare one, while `ui.click` (unknown) and
