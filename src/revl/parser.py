@@ -742,6 +742,80 @@ class ModelRoleDecl:
 
 
 @dataclass
+class CouncilMember:
+    """One member of a `model council`: `<function> -> <role>` (item 516).
+
+    `function` is what the member is FOR (proposer, adversary, verifier) and
+    `role` is the item-512 `model role` that places it. The two are separate
+    words on purpose: the function is the member's job in the aggregation and
+    the role is where its call runs, which is what lets a council put a local
+    adversary beside a cloud proposer.
+
+    SYNTAX ONLY. The function vocabulary, the distinctness rules and the
+    placement lookup are `revl.model_council`'s."""
+    function: str
+    role: str
+    line: int
+
+
+@dataclass
+class AggregateClause:
+    """`aggregate <rule> [quorum <basis>] [on_tie <outcome>]` (item 516).
+
+    The rule that turns the members' answers into one outcome, written down
+    rather than implied. `quorum` and `on_tie` are OPTIONAL and default in
+    `revl.model_council` to the fail-closed readings (`declared` and `split`);
+    `None` here means the clause was omitted, which is not the same as writing
+    the default and is why the parser records the omission rather than filling
+    it in.
+
+    Every one of the three names parses as a bare identifier, INCLUDING the
+    spellings the checker refuses (`aggregate first`, `on_tie allow`,
+    `quorum answered`). That is deliberate and is the discipline item 512's
+    `_model_route_candidate` already uses for `*`: an author who reaches for
+    "whichever member answered" gets the reason it is refused, not a syntax
+    complaint."""
+    rule: str
+    quorum: str | None
+    on_tie: str | None
+    line: int
+
+
+@dataclass
+class ModelCouncilDecl:
+    """`model council NAME { <function> -> <role>, ..., aggregate <rule> }`
+    (roadmap item 516).
+
+    A council is a PROGRAM-LEVEL declaration for the reason
+    `docs/design/531-model-placement.md` section 9 records: it binds several
+    item-512 roles in one aggregation, so the roles it names have to be
+    program-level too.
+
+    `model` stays a CONTEXTUAL keyword — it heads a declaration only in the
+    shapes `model role NAME <residence>` and `model council NAME {`, so the
+    lexer's `KEYWORDS` table and the self-hosted lexer that mirrors it need no
+    sync and a program using `model` as an ordinary name keeps parsing.
+
+    `aggregates` holds EVERY `aggregate` clause written, which is normally one
+    and is empty when none was written. The parser neither supplies a default
+    nor drops a duplicate: "a council declares exactly one aggregation" is a
+    rule with a diagnostic that needs both lines, and inventing a default here
+    would be the silent pick the item exists to remove."""
+    name: str
+    members: tuple
+    aggregates: tuple
+    line: int
+
+    @property
+    def aggregate(self):
+        """The single aggregation clause, or `None`.
+
+        Only meaningful once `revl.model_council` has admitted the council;
+        before that a program may legally have parsed two."""
+        return self.aggregates[0] if self.aggregates else None
+
+
+@dataclass
 class InterceptStmt:
     key: str
     metadata: dict
@@ -2103,6 +2177,10 @@ class Program:
     # `revl.model_route` (validated there). Empty for every program that
     # declares none, so those programs are byte-identical.
     model_roles: list[ModelRoleDecl] = field(default_factory=list)
+    # item 516: the model councils declared in this program. Read by
+    # `revl.model_council` (validated there). Empty for every program that
+    # declares none, so those programs are byte-identical.
+    model_councils: list[ModelCouncilDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
     prop_tests: list[PropTestDecl] = field(default_factory=list)
@@ -2598,6 +2676,15 @@ class Parser:
                 # self-hosted lexer's KEYWORDS table needs no sync.
                 program.model_roles.append(self.model_role_decl())
 
+            elif self.at("ident", "model") \
+                    and self.peek_ahead(1).kind == "ident" \
+                    and self.peek_ahead(1).value == "council":
+                # item 516: `model council NAME { ... }`. The second contextual
+                # shape `model` heads, on the same discipline as `model role`
+                # above: the pair `model council` is what makes this a
+                # declaration, so `model` alone is still an ordinary name.
+                program.model_councils.append(self.model_council_decl())
+
             elif self.at("ident", "prop") and self.peek_ahead(1).kind == "kw" \
                     and self.peek_ahead(1).value == "test":
                 # `prop` is a *contextual* keyword: like `fault`, it only heads a
@@ -2736,6 +2823,80 @@ class Parser:
         residence = self.expect(
             "ident", what="a residence for the role (`on_device` or `off_device`)").value
         return ModelRoleDecl(name, residence, line)
+
+    def model_council_decl(self) -> ModelCouncilDecl:
+        """`model council NAME { <fn> -> <role>, ..., aggregate <rule> }`
+        (roadmap item 516).
+
+        Two kinds of item inside the braces, distinguished by the first token:
+        an `aggregate` clause, or a member arm. Both are comma- or
+        semicolon-separated and a trailing comma is allowed, exactly as the
+        `route model` block allows one.
+
+        The parser validates NOTHING beyond the shape: the function
+        vocabulary, the aggregation vocabulary, the distinctness rules and the
+        lookup of each member's `model role` are `revl.model_council`'s, so the
+        refusal and the rule it enforces sit in one file (the `retention` and
+        `route model` discipline).
+
+        A SECOND `aggregate` clause is kept rather than dropped, because "a
+        council declares exactly one aggregation" is a rule with a diagnostic
+        and not a parse accident; the checker needs both lines to name them.
+
+        Member ORDER is preserved. It decides nothing — a rule that depended on
+        it would be the match-order failure `route model` already refuses for
+        two arms on one origin — but the declared order is what the diagnostics
+        and item 517's evidence list members in."""
+        line = self.expect("ident", value="model").line
+        self.expect("ident", value="council")
+        name = self.expect("ident", what="a model council name").value
+        self.expect("{", what=f"`{{` after `model council {name}`")
+        members: list = []
+        aggregates: list = []
+        while not self.at("}"):
+            self._skip_semis()
+            if self.at("}"):
+                break
+            if self.at("ident", "aggregate"):
+                aggregates.append(self._council_aggregate())
+            else:
+                fn_tok = self.expect(
+                    "ident",
+                    what="a council function, or `aggregate`, inside "
+                         f"`model council {name}`")
+                self.expect("arrow", what=f"`->` after `{fn_tok.value}`")
+                role = self.expect(
+                    "ident",
+                    what=f"a model role name after `{fn_tok.value} ->`").value
+                members.append(CouncilMember(fn_tok.value, role, fn_tok.line))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return ModelCouncilDecl(name, tuple(members), tuple(aggregates), line)
+
+    def _council_aggregate(self) -> AggregateClause:
+        """`aggregate <rule> [quorum <basis>] [on_tie <outcome>]` (item 516).
+
+        `aggregate`, `quorum` and `on_tie` are CONTEXTUAL identifiers read only
+        in this slot. Every value is taken as a bare name and checked in
+        `revl.model_council`, including the ones it refuses: `aggregate first`
+        and `on_tie allow` are the two spellings an author reaches for when
+        they want disagreement resolved toward an answer, and each gets the
+        reason rather than a syntax error."""
+        line = self.expect("ident", value="aggregate").line
+        rule = self.expect(
+            "ident", what="an aggregation rule after `aggregate`").value
+        quorum = None
+        if self.at("ident", "quorum"):
+            self.next()
+            quorum = self.expect(
+                "ident", what="a quorum basis after `quorum`").value
+        on_tie = None
+        if self.at("ident", "on_tie"):
+            self.next()
+            on_tie = self.expect(
+                "ident", what="an outcome after `on_tie`").value
+        return AggregateClause(rule, quorum, on_tie, line)
 
     def model_route_stmt(self) -> ModelRouteStmt:
         """`route model on <action> { <origin> -> <role>, ... }` (item 512).
