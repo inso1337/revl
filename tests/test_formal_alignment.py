@@ -15,11 +15,11 @@ revl:
   * F2: the `U` row handed the `emit` marker context to the whole argument
     subtree, so a plain method evaluated to build an emit's argument was
     modeled as "emit on a non-emission" (`NotesConsole` in the same file).
-    The checker's marker is a REGION marker: it judges the head call and
-    admits everything evaluated under it, emission or not (issue #1175 asks
-    whether it should be per-site; the model follows the checker), so an
-    argument-position call carries its own `emitarg` context, admitted
-    either way;
+    The checker's marker covers the head call alone (issue #1175: one
+    `emit` per crossing, the head's arguments lower in the enclosing mode),
+    so an argument-position call carries its own `emitarg` context and is
+    judged as a plain position is: a plain method there is admitted, an
+    emission there is refused for its missing marker;
   * F3: a provide method emitting DIRECTLY through an emission extern
     exported the unnameable `*` on the bound side too, where the reference
     names the extern and measures it against the declared `emission[...]`
@@ -66,10 +66,18 @@ component C requires a: A {
 }
 """
 
-#: The three shapes the region semantics decide (issue #1175). Each is one
+#: The four shapes the marker discipline decides (issue #1175). Each is one
 #: synthetic corpus file; `b.fetch` is an emission, `x.plain` is not.
 NESTED_SHAPES = {
-    # an UNMARKED emission under an emit head: admitted (the region)
+    # a MARKED emission inside an emit head's argument list: refused outright
+    "nested_emit_expression.rvl": """\
+service A { emission fn send(q: Str) -> Str }
+service B { emission fn fetch() -> Str }
+component C requires a: A, b: B {
+  emit a.send(emit b.fetch())
+}
+""",
+    # an UNMARKED emission under an emit head: refused, one marker per crossing
     "nested_emission.rvl": """\
 service A { emission fn send(q: Str) -> Str }
 service B { emission fn fetch() -> Str }
@@ -201,8 +209,9 @@ def test_the_alignment_asks_the_checker_through_the_cli_door(harness):
 def test_the_marker_context_is_the_head_call_s_only(tsv):
     """`emit webui.add_entry(..., { strategy: ranking.strategy(), signals:
     ranking.signals() })`: one `emit` fact for the head, the two `Ranker`
-    calls evaluated to build its argument in the admitted `emitarg` region,
-    and the two plain delegations in the `console` provision plain."""
+    calls evaluated to build its argument in the `emitarg` position (admitted
+    because `Ranker` declares them plain), and the two plain delegations in
+    the `console` provision plain."""
     facts = {tuple(r[3:]) for r in _rows(tsv, "U", NOTES)
              if r[2] == "NotesConsole"}
     assert facts == {
@@ -218,35 +227,43 @@ def test_the_reference_marker_rule_admits_the_component(verdicts):
     assert verdicts.comps[(NOTES, "NotesConsole")] == "ok"
 
 
-def test_the_checker_s_marker_is_a_region_marker():
-    """The premise of `emitarg` (issue #1175): under an emit head an
-    unmarked emission and a plain method are BOTH admitted, and the same
-    emission in plain position is refused for its missing marker."""
+def test_the_checker_s_marker_covers_the_head_call_alone():
+    """The premise of `emitarg` (issue #1175): under an emit head a plain
+    method is admitted, and an unmarked emission is refused for its missing
+    marker exactly as the same emission in plain position is. The checker
+    refuses it: the head's arguments lower in the enclosing mode."""
     from revl.compiler import compile_source
     from revl.diagnostics import classify
     from revl.errors import RevlError
 
-    compile_source(NESTED_SHAPES["nested_emission.rvl"], "nested_emission.rvl")
     compile_source(NESTED_SHAPES["nested_plain.rvl"], "nested_plain.rvl")
+    for name in ("nested_emission.rvl", "plain_position.rvl"):
+        with pytest.raises(RevlError) as excinfo:
+            compile_source(NESTED_SHAPES[name], name)
+        assert classify(excinfo.value)["code"] == "G4"
+        assert "call to emission `b.fetch` must be marked `emit`" in str(excinfo.value)
     with pytest.raises(RevlError) as excinfo:
-        compile_source(NESTED_SHAPES["plain_position.rvl"], "plain_position.rvl")
+        compile_source(NESTED_SHAPES["nested_emit_expression.rvl"],
+                       "nested_emit_expression.rvl")
     assert classify(excinfo.value)["code"] == "G4"
-    assert "call to emission `b.fetch` must be marked `emit`" in str(excinfo.value)
+    assert "one marker admits one crossing" in str(excinfo.value)
 
 
-def test_the_model_admits_the_region_and_judges_the_head(nested):
-    """Both sides, per shape: the two calls under an emit head are `g4=ok`
-    whatever `fetch`/`plain` declare, and the plain-position `b.fetch()`
-    is `g4=fail`. The U facts show WHY: `emitarg` under the head, `plain`
-    outside it."""
+def test_the_model_judges_every_crossing_by_its_own_marker(nested):
+    """Both sides, per shape: the plain method under an emit head is
+    `g4=ok`, the unmarked emission under one is `g4=fail` like the
+    plain-position `b.fetch()`. The U facts show WHERE: `emitarg` under the
+    head, `plain` outside it; the verdict reads the declaration alone."""
     tsv, ref, formal = nested
-    want = {"corpus/nested_emission.rvl": "ok",
+    want = {"corpus/nested_emit_expression.rvl": "fail",
+            "corpus/nested_emission.rvl": "fail",
             "corpus/nested_plain.rvl": "ok",
             "corpus/plain_position.rvl": "fail"}
     assert {rel: ref.comps[(rel, "C")] for rel in want} == want
     if formal is not None:
         assert {rel: formal.comps[(rel, "C")] for rel in want} == want
     ctx = {(r[1], r[5], r[6]): r[3] for r in _rows(tsv, "U")}
+    assert ctx[("corpus/nested_emit_expression.rvl", "B", "fetch")] == "emitnested"
     assert ctx[("corpus/nested_emission.rvl", "B", "fetch")] == "emitarg"
     assert ctx[("corpus/nested_plain.rvl", "X", "plain")] == "emitarg"
     assert ctx[("corpus/plain_position.rvl", "B", "fetch")] == "plain"

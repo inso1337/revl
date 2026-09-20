@@ -3010,6 +3010,12 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // `acqWhere` is the position phrase the host-acquire refusal reports for the
 // statement currently being walked (`stmt_acq_where`), the gate's stand-in for
 // `env._expr_mode`.
+// `emitPos` is where the walk stands relative to an `emit` marker (issue
+// #1175, one marker per crossing): "head" while walking the marked expression
+// down to its head call, "head-bare" the same under a teardown slot (the
+// head's arguments then admit bare emissions, as the slot does), "args" inside
+// a marked head's argument list, "" elsewhere. The reference keeps this as
+// `env._emit_arg_mode` / `env._in_emit_args` around `_emit_head_args`.
 // `ambOps` is the RUNNING composition's declared operations, service name ->
 // operation names, off the item-346 `!services` block (`:S,op,op`). It is the
 // second exhaustive service declaration this gate can hold (see
@@ -3025,7 +3031,7 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, List[Str]],
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
-             localArrows: Map[Str, ArrowN], acqWhere: Str }
+             localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -3126,8 +3132,72 @@ fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
   let scx = ctx_acq(cx, stmt_acq_where(s.kind))
   let root = acq_root_of(s)
-  return root.hit ? walk_exprs(root.args, 0, marked, scx, a)
-                  : walk_expr(s.e, marked, scx, a)
+  if (root.hit) { return walk_exprs(root.args, 0, marked, scx, a) }
+  // an `emit` step's marker covers its head call alone (issue #1175); a
+  // compensate slot is a teardown region and stays marked throughout
+  return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, a)
+}
+
+// ---- one `emit` marker per crossing (issue #1175) --------------------------
+//
+// The reference lowers an emit head's ARGUMENTS in the mode the `emit` sits in
+// (`_emit_head_args`): a call evaluated to build the argument is judged as it
+// would be one statement earlier, so an unmarked emission there draws the G4
+// marker refusal and a plain call is admitted as before; a marker written
+// inside the argument list is refused outright (`_refuse_nested_emit`). Here
+// the walk carries the same three positions in `Ctx.emitPos`.
+
+// The same context at a position relative to an `emit` marker.
+fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           // leaving a marked head for its argument list leaves the `emit`
+           // expression position too: the reference's arguments lower in
+           // "setup" there, whose host-acquire phrase is "this position"
+           acqWhere: pos == "args" && cx.emitPos == "head" ? "this position"
+                                                            : cx.acqWhere,
+           emitPos: pos }
+}
+
+// Whether a marked head's arguments admit a bare emission: never under a
+// body statement, always under a teardown slot; elsewhere the position's own.
+fn args_marked(marked: Bool, cx: Ctx) -> Bool {
+  if (cx.emitPos == "head") { return false }
+  if (cx.emitPos == "head-bare") { return true }
+  return marked
+}
+
+// The context a call's arguments walk in: past a marked head they are the
+// head's argument list, where a nested `emit` is refused.
+fn ctx_args(cx: Ctx) -> Ctx {
+  if (cx.emitPos == "head" || cx.emitPos == "head-bare") {
+    return ctx_emit_pos(cx, "args")
+  }
+  return cx
+}
+
+// Walk a call's arguments (every call path below goes through here, as every
+// argument list in the reference goes through `_emit_head_args`).
+fn walk_args(args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  return walk_exprs(args, 0, args_marked(marked, cx), ctx_args(cx), a)
+}
+
+// The position an `emit` EXPRESSION's own head walks in: under a marked head
+// it inherits that head's (a marker directly under a marker), otherwise the
+// current position's admission decides whether its arguments are bare.
+fn emit_head_pos(marked: Bool, cx: Ctx) -> Str {
+  if (cx.emitPos == "head" || cx.emitPos == "head-bare") { return cx.emitPos }
+  return marked ? "head-bare" : "head"
+}
+
+fn nested_emit_msg() -> Str {
+  return "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
 }
 
 fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
@@ -3189,11 +3259,13 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
     Bad(_)     => a,
     Bin(b)     => walk_expr(b.r, marked, cx, walk_expr(b.l, marked, cx, a)),
     Un(u)      => walk_expr(u.e, marked, cx, a),
-    Emit(u)    => walk_expr(u.e, true, cx, a),
+    Emit(u)    => cx.emitPos == "args"
+                    ? ac_refuse(a, "G4", nested_emit_msg())
+                    : walk_expr(u.e, true, ctx_emit_pos(cx, emit_head_pos(marked, cx)), a),
     Call(c)    => call_check(c.target, c.args, marked, cx, a),
     Field(f)   => field_check(f.target, marked, cx, a),
     OptField(f) => field_check(f.target, marked, cx, a),
-    OptCall(c) => walk_exprs(c.args, 0, marked, cx, walk_expr(c.target, marked, cx, a)),
+    OptCall(c) => walk_args(c.args, marked, cx, walk_expr(c.target, marked, cx, a)),
     Index(x)   => walk_expr(x.idx, marked, cx, walk_expr(x.target, marked, cx, a)),
     If(x)      => walk_expr(x.els, marked, cx,
                            walk_expr(x.then_, marked, cx,
@@ -3224,10 +3296,10 @@ fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
       // read off a spawn handle. If `h` is a known handle it is the instance
       // path (checked like a `req` emission); otherwise it is walked as a value.
       Field(inner) => handle_call(inner, fl.name, args, tg, marked, cx, a),
-      _           => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+      _           => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
     },
     Var(n) => fn_call(n, args, marked, cx, a),
-    _      => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+    _      => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
   }
 }
 
@@ -3245,8 +3317,8 @@ fn handle_call(inner: FieldN, op: Str, args: List[Expr], tg: Expr,
   return match inner.target {
     Var(h) => cx.handles.has(h)
       ? handle_emit(h, inner.name, op, args, marked, cx, a)
-      : walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
-    _ => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+      : walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
+    _ => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
   }
 }
 
@@ -3262,7 +3334,7 @@ fn alias_call(v: Str, op: Str, args: List[Expr], tg: Expr, marked: Bool,
   let ref = match cx.provAlias.lookup(v) { Some(r) => r, None => "" }
   let cut = ref.indexOf("#")
   if (cut == 0 - 1) {
-    return walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a))
+    return walk_args(args, marked, cx, walk_expr(tg, marked, cx, a))
   }
   return handle_emit(ref.slice(0, cut), ref.slice(cut + 1, ref.length()), op,
                      args, marked, cx, a)
@@ -3294,7 +3366,7 @@ fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
                                        .concat(op)]),
            avals: na.avals }
   }
-  return walk_exprs(args, 0, marked, cx, na)
+  return walk_args(args, marked, cx, na)
 }
 
 // ------------------------------------------------------- host acquire verbs
@@ -3455,7 +3527,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
     }
     if (!head_declared(cx, root)) { return g1_refuse(cx, root, a) }
     // a host object or a local receiver, not a requirement — unchecked here
-    return walk_exprs(args, 0, marked, cx, a)
+    return walk_args(args, marked, cx, a)
   }
   let svcName = match cx.reqMap.lookup(root) { Some(v) => v, None => "" }
   let decl = find_msig(svc_of(cx, svcName), meth, 0)
@@ -3482,7 +3554,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
       return ac_refuse(a, "A6", not_a_method_msg(root.concat(".").concat(meth),
                                                  svcName))
     }
-    return walk_exprs(args, 0, marked, cx, a)
+    return walk_args(args, marked, cx, a)
   }
   if (decl.isEm && !marked) {
     return ac_refuse(a, "G4", "call to emission `".concat(root).concat(".")
@@ -3510,7 +3582,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
            aops: union_into(na.aops, [root.concat(".").concat(meth)]),
            avals: na.avals }
   }
-  return walk_exprs(args, 0, marked, cx, na)
+  return walk_args(args, marked, cx, na)
 }
 
 // The `<handle>#<key>` a provision-read ARGUMENT names, else "". A direct read
@@ -3591,7 +3663,7 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps,
            areach: union_into(na.areach, [name]), aops: na.aops, avals: na.avals }
   }
-  return walk_exprs(args, 0, marked, cx, na)
+  return walk_args(args, marked, cx, na)
 }
 
 // A bare `Var` in VALUE position (never a call/access head — those are routed
@@ -3652,7 +3724,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -3666,7 +3738,7 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: where }
+           acqWhere: where, emitPos: cx.emitPos }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -3678,7 +3750,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -3692,7 +3764,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere }
+           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -3706,7 +3778,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -3876,7 +3948,7 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position" }
+           acqWhere: "this position", emitPos: "" }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -3890,7 +3962,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 // The RUNNING composition's operation table, off the item-346 service block's
@@ -3911,7 +3983,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, List[Str]]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -3935,7 +4007,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position" }
+           acqWhere: "this position", emitPos: "" }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -8112,7 +8184,8 @@ fn is_alias_target(target: Str, declared: List[Str]) -> Bool {
   return is_aliasable_builtin(p.head) || contains(declared, p.head)
 }
 
-type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str] }
+type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str],
+                   lines: List[Int] }
 
 // Every type DECLARATION in the file: the names it declares (the reference's
 // `declared` set, which an `event` contributes to as well — the parser appends an
@@ -8126,6 +8199,7 @@ fn alias_scan(ts: List[Token]) -> AliasScan {
   var declared: List[Str] = []
   var names: List[Str] = []
   var targets: List[Str] = []
+  var lines: List[Int] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (at_event(ts, i)) {
@@ -8145,12 +8219,16 @@ fn alias_scan(ts: List[Token]) -> AliasScan {
             && !cfg_is_variant_rhs(ts, j + 1, end)) {
           names = names.push(nm)
           targets = targets.push(type_at(ts, j + 1).ty)
+          // the DECLARATION's own line: `_resolve_type_aliases` anchors the
+          // cycle refusal at `aliases[head].line`, the line of the alias the
+          // expansion came back round to, not at the use site.
+          lines = lines.push(tkc(ts, i).line)
         }
       }
       i = end > i ? end : skip_line(ts, i)
     } else { i += 1 }
   }
-  return { declared: declared, names: names, targets: targets }
+  return { declared: declared, names: names, targets: targets, lines: lines }
 }
 
 fn alias_at(al: Map[Str, Str], name: Str) -> Str {
@@ -8222,6 +8300,96 @@ fn alias_map(ts: List[Token]) -> Map[Str, Str] {
     round += 1
   }
   return out
+}
+
+// ------------------------------------------- the alias CYCLE (457 §2.1 item 1)
+//
+// `_resolve_type_aliases`' `expand` recursion, which is the FIRST obligation of
+// the reference's declaration level — ahead of `_validate_declared_types` and so
+// ahead of every phase `collect_nonlink` already runs. A transparent alias is
+// substituted verbatim at every declaration site, so a cycle has no expansion to
+// substitute and the reference refuses it outright rather than looping in the
+// resolver or emitting a type no tier defines.
+//
+// `alias_map` above computes the same fixed point for the PRODUCER side and
+// bounds its rounds so a cycle terminates with a harmless answer; that is the
+// right shape there, because it runs behind this gate. Here the cycle is the
+// answer.
+//
+// The chain is the reference's, character for character: the stack from the
+// first occurrence of the repeated head, with that head appended, joined
+// " -> ". The refusal is anchored at the repeated alias's own DECLARATION line.
+type AcExp = { cyc: Str, line: Int }
+
+fn ac_clean() -> AcExp { return { cyc: "", line: 0 } }
+
+// `" -> ".join(stack[stack.index(head):] + (head,))`
+fn ac_chain(stack: List[Str], from_: Int, head: Str) -> Str {
+  var out = ""
+  var i = from_
+  while (i < stack.length()) {
+    out = i == from_ ? stack[i] : out.concat(" -> ").concat(stack[i])
+    i += 1
+  }
+  return out == "" ? head : out.concat(" -> ").concat(head)
+}
+
+fn ac_expand(ty: Str, stack: List[Str], names: List[Str], targets: List[Str],
+             lines: List[Int]) -> AcExp {
+  let p = ty_parse(ty)
+  // a type APPLICATION rewrites its ARGUMENTS under the same stack and leaves
+  // its head alone — the reference consults `aliases` only for a bare name.
+  if (p.args.length() > 0) {
+    return ac_expand_args(p.args, 0, stack, names, targets, lines)
+  }
+  let k = names.indexOf(p.head)
+  if (k == 0 - 1) { return ac_clean() }
+  let si = stack.indexOf(p.head)
+  if (si != 0 - 1) { return { cyc: ac_chain(stack, si, p.head), line: lines[k] } }
+  return ac_expand(targets[k], stack.push(p.head), names, targets, lines)
+}
+
+fn ac_expand_args(args: List[Str], i: Int, stack: List[Str], names: List[Str],
+                  targets: List[Str], lines: List[Int]) -> AcExp {
+  if (i >= args.length()) { return ac_clean() }
+  let r = ac_expand(args[i], stack, names, targets, lines)
+  if (r.cyc != "") { return r }
+  return ac_expand_args(args, i + 1, stack, names, targets, lines)
+}
+
+// The transparent aliases in DECLARATION order, which is the order
+// `_resolve_type_aliases` walks its `aliases` dict in, so a file with two
+// disjoint cycles draws the one the earlier declaration reaches.
+type AcTbl = { names: List[Str], targets: List[Str], lines: List[Int] }
+
+fn ac_table(sc: AliasScan) -> AcTbl {
+  var names: List[Str] = []
+  var targets: List[Str] = []
+  var lines: List[Int] = []
+  var i = 0
+  while (i < sc.names.length()) {
+    if (is_alias_target(sc.targets[i], sc.declared)
+        && !contains(names, sc.names[i])) {
+      names = names.push(sc.names[i])
+      targets = targets.push(sc.targets[i])
+      lines = lines.push(sc.lines[i])
+    }
+    i += 1
+  }
+  return { names: names, targets: targets, lines: lines }
+}
+
+fn alias_cycle_refusal(ts: List[Token]) -> Verd {
+  let t = ac_table(alias_scan(ts))
+  var i = 0
+  while (i < t.names.length()) {
+    let r = ac_expand(t.targets[i], [t.names[i]], t.names, t.targets, t.lines)
+    if (r.cyc != "") {
+      return mk_verd(tagged("TYPE", "type alias cycle: ".concat(r.cyc)), r.line)
+    }
+    i += 1
+  }
+  return no_verd()
 }
 
 
@@ -9460,7 +9628,7 @@ fn tk_infer_raw(e: Expr, env: List[Bind]) -> TInf {
     Lst(l)      => tk_items(l.items, 0, env, infer_list_ty(l.items, env)),
     If(f)       => tk_if(f.cond, f.then_, f.els, env),
     Templ(t)    => tk_parts(t.parts, 0, env),
-    Match(m)    => tk_ok(infer_match_ty(m, env)),
+    Match(m)    => tk_match(m, env),
     Hole(h)     => tk_ok(h.ty),
     // an optional chain SHORT-CIRCUITS. Its LEFT-HAND rule is ported
     // (docs/design/457 T2d); the member's own type is not, so the chain's
@@ -9474,6 +9642,86 @@ fn tk_infer_raw(e: Expr, env: List[Bind]) -> TInf {
     // already refused.
     _           => tk_ok(""),
   }
+}
+
+// ----------------------------------------- match totality (457 T3b, §2.3)
+//
+// `_check_match_exhaustiveness`, at the position `_lower_pure_expr` runs it:
+// after `_expr_static_type` has answered the scrutinee's type and BEFORE the
+// scrutinee or any arm is lowered, so a match over a known variant is judged on
+// its arm NAMES ahead of anything inside it. The two refusals are ordered as the
+// reference orders them — an arm naming a case the ADT does not declare first,
+// then the missing cases — and the second is skipped outright when a `_` arm is
+// present.
+//
+// Where it stays SILENT, and why each silence is the sound direction:
+//   * a scrutinee whose type the annotation engine cannot answer. The reference
+//     calls this check best-effort for exactly that reason, and its own
+//     `types.get(None)` misses.
+//   * a scrutinee whose type is not a DECLARED variant this text spells out —
+//     a record, a builtin, `Opt[T]`/`Result[T, E]` (whose arms the reference
+//     also leaves alone, because `types` holds no entry under those spellings),
+//     or a parameterized ADT's applied form.
+//   * a variant with an empty case list, which `adt_case_row` records no row
+//     for.
+// Each of those admits a program the reference may refuse; none refuses one the
+// reference admits, which is the only direction that would be a regression.
+fn tk_unknown_case_msg(pat: Str, ty: Str, declared: List[Str]) -> Str {
+  return "`".concat(pat).concat("` is not a case of `").concat(ty)
+    .concat("` (cases: ").concat(quote_join(declared)).concat(")")
+}
+
+fn tk_missing_msg(missing: List[Str]) -> Str {
+  return "non-exhaustive match: missing "
+    .concat(missing.length() == 1 ? "case " : "cases ")
+    .concat(quote_join(missing))
+}
+
+fn tk_unknown_arm(arms: List[ArmN], i: Int, ty: Str,
+                  declared: List[Str]) -> Str {
+  if (i >= arms.length()) { return "" }
+  let p = arms[i].pat
+  if (p != "" && p != "_" && !contains(declared, p)) {
+    return tagged("TYPE", tk_unknown_case_msg(p, ty, declared))
+  }
+  return tk_unknown_arm(arms, i + 1, ty, declared)
+}
+
+fn tk_arm_covers(arms: List[ArmN], i: Int, name: Str) -> Bool {
+  if (i >= arms.length()) { return false }
+  if (arms[i].pat == name) { return true }
+  return tk_arm_covers(arms, i + 1, name)
+}
+
+fn tk_missing_cases(declared: List[Str], i: Int, arms: List[ArmN],
+                    acc: List[Str]) -> List[Str] {
+  if (i >= declared.length()) { return acc }
+  let next = tk_arm_covers(arms, 0, declared[i]) ? acc : acc.push(declared[i])
+  return tk_missing_cases(declared, i + 1, arms, next)
+}
+
+fn tk_exhaustive(m: MatchN, env: List[Bind]) -> Str {
+  // `_expr_static_type` is `infer_ast` in its NON-raising form, which is the
+  // annotation engine here: a scrutinee this walk would refuse is one the
+  // reference reaches only AFTER this check, so borrowing the refusing walk's
+  // answer would reorder the two.
+  let sty = infer(m.scrut, env)
+  if (sty == "") { return "" }
+  let row = tenv_get(env, "cases ".concat(sty))
+  if (row == "") { return "" }
+  let declared = split_top_commas(row)
+  let unknown = tk_unknown_arm(m.arms, 0, sty, declared)
+  if (unknown != "") { return unknown }
+  if (tk_arm_covers(m.arms, 0, "_")) { return "" }
+  let missing = tk_missing_cases(declared, 0, m.arms, [])
+  if (missing.length() == 0) { return "" }
+  return tagged("T1", tk_missing_msg(missing))
+}
+
+fn tk_match(m: MatchN, env: List[Bind]) -> TInf {
+  let v = tk_exhaustive(m, env)
+  if (v != "") { return { ty: "", v: v } }
+  return tk_ok(infer_match_ty(m, env))
 }
 
 // Walk a sub-expression for its refusal only; the result type is out of slice.
@@ -11487,15 +11735,59 @@ fn fb_host_value(e: Expr, scope: List[Bind]) -> Bool {
   }
 }
 
+// `_record_pattern`: `{ a, b }`, names only — the grammar has no renaming form.
+// `i` is the index just past the opening brace; `ok` is false for anything this
+// reader cannot spell in full, and for the two shapes the reference refuses with
+// a sentence this slice does not carry (an empty pattern, a repeated name), so
+// such a statement stays the undecidable bail it has always been rather than
+// drawing some other refusal in their place. On success `i` is the closing
+// brace.
+type FbPat = { names: List[Str], i: Int, ok: Bool }
+
+fn fb_rec_pattern(ts: List[Token], i: Int) -> FbPat {
+  var k = i
+  var names: List[Str] = []
+  var ok = true
+  var go = true
+  while (go) {
+    if (atk(ts, k, "}")) { go = false }
+    else {
+      if (!atk(ts, k, "ident")) { go = false  ok = false }
+      else {
+        let nm = tkc(ts, k).text
+        if (contains(names, nm)) { ok = false }
+        names = names.push(nm)
+        k += 1
+        if (atk(ts, k, ",")) { k += 1 }
+        else { if (!atk(ts, k, "}")) { go = false  ok = false } }
+      }
+    }
+  }
+  if (names.length() == 0) { ok = false }
+  return { names: names, i: k, ok: ok }
+}
+
 // One statement of a fn body. Mirrors `own_one`'s reader token for token, so the
 // two cannot disagree about where a statement ends; what differs is the payload.
 fn fb_one(ts: List[Token], i: Int, hi: Int, al: Map[Str, Str]) -> FbStepR {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
-    // a destructuring pattern binds names this reader does not enumerate
-    if (atk(ts, i + 1, "{") || atk(ts, i + 1, "[")) {
-      return { step: fb_bail(), i: hi }
+    // a RECORD destructuring pattern is read far enough to ask the one question
+    // `_lower_let_pattern_stmt` asks before it binds anything — is the value a
+    // record — and no further: the step still ENDS the block (`i: hi`), exactly
+    // as the bail it replaces did, so nothing after it is judged and every
+    // consumer of this tree that treated the bail as "undecidable" still does
+    // (`rp_has_bail`, `csh_binders`). A LIST pattern keeps the plain bail: its
+    // own rule is a different message this slice does not port.
+    if (atk(ts, i + 1, "{")) {
+      let pr = fb_rec_pattern(ts, i + 2)
+      if (!pr.ok || !atk(ts, pr.i + 1, "=")) { return { step: fb_bail(), i: hi } }
+      let r = expr_at(ts, pr.i + 2)
+      if (is_bad(r.e) || r.i <= pr.i + 2) { return { step: fb_bail(), i: hi } }
+      return { step: fb_step7("letpat", pr.names.join(","), t.text == "var",
+                              t.line, r.e, "", ""), i: hi }
     }
+    if (atk(ts, i + 1, "[")) { return { step: fb_bail(), i: hi } }
     let name = tkc(ts, i + 1).text
     var j = i + 2
     var dty = ""
@@ -11611,6 +11903,35 @@ fn fb_scan(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[FbStep]
   return out
 }
 
+// The first destructured name already bound in this function, else "".
+fn fb_pat_scope(names: List[Str], i: Int, scope: List[Bind]) -> Str {
+  if (i >= names.length()) { return "" }
+  if (tenv_get(scope, names[i]) != "") { return names[i] }
+  return fb_pat_scope(names, i + 1, scope)
+}
+
+fn tk_destructure_msg(ty: Str) -> Str {
+  return "record destructuring requires a record, but `".concat(tk_render(ty))
+    .concat("` is not a record")
+}
+
+// `_BUILTIN_NONRECORD`: the builtin heads a record pattern can never destructure.
+fn tk_nonrecord_head(h: Str) -> Bool {
+  return h == "Str" || h == "Int" || h == "Int32" || h == "Bool" || h == "Float"
+      || h == "Bytes" || h == "Unit" || h == "List" || h == "Map" || h == "Opt"
+      || h == "Result" || h == "Criterion" || h == "Guard"
+}
+
+// Is this value's type one the reference PROVES is not a record? A declared
+// VARIANT is (`types[value_type]["kind"] != "record"`); a builtin non-record
+// head is. Everything else — a structural spelling, a nominal record, a type
+// this walk could not infer — answers no, which is the silent direction.
+fn tk_nonrecord_value(ty: Str, env: List[Bind]) -> Bool {
+  if (ty == "") { return false }
+  if (tenv_get(env, "cases ".concat(ty)) != "") { return true }
+  return tk_nonrecord_head(parse_head(ty))
+}
+
 fn fb_clean(scope: List[Bind], tys: List[Bind]) -> FbR {
   return { v: no_verd(), scope: scope, tys: tys }
 }
@@ -11641,6 +11962,27 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
   if (i >= steps.length()) { return fb_clean(scope, tys) }
   let s = steps[i]
   if (s.kind == "bail") { return fb_clean(scope, tys) }
+  // docs/design/457 T3b: `_lower_let_pattern_stmt`'s RECORD branch, in its own
+  // order — the per-name scope guard first, then the value's type. Only the two
+  // arms that spell "requires a record" are ported: a DECLARED type whose
+  // `types` entry is not a record (the variant rows `adt_case_row` builds), and
+  // a builtin non-record head (`_BUILTIN_NONRECORD`). The unknown-field and
+  // element-type arms need the field table at a precision this walk does not
+  // hold, so they stay silent. The block ends here either way: the binder is not
+  // threaded on, so no statement after it is judged.
+  if (s.kind == "letpat") {
+    let names = split_top_commas(s.name)
+    let g = fb_pat_scope(names, 0, scope)
+    if (g != "") {
+      return fb_refuse("G6", fb_already_msg(g), s.line, scope, tys)
+    }
+    let vt = infer(s.value, tys)
+    if (tk_nonrecord_value(vt, tys)) {
+      return fb_type_refuse(tagged("TYPE", tk_destructure_msg(vt)), s.line,
+                            scope, tys)
+    }
+    return fb_clean(scope, tys)
+  }
   if (s.kind == "let") {
     if (tenv_get(scope, s.name) != "") {
       return fb_refuse("G6", fb_already_msg(s.name), s.line, scope, tys)
@@ -11919,7 +12261,7 @@ fn rp_returns(steps: List[FbStep], i: Int) -> Bool {
 fn rp_has_bail(steps: List[FbStep], i: Int) -> Bool {
   if (i >= steps.length()) { return false }
   let s = steps[i]
-  if (s.kind == "bail") { return true }
+  if (s.kind == "bail" || s.kind == "letpat") { return true }
   if (rp_has_bail(s.then_, 0) || rp_has_bail(s.els, 0)
       || rp_has_bail(s.body, 0)) { return true }
   return rp_has_bail(steps, i + 1)
@@ -12245,7 +12587,7 @@ fn csh_binders(steps: List[FbStep], i: Int, acc: CshBs) -> CshBs {
   if (i >= steps.length()) { return acc }
   let s = steps[i]
   var out = acc
-  if (s.kind == "bail") { out = { bs: acc.bs, ok: false } }
+  if (s.kind == "bail" || s.kind == "letpat") { out = { bs: acc.bs, ok: false } }
   if (s.kind == "let") { out = csh_add(acc, s.name, s.line) }
   if (s.kind == "for") {
     out = csh_binders(s.body, 0, csh_add(acc, s.name, s.line))
@@ -12417,6 +12759,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // `_validate_declared_types`, the earliest of all), then cache-purity,
   // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
   // the component loop.
+  // the ALIAS CYCLE is first of all: `_resolve_type_aliases` runs ahead of
+  // `_validate_declared_types` in `check_and_lower`, and it RAISES, so on a
+  // program that trips it nothing else is reached.
+  let acv = alias_cycle_refusal(ts)
+  if (acv.v != "") { return { done: true, refs: [acv] } }
   // the DECLARED-TYPE validation runs at the head of `_validate_declared_types`,
   // ahead of the config-is-data walk that closes the same function, so a
   // malformed annotation on a `fn`/`extern` signature is decided before it.
@@ -15576,7 +15923,10 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> Ca
     // carries a space, which no identifier may, so it can never collide with a
     // binding.
     let named = tenv_put(a.binds, "decl ".concat(tkc(ts, i + 1).text), "1")
-    let d = decl_cases(ts, i, { binds: named, amb: a.amb }, al)
+    // docs/design/457 T3b: the ORDERED case list beside the per-case rows, which
+    // is what the two match rules compare an arm list against.
+    let withCases = adt_case_row(ts, i, al, named)
+    let d = decl_cases(ts, i, { binds: withCases, amb: a.amb }, al)
     return case_binds_walk(ts, d.i, d.a, al)
   }
   if (t.text == "test") {
@@ -15604,6 +15954,67 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> Ca
   if (t.text == "service") { return case_binds_walk(ts, p_service(ts, i, empty_prog()).i, a, al) }
   if (t.text == "component") { return case_binds_walk(ts, p_component(ts, i, empty_prog()).i, a, al) }
   return case_binds_walk(ts, skip_line(ts, i), a, al)
+}
+
+// ----------------------------------- the variant table (457 T3b, §2.1 item 3)
+//
+// `_lower_type_decls`' `types[name]["cases"]`, read for the ONE question the
+// match rules ask of it: which case names a variant declares, in declaration
+// order. Recorded as a row keyed `cases <Type>` — the space is what no
+// identifier may carry, so the key can never collide with a binding — and
+// valued with the names comma-joined.
+//
+// The reader is `ir_type_decl`'s, decision for decision, because that one is
+// already byte-exact against the reference's emitted `types` section: a
+// transparent ALIAS contributes nothing (the reference has erased its
+// declaration before `_lower_type_decls` runs), a record BODY is a record and
+// not a variant, and a bare single-case right-hand side is the one-case nominal
+// the reference reads it as. The row is keyed by the DECLARED name alone, so a
+// parameterized `type Box[T]` is found only by a scrutinee whose spelling is the
+// bare `Box` — which is exactly what the reference's `types.get(type_name)` does
+// with the full spelling `Box[Int]`, namely miss and decide nothing.
+//
+// An EMPTY case list records NO row: `tenv_get` cannot tell an empty value from
+// an absent key, and "absent" is the silent direction.
+fn adt_case_names(ts: List[Token], lo: Int, hi: Int) -> Str {
+  var k = lo
+  var out = ""
+  var first = true
+  while (k < hi) {
+    if (atk(ts, k, "ident")) {
+      let nm = tkc(ts, k).text
+      var nk = k + 1
+      // a payload's own type spelling is stepped over, never read as a case
+      if (atk(ts, k + 1, "(")) {
+        let tr = type_at(ts, k + 2)
+        nk = tr.i
+        if (atk(ts, nk, ")")) { nk += 1 }
+      }
+      out = first ? nm : out.concat(",").concat(nm)
+      first = false
+      k = nk
+    } else { k += 1 }
+  }
+  return out
+}
+
+fn adt_case_row(ts: List[Token], i: Int, al: Map[Str, Str],
+                acc: List[Bind]) -> List[Bind] {
+  let lineHi = type_decl_end(ts, i + 1)
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "=")) { return acc }
+  // a transparent alias is ERASED before the type table is built
+  if (al.has(nm)) { return acc }
+  if (atk(ts, j + 1, "{")) { return acc }
+  let names = adt_case_names(ts, j + 1, lineHi)
+  if (names == "") { return acc }
+  // a name declared twice is `duplicate type`, which the reference refuses and
+  // this walk does not port: keep the FIRST row rather than letting the second
+  // win, so nothing here claims a surface the reference never built.
+  if (tenv_get(acc, "cases ".concat(nm)) != "") { return acc }
+  return tenv_put(acc, "cases ".concat(nm), names)
 }
 
 // The built-in half of `_case_table`, declared first so a user ADT can shadow
@@ -18216,6 +18627,17 @@ test "plain provider reaching an emission is refused (G4), exact wording" {
 
 test "unmarked emission is refused (G4)" {
   assert admit_src("""service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute("x") undo db.execute("y") }""") == "G4|call to emission `db.execute` must be marked `emit` (G4)"
+}
+
+// issue #1175: one `emit` marker per crossing. The marker covers the head
+// call; an emission evaluated to build the head's argument is judged in the
+// position the `emit` sits in, a marker written there is refused, and a plain
+// call there is admitted as before.
+test "an emission in an emit head's arguments needs its own marker (G4)" {
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(b.fetch()) }""") == "G4|call to emission `b.fetch` must be marked `emit` (G4)"
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(emit b.fetch()) }""") == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service X { fn plain() -> Str } component C requires a: A, x: X { emit a.send(x.plain()) }""") == ""
+  assert admit_src("""service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } service K { emission fn f() -> Str } component C requires a: A, b: B provides k: K { provide k { fn f() { let r = emit b.fetch() return emit a.send(r) } } }""") == ""
 }
 
 // ---- config-is-data (item 378, G4): byte-exact parity with the reference's

@@ -840,6 +840,77 @@ oracles agreed trivially — the absence, not a divergence. That erasure is
 `return_paths.rvl` rather than half-fixed here, and this paragraph is the record
 that it is known.
 
+**T3b (the rest). Match totality, the alias cycle, non-record destructuring.
+LANDED.** The three obligations left after T3b(returns), each decided at the
+reference's own position and none of them needing the T3a channel to be widened.
+
+`_check_match_exhaustiveness` needed one thing the gate did not hold: the ORDERED
+case list of each declared variant. `adt_case_row` records it beside the
+per-case rows the declaration scan already builds (`cases <Type>`, the names
+comma-joined), reading the declaration with `ir_type_decl`'s own decisions
+because that reader is already byte-exact against the reference's emitted
+`types` section — a transparent alias contributes nothing, a record body is a
+record, a bare single-case right-hand side is the one-case nominal. The check
+then runs inside the expression walk's `Match` arm, where `_lower_pure_expr`
+runs it: after `_expr_static_type` (the NON-raising engine, so a scrutinee the
+refusing walk would reject does not reorder the two) and before the scrutinee or
+any arm is walked, unknown arm first and missing cases second, the second
+skipped outright when a `_` arm is present.
+
+The alias CYCLE is `_resolve_type_aliases`' `expand` recursion, ported at the
+head of `collect_nonlink` — ahead of `declared_types_refusal`, because the
+reference runs `_resolve_type_aliases` before `_validate_declared_types` and it
+RAISES, so a program that trips it reaches nothing else. `alias_map` above
+computes the same fixed point for the PRODUCER side and bounds its rounds so a
+cycle terminates with a harmless answer, which is right there because it runs
+behind this gate; here the cycle is the answer. The chain is the reference's
+string, the anchor the repeated alias's own declaration line.
+
+Non-record destructuring is the one place this slice widened the fn-body reader.
+`fb_one` used to bail outright on a `let { … } =`, so the statement and the whole
+rest of its block went unjudged. It now reads the pattern — `{ a, b }`, names
+only, the grammar has no renaming form — and emits a `letpat` step that STILL
+ends the block (`i: hi`), so every consumer that treated the old bail as
+undecidable still does (`rp_has_bail`, `csh_binders` name it explicitly). Only
+the two arms that spell "requires a record" are ported: a declared type whose
+`types` entry is a variant, and a `_BUILTIN_NONRECORD` head. The unknown-field
+and element-type arms, the empty pattern and the repeated name are silence, and a
+list pattern keeps the plain bail.
+
+What it buys, measured. All four documents moved from `false-admit` to
+`agree-refuse` on tag AND message: `t13_unknown_match_case` and
+`t5_destructure_nonrecord` and `t18_type_alias_cycle` (`TYPE`), and
+`v2_match_nonexhaustive` (`T1`). `false-admit/TYPE` 3 -> 0, the bucket is now
+EMPTY; `false-admit/T1` 6 -> 5. `agree-refuse/TYPE` 6 -> 9 and
+`agree-refuse/T1` 57 -> 58; every other bucket over the 846-program census is
+byte-identical, with no `false-reject` and no `gate-fault`. Over the `--all`
+sweep (1356 programs) and the 400-draw fuzz at seed 7, run on the SAME corpus
+on both trees, fifteen and seventeen programs respectively left a false-admit
+bucket and none entered one, and `agree-admit` is unchanged on both (845 and
+509) — which is the number that would move first if any of these rules
+over-refused.
+
+Where each rule stays SILENT, and why the direction is the sound one. A
+scrutinee whose type the annotation engine cannot answer, or whose type is not a
+declared variant this text spells out — a record, a builtin, `Opt[T]` and
+`Result[T, E]`, a parameterized ADT's applied form — draws no exhaustiveness
+verdict, which is what `types.get(type_name)` does on the reference side too. A
+variant with an empty case list records no row, because `tenv_get` cannot tell an
+empty value from an absent key. A duplicate type name keeps its FIRST row rather
+than letting the second win, so nothing here claims a surface the reference
+never built (it refuses `duplicate type` instead, which this slice does not
+port). Each of those admits a program the reference may refuse; none refuses one
+the reference admits.
+
+What it does NOT carry, out of T3b's own list: `duplicate function` /
+`duplicate parameter`, `_lower_type_decls`' three duplicate refusals,
+wellformed declared types at the SERVICE-method and TYPE-declaration sites (T1
+named those already), `_refuse_callable_shadowing` and verified totality (both
+landed earlier), and the parser strictness that refuses `fn f() -> { }` — which
+is the last row of the crate oracle's `TYPE_LAYER_GAP` and a parser change, not
+a lowering one. No census document turns on any of them, so each is fail-open
+surface rather than a measured divergence.
+
 **T3c. One engine.** Delete lower.rvl's private `infer`/`binop_ty`/
 `builtin_ret`/`join_ty`/`infer_field`/`infer_callee`/`operands_of` and the
 pseudo-binding hacks; the IR annotations come from `infer_t(raise_: false)`.
