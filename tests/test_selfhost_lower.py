@@ -1434,6 +1434,24 @@ component C requires sink: Sink {
   every o in sub { emit sink.write(o) }
 }
 """),
+    # Control for the spawn-handle reach label (issue #1261): a bare
+    # `emission` bound names no capability list at all, so the unnameable
+    # crossing the label stands for is within it and both engines admit. The
+    # accepting twin of the `emission[...]` documents in REJECTED_PROGRAMS —
+    # a fix that refused every handle emit would land here.
+    ("a bare emission bound covers a spawn-handle emit", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+"""),
 ]
 
 
@@ -2880,6 +2898,123 @@ component Bookkeeper provides ledger: Ledger {
       return 0
     }
   }
+}
+""", "G4"),
+    # ---- an `emit` through a spawn handle (issue #1261) --------------------
+    # `_method_emissions` reads an `emit` step's head off `expr.target` and has
+    # THREE arms: a required-key crossing names its wiring key, and everything
+    # else notes `a host emission` plus the unnameable capability `*`. A spawn
+    # handle's provision call is in that second arm — the handle's component is
+    # a separate activation, so from this method's side there is no key to name.
+    #
+    # `handle_emit` recorded nothing, so a provide method whose only crossing
+    # went through a handle carried an EMPTY reach and the G4 provider bound had
+    # nothing to refuse. Where the spawn-emission bound refused the program on
+    # its own the two engines still rendered different text, and where it did
+    # not (the third document below) the gate raised no objection at all:
+    #   reference:  … emits through an unnameable host boundary
+    #                 (reaching `a host emission`)
+    #   gate:       … but it spawns `Worker`, which emits through `net`
+    #
+    # The gate's wording names the component and its capability and reads
+    # better, which is why the direction was decided before the fix rather than
+    # after: it is not a rendering of the same verdict but a WEAKER one. It
+    # resolves the crossing through the spawn graph to the child's own
+    # capability, and that resolution is what let the third document through.
+    ("a G4 excess through a spawn-handle emit", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+""", "G4"),
+    # The plain-declaration half, rendered by the upper-bound arm.
+    ("the plain half of a spawn-handle emit", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup {  fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+""", "G4"),
+    # The one the reach gap ADMITTED: the supervisor's bound names the very key
+    # the child emits through, so the spawn-emission bound is satisfied and only
+    # the body's own crossing is left to refuse it. No `emission[...]` list can
+    # name `*`, so the reference refuses; the gate saw an empty reach.
+    ("a spawn-handle emit under a bound naming the child's key", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission[net] fn go() -> Int }
+service Sup { emission[net] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+""", "G4"),
+    # The provision ALIAS spelling of the same crossing (`let t = w.task`),
+    # which `alias_call` resolves to the same handle op. The reference resolves
+    # it the same way (`Env.provision_locals`), so it draws the same message.
+    ("a spawn-handle emit through a provision alias", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           let t = w.task
+                           emit t.go()
+                           return 0 } }
+}
+""", "G4"),
+    # Control 1: the same composition with NO handle emit in the body. The
+    # crossing is the spawn alone, both engines render the spawn-emission bound,
+    # and a fix that noted the label on the spawn rather than on the emit step
+    # would change this message.
+    ("a spawn with no handle emit draws the spawn-bound verdict", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+
+                           return 0 } }
+}
+""", "G4"),
+    # Control 2: `let r = emit w.task.go()` binds an emit-marked VALUE, which
+    # the reference lowers through its expression path and never builds an
+    # `emit` step from, so neither engine notes the label and the spawn-bound
+    # verdict is the whole answer. This is the control a fix that labelled every
+    # handle call rather than every emit STEP would fail.
+    ("an emit-marked binding through a handle notes no label", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           let r = emit w.task.go()
+                           return 0 } }
 }
 """, "G4"),
 ]
