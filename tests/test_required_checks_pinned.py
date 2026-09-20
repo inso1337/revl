@@ -92,6 +92,24 @@ REQUIRED_CHECKS = ENFORCED_TODAY | ASPIRATIONAL
 # Jobs deliberately NOT required. Each exclusion is a choice with a reason, so a
 # reader can tell an intentional gap from a forgotten one.
 NOT_REQUIRED_CHECKS = {
+    # Roadmap item 537 (issue #1207): scores the diff on programs generated at
+    # score time from a seed drawn in the job, so the set is one the diff's
+    # author could not read. Deliberately NOT a merge gate, and the reason is
+    # the mechanism rather than flakiness.
+    #
+    # A candidate diff that touches the scorer is REFUSED rather than scored
+    # (`diff-reaches-fence`), which is the design's routing of a semantic
+    # change to human review and not a verdict about the change. Required, that
+    # refusal would either block every legitimate edit to the gate tooling or
+    # have to be downgraded to a pass inside the job, and the second is the
+    # fail-open shape the item exists to prevent. Advisory, the refusal stays a
+    # loud annotation and the human reads it.
+    #
+    # The finding direction (exit 1) does fail the job, so a real divergence is
+    # red on the PR even though the check is not blocking. Promotion is where
+    # this is enforced: `tools/evolution_reward.py` carries it as the `held-out`
+    # component, and a conjunction there admits no advisory verdict.
+    "held-out": "item 537 held-out scoring; a scorer-touching diff is REFUSED by design, so it is advisory here and enforced in the promotion reward",
     # Container/privilege smoke that needs a Docker-capable runner; flaky as a
     # hard merge gate, run for signal not enforcement.
     "sandbox-container": "container smoke; not a hard merge gate",
