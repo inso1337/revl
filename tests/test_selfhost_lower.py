@@ -3742,7 +3742,7 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_9_fixtures():
+def test_the_type_layer_gap_is_exactly_4_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     42 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
@@ -3751,13 +3751,14 @@ def test_the_type_layer_gap_is_exactly_9_fixtures():
     more, the declared-type slice (T1) `t6_bare_generic`, and the provide-method
     / component slice the whole `provide-method and component bodies` family,
     all seven of it; on top of those, the name-RESOLUTION half of the G1/G6
-    family (docs/design/457, the G1 read position) took the last two. The
-    twelfth document that moved with T3a, `dynamic_reserved_key`, never had a
-    row here because this pin addresses its fixtures by bare name under
-    `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 9, len(_TYPE_LAYER_CASES)
+    family (docs/design/457, the G1 read position) took two more, and the arrow
+    and optional-chain slices (T2c, and T2d's `?.` half) the five that leave it
+    at four: `t17`, `t32`, `t33`, `t35` and `t14`. The twelfth document that
+    moved with T3a, `dynamic_reserved_key`, never had a row here because this
+    pin addresses its fixtures by bare name under `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 4, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 9, "a fixture is listed twice"
+    assert len(set(names)) == 4, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
