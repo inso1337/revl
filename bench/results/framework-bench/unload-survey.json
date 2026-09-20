@@ -18,6 +18,7 @@
       "ecosystem": "npm",
       "version": "1.30.0",
       "role": "candidate",
+      "category": "tool-host",
       "registration_api": "McpServer.registerTool(name, config, handler)",
       "note": [
         "remove() is implemented as update({ name: null }), which deletes the",
@@ -120,6 +121,7 @@
       "ecosystem": "pypi",
       "version": "2.46.0",
       "role": "candidate",
+      "category": "agent-framework",
       "registration_api": "Agent(toolsets=[...]) with AbstractToolset",
       "note": [
         "The runner-up, and the closest thing to a real teardown contract among",
@@ -177,6 +179,7 @@
       "ecosystem": "pypi",
       "version": "1.44.1",
       "role": "candidate",
+      "category": "agent-framework",
       "registration_api": "Kernel.add_plugin(...) / add_function(...)",
       "note": [
         "The one mainstream framework that calls its unit a plugin, which made it",
@@ -254,6 +257,7 @@
       "ecosystem": "npm",
       "version": "1.5.11",
       "role": "candidate",
+      "category": "agent-framework",
       "registration_api": "createAgent({ tools: [...] })",
       "note": [
         "The framework most readers mean by 'agent framework'."
@@ -289,6 +293,7 @@
       "ecosystem": "pypi",
       "version": "1.6.3",
       "role": "candidate",
+      "category": "agent-framework",
       "registration_api": "model.bind_tools([...])",
       "note": [
         "The python side of the same framework."
@@ -325,6 +330,7 @@
       "ecosystem": "npm",
       "version": "0.18.0",
       "role": "candidate",
+      "category": "agent-framework",
       "registration_api": "new Agent({ tools: [...] })",
       "note": [
         "First-party agent SDK."
@@ -360,6 +366,7 @@
       "ecosystem": "pypi",
       "version": "1.15.22",
       "role": "candidate",
+      "category": "agent-framework",
       "registration_api": "Agent(tools=[...]) / Crew(...)",
       "note": [
         "crewai does publish an event_bus unregister for event handlers, which is",
@@ -393,6 +400,7 @@
       "ecosystem": "npm",
       "version": "4.0.0-rc.10",
       "role": "control",
+      "category": "plugin-runtime",
       "registration_api": "ctx.plugin(...) returning a Fiber",
       "note": [
         "The control. The raw-ts host already runs on a fork of this, pinned by",
