@@ -830,6 +830,15 @@ def select(changed, root) -> dict:
             # the REAL document against the REAL tree, so a doc edit that moves
             # a cited path has to re-run it.
             pytest_nodes.add("tests/test_check_vision_claims.py")
+            # issue #1300: and the self-host residual, for the same reason. The
+            # residual figure lived in prose in three documents and disagreed
+            # with `LOWER_GAP_DOCS` in all three; it is generated now, and the
+            # module below byte-compares the generated blocks and reads every
+            # remaining prose figure. `docgen --check` does that too, in the
+            # `frontend` job, which a documentation-only diff SKIPS -- so
+            # without this line the gate would miss precisely the pull request
+            # that moves one of these documents.
+            pytest_nodes.add("tests/test_selfhost_residual_is_generated.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 
