@@ -697,15 +697,45 @@ class RouteStmt:
 
 
 @dataclass
+class DeviceProfileClause:
+    """`device <class> memory <int> quant <tag>` on a `model role` (item 515).
+
+    The resource a placement DEMANDS, written in the program. It is not the
+    profile a host publishes: what the member was actually loaded onto is the
+    provider's fact (item 538) and reaches revl only inside the opaque
+    `placement_digest` of `revl.model_profile`.
+
+    SYNTAX ONLY. The device vocabulary and the positive-memory rule are
+    `revl.model_route`'s, and `quant` is an opaque tag no rule interprets."""
+    device: str
+    memory_mib: int
+    quant: str
+    line: int
+
+
+@dataclass
 class ModelRouteArm:
-    """One arm of a `route model` block: `<origin> -> <role>`.
+    """One arm of a `route model` block: `<origin> -> <role> | <role> | ...`.
 
     `origin` is an origin class from the item-249 lattice, or `"*"` for the
-    catch-all. `role` names a `model role` declaration. SYNTAX ONLY — every
-    rule over the pair lives in `revl.model_route`."""
+    catch-all. `role` names a `model role` declaration and is the arm's HEAD,
+    the placement item 514's ceiling reads. `alternates` is the rest of the
+    ordered candidate set a scheduler may fall back to (item 515), empty for
+    every arm written before that surface existed.
+
+    `role` may also be the literal `"*"`, which parses so that
+    `revl.model_route` can refuse "any available role" BY NAME rather than as
+    a bare syntax error. SYNTAX ONLY — every rule over the pair lives in
+    `revl.model_route`."""
     origin: str
     role: str
     line: int
+    alternates: tuple = ()
+
+    @property
+    def candidates(self) -> tuple:
+        """The ordered candidate set: the head first, then the alternates."""
+        return (self.role,) + tuple(self.alternates)
 
 
 @dataclass
@@ -735,10 +765,14 @@ class ModelRoleDecl:
     vocabulary in `revl.model_route`, never here.
 
     `model` is a CONTEXTUAL keyword on the `retention`/`secret` discipline — it
-    heads a declaration only in the shape `model role NAME <residence>`."""
+    heads a declaration only in the shape `model role NAME <residence>`.
+
+    `profile` is the optional item-515 device clause, `None` for a role
+    written without one."""
     name: str
     residence: str
     line: int
+    profile: object = None
 
 
 @dataclass
@@ -2735,7 +2769,27 @@ class Parser:
         name = self.expect("ident", what="a model role name").value
         residence = self.expect(
             "ident", what="a residence for the role (`on_device` or `off_device`)").value
-        return ModelRoleDecl(name, residence, line)
+        profile = None
+        if self.at("ident", "device"):
+            # item 515: `device <class> memory <int> quant <tag>`. `device`,
+            # `memory` and `quant` are CONTEXTUAL identifiers read only in this
+            # slot, immediately after a residence, so KEYWORDS is untouched and
+            # a program using any of the three as an ordinary name keeps
+            # parsing. The clause is OPTIONAL: every role on the tree today has
+            # none, so nothing that compiles stops compiling.
+            dline = self.next().line
+            device = self.expect(
+                "ident", what="a device class (`cpu`, `gpu` or `npu`)").value
+            self.expect("ident", value="memory",
+                        what="`memory <MiB>` after the device class")
+            memory = self.expect(
+                "int", what="the resident memory the placement needs, in MiB")
+            self.expect("ident", value="quant",
+                        what="`quant <tag>` after the memory floor")
+            quant = self.expect(
+                "ident", what="a quantisation tag for the placement").value
+            profile = DeviceProfileClause(device, memory.value, quant, dline)
+        return ModelRoleDecl(name, residence, line, profile)
 
     def model_route_stmt(self) -> ModelRouteStmt:
         """`route model on <action> { <origin> -> <role>, ... }` (item 512).
@@ -2764,13 +2818,34 @@ class Parser:
                     "ident", what="an origin class, or `*`, on the left of `->`")
                 origin = origin_tok.value
             self.expect("arrow", what=f"`->` after `{origin}`")
-            role = self.expect(
-                "ident", what=f"a model role name after `{origin} ->`").value
-            arms.append(ModelRouteArm(origin, role, origin_tok.line))
+            role = self._model_route_candidate(origin)
+            # item 515: `<origin> -> a | b | c` is an ORDERED candidate set a
+            # scheduler may pick from. The head stays first, so item 514's
+            # ceiling reads exactly what it read before the alternates existed.
+            alternates: list[str] = []
+            while self.at("|"):
+                self.next()
+                alternates.append(self._model_route_candidate(origin))
+            arms.append(ModelRouteArm(origin, role, origin_tok.line,
+                                      tuple(alternates)))
             if self.at(","):
                 self.next()
         self.expect("}")
         return ModelRouteStmt(action, arms, line)
+
+    def _model_route_candidate(self, origin: str) -> str:
+        """One candidate on the right of a `route model` arrow (item 515).
+
+        `*` is accepted HERE and refused in `revl.model_route`. It is the
+        spelling an author reaches for to mean "any available role", and a
+        bare parse error would answer it with a syntax complaint rather than
+        with the reason: a scheduler that may pick a role no arm names is the
+        fail-open shape this item exists to remove."""
+        if self.at("*"):
+            self.next()
+            return "*"
+        return self.expect(
+            "ident", what=f"a model role name after `{origin} ->`").value
 
     def extern_decl(self, public: bool) -> ExternDecl:
         line = self.expect("kw", "extern").line
