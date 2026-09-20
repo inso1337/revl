@@ -3907,7 +3907,7 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_5_fixtures():
+def test_the_type_layer_gap_is_empty():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     42 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
@@ -3918,17 +3918,20 @@ def test_the_type_layer_gap_is_exactly_5_fixtures():
     all seven of it; on top of those, the name-RESOLUTION half of the G1/G6
     family (docs/design/457, the G1 read position) took two more, and the rest
     of T3b — match exhaustiveness with its unknown-arm twin, the transparent
-    alias cycle and the non-record destructuring rule — took the last four,
+    alias cycle and the non-record destructuring rule — took four more,
     emptying both the `return paths and match` and the `declarations` families.
     The twelfth document that moved with T3a, `dynamic_reserved_key`, never had
     a row here because this pin addresses its fixtures by bare name under
     `examples/rejections/`.
 
-    What is left is one family and a half: the optional-chain rule (T2d) and
-    the four arrow/function-value documents (T2c)."""
-    assert len(_TYPE_LAYER_CASES) == 5, len(_TYPE_LAYER_CASES)
-    names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 5, "a fixture is listed twice"
+    The last five went together: the optional-chain rule (T2d) took
+    `t14_optional_chain_on_nonoptional` out of the expression-typing family,
+    and the function-value rule (T2c) took the four arrow documents. Nothing is
+    pinned here any more, so this pin now reads as a floor rather than a
+    ceiling: a fixture the gate stops refusing has to come back through a row
+    added here and through `KNOWN_BYPASSES`, in the diff, rather than by
+    widening a number."""
+    assert _TYPE_LAYER_CASES == [], _TYPE_LAYER_CASES
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
