@@ -7913,7 +7913,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # ceiling is the union of what it holds and what the model role it routes
     # through can reach, so a role reaching past its component is refused with
     # both sets named. Inert for a program that declares no `model role`, which
-    # is every program that does not opt in (docs/design/539-model-in-
+    # is every program that does not opt in (docs/design/541-model-in-
     # attenuation.md).
     model_product = _collect(_check_model_attenuation, live_components,
                              services, model_roles, model_routes,
@@ -15159,7 +15159,7 @@ def _check_model_attenuation(components: list[dict], services: dict,
     crossing whose declared token does not PROVE it is some other boundary
     counts as a model call (`_consults_a_model`).
 
-    SCOPE. Slice 1 of `docs/design/539-model-in-attenuation.md`: the roles a
+    SCOPE. Slice 1 of `docs/design/541-model-in-attenuation.md`: the roles a
     component's `route model` block NAMES, against what that component holds.
     Which role a given crossing actually reaches is item 512's slice 4 (the
     crossing carries a `model.<role>` token), and until it lands every named

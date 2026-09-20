@@ -115,7 +115,7 @@ component is refused with both sets named. An omitted `reaches` clause leaves
 the reach UNDECLARED, which resolves to the unnameable `*` and not to an empty
 set: a model is an authority surrogate, so treating one nothing has been said
 about as inert would be the fail-open reading. See
-`docs/design/539-model-in-attenuation.md` and `docs/capability-attenuation.md`.
+`docs/design/541-model-in-attenuation.md` and `docs/capability-attenuation.md`.
 
 A declared receiver is not a licence to RECORD. A `Secret[T]` declaration
 authorises disclosure to the receiver it names; it says nothing about a durable
