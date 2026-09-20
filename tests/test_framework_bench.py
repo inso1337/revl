@@ -820,3 +820,66 @@ def test_a_one_attempt_corpus_reports_tokens_to_green_as_a_lower_bound(tmp_path,
     assert framework_bench._retry_censoring("oneshot", [])["censored"]
     (d / "attempt-2.rvl").write_text("component A { }\n")
     assert "censored" not in framework_bench._retry_censoring("oneshot", [])
+
+
+# ---------------------------------------------------------------------------
+# The unload survey reported as a result rather than as a selection rationale
+# ---------------------------------------------------------------------------
+
+
+def test_the_unload_finding_counts_agent_frameworks_and_nothing_else(report):
+    """The surveyed set also holds a tool host and a control. The tool host is
+    the one package with a per-registration retirement and the control was
+    chosen because its unload path was known to exist, so both exclusions run
+    against the finding rather than for it. Counting either in would be a
+    category error in the direction that flatters the result."""
+    cell = report["columns"]["unload-paths"]
+    if cell["status"] != "measured":
+        pytest.skip("no committed survey")
+    surveyed = cell["surveyed"]
+    kinds = {row["category"] for row in surveyed}
+    assert "plugin-runtime" not in kinds, "the control must not be in the table body"
+    counted = [r for r in surveyed if r["category"] == "agent-framework"]
+    assert cell["agent_frameworks_n"] == len(counted)
+    assert len(cell["agent_frameworks_none_published"]) \
+        + len(cell["agent_frameworks_per_registration"]) <= cell["agent_frameworks_n"]
+    tool_hosts = [r for r in surveyed if r["category"] == "tool-host"]
+    for row in tool_hosts:
+        assert row["name"] not in cell["agent_frameworks_per_registration"]
+
+
+def test_the_unload_finding_leads_and_names_every_package_and_version(report):
+    cell = report["columns"]["unload-paths"]
+    if cell["status"] != "measured":
+        pytest.skip("no committed survey")
+    body = framework_bench.render(report)
+    assert body.index("## Unload paths across the ecosystem") < body.index("## The table"), (
+        "the finding is what makes the residue column legitimate, so it comes "
+        "before the table that column is in")
+    for row in cell["surveyed"]:
+        assert row["name"] in body and row["version"] in body, (
+            "an outsider checking this needs the package and the version")
+
+
+def test_the_report_records_how_the_survey_could_have_been_wrong(report):
+    """A survey that only reports its conclusion is worth less than one that
+    records the version of itself that was wrong."""
+    cell = report["columns"]["unload-paths"]
+    if cell["status"] != "measured":
+        pytest.skip("no committed survey")
+    wrong = cell["how_it_could_have_been_wrong"]
+    assert "list.remove()" in wrong, "the false-positive shape has to be named"
+    assert "six of the eight" in wrong, (
+        "the count has to be the one that happened, not a round number")
+    assert cell["what_it_does_not_say"]
+    assert framework_bench.render(report).count("list.remove()") >= 1
+
+
+def test_the_unload_claim_carries_its_denominator_in_its_own_text(report):
+    claims = [c for c in report["claims"] if "agent frameworks" in c["text"]]
+    if not claims:
+        pytest.skip("no committed survey")
+    for claim in claims:
+        assert "n=" in claim["text"]
+        assert "excluding the control" in claim["text"], (
+            "quoted out of context, the claim must still say what it excluded")
