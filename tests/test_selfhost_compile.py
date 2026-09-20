@@ -548,10 +548,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # host declaration's runtime block and `selfhost/lower.rvl` does not, so
         # the native chain emits 7,067 bytes against the reference's 11,094 —
         # the module with no `Job`/`JobHandle` runtime in it. `comp_stream.rvl`
-        # is refused before any rust is built (the same G1 `NATIVE_GATE_GAPS`
-        # records below). Both are `selfhost/lower.rvl`'s, and both are NAMED
-        # rather than skipped, so the day lower.rvl grows either surface this
-        # list shrinks instead of quietly keeping a waiver nobody rereads.
+        # is no longer refused before any rust is built: the item-130 stream
+        # statement forms landed in `selfhost/lower.rvl` (#1139) and the native
+        # gate now ADMITS it, so its residual is measured in bytes by the same
+        # comparison as every document above. Both are `selfhost/lower.rvl`'s,
+        # and both are NAMED rather than skipped, so the day lower.rvl grows
+        # either surface this list shrinks instead of quietly keeping a waiver
+        # nobody rereads.
         "comp_await_job.rvl",
         "comp_stream.rvl",
     ),
@@ -710,7 +713,6 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
 # returns "" and this test fails on the stale entry instead of quietly keeping a
 # waiver nobody rereads. Never add a line here to make a red go away — read what
 # it names first.
-NATIVE_GATE_GAPS: dict[str, str] = {
     # `selfhost/lower.rvl`'s extern grammar now knows every extern classification
     # the reference does: `pure`/`acquire`/`emission` (reserved keywords) and the
     # contextual `witnessed` class (item 243), each with an optional `[caps]`
@@ -719,20 +721,27 @@ NATIVE_GATE_GAPS: dict[str, str] = {
     # — the gate admits it, and its `lower_to_ir` externs section was already
     # byte-exact (tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP is empty).
     #
-    # `selfhost/lower.rvl` does not put a `subscribe` acquisition's bind into the
-    # component scope it resolves call heads against (`call_head_declared` reads
-    # `cx.scopeNames`), so the later `sub.next()` reads as an undeclared access
-    # and draws the shared G1 diagnostic. The REFERENCE admits the document; it
-    # is the self-host frontend that refuses, and it refuses the tree's existing
-    # stream scenario `backends/rust/scenarios/stream.rvl` with the identical
-    # verdict. So this is a pre-existing lower.rvl gap that the first stream
-    # document in the emit corpus makes visible, not one this document
-    # introduces, and it is the frontend lane's to close (item 391), not the
-    # emitter's: the rust emit oracle holds this same document byte-exact
-    # against the reference, stream runtime and all (issue 1153).
-    "emit_rust_corpus/comp_stream.rvl":
-        "G1|`sub` is not a declared requirement of Parked",
-}
+    # The table is EMPTY, and that is the ratchet having worked rather than a
+    # list nobody maintained: both entries it ever held closed by returning "",
+    # and a closed entry is DELETED rather than reworded.
+    #
+    # The stream entry (`emit_rust_corpus/comp_stream.rvl`, pinned to
+    # `G1|`sub` is not a declared requirement of Parked`) was the second of the
+    # two, and the gap is worth recording because it was never the document's.
+    # The REFERENCE admitted it throughout; `selfhost/lower.rvl` did not put a
+    # `subscribe` acquisition's bind into the component scope it resolves call
+    # heads against (`call_head_declared` reads `cx.scopeNames`), so the later
+    # `sub.next()` read as an undeclared access and drew the shared G1
+    # diagnostic, and it refused the tree's existing stream scenario
+    # `backends/rust/scenarios/stream.rvl` with the identical verdict. That is
+    # what made it a lower.rvl gap which the first stream document in the emit
+    # corpus merely made visible (issue 1153) rather than one the document
+    # introduced. The item-130 stream statement forms closed it (#1139, whose
+    # own title records these false-reject/G1 verdicts to zero), the gate now
+    # returns "" here, and the document's residual moved to the byte comparison
+    # `LOWER_GAP_DOCS` above rather than leaving the corpus: the rust emit
+    # oracle holds it byte-exact against the reference, stream runtime and all.
+NATIVE_GATE_GAPS: dict[str, str] = {}
 
 
 def test_native_gate_admits_the_whole_emit_surface(admit):
