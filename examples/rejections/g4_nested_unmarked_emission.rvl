@@ -1,0 +1,16 @@
+// REJECTED — G4: an emission evaluated to build an `emit`'s argument, with no
+// marker of its own. One `emit` marks one boundary crossing: the marker covers
+// the head call `a.send`, and the head's arguments are judged in the position
+// the `emit` sits in, so the unmarked `b.fetch()` there draws the refusal it
+// would draw one statement earlier. Hoist it into its own `emit` step; a
+// provide method binds the value with `let r = emit b.fetch()`.
+//
+// expected error:
+//   call to emission `b.fetch` must be marked `emit` (G4)
+
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+
+component C requires a: A, b: B {
+  emit a.send(b.fetch())
+}
