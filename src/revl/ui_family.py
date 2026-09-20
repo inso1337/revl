@@ -1,5 +1,5 @@
 """The reserved computer-use capability namespace (roadmap item 521,
-docs/design/531-typed-computer-use.md, Slice 1).
+docs/design/532-typed-computer-use.md, Slice 1).
 
 A computer-use agent is the one program shape that breaks G8 by construction:
 its reach is "whatever the GUI permits", which is not an enumerable boundary,
@@ -76,7 +76,7 @@ VERBS: dict[str, dict[str, str]] = {
 
 #: The design doc this namespace is specified by, cited in every refusal so a
 #: reader lands on the argument rather than on the table.
-DESIGN = "docs/design/531-typed-computer-use.md"
+DESIGN = "docs/design/532-typed-computer-use.md"
 
 
 def spellings() -> list[str]:
