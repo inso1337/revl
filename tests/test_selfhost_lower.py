@@ -1583,6 +1583,24 @@ boot component B2 provides e2: Env2 {
      _fixture("host_method_not_on_surface"), "HOST-METHOD"),
     ("g4 an extern undo slot's argument type",
      _fixture("g4_extern_undo_wrong_arg_type"), "T1"),
+    # ---- arrows and function values (docs/design/457 T2c) ------------------
+    # An arrow is an expression and item 75(a) settles which one: its body is
+    # walked over the enclosing scope, its arity is exact whatever its
+    # parameter types are, and a name written in its annotation is the
+    # enclosing `fn`'s type parameter or an opaque nominal, never a fresh one.
+    ("t17 an arrow body reaching through an optional",
+     _fixture("t17_arrow_body_unchecked"), "T1"),
+    ("t32 an arrow value's result in a position that cannot hold it",
+     _fixture("t32_arrow_value_result_flows"), "T1"),
+    ("t33 a call through an arrow value at the wrong arity",
+     _fixture("t33_arrow_value_arity"), "T1"),
+    ("t35 an arrow annotation is not quantified",
+     _fixture("t35_arrow_annotation_not_quantified"), "T1"),
+    # ---- optional chaining (docs/design/457 T2d) ---------------------------
+    # `?.` requires an optional on its left; on a value that is always present
+    # the short-circuit is dead syntax the strict tiers cannot render.
+    ("t14 an optional chain on a non-optional",
+     _fixture("t14_optional_chain_on_nonoptional"), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
@@ -3545,29 +3563,23 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # `dynamic_reserved_key` moved into REJECTED_PROGRAMS above, where tag AND
     # message are compared, and left this list.
     #
-    # What stays needs the optional-chaining rules the expression slice did not
-    # build: `?.` on a non-optional is decided from the target's type at the
-    # CHAIN, which is T2d's.
-    "expression typing (T1/T2)": [
-        ("t14_optional_chain_on_nonoptional", "T1"),
-    ],
+    # The optional-chaining rule closed the rest (docs/design/457 T2d):
+    # `t14_optional_chain_on_nonoptional` is now in REJECTED_PROGRAMS above,
+    # where tag AND message are compared, so this family has no row left here.
     # calls and signatures: LANDED whole (docs/design/457 T2b). The signature
     # table, `unify`/`substitute`, the host stub surface, `_BUILTIN_SIG` and the
     # four lowering-time method refusals moved all nine of this family's
     # fixtures into REJECTED_PROGRAMS above, where tag AND message are compared,
     # so the family has no row left here.
-    # arrows and function values: arrow-body checking, function-value flow and
-    # arity, arrow annotations. (The self-declared async colour,
-    # t34_arrow_self_declared_async, was in this family until the gate learned
-    # to parse an arrow's written return annotation and refuse a self-declared
-    # `Async[…]` colour — rule C1 — so it now AGREES with the reference and has
-    # left this gap; see agree-refuse/A1 in the census.)
-    "arrows and function values": [
-        ("t17_arrow_body_unchecked", "T1"),
-        ("t32_arrow_value_result_flows", "T1"),
-        ("t33_arrow_value_arity", "T1"),
-        ("t35_arrow_annotation_not_quantified", "T1"),
-    ],
+    # arrows and function values: LANDED WHOLE (docs/design/457 T2c). The
+    # self-declared async colour (t34_arrow_self_declared_async) left first,
+    # when the gate learned to parse an arrow's written return annotation and
+    # refuse a self-declared `Async[…]` colour — rule C1. The other four went
+    # with the expression rule: an arrow types as a function value, its body is
+    # walked over the enclosing scope, a call through such a value is checked
+    # for arity and per argument, and an arrow annotation names the enclosing
+    # `fn`'s type parameter or an opaque nominal but never a fresh one. All
+    # four are in REJECTED_PROGRAMS above, where tag AND message are compared.
     # return paths and match: unknown/missing match cases. The RETURN-PATH half
     # has LANDED (docs/design/457 T3b): `fb_function` runs
     # `_check_returns_on_every_path` over the statement tree `fb_scan` already
