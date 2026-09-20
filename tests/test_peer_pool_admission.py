@@ -3,7 +3,7 @@
 Four things are held here, in the order they matter.
 
 1. NON-VACUITY. Before this change the only check a peer faced was
-   ``peer_offer.verify_offer`` — there was no pool for it to join, so nothing
+   ``peer_offer.verify_offer``. There was no pool for it to join, so nothing
    refused it on pool grounds. The corpus below is a set of join requests that
    ALL clear that pre-existing check and that the gate refuses, each on a
    different named link, plus a control that both admit. A gate that refuses
@@ -19,7 +19,7 @@ Four things are held here, in the order they matter.
    structurally: an AST walk asserts a ``Membership`` is constructed in exactly
    one function, that the tier grant is computed in exactly one function, and
    that every function that issues a membership also runs the diff. A behavioural
-   test cannot prove this — it can only show the orderings it happened to try —
+   test cannot prove this: it can only show the orderings it happened to try,
    so the structure is asserted directly.
 
 4. WITHDRAWAL IS THREE WORDS (item 546's shape). What a withdrawal restores,

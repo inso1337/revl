@@ -86,16 +86,16 @@ must not be one word covering both what is restored and what is merely
 compensated. A peer's history is exactly that shape, so :class:`Withdrawal`
 reports three disjoint sets and never a single boolean:
 
-* ``revoked`` — the caps and budgets the peer held and holds no longer. This IS
+* ``revoked``, the caps and budgets the peer held and holds no longer. This IS
   an inverse: after a withdrawal the peer's authority is byte-for-byte the
   authority of a peer that never joined.
-* ``retained`` — the receipts it delivered, the evidence it accumulated, the
+* ``retained``, the receipts it delivered, the evidence it accumulated, the
   effects already witnessed, and the highest tier it reached. Withdrawal does
   not un-observe any of it. It stays in the ledger, and it does NOT re-confer
   authority: a withdrawn peer that joins again re-enters at
   :data:`ENTRY_TIER`, because the evidence is a record of what happened and not
   a credential that survives its holder's removal.
-* ``orphaned`` — work dispatched to the peer that had not been delivered when
+* ``orphaned``, work dispatched to the peer that had not been delivered when
   it left. This is neither restored nor compensated here. It is named and
   handed to ``lawful_retry.dispatch_on_loss``, which is the module that already
   owns replay-versus-compensate, so the effect of a peer leaving on outstanding
@@ -151,7 +151,7 @@ SIGNATURE_FIELD = "signature"
 
 #: Three protocols, three domains. Without domain separation a charter, a join
 #: and a pool receipt are the same `hmac(key, canonical(body))` construction, so
-#: one could be replayed as another under a shared key — and the same reasoning
+#: one could be replayed as another under a shared key, and the same reasoning
 #: keeps all three distinct from `attest.SIGN_DOMAIN`, `peer_offer.SIGN_DOMAIN`
 #: and the deploy-receipt domain.
 CHARTER_DOMAIN = b"revl.pool-charter/v1\x00"
@@ -748,7 +748,7 @@ def _refusal(link: str, reason: str, **extra) -> dict:
     :data:`REFUSAL_LINKS`: this function is on the refusal path and the gate's
     contract is that it never raises, so an internal check here could turn a
     refusal into a crash on exactly the hostile input the refusal exists for.
-    The link set is instead held STATICALLY — ``tests/test_peer_pool_admission``
+    The link set is instead held STATICALLY. ``tests/test_peer_pool_admission``
     walks this module's AST and fails if any ``_refusal`` call names something
     outside :data:`REFUSAL_LINKS`, or if a link in it is never reached."""
     return {"kind": RECEIPT_KIND, "version": RECEIPT_VERSION,
@@ -781,12 +781,12 @@ def _ceiling_precondition(charter: PoolCharter, tier: str, peer_id: str,
     Two diffs, both fail-closed:
 
     * the tier grant against the CHARTER CEILING, via
-      ``peer_authority.grant_widenings`` — the pool never delegates authority it
+      ``peer_authority.grant_widenings``: the pool never delegates authority it
       does not itself hold, and measuring against the charter rather than the
       tier below means an error in one rung cannot raise the ceiling for the
       rungs above it;
     * the tier grant against the PEER's own advertised ``grant_ceiling``, via
-      ``cap_order.covers_set`` — a peer is never handed more than it said it
+      ``cap_order.covers_set``: a peer is never handed more than it said it
       would accept, which is ``peer_offer``'s own seam to this invariant.
     """
     if tier not in charter.tiers:
@@ -852,7 +852,7 @@ def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
     """Decide whether a peer joins the pool, and at what tier.
 
     Returns a receipt: ``verdict: ADMIT`` with the issued tier and grant, or
-    ``verdict: REFUSE`` naming one of :data:`REFUSAL_LINKS`. NEVER raises — a
+    ``verdict: REFUSE`` naming one of :data:`REFUSAL_LINKS`. NEVER raises, because a
     hostile peer-supplied join record must not be able to break that contract,
     which is the same rule ``peer_offer.verify_offer`` holds and for the same
     reason: the wire is hostile.
@@ -1174,7 +1174,7 @@ ROSTER_FILE = "roster.json"
 
 
 def _read_json(path) -> Any:
-    from pathlib import Path  # noqa: PLC0415 — lazy
+    from pathlib import Path  # noqa: PLC0415 (lazy)
 
     with open(Path(path), "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -1236,12 +1236,12 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster) -> str:
 
 
 def pool_command(args) -> int:
-    """`revl pool` — stand a private pool up, join a peer to it, read its
+    """`revl pool`: stand a private pool up, join a peer to it, read its
     membership, withdraw a peer.
 
     Every verb prints a receipt and exits nonzero on a refusal, so an operator
     script reads the exit status and an operator reads the named link."""
-    from .attest import resolve_key  # noqa: PLC0415 — lazy
+    from .attest import resolve_key  # noqa: PLC0415 (lazy)
     from .errors import RevlError  # noqa: PLC0415
 
     import sys  # noqa: PLC0415
