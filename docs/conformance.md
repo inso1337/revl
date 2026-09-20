@@ -241,6 +241,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `T1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/t1_service_arg_type.rvl`](../examples/rejections/t1_service_arg_type.rvl) |
 | `T2` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/t2_null_in_expression.rvl`](../examples/rejections/t2_null_in_expression.rvl) |
 | `T3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/gate.py`](../src/revl/gate.py) |
+| `G-COUNCIL-SPLIT` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/model_council.py`](../src/revl/model_council.py) |
 | `G-MODEL-PLACE` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/model_route.py`](../src/revl/model_route.py) |
 | `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_expired_at_persistence_sink.rvl`](../examples/rejections/gretain_expired_at_persistence_sink.rvl) |
 | `G-SECRET` | **div** | **div** | no repro | **div** | **div** | **div** | no repro | [`src/revl/taint.py`](../src/revl/taint.py) |
@@ -249,13 +250,13 @@ The six host columns share their verdict wherever a register does not separate t
 
 | tier | proved | div | no repro | unimpl |
 |---|---|---|---|---|
-| py | 17 | 2 | 5 | 0 |
-| ts | 17 | 2 | 5 | 0 |
-| rust | 18 | 0 | 6 | 0 |
-| java | 17 | 2 | 5 | 0 |
-| wasm | 17 | 2 | 5 | 0 |
-| go | 17 | 2 | 5 | 0 |
-| revl | 4 | 6 | 6 | 8 |
+| py | 17 | 2 | 6 | 0 |
+| ts | 17 | 2 | 6 | 0 |
+| rust | 18 | 0 | 7 | 0 |
+| java | 17 | 2 | 6 | 0 |
+| wasm | 17 | 2 | 6 | 0 |
+| go | 17 | 2 | 6 | 0 |
+| revl | 4 | 6 | 7 | 8 |
 
 **Why a cell is not `proved`.** Every non-`proved` cell above, with the register or the reason that decided it:
 
@@ -274,6 +275,7 @@ The six host columns share their verdict wherever a register does not separate t
 - `A9` on revl is **unimplemented**. The self-host gate raises no objection to any A9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `T1` on revl is a **recorded divergence**. The self-host gate agrees on 24 of 30 T1 reproducers; the rest it admits.
 - `T3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. An open hole is refused at the ADMISSION gate rather than by `compile_files`, so a hole fixture compiles here and is refused one stage later; the reproducers live with the gate (`src/revl/holes.py`, `docs/holes.md`).
+- `G-COUNCIL-SPLIT` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Issue #1190 registers the code with its reproducers as INLINE strings in `tests/test_council_disagreement_1190.py` and as `revl reject G-COUNCIL-SPLIT` fences in `docs/design/557-council-disagreement.md`, compiled by `tests/test_doc_examples.py`. A fixture file cannot go in `examples/rejections/` yet: that directory is a census corpus root and `selfhost/parser.rvl` answers any `model council` program `BAD|unexpected token at top level`, so the fixture would enter the census as a divergence against a self-host that cannot read it. Remove this entry when the self-host port lands (issue #1291); a stale acknowledgement fails this gate.
 - `G-MODEL-PLACE` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Item 512 lands the rule with its reproducers as INLINE
                       strings in `tests/test_model_placement_512.py` and
                       `tests/test_model_ceiling_514.py` rather than as fixture

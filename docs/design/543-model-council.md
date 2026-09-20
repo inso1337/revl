@@ -212,7 +212,7 @@ has exactly two members: `split`, the default, which returns the dissent; and
 admitting outcome**, and the spellings for one are enumerated so that the
 refusal can be precise:
 
-```revl reject G-MODEL-PLACE
+```revl reject G-COUNCIL-SPLIT
 model role edge on_device
 model role aux  on_device
 model role vast off_device
@@ -226,14 +226,14 @@ model council Release {
 ```
 
     `on_tie allow` in model council `Release` admits when the members disagree
-    (G-MODEL-PLACE)
+    (G-COUNCIL-SPLIT)
 
 That is the roadmap's own exit test for the declaration half, and its hint
 names both admitted outcomes so the fix does not require reading this note.
 
 The same shape refuses the rule that picks a member rather than aggregating:
 
-```revl reject G-MODEL-PLACE
+```revl reject G-COUNCIL-SPLIT
 model role edge on_device
 model role vast off_device
 
@@ -245,7 +245,7 @@ model council Release {
 ```
 
     `aggregate first` in model council `Release` resolves disagreement toward
-    one member's answer (G-MODEL-PLACE)
+    one member's answer (G-COUNCIL-SPLIT)
 
 ---
 
@@ -378,15 +378,16 @@ All of it lives in `src/revl/model_council.py`, beside the rules, the way
 `revl.model_route` holds item 512's. The parser reads the shape and validates
 nothing.
 
-Every refusal carries `G-MODEL-PLACE`. **No new guarantee code is registered.**
-The council is the placement family's second construct, not a second family:
-the code already reads "a model role declared `off_device` never receives a
-confidentiality origin, and an action reaches only the roles its `route model`
-block names", and every rule below is a rule about which roles a declaration
-binds and how. Registering a new code would also have needed either a
-reproducer under `examples/rejections/` or an `ACKNOWLEDGED` entry in
-`tools/tier_guarantees.py` for item 523's generated tier matrix, and adding a
-family for a slice that adds no new class of refusal is not worth either.
+**Superseded by `docs/design/557-council-disagreement.md` (issue #1190).**
+This slice filed all thirteen refusals under `G-MODEL-PLACE`, on the reading
+that the council is the placement family's second construct rather than a
+second family. Note 557 kept two of them there and gave the other eleven their
+own code, `G-COUNCIL-SPLIT`, for a reason this note did not weigh: a code is
+not a label, it is the `guarantee` and `fix` pair `revl.diagnostics.classify()`
+hands an agent so it can react without reading prose, and item 512's fix line
+says to route the origin to a role declared `on_device`, which is not the
+rewrite for any refusal in rows 1 and 3 to 13. The rows below still hold; the
+code column is 557 section 3's.
 
 | # | The decision | Direction |
 | - | ------------ | --------- |
@@ -547,7 +548,7 @@ Measured, on the gate built from `selfhost/lower.rvl` at this branch:
 | the component with no model declaration (control) | admits | `''` (admits) |
 | `model role` alone (item 512, shipped) | admits | `BAD\|unexpected token at top level` |
 | a council with `aggregate unanimous` | admits | `BAD\|unexpected token at top level` |
-| the same council with `on_tie allow` | refuses `G-MODEL-PLACE` | `BAD\|unexpected token at top level` |
+| the same council with `on_tie allow` | refuses `G-COUNCIL-SPLIT` | `BAD\|unexpected token at top level` |
 | a shipped `retention` declaration (item 472) | admits | `BAD\|unexpected token at top level` |
 
 The gate refuses both, so it never admits a program whose aggregation it cannot
@@ -585,7 +586,11 @@ Each slice is independently landable and carries its oracle in the same PR.
 `tests/test_model_council_516.py` is the standing guard on every one.
 
 **S1. The declaration, checked. LANDED with this note.** The surface of section
-2, the thirteen refusals of section 8, no IR, no new guarantee code.
+2, the thirteen refusals of section 8, no IR. Section 8's "no new guarantee
+code" was revisited by item 1190 and
+`docs/design/557-council-disagreement.md`, which registers
+`G-COUNCIL-SPLIT` for eleven of the thirteen; nothing else in this slice
+moved.
 
 **S2. Binding a council to an action.** A `route model` arm names a council
 where it today names a role, and the council's residence (section 6) is what

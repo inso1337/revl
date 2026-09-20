@@ -113,6 +113,20 @@ ACKNOWLEDGED: dict[str, str] = {
           "stage later; the reproducers live with the gate "
           "(`src/revl/holes.py`, `docs/holes.md`).",
     "G-MODEL-PLACE": "item 512 lands the rule with its reproducers as INLINE\n                      strings in `tests/test_model_placement_512.py` and\n                      `tests/test_model_ceiling_514.py` rather than as fixture\n                      files, deliberately: `examples/rejections/` is a census\n                      corpus root, and the self-host port of `route model` is\n                      slice 3, so until a named `MODEL` marker exists the\n                      self-host answers a fixture here `BAD|unexpected token at\n                      top level` and it would enter the census as\n                      `refuse-out-of-slice/BAD`. Remove this entry when slice 3\n                      lands; a stale acknowledgement fails this gate.",
+    "G-COUNCIL-SPLIT": "issue #1190 registers the code with its reproducers "
+                       "as INLINE strings in "
+                       "`tests/test_council_disagreement_1190.py` and as "
+                       "`revl reject G-COUNCIL-SPLIT` fences in "
+                       "`docs/design/557-council-disagreement.md`, compiled "
+                       "by `tests/test_doc_examples.py`. A fixture file "
+                       "cannot go in `examples/rejections/` yet: that "
+                       "directory is a census corpus root and "
+                       "`selfhost/parser.rvl` answers any `model council` "
+                       "program `BAD|unexpected token at top level`, so the "
+                       "fixture would enter the census as a divergence "
+                       "against a self-host that cannot read it. Remove this "
+                       "entry when the self-host port lands (issue #1291); a "
+                       "stale acknowledgement fails this gate.",
     "T-UNRESOLVED": "refused by the checker (`src/revl/typecheck.py`) for a "
                     "type the compilation does not declare, which is a "
                     "multi-file condition a single-file fixture in this corpus "
@@ -200,17 +214,31 @@ def guarantee_text(code: str) -> str:
 def enforcement_sites(code: str) -> list[str]:
     """The reference modules that raise under `code`, read off the source.
 
-    Two spellings, because the compiler uses both: an explicit
-    `code="G9"` keyword on the RevlError, and the `(G9)` tag the message
-    convention embeds. A code with neither is not enforced by this frontend at
-    all, which is a verdict rather than a gap in this tool.
+    Three spellings, because the compiler uses all three: an explicit
+    `code="G9"` keyword on the RevlError, the `(G9)` tag the message convention
+    embeds, and a module-level `CODE = "G-MODEL-PLACE"` constant that every
+    raise in the file then passes by name. A code with none of the three is not
+    enforced by this frontend at all, which is a verdict rather than a gap in
+    this tool.
+
+    The constant spelling was added for issue #1190. `src/revl/model_council.py`
+    holds its code in `CODE` and passes it through one `_err` helper, so no
+    literal reaches a raise site and the module read as "not an enforcement
+    site" while it was refusing eleven shapes. That is the wrong direction for
+    a matrix to be wrong in: it reported a checked guarantee as unimplemented
+    on every tier. The pattern is anchored to a module-level assignment
+    (`^[A-Z_]*CODE = "..."`), so naming a code in prose still does not count as
+    enforcing it.
     """
     tag = re.compile(r"\(" + re.escape(code) + r"\)")
     keyword = re.compile(r"""code\s*=\s*["']""" + re.escape(code) + r"""["']""")
+    constant = re.compile(
+        r"""^[A-Z_]*CODE\s*=\s*["']""" + re.escape(code) + r"""["']""",
+        re.MULTILINE)
     hits = []
     for path in sorted((ROOT / "src" / "revl").glob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if keyword.search(text) or tag.search(text):
+        if keyword.search(text) or tag.search(text) or constant.search(text):
             hits.append(f"src/revl/{path.name}")
     return hits
 
