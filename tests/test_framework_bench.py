@@ -787,3 +787,36 @@ def test_a_containment_figure_without_an_attribution_split_is_refused():
            "summary": {"revl": {"attempts": 3, "complied": 2, "containment": 2,
                                 "escapes": 0}}}
     assert any("attribution split" in p for p in injection_escape.check(doc))
+
+
+def test_a_reported_token_count_is_never_compared_with_an_estimated_one():
+    """They count different things. A reported count includes a reasoning
+    channel the caller paid for and never saw; an estimated count is recounted
+    from the source that survived and cannot include it. The pinned model spent
+    3693 completion tokens on a 358-character answer, so the two differ by an
+    order of magnitude for the same work."""
+    cell = framework_bench.column_tokens_to_green(
+        "typed-deepseek-v4-pro", ROOT, {"present": False})
+    if cell["status"] != "measured":
+        pytest.skip("no committed token corpus")
+    assert cell["token_source"] in (
+        "reported by the endpoint that served the run",
+        "estimated from the committed source")
+    assert cell["sources_are_not_comparable"]
+    body = framework_bench.render(framework_bench.build_report(
+        type("A", (_Args,), {"tokens_from": "typed-deepseek-v4-pro"})()))
+    assert "What the tokens-to-green figure counts" in body
+
+
+def test_a_one_attempt_corpus_reports_tokens_to_green_as_a_lower_bound(tmp_path, monkeypatch):
+    """tokens-to-green is taken over admitted cells. In a one-attempt corpus the
+    components that would have needed a retry are absent from the denominator
+    rather than contributing a larger number to it, so the median reads low for
+    a reason that has nothing to do with the model."""
+    monkeypatch.setattr(framework_bench, "BENCH", tmp_path)
+    d = tmp_path / "results" / "oneshot" / "01-x" / "v2"
+    d.mkdir(parents=True)
+    (d / "attempt-1.rvl").write_text("component A { }\n")
+    assert framework_bench._retry_censoring("oneshot", [])["censored"]
+    (d / "attempt-2.rvl").write_text("component A { }\n")
+    assert "censored" not in framework_bench._retry_censoring("oneshot", [])
