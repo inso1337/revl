@@ -1,0 +1,51 @@
+// A model council with role-bound members and typed disagreement (roadmap item
+// 516, `docs/design/543-model-council.md`).
+//
+// A council is several models answering the same question, each PLACED
+// separately. That is the whole point of the construct: a local adversary may
+// read an origin the cloud proposer may not, and item 514's ceiling decides
+// that per member rather than per council. So a member is a pair — what it is
+// FOR (`proposer`, `adversary`, `verifier`) and WHERE it runs (an item-512
+// `model role`).
+//
+// The aggregation is WRITTEN DOWN, because the rule that turns three answers
+// into one outcome is the council. `unanimous` names one value or names none,
+// and naming none is `split`, which carries the members' differing answers as
+// evidence. Nothing here resolves a disagreement toward an answer: a council
+// that degrades to "whichever member answered" is strictly worse than one
+// model, because the caller believes several agreed.
+//
+// The floor is counted over the DECLARED members and never over the ones that
+// answered. A member that fails or times out abstains, and an abstention counts
+// against the floor rather than toward agreement, so a council cannot shrink
+// itself into a quorum.
+//
+// The declaration is checked at admission and contributes NOTHING to the IR:
+// this file emits byte for byte what it would emit with the council deleted.
+//
+// This file is also the self-host's ADMITTING reproducer. The gate built from
+// `selfhost/lower.rvl` answered every council program `BAD|unexpected token at
+// top level` until the declaration was ported; it now admits this one and
+// refuses `examples/rejections/gmodelplace_council_on_tie_allow.rvl` beside it
+// with the reference's own message.
+
+model role edge on_device
+model role local2 on_device
+model role vast off_device
+
+service Answer {
+  fn classify(text: Str) -> Str
+}
+
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  verifier -> local2,
+  aggregate unanimous quorum declared on_tie split
+}
+
+component Classifier provides out: Answer {
+  provide out {
+    fn classify(text) = text
+  }
+}
