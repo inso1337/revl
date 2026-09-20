@@ -5,13 +5,7 @@
    "examples/rejections/t17_arrow_body_unchecked.rvl",
    "examples/rejections/t32_arrow_value_result_flows.rvl",
    "examples/rejections/t33_arrow_value_arity.rvl",
-   "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-   "examples/rejections/v2_match_nonexhaustive.rvl"
-  ],
-  "false-admit/TYPE": [
-   "examples/rejections/t13_unknown_match_case.rvl",
-   "examples/rejections/t18_type_alias_cycle.rvl",
-   "examples/rejections/t5_destructure_nonrecord.rvl"
+   "examples/rejections/t35_arrow_annotation_not_quantified.rvl"
   ]
  },
  "corpus_dirs": [
@@ -25,18 +19,6 @@
   "dogfood"
  ],
  "details": {
-  "examples/rejections/t13_unknown_match_case.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Pending` is not a case of `Status` (cases: `Active`, `Retired`)",
-    "tag": "TYPE"
-   }
-  },
   "examples/rejections/t14_optional_chain_on_nonoptional.rvl": {
    "bucket": "false-admit/T1",
    "gate": {
@@ -59,18 +41,6 @@
    "reference": {
     "message": "field access `.name` on `Opt[Row]`: the optional wrapper has no such member \u2014 `T` flows into `Opt[T]`, never silently back out",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/t18_type_alias_cycle.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "type alias cycle: Handle -> Ref -> Handle",
-    "tag": "TYPE"
    }
   },
   "examples/rejections/t32_arrow_value_result_flows.rvl": {
@@ -106,30 +76,6 @@
    },
    "reference": {
     "message": "argument 1 of `f` expects `Q`, got `Int`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t5_destructure_nonrecord.rvl": {
-   "bucket": "false-admit/TYPE",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "record destructuring requires a record, but `List[Int]` is not a record",
-    "tag": "TYPE"
-   }
-  },
-  "examples/rejections/v2_match_nonexhaustive.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "non-exhaustive match: missing case `Invalid`",
     "tag": "T1"
    }
   }
