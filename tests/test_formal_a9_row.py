@@ -281,14 +281,15 @@ def test_a_blind_row_lands_in_missed_a9(harness, verdicts):
 
 def test_an_a9_fail_is_not_formal_clean(harness, verdicts):
     """`formal_clean` reads the A9 row: an admitted file whose row said
-    `fail` would be `formal-strict`, not `agree-accept`."""
+    `fail` would be `formal-strict`, not `agree-accept`, and fatal since
+    issue #1169."""
     rel = ADMITTED[0]
     counts, _ = _align(harness, verdicts, rel)
-    assert counts == {"agree-accept": "1"}
+    assert counts["agree-accept"] == "1"
     strict = verdicts._replace(a9={**verdicts.a9, ADMITTED: "fail"})
     counts, fatal = _align(harness, strict, rel)
-    assert counts == {"formal-strict": "1"}
-    assert fatal == []
+    assert counts["formal-strict"] == "1"
+    assert fatal == [f"formal-strict: {rel}"]
 
 
 # ------------------------------------------------------- the ratchet

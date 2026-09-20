@@ -1,5 +1,5 @@
-"""Three fidelity gaps behind the checker-alignment buckets (issue #1169, F1
-to F3).
+"""Four fidelity gaps behind the checker-alignment buckets, and the
+promotion that makes those buckets able to fire (issue #1169, F1 to F4).
 
 `formal/harness/diff_corpus.py` ends by compiling every modeled corpus file
 with the real checker and filing the pair (checker code, formal verdicts) in
@@ -23,7 +23,16 @@ revl:
   * F3: a provide method emitting DIRECTLY through an emission extern
     exported the unnameable `*` on the bound side too, where the reference
     names the extern and measures it against the declared `emission[...]`
-    entries (`Inner` and `AuditSink` in `examples/interpose_observe.rvl`).
+    entries (`Inner` and `AuditSink` in `examples/interpose_observe.rvl`);
+  * F4: the arm chain `accept / G4 / G2,G3 / A9 / A2 / else` had nothing
+    for a G5 or a G6 checker code, so `g5_undo_handle_emission.rvl` landed
+    in `formal-found-other` and eleven more G5 refusals in the generic
+    `out-of-fragment`. There is a G5 arm now, and a documented reason there
+    is no `agree-G6` (below).
+
+And the promotion the first four were the precondition for: `formal-strict`
+and `formal-found-other` are in `FATAL_BUCKETS`. Informational is how the
+three files survived, and a bucket that cannot fire is not a gate.
 
 `make formal` needs a Lean toolchain; this module runs in the plain
 `pytest tests/` job and pins each fix on the file that exposed it, plus the
@@ -35,9 +44,12 @@ bound case that F3 must not cost.
 from __future__ import annotations
 
 import importlib.util
+import io
+import re
 import shutil
 import sys
 import warnings
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -126,10 +138,20 @@ def harness():
 
 
 @pytest.fixture(scope="module")
-def tsv(harness):
+def exported(harness):
+    """`(tsv rows, file facts, census)` for the whole corpus, exported once."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        rows, _facts, _census = harness.export()
+        return harness.export()
+
+
+@pytest.fixture(scope="module")
+def rows(exported):
+    return exported[0]
+
+
+@pytest.fixture(scope="module")
+def tsv(rows):
     return [r.split("\t") for r in rows]
 
 
@@ -326,3 +348,237 @@ def test_the_reference_measures_the_extern_by_name():
     info = classify(excinfo.value)
     assert (info["code"], info["category"]) == ("G4", "emission-capability")
     assert "emits through `wire`" in str(excinfo.value)
+
+
+# ------------------------- F4: a G5 arm, and no G6 arm on the confinement row
+
+#: The G5 fixture whose `undo` reaches its emission through a NAMED fn, so the
+#: model's `Prog` resolves it and the `U5` row counts the registration.
+G5_BY_U5 = "examples/rejections/g5_undo_fn_emission.rvl"
+#: The G5 fixture the `U5` row cannot see (`undo w.task.run(...)` reads the
+#: crossing off a spawn handle) but the marker rule refuses through the `G`
+#: row: an unmarked call to a method the service declares `emission`. This is
+#: the file that sat in `formal-found-other`.
+G5_BY_G_ROW = "examples/rejections/g5_undo_handle_emission.rvl"
+#: A G5 fixture no row sees: `undo dispatch1(ref)`, where `dispatch1` calls
+#: its own parameter, so the reach fold leaves the `Prog` at the first hop.
+G5_OUT_OF_PROG = "examples/rejections/g5_undo_handle_ref_arg.rvl"
+#: The corpus's only G6-coded file.
+G6 = "examples/rejections/g6_method_local_shadows_component.rvl"
+
+#: A program the checker ACCEPTS whose `C` row nonetheless `fail`s: `Map` is a
+#: host root, not a declared require, so the confinement surface reports a
+#: leak. The evidence that an `agree-G6` keyed on a `C` fail could not fail.
+HOST_ROOT_SOURCE = """\
+service K { fn f() -> Int }
+component C provides k: K {
+  let store = effect Map.new() undo store.drop()
+  provide k { fn f() = 1 }
+}
+"""
+
+
+@pytest.fixture
+def align(harness, monkeypatch, tmp_path):
+    """Run `checker_alignment` over ONE corpus file, with its no-manifest
+    writer pointed at a scratch directory, and return
+    `(non-zero bucket counts, fatal findings, the printed report)`."""
+    (tmp_path / "harness" / "out").mkdir(parents=True)
+    monkeypatch.setattr(harness, "FORMAL", tmp_path)
+
+    def run(rel, verdicts, rows):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fatal = harness.checker_alignment({rel: {}}, [], verdicts, rows)
+        out = buf.getvalue()
+        counts = {k: int(n) for k, n in re.findall(
+            r"^  ([a-zA-Z0-9-]+)\s+(\d+)(?:\s+FATAL)?$", out, re.MULTILINE)
+            if int(n)}
+        return counts, fatal, out
+    return run
+
+
+def test_the_checker_refuses_each_g5_fixture_with_code_g5(harness):
+    """The premise. All three arms below are about files revl answers `G5`
+    for; if one stops being a G5 the test under it is measuring nothing."""
+    for rel in (G5_BY_U5, G5_BY_G_ROW, G5_OUT_OF_PROG):
+        assert harness.checker_code(rel)[0] == "G5", rel
+
+
+def test_a_resolvable_undo_agrees_by_the_u5_row(align, verdicts, rows):
+    counts, fatal, out = align(G5_BY_U5, verdicts, rows)
+    assert counts == {"agree-G5": 1}
+    assert fatal == []
+    assert f"ALIGN agree-G5 via U5: {G5_BY_U5}" in out
+
+
+def test_a_handle_undo_agrees_by_the_marker_row(align, verdicts, rows):
+    """`undo w.task.run("bye")` is an unmarked call to an `emission` method,
+    so the `G` row refuses the component even though the `U5` row counts
+    nothing. This file is why the arm exists: it was `formal-found-other`,
+    which is now fatal, so without the arm the gate would red."""
+    counts, fatal, out = align(G5_BY_G_ROW, verdicts, rows)
+    assert counts == {"agree-G5": 1}
+    assert fatal == []
+    assert f"ALIGN agree-G5 via G: {G5_BY_G_ROW}" in out
+
+
+def test_an_undo_that_leaves_the_prog_is_out_of_fragment_not_missed(
+        harness, align, verdicts, rows):
+    """`missed-G5` would be a claim that the model went blind. Here the model
+    has no fact at all: `dispatch1` calls its own parameter, which is not a
+    declared fn or extern, so the reach fold has nothing to follow. Named,
+    not counted, and not fatal."""
+    assert G5_OUT_OF_PROG not in harness.g5_files_the_prog_resolves(rows)
+    counts, fatal, out = align(G5_OUT_OF_PROG, verdicts, rows)
+    assert counts == {"out-of-fragment-G5": 1}
+    assert fatal == []
+    assert f"ALIGN out-of-fragment-G5: {G5_OUT_OF_PROG}" in out
+
+
+def test_missed_g5_is_a_gate_failure(harness):
+    assert "missed-G5" in harness.FATAL_BUCKETS
+
+
+def test_missed_g5_fires_when_the_prog_resolves_the_undo(
+        harness, align, verdicts, rows):
+    """The input that still FAILS after the arm. `g5_undo_fn_emission.rvl`
+    reaches its emission through `wrap`, a declared fn whose whole callee
+    closure is declared, so the `Prog` resolves the `undo` and a zero count
+    is the fold going blind rather than an absent fact. Blind the `U5` row
+    and the file is `missed-G5`, fatal, exactly as a `missed-G4` is."""
+    assert G5_BY_U5 in harness.g5_files_the_prog_resolves(rows)
+    blind = verdicts._replace(g5reg={
+        k: (0 if isinstance(v, int) else v) for k, v in verdicts.g5reg.items()})
+    counts, fatal, _out = align(G5_BY_U5, blind, rows)
+    assert counts == {"missed-G5": 1}
+    assert fatal == [f"missed-G5: {G5_BY_U5}"]
+
+
+def test_the_confinement_row_fails_on_a_program_the_checker_accepts(
+        harness, tmp_path_factory):
+    """Why there is no `agree-G6` keyed on a `C` fail. The model's `C` row is
+    the issue-276 confinement surface: a statement head whose root is not a
+    declared require or require-held binding is a `fail`, and a host root
+    like `Map` never is one. The checker accepts this program, so an
+    agreement resting on a `C` fail would be an agreement that cannot fail."""
+    from revl.compiler import compile_source
+
+    compile_source(HOST_ROOT_SOURCE, "host_root.rvl")
+    _rows, ref, _formal = _synthetic_corpus(
+        harness, tmp_path_factory.mktemp("hostroot"),
+        {"host_root.rvl": HOST_ROOT_SOURCE})
+    assert any(x == "fail" for x in ref.confinements.values())
+
+
+def test_a_g6_refusal_is_out_of_fragment_with_the_model_clean(
+        align, verdicts, rows, harness):
+    """revl's G6 is purity outside effect forms and the duplicate-binding
+    refusal; the model states neither. Its verdicts on the file are all
+    `ok`, and the `C` rows that do `fail` are about something else."""
+    assert harness.checker_code(G6)[0] == "G6"
+    assert verdicts.comps[(G6, "C")] == "ok"
+    assert any(x == "fail" for k, x in verdicts.confinements.items()
+               if k[0] == G6)
+    counts, fatal, out = align(G6, verdicts, rows)
+    assert counts == {"out-of-fragment-G6": 1}
+    assert fatal == []
+    assert f"ALIGN out-of-fragment-G6: {G6}" in out
+
+
+# ----------------------------------- the promotion: both buckets can now fire
+
+def test_both_informational_buckets_are_fatal(harness):
+    assert {"formal-strict", "formal-found-other"} <= set(harness.FATAL_BUCKETS)
+
+
+def test_a_model_refusal_on_an_accepted_file_fails_the_gate(
+        align, verdicts, rows):
+    """The input that still FAILS for `formal-strict`: the checker accepts
+    `notes.rvl` and a model row says `fail`. Before the promotion this
+    printed and returned nothing."""
+    strict = verdicts._replace(
+        comps={**verdicts.comps, (NOTES, "NotesConsole"): "fail"})
+    counts, fatal, out = align(NOTES, strict, rows)
+    assert counts == {"formal-strict": 1}
+    assert fatal == [f"formal-strict: {NOTES}"]
+    assert f"ALIGN formal-strict: {NOTES}" in out
+
+
+def test_a_model_refusal_under_an_unmodelled_code_fails_the_gate(
+        align, verdicts, rows):
+    """The input that still FAILS for `formal-found-other`: revl refuses the
+    G6 file for a rule the model does not state, and a model row refuses it
+    for some other reason. `out-of-fragment-G6` is only for a CLEAN model."""
+    dirty = verdicts._replace(comps={**verdicts.comps, (G6, "C"): "fail"})
+    counts, fatal, _out = align(G6, dirty, rows)
+    assert counts == {"formal-found-other": 1}
+    assert fatal == [f"formal-found-other: {G6}"]
+
+
+# ------------------------- STATUS.md's claim is generated, not typed
+
+@pytest.fixture(scope="module")
+def status(harness, exported):
+    """The census block this corpus produces, and the alignment it rests on.
+    Runs the real `checker_alignment` over every modeled file (its
+    no-manifest writer targets the git-ignored `formal/harness/out/`)."""
+    rows, facts, census = exported
+    ref = harness.reference_from_tsv(rows)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        fatal = harness.checker_alignment(
+            facts, census["componentless"], ref, rows)
+    block = harness.status_block(census, facts, census["componentless"],
+                                 census["refusals"], ref, harness._ALIGN)
+    return block, fatal, dict(harness._ALIGN)
+
+
+def test_the_corpus_has_no_disagreeing_bucket(status):
+    """The exit criterion of the issue: with F1 to F4 in, every bucket that
+    now fails the gate is empty, which is what makes the promotion a gate
+    rather than a permanent red."""
+    _block, fatal, align = status
+    assert fatal == []
+    assert {k: v for k, v in align.items() if k in
+            ("formal-strict", "formal-found-other")} == {}
+
+
+def test_status_md_carries_the_block_this_run_produces(harness, status):
+    """The second half of the issue. `formal/STATUS.md` asserted 0 formal-
+    strict and 0 formal-found-other with nothing comparing the assertion to
+    the gate's output. The numbers are rendered by the run that measures
+    them, and a stale checkout of the block fails here and in `make
+    formal`."""
+    block, _fatal, _align = status
+    assert harness.sync_status(block, write=False) is None
+    assert "| `formal-strict` | 0 | **FATAL** |" in block
+    assert "| `formal-found-other` | 0 | **FATAL** |" in block
+
+
+def test_a_stale_block_is_reported_as_drift(harness, status, tmp_path,
+                                            monkeypatch):
+    """The check bites. Edit the checked-in block and `sync_status` says so
+    rather than agreeing; `--write-status` puts it back."""
+    block, _fatal, _align = status
+    copy = tmp_path / "STATUS.md"
+    copy.write_text(
+        harness.STATUS_PATH.read_text(encoding="utf-8").replace(
+            "| `formal-strict` | 0 |", "| `formal-strict` | 7 |"),
+        encoding="utf-8")
+    monkeypatch.setattr(harness, "STATUS_PATH", copy)
+    assert harness.sync_status(block, write=False) is not None
+    assert harness.sync_status(block, write=True) is None
+    assert harness.sync_status(block, write=False) is None
+    assert "| `formal-strict` | 0 |" in copy.read_text(encoding="utf-8")
+
+
+def test_a_document_with_no_markers_is_drift_too(harness, status, tmp_path,
+                                                 monkeypatch):
+    """Deleting the markers must not read as agreement."""
+    block, _fatal, _align = status
+    copy = tmp_path / "STATUS.md"
+    copy.write_text("nothing generated here\n", encoding="utf-8")
+    monkeypatch.setattr(harness, "STATUS_PATH", copy)
+    assert harness.sync_status(block, write=False) is not None
+    assert harness.sync_status(block, write=True) is not None

@@ -214,10 +214,10 @@ def test_the_export_agrees_with_the_shipped_checker_field_by_field(
     export derives from its own walk.
 
     This is the one place `config_shape` can be wrong without the gate
-    noticing. A spurious `fail` over an accepted file only moves it into
-    `formal-strict`, which `diff_corpus.FATAL_BUCKETS` treats as informational,
-    so the corpus gate would stay green while the model quietly refused a
-    program revl ships.
+    noticing. A spurious `fail` over an accepted file moves it into
+    `formal-strict`, which was informational until issue #1169 and is now a
+    gate failure; before that promotion the corpus gate stayed green while
+    the model quietly refused a program revl ships.
 
     The two walks are NOT the same walk. The checker sees a program
     `taint.extract_and_normalize` has stripped and `lower._resolve_type_aliases`
