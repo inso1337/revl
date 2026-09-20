@@ -146,8 +146,10 @@ KNOWN_BYPASSES = {
     # component body now carries the environment that slice left empty — the
     # method parameters at the service's declared types, the body's annotated
     # and inferred locals, the activation locals at the operations they bind.
-    # What remains is the optional-chain rule, which is T2d's.
-    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
+    # The optional-chain rule (docs/design/457 T2d) closed the rest: `?.` now
+    # requires an optional on its left, so `t14_optional_chain_on_nonoptional`
+    # refuses with the reference's own sentence and is struck from this list.
+    # This family has no open bypass.
     # -- calls and signatures --
     # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
     # type parameters, the arity window, `unify`/`substitute` at a generic call
@@ -156,10 +158,15 @@ KNOWN_BYPASSES = {
     # a method call. All nine of this family's fixtures now refuse with the
     # reference's own tag and sentence and are struck from this list.
     # -- arrows and function values --
-    "examples/rejections/t17_arrow_body_unchecked.rvl",
-    "examples/rejections/t32_arrow_value_result_flows.rvl",
-    "examples/rejections/t33_arrow_value_arity.rvl",
-    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
+    # CLOSED WHOLE by docs/design/457 T2c: an arrow types as a function value
+    # (parameters at their annotations or bottom, the result from the body only
+    # where no bottom parameter reaches it), its body is walked as an ordinary
+    # expression over the enclosing scope, a call through such a value is
+    # checked for arity and then per argument, and an annotation's type name
+    # resolves to the enclosing `fn`'s type parameter or an opaque nominal and
+    # never to a fresh one. All four remaining fixtures of this family now
+    # refuse with the reference's own tag and sentence and are struck from this
+    # list; `t34_arrow_self_declared_async` left it earlier with rule C1.
     # -- return paths and match --
     # The RETURN-PATH half landed with docs/design/457 T3b: `fb_function` runs
     # `_check_returns_on_every_path` over the statement tree the fn-body walk
