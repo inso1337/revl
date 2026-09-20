@@ -242,23 +242,31 @@ in-slice; a G8 refusal classifies OUT-OF-SLICE; so every oracle stays green
 over a family of checks the self-host does not run. That is item 391's own
 finding, restated by 417, arriving here.
 
-Not repaired in this slice, and the reason is scope rather than difficulty.
-The repair is the NAMED DECLINE §9 asks for, and the mechanism already exists:
-`tools/build_gate_crate.py`'s frontier table, which makes the native gate
-answer `OutsideFrontier { reason }` for a construct the self-host does not
-cover. Today that table has two axes, `keywords` and `builtins`, both derived
-from the reference compiler's own tables; a reserved-capability-root axis
-derived from `ui_family.ROOTS` is the third. It carries a crate regeneration
-(both `build_gate_crate.py` and `build_gate_wasm.py`, then
-`tests/test_gate_crate_admit.py`, which is the only gate that actually shells
-cargo), and §9 ties that regeneration to slice 3, which carries one anyway for
-the prefix-closure check. Doing it here would put the expensive half of slice
-3 in slice 4 and leave slice 3 with the cheap half.
+**Repaired in slice 3, by a named decline rather than by a port.**
+`tools/build_gate_crate.py`'s frontier table is the mechanism §9 is asking
+for: a construct in it makes the native gate answer
+`OutsideFrontier { reason }` instead of no objection. It had two axes,
+`keywords` and `builtins`, both derived from the reference compiler's own
+tables. A third, `capability_roots`, is derived from `ui_family.ROOTS` minus
+whatever `selfhost/lower.rvl::reserved_capability_root` names, which is
+nothing today and empties the table in the same wave as a future port.
+`src/revl/ui_family.py` joins `DIGEST_INPUTS` for the reason
+`src/revl/lexer.py` is already there: a root added to it moves the covered
+surface, and a `frontier_id` that did not move would claim two gates cover the
+same surface when they do not. Both builders were regenerated and
+`tests/test_gate_crate_admit.py` drives the result from the consumer side, so
+a source carrying `ui.` or `screen.` now comes back `outside_frontier` with
+code `FRONTIER`.
 
-The measurement is pinned by
-`test_the_selfhost_gate_does_not_decide_a_ui_program`, which fails by name if
-the self-host ever grows a verdict on these programs, so the next reader of
-§9 finds the date corrected rather than re-derives it.
+What that discharges and what it does not. The gate DECLINES BY NAME instead
+of agreeing by silence, which is §9's requirement. It is not a port:
+`selfhost/lower.rvl` still runs none of item 521's checks, so
+`test_the_selfhost_gate_does_not_decide_a_ui_program` keeps measuring the
+`admit_src` silence and fails by name if the self-host ever grows a verdict
+there. The frontier guard is lexical and conservative: a source mentioning the
+namespace in a host body or a comment costs a false `OutsideFrontier`, which
+is the only direction this crate is allowed to err in, and no program in
+`examples/`, `stdlib/` or `selfhost/` mentions either root today.
 
 ## 9. `retention.persistence_sink_of`, and why `ui` does not join it
 

@@ -50,9 +50,11 @@ THE TWO OPEN QUESTIONS PR #1284 LEFT, answered here by measurement rather than
 by argument, at the bottom of the file:
   * `test_the_selfhost_gate_does_not_decide_a_ui_program` - the self-host gate
     returns "" (no objection) on three programs the reference refuses under
-    G8, so design 532 §9's obligation has been outstanding since SLICE 1, not
-    since slice 3 as §9 records. Measured, not repaired: the repair is a
-    frontier marker plus a crate regeneration and belongs to slice 3.
+    G8, so design 532 §9's obligation had been outstanding since SLICE 1, not
+    since slice 3 as §9 records. Slice 3 discharges it at the GATE, by a
+    frontier-table entry that makes the native gate decline a reserved
+    namespace by name; `admit_src` itself is unported, which is what this test
+    goes on measuring.
   * `test_widening_the_persistence_sink_set_with_ui_would_misclassify_three_
     verbs` - `retention.persistence_sink_of` reads a token's HEAD, so adding
     `ui` to it would make `ui.click` and `ui.find` durable storage alongside
@@ -552,11 +554,14 @@ def test_the_selfhost_gate_does_not_decide_a_ui_program(selfhost_admit) -> None:
     every oracle stays green over a check the self-host does not run. That is
     item 391's own finding, restated by 417, arriving on this family.
 
-    Not repaired here, and the reason is scope rather than difficulty: the
-    repair is a named decline, which means a frontier-table entry in
-    `tools/build_gate_crate.py` (and its `build_gate_wasm.py` twin) and a
-    crate regeneration. §9 ties that to slice 3, which carries a crate
-    regeneration anyway for the prefix-closure check.
+    Repaired at the GATE by slice 3, and not by a port: a third frontier-table
+    axis derived from `ui_family.ROOTS` makes the native gate answer
+    `outside_frontier` with a reason on a source carrying a reserved namespace,
+    which is the named decline §9 asks for
+    (`tests/test_ui_ladder_rungs_521.py::test_the_reserved_roots_are_a_
+    declared_frontier_gap`, and the consumer-side probe in
+    `tests/test_gate_crate_admit.py`). `admit_src` is still unported, so this
+    test keeps measuring the silence and fails by name the day it stops.
     """
     family = (
         'extern emission[screen.observe] fn screen_observe(r: Str) -> Str\n'
