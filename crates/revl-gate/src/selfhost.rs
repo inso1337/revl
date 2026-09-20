@@ -234,6 +234,7 @@ pub struct Ctx__m2 {
     provAlias: std::collections::HashMap<String, String>,
     localArrows: std::collections::HashMap<String, ArrowN>,
     acqWhere: String,
+    emitPos: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -8674,7 +8675,46 @@ fn walk_one_stmt(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
     let marked = ((s.kind == "emit") || (s.kind == "compensate"));
     let scx = ctx_acq(cx.clone(), stmt_acq_where(&s.kind));
     let root_ = acq_root_of(s.clone());
-    return if root_.hit { walk_exprs(&root_.args, 0i64, marked.clone(), scx.clone(), a.clone()) } else { walk_expr(s.e.clone(), marked.clone(), scx.clone(), a.clone()) };
+    if root_.hit {
+        return walk_exprs(&root_.args, 0i64, marked.clone(), scx.clone(), a.clone());
+    }
+    return walk_expr(s.e.clone(), marked.clone(), if (s.kind == "emit") { ctx_emit_pos(scx.clone(), String::from("head")) } else { scx.clone() }, a.clone());
+}
+
+fn ctx_emit_pos(cx: Ctx__m2, pos: String) -> Ctx__m2 {
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: if ((pos == "args") && (cx.emitPos == "head")) { String::from("this position") } else { cx.acqWhere }, emitPos: pos.clone() };
+}
+
+fn args_marked(marked: bool, cx: Ctx__m2) -> bool {
+    if (cx.emitPos == "head") {
+        return false;
+    }
+    if (cx.emitPos == "head-bare") {
+        return true;
+    }
+    return marked;
+}
+
+fn ctx_args(cx: Ctx__m2) -> Ctx__m2 {
+    if ((cx.emitPos == "head") || (cx.emitPos == "head-bare")) {
+        return ctx_emit_pos(cx.clone(), String::from("args"));
+    }
+    return cx;
+}
+
+fn walk_args(args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
+    return walk_exprs(args, 0i64, args_marked(marked, cx.clone()), ctx_args(cx.clone()), a.clone());
+}
+
+fn emit_head_pos(marked: bool, cx: Ctx__m2) -> String {
+    if ((cx.emitPos == "head") || (cx.emitPos == "head-bare")) {
+        return cx.emitPos;
+    }
+    return if marked { String::from("head-bare") } else { String::from("head") };
+}
+
+fn nested_emit_msg() -> String {
+    return String::from("`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)");
 }
 
 fn walk_stmts(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> Ac {
@@ -8730,11 +8770,11 @@ fn walk_expr(e: Expr, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
     Expr::Bad(_) => a,
     Expr::Bin(b) => { let b = *b; walk_expr(b.r.clone(), marked, cx.clone(), walk_expr(b.l.clone(), marked, cx.clone(), a.clone())) },
     Expr::Un(u) => { let u = *u; walk_expr(u.e.clone(), marked, cx.clone(), a.clone()) },
-    Expr::Emit(u) => { let u = *u; walk_expr(u.e.clone(), true, cx.clone(), a.clone()) },
+    Expr::Emit(u) => { let u = *u; if (cx.emitPos == "args") { ac_refuse(a.clone(), String::from("G4"), nested_emit_msg()) } else { walk_expr(u.e.clone(), true, ctx_emit_pos(cx.clone(), emit_head_pos(marked, cx.clone())), a.clone()) } },
     Expr::Call(c) => { let c = *c; call_check(c.target.clone(), &c.args, marked, cx.clone(), a.clone()) },
     Expr::Field(f) => { let f = *f; field_check(f.target.clone(), marked, cx.clone(), a.clone()) },
     Expr::OptField(f) => { let f = *f; field_check(f.target.clone(), marked, cx.clone(), a.clone()) },
-    Expr::OptCall(c) => { let c = *c; walk_exprs(&c.args, 0i64, marked, cx.clone(), walk_expr(c.target.clone(), marked, cx.clone(), a.clone())) },
+    Expr::OptCall(c) => { let c = *c; walk_args(&c.args, marked, cx.clone(), walk_expr(c.target.clone(), marked, cx.clone(), a.clone())) },
     Expr::Index(x) => { let x = *x; walk_expr(x.idx.clone(), marked, cx.clone(), walk_expr(x.target.clone(), marked, cx.clone(), a.clone())) },
     Expr::If(x) => { let x = *x; walk_expr(x.els.clone(), marked, cx.clone(), walk_expr(x.then_.clone(), marked, cx.clone(), walk_expr(x.cond.clone(), marked, cx.clone(), a.clone()))) },
     Expr::Rec(r) => walk_inits(&r.fields, 0i64, marked, cx.clone(), a.clone()),
@@ -8752,17 +8792,17 @@ fn call_check(tg: Expr, args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
     Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
     Expr::Var(v) => if cx.provAlias.contains_key(&v) { alias_call(v.clone(), &fl.name, args, tg.clone(), marked, cx.clone(), a.clone()) } else { req_call(v.clone(), &fl.name, args, marked, cx.clone(), a.clone()) },
     Expr::Field(inner) => { let inner = *inner; handle_call(inner, &fl.name, args, tg.clone(), marked, cx.clone(), a.clone()) },
-    _ => walk_exprs(args, 0i64, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
+    _ => walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
 } },
     Expr::Var(n) => fn_call(n, args, marked, cx.clone(), a.clone()),
-    _ => walk_exprs(args, 0i64, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
+    _ => walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
 };
 }
 
 fn handle_call(inner: FieldN, op: &str, args: &[Expr], tg: Expr, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
     return match inner.target.clone() {
-    Expr::Var(h) => if cx.handles.contains_key(&h) { handle_emit(h.clone(), &inner.name, op, args, marked, cx.clone(), a.clone()) } else { walk_exprs(args, 0i64, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())) },
-    _ => walk_exprs(args, 0i64, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
+    Expr::Var(h) => if cx.handles.contains_key(&h) { handle_emit(h.clone(), &inner.name, op, args, marked, cx.clone(), a.clone()) } else { walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())) },
+    _ => walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
 };
 }
 
@@ -8774,7 +8814,7 @@ fn alias_call(v: String, op: &str, args: &[Expr], tg: Expr, marked: bool, cx: Ct
 };
     let cut = ref_.revl_index_of("#");
     if (cut == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-        return walk_exprs(args, 0i64, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone()));
+        return walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone()));
     }
     return handle_emit(ref_.revl_slice(0i64, cut), &(ref_.revl_slice((cut).checked_add(1i64).expect("revl: Int overflow"), ref_.revl_length())), op, args, marked, cx.clone(), a.clone());
 }
@@ -8802,7 +8842,7 @@ fn handle_emit(h: String, key: &str, op: &str, args: &[Expr], marked: bool, cx: 
     if (decl.isAsync && (!cx.underArrow)) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), vec![(((h.revl_concat(".")).revl_concat(&key)).revl_concat(".")).revl_concat(&op)]), avals: na.avals.clone() };
     }
-    return walk_exprs(args, 0i64, marked, cx.clone(), na.clone());
+    return walk_args(args, marked, cx.clone(), na.clone());
 }
 
 fn host_acquire_release(root_: &str, verb: &str) -> String {
@@ -8886,7 +8926,7 @@ fn req_call(root_: String, meth: &str, args: &[Expr], marked: bool, cx: Ctx__m2,
         if (!head_declared(cx.clone(), &root_)) {
             return g1_refuse(cx.clone(), &root_, a.clone());
         }
-        return walk_exprs(args, 0i64, marked, cx.clone(), a.clone());
+        return walk_args(args, marked, cx.clone(), a.clone());
     }
     let svcName = match cx.reqMap.get(&root_).cloned() {
     Some(v) => v,
@@ -8898,7 +8938,7 @@ fn req_call(root_: String, meth: &str, args: &[Expr], marked: bool, cx: Ctx__m2,
         if (svc_decl_known(cx.clone(), svcName.clone()) && (!svc_has_method(cx.clone(), svcName.clone(), meth))) {
             return ac_refuse(a.clone(), String::from("A6"), not_a_method_msg(&((root_.revl_concat(".")).revl_concat(&meth)), &svcName));
         }
-        return walk_exprs(args, 0i64, marked, cx.clone(), a.clone());
+        return walk_args(args, marked, cx.clone(), a.clone());
     }
     if (decl.isEm && (!marked)) {
         return ac_refuse(a.clone(), String::from("G4"), (((String::from("call to emission `").revl_concat(&root_)).revl_concat(".")).revl_concat(&meth)).revl_concat("` must be marked `emit` (G4)"));
@@ -8910,7 +8950,7 @@ fn req_call(root_: String, meth: &str, args: &[Expr], marked: bool, cx: Ctx__m2,
     if (decl.isAsync && (!cx.underArrow)) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), vec![(root_.revl_concat(".")).revl_concat(&meth)]), avals: na.avals.clone() };
     }
-    return walk_exprs(args, 0i64, marked, cx.clone(), na.clone());
+    return walk_args(args, marked, cx.clone(), na.clone());
 }
 
 fn provision_ref(e: Expr, cx: Ctx__m2) -> String {
@@ -8977,7 +9017,7 @@ fn fn_call(name: String, args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac 
     if contains__m2(&cx.colored, &name) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: union_into(na.areach.clone(), vec![name.clone()]), aops: na.aops.clone(), avals: na.avals.clone() };
     }
-    return walk_exprs(args, 0i64, marked, cx.clone(), na.clone());
+    return walk_args(args, marked, cx.clone(), na.clone());
 }
 
 fn var_check(name: String, cx: Ctx__m2, a: Ac) -> Ac {
@@ -8999,23 +9039,23 @@ fn bare_declared(cx: Ctx__m2, name: &str) -> bool {
 }
 
 fn ctx_bind(cx: Ctx__m2, names: Vec<String>) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: union_into(cx.scopeNames.clone(), names.clone()), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: union_into(cx.scopeNames.clone(), names.clone()), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
 fn ctx_acq(cx: Ctx__m2, where_: String) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: where_.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: where_.clone(), emitPos: cx.emitPos.clone() };
 }
 
 fn ctx_alias(cx: Ctx__m2, al: std::collections::HashMap<String, String>) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: al.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: al.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
 fn ctx_arrows(cx: Ctx__m2, m: std::collections::HashMap<String, ArrowN>) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: m.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: m.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
 fn ctx_under_arrow(cx: Ctx__m2) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: true, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: true, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
 fn field_check(target: Expr, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
@@ -9151,11 +9191,11 @@ fn prov_key_svc(pg: Prog) -> std::collections::HashMap<String, String> {
 }
 
 fn mk_ctx(svcs: std::collections::HashMap<String, SvcD>, rm: std::collections::HashMap<String, String>, caps: std::collections::HashMap<String, Vec<String>>, colored: Vec<String>, emitting: Vec<String>, ai: Vec<String>, scope: Vec<String>, fnn: Vec<String>, cnm: String, slots: std::collections::HashMap<String, Vec<i64>>, pks: std::collections::HashMap<String, String>) -> Ctx__m2 {
-    return Ctx__m2 { svcs: svcs.clone(), ambOps: std::collections::HashMap::new(), reqMap: rm.clone(), caps: caps.clone(), colored: colored.clone(), emittingNames: emitting.clone(), asyncExterns: ai.clone(), scopeNames: scope.clone(), fnNames: fnn.clone(), compName: cnm.clone(), fnAsyncSlots: slots.clone(), underArrow: false, handles: std::collections::HashMap::new(), provKeySvc: pks.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position") };
+    return Ctx__m2 { svcs: svcs.clone(), ambOps: std::collections::HashMap::new(), reqMap: rm.clone(), caps: caps.clone(), colored: colored.clone(), emittingNames: emitting.clone(), asyncExterns: ai.clone(), scopeNames: scope.clone(), fnNames: fnn.clone(), compName: cnm.clone(), fnAsyncSlots: slots.clone(), underArrow: false, handles: std::collections::HashMap::new(), provKeySvc: pks.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position"), emitPos: String::from("") };
 }
 
 fn ctx_with_callables(cx: Ctx__m2, names: Vec<String>) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: union_into(cx.fnNames.clone(), names.clone()), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: union_into(cx.fnNames.clone(), names.clone()), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
 fn amb_ops_map(xs: &[SvcOps], i: i64, acc: std::collections::HashMap<String, Vec<String>>) -> std::collections::HashMap<String, Vec<String>> {
@@ -9166,7 +9206,7 @@ fn amb_ops_map(xs: &[SvcOps], i: i64, acc: std::collections::HashMap<String, Vec
 }
 
 fn ctx_amb_ops(cx: Ctx__m2, ops: std::collections::HashMap<String, Vec<String>>) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: ops.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: ops.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
 fn req_map_of(reqs: &[Bind]) -> std::collections::HashMap<String, String> {
@@ -9180,7 +9220,7 @@ fn req_map_of(reqs: &[Bind]) -> std::collections::HashMap<String, String> {
 }
 
 fn ctx_for(base: Ctx__m2, comp: CompD) -> Ctx__m2 {
-    return Ctx__m2 { svcs: base.svcs.clone(), ambOps: base.ambOps.clone(), reqMap: req_map_of(&comp.reqMap), caps: base.caps.clone(), colored: base.colored.clone(), emittingNames: base.emittingNames.clone(), asyncExterns: base.asyncExterns.clone(), scopeNames: scope_names_of(comp.clone()), fnNames: base.fnNames.clone(), compName: comp.name.clone(), fnAsyncSlots: base.fnAsyncSlots.clone(), underArrow: false, handles: handles_of(comp.clone()), provKeySvc: base.provKeySvc.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position") };
+    return Ctx__m2 { svcs: base.svcs.clone(), ambOps: base.ambOps.clone(), reqMap: req_map_of(&comp.reqMap), caps: base.caps.clone(), colored: base.colored.clone(), emittingNames: base.emittingNames.clone(), asyncExterns: base.asyncExterns.clone(), scopeNames: scope_names_of(comp.clone()), fnNames: base.fnNames.clone(), compName: comp.name.clone(), fnAsyncSlots: base.fnAsyncSlots.clone(), underArrow: false, handles: handles_of(comp.clone()), provKeySvc: base.provKeySvc.clone(), provAlias: std::collections::HashMap::new(), localArrows: std::collections::HashMap::new(), acqWhere: String::from("this position"), emitPos: String::from("") };
 }
 
 fn handles_of(comp: CompD) -> std::collections::HashMap<String, String> {
@@ -24897,6 +24937,14 @@ fn plain_provider_reaching_an_emission_is_refused__g4___exact_wording() {
 #[test]
 fn unmarked_emission_is_refused__g4_() {
     assert!((admit_src(String::from("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }")) == "G4|call to emission `db.execute` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn an_emission_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(b.fetch()) }")) == "G4|call to emission `b.fetch` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(emit b.fetch()) }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service X { fn plain() -> Str } component C requires a: A, x: X { emit a.send(x.plain()) }")) == ""));
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } service K { emission fn f() -> Str } component C requires a: A, b: B provides k: K { provide k { fn f() { let r = emit b.fetch() return emit a.send(r) } } }")) == ""));
 }
 
 #[test]

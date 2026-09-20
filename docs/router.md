@@ -13,6 +13,16 @@ This is the runtime half of the load-balancer story; the *why* (G2 vs. load
 balancing, the two non-goals, the comparison table) is docs/distribution-model.md
 (item 163). Read that first for the model; this note is the mechanism.
 
+**A sibling route condition, for a different thing.** `route model on <action>`
+(item 512, `docs/design/531-model-placement.md`) places a MODEL CALL the way
+this note's route places a provider, and the two are deliberately not the same
+construct. A `realms(...)` route binds one key across N realms and the runtime
+router picks a live one, so it is a selection with a strategy. A `route model`
+block names which roles an action may reach, keyed by the ORIGIN CLASS of what
+the action is given, and picks nothing: it is a permission checked at
+admission, writes no IR, and has no strategy. Which of two admissible roles to
+use is roadmap item 515.
+
 ---
 
 ## 1. What item 162 left, what item 161 adds

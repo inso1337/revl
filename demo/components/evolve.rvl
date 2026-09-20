@@ -79,6 +79,11 @@ component GreeterV1 provides greeter: Greeter {
 component Evolver requires assistant: Assistant, compiler: Runtime
                   provides evolve: Evolve {
   provide evolve {
-    fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+    // one `emit` per crossing: the completion is its own step, bound to a
+    // value, before the proposal that consumes it
+    fn once(goal) {
+      let draft = emit assistant.complete(goal)
+      return emit compiler.propose(draft)
+    }
   }
 }

@@ -119,6 +119,12 @@ REDACTED_SECRET = "<redacted:secret>"
 # value (CRITICAL 1 fix, §4a / §7).
 _ORIGIN_CLASSES = {"web", "net", "fs", "model", "input", "secret", "confidential"}
 
+# The same set, public and frozen, for the surfaces that key a DECLARATION by an
+# origin class rather than derive one: `route model`'s arms (item 512,
+# `revl.model_route`). One vocabulary, read from the lattice that defines it, so
+# a new origin class cannot reach the checker without reaching that surface too.
+ORIGIN_CLASSES = frozenset(_ORIGIN_CLASSES)
+
 # Slice D: the two DERIVED classes. Sink-ness and source-ness are read off the
 # granting side's declared capability scope, never from an author qualifier —
 # `_sink_of`/`_origin_of` are the derivation, `_SINK_CLASS_SCOPES` the sink-class

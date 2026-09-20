@@ -1,0 +1,17 @@
+// REJECTED — G4: an `emit` expression inside the arguments of an `emit`. One
+// marker admits one crossing: `compensate` binds per `emit`, and every
+// per-step check reads the step's head, so a crossing marked inside the
+// argument list has no step of its own. Hoist the inner crossing into its own
+// `emit` first; a provide method binds the value with `let r = emit b.fetch()`,
+// an activation body has no value binding (an `emit` step there discards its
+// result), so move the pair into a provide method to pass the value along.
+//
+// expected error:
+//   `emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)
+
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+
+component C requires a: A, b: B {
+  emit a.send(emit b.fetch())
+}

@@ -373,13 +373,21 @@ site (G4's actual point) while the value flows:
 
 ```revl fragment
 provide evolve {
-  fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+  fn once(goal) {
+    let draft = emit assistant.complete(goal)
+    return emit compiler.propose(draft)
+  }
 }
 ```
 
 Legal on a service emission or on an `emission` extern (both are boundary
-crossings); `emit` on anything else is refused. The statement form still
-takes an optional `compensate`.
+crossings); `emit` on anything else is refused. One marker covers one
+crossing, the head call it is written on: the head's arguments are judged in
+the position the `emit` sits in, so an emission evaluated to build an argument
+needs an `emit` of its own, hoisted into its own step as `draft` is above, and
+an `emit` written inside another's argument list is refused
+(docs/rejections.md, G4). The statement form still takes an optional
+`compensate`.
 
 ### 4b.3 Provide-method bodies take plain bindings
 
