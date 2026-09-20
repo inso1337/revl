@@ -2729,6 +2729,159 @@ component C requires sink: Sink provides api: Api {
   provide api { fn go() { return sink.write("x") } }
 }
 """, "G4"),
+    # ---- the reach order inside one statement (issue #1261) ----------------
+    # `_method_emissions` notes a statement's evidence at the STATEMENT NODE,
+    # because its `walk` runs over the body LIST and visits each statement dict
+    # whole before recursing into it. At that one visit it notes the step's own
+    # crossing, then `for name in sorted(calls & env.emitting_fns)` over the
+    # names `_calls_in` collected from the WHOLE statement subtree, then the
+    # names passed as VALUES, and only then the sub-nodes.
+    #
+    # Every G4 document above reaches at most one emitting name per statement,
+    # so nothing in the corpus measured that sort, and the gate — which reaches
+    # the names in SOURCE order as it walks — rendered the same refusal with the
+    # same tag and the same offending tokens in a different reach order:
+    #   reference:  … (reaching `audit_log()`, `pg_write()`)
+    #   gate:       … (reaching `pg_write()`, `audit_log()`)
+    # Both engines refuse; the divergence is on the MESSAGE half of item 391's
+    # agreement, which is the half `test_rejected_programs_agree` compares and
+    # `gate_reference_census.load_corpus` reads this list for.
+    #
+    # `pg_write` before `audit_log` in the source on purpose: the two orders are
+    # each other's reverse, so a document written the other way round would
+    # agree whether or not anything sorted.
+    ("two host externs in one statement sort by name", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = pg_write(row) + audit_log(row)
+      return r
+    }
+  }
+}
+""", "G4"),
+    # The plain-declaration half: the same list is rendered by the upper-bound
+    # arm ("reaches …"), which is a separate `g4_verdict` branch.
+    ("two host externs in one statement sort by name, plain half", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = pg_write(row) + audit_log(row)
+      return r
+    }
+  }
+}
+""", "G4"),
+    # An `emit` step and its `compensate` slot are ONE node on the reference and
+    # TWO statements here (parser.rvl reads the compensation as its own `Stmt`),
+    # so the sort runs across the pair — and the step's own crossing stays ahead
+    # of it. A gate that sorted per STATEMENT rather than per node would draw
+    # `fs.append`, `pg_write()`, `audit_log()` here.
+    ("an emit step and its compensate slot sort as one node", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Store { emission fn append(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires fs: Store provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit fs.append(pg_write(row).to_str()) compensate audit_log(row).to_str()
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # A required-key crossing reached DEEPER in the same statement lands after
+    # the sorted names, because the reference notes it on the recursion into the
+    # sub-node and the names at the statement node above it. The walk reaches
+    # `un.revert` first, so a fix that only sorted the names among themselves,
+    # in place, would leave `un.revert` ahead of them.
+    ("a deeper required-key crossing follows the sorted names", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Store { emission fn append(row: Str) -> Int }
+service Undo { emission fn revert(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires fs: Store, un: Undo provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit fs.append(row) compensate un.revert(pg_write(row).to_str() + audit_log(row).to_str())
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # The same two names in a conditional: one statement, two branches, and the
+    # reference still collects the subtree at the statement node.
+    ("a conditional reaching two host externs sorts them", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = row == "x" ? pg_write(row) : audit_log(row)
+      return r
+    }
+  }
+}
+""", "G4"),
+    # Control 1: the same two externs in TWO statements. The sort is per node,
+    # so the reference keeps them in source order here — `pg_write()` first.
+    # A fix that sorted the whole accumulated list would fail on this one.
+    ("two host externs in two statements keep source order", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let a = pg_write(row)
+      let b = audit_log(row)
+      return a + b
+    }
+  }
+}
+""", "G4"),
+    # Control 2: an emit step and a compensate slot that cross REQUIRED KEYS.
+    # Those labels are `<key>.<op>`, not names, so nothing is sorted and the
+    # order is the walk's — a renderer that sorted every label would reverse it.
+    ("a compensate slot through required keys keeps its order", """
+service Store { emission fn append(row: Str) -> Int }
+service Undo { emission fn revert(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires un: Undo, fs: Store provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit un.revert(row) compensate fs.append(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # Control 3: the same two externs passed as VALUES, one per statement. The
+    # value labels are a second sorted group on the reference, and per node as
+    # well, so these two also stay in source order.
+    ("two host externs passed as values keep source order", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let f = pg_write
+      let g = audit_log
+      return 0
+    }
+  }
+}
+""", "G4"),
 ]
 
 
