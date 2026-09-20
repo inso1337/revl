@@ -617,6 +617,9 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
         # item 121 Slice 2: and mint the value-flow token for this static site,
         # naming the crossing the recorder just made for the winning attempt.
         revl_note_validated_completion(site)
+        # item 518: consult the shadow observer for THIS crossing, after the
+        # answer has validated and with no path from it to the return below.
+        _revl_serve_shadow(_revl_recorded_crossing.get(), value)
         return validated
 
 
@@ -648,6 +651,9 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
             continue
         _revl_record_model_call(started, attempt + 1, budget + 1, result)
         revl_note_validated_completion(site)
+        # item 518: the async colour crosses the same seam. The observer is
+        # synchronous on both, so one implementation serves both colours.
+        _revl_serve_shadow(_revl_recorded_crossing.get(), result)
         return validated
 
 
@@ -709,6 +715,12 @@ def revl_reset_run_trace_state() -> None:
     # that rather than inheriting the previous generation's engagement.
     _revl_model_evidence_sealer.set(None)
     _revl_model_evidence_draft.set(None)
+    # item 518: a generation boundary ends the window too. A shadow that
+    # survived a `--watch` reload would accumulate one generation's crossings
+    # into the next generation's ledger.
+    _revl_shadow.set(None)
+    _revl_in_shadow.set(False)
+    _revl_shadow_faults.set(())
 
 
 # item 242: the model-hop observations live in THIS fiber, KEYED BY THE CROSSING
@@ -935,6 +947,114 @@ def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]",
 def revl_recorded_crossing() -> "Optional[tuple]":
     """The crossing this fiber recorded most recently, or None."""
     return _revl_recorded_crossing.get()
+
+
+# ---------------------------------------------------------------------------
+# item 518 (issue #1192): the shadow seam.
+#
+# A shadow serves a declared fraction of a model action to a SUCCESSOR role
+# while the incumbent's answer stays the one handed back to the body. The
+# scheduling, the selection, the stamping and the accounting are
+# `revl.shadow_routing`'s and none of them are here: this module is everything
+# an emitted component imports and it may not grow a dependency on the
+# compiler package. What is here is the seam itself, one hook consulted at the
+# completion crossing, whose return value is discarded.
+#
+# Three properties the placement below is chosen for, each measured in
+# `tests/test_shadow_runtime_518.py` rather than asserted here:
+#
+#   * The hook cannot change the answer. It is called after the response has
+#     validated and its result is ignored, so `validate_retry` returns the
+#     object `validate_response` produced whatever the observer does. A seam
+#     that could substitute an answer would be a cutover, not a shadow.
+#   * It fires once per crossing, on the attempt that validated, and it is
+#     handed the crossing the recorder minted for that attempt. An exhausted
+#     budget raises before it and is NOT shadowed: with no incumbent answer
+#     there is nothing to compare a successor's against.
+#   * A fault in the observer stops the SHADOW and never the incumbent. The
+#     exception is caught, the hook is detached, and the fault is kept for the
+#     operator to read (`revl_shadow_faults`), because a shadow that failed
+#     silently would leave a window that looks short rather than broken.
+# ---------------------------------------------------------------------------
+
+#: The observer, or None. Absent is the default and every path below is then a
+#: no-op, which is what makes this seam additive: an emitted program that
+#: never attaches one behaves exactly as it did before.
+_revl_shadow: "contextvars.ContextVar[Optional[Callable]]" = \
+    contextvars.ContextVar("_revl_shadow", default=None)
+
+#: Re-entrancy. The successor's own completion crosses this same seam, so
+#: without this register the observer would observe itself, unboundedly. Set
+#: for the duration of the hook and RESTORED rather than cleared, so a nested
+#: seam cannot re-arm the shadow from inside it.
+_revl_in_shadow: "contextvars.ContextVar[bool]" = \
+    contextvars.ContextVar("_revl_in_shadow", default=False)
+
+#: `(crossing, repr(exception))` per swallowed observer fault, oldest first.
+_revl_shadow_faults: "contextvars.ContextVar[tuple]" = \
+    contextvars.ContextVar("_revl_shadow_faults", default=())
+
+
+def revl_attach_shadow(observe: Callable) -> None:
+    """Wire this fiber's model completion seam to a shadow observer.
+
+    ``observe(crossing, value)`` is called with the ``(component, stepIndex)``
+    crossing the recorder just minted and the RAW host return of the
+    completion that validated, which is the value `revl_host_usage` reads and
+    not the constructed response the body receives. Whether that crossing is
+    served in shadow, whether the successor is consulted at all, and what is
+    recorded are the observer's decisions: this seam decides nothing and reads
+    no share, so the declared fraction lives in exactly one place.
+
+    Attaching resets the fault list, because a fresh window's faults are its
+    own."""
+    _revl_shadow.set(observe)
+    _revl_shadow_faults.set(())
+
+
+def revl_detach_shadow() -> None:
+    """Stop shadowing this fiber. Faults recorded so far are kept, so a caller
+    that detaches on a fault can still read what the fault was."""
+    _revl_shadow.set(None)
+
+
+def revl_shadow_attached() -> bool:
+    """Whether an observer is wired in this fiber."""
+    return _revl_shadow.get() is not None
+
+
+def revl_shadow_faults() -> tuple:
+    """Every observer fault this seam swallowed, oldest first.
+
+    Non-empty means the window is INCOMPLETE: the incumbent answered and the
+    shadow did not, so a caller that reads a ledger without reading this reads
+    a short window as a clean one."""
+    return _revl_shadow_faults.get()
+
+
+def _revl_serve_shadow(crossing, value) -> None:
+    """Consult this fiber's shadow observer for one completion crossing.
+
+    Returns nothing, by construction: the caller's next statement returns the
+    incumbent's validated answer and there is no path from here to it."""
+    observe = _revl_shadow.get()
+    if observe is None or _revl_in_shadow.get():
+        return
+    if not isinstance(crossing, tuple) or len(crossing) != 2 \
+            or crossing[0] is None:
+        # Recording is off, or the timeline was hand-built: there is no
+        # crossing to key an observation on, and a shadow keyed on None would
+        # accumulate every completion in the process under one key.
+        return
+    token = _revl_in_shadow.set(True)
+    try:
+        observe(crossing, value)
+    except Exception as error:  # noqa: BLE001 - a shadow may not break the run
+        _revl_shadow.set(None)
+        _revl_shadow_faults.set((*_revl_shadow_faults.get(),
+                                 (crossing, repr(error))))
+    finally:
+        _revl_in_shadow.reset(token)
 
 
 def _revl_record_model_call(started: float, attempts: int, attempt_ceiling: int,
