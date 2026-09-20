@@ -40,6 +40,22 @@ three outcomes: not restored, not reported"
 shape - `undeclared` sits below `neither` there for the same reason, because a
 class with no exit must not inherit the exit of a class that has one.
 
+ONE VOCABULARY, NOT TWO. Item 546 landed first and its
+`layer_state.OUTCOMES` is `("restored", "compensated", "uncompensated",
+"untouched")`, with a note saying `uncompensated` "is item 522's word for that
+fact and is taken from it rather than renamed". Those four are these four,
+spelled identically, and `tests/test_ui_transaction_phases_522.py` asserts the
+agreement so the two cannot drift. The fifth, `unregistered`, has no member
+there and should not: 546's list is what a ROLLBACK DID, and `unregistered` is
+a fact about a DECLARATION that is known before anything runs.
+
+`confirm-required` is likewise NOT folded into any of them. Item 546 refuses
+that fold by name (`class-not-a-state-class`) because the class says who may
+authorise a step rather than what the step leaves behind, and this module keeps
+the distinction structurally: a step carries its registry state class and its
+raised authority class in SEPARATE fields, and the residue verdict is computed
+from the state class alone, so a raise can never move a step's residue.
+
 FAILURE DIRECTION, stated for every decision in this module:
 
   * the aggregate is the weakest part, so one unclassifiable step cannot be
