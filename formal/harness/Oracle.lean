@@ -29,8 +29,10 @@ proved model itself**, not from a private restatement of it (roadmap item
     development (`ceilingOKB_iff` discharges the unbounded `∀ k` through
     `RevL.Lemmas.budgetOf_attained`);
   * `A9 … a9=` is `a9RowB`, which IS `RevL.A9.a9B` over the component's
-    `LComponent` beside its installed provide-block keys (the `PB` rows);
-    `a9RowB_iff` PROVES `a9RowB c blocks = true ↔ RevL.A9.A9OK ⟨c, blocks⟩`.
+    `LComponent` beside its installed provide-block keys (the `PB` rows)
+    and its routed keys (the `PR` rows); `a9RowB_iff` PROVES
+    `a9RowB c blocks routed = true ↔ RevL.A9.A9OK ⟨c, blocks, routed⟩`,
+    both directions of the rule (issues 1167 and #1172).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -98,6 +100,14 @@ Fact rows in (tab-separated, one fact per line):
                                              order — a double install is a
                                              repeated row. This is the fact
                                              the A9 row reads; C is not it
+  PR <file> <comp> <key>                     one `isolate key in realms(...)`
+                                             bind: the routes-installed key
+                                             (issue #1172's exemption, as
+                                             data). Its realm legs are NOT
+                                             folded into M: the linker
+                                             resolves them per leg, which
+                                             `LComponent`'s one realm per
+                                             key cannot express
   K <file> <comp> <local> <cap>              require-held capability, named
                                              by the DECLARED boundary
   A <file> <comp> <cap>                      activation emit-step surface,
@@ -191,9 +201,12 @@ Verdict rows out:
                                                    config-is-data rule
   X <file> <refused=CODE>                          refusal of record
   A9 <file> <comp> <a9=ok|fail>                    every installed block key
-                                                   is declared (RevL.A9);
-                                                   one row per component
-                                                   that installs a block
+                                                   is declared AND every
+                                                   declared key is installed
+                                                   by a block or a route
+                                                   (RevL.A9); one row per
+                                                   component that declares
+                                                   or installs anything
   D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
   O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a>   A8/R4 recovery
   A2 <file> <comp> <a2=ok|fail>                    no acquisition after a
@@ -322,18 +335,18 @@ def linkVerdict (comps : List LComponent) : Bool :=
 
 /-! ## Deciding A9
 
-The installed block keys live beside the `LComponent` (`RevL.A9.Installed`,
-additively — L0 carries the clause only), and the verdict is the L2 file's
-own `a9B`. Nothing is restated here; the bridge is the model's `a9B_iff`
-applied to the row's shape. -/
+The installed block keys and the routed keys live beside the `LComponent`
+(`RevL.A9.Installed`, additively — L0 carries the clause only), and the
+verdict is the L2 file's own `a9B`, both directions. Nothing is restated
+here; the bridge is the model's `a9B_iff` applied to the row's shape. -/
 
-def a9RowB (c : LComponent) (blocks : List String) : Bool :=
-  RevL.A9.a9B ⟨c, blocks⟩
+def a9RowB (c : LComponent) (blocks routed : List String) : Bool :=
+  RevL.A9.a9B ⟨c, blocks, routed⟩
 
 /-- **The A9 verdict is the model's judgment.** -/
-theorem a9RowB_iff (c : LComponent) (blocks : List String) :
-    a9RowB c blocks = true ↔ RevL.A9.A9OK ⟨c, blocks⟩ :=
-  RevL.A9.a9B_iff ⟨c, blocks⟩
+theorem a9RowB_iff (c : LComponent) (blocks routed : List String) :
+    a9RowB c blocks routed = true ↔ RevL.A9.A9OK ⟨c, blocks, routed⟩ :=
+  RevL.A9.a9B_iff ⟨c, blocks, routed⟩
 
 /-! ## Deciding the capability order
 
@@ -956,6 +969,11 @@ structure PBRow where
   comp : String
   key : String
 
+structure PRRow where
+  path : String
+  comp : String
+  key : String
+
 structure XRow where
   path : String
   code : String
@@ -1248,6 +1266,11 @@ def parsePB (f : List String) : Option PBRow :=
   | ["PB", path, comp, key] => some ⟨path, comp, key⟩
   | _ => none
 
+def parsePR (f : List String) : Option PRRow :=
+  match f with
+  | ["PR", path, comp, key] => some ⟨path, comp, key⟩
+  | _ => none
+
 def parseX (f : List String) : Option XRow :=
   match f with
   | ["X", path, code] => some ⟨path, code⟩
@@ -1535,9 +1558,16 @@ end A2Ordering
 
 /-- Build the model's component from an `M` row. `realm` is the
 component's own `isolate` map, defaulting to `sharedRealm` — `lower._realm`
-exactly. -/
-def toLComponent (r : MRow) : LComponent :=
-  { name := r.name, requires := r.requires, provides := r.provides,
+exactly. A ROUTED requirement (`PR` row,
+`isolate k in realms(...)`) is elided: the linker resolves it per leg
+against `provider_of[(k, leg)]` and never through the single-realm table,
+and `LComponent.realm` places a key in one realm, so spelling it here would
+put the requirement in the shared realm — where a Router that also
+`provides k` would read as a phantom G3 self-provision. Elided, like the
+requirements `localComposition` elides, not supplied. -/
+def toLComponent (r : MRow) (routed : List String) : LComponent :=
+  { name := r.name, requires := r.requires.filter (fun k => !routed.contains k),
+    provides := r.provides,
     realm := fun k =>
       match r.realms.find? (·.1 == k) with
       | some (_, rl) => rl
@@ -1559,6 +1589,7 @@ def main (args : List String) : IO UInt32 := do
     let srows := fields.filterMap parseS
     let xrows := fields.filterMap parseX
     let pbrows := fields.filterMap parsePB
+    let prrows := fields.filterMap parsePR
     let harows := fields.filterMap parseHA
     let cfrows := fields.filterMap parseCF
     let cnrows := fields.filterMap parseCN
@@ -1637,6 +1668,7 @@ def main (args : List String) : IO UInt32 := do
       let uu := urows.filter (fun r => r.path == p)
       let uha := harows.filter (fun r => r.path == p)
       let upb := pbrows.filter (fun r => r.path == p)
+      let upr := prrows.filter (fun r => r.path == p)
       let ems : List (String × String) :=
         (ub.filter (fun b => b.mode != "plain")).map (fun b => (b.svc, b.meth))
       let bounds : List (String × String × String × List String) :=
@@ -1646,7 +1678,10 @@ def main (args : List String) : IO UInt32 := do
       -- The static composition: spawn TEMPLATES are runtime instances, not
       -- composition members, and `lower._link` excludes them from the G2/G3
       -- table for exactly that reason.
-      let comps := (fm.filter (fun r => !r.isTemplate)).map toLComponent
+      let routedOf := fun (cn : String) =>
+        (upr.filter (fun b => b.comp == cn)).map (·.key)
+      let comps := (fm.filter (fun r => !r.isTemplate)).map
+        (fun r => toLComponent r (routedOf r.name))
       let dv := if decide (ProvidesDisjoint comps) then "ok" else "fail"
       let cv := if decide (RequiresClosed comps) then "ok" else "fail"
       let lv := if linkVerdict comps then "ok" else "fail"
@@ -1664,16 +1699,19 @@ def main (args : List String) : IO UInt32 := do
         let acquireOK := hostAcquireOK (uha.filter (fun r => r.comp == cn))
         let gv := if markerOK && acquireOK then "ok" else "fail"
         out := out ++ s!"G\t{p}\t{cn}\tg4={gv}\n"
-      -- A9 verdicts (issue 1167): every installed provide block's key is
-      -- declared in the clause. One row per component that installs a block
-      -- (a component with no block would agree vacuously); the clause comes
-      -- off the M row's `LComponent`, the blocks off the PB rows, and the
-      -- verdict is the model's `a9B` (`a9RowB_iff`). Templates included:
+      -- A9 verdicts (issues 1167 / #1172): every installed provide block's
+      -- key is declared in the clause, and every declared key is installed
+      -- by a block or a `realms(...)` route. One row per component that
+      -- declares or installs anything (a component with neither would agree
+      -- vacuously); the clause comes off the M row's `LComponent`, the
+      -- blocks off the PB rows, the routes off the PR rows, and the verdict
+      -- is the model's `a9B` (`a9RowB_iff`). Templates included:
       -- `lower._lower_provide` runs on a spawn target's body too.
       for r in fm do
         let blocks := (upb.filter (fun b => b.comp == r.name)).map (·.key)
-        if !blocks.isEmpty then
-          let av := if a9RowB (toLComponent r) blocks then "ok" else "fail"
+        let routed := routedOf r.name
+        if !blocks.isEmpty || !r.provides.isEmpty then
+          let av := if a9RowB (toLComponent r routed) blocks routed then "ok" else "fail"
           out := out ++ s!"A9\t{p}\t{r.name}\ta9={av}\n"
       -- CD verdicts (G4 config-is-data) per DECLARED config field, not per
       -- component: a file's externs declare config too and are held to the
