@@ -870,6 +870,70 @@ same-name replacement, a second `boot`, a per-realm conflict, plus a
 generator; `admit_src == admit_into(_, "{}")` pinned. ~400 lines plus the
 generator template.
 
+**T5 PARTIAL — the running SIGNATURE, and the oracle.** Read the shape
+decision first, because it is not 4.5's. `admit_into` did not wait for this
+slice and did not take JSON: `selfhost/compile.rvl`'s
+`admit_into(source, manifest)` and `crates/revl-gate`'s
+`admit_into(&str, &str)` have been the manifest verb since #860, over the
+item-186 ROW WIRE rather than a compiled IR document. Section 8 listed that as
+a decision to confirm ("a purpose-built line format the py side would render")
+and the tree confirmed it the other way round from 4.5's default, so
+`stdlib/json.rvl` stays out of the crate closure and `serde_json` stays off
+the dependency list.
+
+What landed here is the half 4.5 names and the wire did not carry: the running
+service's declared PARAMETER LISTS. `revl.manifest.manifest_wire` renders each
+operation token as `op(name:Type|name:Type)`, the fold parses it into `AmbSvc.
+sigs`, and `ct_req_msig` resolves a call through a requirement against the
+RUNNING declaration when the candidate declares no service of that name. So
+"a candidate's `requires store: Store` resolves and its call sites are typed
+against the RUNNING signature" is now true of the arguments.
+
+Measured, on `bench/admission_latency.py`'s running composition: a candidate
+calling `store.bump(key)` on a running `bump(n: Int)` moved from a
+no-objection to `T1|`store.bump` argument `n` expects `Int`, got `Str``, the
+reference's sentence byte for byte, while its well-typed twin `store.get(key)`
+still raises none. Over the oracle's 40 drawn pairs the native manifest arm
+refused 0 before and 27 after, every one of them agreeing with the reference
+on tag AND message. The census is byte-identical (it runs standalone
+`admit_src`, which this slice does not touch): `false-admission` empty,
+`false-reject` empty, `false-admit` 9.
+
+Withheld, deliberately, and each is the under-refusing direction:
+
+* the return type, and the `emission`/`async`/capability markings. The G4 and
+  A1 arms read those, and an arm answering from a declaration nobody sent is
+  the wave-through the block exists to avoid. Only `ct_req_msig` reads a
+  wire-built `MSig`, and its rule reads `ps` alone;
+* a parameter list whose spelling needs one of the wire's structural
+  characters (`Map[Str, Int]` carries the operation separator). The renderer
+  withholds the whole list rather than escaping it or emitting one that lost a
+  parameter to the split; the row then carries the bare name, which the fold
+  reads as silence about the arguments;
+* ARITY. `store.get(key, key)` against a one-parameter running `get` is a
+  reference refusal with no code, and the gate false-admits it standalone
+  too — it is not a manifest question;
+* the provide method's RETURN against the service it implements
+  (`wrong_return_on_running`), for the same reason: a standalone false-admit,
+  T4's;
+* `_admit_service_replacement`'s section-5 relation on a redeclared running
+  service. `tests/test_selfhost_admit_into.py::WITHHELD` is the list, and it
+  is a test rather than a comment: a named entry that has silently started
+  agreeing reds, and so does an unnamed pair that has started withholding.
+
+Oracle: `tests/test_selfhost_admit_into.py`, the differential against the
+public `revl.gate.admit_into` over (running, candidate) pairs — the harness's
+`RUNNING`/`CANDIDATE`, `_REDECLARE_RUNNING`, `_CALLS_MISSING_METHOD`,
+`_INCOMPLETE_PROVIDE`, the hole draft, a same-name replacement, a per-realm
+conflict, the typed pair, plus the generator — asserting the asymmetric
+property: every native refusal is a reference refusal with the same tag and
+sentence, and every native silence is named. `admit_ambient(src, "") ==
+admit_src(src)` is pinned over the whole corpus.
+
+Still T5's, and not landed: nothing takes a compiled IR document. An embedder
+holding one projects it with `revl.manifest.manifest_wire` on the py side,
+which is the seam 337 Seam 2/3 would have to cross.
+
 **T6. The `Admitted` arm.** The family registry and post-gate family scan
 (3.6); `Verdict` rewrite; api `2.0.0` lockstep; census `false-admission`
 bucket; `bench/inprocess_gate_rust` manifest batch; the crate README. Oracle:
