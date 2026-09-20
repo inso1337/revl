@@ -109,16 +109,24 @@ HELD_OUT_FENCE = (
     "tests/test_selfhost_lower.py",
 )
 
-# The subject roots. Every in-repo file this tool loads has to be classified as
-# one or the other -- `tests/test_heldout_scoring.py` asserts the tool's own
-# import closure carries no third category, so a dependency added without a
-# decision is a RED rather than a silent hole in the fence.
+# The subject: the top-level directories a candidate is allowed to change and
+# that the gate measures. `tests` is one of them on purpose -- a candidate that
+# improves the compiler changes tests with it, and the two test files the fence
+# names are exempted by the fence rather than by forbidding the directory.
+# Every in-repo file a scoring run loads has to fall in one category or the
+# other; `tests/test_heldout_scoring.py` asserts the closure carries no third,
+# so a dependency added without a decision is a RED rather than a silent hole.
 SUBJECT_ROOTS = (
-    "src/revl/",
-    "selfhost/",
-    "backends/",
-    "crates/",
-    "stdlib/",
+    "src",
+    "selfhost",
+    "backends",
+    "crates",
+    "stdlib",
+    "tests",
+    "examples",
+    "tck",
+    "dogfood",
+    "demo",
 )
 
 # Repo files a scoring run loads that `sys.modules` does not show, because they
@@ -148,14 +156,13 @@ def classify(path: str):
     that is in no category is a hole in the fence, and the classification test
     turns it into a RED rather than leaving it to be noticed.
     """
-    norm = path.replace("\\", "/")
+    norm = path.replace("\\", "/").strip("/")
     if norm in HELD_OUT_FENCE:
         return "fence"
     if norm in SCORING_UNREACHED:
         return "unreached"
-    for root in SUBJECT_ROOTS:
-        if norm.startswith(root):
-            return "subject"
+    if norm.split("/", 1)[0] in SUBJECT_ROOTS:
+        return "subject"
     return None
 
 # A seed shorter than this is not searched for in the tree: a short string
