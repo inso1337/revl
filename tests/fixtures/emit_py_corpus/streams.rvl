@@ -1,0 +1,88 @@
+// item 130 / item 391: the STREAM STATEMENT FORMS, in the corpus that measures
+// them. Until this document there were exactly five `subscribe` programs in the
+// repo and all five sat in `backends/*/testdata`, which no self-host projection
+// globs — so the admission walk's blindness to these three forms showed up only
+// as a `false-reject/G1` census bucket, and the false ADMISSIONS underneath it
+// (an undeclared stream in a `subscribe` head raised no objection at all) were
+// measured by nothing.
+//
+// Four forms, one per branch the reader grew:
+//
+//   Plain    — `let <x> = subscribe <stream> undo <x>.close()`. A subscription
+//     IS an acquisition, so the binding must reach the component's scope: every
+//     later `sub.next()` resolved against nothing before this.
+//   Windowed — the same with the Slice 2 qualifier tail (`policy block buffer 2
+//     drain 10ms`), which the reader steps over to the bracket's `undo`.
+//   Fanin    — the Slice 3 `merge(a, b)` head. `merge` is not a call here: the
+//     reference parses it into a `StreamMergeExpr` before its expression
+//     grammar runs, so the word names nothing and its OPERANDS are what
+//     resolve. Reading it as a call refuses `merge` itself.
+//   Chain    — the Slice 2 combinator chain, whose arrow bodies are ordinary
+//     expressions whose heads the reference resolves.
+//   Iterate  — Slice 4's `every <x> in <sub> { … }`, which shares the `every`
+//     keyword with the timer and is told apart by one token of lookahead.
+//   Handler  — Slice 5's `on <Event> as <x> in <sub> { … }`, whose `on` is a
+//     CONTEXTUAL keyword in neither lexer's table.
+//   Coeffect — the same handler with the `in <sub>` clause dropped (§6b): the
+//     source is the component's required `Stream[OrderPlaced]`.
+
+event OrderPlaced(key: order_id) { order_id: Str, quantity: Int }
+
+service Sink { emission fn write(v: Str) }
+
+component Plain {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}
+
+component Windowed {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src policy block buffer 2 drain 10ms undo sub.close()
+  await sub.next()
+}
+
+component Fanin {
+  let a = effect Stream.source() undo a.close()
+  let b = effect Stream.source() undo b.close()
+  let sub = subscribe merge(a, b) undo sub.close()
+  await sub.next()
+}
+
+component Chain requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.filter(x => x != "skip").map(x => x + "!").take(2)
+              undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderPlaced as e in sub {
+    emit sink.write(e.order_id)
+  }
+}
+
+component Coeffect requires sink: Sink, feed: Stream[OrderPlaced] {
+  on OrderPlaced as e {
+    emit sink.write(e.order_id)
+  }
+}
+
+// -- negative controls ------------------------------------------------------
+//
+// `on` is contextual: it heads a statement only in the shape `on IDENT as`, so
+// a parameter, a record field and a local named `on` must keep parsing — the
+// same discipline `events.rvl` pins for `event`.
+
+type Switch = { on: Bool }
+
+fn flip(on: Bool) -> Bool { return !on }
+
+fn switched(s: Switch) -> Bool {
+  let on = flip(s.on)
+  return on
+}
