@@ -144,7 +144,7 @@ def refusal(token: str, kind: str) -> tuple[str, str] | None:
 
 # ------------------------------------------------- the reversibility classes
 #
-# Roadmap item 522 (issue #1196), docs/design/536-ui-transactions.md, Slice 1.
+# Roadmap item 522 (issue #1196), docs/design/538-ui-transactions.md, Slice 1.
 #
 # A UI transaction that treats an unclassified step as reversible is the
 # fail-open shape: the "clean teardown" claim outlives the thing that was
@@ -254,7 +254,7 @@ def teardown_refusal(token: str, kind: str, name: str,
             f"transaction over this step must report `uncompensated`, and a "
             f"registered inverse revl cannot honour would let it print "
             f"`no_residue` instead (G4, roadmap item 522, "
-            f"docs/design/536-ui-transactions.md)",
+            f"docs/design/538-ui-transactions.md)",
         )
     if cls == COMPENSATABLE and not has_compensate:
         return (
@@ -262,6 +262,6 @@ def teardown_refusal(token: str, kind: str, name: str,
             f"declare `compensate`",
             f"{OBLIGATION[cls]}; write `compensate <inverse>()` before the "
             f"`= @backend` body (G4, roadmap item 522, "
-            f"docs/design/536-ui-transactions.md)",
+            f"docs/design/538-ui-transactions.md)",
         )
     return None

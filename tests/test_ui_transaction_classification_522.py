@@ -1,5 +1,5 @@
 """The computer-use reversibility classification (roadmap item 522, issue
-#1196, Slice 1 of docs/design/536-ui-transactions.md).
+#1196, Slice 1 of docs/design/538-ui-transactions.md).
 
 The item's exit has two halves. This file covers the half that Slice 1 lands:
 A TRANSACTION MAY NOT CLAIM CLEANLINESS IT CANNOT HAVE.
@@ -114,7 +114,7 @@ def test_the_refusal_names_the_extern_and_the_declaration() -> None:
         "  compensate rm() = @py { return \"\" }\n")
     assert "`emission[ui.download]`" in error.message
     assert "`fetch_invoice`" in error.message
-    assert "docs/design/536-ui-transactions.md" in (error.hint or "")
+    assert "docs/design/538-ui-transactions.md" in (error.hint or "")
 
 
 def test_the_refusal_classifies_as_a_g4_reversibility_finding() -> None:

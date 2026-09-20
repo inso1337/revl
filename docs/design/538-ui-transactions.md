@@ -1,6 +1,8 @@
 # Design: UI transactions and honest non-invertibility
 
-Design-doc id 536. 531 to 535 are taken on open branches, so this is the next
+Design-doc id 538. Three lanes each scanned the open pull requests for a free
+number in the same window and each arrived at 536; resolved by issue order, so
+536 is issue #1191's, 537 is issue #1194's, and this is 538.
 free number checked against every remote ref rather than against `main` alone
 (four lanes collided on 531 by checking `main`); the roadmap item of the same
 number is unrelated, which is the convention 457 established. Roadmap item
