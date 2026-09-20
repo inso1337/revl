@@ -91,6 +91,18 @@ RESIDENCES = ("on_device", "off_device")
 # may receive and an `off_device` role may not.
 CONFIDENTIALITY_ORIGINS = ("confidential", "secret")
 
+# The origins the VALUE-level ceiling judges (item 514). `secret` is
+# deliberately NOT one of them, and the omission is a decision rather than an
+# oversight. A bound provider key is already refused at every crossing kind by
+# item 256's own rule, so a ceiling arm for it would only ever restate a
+# shipped refusal under the wrong code - and the ONE crossing item 256 admits,
+# the section-4b re-entry into the same bound capability's own extern body, is
+# the provider making its own call. Refusing that under G-MODEL-PLACE would
+# contradict a landed guarantee to no purpose. `check()` keeps refusing an ARM
+# that names `secret`, citing G-SECRET-FLOW, which is the declaration half and
+# is unaffected by this.
+CEILING_ORIGINS = ("confidential",)
+
 # The code every refusal in this file carries, except the `secret` arm, which
 # cites the guarantee that already forbids it.
 CODE = "G-MODEL-PLACE"
@@ -364,12 +376,13 @@ def admits(arms: dict | None, origin: str, routed_component: bool) -> Verdict:
     action carries no `route model` block. `routed_component` says whether the
     component declares a block for any action at all.
 
-    The ceiling is a CONFIDENTIALITY ceiling: an origin that is not a
-    confidentiality origin is not this rule's business (which roles an action's
-    other origins reach is the crossing side, slice 4), so it admits. Every
-    other path either names an on-device placement or refuses.
+    The ceiling is a CONFIDENTIALITY ceiling: an origin outside
+    `CEILING_ORIGINS` is not this rule's business - which roles an action's
+    other origins reach is the crossing side, slice 4, and the bound-key
+    `secret` origin is item 256's - so it admits. Every other path either names
+    an on-device placement or refuses.
     """
-    if origin not in CONFIDENTIALITY_ORIGINS:
+    if origin not in CEILING_ORIGINS:
         return _OK
     if arms is None:
         # An unrouted action in an UNROUTED component is the state of the world
