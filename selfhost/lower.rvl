@@ -8112,7 +8112,8 @@ fn is_alias_target(target: Str, declared: List[Str]) -> Bool {
   return is_aliasable_builtin(p.head) || contains(declared, p.head)
 }
 
-type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str] }
+type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str],
+                   lines: List[Int] }
 
 // Every type DECLARATION in the file: the names it declares (the reference's
 // `declared` set, which an `event` contributes to as well — the parser appends an
@@ -8126,6 +8127,7 @@ fn alias_scan(ts: List[Token]) -> AliasScan {
   var declared: List[Str] = []
   var names: List[Str] = []
   var targets: List[Str] = []
+  var lines: List[Int] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (at_event(ts, i)) {
@@ -8145,12 +8147,16 @@ fn alias_scan(ts: List[Token]) -> AliasScan {
             && !cfg_is_variant_rhs(ts, j + 1, end)) {
           names = names.push(nm)
           targets = targets.push(type_at(ts, j + 1).ty)
+          // the DECLARATION's own line: `_resolve_type_aliases` anchors the
+          // cycle refusal at `aliases[head].line`, the line of the alias the
+          // expansion came back round to, not at the use site.
+          lines = lines.push(tkc(ts, i).line)
         }
       }
       i = end > i ? end : skip_line(ts, i)
     } else { i += 1 }
   }
-  return { declared: declared, names: names, targets: targets }
+  return { declared: declared, names: names, targets: targets, lines: lines }
 }
 
 fn alias_at(al: Map[Str, Str], name: Str) -> Str {
@@ -8222,6 +8228,96 @@ fn alias_map(ts: List[Token]) -> Map[Str, Str] {
     round += 1
   }
   return out
+}
+
+// ------------------------------------------- the alias CYCLE (457 §2.1 item 1)
+//
+// `_resolve_type_aliases`' `expand` recursion, which is the FIRST obligation of
+// the reference's declaration level — ahead of `_validate_declared_types` and so
+// ahead of every phase `collect_nonlink` already runs. A transparent alias is
+// substituted verbatim at every declaration site, so a cycle has no expansion to
+// substitute and the reference refuses it outright rather than looping in the
+// resolver or emitting a type no tier defines.
+//
+// `alias_map` above computes the same fixed point for the PRODUCER side and
+// bounds its rounds so a cycle terminates with a harmless answer; that is the
+// right shape there, because it runs behind this gate. Here the cycle is the
+// answer.
+//
+// The chain is the reference's, character for character: the stack from the
+// first occurrence of the repeated head, with that head appended, joined
+// " -> ". The refusal is anchored at the repeated alias's own DECLARATION line.
+type AcExp = { cyc: Str, line: Int }
+
+fn ac_clean() -> AcExp { return { cyc: "", line: 0 } }
+
+// `" -> ".join(stack[stack.index(head):] + (head,))`
+fn ac_chain(stack: List[Str], from_: Int, head: Str) -> Str {
+  var out = ""
+  var i = from_
+  while (i < stack.length()) {
+    out = i == from_ ? stack[i] : out.concat(" -> ").concat(stack[i])
+    i += 1
+  }
+  return out == "" ? head : out.concat(" -> ").concat(head)
+}
+
+fn ac_expand(ty: Str, stack: List[Str], names: List[Str], targets: List[Str],
+             lines: List[Int]) -> AcExp {
+  let p = ty_parse(ty)
+  // a type APPLICATION rewrites its ARGUMENTS under the same stack and leaves
+  // its head alone — the reference consults `aliases` only for a bare name.
+  if (p.args.length() > 0) {
+    return ac_expand_args(p.args, 0, stack, names, targets, lines)
+  }
+  let k = names.indexOf(p.head)
+  if (k == 0 - 1) { return ac_clean() }
+  let si = stack.indexOf(p.head)
+  if (si != 0 - 1) { return { cyc: ac_chain(stack, si, p.head), line: lines[k] } }
+  return ac_expand(targets[k], stack.push(p.head), names, targets, lines)
+}
+
+fn ac_expand_args(args: List[Str], i: Int, stack: List[Str], names: List[Str],
+                  targets: List[Str], lines: List[Int]) -> AcExp {
+  if (i >= args.length()) { return ac_clean() }
+  let r = ac_expand(args[i], stack, names, targets, lines)
+  if (r.cyc != "") { return r }
+  return ac_expand_args(args, i + 1, stack, names, targets, lines)
+}
+
+// The transparent aliases in DECLARATION order, which is the order
+// `_resolve_type_aliases` walks its `aliases` dict in, so a file with two
+// disjoint cycles draws the one the earlier declaration reaches.
+type AcTbl = { names: List[Str], targets: List[Str], lines: List[Int] }
+
+fn ac_table(sc: AliasScan) -> AcTbl {
+  var names: List[Str] = []
+  var targets: List[Str] = []
+  var lines: List[Int] = []
+  var i = 0
+  while (i < sc.names.length()) {
+    if (is_alias_target(sc.targets[i], sc.declared)
+        && !contains(names, sc.names[i])) {
+      names = names.push(sc.names[i])
+      targets = targets.push(sc.targets[i])
+      lines = lines.push(sc.lines[i])
+    }
+    i += 1
+  }
+  return { names: names, targets: targets, lines: lines }
+}
+
+fn alias_cycle_refusal(ts: List[Token]) -> Verd {
+  let t = ac_table(alias_scan(ts))
+  var i = 0
+  while (i < t.names.length()) {
+    let r = ac_expand(t.targets[i], [t.names[i]], t.names, t.targets, t.lines)
+    if (r.cyc != "") {
+      return mk_verd(tagged("TYPE", "type alias cycle: ".concat(r.cyc)), r.line)
+    }
+    i += 1
+  }
+  return no_verd()
 }
 
 
@@ -12096,6 +12192,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // `_validate_declared_types`, the earliest of all), then cache-purity,
   // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
   // the component loop.
+  // the ALIAS CYCLE is first of all: `_resolve_type_aliases` runs ahead of
+  // `_validate_declared_types` in `check_and_lower`, and it RAISES, so on a
+  // program that trips it nothing else is reached.
+  let acv = alias_cycle_refusal(ts)
+  if (acv.v != "") { return { done: true, refs: [acv] } }
   // the DECLARED-TYPE validation runs at the head of `_validate_declared_types`,
   // ahead of the config-is-data walk that closes the same function, so a
   // malformed annotation on a `fn`/`extern` signature is decided before it.
