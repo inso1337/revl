@@ -216,9 +216,15 @@ pub struct RouteP {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AmbSvc {
+    ops: Vec<String>,
+    sigs: Vec<MSig>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ctx__m2 {
     svcs: std::collections::HashMap<String, SvcD>,
-    ambOps: std::collections::HashMap<String, Vec<String>>,
+    ambOps: std::collections::HashMap<String, AmbSvc>,
     reqMap: std::collections::HashMap<String, String>,
     caps: std::collections::HashMap<String, Vec<String>>,
     colored: Vec<String>,
@@ -535,6 +541,7 @@ pub struct Cut {
 pub struct SvcOps {
     name: String,
     ops: Vec<String>,
+    sigs: Vec<MSig>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -555,7 +562,16 @@ pub struct Manifest {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OpsR {
     xs: Vec<String>,
+    sigs: Vec<MSig>,
     claimed: bool,
+    ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OpTok {
+    name: String,
+    ps: Vec<ParamN>,
+    sig: bool,
     ok: bool,
 }
 
@@ -8625,7 +8641,7 @@ fn svc_has_method(cx: Ctx__m2, svcName: String, m: &str) -> bool {
         return (find_msig(svc_of(cx.clone(), svcName.clone()), m, 0i64).name != "");
     }
     return match cx.ambOps.get(&svcName).cloned() {
-    Some(ops) => contains__m2(&ops, m),
+    Some(a) => contains__m2(&a.ops, m),
     None => false,
     _ => unreachable!(),
 };
@@ -9162,14 +9178,14 @@ fn ctx_with_callables(cx: Ctx__m2, names: Vec<String>) -> Ctx__m2 {
     return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: union_into(cx.fnNames.clone(), names.clone()), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
-fn amb_ops_map(xs: &[SvcOps], i: i64, acc: std::collections::HashMap<String, Vec<String>>) -> std::collections::HashMap<String, Vec<String>> {
+fn amb_ops_map(xs: &[SvcOps], i: i64, acc: std::collections::HashMap<String, AmbSvc>) -> std::collections::HashMap<String, AmbSvc> {
     if (i >= xs.revl_length()) {
         return acc;
     }
-    return amb_ops_map(xs, (i).checked_add(1i64).expect("revl: Int overflow"), { let mut c = acc.clone(); c.insert((xs)[(i) as usize].name.clone(), (xs)[(i) as usize].ops.clone()); c });
+    return amb_ops_map(xs, (i).checked_add(1i64).expect("revl: Int overflow"), { let mut c = acc.clone(); c.insert((xs)[(i) as usize].name.clone(), AmbSvc { ops: (xs)[(i) as usize].ops.clone(), sigs: (xs)[(i) as usize].sigs.clone() }); c });
 }
 
-fn ctx_amb_ops(cx: Ctx__m2, ops: std::collections::HashMap<String, Vec<String>>) -> Ctx__m2 {
+fn ctx_amb_ops(cx: Ctx__m2, ops: std::collections::HashMap<String, AmbSvc>) -> Ctx__m2 {
     return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: ops.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
 }
 
@@ -9330,14 +9346,25 @@ fn ct_no_msig() -> MSig {
     return MSig { name: String::from(""), isEm: false, caps: vec![], isAsync: false, ps: vec![], ret: String::from("") };
 }
 
+fn ct_req_msig(cx: Ctx__m2, svcName: String, op: &str) -> MSig {
+    if cx.svcs.contains_key(&svcName) {
+        return find_msig(svc_of(cx.clone(), svcName.clone()), op, 0i64);
+    }
+    return match cx.ambOps.get(&svcName).cloned() {
+    Some(a) => find_msig(SvcD { name: svcName.clone(), methods: a.sigs }, op, 0i64),
+    None => ct_no_msig(),
+    _ => unreachable!(),
+};
+}
+
 fn ct_req_decl(tg: Expr, cx: Ctx__m2) -> MSig {
     return match tg {
     Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
-    Expr::Var(v) => if (cx.reqMap.contains_key(&v) && (!cx.provAlias.contains_key(&v))) { find_msig(svc_of(cx.clone(), match cx.reqMap.get(&v).cloned() {
+    Expr::Var(v) => if (cx.reqMap.contains_key(&v) && (!cx.provAlias.contains_key(&v))) { ct_req_msig(cx.clone(), match cx.reqMap.get(&v).cloned() {
     Some(sv) => sv,
     None => String::from(""),
     _ => unreachable!(),
-}), &fl.name, 0i64) } else { ct_no_msig() },
+}, &fl.name) } else { ct_no_msig() },
     _ => ct_no_msig(),
 } },
     _ => ct_no_msig(),
@@ -16394,25 +16421,66 @@ fn man_bad(man: Manifest, msg: &str) -> Manifest {
 }
 
 fn mk_ops_none() -> OpsR {
-    return OpsR { xs: vec![], claimed: false, ok: true };
+    return OpsR { xs: vec![], sigs: vec![], claimed: false, ok: true };
+}
+
+fn parse_optok(one: String) -> OpTok {
+    let lp = one.revl_index_of("(");
+    if (lp == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return OpTok { name: one.clone(), ps: vec![], sig: false, ok: bare_ident(&one, 0i64) };
+    }
+    let nm = one.revl_slice(0i64, lp);
+    if ((!bare_ident(&nm, 0i64)) || (one.revl_slice((one.revl_length()).checked_sub(1i64).expect("revl: Int overflow"), one.revl_length()) != ")")) {
+        return OpTok { name: String::from(""), ps: vec![], sig: false, ok: false };
+    }
+    let inner = one.revl_slice((lp).checked_add(1i64).expect("revl: Int overflow"), (one.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+    if (inner == "") {
+        return OpTok { name: nm.clone(), ps: vec![], sig: true, ok: true };
+    }
+    let mut ps: Vec<ParamN> = vec![];
+    let mut s = inner.clone();
+    let mut ok = true;
+    let mut done = false;
+    while (!done) {
+        let bar = s.revl_index_of("|");
+        let piece = if (bar == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { s.clone() } else { s.revl_slice(0i64, bar) };
+        let colon = piece.revl_index_of(&String::from(":"));
+        let pn = if (colon == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { String::from("") } else { piece.revl_slice(0i64, colon) };
+        let pt = if (colon == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { String::from("") } else { piece.revl_slice((colon).checked_add(1i64).expect("revl: Int overflow"), piece.revl_length()) };
+        if (((colon == (0i64).checked_sub(1i64).expect("revl: Int overflow")) || (!bare_ident(&pn, 0i64))) || (pt == "")) {
+            ok = false;
+            done = true;
+        } else {
+            ps.push(Bind { name: pn.clone(), ty: pt.clone() });
+            if (bar == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                done = true;
+            } else {
+                s = s.revl_slice((bar).checked_add(1i64).expect("revl: Int overflow"), s.revl_length());
+            }
+        }
+    }
+    return OpTok { name: if ok { nm.clone() } else { String::from("") }, ps: if ok { ps.clone() } else { vec![] }, sig: ok, ok: ok };
 }
 
 fn mk_ops(rest: String) -> OpsR {
     if (rest == "") {
-        return OpsR { xs: vec![], claimed: true, ok: true };
+        return OpsR { xs: vec![], sigs: vec![], claimed: true, ok: true };
     }
     let mut xs: Vec<String> = vec![];
+    let mut sigs: Vec<MSig> = vec![];
     let mut s = rest.clone();
     let mut ok = true;
     let mut done = false;
     while (!done) {
         let comma = s.revl_index_of(",");
         let one = if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { s.clone() } else { s.revl_slice(0i64, comma) };
-        if (!bare_ident(&one, 0i64)) {
+        let t = parse_optok(one);
+        if (!t.ok) {
             ok = false;
             done = true;
         } else {
-            xs = if contains__m2(&xs, &one) { xs.clone() } else { xs.revl_push(one.clone()) };
+            xs = if contains__m2(&xs, &t.name) { xs.clone() } else { xs.revl_push(t.name.clone()) };
+            sigs = if t.sig { sigs.revl_push(MSig { name: t.name.clone(), isEm: false, caps: vec![], isAsync: false, ps: t.ps.clone(), ret: String::from("") }) } else { sigs.clone() };
             if (comma == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 done = true;
             } else {
@@ -16420,7 +16488,7 @@ fn mk_ops(rest: String) -> OpsR {
             }
         }
     }
-    return OpsR { xs: if ok { xs.clone() } else { vec![] }, claimed: true, ok: ok };
+    return OpsR { xs: if ok { xs.clone() } else { vec![] }, sigs: if ok { sigs.clone() } else { vec![] }, claimed: true, ok: ok };
 }
 
 fn parse_row(row: String, man: Manifest) -> Manifest {
@@ -16446,7 +16514,7 @@ fn parse_row(row: String, man: Manifest) -> Manifest {
         if (!ops.ok) {
             return man_bad(man.clone(), &((String::from("manifest service row `").revl_concat(&row)).revl_concat("` does not name an operation")));
         }
-        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: if contains__m2(&man.svcs, &sname) { man.svcs } else { man.svcs.revl_push(sname.clone()) }, svcsKnown: man.svcsKnown, svcOps: if ops.claimed { man.svcOps.revl_push(SvcOps { name: sname.clone(), ops: ops.xs.clone() }) } else { man.svcOps }, bad: String::from("") };
+        return Manifest { provs: man.provs.clone(), reqs: man.reqs.clone(), routes: man.routes.clone(), hands: man.hands.clone(), mnames: man.mnames.clone(), repl: man.repl.clone(), halted: man.halted, svcs: if contains__m2(&man.svcs, &sname) { man.svcs } else { man.svcs.revl_push(sname.clone()) }, svcsKnown: man.svcsKnown, svcOps: if ops.claimed { man.svcOps.revl_push(SvcOps { name: sname.clone(), ops: ops.xs.clone(), sigs: ops.sigs.clone() }) } else { man.svcOps }, bad: String::from("") };
     }
     if (row.revl_slice(0i64, 1i64) == "-") {
         let name = row.revl_slice(1i64, row.revl_length());
@@ -24873,6 +24941,42 @@ fn an_exhaustive_service_block_that_omits_the_name_still_refuses() {
 fn the_empty_wire_keeps_the_standalone_verdict() {
     let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
     assert!((admit_ambient(cand.clone(), String::from("")) == admit_src(cand.clone())));
+}
+
+#[test]
+fn a_required_service_call_is_typed_against_the_running_signature() {
+    let bad = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
+    assert!((admit_ambient(bad.clone(), String::from("Kv/store/;!services;:Store,get(key:Str),bump(n:Int)")) == "T1|`store.bump` argument `n` expects `Int`, got `Str`"));
+    let ok = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_ambient(ok.clone(), String::from("Kv/store/;!services;:Store,get(key:Str),bump(n:Int)")) == ""));
+}
+
+#[test]
+fn an_operation_named_without_a_parameter_list_decides_nothing_about_arguments() {
+    let bad = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
+    assert!((admit_ambient(bad.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == ""));
+    let miss = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nope(key) } }");
+    assert!((admit_ambient(miss.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == "A6|`store.nope` is not a method of service Store"));
+}
+
+#[test]
+fn the_text_s_service_declaration_outranks_the_running_one() {
+    let src = String::from("service Store { fn bump(n: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
+    assert!((admit_ambient(src.clone(), String::from("Kv/other/;!services;:Store,bump(n:Int)")) == ""));
+}
+
+#[test]
+fn an_empty_parameter_list_is_a_claim__not_silence() {
+    let src = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.ping() } }");
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,ping()")) == ""));
+}
+
+#[test]
+fn a_garbled_parameter_list_refuses_the_wire_by_name() {
+    let src = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(key")) == "MANIFEST|manifest service row `:Store,get(key` does not name an operation"));
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(:Str)")) == "MANIFEST|manifest service row `:Store,get(:Str)` does not name an operation"));
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(key:)")) == "MANIFEST|manifest service row `:Store,get(key:)` does not name an operation"));
 }
 
 #[test]
