@@ -31,7 +31,7 @@ and the honest map of what is missing are in
 | 6 | `ui.download` and `ui.click` may not declare `compensate`; `ui.text` must | G4, item 522 | three refusals, each naming the verb's class |
 | 7 | `confidential -> drafter` is refused | item 512 | the action, origin, role and residence, by name |
 | 8 | the operator's floor refuses the `ui.download` rung | item 33 | a policy violation with a why-trace |
-| 9 | two crossings report bare and one compensated | G4, item 546 | `revl erase-report` |
+| 9 | two crossings uncompensated, one restored, two untouched | G4, items 522/546 | `revl erase-report` |
 | + | the admitted whole is signed and checkable | item 127 | `revl attest`, then `--verify --against` |
 
 Six of the ten are refusals, which is the intended proportion. The review's own
@@ -60,7 +60,7 @@ of them is stubbed here. A stub in a demo becomes a claim the project did not
 earn.
 
 `ui.text` reports `[restored]` - its declared inverse puts the field back.
-`ui.click` and `ui.download` report `[uncompensated]`: an inverse was possible
+`ui.click` and `ui.download` report `[UNCOMPENSATED]`: an inverse was possible
 to ask for and none exists. The reads report `[untouched]`. Those are three
 different facts and item 522 gives them three different words, because the
 aggregate over a step set is its WEAKEST part. Nothing here may be summarised

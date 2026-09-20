@@ -256,7 +256,12 @@ def main() -> int:
                   "--no-residue-proof"], work)
     _check(proc.returncode == 0, "`revl erase-report` renders the realm")
     report = proc.stdout
-    _artifact("revl erase-report ladder.rvl --realm billing", report, keep=24)
+    # keep must clear the crossings block AND item 522's residue split, which is
+    # what this step is pointing at. The artifact is 61 lines, so `--verbose`
+    # still has a job. It is 40 rather than 31 because the DOES NOT PROVE block
+    # above it grows one line per residue state; the test below fails if a later
+    # change pushes the split back out of the default render.
+    _artifact("revl erase-report ladder.rvl --realm billing", report, keep=40)
     _check("[UNCOMPENSATED] LegacyAgent  host fetch_receipt()" in report,
            "the `ui.download` crossing reports UNCOMPENSATED - no inverse exists")
     _check("[UNCOMPENSATED] LegacyAgent  host actuate()" in report,
