@@ -561,6 +561,37 @@ pub struct MSpan {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CMem {
+    cfun: String,
+    crole: String,
+    cmline: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CAgg {
+    crule: String,
+    cquorum: String,
+    ctie: String,
+    caline: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CDecl {
+    ccname: String,
+    cmems: Vec<CMem>,
+    caggs: Vec<CAgg>,
+    ccline: i64,
+    cok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CBody {
+    ymems: Vec<CMem>,
+    yaggs: Vec<CAgg>,
+    yok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cut {
     s: String,
     rest: String,
@@ -6784,8 +6815,25 @@ fn model_role_end(ts: &[Token], i: i64) -> i64 {
     return j;
 }
 
+fn at_model_council(ts: &[Token], i: i64) -> bool {
+    let t = tkc(ts, i);
+    if (!((t.kind == "ident") && (t.text == "model"))) {
+        return false;
+    }
+    let c = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    if (!((c.kind == "ident") && (c.text == "council"))) {
+        return false;
+    }
+    return (atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "ident") && atk(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "{"));
+}
+
+fn model_council_end(ts: &[Token], i: i64) -> i64 {
+    let e = close_brace(ts, (i).checked_add(3i64).expect("revl: Int overflow"));
+    return if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (i).checked_add(1i64).expect("revl: Int overflow") } else { e };
+}
+
 fn at_top_decl(ts: &[Token], i: i64) -> bool {
-    return ((((((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i)) || at_event(ts, i)) || at_qual_test(ts, i)) || at_model_role(ts, i));
+    return (((((((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i)) || at_event(ts, i)) || at_qual_test(ts, i)) || at_model_role(ts, i)) || at_model_council(ts, i));
 }
 
 fn at_pub_prefix(ts: &[Token], i: i64) -> bool {
@@ -8528,6 +8576,9 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
     }
     if at_model_role(&ts, i) {
         return p_top(ts.clone(), model_role_end(&ts, i), pg.clone());
+    }
+    if at_model_council(&ts, i) {
+        return p_top(ts.clone(), model_council_end(&ts, i), pg.clone());
     }
     if (t.kind != "kw") {
         return p_top(ts.clone(), skip_line(&ts, i), bad_prog(pg.clone(), String::from("unexpected token at top level")));
@@ -16603,11 +16654,333 @@ fn model_place_refusal(ts: Vec<Token>) -> Verd {
     return no_verd();
 }
 
+fn council_functions() -> Vec<String> {
+    return vec![String::from("proposer"), String::from("adversary"), String::from("verifier")];
+}
+
+fn council_aggregations() -> Vec<String> {
+    return vec![String::from("unanimous"), String::from("majority"), String::from("veto")];
+}
+
+fn council_pick_one() -> Vec<String> {
+    return vec![String::from("first"), String::from("any"), String::from("fastest"), String::from("cheapest"), String::from("best"), String::from("random")];
+}
+
+fn council_quorum_bases() -> Vec<String> {
+    return vec![String::from("declared")];
+}
+
+fn council_refused_quorums() -> Vec<String> {
+    return vec![String::from("answered"), String::from("reachable"), String::from("available"), String::from("responding")];
+}
+
+fn council_tie_outcomes() -> Vec<String> {
+    return vec![String::from("split"), String::from("deny")];
+}
+
+fn council_admitting_ties() -> Vec<String> {
+    return vec![String::from("allow"), String::from("admit"), String::from("proceed"), String::from("accept"), String::from("first"), String::from("any")];
+}
+
+fn ccl_twice_msg(name: &str, fline: i64) -> String {
+    return (((String::from("model council `").revl_concat(&name)).revl_concat("` is declared twice (first on line ")).revl_concat(&(fline).to_string())).revl_concat(")");
+}
+
+fn ccl_role_name_msg(name: &str, rline: i64) -> String {
+    return ((String::from("model council `").revl_concat(&name)).revl_concat("` has the name of the model role declared on line ")).revl_concat(&(rline).to_string());
+}
+
+fn ccl_unknown_fn_msg(fun: &str, name: &str) -> String {
+    return (((String::from("unknown council function `").revl_concat(&fun)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("`");
+}
+
+fn ccl_fn_twice_msg(fun: &str, name: &str, fline: i64, frole: &str) -> String {
+    return (((((((String::from("council function `").revl_concat(&fun)).revl_concat("` is declared twice in model council `")).revl_concat(&name)).revl_concat("` (first on line ")).revl_concat(&(fline).to_string())).revl_concat(", as `")).revl_concat(&frole)).revl_concat("`)");
+}
+
+fn ccl_no_role_msg(fun: &str, name: &str, role: &str) -> String {
+    return (((((String::from("member `").revl_concat(&fun)).revl_concat("` of model council `")).revl_concat(&name)).revl_concat("` names model role `")).revl_concat(&role)).revl_concat("`, which is not declared");
+}
+
+fn ccl_same_role_msg(ffun: &str, fun: &str, name: &str, role: &str) -> String {
+    return (((((((String::from("members `").revl_concat(&ffun)).revl_concat("` and `")).revl_concat(&fun)).revl_concat("` of model council `")).revl_concat(&name)).revl_concat("` are both placed on model role `")).revl_concat(&role)).revl_concat("`");
+}
+
+fn ccl_too_few_msg(name: &str, have: i64) -> String {
+    return ((((String::from("model council `").revl_concat(&name)).revl_concat("` declares ")).revl_concat(&(have).to_string())).revl_concat(" member")).revl_concat(&if (have == 1i64) { String::from("") } else { String::from("s") });
+}
+
+fn ccl_no_proposer_msg(name: &str) -> String {
+    return (String::from("model council `").revl_concat(&name)).revl_concat("` declares no `proposer`");
+}
+
+fn ccl_no_agg_msg(name: &str) -> String {
+    return (String::from("model council `").revl_concat(&name)).revl_concat("` declares no `aggregate` rule");
+}
+
+fn ccl_two_agg_msg(name: &str, frule: &str, fline: i64, srule: &str) -> String {
+    return (((((((String::from("model council `").revl_concat(&name)).revl_concat("` declares two `aggregate` rules (`")).revl_concat(&frule)).revl_concat("` on line ")).revl_concat(&(fline).to_string())).revl_concat(", `")).revl_concat(&srule)).revl_concat("` here)");
+}
+
+fn ccl_pick_one_msg(rule: &str, name: &str) -> String {
+    return (((String::from("`aggregate ").revl_concat(&rule)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("` resolves disagreement toward one member's answer");
+}
+
+fn ccl_unknown_rule_msg(rule: &str, name: &str) -> String {
+    return (((String::from("unknown aggregation rule `").revl_concat(&rule)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("`");
+}
+
+fn ccl_veto_msg(name: &str) -> String {
+    return (String::from("`aggregate veto` in model council `").revl_concat(&name)).revl_concat("`, which declares no `adversary`");
+}
+
+fn ccl_quorum_answered_msg(q: &str, name: &str) -> String {
+    return (((String::from("`quorum ").revl_concat(&q)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("` counts the rule's floor over the members that answered");
+}
+
+fn ccl_unknown_quorum_msg(q: &str, name: &str) -> String {
+    return (((String::from("unknown quorum basis `").revl_concat(&q)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("`");
+}
+
+fn ccl_tie_admits_msg(o: &str, name: &str) -> String {
+    return (((String::from("`on_tie ").revl_concat(&o)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("` admits when the members disagree");
+}
+
+fn ccl_unknown_tie_msg(o: &str, name: &str) -> String {
+    return (((String::from("unknown tie outcome `").revl_concat(&o)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("`");
+}
+
+fn ccl_undecided_msg(name: &str) -> String {
+    return (String::from("model council `").revl_concat(&name)).revl_concat("` is written in a form this gate does not decide");
+}
+
+fn cverd(msg: &str, line: i64) -> Verd {
+    return mk_verd(tagged("COUNCIL", msg), line);
+}
+
+fn council_body(ts: &[Token], lo: i64, hi: i64) -> CBody {
+    let mut i = lo;
+    let mut mems: Vec<CMem> = vec![];
+    let mut aggs: Vec<CAgg> = vec![];
+    while (i < hi) {
+        if (atk(ts, i, ",") || atk(ts, i, ";")) {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if ati(ts, i, "aggregate") {
+                if (!atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                    return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
+                }
+                let aline = tkc(ts, i).line;
+                let rule = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+                let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+                let mut q = String::from("");
+                if ati(ts, j.clone(), "quorum") {
+                    if (!atk(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                        return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
+                    }
+                    q = tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
+                    j = (j).checked_add(2i64).expect("revl: Int overflow");
+                }
+                let mut ot = String::from("");
+                if ati(ts, j.clone(), "on_tie") {
+                    if (!atk(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                        return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
+                    }
+                    ot = tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
+                    j = (j).checked_add(2i64).expect("revl: Int overflow");
+                }
+                aggs.push(CAgg { crule: rule.clone(), cquorum: q.clone(), ctie: ot.clone(), caline: aline });
+                i = j.clone();
+            } else {
+                if (!atk(ts, i, "ident")) {
+                    return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
+                }
+                if (!atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "arrow")) {
+                    return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
+                }
+                if (!atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "ident")) {
+                    return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
+                }
+                mems.push(CMem { cfun: tkc(ts, i).text, crole: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, cmline: tkc(ts, i).line });
+                i = (i).checked_add(3i64).expect("revl: Int overflow");
+            }
+        }
+    }
+    return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: true };
+}
+
+fn model_councils_of(ts: &[Token]) -> Vec<CDecl> {
+    let mut i = 0i64;
+    let mut depth = 0i64;
+    let mut out: Vec<CDecl> = vec![];
+    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
+        if ((depth == 0i64) && at_model_council(ts, i)) {
+            let e = close_brace(ts, (i).checked_add(3i64).expect("revl: Int overflow"));
+            if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                i = ts.revl_length();
+            } else {
+                let b = council_body(ts, (i).checked_add(4i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
+                out.push(CDecl { ccname: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, cmems: b.ymems.clone(), caggs: b.yaggs.clone(), ccline: tkc(ts, i).line, cok: b.yok });
+                i = e;
+            }
+        } else {
+            if atk(ts, i, "{") {
+                depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atk(ts, i, "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn ccl_at(cs: &[CDecl], n: &str, i: i64) -> i64 {
+    if (i >= cs.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if ((cs)[(i) as usize].ccname == n) {
+        return i;
+    }
+    return ccl_at(cs, n, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn cmem_fn_at(ms: &[CMem], f: &str, i: i64) -> i64 {
+    if (i >= ms.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if ((ms)[(i) as usize].cfun == f) {
+        return i;
+    }
+    return cmem_fn_at(ms, f, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn cmem_role_at(ms: &[CMem], r: &str, i: i64) -> i64 {
+    if (i >= ms.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if ((ms)[(i) as usize].crole == r) {
+        return i;
+    }
+    return cmem_role_at(ms, r, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn council_members_refusal(c: CDecl, rs: &[MRole]) -> Verd {
+    let mut i = 0i64;
+    while (i < c.cmems.revl_length()) {
+        let m = (c.cmems)[(i) as usize].clone();
+        if (!contains__m2(&council_functions(), &m.cfun)) {
+            return cverd(&ccl_unknown_fn_msg(&m.cfun, &c.ccname), m.cmline);
+        }
+        let pf = cmem_fn_at(&c.cmems, &m.cfun, 0i64);
+        if (pf != i) {
+            return cverd(&ccl_fn_twice_msg(&m.cfun, &c.ccname, (c.cmems)[(pf) as usize].cmline.clone(), &(c.cmems)[(pf) as usize].crole), m.cmline);
+        }
+        if (mrole_at(rs, &m.crole, 0i64) == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return cverd(&ccl_no_role_msg(&m.cfun, &c.ccname, &m.crole), m.cmline);
+        }
+        let pr = cmem_role_at(&c.cmems, &m.crole, 0i64);
+        if (pr != i) {
+            return cverd(&ccl_same_role_msg(&(c.cmems)[(pr) as usize].cfun, &m.cfun, &c.ccname, &m.crole), m.cmline);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn council_aggregate_refusal(c: CDecl) -> Verd {
+    if (c.caggs.revl_length() == 0i64) {
+        return cverd(&ccl_no_agg_msg(&c.ccname), c.ccline);
+    }
+    if (c.caggs.revl_length() > 1i64) {
+        return cverd(&ccl_two_agg_msg(&c.ccname, &(c.caggs)[(0i64) as usize].crule, (c.caggs)[(0i64) as usize].caline.clone(), &(c.caggs)[(1i64) as usize].crule), (c.caggs)[(1i64) as usize].caline.clone());
+    }
+    let cl = (c.caggs)[(0i64) as usize].clone();
+    if contains__m2(&council_pick_one(), &cl.crule) {
+        return cverd(&ccl_pick_one_msg(&cl.crule, &c.ccname), cl.caline);
+    }
+    if (!contains__m2(&council_aggregations(), &cl.crule)) {
+        return cverd(&ccl_unknown_rule_msg(&cl.crule, &c.ccname), cl.caline);
+    }
+    if ((cl.crule == "veto") && (cmem_fn_at(&c.cmems, "adversary", 0i64) == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
+        return cverd(&ccl_veto_msg(&c.ccname), cl.caline);
+    }
+    if (cl.cquorum != "") {
+        if contains__m2(&council_refused_quorums(), &cl.cquorum) {
+            return cverd(&ccl_quorum_answered_msg(&cl.cquorum, &c.ccname), cl.caline);
+        }
+        if (!contains__m2(&council_quorum_bases(), &cl.cquorum)) {
+            return cverd(&ccl_unknown_quorum_msg(&cl.cquorum, &c.ccname), cl.caline);
+        }
+    }
+    if (cl.ctie != "") {
+        if contains__m2(&council_admitting_ties(), &cl.ctie) {
+            return cverd(&ccl_tie_admits_msg(&cl.ctie, &c.ccname), cl.caline);
+        }
+        if (!contains__m2(&council_tie_outcomes(), &cl.ctie)) {
+            return cverd(&ccl_unknown_tie_msg(&cl.ctie, &c.ccname), cl.caline);
+        }
+    }
+    return no_verd();
+}
+
+fn council_one_refusal(cs: &[CDecl], i: i64, rs: &[MRole]) -> Verd {
+    let c = (cs)[(i) as usize].clone();
+    let p = ccl_at(cs, &c.ccname, 0i64);
+    if (p != i) {
+        return cverd(&ccl_twice_msg(&c.ccname, (cs)[(p) as usize].ccline.clone()), c.ccline);
+    }
+    let ri = mrole_at(rs, &c.ccname, 0i64);
+    if (ri != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return cverd(&ccl_role_name_msg(&c.ccname, (rs)[(ri) as usize].rline.clone()), c.ccline);
+    }
+    let mv = council_members_refusal(c.clone(), rs);
+    if (mv.v != "") {
+        return mv;
+    }
+    if (c.cmems.revl_length() < 2i64) {
+        return cverd(&ccl_too_few_msg(&c.ccname, c.cmems.revl_length()), c.ccline);
+    }
+    if (cmem_fn_at(&c.cmems, "proposer", 0i64) == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return cverd(&ccl_no_proposer_msg(&c.ccname), c.ccline);
+    }
+    return council_aggregate_refusal(c.clone());
+}
+
+fn model_council_refusal(ts: &[Token]) -> Verd {
+    let cs = model_councils_of(ts);
+    if (cs.revl_length() == 0i64) {
+        return no_verd();
+    }
+    let mut i = 0i64;
+    while (i < cs.revl_length()) {
+        if (!(cs)[(i) as usize].cok.clone()) {
+            return cverd(&ccl_undecided_msg(&(cs)[(i) as usize].ccname), (cs)[(i) as usize].ccline.clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let rs = model_roles_of(ts);
+    i = 0i64;
+    while (i < cs.revl_length()) {
+        let v = council_one_refusal(&cs, i, &rs);
+        if (v.v != "") {
+            return v;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
     let base = ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone())), amb_ops_map(&ambOps, 0i64, std::collections::HashMap::new()));
     let mdlv = model_place_refusal(ts.clone());
     if (mdlv.v != "") {
         return NoLink { done: true, refs: vec![mdlv.clone()] };
+    }
+    let cclv = model_council_refusal(&ts);
+    if (cclv.v != "") {
+        return NoLink { done: true, refs: vec![cclv.clone()] };
     }
     let wfv = declared_types_refusal(ts.clone());
     if (wfv.v != "") {
@@ -26102,6 +26475,85 @@ fn a_model_placement_is_a_prelude_declaration() {
 fn _model__and__route__stay_ordinary_identifiers() {
     assert!((admit_src(String::from("service Model { fn c(x: Str) -> Str }\nservice M { fn go(x: Str) -> Str }\ncomponent C requires model: Model provides out: M {\n  provide out { fn go(x) = x }\n}")) == ""));
     assert!((admit_src(String::from("service M { fn go(model: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(model) = model }\n}")) == ""));
+}
+
+#[test]
+fn a_council_of_three_placed_members_with_a_written_aggregation_admits() {
+    let v = admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  verifier -> local2,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast; adversary -> edge;\n  aggregate majority quorum declared on_tie deny }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == ""));
+}
+
+#[test]
+fn an_aggregation_that_admits_on_a_tie_is_refused_by_name() {
+    let v = admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie allow\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "COUNCIL|`on_tie allow` in model council `Release` admits when the members disagree"));
+    assert!((admit_tag(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie allow\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL"));
+}
+
+#[test]
+fn a_rule_that_picks_one_member_s_answer_is_refused__and_so_is_a_typo() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate first }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimus }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown aggregation rule `unanimus` in model council `Release`"));
+}
+
+#[test]
+fn the_floor_is_counted_over_the_declared_members__never_the_answering_set() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate majority quorum answered\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`quorum answered` in model council `Release` counts the rule's floor over the members that answered"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate majority quorum declaired\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown quorum basis `declaired` in model council `Release`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie splitt\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown tie outcome `splitt` in model council `Release`"));
+}
+
+#[test]
+fn a_council_is_several_models__each_with_its_own_placement() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, critic -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown council function `critic` in model council `Release`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, proposer -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|council function `proposer` is declared twice in model council `Release` (first on line 3, as `vast`)"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` names model role `vast`, which is not declared"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|members `proposer` and `adversary` of model council `Release` are both placed on model role `edge`"));
+}
+
+#[test]
+fn one_member_wearing_a_council_s_name_is_refused__and_so_is_no_proposer() {
+    assert!((admit_src(String::from("model role vast off_device\nmodel council Release { proposer -> vast, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 1 member"));
+    assert!((admit_src(String::from("model role vast off_device\nmodel council Release { aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 0 members"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { adversary -> vast, verifier -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares no `proposer`"));
+}
+
+#[test]
+fn a_council_declares_exactly_one_aggregation__written_down() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares no `aggregate` rule"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous,\n  aggregate majority\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares two `aggregate` rules (`unanimous` on line 6, `majority` here)"));
+}
+
+#[test]
+fn _veto__needs_the_adversary_it_is_the_veto_of() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, verifier -> edge, aggregate veto }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate veto` in model council `Release`, which declares no `adversary`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate veto }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == ""));
+}
+
+#[test]
+fn a_council_has_one_name__and_it_is_not_a_role_s() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nmodel council Release { proposer -> edge, adversary -> vast, aggregate majority }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` is declared twice (first on line 3)"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council edge { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `edge` has the name of the model role declared on line 1"));
+}
+
+#[test]
+fn the_role_table_is_decided_before_any_council_indexes_it() {
+    let v = admit_src(String::from("model role edge on_devise\nmodel council Release { proposer -> edge, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown residence `on_devise` for model role `edge`"));
+}
+
+#[test]
+fn a_council_leaves_the_rest_of_the_document_checked__and__council__is_a_name() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent C provides api: Api {\n  provide api { fn go(k) { return kv.get(k) } }\n}")) == "G1|`kv` is not a declared requirement of C"));
+    assert!((admit_src(String::from("service M { fn go(council: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(council) = council }\n}")) == ""));
+}
+
+#[test]
+fn a_council_and_a_route_model_block_are_decided_in_the_same_compilation() {
+    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, adversary -> local, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> local, * -> cloud }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
 }
 
 #[test]
