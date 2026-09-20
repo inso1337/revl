@@ -768,20 +768,24 @@ def select(changed, root) -> dict:
             # table goes stale silently, which is the whole defect it exists
             # to prevent.
             pytest_nodes.add("tests/test_census_artifact.py")
-            reasons.append(f"{f} (census/provenance coupling)")
+            detail = "census/provenance coupling"
+            # issue #1215: the `gate_census` row of
+            # `tools/oracle_construct_reach.py` imports the census for its
+            # corpus walk and its fast engine, so a change to the census moves
+            # what that row measures and what its ledger records.
+            # This selection used to live in a SECOND arm matching the same file
+            # further down, which the `continue` above it made unreachable, so it
+            # had never once run (issue #1315). It is folded in here rather than
+            # ordered ahead of this arm on purpose: a separate earlier arm would
+            # take the census file out of this one, and every node added to the
+            # coupling from then on -- this arm is edited often -- would silently
+            # apply to `corpus_provenance.py` alone. That is the same defect with
+            # a smaller blast radius, not a fix. Provenance is deliberately not
+            # in here: the oracle reads the census, not the provenance table.
             if f == "tools/gate_reference_census.py":
-                # issue #1215: the `gate_census` row of
-                # tools/oracle_construct_reach.py imports this file for its
-                # corpus walk and its fast engine, so a change to the census
-                # moves what that row measures and what its ledger records.
-                # This clause used to be a second `if f == ...` rule further
-                # down, which the `continue` above made unreachable -- the
-                # census kept selecting the coupling pair and never the
-                # construct-reach ledger the rule was added to cover.
                 pytest_nodes.add("tests/test_oracle_construct_reach.py")
-                reasons.append(
-                    "tools/gate_reference_census.py (construct-reach ledger)"
-                )
+                detail += " + construct-reach oracle"
+            reasons.append(f"{f} ({detail})")
             continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
