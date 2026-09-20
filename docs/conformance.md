@@ -218,6 +218,8 @@ Rows are `revl.diagnostics.GUARANTEES`, the compiler's own register, so a guaran
 
 The six host columns share their verdict wherever a register does not separate them, and that is the claim rather than a shortcut: every code below is decided by the frontend, which runs once, before emission, so no emitter ever receives a program that violates one. A column moves away from its siblings exactly when a divergence register says it does.
 
+**What `proved` does NOT claim.** It is a REFUSAL claim: the implementation deciding that column refuses a violating program under that code. Where a rule also has a RUNTIME half (G7's LIFO walk over registered entries, A8's revert-and-contain, G4's inverse actually running), that half is the construct matrix's and the per-tier runtime suites' question, not this one. Reading a `proved` cell as "the tier's runtime discharges this at execution time" would overstate it, and overstating is the failure a support table is for preventing.
+
 | guarantee | py | ts | rust | java | wasm | go | revl | evidence |
 |---|---|---|---|---|---|---|---|---|
 | `G1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g1_template_undeclared.rvl`](../examples/rejections/g1_template_undeclared.rvl) |
