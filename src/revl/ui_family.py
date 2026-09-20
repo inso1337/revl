@@ -341,18 +341,45 @@ def _bare(token: str) -> str:
 
 
 def taint_roles(token: str) -> frozenset[str]:
-    """The taint roles of a computer-use token; empty for anything else."""
-    return TAINT_ROLES.get(_bare(token), frozenset())
+    """The taint roles of a computer-use token; empty for anything else.
+
+    Resolved by the LONGEST REGISTERED PREFIX, not by exact match, and that is
+    the forward-safety this table owes the ladder. Slice 3 will admit the rung
+    tokens (`ui.click.selector`, `ui.click.pixel`), and a rung is a strictly
+    WEAKER way to name the same target - a selector may match a different
+    control that satisfies it, a pixel always hits something - so a rung must
+    never carry a weaker taint role than the verb it descends from. An exact
+    match would have given `ui.click.pixel` no role at all, which is the
+    fail-open direction, reached by adding a spelling in a different file.
+    """
+    segments = _bare(token).split(".")
+    for depth in range(len(segments), 0, -1):
+        roles = TAINT_ROLES.get(".".join(segments[:depth]))
+        if roles:
+            return roles
+    return frozenset()
 
 
 def is_taint_sink(token: str) -> bool:
     """Is every argument of this computer-use verb a taint sink?
 
-    False for a token that is not in the family, so a caller may ask about any
-    capability token. `revl.taint._sink_of` consults this for a `ui.*` token
-    INSTEAD OF the head rule, which is what keeps `ui.find` off the sink side.
+    False for a token outside the family, so a caller may ask about any
+    capability token. `revl.taint._sink_of` consults this for a token under a
+    reserved root INSTEAD OF its head rule, which is what keeps `ui.find` off
+    the sink side.
+
+    A token under the `ui` root that this table cannot resolve at all is
+    treated as a SINK. Such a token cannot be declared today (the verb set is
+    closed and `refusal()` rejects it), so this is not a live path; it is the
+    default that decides which way an unrecognised spelling falls if one ever
+    reaches here - through an ambient manifest, say - and the default has to be
+    the side that refuses.
     """
-    return SINK in taint_roles(token)
+    bare = _bare(token)
+    roles = taint_roles(bare)
+    if roles:
+        return SINK in roles
+    return bare.split(".", 1)[0] == "ui"
 
 
 def source_origin(token: str) -> str | None:
