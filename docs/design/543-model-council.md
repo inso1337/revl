@@ -544,9 +544,11 @@ Measured, on the gate built from `selfhost/lower.rvl` at this branch:
 
 | program | reference | gate |
 | ------- | --------- | ---- |
-| the component with no council (control) | admits | `''` (admits) |
+| the component with no model declaration (control) | admits | `''` (admits) |
+| `model role` alone (item 512, shipped) | admits | `BAD\|unexpected token at top level` |
 | a council with `aggregate unanimous` | admits | `BAD\|unexpected token at top level` |
 | the same council with `on_tie allow` | refuses `G-MODEL-PLACE` | `BAD\|unexpected token at top level` |
+| a shipped `retention` declaration (item 472) | admits | `BAD\|unexpected token at top level` |
 
 The gate refuses both, so it never admits a program whose aggregation it cannot
 decide. It errs in the false-reject direction, which is the direction the
@@ -555,10 +557,11 @@ census docstring names as the one the crate is allowed to err in.
 The marker is the generic top-level parse refusal rather than a named one, for
 exactly the reason item 512's section 7 records: that is the state of every
 contextual top-level declaration the reference has added since the self-host's
-top-level dispatch was written, and the same gate answers
-`BAD|unexpected token at top level` for a shipped `retention` declaration. A
-named marker is item 512's slice 3, and a `MODEL` marker covering both shapes
-`model` heads would serve this item too.
+top-level dispatch was written. The last two rows are the measurement that says
+so, on the same build: the gate gives the same answer to a shipped `retention`
+declaration and to `model role`, which item 512 landed. A named marker is item
+512's slice 3, and a `MODEL` marker covering both shapes `model` heads would
+serve this item too.
 
 Because no `.rvl` in any corpus directory uses the construct, the census is
 unmoved: `--check` reports no change from the baseline, `false-reject` is still
