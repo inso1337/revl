@@ -388,3 +388,236 @@ def source_origin(token: str) -> str | None:
     its head rule, because `ui.find`'s head is the SINK root and the head rule
     would otherwise mint the literal token as an origin nothing matches."""
     return SOURCE_ORIGIN if SOURCE in taint_roles(token) else None
+
+
+# ------------------------------------------------------- the target record
+#
+# Roadmap item 521 (issue #1195), docs/design/565-ui-target-binding.md,
+# Slice 4. Design 532 §5 ends by listing the binding a verified target
+# carries, and then leaves it as prose. Slices 1 to 3 spell the family's
+# AUTHORITY; this is the slice that spells its DATA, and the two are not the
+# same claim.
+#
+# WHAT A BARE STRING TARGET CANNOT DO, written as the defect rather than as a
+# preference. `ui.find` returning `Str` means an actuation names its target BY
+# NAME, and a name is re-resolved at every use:
+#
+#   * nothing binds the actuation to the observation it came from. The
+#     evidence that justified "this is the Approve button" is not carried, so
+#     no later step can check that the control acted on is the control that
+#     was looked at;
+#   * nothing expires. A target resolved before a dialog opened is still
+#     spellable afterwards, and the spelling still resolves - to a different
+#     control. That is rung 1's failure direction (design 532 §4.1) reached
+#     from rung 0, by waiting;
+#   * nothing survives a phase boundary. Item 522's transaction re-resolves a
+#     target by name at every phase, which is a check-to-use race at every
+#     boundary, and its postcondition verdict is POSITIONAL for the same
+#     reason - with no target identity to bind to, "a read follows an
+#     actuation in the same method" is the strongest statement available
+#     (PR #1287's own "what is not verified").
+#
+# A record answers all three by being ONE VALUE THAT TRAVELS: the evidence
+# hash, the expiry and the identity are carried by the thing that is passed,
+# so a later phase has them without asking the screen a second time.
+#
+# The field set is REGISTRY-OWNED and CLOSED, for the reason the reversibility
+# class and the taint role are: a binding an author can drop is a binding a
+# careless author drops, and a target missing its expiry is exactly the target
+# whose staleness nothing can notice.
+
+#: The reserved record name. A program that declares a computer-use verb
+#: declares this record, and revl checks it. The record itself is the
+#: AUTHOR'S - revl ships no `UiTarget` type, exactly as it ships no `ui.click`
+#: extern - because the family is host-backed and its data shape is as
+#: OS-specific as its effect surface. What revl owns is the FLOOR.
+TARGET_TYPE = "UiTarget"
+
+#: field -> the declared type it must carry. Checked as a FLOOR and not as a
+#: ceiling: a field the registry does not name is the author's own and is
+#: admitted, because refusing it would be a false refusal with no soundness
+#: gain, while a MISSING field is a binding nothing can recover later.
+TARGET_FIELDS: dict[str, str] = {
+    "application": "Str",
+    "window": "Str",
+    "role": "Str",
+    "name": "Str",
+    "evidence": "Str",
+    "action": "Str",
+    "session": "Str",
+    "bounds": "Str",
+    "expiry": "Int",
+    "confirm": "Bool",
+}
+
+#: field -> what it binds. This is the rule and not a comment: the refusals
+#: below quote it, so an author reading a diagnostic learns why the field
+#: exists rather than only that it is missing. Its keys are `TARGET_FIELDS`'
+#: keys exactly; the equality is a test, not a convention.
+TARGET_FIELD_BINDS: dict[str, str] = {
+    "application": "the application the control belongs to - the coarsest "
+                   "thing an operator recognises in an audit line",
+    "window": "the window within that application; an application identity "
+              "alone does not distinguish two documents open side by side",
+    "role": "the accessibility-tree role, empty where the platform publishes "
+            "none. Empty is a MEASUREMENT (no tree was available) and is not "
+            "the same as absent",
+    "name": "the control's own name within that role, which is what the "
+            "author asked for and what an audit line can be read against",
+    "evidence": "the screenshot, DOM or accessibility-tree evidence hash the "
+                "binding was taken from. Without it nothing connects the "
+                "actuation to the observation that justified it",
+    "action": "the ONE action type this target admits. A target resolved for "
+              "a read is not a target for a click, and a record that does "
+              "not say so lets one become the other by being passed along",
+    "session": "the user, session or task identity the resolution happened "
+               "under, so a target cannot be carried into another one",
+    "bounds": "the region or coordinate bound the target was resolved "
+              "within, which is what a lower rung would have to stay inside",
+    "expiry": "the instant the binding stops being a binding. A target with "
+              "no expiry is a target whose staleness nothing can notice, "
+              "which is the defect this record exists to remove",
+    "confirm": "whether a human confirmation is required before acting. "
+               "Item 522 owns the gate; the target carries the fact so the "
+               "gate has something to read that the screen did not supply",
+}
+
+#: The verbs whose RETURN is a target. `screen.observe` is deliberately not
+#: here: it returns observed CONTENT, and content is not a target - making it
+#: one would mean every screen read minted authority, which is the opposite of
+#: the item's premise.
+TARGET_PRODUCERS: tuple[str, ...] = ("ui.find",)
+
+#: The verbs that ACT on a target, each of which must receive one. This is the
+#: half that closes the re-resolution race: an actuation that takes a `Str`
+#: names its target again, and a name resolved twice is two targets.
+TARGET_CONSUMERS: tuple[str, ...] = ("ui.click", "ui.text", "ui.download")
+
+
+def target_record_shape() -> str:
+    """The declaration an author has to write, rendered from the registry so
+    the diagnostic and the table cannot drift (item 274: a refusal names the
+    nearest allowed space)."""
+    body = "\n".join(f"  {name}: {type_}"
+                     for name, type_ in TARGET_FIELDS.items())
+    return f"type {TARGET_TYPE} = {{\n{body}\n}}"
+
+
+def target_record_refusal(
+        declared: dict[str, str] | None) -> tuple[str, str] | None:
+    """`(message, hint)` when the program's `UiTarget` does not carry the
+    registry's binding, else `None`.
+
+    `declared` is the record's field table (name -> declared type), or `None`
+    when the program declares no `UiTarget` at all, or declares it as
+    something other than a record.
+
+    Two refusals, both fail-closed:
+
+    1. NO RECORD. A program that declares a computer-use verb and no target
+       record has nothing for the verb to carry. Refused with the shape.
+    2. A MISSING OR MIS-TYPED FIELD. Reported one field at a time, nearest
+       first in registry order, with what that field binds - the `expiry`
+       case is the one design 532 §10 names as this slice's oracle, and it is
+       not special-cased: it is refused by the same rule as the other nine.
+    """
+    if declared is None:
+        return (
+            f"a computer-use program must declare the target record "
+            f"`{TARGET_TYPE}`",
+            f"`ui.find` resolves a target and the actuation verbs act on one, "
+            f"so the binding has to be a value that travels between them; "
+            f"write\n\n{target_record_shape()}\n\n"
+            f"(G8, roadmap item 521, docs/design/565-ui-target-binding.md)",
+        )
+    for name, type_ in TARGET_FIELDS.items():
+        if name not in declared:
+            return (
+                f"the target record `{TARGET_TYPE}` does not carry `{name}`",
+                f"{name} binds {TARGET_FIELD_BINDS[name]}; add "
+                f"`{name}: {type_}` (G8, roadmap item 521, "
+                f"docs/design/565-ui-target-binding.md)",
+            )
+        if declared[name] != type_:
+            return (
+                f"the target record `{TARGET_TYPE}` declares `{name}` as "
+                f"`{declared[name]}`, not `{type_}`",
+                f"{name} binds {TARGET_FIELD_BINDS[name]}, and the type is "
+                f"registry-owned so every reader of a target agrees on what "
+                f"it holds (G8, roadmap item 521, "
+                f"docs/design/565-ui-target-binding.md)",
+            )
+    return None
+
+
+def target_signature_refusal(token: str, kind: str, name: str,
+                             returns: str | None,
+                             param_types) -> tuple[str, str] | None:
+    """`(message, hint)` when a computer-use extern's SIGNATURE does not carry
+    the target, else `None`.
+
+    `returns` and `param_types` are the declared types with any item-249
+    qualifier already stripped, which is why this asks for `UiTarget` and not
+    for `Untrusted[UiTarget]`. The `Untrusted` half is slice 2's DERIVATION:
+    `ui.find` is a source and mints `screen` on its return with no author
+    qualifier, under `taint_strict`. Requiring the author to write it here
+    would contradict that slice's own argument - a classification an author
+    writes is a classification an author can forget - so this slice owns the
+    `UiTarget` half, which is not profile-gated, and slice 2 owns the
+    `Untrusted` half, which is.
+
+    A service method's `emission[...]` scope does NOT come through here, for
+    the reason item 522's `teardown_refusal` gives: the obligation belongs to
+    the declaration that actually crosses, and a service method declares an
+    interface rather than a crossing.
+    """
+    bare = _bare(token)
+    if bare in TARGET_PRODUCERS:
+        if strip_qualifiers_shallow(returns) != TARGET_TYPE:
+            shown = f"`{returns}`" if returns else "nothing"
+            return (
+                f"`{kind}[{bare}]` resolves a target, so extern `{name}` must "
+                f"return `{TARGET_TYPE}`, not {shown}",
+                f"a target returned as a bare value is a target named by "
+                f"NAME, and a name is re-resolved at every use: nothing binds "
+                f"the actuation to the observation it came from, nothing "
+                f"expires, and nothing survives a phase boundary. Return "
+                f"`{TARGET_TYPE}` (or `Untrusted[{TARGET_TYPE}]`, which is the "
+                f"same declaration once the qualifier is read) (G8, roadmap "
+                f"item 521, docs/design/565-ui-target-binding.md)",
+            )
+        return None
+    if bare in TARGET_CONSUMERS:
+        types = [strip_qualifiers_shallow(t) for t in (param_types or ())]
+        if TARGET_TYPE not in types:
+            shown = ", ".join(f"`{t}`" for t in types) or "no parameters"
+            return (
+                f"`{kind}[{bare}]` acts on a target, so extern `{name}` must "
+                f"take a `{TARGET_TYPE}` parameter; it declares {shown}",
+                f"an actuation that receives its target as a bare value "
+                f"resolves it a second time, and a name resolved twice is two "
+                f"targets - the check-to-use race a UI transaction hits at "
+                f"every phase boundary (roadmap item 522). Declare the target "
+                f"parameter as `{TARGET_TYPE}` (G8, roadmap item 521, "
+                f"docs/design/565-ui-target-binding.md)",
+            )
+    return None
+
+
+def strip_qualifiers_shallow(type_name: str | None) -> str | None:
+    """`Untrusted[UiTarget]` -> `UiTarget`, and anything else unchanged.
+
+    A leaf-module copy of the ONE case `revl.taint.strip_qualifiers` handles
+    that matters here, so this module keeps its no-import property (every
+    consumer imports IT, never the other way round). It is shallow on purpose:
+    `List[UiTarget]` is NOT a target, it is a list, and a consumer that takes
+    a list of targets has not named which one it acts on.
+    """
+    if not type_name:
+        return type_name
+    text = type_name.strip()
+    for qualifier in ("Untrusted", "Trusted", "Secret"):
+        head = qualifier + "["
+        if text.startswith(head) and text.endswith("]"):
+            return strip_qualifiers_shallow(text[len(head):-1])
+    return text

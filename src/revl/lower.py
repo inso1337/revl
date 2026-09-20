@@ -7502,6 +7502,85 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         check(decl, declared, getattr(decl, "source", "") or filename)
 
 
+def _check_ui_target_binding(program: Program, types: dict, filename: str) -> None:
+    """The computer-use target record and the signatures that carry it
+    (roadmap item 521, docs/design/565-ui-target-binding.md, Slice 4).
+
+    Slice 1 closed the family's NAMESPACE and slice 2 derived its taint
+    classes, so by here a declared UI token is one of five spellings and an
+    observed value is `Untrusted` by derivation. Neither of those says
+    anything about the target's SHAPE, and the shape is what a later phase
+    reads: `ui.find` returning `Str` names its target by NAME, and a name is
+    re-resolved at every use, so nothing binds an actuation to the
+    observation that justified it, nothing expires, and nothing survives a
+    phase boundary (item 522's check-to-use race, and the reason its
+    postcondition verdict is positional).
+
+    Three refusals, all `G8`/`boundary` like slice 1's, none registering a new
+    guarantee code:
+
+    1. a program declaring a target-carrying verb and no `UiTarget` record;
+    2. a `UiTarget` missing a registry field, or declaring one at the wrong
+       type - `expiry` is design 532 §10's named oracle for this slice and is
+       refused by the same rule as the other nine, not by a special case;
+    3. a producer verb whose return is not the record, or an actuation verb
+       with no parameter that is.
+
+    WHERE THIS RUNS AND WHY. After `_lower_type_decls` (the record table is
+    what the obligation is checked against) and after `extract_and_normalize`
+    stripped the item-249 qualifiers in place, which is why the comparison is
+    against `UiTarget` and not `Untrusted[UiTarget]`: the `Untrusted` half is
+    slice 2's derivation and is profile-gated on `taint_strict`, while this
+    half is not gated at all. An author may write either spelling.
+
+    SCOPE. Externs only. A service method's `emission[ui.find]` scope funnels
+    through the same parser hook slice 1 uses, and deliberately does not reach
+    here: the obligation belongs to the declaration that actually crosses, and
+    a service method declares an interface (item 522's `teardown_refusal`
+    makes the same cut for the same reason).
+
+    Inert for a program that declares no computer-use verb, which is every
+    program in the tree but the item's own fixtures.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    carriers = []
+    for ext in program.externs:
+        for cap in ext.capabilities or ():
+            bare = ui_family._bare(cap)
+            if bare in ui_family.TARGET_PRODUCERS or \
+                    bare in ui_family.TARGET_CONSUMERS:
+                carriers.append((ext, bare))
+                break
+    if not carriers:
+        return
+
+    spec = types.get(ui_family.TARGET_TYPE)
+    declared = spec.get("fields") if isinstance(spec, dict) \
+        and spec.get("kind") == "record" else None
+    record = ui_family.target_record_refusal(declared)
+    if record is not None:
+        # The line is the target record's own when there is one to point at,
+        # and the declaration that CREATED the obligation when there is not.
+        line = carriers[0][0].line
+        for decl in program.type_decls:
+            if decl.name == ui_family.TARGET_TYPE:
+                line = decl.line
+                break
+        message, hint = record
+        raise RevlError(filename, line, message, hint,
+                        code="G8", category="boundary")
+
+    for ext, bare in carriers:
+        signature = ui_family.target_signature_refusal(
+            bare, ext.classification, ext.name, ext.returns,
+            [p.type for p in ext.params])
+        if signature is not None:
+            message, hint = signature
+            raise RevlError(filename, ext.line, message, hint,
+                            code="G8", category="boundary")
+
+
 def check_and_lower(program: Program, ambient: dict | None = None,
                     taint_strict: bool = False, untrusted: bool = False) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
@@ -7614,6 +7693,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _validate_declared_types(program, program.filename)
     _check_principal_producers(program, program.filename)
     types = _lower_type_decls(program, program.filename)
+    # item 521 slice 4: the computer-use target record and the signatures
+    # that carry it. Checked here because the obligation is a program-level
+    # fact (a verb declared in one place, a record declared in another) and
+    # the record table is what it is checked against. Inert - one loop over
+    # the extern list that finds nothing - for a program declaring no UI verb.
+    _check_ui_target_binding(program, types, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     # item 130 Slice 5: the typed-event contracts. Built after the record table
