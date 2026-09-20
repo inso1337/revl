@@ -42,13 +42,14 @@ discipline for the `--json` form.
 
 from __future__ import annotations
 
+from . import ui_transaction as uitx
 from .lower import SHARED_REALM
 from .query import Composition, classify_compensation, withdrawal
 
 # Report identity — a versioned, self-describing artifact, in the spirit of
 # `interchange.stamp`. Bump MINOR for an additive change, MAJOR for a breaking
 # one (a removed or re-shaped member).
-ERASE_REPORT_VERSION = "1.0"
+ERASE_REPORT_VERSION = "1.1"
 ERASE_REPORT_KIND = "revl.erase-report"
 
 # The header the report states about itself. This is load-bearing prose: it is
@@ -180,6 +181,66 @@ def _network_boundary(all_cross: list[dict], witnessed: list[dict]) -> dict:
                 "inversion (§6.1) — a compensable crossing still left the system, "
                 "it is not un-issued.",
     }
+
+
+def _ui_residue(crossing: dict) -> str | None:
+    """The item-522 residue state of a crossing whose capability is a
+    computer-use verb, or `None` for every other crossing.
+
+    `None` is the whole compatibility story: a composition that crosses no
+    computer-use verb gets `None` on every crossing, no `uiResidue` section,
+    and a report byte-identical to the one before this change. The split only
+    speaks where the registry can tell it something.
+
+    WHY IT EXISTS. `bare` is one word covering three outcomes, and two of the
+    three readings are false for a computer-use verb. Measured on the item-525
+    flagship agent before this change: `read_pane` (`screen.observe`, a READ)
+    and `actuate` (`ui.click`, no inverse EXISTS) both printed `[BARE]`, under
+    a note reading "a bare crossing left the system with nothing done about it
+    ... so it can be handled out of band". Nothing needs handling for the read,
+    and nothing CAN be done about the click. `compensated` collapses the same
+    way at the other end: a `ui.text` inverse RESTORES the field it typed into,
+    which is a stronger fact than an offset that merely counteracts.
+    """
+    for cap in crossing.get("capabilities") or []:
+        state = uitx.residue_state(cap, bool(crossing.get("compensated")))
+        if state is not None:
+            return state
+    return None
+
+
+def _ui_residue_section(all_cross: list[dict]) -> dict | None:
+    """The realm's computer-use revert split, or `None` when the realm crosses
+    no computer-use verb (so a UI-free report is unchanged).
+
+    Five DISJOINT lists under five names. A revert reports what it RESTORED
+    and what it only COMPENSATED separately: they are different facts about
+    the world and one word for both is the defect this section removes. The
+    aggregate is the WEAKEST part (item 546 rule 3, PR #1256), so a realm with
+    one uncompensated click does not read as compensated because four other
+    steps were."""
+    steps = []
+    for crossing in all_cross:
+        for cap in crossing.get("capabilities") or []:
+            if uitx.residue_state(cap, bool(crossing.get("compensated"))) \
+                    is not None:
+                steps.append((crossing.get("name") or crossing.get("label")
+                              or crossing.get("token"), cap,
+                              bool(crossing.get("compensated"))))
+                break
+    if not steps:
+        return None
+    report = uitx.revert_report(steps)
+    report["note"] = (
+        "the computer-use split (roadmap item 522). `untouched` is a read and "
+        "is NOT residue; `restored` put the state back; `compensated` attached "
+        "an offset that is not a restoration; `uncompensated` has no inverse "
+        "and never will; `unregistered` had one and nobody declared it. The "
+        "aggregate is the WEAKEST of these, never their average.")
+    report["meaning"] = {state: uitx.MEANING[state]
+                         for state in uitx.WEAKEST_FIRST
+                         if report.get(state)}
+    return report
 
 
 def _crossings(index: Composition, members: list[str],
@@ -324,6 +385,15 @@ def _crossings(index: Composition, members: list[str],
     unresolved_tokens = sorted(
         c["token"] for c in unresolved if c.get("token"))
     network = _network_boundary(all_cross, witnessed)
+    # item 522: tag each crossing with its computer-use residue state, and fold
+    # the realm's computer-use crossings into the five-way revert split. Both
+    # are additive and both are `None`/absent for a realm that crosses no
+    # computer-use verb, so every existing report is byte-identical.
+    for crossing in all_cross:
+        state = _ui_residue(crossing)
+        if state is not None:
+            crossing["uiResidue"] = state
+    ui_residue = _ui_residue_section(all_cross)
     return {
         "emissions": emissions,
         "externs": externs,
@@ -359,6 +429,10 @@ def _crossings(index: Composition, members: list[str],
         # touches no network boundary, so a network-free report is byte-identical
         # but for this additive member.
         "networkBoundary": network,
+        # item 522 (issue #1196): the computer-use revert split. Absent for a
+        # realm that crosses no computer-use verb — which is every realm in the
+        # tree today — so a report without one is unchanged.
+        **({"uiResidue": ui_residue} if ui_residue is not None else {}),
         "note": "a crossing is bare when nothing was done about it, "
                 "compensated when an offset landed, unresolved when an offset "
                 "was owed but did not land. Compensation is not inversion "
@@ -517,12 +591,42 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
             "networkCompensableFraction":
                 crossings["networkBoundary"]["compensableFraction"],
             "stateGoneProven": residue.get("proven"),
+            # item 522: the weakest computer-use residue state in the realm, or
+            # `None` when the realm crosses no computer-use verb. The WEAKEST,
+            # never an average — one uncompensated click is not diluted by four
+            # clean steps (item 546 rule 3).
+            "uiResidueAggregate":
+                (crossings.get("uiResidue") or {}).get("aggregate"),
             "otherRealmsUntouched": others["untouched"],
         },
     }
 
 
 # --------------------------------------------------------------- rendering
+
+#: item 522: the tag a computer-use crossing prints instead of the two-state
+#: `[compensated]` / `[BARE]`. Upper case is reserved for the states that are
+#: RESIDUE AN AUDITOR MUST HANDLE, so the shout means the same thing it always
+#: meant in this report and `[untouched]` never shouts at a reader about a read.
+_UI_TAG: dict[str, str] = {
+    uitx.UNTOUCHED: "[untouched]",
+    uitx.RESTORED: "[restored]",
+    uitx.COMPENSATED: "[compensated]",
+    uitx.UNCOMPENSATED: "[UNCOMPENSATED]",
+    uitx.UNREGISTERED: "[UNREGISTERED]",
+}
+
+
+def _tag(crossing: dict) -> str:
+    """The residue tag for one crossing. A computer-use crossing prints its
+    item-522 state; every other crossing prints the two-state tag it always
+    printed, so a report over a composition with no computer-use verb is
+    byte-identical to the one before this change."""
+    state = crossing.get("uiResidue")
+    if state in _UI_TAG:
+        return _UI_TAG[state]
+    return "[compensated]" if crossing.get("compensated") else "[BARE]"
+
 
 def render(report: dict) -> str:
     """Human rendering. The structured report is the product; this is the
@@ -576,19 +680,24 @@ def render(report: dict) -> str:
     header = (f"  [2] BOUNDARY CROSSINGS — {cross['total']} "
               f"({cross['compensatedCount']} compensated, {cross['bareCount']} bare")
     header += f", {unresolved_n} UNRESOLVED)" if unresolved_n else ")"
+    # item 522: the two-state counts above are kept byte-for-byte (a consumer
+    # gates on them), and they are COARSE for a computer-use crossing — they
+    # count a read as bare. Say so on the same line rather than leaving the
+    # headline number to be read as the finding.
+    if cross.get("uiResidue"):
+        header += ("  [computer-use crossings are counted coarsely here; the "
+                   "split below is the finding]")
     out.append(header)
     if not cross["emissions"] and not cross["externs"] \
             and not cross.get("widenings"):
         out.append("      none — this realm made no irreversible boundary "
                    "crossing (fully revertible, G8)")
     for c in cross["emissions"]:
-        tag = "[compensated]" if c["compensated"] else "[BARE]"
-        out.append(f"      {tag:<14} {c['component']}  emit {c['label']}")
+        out.append(f"      {_tag(c):<14} {c['component']}  emit {c['label']}")
     for c in cross["externs"]:
         # item 254: an emission extern that owns a `compensate` slot is
         # compensated, not bare (the network compensate-grade case).
-        tag = "[compensated]" if c["compensated"] else "[BARE]"
-        out.append(f"      {tag:<14} {c['component']}  host {c['name']}()")
+        out.append(f"      {_tag(c):<14} {c['component']}  host {c['name']}()")
     # item 414: a `*` widening, an emitting callable escaping in value
     # position, reaching a boundary that cannot be named.
     for c in cross.get("widenings") or []:
@@ -613,6 +722,25 @@ def render(report: dict) -> str:
             f"{net['total']} API crossing(s) witnessed/compensable ({pct}) — "
             f"{net['witnessedCount']} witnessed, {net['compensatedCount']} "
             f"compensated, {net['bareCount']} bare")
+    # item 522: the computer-use revert split, printed only when the realm
+    # crosses a computer-use verb. Five names for five outcomes, because a
+    # revert reports what it RESTORED and what it only COMPENSATED separately.
+    ui = cross.get("uiResidue")
+    if ui:
+        out.append("")
+        out.append(f"      computer-use revert split (item 522) — aggregate: "
+                   f"{ui['aggregate'].upper()} (the WEAKEST part, not the "
+                   f"average)")
+        for state in uitx.WEAKEST_FIRST:
+            names = ui.get(state) or []
+            if names:
+                out.append(f"        {state:<14} {', '.join(names)}")
+        order = ui.get("compensateOrder") or []
+        out.append("        compensate LIFO: "
+                   + (" -> ".join(order) if order
+                      else "none — no step in this realm has an inverse to run"))
+        out.append(f"        claim: {ui['claim']}")
+        out.append(f"        note: {ui['note']}")
     out.append(f"      note: {cross['note']}")
 
     # 3. others untouched
