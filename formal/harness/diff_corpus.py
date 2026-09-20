@@ -17,7 +17,13 @@ Pipeline (formal/STATUS.md, "differential oracle"):
        (`w.task.run` reads the child's `task` provision), emission externs
        and the transitively-emitting named functions;
      - a component's activation emit-step surface, the capabilities its
-       `requires` bindings grant it, and its activation-body spawn edges.
+       `requires` bindings grant it, and its activation-body spawn edges;
+     - a config field's declared TYPE, decomposed into the nodes it
+       reaches and each node's data classification. That one is not
+       about a crossing at all: the G4 guarantee also forbids a config
+       field whose type can carry a live callable or a capability (item
+       378), and with no type-shape fact the model could not see such a
+       refusal at all (issue 1161).
 
    That is what lets the shaped model see a provider exceeding its
    declaration and a spawn widening a child's authority, not just a missing
@@ -51,9 +57,10 @@ Pipeline (formal/STATUS.md, "differential oracle"):
 4. report checker alignment: compile each file with the real checker
    (`revl.compiler.compile_files`, the path the CLI takes, so a `use`
    resolves) and compare its refusal codes against
-   the formal verdicts. Informational, EXCEPT `missed-G4` and `missed-G2`
-   (`FATAL_BUCKETS`) — the checker refusing where the model sees nothing
-   is the dangerous direction and fails the gate.
+   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`,
+   `missed-A9` and `missed-A2` (`FATAL_BUCKETS`) — the checker refusing
+   where the model sees nothing is the dangerous direction and fails the
+   gate.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -89,6 +96,18 @@ from revl.diagnostics import classify
 from revl.errors import RevlError
 from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
 from revl.typecheck import parse_type  # the shipped type-head splitter
+# The config-is-data tables (item 378), imported rather than restated: the
+# classification a `CN` node carries is the SHIPPED checker's, so the harness
+# cannot drift from it by spelling a head into the wrong bucket.
+from revl.typecheck import (
+    _CONFIG_DATA_CONTAINERS,
+    _CONFIG_DATA_SCALARS,
+    _CONFIG_ERASED,
+    FN_HEAD,
+    _is_type_expression,
+    structural_fields,
+)
+from revl.taint import strip_qualifiers  # the shipped qualifier normalization
 from revl.wal import WAL_GUARANTEE, WAL_VERSION
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
@@ -103,7 +122,10 @@ from revl.parser import (
     LetEffect,
     Parser,
     ProvideStmt,
+    RouteStmt,
     SpawnExpr,
+    StreamIterStmt,
+    TimerStmt,
 )
 
 
@@ -878,9 +900,15 @@ def _isolate_map(comp) -> dict[str, str]:
 
     `isolate <key> in realms(...)` (the multi-realm ROUTE, item 162) is a
     different construct and is NOT folded in here: a routed key resolves
-    per-realm at each leg rather than pinning one realm. No corpus file uses
-    one today; if one appears its route legs are simply not modeled, and the
-    key falls back to the shared realm."""
+    per-realm at each leg rather than pinning one realm, which the model's
+    one-realm-per-key `LComponent.realm` cannot express. Its legs are not
+    modeled: the routed REQUIREMENT is elided from the V row's manifest on
+    both sides (`Oracle.toLComponent`, `reference_from_tsv`) rather than
+    mis-spelled into the shared realm, where it would read as the
+    component's own provision (a phantom G3 self-provision), and the route
+    is carried only as the A9 installation fact (`PR`).
+    `tests/formal_corpus/a9_routes_installs_key.rvl` is the corpus file that
+    uses one."""
     out: dict[str, str] = {}
     for stmt in comp.body:
         if isinstance(stmt, IsolateStmt):
@@ -1043,6 +1071,188 @@ def _host_acquire_facts(comp, fns: dict) -> list[tuple[str, str]]:
     return out
 
 
+
+# ---------------------------------------------------------------- config-data
+#
+# The THIRD rule under the G4 guarantee, and the first that is not about a
+# crossing at all. `g4OK` (the marker rule) and `hostAcquireOK` (the acquire
+# rule) both judge something a body DOES; config-is-data (item 378,
+# `typecheck.check_config_field_is_data`) judges a config field's declared
+# TYPE — a config value is injected as static data at plug/spawn/load time, so
+# its type must be built, transitively, out of data. An arrow field is a live
+# callable invoked past every authority fold; a `service` field is a capability
+# handed over with no wiring at all.
+#
+# The model had no type-shape facts, so a refusal of this class was invisible
+# to it and reported as `missed-G4` — fatal — wherever a fixture for it was
+# placed (issue 1161). The export now decomposes a config field's declared type
+# the way `Z`/`Y` decompose a capability: the SHIPPED tables and the shipped
+# splitter classify each node the type reaches, and the JUDGMENT — that every
+# reached node is a data form — is stated on both verdict sides.
+#
+# The classification is an ALLOWLIST on both sides, matching the checker's own
+# discipline (`_walk_config_type` refuses a head that is not *provably* data
+# rather than denying two known-bad ones). A form neither side has heard of is
+# therefore refused, which is the SAFE direction: the model can only become
+# stricter than the checker, never blind to one of its refusals.
+CONFIG_DATA_FORMS = frozenset(
+    {"scalar", "container", "record", "variant", "struct", "tparam"})
+
+
+def config_type_defs(prog) -> dict[str, dict]:
+    """The lightweight type table `check_config_field_is_data` resolves nominal
+    heads through — `lower._check_config`'s own construction, clause for
+    clause, so a record/ADT/alias resolves here exactly as it does there."""
+    out: dict[str, dict] = {}
+    for decl in prog.type_decls:
+        if decl.fields:
+            out.setdefault(
+                decl.name,
+                {"kind": "record", "params": list(decl.params or ()),
+                 "fields": {f.name: f.type for f in decl.fields}})
+        else:
+            out.setdefault(
+                decl.name,
+                {"kind": "variant", "params": list(decl.params or ()),
+                 "cases": [{"name": c.name, "payload": c.payload}
+                           for c in decl.cases]})
+    return out
+
+
+def config_shape(type_name: str | None, *, service_names: set[str],
+                 type_defs: dict, visited: frozenset = frozenset(),
+                 tparams: frozenset = frozenset(),
+                 out: "list[tuple[str, str]] | None" = None
+                 ) -> list[tuple[str, str]]:
+    """Every node `type_name` reaches, as `(form, spelling)` in walk order.
+
+    A transcription of `typecheck._walk_config_type` with one difference: the
+    checker RAISES at the first offender, and this walk records it and carries
+    on with its siblings. The two are equivalent for the verdict — "some node
+    is not a data form" is exactly "the checker's descent raises somewhere" —
+    and recording all of them makes the fact set independent of the order the
+    descent happens to take.
+
+    An offender is never descended into, which the checker does not do either
+    (it has already raised), so the walk terminates on the same `visited`
+    guard the checker uses for a recursive type."""
+    if out is None:
+        out = []
+    # `taint.extract_and_normalize` runs before the checker and STRIPS every
+    # `Secret[T]`/`Untrusted[T]`/`Trusted[T]`/`Retained[T, p]` qualifier off a
+    # declared type in place, so `check_config_field_is_data` is handed the
+    # bare type and `config { api_key: Secret[Str] }` is a `Str` field by the
+    # time it is judged. This export parses the corpus and does NOT run the
+    # taint pass, so it applies that ONE normalization with the shipped
+    # function — idempotent, and byte-identical on a type carrying no
+    # qualifier. Without it, every `Secret[T]` config field in the tree would
+    # read as an opaque head and the model would refuse three files revl
+    # accepts.
+    type_name = strip_qualifiers(type_name)
+    if not type_name:
+        return out
+    type_name = type_name.strip()
+
+    def walk(target, *, visited=visited, tparams=tparams):
+        config_shape(target, service_names=service_names, type_defs=type_defs,
+                     visited=visited, tparams=tparams, out=out)
+
+    sfields = structural_fields(type_name)
+    if sfields is not None:
+        out.append(("struct", type_name))
+        for ftype in sfields.values():
+            walk(ftype)
+        return out
+    head, args = parse_type(type_name)
+    if head == FN_HEAD:
+        out.append(("arrow", type_name))
+        return out
+    if head in service_names:
+        out.append(("service", type_name))
+        return out
+    if head in tparams:
+        out.append(("tparam", type_name))
+        return out
+    if head in _CONFIG_DATA_CONTAINERS:
+        out.append(("container", type_name))
+        for arg in args:
+            walk(arg)
+        return out
+    if head in _CONFIG_DATA_SCALARS:
+        out.append(("scalar", type_name))
+        for arg in args:
+            walk(arg)
+        return out
+    info = type_defs.get(head or "")
+    if info is None:
+        # Nothing here proves the field is data. The checker splits the
+        # diagnostic between an erased head (`Any`/`Value`/`Never`, each a
+        # `compatible` wildcard in some direction) and any other unresolvable
+        # one; both refuse, and the two forms are kept apart so the fact says
+        # WHICH shape reopened the hole.
+        out.append(("erased" if head in _CONFIG_ERASED else "opaque",
+                    type_name))
+        return out
+    out.append((info.get("kind") or "variant", type_name))
+    if head not in visited:
+        child_visited = visited | {head}
+        child_tparams = frozenset(info.get("params") or ())
+        if info.get("kind") == "record":
+            for ftype in (info.get("fields") or {}).values():
+                walk(ftype, visited=child_visited, tparams=child_tparams)
+        else:
+            for case in info.get("cases") or []:
+                payload = case.get("payload")
+                if payload is not None:
+                    walk(payload, visited=child_visited, tparams=child_tparams)
+                    continue
+                name = case.get("name")
+                if _is_type_expression(name, type_defs, child_tparams):
+                    walk(name, visited=child_visited, tparams=child_tparams)
+    # A user generic head carries data in its type arguments too; walked with
+    # the OUTER type-parameter scope, since they are written at this use site.
+    for arg in args:
+        walk(arg)
+    return out
+
+
+def config_rows(prog, rel: str) -> list[str]:
+    """`CF` (a config field is declared) + `CN` (one node its type reaches)
+    for every config field in the file — a component's and an extern's, the
+    two `lower._check_config` is called for."""
+    svc_names = {svc.name for svc in prog.services}
+    tdefs = config_type_defs(prog)
+    owners = [("component", c.name, c.config) for c in prog.components]
+    owners += [("extern", e.name, e.config or ()) for e in prog.externs]
+    rows: list[str] = []
+    for kind, owner, fields in owners:
+        for cfg in fields:
+            rows.append("\t".join(
+                ["CF", rel, kind, owner, cfg.name, cfg.type or "-"]))
+            nodes = config_shape(cfg.type, service_names=svc_names,
+                                 type_defs=tdefs)
+            for i, (form, spelling) in enumerate(nodes):
+                rows.append("\t".join(
+                    ["CN", rel, kind, owner, cfg.name, str(i), form,
+                     spelling]))
+    return rows
+
+
+def _a2_step(stmt: object) -> str:
+    """One activation-body statement as the A2 rule sees it (issue 1166):
+    the four statement forms `lower._dispatch_action` refuses once
+    `provide_seen_line` is set are `acquire`; a `provide` block is what sets
+    it; everything else moves nothing. A component `if` arm admits only
+    `fail` and nested `if` (`_lower_component_guard_stmts`), so the body is
+    flat for this rule and no acquisition can hide inside an arm."""
+    if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt, StreamIterStmt)):
+        return "acquire"
+    if isinstance(stmt, ProvideStmt):
+        return "provide"
+    return "other"
+
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
     tsv: list[str] = []
@@ -1122,8 +1332,21 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 "FN", rel, fn.name, ",".join(fn_calls[fn.name]),
                 "star" if star_fns.get(fn.name) else "plain"]))
 
+        # config-is-data facts (CF/CN), file-wide: the declared config fields
+        # and, decomposed by the shipped tables, the type nodes each one
+        # reaches. An extern's config is judged at the same bar as a
+        # component's, so both owners ship rows (issue 1161).
+        tsv.extend(config_rows(prog, rel))
+
         ff: dict = {"components": {}}
         for c in prog.components:
+            # A routed requirement (`isolate k in realms(...)`, item 162) is
+            # exported as a `PR` fact below. M stays the faithful manifest;
+            # it is the V-row MODEL on both sides that elides a routed
+            # requirement (`Oracle.toLComponent`, `reference_from_tsv`),
+            # because the linker resolves it per leg and never through the
+            # single-realm table.
+            routed = [stmt.key for stmt in c.body if isinstance(stmt, RouteStmt)]
             requires = [(local, svc) for local, svc, _line in c.requires]
             provides = [key for key, _svc, _line in c.provides]
             require_map = dict(requires)
@@ -1144,6 +1367,20 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.append("\t".join(["R", rel, c.name, local, svc]))
             for key, svc, _ln in c.provides:
                 tsv.append("\t".join(["C", rel, c.name, key, svc]))
+            # PB: one row per installed provide BLOCK, in body order (issue
+            # 1167). C above reads the `provides` CLAUSE; A9 is the rule that
+            # the two agree, so the A9 row needs the block as its own fact —
+            # read off the same AST node `lower._lower_provide` refuses on.
+            # A double install is a repeated row, not a collapsed one.
+            for stmt in c.body:
+                if isinstance(stmt, ProvideStmt):
+                    tsv.append("\t".join(["PB", rel, c.name, stmt.key]))
+            # PR: one row per `isolate k in realms(...)` bind (issue #1172).
+            # The converse of A9 exempts a routed key from needing a block,
+            # so the exemption is exported as DATA off the `RouteStmt` the
+            # checker records into `routes`, never inferred here.
+            for key in routed:
+                tsv.append("\t".join(["PR", rel, c.name, key]))
 
             # require-held capability facts (K): the boundaries a requires
             # binding hands this component — the structured valuations of the
@@ -1333,6 +1570,13 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for idx, kind, heads, inverse in terms:
                 tsv.append("\t".join(["I", rel, c.name, str(idx), kind,
                                        ",".join(heads), ",".join(inverse)]))
+            # body-step facts (AQ, issue 1166): the activation body in
+            # order, one row per statement, each as the A2 rule sees it. The
+            # oracle folds `RevL.A2.a2B` over them and the reference folds
+            # the checker's rule over the same rows.
+            for ord_, stmt in enumerate(c.body):
+                tsv.append("\t".join(["AQ", rel, c.name, str(ord_),
+                                       _a2_step(stmt)]))
             ff["components"][c.name] = {"calls": calls, "kinds": kinds}
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
@@ -2103,6 +2347,52 @@ def prog_coverage() -> list[str]:
     return findings
 
 
+#: non-vacuity ratchet for the A2 row (issue 1166). Filled by
+#: `reference_from_tsv`, read by `a2_coverage`: `(file, comp) ->
+#: (admitted, acquisitions, provisions)` for every component's body.
+_A2_BODIES: dict = {}
+
+
+def a2_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A2` row (issue 1166).
+
+    Same discipline as the ratchets above: a row that says `ok` over bodies
+    with no provision, or no acquisition, certifies nothing about the
+    ordering — the fold's flag is never set, or never tested. So the corpus
+    must EXERCISE the rule on the reference's own fold:
+
+      * some body is ADMITTED with at least one provision AND at least one
+        acquisition — the ordinary `let x = effect … undo …; provide k { … }`
+        shape, where the flag is set and every acquisition sits above it;
+      * some body is REFUSED — an acquisition after the first `provide`
+        (`examples/rejections/a2_acquire_after_provide.rvl`).
+
+    A refused body is a `fail` on both sides (the oracle's `a2OKB` and this
+    fold are the same rule), so the row bites through
+    `RevL.A2.a2_not_vacuous` / `RevL.A2.fixture_refused`: the verdict flips
+    between the two shapes, and a reference that drifted to accept the
+    second would diverge from the Lean row here. Returns findings, treated
+    as gate failures."""
+    admitted = refused = None
+    for key, (ok, n_acq, n_prov) in _A2_BODIES.items():
+        if ok and n_acq > 0 and n_prov > 0:
+            admitted = admitted or key
+        if not ok:
+            refused = refused or key
+    findings: list[str] = []
+    for label, witness in (
+            ("an admitted body with both a provision and an acquisition",
+             admitted),
+            ("a body refused for an acquisition after a provision", refused)):
+        if witness is None:
+            findings.append(f"a2 coverage: NO witness of {label} — "
+                            "the A2 row would agree vacuously")
+    if not findings:
+        print(f"a2 coverage: {len(_A2_BODIES)} bodies; "
+              f"admitted={admitted} refused={refused}")
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -2128,7 +2418,12 @@ class Verdicts(NamedTuple):
     `confinements` C rows (G6: a reconstructed statement's reach surface is
     within its component's declared context), `g8surface` S8 rows (G8: a
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
-    rows (G5: an effect's teardown registration count)."""
+    rows (G5: an effect's teardown registration count), `a9` A9 rows (every
+    installed provide block's key is declared in the `provides` clause, and
+    every declared key is installed by a block or a `realms(...)` route),
+    `configs` CD rows (G4 config-is-data: a config field's declared type is
+    built out of data), `a2` A2 rows (A2: no acquisition after a provision in
+    a component's activation body)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2139,13 +2434,21 @@ class Verdicts(NamedTuple):
     confinements: dict[tuple[str, str, str], str]
     g8surface: dict[tuple[str, str, str], object]
     g5reg: dict[tuple[str, str, str], object]
+    a9: dict[tuple[str, str], str]
+
+    configs: dict[tuple[str, str, str, str], str]
+    a2: dict[tuple[str, str], str]
+
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
                 + len(self.dispositions) + len(self.recoveries)
                 + len(self.confinements) + len(self.g8surface)
-                + len(self.g5reg))
+
+                + len(self.g5reg) + len(self.a9) + len(self.configs)
+                + len(self.a2))
+
 
 
 def _cols(field: str) -> list[str]:
@@ -2166,6 +2469,11 @@ def parse_verdicts(text: str) -> Verdicts:
     confinements: dict[tuple[str, str, str], str] = {}
     g8surface: dict[tuple[str, str, str], object] = {}
     g5reg: dict[tuple[str, str, str], object] = {}
+    a9: dict[tuple[str, str], str] = {}
+
+    configs: dict[tuple[str, str, str, str], str] = {}
+    a2: dict[tuple[str, str], str] = {}
+
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -2221,10 +2529,24 @@ def parse_verdicts(text: str) -> Verdicts:
             body = parts[4].split("=", 1)[1]
             g5reg[(parts[1], parts[2], parts[3])] = (
                 "n/a" if body == "n/a" else int(body))
+        elif parts[0] == "A9" and len(parts) == 4:
+            # A9 provide-block declaration, both directions: (file, comp) ->
+            # ok|fail.
+            a9[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
+
+        elif parts[0] == "CD" and len(parts) == 6:
+            # G4 config-is-data: (file, owner kind, owner, field) -> ok|fail.
+            configs[(parts[1], parts[2], parts[3], parts[4])] = \
+                parts[5].split("=", 1)[1]
+        elif parts[0] == "A2" and len(parts) == 4:
+            # A2 ordering: (file, comp) -> ok|fail.
+            a2[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+                    recoveries, confinements, g8surface, g5reg, a9, configs,
+                    a2)
+
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -2278,7 +2600,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     declaration is an upper bound — the method's reached emission tokens
     must be within its declared bound (plain => none; any => free; scoped
     => the declared entries). W rows are PER-SPAWN-EDGE attenuation
-    (item 66/294). X rows carry a parse refusal through."""
+    (item 66/294). CD rows are PER-CONFIG-FIELD config-is-data: every node
+    the field's declared type reaches must be a data form (item 378).
+    X rows carry a parse refusal through."""
     rows = [r.split("\t") for r in tsv]
     mrows = [r for r in rows if r and r[0] == "M" and len(r) == 7]
     xrows = [r for r in rows if r and r[0] == "X" and len(r) == 3]
@@ -2293,6 +2617,10 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     irows = [r for r in rows if r and r[0] == "I" and len(r) == 7]
     exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
     fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
+    pbrows = [r for r in rows if r and r[0] == "PB" and len(r) == 4]
+    prrows = [r for r in rows if r and r[0] == "PR" and len(r) == 4]
+    cfrows = [r for r in rows if r and r[0] == "CF" and len(r) == 6]
+    cnrows = [r for r in rows if r and r[0] == "CN" and len(r) == 8]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -2306,6 +2634,13 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         key = (r[1], r[2], r[3])
         mode, ents = bounds_by_file.get(key, ("plain", set()))
         bounds_by_file[key] = (mode, ents | {r[4]})
+
+    # Routed requirements (`PR` rows, item 162 binds) are resolved by the
+    # linker per leg, never through the single-realm table; the V-row model
+    # elides them from `requires` exactly as `Oracle.toLComponent` does.
+    routed_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in prrows:
+        routed_by_comp.setdefault((r[1], r[2]), []).append(r[3])
 
     def _realms(row: list[str]) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -2321,7 +2656,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         # (`lower._link`'s `templates` exclusion), so they take no part in
         # the static G2/G3 table.
         fm = [r for r in mrows if r[1] == rel and r[6] != "template"]
-        shaped = [([k for k in r[3].split(",") if k],
+        shaped = [([k for k in r[3].split(",")
+                    if k and k not in routed_by_comp.get((rel, r[2]), [])],
                    [k for k in r[4].split(",") if k], _realms(r)) for r in fm]
         prov_slots = [s for _rq, pv, rl in shaped for s in _slots(pv, rl)]
         need_slots = [s for rq, _pv, rl in shaped for s in _slots(rq, rl)]
@@ -2523,17 +2859,212 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                 g5reg[(rel, compn, index)] = n
                 _G5_REGS[(rel, compn, index)] = n
 
+    # CD verdicts (G4 config-is-data, issue 1161). The rule is the ALLOWLIST
+    # and nothing else: a config field is data iff every node its declared type
+    # reaches is a data form. The decomposition is the exporter's (the shipped
+    # tables did the classifying); the judgment is stated here and, separately,
+    # in `Oracle.configDataOK`.
+    config_nodes: dict[tuple[str, str, str, str], list[str]] = {}
+    for r in cnrows:
+        config_nodes.setdefault((r[1], r[2], r[3], r[4]), []).append(r[6])
+    configs: dict[tuple[str, str, str, str], str] = {}
+    for r in cfrows:
+        key = (r[1], r[2], r[3], r[4])
+        forms = config_nodes.get(key, [])
+        configs[key] = ("ok" if all(f in CONFIG_DATA_FORMS for f in forms)
+                        else "fail")
+        _CONFIG_FIELDS[key] = (configs[key], tuple(forms))
+
+    # A9 rows (issues 1167 / #1172), both directions: every installed provide
+    # BLOCK's key is declared in the `provides` CLAUSE, and every declared
+    # key is installed by a block or by a `realms(...)` route. The clause
+    # comes off the M row, the blocks off the PB rows and the routes off the
+    # PR rows — three facts the exporter reads off three different AST nodes
+    # — so this is membership between lists, recomputed here without the
+    # Lean side's `Installed` structure. One row per component that declares
+    # or installs anything: a component with neither would agree vacuously.
+    _A9_ROWS.clear()
+    provides_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in mrows:
+        provides_by_comp[(r[1], r[2])] = [k for k in r[4].split(",") if k]
+    blocks_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in pbrows:
+        blocks_by_comp.setdefault((r[1], r[2]), []).append(r[3])
+    a9: dict[tuple[str, str], str] = {}
+    for key in sorted(set(provides_by_comp) | set(blocks_by_comp)):
+        declared = provides_by_comp.get(key, [])
+        blocks = blocks_by_comp.get(key, [])
+        routed = routed_by_comp.get(key, [])
+        if not declared and not blocks:
+            continue
+        undeclared = [k for k in blocks if k not in declared]
+        uninstalled = [k for k in declared if k not in blocks and k not in routed]
+        a9[key] = "ok" if not (undeclared or uninstalled) else "fail"
+        _A9_ROWS[key] = (not undeclared, not uninstalled, len(blocks), len(routed))
+
+    # A2 rows (no acquisition after a provision, issue 1166), recomputed
+    # INDEPENDENTLY from the AQ rows: the checker's own rule
+    # (`lower._dispatch_action`) folded over the body in index order — a flag
+    # set at the first `provide`, an `acquire` refused while it is set. One
+    # verdict per component the M rows name, so a body with no statements is
+    # a (vacuous) `ok` on both sides rather than a missing row.
+    aqrows = [r for r in rows if r and r[0] == "AQ" and len(r) == 5]
+    bodies: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    for r in aqrows:
+        bodies.setdefault((r[1], r[2]), []).append((int(r[3]), r[4]))
+    _A2_BODIES.clear()
+    a2: dict[tuple[str, str], str] = {}
+    for r in mrows:
+        key = (r[1], r[2])
+        seen = False
+        ok = True
+        n_acq = n_prov = 0
+        for _ord, kind in sorted(bodies.get(key, [])):
+            if kind == "provide":
+                seen = True
+                n_prov += 1
+            elif kind == "acquire":
+                n_acq += 1
+                if seen:
+                    ok = False
+        a2[key] = "ok" if ok else "fail"
+        _A2_BODIES[key] = (ok, n_acq, n_prov)
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements, g8surface, g5reg)
+
+                    recoveries, confinements, g8surface, g5reg, a9,
+                    configs, a2)
 
 
-# The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
+#: What the REFERENCE decided for each config field, for the CD row's
+#: non-vacuity ratchet: (verdict, the forms its type reached). Filled by
+#: `reference_from_tsv`, read by `config_coverage`. Evidence that the row
+#: BITES, not a claim either side makes — so it is kept beside the compared
+#: verdict rather than inside it, the same way `_CONFINEMENTS` is.
+_CONFIG_FIELDS: dict = {}
+
+
+def config_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `CD` row (G4 config-is-data, 1161).
+
+    Every config field in the corpus belongs to a file somebody wrote to
+    compile, so a row that only ever said `ok` would agree over nothing — the
+    same vacuity `attenuation_coverage` and `confinement_coverage` guard. This
+    states, and enforces, that the corpus exercises BOTH verdicts, and that the
+    admitting side is not trivial either: an `ok` over an empty node list would
+    certify nothing about the walk."""
+    findings: list[str] = []
+    if not _CONFIG_FIELDS:
+        return ["config coverage: no CD rows at all — the row is vacuous"]
+    admitted = [k for k, (v, _f) in _CONFIG_FIELDS.items() if v == "ok"]
+    refused = [k for k, (v, _f) in _CONFIG_FIELDS.items() if v == "fail"]
+    nonempty = [k for k, (v, f) in _CONFIG_FIELDS.items() if v == "ok" and f]
+    if not refused:
+        findings.append("config coverage: NO refused config field — the CD "
+                        "row would agree vacuously")
+    if not nonempty:
+        findings.append("config coverage: NO admitted config field whose type "
+                        "reaches a node — the walk is never exercised")
+    if not findings:
+        forms = sorted({f for _v, fs in _CONFIG_FIELDS.values() for f in fs})
+        print(f"config coverage: {len(_CONFIG_FIELDS)} config fields, "
+              f"{len(admitted)} data / {len(refused)} refused; "
+              f"forms={','.join(forms)}")
+    return findings
+
+
+
+#: What the REFERENCE computed for each A9 row, for the non-vacuity ratchet:
+#: (every block declared, every declared key installed, block count, routed
+#: count). Filled by `reference_from_tsv`; read by `a9_coverage`. Evidence the
+#: row BITES, not a claim either side makes.
+_A9_ROWS: dict = {}
+
+
+def a9_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A9` row (issues 1167 / #1172).
+
+    Same discipline as `confinement_coverage`: a row every corpus component
+    satisfies certifies nothing. So the corpus must carry every verdict the
+    rule can give, on the reference's own computation:
+
+      * some component installs at least one block and is admitted — the
+        `ok` that is a real check in direction 1;
+      * some component installs a block whose key the clause never declared
+        — the refused shape of direction 1
+        (`examples/rejections/a9_provide_key_not_declared.rvl`);
+      * some component declares a key that no block and no route installs,
+        with every block it does install declared — the refused shape of
+        direction 2 ALONE (`examples/rejections/a9_provides_without_block.rvl`);
+      * some component is admitted with a ROUTED key — the exemption
+        exercised (`tests/formal_corpus/a9_routes_installs_key.rvl`), without
+        which the `PR` fact could be dropped and nothing would move.
+
+    Returns findings, which the caller treats as gate failures.
+    """
+    admitted = undeclared = uninstalled = routed = None
+    for key, (blocks_ok, declared_ok, n_blocks, n_routed) in _A9_ROWS.items():
+        ok = blocks_ok and declared_ok
+        if ok and n_blocks > 0:
+            admitted = admitted or key
+        if not blocks_ok:
+            undeclared = undeclared or key
+        # Direction 2 ALONE: the first fixture fails both directions (its
+        # `skin1` is declared and uninstalled too) and must not stand in for
+        # the shape whose only defect is a declared key nothing installs.
+        if blocks_ok and not declared_ok:
+            uninstalled = uninstalled or key
+        if ok and n_routed > 0:
+            routed = routed or key
+    findings: list[str] = []
+    for label, witness in (
+            ("a component installing a block under a declared key", admitted),
+            ("a component installing a block the clause never declared",
+             undeclared),
+            ("a component declaring a key nothing installs", uninstalled),
+            ("a component admitted with a routed key and no block", routed)):
+        if witness is None:
+            findings.append(f"a9 coverage: NO witness of {label} — "
+                            "the A9 row would agree vacuously")
+    if not findings:
+        print(f"a9 coverage: {len(_A9_ROWS)} declaring/installing components; "
+              f"admitted={admitted} undeclared={undeclared} "
+              f"uninstalled={uninstalled} routed={routed}")
+    return findings
+
+
+# The buckets that are GATE FAILURES, not findings (item 418 step 7). All
 # are the DANGEROUS direction: the real checker REFUSES a file and the model
 # sees nothing wrong with it, so the model is weaker than what revl enforces
 # and the "the model agrees with the checker" claim would be false.
 # `formal-strict` — the model refusing what the checker accepts — stays
 # informational: it is the safe direction and names fragment gaps.
-FATAL_BUCKETS = ("missed-G4", "missed-G2")
+# `missed-A9` (issues 1167 / #1172) is the same direction for the
+# provide-block rule: the checker refuses an undeclared block key or a
+# declared key nothing installs, and the model's A9 row says `ok`.
+# `missed-A2` (issue 1166): the checker's A2 refusal with the A2 row `ok`.
+FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9", "missed-A2")
+
+
+def checker_code(rel: str) -> tuple[str, str]:
+    """The shipped checker's verdict on one corpus file: `("accept", "")`, or
+    the refusal's `(code, category)`.
+
+    Asked through `compile_files`, the path `revl check` and every other CLI
+    verb take, so a `use "stdlib/http.rvl"` resolves against the file's own
+    directory and the search path. `compile_source(text, rel)` reads a bare
+    string and refuses ANY `use` before checking a thing (`REVL`: "`use`
+    declarations need `modules=` ... or compile_files"), so a use-bearing
+    file was filed under a refusal that says nothing about its composition,
+    and whatever the model said about it sank into `formal-found-other`
+    (#1169 F1). The same door resolves an extern body file, a `ref` and an
+    `asset`, which the bare-string door refuses for the same reason."""
+    try:
+        compile_files([str(REPO / rel)])
+        return "accept", ""
+    except RevlError as e:
+        info = classify(e)
+        return (info.get("code") or "UNCODED"), (info.get("category") or "")
 
 
 def checker_code(rel: str) -> tuple[str, str]:
@@ -2578,13 +3109,19 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         align[key] = align.get(key, 0) + 1
         samples.setdefault(key, []).append(rel)
 
-    # The model covers BOTH G4 rules now. The MARKER rule — a classified
+    # The model covers ALL THREE G4 rules now. The MARKER rule — a classified
     # statement's marker presence against the interface's declared emission,
     # over crossings resolved to a (service, method) — is `Oracle.g4OK`. The
     # ACQUIRE rule — a HOST acquire verb (`Pool.open`) legal only as the
     # acquisition of an `effect … undo …` bracket, where its release is
     # registered — is `Oracle.hostAcquireOK` over the `HA` position facts
-    # (issue 334). So a G4 refusal is fatal in EVERY category again: there is
+    # (issue 334). The CONFIG-IS-DATA rule — a config field's declared type
+    # must be built, transitively, out of data, so it can carry neither a live
+    # callable nor a capability (item 378) — is `Oracle.configDataOK` over the
+    # `CN` type-shape facts (issue 1161); it is the one G4 rule that judges a
+    # declaration rather than a body, which is why it needed facts of a new
+    # kind rather than a case in an existing rule.
+    # So a G4 refusal is fatal in EVERY category again: there is
     # no out-of-fragment exemption. The two G4-coded refusals the model still
     # cannot see — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` —
     # never reach this loop: one is refused at PARSE and one declares no
@@ -2595,11 +3132,25 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
         prov_rows = [(k, x) for k, x in v.providers.items() if k[0] == rel]
         spawn_rows = [(k, x) for k, x in v.spawns.items() if k[0] == rel]
+        a9_rows = [(k, x) for k, x in v.a9.items() if k[0] == rel]
+
+        # The CD row is the third rule under the G4 guarantee (issue 1161), so
+        # it joins the two crossing rules in BOTH directions: it can clear a
+        # G4 refusal the model would otherwise have missed, and a CD failure
+        # over a file the checker accepts is `formal-strict` like any other.
+        cfg_rows = [(k, x) for k, x in v.configs.items() if k[0] == rel]
+        g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows
+        # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
+        # refuses the shape with code A2, so a model `fail` on an accepted
+        # file is `formal-strict` and a checker A2 with the row `ok` is the
+        # fatal `missed-A2`.
+        a2_rows = [(k, x) for k, x in v.a2.items() if k[0] == rel]
         vrow = v.files.get(rel, ("ok", "ok", "ok"))
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in comp_rows + prov_rows + spawn_rows)
-        raw_found = any(x == "fail"
-                        for _, x in comp_rows + prov_rows + spawn_rows)
+            x == "ok" for _, x in g4_rows + a9_rows + a2_rows)
+        a2_found = any(x == "fail" for _, x in a2_rows)
+        raw_found = any(x == "fail" for _, x in g4_rows)
+
         code, category = checker_code(rel)
         if code == "accept":
             # `formal-strict`: the checker ACCEPTS the file but the shaped
@@ -2611,6 +3162,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif code in ("G2", "G3"):
             manifest_fail = vrow[0] == "fail" or vrow[2] == "fail"
             record(f"agree-{code}" if manifest_fail else f"missed-{code}", rel)
+        elif code == "A9":
+            # The A9 row is the model's `a9B` over the component's clause,
+            # installed blocks and routes (issues 1167 / #1172): a checker A9
+            # refusal the row does not see is the model being weaker than
+            # what revl enforces, and fatal.
+            a9_fail = any(x == "fail" for _, x in a9_rows)
+            record("agree-A9" if a9_fail else "missed-A9", rel)
+        elif code == "A2":
+            record("agree-A2" if a2_found else "missed-A2", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -2648,6 +3208,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             for rel in names:
                 print(f"    NO-MANIFEST {code}: {rel}")
     full = FORMAL / "harness" / "out" / "no_manifest.txt"
+    # A clean checkout has no out/ yet (the gate creates it when the oracle
+    # runs); the no-toolchain tests reach this writer first.
+    full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text("".join(
         f"{code}\t{rel}\n" for code in sorted(nm_codes)
         for rel in sorted(nm_codes[code])), encoding="utf-8")
@@ -2697,7 +3260,12 @@ def main() -> int:
             ("recovery", ref.recoveries, formal.recoveries),
             ("confinement", ref.confinements, formal.confinements),
             ("g8_surface", ref.g8surface, formal.g8surface),
-            ("g5_registration", ref.g5reg, formal.g5reg)):
+            ("g5_registration", ref.g5reg, formal.g5reg),
+            ("a9", ref.a9, formal.a9),
+
+            ("config_data", ref.configs, formal.configs),
+            ("a2", ref.a2, formal.a2)):
+
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2714,7 +3282,11 @@ def main() -> int:
         f"{len(ref.recoveries)} recoveries + "
         f"{len(ref.confinements)} confinements + "
         f"{len(ref.g8surface)} surfaces + "
-        f"{len(ref.g5reg)} teardowns) — "
+        f"{len(ref.g5reg)} teardowns + "
+        f"{len(ref.a9)} provide-clause components + "
+        f"{len(ref.configs)} config fields + "
+        f"{len(ref.a2)} a2 bodies) — "
+
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
@@ -2722,6 +3294,11 @@ def main() -> int:
     mismatches.extend(attenuation_coverage())
     mismatches.extend(confinement_coverage())
     mismatches.extend(prog_coverage())
+    mismatches.extend(a9_coverage())
+
+    mismatches.extend(config_coverage())
+    mismatches.extend(a2_coverage())
+
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:

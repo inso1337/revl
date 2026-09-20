@@ -108,6 +108,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _boundary_witness import assert_boundary_witness  # noqa: E402
+
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
 
 # item 243 Slice 2b (docs/design/teardown-contract.md): the reference emitter's
@@ -406,3 +410,98 @@ console.log(removals.join(","))
     proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == expected
+
+
+# ---------------------------------------------------------------------------
+# Deferred families stay LOUD (issue #1123).
+#
+# The self-host emitters' safety argument is that an unported construct answers
+# with a named `<<UNSUPPORTED-...>>` marker rather than with silence: a marker is
+# visible in the emitted bytes and is pinned here, while a section the port
+# simply skips is invisible to the byte oracle (no corpus document carries one)
+# and is counted as mirrored by tools/selfhost_coverage.py.
+#
+# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+# every self-host slice, and `selfhost/emit_ts.rvl` used to emit NOTHING for it.
+# It now emits one named marker per test, per family.
+IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
+
+LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
+component P provides p: Ping {
+  provide p { fn ping() = 1 }
+}
+lifecycle test "probe" {
+  load P
+  assert true
+}
+"""
+
+FAULT_TEST_SRC = """service Ping { fn ping() -> Int }
+component P provides p: Ping {
+  let scratch = effect Map.new() undo scratch.drop()
+  provide p { fn ping() = 1 }
+}
+fault test "probe" for P {
+  fail at step 1
+  assert no residue
+}
+"""
+
+
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param(IN_FILE_TEST_SRC, "import { expect, it } from 'vitest'",
+                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
+    pytest.param(LIFECYCLE_TEST_SRC, "import { AsyncLocalStorage } from 'node:async_hooks'",
+                 "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
+])
+def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
+                                           reference_token, port_token):
+    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
+    path = tmp_path / "boundary.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_ts_src"](ir)
+    assert reference_token in want
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"
+
+
+def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
+        emitted, reference, tmp_path):
+    """`fault test` runs on the python reference tier only (docs/fault-tests.md),
+    so the reference TS emitter refuses the whole document by name. The port has
+    no refusal channel — a pure self-host emitter fn cannot `fail` — so it names
+    the section with a marker instead of dropping it."""
+    path = tmp_path / "fault.rvl"
+    path.write_text(FAULT_TEST_SRC)
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError, match="fault tests do not lower"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_ts_src"](ir)
+
+
+# item 130 (issue #81): the stream surface this port does not carry
+# ---------------------------------------------------------------------------
+#
+# The reference emitter lowers the whole `Stream[T]` surface on this tier; the
+# Path B port does not, and `tests/fixtures/selfhost_blind_spots.json` carries
+# that as a named `unported` baseline. The baseline records the GAP. What was
+# never checked is that the port is LOUD about it: the ledger is satisfied by a
+# port that silently emits a module with the subscription missing, which is the
+# section-level silence issue #1123 found for the in-file test section and the
+# worst answer item 130 admits for a stream. So the marker is pinned here,
+# where it runs.
+
+
+def test_the_stream_surface_is_named_not_dropped(emitted, reference):
+    """A stream document reaches TWO port boundaries — the `subscribe`
+    acquisition and the `stream-iter` loop behind `every … in` — and both must
+    answer with a marker rather than with nothing."""
+    ir = compile_files([str(ROOT / "backends" / "go" / "testdata" / "stream_130.rvl")])
+    want = reference.emit(ir)
+    got = emitted["emit_ts_src"](ir)
+    for reference_token, port_token in (
+        ("host.Stream.subscribe(", "<<UNSUPPORTED-EXPR:subscribe>>"),
+        ("host.Stream.isClosed(", "<<UNSUPPORTED-STEP:stream-iter>>"),
+    ):
+        assert_boundary_witness(want, got, reference_token, port_token)

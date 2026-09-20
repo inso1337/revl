@@ -318,7 +318,12 @@ def _classify(e: RevlError) -> str:
         return "A6"
     if ("no builtin method" in m
             or "non-exhaustive match" in m
-            or "type argument(s), got" in m):
+            or "type argument(s), got" in m
+            # the unknown-field read, structural (item 71) and nominal alike.
+            # Code-less in the reference, but `revl.diagnostics.classify`
+            # already files it as a type mismatch, so it carries the T1 the
+            # design's §4.3 vocabulary gives it (slice T2a).
+            or "has no field" in m):
         return "T1"
     if ("is not a case of" in m
             or "record update names" in m
@@ -341,7 +346,18 @@ def _classify(e: RevlError) -> str:
                 and " receiver, got " in m)
             or ("builtin `" in m and "` takes " in m
                 and " argument(s), " in m)
-            or "takes no arguments, " in m):
+            or "takes no arguments, " in m
+            # slice T2a's three remaining code-less expression refusals, named
+            # in the design's §4.3 TYPE list. Each is a zero-hit marker over the
+            # whole census corpus today (no program in the tree draws one), so
+            # naming them moves no document between buckets; they exist so the
+            # checker oracle can compare a TAG as well as a message when the
+            # statement layer (T3a) starts carrying these to `admit_src`.
+            or "cannot order" in m
+            or "ternary branches disagree" in m
+            or "record update requires" in m
+            or "record literal for `" in m
+            or "but the record has " in m):
         return "TYPE"
     return "OUT:" + m
 
@@ -1275,6 +1291,37 @@ component C provides cache: Cache {
   }
 }
 """),
+    # ---- the transparent alias, across every declaration site the
+    # provide-method type layer reads (docs/design/457) ----------------------
+    # The corpus had no document that spelled `type X = <scalar>` and then used
+    # X in a signature, so nothing held the gate to ERASING it. The reference
+    # does erase it, which makes every position below an ordinary `Int`/`Str`
+    # and the whole component legal; a gate that reads the alias as a type of
+    # its own refuses all of them at once. This is an ACCEPTED program for that
+    # reason — it is the false rejection, written down.
+    ("a transparent alias through a service, a config field and a body", """
+type Slot = Int
+type Label = Str
+
+service Shelf {
+  fn at(i: Slot) -> Label
+  fn width() -> Slot
+}
+
+component Rack provides shelf: Shelf {
+  config { size: Slot = 3 }
+
+  let rows = effect Map.new() undo rows.drop()
+
+  provide shelf {
+    fn at(i: Slot) -> Label {
+      let names: List[Str] = ["a", "b", "c"]
+      return names[i]
+    }
+    fn width() -> Slot { return 3 }
+  }
+}
+"""),
     # ---- docs/design/457 T3b: returns on every path, the ADMITTING side ----
     # The direction this rule may not err in is the false alarm, so each shape
     # the reference ACCEPTS is here beside the refusal it neighbours. The
@@ -1329,6 +1376,62 @@ type R = { a: Int, b: Int }
 fn f(r: R) -> Int {
   let { a, b } = r
   return a + b
+}
+"""),
+    # ---- docs/design/457: what the name-RESOLUTION rule must NOT refuse -----
+    # The accepting twins of the G1 read rows in REJECTED_PROGRAMS. Each names
+    # one member of `callables` or one binder, and a rule that missed any of
+    # them would refuse a program the reference admits.
+    ("every callable universe member read by name", """
+type Shape = Circle | Square
+extern pure fn ext(n: Int) -> Int = @py { return n }
+fn helper(n: Int) -> Int { return n }
+fn f(p: Int) -> Int {
+  let m = Map.new()
+  let s = Some(p)
+  let o = Ok(p)
+  let e = Err("x")
+  let n = None
+  let sh = Circle
+  let q = Square
+  let h = helper(p)
+  let x = ext(p)
+  var t = 0
+  for (v of [1, 2]) { t += v }
+  return h + x + t
+}
+"""),
+    # the reference writes `scope[name]` BEFORE it lowers the initialiser, so a
+    # `let` may mention its own name and still resolve.
+    ("a let whose initialiser mentions its own name", """
+fn f(n: Int) -> Int {
+  let n2 = n
+  return n2
+}
+"""),
+    # the host constructor roots, read through their own verbs.
+    ("a host root used as a constructor receiver", """
+fn f() -> Int {
+  let p = Pool.open("u", 2)
+  let j = Job.new()
+  return 1
+}
+"""),
+    # The iteration HEAD binds its item; it does not TYPE it. `every o in sub`
+    # reads the head as a statement whose expression is a placeholder, and a
+    # placeholder that IS a value (`IntLit("0")`) infers `Int`: the type walker
+    # binds an untyped statement's name to its expression's type, so the item
+    # became `Int` and `emit sink.write(o)` was refused T1 (`argument `v`
+    # expects `Str`, got `Int`) — a refusal the reference does not draw, since
+    # it leaves a plain `every`'s item deliberately untyped (lower.py
+    # `_lower_stream_iter_step`). Nothing else in this program refuses, so the
+    # pair is the pin; the item's type is the only thing in question.
+    ("a plain every iteration's item stays untyped", """
+service Sink { emission fn write(v: Str) -> Int }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
 }
 """),
 ]
@@ -2324,6 +2427,48 @@ fn f() -> Int {
   return 1
 }
 """, "G1"),
+    # ---- docs/design/457: the name RESOLUTION half of G1 --------------------
+    # `_lower_pure_expr`'s `ExprVar` arm: a READ must land in the fn's `scope`
+    # or in `callables`. Both fixtures were pinned in TYPE_LAYER_GAP below and
+    # have been struck from it.
+    ("an undeclared name read in a return",
+     _fixture("v2_undeclared_fn_var"), "G1"),
+    ("an undeclared name read inside a template",
+     _fixture("g1_template_undeclared"), "G1"),
+    # the callee position is a name read like any other.
+    ("a call to a name nothing declares", """
+fn f() -> Int {
+  return g()
+}
+""", "G1"),
+    # an argument is walked after the callee, which is the reference's order.
+    ("an undeclared name in an argument", """
+fn g(n: Int) -> Int { return n }
+fn f() -> Int {
+  return g(missing)
+}
+""", "G1"),
+    # a `var` binds the name for the rest of its block; the read AFTER the block
+    # is the undeclared one, since a block never leaks a binding outward.
+    ("a read of a name bound only inside a sibling block", """
+fn f(c: Bool) -> Int {
+  if (c) { let inner = 1 }
+  return inner
+}
+""", "G1"),
+    # an ADT case with no payload is a VALUE, not an undeclared name: the
+    # reference's `_tagged_case` arm returns ahead of the resolver.
+    # (the accepting twin lives in ACCEPTED_PROGRAMS.)
+    #
+    # a receiver-first list transform is SUGAR for its free function, so the
+    # next name the reference resolves is that free function's — undeclared
+    # here, exactly as the reference has it.
+    ("a list transform whose free function nothing declares", """
+fn f(xs: List[Int]) -> Int {
+  let ys = xs.map(3)
+  return 1
+}
+""", "G1"),
     # ---- item 391 / issue #106: the shadowed module callable (G6) ----------
     # `_refuse_callable_shadowing`. A body that BINDS a name and CALLS it while
     # a module `fn` or `extern` of that name is in scope has two readings, and
@@ -2403,6 +2548,57 @@ component C provides cache: Cache {
     *[(f"{label} does not swallow the next operation",
        _sop(clause, _SOP_PLAIN_PUT, impl), "G4")
       for label, clause, impl in _SOP_CLAUSES],
+    # ---- docs/design/457 slice T1: the DECLARED-TYPE validation ------------
+    # `lower.py::_validate_declared_types` -> `typecheck.check_type_wellformed`,
+    # now decided natively: `selfhost/lower.rvl` `use`s the shared spelling
+    # algebra in `selfhost/types.rvl` and runs it over every module `fn` and
+    # `extern` signature and every config field, at the phase position the
+    # reference gives it (the head of the same function that closes with the
+    # config-is-data walk). `t6_bare_generic` was pinned in TYPE_LAYER_GAP
+    # below and has been struck from it.
+    ("a bare builtin generic as a fn return",
+     _fixture("t6_bare_generic"), "T1"),
+    ("a bare builtin generic as a fn parameter", """
+fn f(x: List) -> Int {
+  return 1
+}
+""", "T1"),
+    # the walk recurses into type ARGUMENTS, so a well-formed head does not
+    # excuse a malformed argument.
+    ("a bare builtin generic nested in a type argument", """
+fn f(x: Map[Str, Opt]) -> Int {
+  return 1
+}
+""", "T1"),
+    # the arity is checked in both directions, not just against zero.
+    ("a builtin generic given too few arguments", """
+fn f() -> Map[Str] {
+  return Map.empty()
+}
+""", "T1"),
+    ("a bare builtin generic as an extern parameter",
+     'extern pure fn e(x: Result) -> Int = @py { return 1 }\n', "T1"),
+    ("a bare builtin generic as an extern return",
+     'extern pure fn e(x: Int) -> List = @py { return [] }\n', "T1"),
+    # the POSITION-restricted heads. `Async[T]` is a value type nowhere, and an
+    # async function type is a module `fn` parameter only (item 92) — so the
+    # same spelling is refused on an extern and admitted on a module fn, which
+    # is the pair that proves the flag is threaded and not hard-coded.
+    ("a bare Async as a value type", """
+fn f(x: Async[Str]) -> Int {
+  return 1
+}
+""", "A1"),
+    ("an async function type outside a module fn parameter",
+     'extern pure fn e(cb: (Str) -> Async[Str]) -> Int = @py { return 1 }\n',
+     "A1"),
+    # a config field asks the WELLFORMED question before the is-data one.
+    ("a bare builtin generic as a config field", """service S { fn q(a: Str) -> Int }
+component C provides s: S {
+  config { n: Opt }
+  provide s { fn q(a) { return 0 } }
+}
+""", "T1"),
     # ---- docs/design/457 §2.4: the component header's service-existence rule -
     # The reference resolves every `requires`/`provides` annotation against its
     # service table (`Env.__init__` for the requirements, `_lower_component`'s
@@ -2518,6 +2714,21 @@ fn f() -> Int {
   let n = 2
 }
 """, "T1"),
+    # The same iteration head, now with a real refusal in the program: the
+    # unmarked emission the G4 walk must still reach (the loop body is read out
+    # inline, so a reader that stepped over it would lose this too). The
+    # reference draws ONE refusal here — the G4 — and naming the item `Int`
+    # added a T1 that outranked it, which is the whole shape of the defect.
+    ("an iteration body is still walked for its own refusal", """
+service Sink { emission fn write(v: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires sink: Sink provides api: Api {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+  provide api { fn go() { return sink.write("x") } }
+}
+""", "G4"),
 ]
 
 
@@ -3038,6 +3249,39 @@ fn holder() -> Int { let f = tick   return 0 }
 service Bus { emission fn publish(topic: Str) }
 component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
 """),
+    # docs/design/457 slice T1: the DECLARED-TYPE validation is FAIL-FAST on
+    # both sides — the reference raises it inside `_validate_declared_types`,
+    # before its collect-all sink exists — so it beats an EARLIER-LINE link
+    # refusal and the full list is a singleton. This is the case a phase order
+    # that merely appended the new refusal into the collected sink would get
+    # wrong: the sink orders by line, and the bare generic is on line 4 while
+    # the duplicate provider is on line 3.
+    ("bare generic after an earlier-line duplicate provider",
+     """service D { fn q(s: Str) -> Int }
+component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+fn late() -> Opt { return Some(1) }
+"""),
+    # the same two refusals with the declared-type one FIRST in the file, so the
+    # winner is not evidence of the phase order on its own. Both variants must
+    # name the bare generic, and both lists must be singletons.
+    ("bare generic before the duplicate provider",
+     """fn early() -> Opt { return Some(1) }
+service D { fn q(s: Str) -> Int }
+component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+"""),
+    # the declared-type question and the config-is-data question live in the
+    # SAME reference function, per field, wellformed first: the component's
+    # config declares an arrow field (is-data, G4) and a bare generic
+    # (wellformed, T1), and the wellformed one wins on both sides.
+    ("bare generic beside an arrow config field",
+     """service S { fn q(a: Str) -> Int }
+component C provides s: S {
+  config { h: (Str) -> Str, n: Opt }
+  provide s { fn q(a) { return 0 } }
+}
+"""),
 ]
 
 
@@ -3263,7 +3507,7 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`; it now stands at 40. The self-declared async-colour
+# `examples/rejections/`; it now stands at 9. The self-declared async-colour
 # arrow (rule C1) and then the four fn-body BINDING fixtures (item 391's
 # binding-discipline slice) moved OUT of the gap into gate/reference agreement,
 # and two slices have moved fixtures IN by making the gate READ a body it used
@@ -3286,19 +3530,12 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # The tag beside each fixture is what `_classify` (above) derives from the
 # reference refusal, i.e. the bucket the census now files the false-admit under.
 TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
-    # fn-body binding rules (G1/G6). The ASSIGNMENT half of this family has
-    # LANDED (item 391's binding-discipline slice): the module-`fn` scope walk
-    # and the arrow-body write form moved `v2_let_reassignment`,
-    # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
-    # `g6_closure_mutates_capture` into REJECTED_PROGRAMS above, where tag AND
-    # message are compared, and the callable-shadowing slice has since moved
-    # `shadowed_module_fn_call` there too. What stays pinned here needs what
-    # neither slice builds: resolving a name READ against the whole callable
-    # universe, which is what both G1 rows want.
-    "fn-body binding (G1/G6)": [
-        ("g1_template_undeclared", "G1"),
-        ("v2_undeclared_fn_var", "G1"),
-    ],
+    # fn-body binding rules (G1/G6): LANDED WHOLE. The ASSIGNMENT half went
+    # first (item 391's binding-discipline slice), then the callable-shadowing
+    # slice, and the name-RESOLUTION half (docs/design/457, the G1 read position)
+    # closed the rest: `g1_template_undeclared` and `v2_undeclared_fn_var` are
+    # now in REJECTED_PROGRAMS above, where tag AND message are compared, so
+    # this family has no row left here.
     # expression typing (T1/T2): the operator/field/index/record algebra and the
     # literal-range and `null` refusals. The fn-body STATEMENT layer
     # (docs/design/457 T3a) landed this family: the `lir_*` walk now carries a
@@ -3341,28 +3578,29 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("t13_unknown_match_case", "TYPE"),
         ("v2_match_nonexhaustive", "T1"),
     ],
-    # declarations: alias cycles, bare generics, non-record destructuring.
+    # declarations: alias cycles and non-record destructuring. The DECLARED-TYPE
+    # half of this family has LANDED (slice T1): `selfhost/lower.rvl` `use`s the
+    # spelling algebra in `selfhost/types.rvl` and runs `check_type_wellformed`
+    # over every module `fn`/`extern` signature and every config field, so
+    # `t6_bare_generic` now refuses with the reference's tag and message and has
+    # moved into REJECTED_PROGRAMS above. What stays pinned here is decided
+    # elsewhere: the alias cycle in `_resolve_type_aliases` and the destructuring
+    # rule in `_lower_let_pattern_stmt`, neither of which is a declared-type
+    # question.
     "declarations": [
         ("t18_type_alias_cycle", "TYPE"),
-        ("t6_bare_generic", "T1"),
         ("t5_destructure_nonrecord", "TYPE"),
     ],
-    # provide-method and component bodies: method params take the service
-    # signature, the body checks against its return, required-service call
-    # argument typing, config defaults, a method-local shadowing a component name.
-    # The member-EXISTENCE half of this family has landed (docs/design/457 T4b);
-    # what is left here all needs the expression algebra T1-T3 build.
-    "provide-method and component bodies": [
-        ("t1_service_arg_type", "T1"),
-        ("t4_field_arg_type", "T1"),
-        ("t7_provide_param_annotation_mismatch", "T1"),
-        ("t16_provide_method_missing_return", "T1"),
-        ("t31_index_non_int_provide_method", "T1"),
-        ("t3_config_default_type", "T1"),
-        # the t29 field-read-on-`Any` shape inside a provide method, pinned for
-        # the same reason: the `pub extern` parse refusal used to hide it.
-        ("t30_field_read_on_any_provide_method", "T1"),
-    ],
+    # provide-method and component bodies: EMPTY. This family has landed
+    # (docs/design/457, the provide-method slice). All seven of its documents —
+    # `t1_service_arg_type`, `t4_field_arg_type`,
+    # `t7_provide_param_annotation_mismatch`, `t16_provide_method_missing_return`,
+    # `t30_field_read_on_any_provide_method`, `t31_index_non_int_provide_method`
+    # and `t3_config_default_type` — moved into
+    # `_PROVIDE_FIXTURES` below, where tag AND message are compared. The key is
+    # kept rather than deleted so the family's name stays attached to the slice
+    # that closed it.
+    "provide-method and component bodies": [],
 }
 
 _TYPE_LAYER_CASES = [
@@ -3492,18 +3730,22 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_19_fixtures():
+def test_the_type_layer_gap_is_exactly_9_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
-    41 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
+    42 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
     two of them, the fn-body STATEMENT layer (T3a) eleven more of the expression
-    rows for the module-`fn` surface, and the call-and-signature layer (T2b)
-    nine more; the twelfth document that moved with T3a,
-    `dynamic_reserved_key`, never had a row here because this pin addresses its
-    fixtures by bare name under `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 19, len(_TYPE_LAYER_CASES)
+    rows for the module-`fn` surface, the call-and-signature layer (T2b) nine
+    more, the declared-type slice (T1) `t6_bare_generic`, and the provide-method
+    / component slice the whole `provide-method and component bodies` family,
+    all seven of it; on top of those, the name-RESOLUTION half of the G1/G6
+    family (docs/design/457, the G1 read position) took the last two. The
+    twelfth document that moved with T3a, `dynamic_reserved_key`, never had a
+    row here because this pin addresses its fixtures by bare name under
+    `examples/rejections/`."""
+    assert len(_TYPE_LAYER_CASES) == 9, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 19, "a fixture is listed twice"
+    assert len(set(names)) == 9, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
@@ -3584,27 +3826,47 @@ def test_the_return_path_refusal_is_anchored_where_the_reference_anchors_it(
 
 def test_an_unresolved_name_read_outranks_the_return_path_on_the_reference(
         admit):
-    """A PRECEDENCE divergence this slice introduces, pinned rather than left to
-    be met.
+    """The PRECEDENCE divergence the returns-on-every-path slice introduced, now
+    CLOSED, kept here as the non-vacuity witness.
 
     The reference lowers a fn body statement by statement and only then asks
     whether the fn returns on every path, so a body that BOTH reads an
-    undeclared name and never returns draws the name refusal. This gate runs the
-    body's binding discipline (which decides the ASSIGNMENT position only, not a
-    name READ — `g1_template_undeclared` and `v2_undeclared_fn_var` are still
-    pinned above for exactly that) and then the return-path rule, so it draws
-    the return-path refusal instead.
-
-    Both refusals are TRUE and the program is refused either way, so this is a
-    419c-style naming divergence and never an admission the reference would not
-    give. It closes with the name-resolution slice, which owns the read position;
-    until then the gate refuses a program it used to wave through, under the
-    other of the two guarantees the program breaks."""
+    undeclared name and never returns draws the name refusal. Until the name
+    READ position was built, this gate decided only the ASSIGNMENT half of the
+    binding discipline and drew the return-path refusal instead — true, but the
+    other of the two guarantees the program breaks. The read position now runs
+    inside `fb_walk`, ahead of `rp_refusal`, which is the reference's own
+    order."""
     src = "fn f() -> Int {\n  nobody\n}\n"
     ref_tag, ref_msg = _ref(src)
     assert (ref_tag, ref_msg) == ("G1", "`nobody` is not declared in this function")
-    assert admit(src) == (
-        "T1|`f` is declared to return `Int` but its body never returns a value")
+    assert admit(src) == "G1|`nobody` is not declared in this function"
+
+
+def test_the_name_resolution_rule_stops_at_a_use_declaration(admit):
+    """The declared frontier of the G1 read rule (docs/design/457 §2.3), pinned
+    as a divergence rather than left to be discovered.
+
+    A `use` declaration puts the imported module's `pub fn`s into `callables`
+    (`program.fn_scopes`) and makes an aliased `alias.f(..)` call resolve before
+    the name resolver runs at all. This gate does not read modules, so the
+    callable universe stops being knowable from the text alone and the rule is
+    switched off for the WHOLE text. That under-refuses, which is the direction
+    the gate is allowed to err in.
+
+    The reference cannot be driven on these texts either (it wants `modules=`),
+    so the assertion is on the GATE alone: the withholding is deliberate."""
+    withheld = """use "./other.rvl" as other
+
+fn f() -> Int {
+  return nothing_declares_this
+}
+"""
+    assert admit(withheld) == ""
+    # the same body WITHOUT the `use` is refused, so the row above is the `use`
+    # doing the withholding and not the reader failing to reach the statement.
+    assert admit("fn f() -> Int {\n  return nothing_declares_this\n}\n") == \
+        "G1|`nothing_declares_this` is not declared in this function"
 
 
 # ---------------------------------------------------------------- ambient / #86
@@ -4707,7 +4969,7 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
     assert got == ref, (name, layout, got, ref)
 
 
-# ---- an OPEN ordering divergence: the handoff verdict vs a body refusal -----
+# ---- a CLOSED ordering divergence: the handoff verdict vs a body refusal ----
 #
 # `_admit_handoff_replacement` runs over `live_components`, which
 # `src/revl/lower.py` builds by DROPPING every component whose body lowering
@@ -4715,21 +4977,21 @@ def test_oracle_b_multi_refusal_ordering_agrees(admit_ambient, name,
 # component whose body refuses contributes NO handoff verdict at all — the body
 # refusal is the whole answer, whatever line either sits on.
 #
-# `selfhost/lower.rvl`'s `handoff_refusals` walks every component in the text,
-# poisoned or not, and its verdict is anchored at the COMPONENT declaration
-# line. `pick_min` orders by `(line, seq)`, so it beats any INLINE body refusal,
+# `selfhost/lower.rvl`'s `handoff_refusals` used to walk every component in the
+# text, poisoned or not, with its verdict anchored at the COMPONENT declaration
+# line. `pick_min` orders by `(line, seq)`, so it beat any INLINE body refusal,
 # which `body_line` anchors at the offending STATEMENT — a strictly later line.
 #
-# This predates the A6 member rule and is not caused by it: the reproducer below
+# This predates the A6 member rule and was not caused by it: the reproducer below
 # uses the G1 undeclared-access refusal, which has been inline-anchored since
 # long before docs/design/457. A whole-component AGGREGATE verdict (the G4
 # emission-reach one) is anchored at the component line, ties, and is saved by
-# `seq` — which is why no corpus program has caught this.
+# `seq` — which is why no corpus program caught this.
 #
-# Both refusals are TRUE of the program, so this is a 419c naming divergence and
-# never a false admission. Pinned rather than fixed here: the fix belongs to the
-# handoff slice that owns `handoff_refusals`, needs the poisoned-component set
-# threaded into `collect_nonlink`, and carries its own oracle rows.
+# Both refusals are TRUE of the program, so this was a 419c naming divergence and
+# never a false admission. The handoff slice (issue #1127) threaded the poisoned
+# set through `collect_nonlink`, so the pin below is now an AGREEMENT, kept as
+# the regression witness this comment asked the closing slice to leave behind.
 
 _HO_RUNNING = """service D { fn q(s: Str) -> Int }
 service Extra { fn e(s: Str) -> Str }
@@ -4763,25 +5025,16 @@ component NewStore provides db: D requires ex: Extra {
 @pytest.mark.parametrize("label,src", _HO_PAIRS, ids=[n for n, _ in _HO_PAIRS])
 def test_a_handoff_drift_outranks_an_inline_body_refusal_on_the_gate(
         admit_ambient, label, src):
-    """The divergence, measured in both directions so it cannot drift silently.
+    """The former divergence, measured in both directions so it cannot return.
 
-    The reference names the BODY refusal (the component never reaches the
-    handoff pass); the gate names the handoff drift. Both are true, so this is a
-    naming divergence and not a false alarm — and the gate still REFUSES, which
-    is the property that matters for soundness.
-
-    When the handoff slice threads the poisoned set through, this test flips to
-    an agreement: delete the `!=` arm and assert equality."""
+    The reference names the BODY refusal, because the component never reaches
+    the handoff pass. The gate named the handoff drift until the poisoned set
+    was threaded through `collect_nonlink`; it now names the body refusal too."""
     ref = _ref_ambient(src, _HO_RUNNING, replacing=("OldStore",))
     got = _gate_ambient(admit_ambient, src, _HO_RUNNING, replacing=("OldStore",))
     assert ref.startswith(("G1|", "A6|")), (
         f"the reference must name the body refusal for {label}: {ref!r}")
-    assert got.startswith("G2|state hand-off on `db` differs"), (
-        f"the gate is expected to name the handoff drift for {label}: {got!r}")
-    assert got != ref, (
-        "this pin exists because the two disagree; if they now agree, the "
-        "handoff slice has been fixed - replace this test with an equality "
-        "assertion rather than deleting it")
+    assert got == ref, (label, got, ref)
     # NON-VACUITY: with the handoff made compatible, the two agree on the body
     # refusal, so the divergence is the handoff verdict's ranking and nothing
     # else about these programs.
@@ -5114,6 +5367,124 @@ def test_a_component_refusal_still_outranks_a_tying_handoff(admit_ambient):
     assert _ref_ambient(src, _H_MO_M) == expected
 
 
+# -- a poisoned component contributes no hand-off verdict (issue #1127) -------
+#
+# `_admit_handoff_replacement` runs over `live_components`, which
+# `src/revl/lower.py` builds by DROPPING every component whose body lowering
+# raised (it appends a `poisoned` header stub instead). So on the reference a
+# component whose body refuses contributes NO hand-off verdict at all: the body
+# refusal is the whole answer, whatever line either sits on.
+#
+# `handoff_refusals` used to walk every component in the text, poisoned or not,
+# and anchored its verdict at the COMPONENT declaration line. `pick_min` orders
+# by `(line, seq)`, so it beat any INLINE body refusal, which `body_line`
+# anchors at the offending STATEMENT — a strictly later line. Both refusals are
+# true of the program, so the divergence was a 419c NAMING one and never a false
+# admission; the fix narrows which of the two true refusals gets named and can
+# only ever remove a hand-off verdict the component loop has already refused
+# over, so it cannot turn a refusal into an admission.
+#
+# A whole-component AGGREGATE verdict (the G4 emission-reach one) is anchored at
+# the component line, tied, and was saved by `seq` — which is why no corpus
+# program caught this. The G1 undeclared access below is inline-anchored and has
+# been since long before the type layer, so the reproducer predates every recent
+# member of the family.
+
+_PC_RUNNING = """service D { fn q(s: Str) -> Int }
+component OldStore provides db: D {
+  handoff db: Str
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+"""
+
+#: The incoming text: `NewStore` accepts `Int` where the running `OldStore`
+#: exports `Str` (a hand-off drift, anchored at the component line) AND refuses
+#: inline on an undeclared access (anchored at the `provide` statement, later).
+_PC_BOTH = """service D { fn q(s: Str) -> Int }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { emit nope.execute(s)   return 0 } }
+}
+"""
+
+_PC_BODY_REFUSAL = "G1|`nope` is not a declared requirement of NewStore"
+_PC_DRIFT = ("G2|state hand-off on `db` differs from the running manifest: "
+             "`NewStore` accepts `Int`, but `OldStore` exports `Str` — the "
+             "successor cannot hold the predecessor's state, and dropping it "
+             "on the swap would be residue")
+
+
+def _pc_ambient(admit_ambient, src: str) -> tuple[str, str]:
+    kw = {"replacing": ("OldStore",)}
+    return (_gate_ambient(admit_ambient, src, _PC_RUNNING, **kw),
+            _ref_ambient(src, _PC_RUNNING, **kw))
+
+
+def test_a_poisoned_component_contributes_no_handoff_verdict(admit_ambient):
+    """Two TRUE refusals in one program, and the gate must name the one
+    `check_and_lower` names: the body refusal, because the reference never
+    reaches the hand-off pass for a component it poisoned.
+
+    Before the poisoned set was threaded into `collect_nonlink` the gate
+    answered the `G2` hand-off drift here, which is the issue-#1127
+    divergence."""
+    got, ref = _pc_ambient(admit_ambient, _PC_BOTH)
+    assert ref == _PC_BODY_REFUSAL, ref
+    assert got == ref, (got, ref)
+
+
+def test_the_handoff_verdict_is_genuinely_there_to_be_skipped(admit_ambient):
+    """NON-VACUITY, both halves.
+
+    Make the hand-off COMPATIBLE and the answer does not move: the body refusal
+    was always what both sides name. Repair the BODY instead and the hand-off
+    drift is what both sides name, so the verdict the test above suppresses is
+    a real one the gate still reports when nothing poisons its component."""
+    compatible = _PC_BOTH.replace("handoff db: Int", "handoff db: Str")
+    got, ref = _pc_ambient(admit_ambient, compatible)
+    assert ref == _PC_BODY_REFUSAL, ref
+    assert got == ref, (got, ref)
+
+    sound_body = _PC_BOTH.replace("emit nope.execute(s)   ", "")
+    got, ref = _pc_ambient(admit_ambient, sound_body)
+    assert ref == _PC_DRIFT, ref
+    assert got == ref, (got, ref)
+
+
+def test_a_sibling_component_still_carries_its_own_handoff_verdict(
+        admit_ambient):
+    """The skip is PER COMPONENT, not per admission — exactly `live_components`,
+    which drops the poisoned entry and keeps the rest.
+
+    `NewStore` drifts on its own key and lowers cleanly, so its hand-off verdict
+    survives; `Bad` refuses in its body, later in the file, and is poisoned. The
+    drift is what both sides name. A skip that fired for the whole admission
+    because SOME component was poisoned would name `Bad`'s `G1` here."""
+    src = """service D { fn q(s: Str) -> Int }
+service C { fn g(k: Str) -> Str }
+component NewStore provides db: D {
+  handoff db: Int
+  provide db { fn q(s) { let x = s   return 0 } }
+}
+component Bad provides other: C {
+  provide other { fn g(k) { emit nope.execute(k)   return k } }
+}
+"""
+    bad_refusal = "G1|`nope` is not a declared requirement of Bad"
+    got, ref = _pc_ambient(admit_ambient, src)
+    assert ref == _PC_DRIFT, ref
+    assert got == ref, (got, ref)
+
+    # ... and `Bad` is genuinely refused, so the program really does carry two
+    # true refusals and the drift won on `(line, seq)` rather than alone.
+    assert _ref_ambient(src, _PC_RUNNING,
+                        replacing=("OldStore",)) != bad_refusal
+    compatible = src.replace("handoff db: Int", "handoff db: Str")
+    got, ref = _pc_ambient(admit_ambient, compatible)
+    assert ref == bad_refusal, ref
+    assert got == ref, (got, ref)
+
+
 # ======================= calls and signatures (docs/design/457 T2b) ==========
 #
 # `_tsb_program` draws a module `fn` whose body CALLS things: module `fn`s at
@@ -5220,14 +5591,13 @@ def _tsb_program(rng) -> str:
             f"  {body}\n  return {rng.choice(_TSB_ARGS)}\n}}\n")
 
 
-# The one family whose EARLIER reference refusal this slice does not build: a
-# receiver-first list transform desugars to a free function and the reference
-# refuses that undeclared NAME. Resolving a name READ needs the whole callable
-# universe, which is still open (`g1_template_undeclared`,
-# `v2_undeclared_fn_var` in TYPE_LAYER_GAP above).
-_TSB_LATER_SLICES = ("is not declared in this function",)
+# The family this draw once excluded — a receiver-first list transform desugars
+# to a free function and the reference refuses that undeclared NAME — is now
+# BUILT (the G1 read position, docs/design/457). The exclusion list is empty and
+# stays here so the next slice that needs one has the shape to hand.
+_TSB_LATER_SLICES: tuple[str, ...] = ()
 
-_TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
+_TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY", "G1")
 
 
 @pytest.mark.parametrize("seed", [5, 17, 31])
@@ -5506,8 +5876,6 @@ _TFB_LATER_SLICES = (
     # HOST-METHOD refusal.
     "builtin `",
     "stdlib method `",
-    # G1 name READS — resolving one needs the whole callable universe.
-    "is not declared in this function",
     # item 485: the `List` index bounds pass, which runs over a body before it
     # is lowered and so precedes every verdict here.
     "is out of range for a",
@@ -5517,16 +5885,22 @@ _TFB_LATER_SLICES = (
     "record update requires a record type",
     # the ordering family: `<`/`>` on an unorderable operand is code-less too.
     "cannot order `",
-    # the NAMED record's field-existence rule, which needs the declared field
-    # SET the statement layer's environment does not enumerate.
+    # the NAMED record's field rules, which need the declared field SET the
+    # statement layer's environment does not enumerate: the field-existence
+    # read, and the two literal/annotation completeness sentences T2a names in
+    # `_classify` above. `selfhost/lower.rvl` spells none of the three, so a
+    # program whose reference minimum is one of them is refused LATER by the
+    # gate (an under-refusal over some other true objection in the same body).
     "has no field `",
+    "record literal for `",
+    ", but the record has ",
 )
 
 
 # The tags this slice issues. A program whose reference minimum carries a tag
 # outside this set is decided by some OTHER phase of the gate, and which of the
 # two refusals is the minimum is that phase's ordering question, not this one's.
-_TFB_TAGS = ("T1", "T2", "TYPE")
+_TFB_TAGS = ("T1", "T2", "TYPE", "G1")
 
 
 @pytest.mark.parametrize("seed", [11, 23, 97])
@@ -5629,3 +6003,636 @@ def test_the_type_layer_stays_silent_where_it_cannot_decide(admit):
     for src in admitted:
         assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
         assert admit(src) == "", src
+
+
+
+
+# ==================== name resolution (docs/design/457, the G1 read position) =
+#
+# `_lower_pure_expr`'s `ExprVar` arm. `_nr_program` draws a module `fn` whose
+# body READS names from four disjoint pools — the fn's own binders, the module's
+# declarations, the callable universe (`Map`/`Pool`/`Job`/`Stream`,
+# `Some`/`None`/`Ok`/`Err`, `endorse`), and names nothing declares — at every
+# position the lowering walk descends through: a bare read, a call callee, a
+# call argument, a field target, an index, an interpolation, a ternary arm, a
+# list element, a record field and a receiver-first list transform.
+#
+# It is a DIFFERENTIAL draw compared on TAG and MESSAGE, not an expectation
+# table, and the absolute half of the bound (never refuse what the reference
+# admits) is what the mixture of declared and undeclared pools is for.
+
+_NR_HEAD = """type NrRow = { h: Str }
+type NrShape = NrCircle | NrSquare(Int)
+
+fn nr_helper(n: Int) -> Int {
+  return n
+}
+
+extern pure fn nr_ext(s: Str) -> Str = @py { return s }
+
+"""
+
+# Names the reference resolves: the fn's binders, the module's declarations and
+# the callable universe. Nothing drawn from here may EVER be refused.
+_NR_DECLARED = ["a", "b", "c", "loc", "nr_helper", "nr_ext", "Map", "Pool",
+                "Job", "Stream", "Some", "None", "Ok", "Err", "endorse",
+                "NrCircle", "NrSquare"]
+# Names nothing declares. The item-384 redirect table is deliberately absent:
+# those draw the reference's own sentence, not G1, and the token scanner that
+# ports them runs ahead of this walk.
+_NR_UNDECLARED = ["zz", "nobody", "missing", "nr_absent", "qqq", "list_map"]
+
+
+def _nr_name(rng):
+    return rng.choice(_NR_DECLARED if rng.randrange(3) else _NR_UNDECLARED)
+
+
+def _nr_expr(rng, depth=1):
+    n = _nr_name(rng)
+    k = rng.randrange(10 if depth else 1)
+    if k == 0:
+        return n
+    if k == 1:
+        return f"{n}({_nr_expr(rng, 0)})"
+    if k == 2:
+        return f"nr_helper({_nr_expr(rng, 0)})"
+    if k == 3:
+        return f"{n}.h"
+    if k == 4:
+        return f"{n}[0]"
+    if k == 5:
+        return f"`x${{{_nr_expr(rng, 0)}}}y`"
+    if k == 6:
+        return f"(a > 0 ? {_nr_expr(rng, 0)} : {_nr_expr(rng, 0)})"
+    if k == 7:
+        return f"[{_nr_expr(rng, 0)}]"
+    if k == 8:
+        return "{ h: " + _nr_expr(rng, 0) + " }"
+    return f"{n}.{rng.choice(['map', 'filter', 'reduce'])}(nr_helper)"
+
+
+def _nr_stmt(rng):
+    e = _nr_expr(rng)
+    tag = rng.randrange(99)
+    k = rng.randrange(6)
+    if k == 0:
+        return f"let s{tag} = {e}"
+    if k == 1:
+        return f"var v{tag} = {e}"
+    if k == 2:
+        return e
+    if k == 3:
+        return f"if (a > 0) {{ let w{tag} = {e} }}"
+    if k == 4:
+        return f"while (false) {{ let u{tag} = {e} }}"
+    return f"for (it{tag} of c) {{ let y{tag} = {e} }}"
+
+
+def _nr_program(rng) -> str:
+    body = "\n  ".join(_nr_stmt(rng) for _ in range(rng.randrange(1, 4)))
+    return (f"{_NR_HEAD}fn f(a: Int, b: Str, c: List[Int]) -> Int {{\n"
+            f"  let loc = a\n"
+            f"  {body}\n  return a\n}}\n")
+
+
+# The families whose EARLIER reference refusal this slice does not build, so a
+# program carrying one may be refused later by the gate, or not at all.
+_NR_LATER_SLICES = (
+    # T2d: a match arm's payload binding, which the lowering walk does not enter
+    "is not a case of",
+    # item 485: the List index bounds pass runs over a body before it is lowered
+    "is out of range for a",
+    # the NAMED record's field-existence rule (the declared field SET)
+    "has no field `",
+    # the ordering family, code-less in the reference
+    "cannot order `",
+    # the ADT CONSTRUCTOR's payload rule (`typecheck.py`, `_case_call`): the
+    # signature layer (docs/design/457 T2b) builds module-`fn` and host
+    # signatures, and a case constructor's is not one of them. The reference
+    # raises it while typing the call, which is ahead of the lowering walk this
+    # slice runs in, so the gate reports a LATER refusal instead.
+    "payload expects",
+    # a callable NAME read as a VALUE. `nr_helper` and `nr_ext` resolve here —
+    # that is this slice's whole claim — but neither the signature rows nor the
+    # `fn`-token scan gives such a read a function TYPE, so a refusal that
+    # SPELLS one (`got `(Str) -> Str``) is one the type layer could not reach.
+    # Owned by the signature slice, which decides what a name's type is; matched
+    # on the arrow because that is the only thing the missing type appears as.
+    ") -> ",
+    # the TERNARY branch-agreement rule (`typecheck.py`): the two arms of
+    # `cond ? A : B` must share a type. The draw is `_nr_expr`'s `k == 6`, and
+    # against `_NR_HEAD`'s `type NrShape = NrCircle | NrSquare(Int)` an arm that
+    # is the bare case `NrCircle` beside one that is `c: List[Int]` always
+    # disagrees. The reference raises it while TYPING the statement, ahead of the
+    # lowering walk this slice runs in, so a program carrying one is refused by
+    # the gate at a LATER statement — the name read inside a following statement,
+    # which is a true refusal of the same program and not a gate error. Owned by
+    # the type layer, like `payload expects` above.
+    "ternary branches disagree",
+)
+
+_NR_TAGS = ("G1", "T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
+
+
+@pytest.mark.parametrize("seed", [3, 19, 41])
+def test_name_resolution_fuzz_agrees_on_tag_and_message(admit, seed):
+    """THE BOUND, over 400 drawn name-reading fn bodies per seed.
+
+      * the gate NEVER refuses a program the reference admits — absolute, with
+        no allowance. Two thirds of every drawn name comes from the DECLARED
+        pool, so this half of the claim is the one that carries the risk;
+      * where the reference's own refusal is in this slice's vocabulary and
+        outside a later slice's family, the gate's verdict is the reference's
+        TAG AND SENTENCE, byte for byte.
+    """
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    g1 = 0
+    for _ in range(400):
+        src = _nr_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _NR_TAGS:
+            continue
+        if any(m in ref_msg for m in _NR_LATER_SLICES):
+            continue
+        compared += 1
+        if ref_tag == "G1":
+            g1 += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 350, drawn
+    assert compared >= 150, compared
+    assert g1 >= 50, g1
+
+
+def test_the_name_resolution_rule_reaches_every_lowered_position(admit):
+    """Each position the lowering walk descends through, as a named case. A
+    reader that stopped short of one of these would leave the family half
+    built, and the fuzz above would only report it as a rate.
+
+    Every row asserts the REFERENCE first, so a body whose reference refusal is
+    some other rule cannot pass as a witness for this one. The interpolation row
+    is a `let` and not a `return` for exactly that reason: a `Str` template in a
+    `-> Int` fn draws the return-type mismatch, which the reference raises while
+    TYPING the statement and so ahead of the name it would otherwise resolve."""
+    head = "type NrRow = { h: Str }\n\nfn g(n: Int) -> Int { return n }\n\n"
+    bodies = [
+        "  return zz",
+        "  return zz(1)",
+        "  return g(zz)",
+        "  return zz.h",
+        "  return zz[0]",
+        '  let t = `a${zz}b`  return 1',
+        "  return (a > 0 ? zz : 1)",
+        "  let xs = [zz]  return 1",
+        "  let r = { h: zz }  return 1",
+        "  let y = -zz  return 1",
+        "  let y = zz + 1  return 1",
+        "  if (a > 0) { let y = zz }  return 1",
+        "  while (false) { let y = zz }  return 1",
+        "  for (v of [1]) { let y = zz }  return 1",
+        "  var m = 1  m = zz  return 1",
+        "  assert zz  return 1",
+    ]
+    for body in bodies:
+        src = f"{head}fn f(a: Int) -> Int {{\n{body}\n}}\n"
+        assert _ref(src) == ("G1", "`zz` is not declared in this function"), src
+        assert admit(src) == "G1|`zz` is not declared in this function", src
+        _agree(admit, src)
+
+
+def test_an_adt_case_resolves_by_its_payload_and_its_position(admit):
+    """The ADT-case half of the read rule, which the differential fuzz above
+    found and this pins by name.
+
+    The reference's `ExprVar` arm lets a case name stand as a VALUE only where
+    `_tagged_case` reports no payload and an ADT that is neither `Result` nor
+    `Opt`; anything else falls through to `callables`, which no case name joins.
+    The CALL position is looser — `_lower_pure_expr`'s `ExprCall` arm builds an
+    `adt` node for any unshadowed case — so the same name is declared as a
+    constructor and undeclared as a value."""
+    head = "type NrShape = NrCircle | NrSquare(Int)\n\n"
+    refused = [
+        "  let x = NrSquare\n  return 1",
+        "  let x = NrSquare.h\n  return 1",
+        "  return (true ? 1 : NrSquare)",
+    ]
+    for body in refused:
+        src = f"{head}fn f() -> Int {{\n{body}\n}}\n"
+        assert _ref(src) == ("G1",
+                             "`NrSquare` is not declared in this function"), src
+        assert admit(src) == "G1|`NrSquare` is not declared in this function", src
+    admitted = [
+        # the NULLARY case as a value, and the payload-carrying one CALLED
+        f"{head}fn f() -> NrShape {{\n  return NrCircle\n}}\n",
+        f"{head}fn f() -> NrShape {{\n  return NrSquare(1)\n}}\n",
+        # `Ok`/`Err` are `Result` cases, so neither stands bare as a value —
+        # but both are in `_BUILTIN_CONSTRUCTORS`, which is why they resolve
+        "fn f() -> Int {\n  let x = Ok\n  let y = Ok(1)\n  return 1\n}\n",
+        # a parameter SHADOWS a case of the same spelling (issue #320)
+        "type S = A | B(Int)\n\nfn f(B: Int) -> Int {\n  return B\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+
+
+def test_the_name_resolution_rule_stays_silent_where_it_cannot_decide(admit):
+    """The other half of the bound as named cases: programs the reference
+    ADMITS whose shape this rule approximates, and says nothing about."""
+    admitted = [
+        # a nullary ADT case is a VALUE, not an unresolved name
+        "type Shape = Circle | Square\n\nfn f() -> Shape {\n  return Circle\n}\n",
+        # a module `fn` read as a function VALUE, not called
+        "fn g(n: Int) -> Int { return n }\n"
+        "fn f() -> Int {\n  let h = g\n  return h(1)\n}\n",
+        # an `extern`'s name, which no signature row of this reader spells in
+        # full when the declaration carries a witness or a slot
+        'extern pure fn e(s: Str) -> Str = @py { return s }\n'
+        'fn f() -> Str {\n  return e("x")\n}\n',
+        # the loop binder is live inside the body and gone after it
+        "fn f(xs: List[Int]) -> Int {\n  var t = 0\n"
+        "  for (x of xs) { t += x }\n  return t\n}\n",
+        # a `let` may mention its own name: the reference binds it in `scope`
+        # before it lowers the initialiser
+        "fn f(n: Int) -> Int {\n  let n2 = n\n  return n2\n}\n",
+        # `endorse` and the host roots
+        'fn f() -> Int {\n  let m = Map.new()\n  let p = Map.empty()\n'
+        '  return 1\n}\n',
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+
+
+# ============ the provide-method / component TYPE layer (docs/design/457)
+#
+# The half the fn-body slice above deliberately left empty: a component body and
+# a provide-method body resolve their names through the component's own header —
+# the requirement handles, the service signature, the config fields, the
+# activation locals — and none of those was in the type environment, so every
+# expression in one was answered with silence.
+#
+# The corpus documents this closes, each drawing the reference's own sentence:
+_PROVIDE_FIXTURES = [
+    # the service is the source of truth for a provider's signature (A6): a
+    # restated parameter annotation is compared against the declaration
+    ("t7_provide_param_annotation_mismatch",
+     "T1|parameter `sql` of `query` (from service `Db`) expects `Str`, "
+     "got `Int`"),
+    # ... and a provider must produce what its service promises
+    ("t16_provide_method_missing_return",
+     "T1|`get` implements `Store.get`, which returns `Str`, but this body "
+     "never returns a value"),
+    # the method's own body, typed from the service signature and its
+    # annotated locals
+    ("t30_field_read_on_any_provide_method",
+     "T1|field read `.kind` on a value of type `Any` — an erased value has "
+     "no known fields"),
+    ("t31_index_non_int_provide_method", "T1|index expects `Int`, got `Str`"),
+    # a call through a requirement handle, held to the declared signature
+    ("t1_service_arg_type",
+     "T1|`db.query` argument `sql` expects `Str`, got `Int`"),
+    # ... with the activation local typed from the operation it binds
+    ("t4_field_arg_type",
+     "T1|`s.take` argument `s` expects `Str`, got `Int`"),
+    # the config block's own rule
+    ("t3_config_default_type",
+     "T1|config field `n` default expects `Int`, got `Str`"),
+]
+
+
+@pytest.mark.parametrize("name,expected", _PROVIDE_FIXTURES)
+def test_the_provide_method_documents_draw_the_reference_sentence(
+        admit, name, expected):
+    src = _fixture(name)
+    tag, msg = _ref(src)
+    assert f"{tag}|{msg}" == expected, "the reference moved: " + name
+    assert admit(src) == expected, name
+
+
+# --------------------------------------------------- the differential fuzz
+#
+# `_provide_program` draws a component around ONE service: the operation's
+# parameter and return types, the method's own (optional) restatement of them,
+# a body of the statement forms a provide method takes, and an activation body
+# that calls through a requirement handle. It is a differential draw — the
+# reference is the ground truth on every input and the two are compared on TAG
+# and MESSAGE.
+
+_PV_TYPES = ["Int", "Int32", "Float", "Str", "Bool", "Opt[Int]", "List[Int]",
+             "Any", "PvRow", "Map[Str, Int]"]
+# `k` and `v` are the drawn method's own parameters. A config field is NOT in
+# the pool: the reference spells one `config.<name>`, and a bare `cfg` is an
+# undeclared name the wiring walk refuses, which would make the draw measure G1.
+_PV_LITS = ["1", "0", "3.5", '"s"', "true", "[]", "[1]", '{ h: "x", n: 1 }',
+            "None", "k", "v"]
+_PV_CFG_DEFAULTS = ["1", '"s"', "true", "3.5"]
+_PV_HEAD = ("type PvRow = { h: Str, n: Int }\n"
+            "extern pure fn pv_any(s: Str) -> Any\n"
+            "  = @py { return s }\n"
+            "  = @ts { return s }\n"
+            "extern emission fn down_log(m: Str) -> Int\n"
+            "  = @py { return 0 }\n"
+            "  = @ts { return 0 }\n\n")
+
+
+def _pv_expr(rng) -> str:
+    k = rng.randrange(8)
+    if k < 3:
+        return rng.choice(_PV_LITS)
+    if k == 3:
+        return f"{rng.choice(_PV_LITS)}.{rng.choice(['h', 'n', 'missing'])}"
+    if k == 4:
+        return f"{rng.choice(_PV_LITS)}[{rng.choice(_PV_LITS)}]"
+    if k == 5:
+        op = rng.choice(["+", "-", "*", "==", "<", "&&", "??"])
+        return f"({rng.choice(_PV_LITS)} {op} {rng.choice(_PV_LITS)})"
+    if k == 6:
+        return f"pv_any({rng.choice(_PV_LITS)})"
+    return f"{rng.choice(['!', '-', '~'])}{rng.choice(_PV_LITS)}"
+
+
+def _pv_stmt(rng, n: int) -> str:
+    """One statement of a provide-method body. The forms are the ones the
+    reference's parser takes THERE — a bare expression and an `assert` are
+    statements in a `fn` body and parse errors in a provide method, so drawing
+    one would measure the parser rather than the type layer.
+
+    Each binding gets a FRESH name. A repeated one is a `_check_rebind` G6, and
+    a body carrying both that and a type refusal measures the ORDERING question
+    pinned in `test_a_wiring_refusal_outranks_an_earlier_type_one` rather than
+    the type layer this draw is for."""
+    k = rng.randrange(4)
+    if k == 0:
+        return f"let w{n} = {_pv_expr(rng)}"
+    if k == 1:
+        return f"let w{n}: {rng.choice(_PV_TYPES)} = {_pv_expr(rng)}"
+    if k == 2:
+        return f"let w{n} = emit down_log({_pv_expr(rng)})"
+    return f"return {_pv_expr(rng)}"
+
+
+def _provide_program(rng) -> str:
+    pty, vty, rty = (rng.choice(_PV_TYPES) for _ in range(3))
+    ann = "" if rng.randrange(2) else f": {rng.choice(_PV_TYPES)}"
+    ret = "" if rng.randrange(2) else f" -> {rng.choice(_PV_TYPES)}"
+    body = "\n      ".join(_pv_stmt(rng, n)
+                           for n in range(rng.randrange(1, 4)))
+    setup = ""
+    if rng.randrange(2):
+        setup = (f"  let got = effect up.read({rng.choice(_PV_LITS)})"
+                 f" undo up.read(\"x\")\n")
+    return (
+        f"{_PV_HEAD}"
+        f"service PvUp {{ fn read(a: {rng.choice(_PV_TYPES)}) -> "
+        f"{rng.choice(_PV_TYPES)} }}\n"
+        f"service PvDown {{ fn put(k: {pty}, v: {vty}) -> {rty} }}\n\n"
+        f"component PvC requires up: PvUp provides down: PvDown {{\n"
+        f"  config {{ cfg: {rng.choice(_PV_TYPES)} = "
+        f"{rng.choice(_PV_CFG_DEFAULTS)} }}\n"
+        f"{setup}"
+        f"  provide down {{\n"
+        f"    fn put(k{ann}, v){ret} {{\n"
+        f"      {body}\n"
+        f"    }}\n"
+        f"  }}\n}}\n")
+
+
+# The reference messages whose family the provide-method slice leaves to a later
+# one, exactly as `_TFB_LATER_SLICES` does for the fn-body one.
+_PV_LATER_SLICES = _TFB_LATER_SLICES + (
+    # T2b: the unified signature of a generic / builtin receiver, and the
+    # arity and existence halves of the A6 provision rules the gate steps over
+    "is not a method of service",
+    "params but service",
+    # the missing-return rule's sibling, which needs the control-flow shape
+    # `span_may_return` deliberately refuses to guess at
+    "control can reach the end",
+    # G1/G6 name discipline over a component body, decided by the wiring walk
+    "is not declared in",
+    "is already bound in",
+    # the CHECK-position record rules over a component body (T2c/T3b)
+    "record update",
+)
+
+_PV_TAGS = ("T1", "T2", "TYPE")
+
+
+@pytest.mark.parametrize("seed", [5, 41, 83])
+def test_provide_program_fuzz_never_refuses_what_the_reference_admits(
+        admit, seed):
+    """THE BOUND over 300 drawn components per seed, in the order the two claims
+    matter:
+
+      * the gate NEVER refuses a program the reference admits. Absolute, no
+        allowance — a false rejection is the one direction a gate may not err in;
+      * where both sides' minimum refusal is in this slice's vocabulary
+        (`_PV_TAGS`) and outside the families a later slice owns, the gate's
+        verdict is the reference's TAG AND SENTENCE, byte for byte."""
+    rng = random.Random(seed)
+    drawn = 0
+    compared = 0
+    for _ in range(300):
+        src = _provide_program(rng)
+        try:
+            ref_tag, ref_msg = _ref(src)
+        except RecursionError:  # pragma: no cover - a deep draw, not a verdict
+            continue
+        got = admit(src)
+        drawn += 1
+        assert not (ref_tag == "" and got != ""), \
+            f"the reference ADMITS this and the gate refused {got!r}:\n{src}"
+        if got == "" or ref_tag not in _PV_TAGS:
+            continue
+        if any(m in ref_msg for m in _PV_LATER_SLICES):
+            continue
+        compared += 1
+        assert got == f"{ref_tag}|{ref_msg}", \
+            f"verdict differs from the reference:\n{src}"
+    assert drawn >= 280, drawn
+    assert compared >= 20, compared
+
+
+def test_a_transparent_alias_is_not_a_type_of_its_own(admit):
+    """THE REGRESSION THE FUZZ COULD NOT DRAW, in both bodies and at every
+    declaration site the slice reads.
+
+    `type Idx = Int` is ERASED by the reference before it compares anything, so
+    `xs[i]` with `i: Idx` is an `Int` index and is admitted. A gate that reads
+    the alias as a type of its own refuses all eight of these — a false
+    rejection, and one that reaches every rule at once rather than a single
+    position. The fuzz draws only declared spellings, so it never wrote an
+    alias and never saw it; these are hand-written for that reason.
+
+    Until alias erasure lands (it is its own slice), a spelling mentioning a
+    DECLARED name whose shape this walk does not carry decides nothing. The
+    `decl <Name>` row is what bounds that to the alias question — see
+    `test_an_undeclared_type_name_is_still_decided` for the other side of it."""
+    admitted = [
+        # a service parameter, reaching the method body's index rule
+        "type Idx = Int\nservice S { fn at(xs: List[Int], i: Idx) -> Int }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn at(xs, i) { return xs[i] } }\n}\n",
+        # the A6 parameter-annotation rule: the alias and its expansion are the
+        # same type to the reference
+        "type Idx = Int\nservice S { fn at(i: Idx) -> Int }\n"
+        "component C provides s: S { provide s { fn at(i: Int) = i } }\n",
+        # ... and the return-annotation twin
+        "type Idx = Int\nservice S { fn at(i: Int) -> Idx }\n"
+        "component C provides s: S { provide s { fn at(i: Int) -> Int = i } }\n",
+        # a requirement call's argument
+        "type Idx = Int\nservice S { fn at(i: Idx) -> Idx }\n"
+        "component C requires s: S {\n"
+        "  let n = effect s.at(3) undo s.at(4)\n}\n",
+        # a config field's declared type
+        "type Idx = Int\nservice S { fn ping() -> Int }\n"
+        "component C provides s: S {\n  config { n: Idx = 3 }\n"
+        "  provide s { fn ping() = 0 }\n}\n",
+        # the module-`fn` twin, on the surface the fn-body slice reads
+        "type Idx = Int\nfn f(i: Idx, xs: List[Int]) -> Int {\n"
+        "  return xs[i]\n}\n",
+        # a condition position, where the alias hides a `Bool`
+        "type Flag = Bool\nfn f(b: Flag) -> Int {\n  assert b\n  return 0\n}\n",
+        # ... and through a declared record's FIELD type
+        "type Row = { id: Idx }\ntype Idx = Int\n"
+        "fn f(r: Row, xs: List[Int]) -> Int {\n  return xs[r.id]\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+
+
+def test_the_provide_method_layer_reaches_each_position(admit):
+    """NON-VACUITY, spelled out: each name family the environment carries draws
+    the reference's own sentence, and a body that names NOTHING is untouched."""
+    cases = [
+        # the method parameter, at the service's declared type
+        ("service S { fn put(k: Str) -> Int }\n"
+         "component C provides s: S {\n"
+         "  provide s { fn put(k) { return k } }\n}\n",
+         "T1|`put` returns expects `Int`, got `Str`"),
+        # the annotated local
+        # a body binding, at the INFER position the reference runs there (an
+        # ANNOTATED one is not a checking position in a provide method — the
+        # reference records the annotation and compares nothing)
+        ("service S { fn put(k: Str) -> Int }\n"
+         "component C provides s: S {\n"
+         "  provide s { fn put(k) {\n    let n = k + 1\n    return 0\n"
+         "  } }\n}\n",
+         "T1|operand of string `+` expects `Str`, got `Int`"),
+        # the activation local, typed from the operation it binds
+        ("type Row = { id: Int }\n"
+         "service S { fn get() -> Row\n  fn take(s: Str) -> Int }\n"
+         "component C requires s: S {\n"
+         "  let r = effect s.get() undo s.get()\n"
+         "  let z = effect s.take(r.id) undo s.get()\n}\n",
+         "T1|`s.take` argument `s` expects `Str`, got `Int`"),
+        # the config default
+        ("service S { fn ping() -> Int }\n"
+         "component C provides s: S {\n  config { n: Bool = 1 }\n"
+         "  provide s { fn ping() = 0 } }\n",
+         "T1|config field `n` default expects `Bool`, got `Int`"),
+    ]
+    for src, expected in cases:
+        ref_tag, ref_msg = _ref(src)
+        assert f"{ref_tag}|{ref_msg}" == expected, "the reference moved: " + src
+        assert admit(src) == expected, src
+
+
+def test_a_wiring_refusal_outranks_an_earlier_type_one(admit):
+    """THE ORDERING CLASS THIS SLICE DOES NOT CLOSE, pinned rather than
+    described, so a slice that closes it has to come here and delete it.
+
+    The reference lowers a provide-method body STATEMENT BY STATEMENT and both
+    rules fire during that walk — `_check_rebind` on a binding that collides
+    with a name already in scope, and `_sweep`'s type oracle on the value — so
+    on a body carrying both the EARLIER SOURCE LINE wins. This gate runs the
+    wiring walk (G1/G4/A1/G6) over the whole body first and the type layer after
+    it, the placement the fn-body statement layer chose, so a wiring refusal is
+    reported even when a type refusal stands on an earlier line.
+
+    It is an under-refusal, never a false rejection: both refusals are true of
+    the program and the gate names the later one. Closing it is the ordering
+    question item 419c owns — interleaving the two walks per statement rather
+    than running them in sequence.
+    """
+    src = ("service S { fn put(k: Str) -> Int }\n"
+           "component C provides s: S {\n"
+           "  provide s {\n"
+           "    fn put(k) {\n"
+           "      let w = ~[]\n"          # the TYPE refusal, line 5
+           "      let w = 2\n"            # the REBIND, line 6
+           "      let z = undeclared\n"   # the G1 that makes the walk refuse
+           "    }\n  }\n}\n")
+    ref_tag, ref_msg = _ref(src)
+    assert (ref_tag, ref_msg) == (
+        "T1", "`~` requires an `Int32` operand, got `List[Never]`"), ref_msg
+    assert admit(src) == "G6|`w` is already bound in `put`"
+    # ... and with the wiring refusal gone the gate reports the reference's own
+    # verdict, so the divergence is the ORDERING and not a missing rule.
+    clean = src.replace("      let z = undeclared\n", "")
+    assert _ref(clean) == (ref_tag, ref_msg)
+    assert admit(clean) == f"{ref_tag}|{ref_msg}"
+
+
+def test_an_undeclared_type_name_is_still_decided(admit):
+    """THE OTHER SIDE of the alias launder, so the narrowing is a decision
+    rather than a leftover.
+
+    A name the document never DECLARES is not an alias: the reference has no
+    type for it either and refuses the document for that. Laundering it as well
+    would trade a divergent refusal for a no-objection on a program the
+    reference refuses — the bypass direction — so it keeps the reading it has.
+    The two sides disagree on WHICH refusal (the reference reaches the undeclared
+    type first), which is a message mismatch and not a bypass; both refuse."""
+    src = ("fn put(m: Map[Str, Int], k: Str) -> Ma[Str, Int] {\n"
+           "  return m.set(k, \"one\")\n}\n")
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "T1" and ref_msg != ""
+    assert admit(src).startswith("T1|"), "an undeclared head must still decide"
+
+
+def test_a_bare_return_in_a_provide_method_is_not_typed(admit):
+    """The component-body twin of the module-`fn` rule (`fb_walk`'s `bare` op):
+    a `return` that writes no value is a `return` for a totality question and
+    NOT an expression to type.
+
+    The second case is the one the statement reader makes possible. Its
+    expression grammar does not stop at the end of a line, so `return` alone,
+    followed by a statement that begins with an identifier, would read that next
+    statement as this return's operand and hold the body to ITS type — a refusal
+    the reference never issues, on a program it admits.
+
+    The reference's own bare-return refusal ("`m` returns `Int` but this
+    `return` carries no value") is the totality slice's and is not spelled here;
+    leaving it is a no-objection, the direction this gate may take."""
+    admitted = [
+        # an operation that declares no result: a bare `return` is ordinary
+        "service S { fn put(k: Str) }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn put(k) { return } }\n}\n",
+        # ... and the next line is not the return's operand
+        "service S { fn put(k: Str) }\n"
+        "component C provides s: S {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide s {\n    fn put(k) {\n      return\n"
+        "      store.insert(k, \"v\")\n    }\n  }\n}\n",
+    ]
+    for src in admitted:
+        assert _ref(src) == ("", ""), f"the reference refuses this now:\n{src}"
+        assert admit(src) == "", src
+    # ... while a return that DOES carry a value is still checked against the
+    # service's declared result, so the fence is not a hole.
+    typed = ("service S { fn put(k: Str) -> Int }\n"
+             "component C provides s: S {\n"
+             "  provide s { fn put(k) { return k } }\n}\n")
+    assert admit(typed) == "T1|`put` returns expects `Int`, got `Str`"

@@ -232,6 +232,28 @@ REJECTIONS = {
     "g4_extern_undo_self_call.rvl": "extern `open_ledger`'s `undo` cannot call the extern itself",
     "g4_extern_undo_param_not_in_scope.rvl": "`path` is not declared — the `undo` slot of extern `open_ledger` sees only the implicit `result` binding",
     "g4_extern_compensate_result.rvl": "`result` is not bound in the `compensate` slot of extern `send`",
+    # item 378 / issue #1151: a config field's declared type must be data, and
+    # the question is asked AFTER transparent aliases are erased. An extern's
+    # `config` block is NOT one of the sites `_resolve_type_aliases`
+    # substitutes at, but the alias DECLARATION is dropped all the same — so
+    # the alias head survives into a type table with no entry behind it and is
+    # refused as opaque, naming neither the alias target nor a resolution the
+    # reference never performed.
+    #
+    # Its COMPONENT twin — where the field type IS substituted, so the
+    # diagnostic names `(Int) -> Str` and not the alias — is an inline row in
+    # tests/test_selfhost_lower.py's REJECTED_PROGRAMS rather than a file here,
+    # and deliberately so: `formal/harness/diff_corpus.py` walks `examples`,
+    # `tck` and `tests` and treats `missed-G4` as FATAL, so a COMPONENT-shaped
+    # G4 document anywhere in those trees becomes a formal-gate failure until
+    # the Lean model grows a config-is-data row. (An extern declares no
+    # component, so this one lands in the harness's `no-manifest` census beside
+    # `g4_missing_undo.rvl` — named, not fatal.) The oracle rows are strings,
+    # not files, so they reach the gate/reference census through
+    # `load_corpus` and the formal harness never sees them.
+    "g4_extern_config_alias_opaque.rvl":
+        "config field `on_row` of extern `load_rows` has type `Handler`, "
+        "which reaches the opaque type `Handler`",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
     # item 294 Slice 1: a spawn that widens a parameterized capability (a child
@@ -244,6 +266,26 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+
+    # item 378: the third rule under G4, and the only one that judges a
+    # DECLARED TYPE rather than a crossing. A config value is injected as
+    # static data, so an arrow field would be a live callable the body invokes
+    # past every authority fold. Reached THROUGH a record here — the type as
+    # written says nothing, and the offence only exists once the declaration is
+    # resolved and descended into. Its accepted twin is the same file with
+    # `tail` dropped from `Hooks`.
+    "g4_config_record_arrow.rvl":
+        "config field `hooks` of component `Loader` has type `Hooks`, which "
+        "reaches an arrow (function) type; a config field must be static data",
+
+    # item 343: the same bound with a DOTTED, realm-style token. It is here
+    # because a dotted token is the shape a reader can silently split into two
+    # capabilities, which puts the wiring key into the declared scope by
+    # accident and passes the bound on a program the reference refuses.
+    "g4_dotted_capability_key.rvl":
+        "`Task.go` is declared `emission[fs.write]`, but this implementation "
+        "emits through `fs` (reaching `fs.ingest`)",
+
     # item 260: the BUDGET half of attenuation. Stripping the ceilings makes
     # both sides the same bare `net`, so only the dedicated ceiling check sees
     # it. Its accepted twin is `examples/budget_attenuation.rvl`; the pair is
@@ -384,6 +426,12 @@ REJECTIONS = {
     # A9 bounds the *key* against the clause). Dedicated code A9 (A1-A8 are all
     # occupied in the amendment table), with a hint naming both fixes.
     "a9_provide_key_not_declared.rvl": "`skin` is not declared in the `provides` clause of S (A9)",
+    # issue #1172: the converse of A9. A key the clause declares that no block
+    # installs used to link as the provider of that key and leave every
+    # consumer PENDING (R2) at run time; the one form that installs a declared
+    # key without a block, `isolate <key> in realms(...)`, is exempt by syntax.
+    "a9_provides_without_block.rvl":
+        "`skin` is declared in the `provides` clause of S but no `provide skin { … }` block installs it (A9)",
     "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
     "g1_unknown_upper_host.rvl":
         "`StreamB` is not a declared requirement of C",

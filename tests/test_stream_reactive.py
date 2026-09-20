@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -2311,6 +2312,112 @@ def test_go_lowers_a_stream_component_that_also_declares_a_record():
     assert "func LoadC(" in code
     assert 'sub = StreamSubscribe(src, "error", 0)' in code
     assert "type Foo struct {" in code
+
+
+def test_go_diverts_a_source_only_component_beside_a_top_level_declaration():
+    """The same routing rule, on the stream surface it did not cover.
+
+    `_document_holds_stream` recognised a `subscribe` bracket and a `stream-iter`
+    body step, and nothing else. A component that only ACQUIRES a provider —
+    `let src = effect Stream.source() undo src.close()`, the shape
+    `test_source_only_program_still_emits_on_the_lowered_tiers` already requires
+    this tier to emit — carries neither, so the moment the document also held a
+    top-level declaration it routed to the pure typed-core path and the whole
+    component vanished: no subscription, no `Close` inverse, no diagnostic. A
+    live provider is a live host listener whether or not anything is reading it,
+    so it is diverted like every other stream component."""
+    emit = _tier_emit("go")
+    code = emit.emit(compile_source("""
+    type Foo = { a: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+    }
+    """, "s.rvl"))
+    assert "func LoadC(" in code
+    assert "StreamSource()" in code
+
+
+@pytest.mark.parametrize("tail, named", [
+    ("fn tag(s: Str) -> Str { return s }", "functions"),
+    ('test "t" { assert 1 == 1 }', "tests"),
+])
+def test_go_refuses_a_stream_document_whose_top_level_it_would_drop(tail, named):
+    """The other direction of the same routing decision, and the same rule.
+
+    A stream document is diverted to the live stc-go path so the component is not
+    dropped. That path renders types, externs, services, components and lifecycle
+    tests — it renders no top-level `fn` and no plain `test` block. So the
+    diversion silently dropped whatever the pure path would have emitted, and the
+    document compiled to a module missing a section the author wrote. Refused by
+    name instead: the tier states which section it cannot carry beside a stream
+    rather than answering with a module that is quietly short of one."""
+    emit = _tier_emit("go")
+    src = tail + """
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      await sub.next()
+    }
+    """
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(src, "s.rvl"))
+    message = str(excinfo.value)
+    assert named in message
+    assert "item 130" in message
+
+
+def test_go_still_emits_a_stream_document_whose_top_level_it_can_carry():
+    """The control for the refusal above: a `type` (every typed event declares
+    one) and an `extern` ARE rendered on the live path, so a stream document
+    carrying them still emits."""
+    emit = _tier_emit("go")
+    code = emit.emit(compile_source("""
+    type Foo = { a: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl"))
+    assert "type Foo struct {" in code
+    assert 'sub = StreamSubscribe(src, "error", 0)' in code
+
+
+@pytest.mark.parametrize("program", [_CONSUMER, _SOURCE_ONLY])
+def test_the_wasm_refusal_names_every_tier_that_lowers_a_stream(program):
+    """wasm's refusal is correct behaviour, not a gap (§4.6, §8: no async host
+    seam, and it skips `advance`). That is precisely why the tier list inside it
+    has to stay true: routing the author somewhere that works is the refusal's
+    only remaining job, and a list that omits a working tier is a wrong answer
+    delivered by a right refusal.
+
+    It read "py, go, rust" long after ts and java had both graduated onto the
+    surface. So the list is checked against the EMITTERS — every tier named must
+    actually emit this program, and every tier that emits it must be named —
+    rather than against a comment that can go stale the same way."""
+    named = {"py": "python", "ts": "typescript", "go": "go",
+             "java": "java", "rust": "rust"}
+    wasm = _tier_emit("wasm")
+    with pytest.raises(wasm.EmitError) as excinfo:
+        wasm.emit(compile_source(program, "s.rvl"))
+    message = str(excinfo.value)
+    # Read the list out of the sentence rather than searching the whole message
+    # for each short name: "awaits" contains "ts", so a substring test would
+    # find the typescript tier in a message that never names it.
+    found = re.search(r"lower the subscription protocol \(([^)]*)\)", message)
+    assert found is not None, message
+    listed = {t.strip() for t in found.group(1).split(",")}
+    lowers = set()
+    for short, tier in named.items():
+        try:
+            _tier_emit(tier).emit(compile_source(program, "s.rvl"))
+        except Exception:  # noqa: BLE001 — any refusal means "does not lower"
+            continue
+        lowers.add(short)
+    assert lowers == set(named), "a tier stopped lowering the stream surface"
+    assert listed == lowers, (
+        f"the wasm refusal names {sorted(listed)}; these tiers lower a stream: "
+        f"{sorted(lowers)}")
 
 
 def test_wasm_still_refuses_a_handler_program():

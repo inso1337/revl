@@ -125,31 +125,29 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # slice (T1..T4) refuses a family for real, at which point its fixtures leave
 # BOTH lists and the census baseline is re-recorded.
 KNOWN_BYPASSES = {
-    # -- fn-body binding rules (G1/G6) --
+    # -- fn-body binding rules (G1/G6): CLOSED, no row left --
     # The ASSIGNMENT half landed with item 391's binding-discipline slice (the
     # `let`/`var`/parameter scope walk over a module `fn` body, plus the
     # arrow-body write form): `v2_let_reassignment`,
     # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
-    # `g6_closure_mutates_capture` now refuse with the reference's message
-    # byte-for-byte and are struck from this list, and the callable-shadowing
-    # slice has since struck `shadowed_module_fn_call` the same way. What
-    # remains needs machinery neither slice builds: resolving a name READ
-    # against the whole callable universe, which is what both G1 rows below
-    # want.
-    "examples/rejections/g1_template_undeclared.rvl",
-    "examples/rejections/v2_undeclared_fn_var.rvl",
+    # `g6_closure_mutates_capture` refused with the reference's message
+    # byte-for-byte and were struck from this list, and the callable-shadowing
+    # slice struck `shadowed_module_fn_call` the same way. The name-RESOLUTION
+    # rule (docs/design/457 §2.3) took the last two, `g1_template_undeclared`
+    # and `v2_undeclared_fn_var`: a name READ now resolves against the fn's
+    # scope and the callable universe, so the gate refuses both under G1 in the
+    # reference's own sentence and this family has no open bypass.
     # -- expression typing (T1/T2) --
     # The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
     # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
     # `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
-    # reference's own sentence and have been struck from this list. What remains
-    # is the optional-chain rule (T2d) and the provide-method BODY, whose type
-    # environment — requirement handles, activation locals, config fields, the
-    # service signature — is the component slice's to build; the gate walks one
-    # over the empty environment today, which decides `null` and the `Float`
-    # literal bound and stays silent about every rule a name would answer for.
+    # reference's own sentence and have been struck from this list, and the
+    # provide-method slice has since struck `t30` the same way: the walk over a
+    # component body now carries the environment that slice left empty — the
+    # method parameters at the service's declared types, the body's annotated
+    # and inferred locals, the activation locals at the operations they bind.
+    # What remains is the optional-chain rule, which is T2d's.
     "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-    "examples/rejections/t30_field_read_on_any_provide_method.rvl",
     # -- calls and signatures --
     # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
     # type parameters, the arity window, `unify`/`substitute` at a generic call
@@ -171,41 +169,37 @@ KNOWN_BYPASSES = {
     "examples/rejections/t13_unknown_match_case.rvl",
     "examples/rejections/v2_match_nonexhaustive.rvl",
     # -- declarations --
+    # `t6_bare_generic` LEFT this list with the type layer's slice T1:
+    # `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
+    # `selfhost/types.rvl` and runs `check_type_wellformed` over every module
+    # `fn`/`extern` signature and every config field, at the phase position
+    # `_validate_declared_types` gives it. What stays here is decided somewhere
+    # else entirely: the alias cycle in `_resolve_type_aliases`, the
+    # destructuring rule in `_lower_let_pattern_stmt`.
     "examples/rejections/t18_type_alias_cycle.rvl",
-    "examples/rejections/t6_bare_generic.rvl",
     "examples/rejections/t5_destructure_nonrecord.rvl",
-    # -- provide-method and component bodies --
-    "examples/rejections/t1_service_arg_type.rvl",
-    "examples/rejections/t4_field_arg_type.rvl",
-    "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
-    "examples/rejections/t16_provide_method_missing_return.rvl",
-    "examples/rejections/t31_index_non_int_provide_method.rvl",
-    "examples/rejections/t3_config_default_type.rvl",
-    # -- NOT the type layer, and pre-dating this design --
-    # `_check_spawn_attenuation`'s PARAMETERIZED capability-widening refusal
-    # (item 294): `fs.write(path="/etc")` is not within the held
-    # `fs.write(path="/tmp")` cone. The gate's capability model is token-level
-    # (`fs`, `*`), so a same-token narrower/wider valuation is invisible to it.
-    # Closing it needs the `cap_order` (T,P)-pair cone/ceiling algebra ported
-    # into the gate, a much larger change than a `with { ... }` reader.
-    "examples/rejections/g4_spawn_widens_parameter.rvl",
-    # Its BUDGET twin, under the same missing algebra: `net(calls=1000)` is not
-    # within the held `net(calls=100)` ceiling, and a token-level model sees the
-    # bare `net` on both sides.
-    #
-    # It is NEW HERE and not newly admitted. It was a `tag-mismatch/G4->BAD`:
-    # both components spell an annotated provide method (`fn go() -> Int`), the
-    # gate's `p_prov_methods` could not parse one, and the whole component
-    # failed with `BAD|bad provide block in component Child` BEFORE any spawn
-    # check ran. The census read that as a refusal with the wrong tag, which
-    # flattered the gate — it was not deciding the guarantee at all. With the
-    # parse fixed the program reaches the attenuation fold and the gate's real
-    # state shows: the same token-level blindness its parameter twin above has
-    # had since item 294. t29/t30 (a `pub extern` parse refusal) and t25 (a
-    # type-parameter list) are the same story from earlier slices, and the
-    # accepted twin `examples/budget_attenuation.rvl` left `false-reject/BAD`
-    # in the same change.
-    "examples/rejections/g4_spawn_widens_budget.rvl",
+    # -- provide-method and component bodies: NONE --
+    # The whole family closed with the provide-method slice (docs/design/457).
+    # `t1_service_arg_type`, `t4_field_arg_type`,
+    # `t7_provide_param_annotation_mismatch`,
+    # `t16_provide_method_missing_return`,
+    # `t31_index_non_int_provide_method` and `t3_config_default_type` now refuse
+    # with the reference's own sentence; `t30_field_read_on_any_provide_method`
+    # left the expression-typing group above in the same change.
+    # -- NOT the type layer: the parameterized rows are STRUCK --
+    # `_check_spawn_attenuation`'s two parameterized rows --
+    # `g4_spawn_widens_parameter` (a `path` cone) and `g4_spawn_widens_budget`
+    # (a `calls` ceiling) -- are STRUCK: `selfhost/lower.rvl` now carries the
+    # `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
+    # so both sides of the attenuation fold are spelled in the boundary's own
+    # namespace and both refuse with the reference's message byte-for-byte.
+    # `examples/rejections/g4_dotted_capability_key.rvl` is the corpus document
+    # for the shape that change caught and nothing spelled: a dotted item-343
+    # emission scope, which the old scope-list reader split into two
+    # capabilities so that the wiring key landed in the declared scope by
+    # accident. The other shape it caught -- a widening laundered through a key
+    # SPELLED the same on both sides -- is pinned by an in-file test in
+    # `selfhost/lower.rvl` instead; see the capability-order header there.
 }
 
 

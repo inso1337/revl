@@ -108,7 +108,9 @@ reproduce).
 """
 
 import importlib.util
+import json
 import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -119,6 +121,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tests"))
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
 CORPUS = [
@@ -237,6 +241,34 @@ CORPUS = [
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
+    "comp_await_job.rvl",    # the activation-body `await` step and the
+                             #   `plugin_async` + `|ctx, config| async move {`
+                             #   lowering it forces on BOTH component paths, the
+                             #   host async seam (`Job::run(..).await`) vs the
+                             #   erased awaitable (a required-service call, item
+                             #   131), the `host` component-dialect expression
+                             #   kind, and the `Job` host stub — whose emitted
+                             #   block was missing `pub struct Job;` itself.
+                             #   No document awaited anything before this one.
+    "comp_stream.rvl",       # the `Stream[T]` surface (item 130): the ~950-line
+                             #   stream host runtime, the `subscribe` acquisition
+                             #   with its policy/buffer operands, the `merge`
+                             #   fan-in, the `filter`/`map`/`take` derived chain,
+                             #   the blocking `await sub.next()`, and the
+                             #   `every .. in` loop. No document subscribed to a
+                             #   stream before this one, so all three were
+                             #   measured vacuously at once. The typed-event
+                             #   handler rides along: its contract line renders
+                             #   the derived schema through python `json.dumps`
+                             #   DEFAULTS, reproduced in pure revl.
+    "comp_timer.rvl",       # the activation-body `timer` step (item 57): both
+                             #   modes (`revl_schedule_every` / `_after`), the
+                             #   per-timer required-service clone the `move`
+                             #   firing closure needs, the derived cancellation
+                             #   on the same `ctx.effect` ledger, the
+                             #   per-COMPONENT counter, and the `uses_timer` gate
+                             #   on the clock/scheduler preamble. No document
+                             #   armed a timer before this one.
     "comp_body_steps.rvl",   # the activation-body steps other than `provide`:
                              #   the bare `effect`/`undo` bracket over a required
                              #   service, the fire-and-forget `emit`, and the
@@ -808,9 +840,7 @@ def test_selfhost_stages_cargo_build_and_run(tmp_path):
 # the result: the rust emitter, emitted to rust, compiles. Byte-exact emit does
 # not prove it (the item-266 lesson), so the build is run, not inferred.
 #
-# It is a BUILD gate, not a run gate. Driving the emitted emitter needs a
-# rust-side IR constructor to feed its `Any` parameter, which is the next slice
-# and is why tools/bench_selfhost_rust.py records emitter stages as `ir_in`.
+# It is a BUILD gate. The RUN gate is the next test.
 
 
 @pytest.mark.skipif(
@@ -843,3 +873,257 @@ def test_the_rust_emitter_builds_as_rust(reference, tmp_path):
     assert built.returncode == 0, (
         "selfhost/emit_rust.rvl does not build as rust (item 146 / #98 Stage 4 "
         "regression):\n" + (built.stderr or built.stdout or "").strip()[-3000:])
+
+
+# ---------------------------------------------------------------------------
+# The deferred in-file test section stays LOUD (issue #1123).
+#
+# The self-host emitters' safety argument is that an unported construct answers
+# with a named `<<UNSUPPORTED-...>>` marker rather than with silence: a marker is
+# visible in the emitted bytes and is pinned here, while a section the port
+# simply skips is invisible to the byte oracle (no corpus document on any tier
+# carries a test section) and is counted as mirrored by
+# tools/selfhost_coverage.py.
+#
+# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+# every self-host slice, and all six ports used to emit NOTHING for it. Each now
+# emits one named marker per test, per section.
+IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
+
+LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
+component P provides p: Ping {
+  provide p { fn ping() = 1 }
+}
+lifecycle test "probe" {
+  load P
+  assert true
+}
+"""
+
+FAULT_TEST_SRC = """service Ping { fn ping() -> Int }
+component P provides p: Ping {
+  let scratch = effect Map.new() undo scratch.drop()
+  provide p { fn ping() = 1 }
+}
+fault test "probe" for P {
+  fail at step 1
+  assert no residue
+}
+"""
+
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param(IN_FILE_TEST_SRC, "fn probe() {",
+                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
+    pytest.param(LIFECYCLE_TEST_SRC, "fn revl_lifecycle_probe() {",
+                 "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
+])
+def test_deferred_test_sections_are_named(emitted, reference, tmp_path, source,
+                                          reference_token, port_token):
+    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
+    path = tmp_path / "boundary.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_rust_src"](ir)
+    assert reference_token in want
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"
+
+
+def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
+        emitted, reference, tmp_path):
+    """`fault test` runs on the python reference tier only (docs/fault-tests.md),
+    so this reference emitter refuses the whole document by name. The port has no
+    refusal channel - a pure self-host emitter fn cannot `fail` - so it names the
+    section with a marker instead of dropping it."""
+    path = tmp_path / "fault.rvl"
+    path.write_text(FAULT_TEST_SRC)
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError, match="fault tests do not lower"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_rust_src"](ir)
+
+
+# item 130 (issue #81): the stream surface this port NOW carries — the two
+# markers this section used to pin are CLOSED by issue 1153.
+# ---------------------------------------------------------------------------
+#
+# `<<DEFER-stream-host>>` and `<<DEFER-comp-step:stream-iter>>` stood in for the
+# stream HOST RUNTIME and the iteration step: the reference lowered the whole
+# `Stream[T]` surface and the Path B port named what it did not carry, so a crate
+# agreeing with the oracle could never be agreeing vacuously. Issue 1153 ported
+# both, so the witness cannot stand any more ("the port no longer emits
+# `<<DEFER-stream-host>>`: the boundary has moved") — and it is not deleted
+# quietly, because the reason it existed is the reason it is now replaced by a
+# STRONGER claim rather than a weaker one: the port does not merely emit
+# something, it emits the reference's bytes. If either marker ever comes back,
+# this reddens.
+
+
+def test_the_stream_surface_is_carried_byte_for_byte(emitted, reference):
+    """The tree's own stream scenario agrees with the reference byte for byte —
+    `Stream::subscribe(`, `Stream::contract(` and the `revl_stream_record` host
+    sink among the bytes — where the port used to emit the two DEFER markers
+    above instead. The corpus document for the same surface, `comp_stream.rvl`,
+    reaches only the EMITTER half of this oracle (the native frontend refuses it
+    — see `NATIVE_GATE_GAPS` in tests/test_selfhost_compile.py), so this document
+    stays pinned here, beside the enumerated corpus."""
+    ir = compile_files([str(ROOT / "backends" / "go" / "testdata"
+                            / "stream_event_130.rvl")])
+    want = reference.emit(ir)
+    got = emitted["emit_rust_src"](ir)
+    for token in ("Stream::subscribe(", "Stream::contract(",
+                  "revl_stream_record"):
+        assert token in want, f"the reference no longer emits {token}"
+        assert token in got, f"the port dropped {token}"
+    assert got == want
+    for marker in ("<<DEFER-stream-host>>", "<<DEFER-comp-step:stream-iter>>"):
+        assert marker not in got, f"{marker} is back: the boundary reopened"
+
+
+# --------------------------------------------------------------------------
+# item 146 / issue #98 Stage 4 — the rust EMITTER RUNS as rust, and its output
+# is the reference's, byte for byte.
+#
+# The gate above proves the emitted emitter COMPILES. It does not prove it runs:
+# that is the same item-266 lesson one level up, and it bit exactly here. What
+# stood between compiling and running was the emitter's parameter: it takes the
+# interchange IR as an `Any`, which erases to the opaque `cordis::Value`, and no
+# `main` can spell one of those.
+#
+# The constructor for that slot already shipped — `stdlib/json.rvl::json_parse`,
+# whose `@rs` body boxes a `serde_json::Value` into a `cordis::Value`, the same
+# representation stdlib/value.rvl's `@rs` accessors downcast back out. What was
+# missing was the COMPOSITION: a revl document that hands one to the other
+# (tools/bench_selfhost_rust.py's `driver_document`), so the emitter becomes a
+# Str -> Str filter a generated `main` can drive. No hand-written rust
+# participates: the driver is revl, compiled by the reference rust backend like
+# any other document.
+#
+# Two levels are gated, because they fail differently:
+#   * the EMITTER — IR document in, rust source out, over the whole byte-exact
+#     corpus above. This is the emitter under its own oracle's inputs, run
+#     natively instead of under CPython.
+#   * the WHOLE CHAIN — revl source in, rust source out, with `lower_to_ir`
+#     ahead of the emitter. That is what `selfhost/compile.rvl::compile_to` is on
+#     the py tier; compile.rvl itself cannot be emitted to rust (it `use`s
+#     emit_py.rvl, whose CPython-only `py_repr` extern has no `@rs` body), so the
+#     rust-tier chain is spelled over the one emitter that does build as rust.
+#
+# NON-VACUITY: each gate also checks that the comparison it just passed is
+# capable of failing, by corrupting a single byte of the expectation. A byte
+# comparison that cannot fail is not evidence.
+
+
+def _one_byte_corrupted(text: str) -> str:
+    """`text` with exactly one byte changed, at its midpoint."""
+    at = len(text) // 2
+    swap = "X" if text[at] != "X" else "Y"
+    return text[:at] + swap + text[at + 1:]
+
+
+@pytest.mark.skipif(
+    shutil.which("cargo") is None,
+    reason="cargo not installed: cannot gate the rust emitter RUN (item 146)",
+)
+def test_the_rust_emitter_runs_as_rust_and_matches_the_reference(
+        reference, tmp_path):
+    """selfhost/emit_rust.rvl, emitted to rust and RUN, emits the reference's
+    bytes for every document in the byte-exact corpus.
+
+    Loud gate: a cordis-rs runtime that does not resolve skips with the reason
+    rather than passing vacuously.
+    """
+    bench = _load_bench_rust()
+    runtime_reason = bench.rust_runtime_reason()
+    if runtime_reason is not None:
+        pytest.skip(f"cordis-rs runtime does not resolve here: {runtime_reason}")
+
+    binary, built = bench.build_ir_driver_binary(
+        "selfhost/emit_rust.rvl", "emit_rust_src",
+        tmp_path / "emit_rust_driver", "revl_emit_rust_driver")
+    assert binary is not None, (
+        "the json_parse IR driver for selfhost/emit_rust.rvl did not build:\n"
+        + (built.stderr or built.stdout or "").strip()[-3000:])
+
+    for rel in CORPUS:
+        ir = compile_files([str(CORPUS_DIR / rel)])
+        want = reference.emit(ir)
+        run = subprocess.run([str(binary)], input=json.dumps(ir), text=True,
+                             capture_output=True, timeout=300)
+        assert run.returncode == 0, (
+            f"the native rust emitter exited nonzero on {rel}:\n"
+            + (run.stderr or "").strip()[-2000:])
+        assert run.stdout == want, (
+            f"the NATIVE rust emitter diverged from the reference on {rel}\n"
+            f"--- lengths ref={len(want)} got={len(run.stdout)} ---")
+
+    # non-vacuity: the same comparison, against an expectation off by one byte.
+    ir = compile_files([str(CORPUS_DIR / CORPUS[0])])
+    got = subprocess.run([str(binary)], input=json.dumps(ir), text=True,
+                         capture_output=True, timeout=300).stdout
+    corrupted = _one_byte_corrupted(reference.emit(ir))
+    assert len(corrupted) == len(got) and corrupted != got, (
+        "the byte comparison above cannot fail — it is a tautology, not evidence")
+
+
+@pytest.mark.skipif(
+    shutil.which("cargo") is None,
+    reason="cargo not installed: cannot gate the native rust chain (item 146)",
+)
+def test_the_whole_native_chain_runs_as_rust_and_matches_the_reference(
+        reference, tmp_path):
+    """revl SOURCE in, rust source out, entirely as a rust binary: `lower_to_ir`
+    + `json_parse` + `emit_rust_src`, all native, byte-for-byte the reference
+    compile. This is `selfhost/compile.rvl::compile_to(source, "rust")` on the
+    native tier.
+
+    The corpus is the subset tests/test_selfhost_compile.py already holds the
+    native chain to byte-exact under CPython (its RUST_FUNCTION_DOCS +
+    RUST_COMPONENT_DOCS): the documents where the NATIVE `lower_to_ir` and the
+    native emitter agree with the reference end to end. The rest of the
+    byte-exact emitter corpus is excluded here for the same reason it is excluded
+    there — the native IR producer, not the emitter, is the frontier.
+    """
+    bench = _load_bench_rust()
+    runtime_reason = bench.rust_runtime_reason()
+    if runtime_reason is not None:
+        pytest.skip(f"cordis-rs runtime does not resolve here: {runtime_reason}")
+
+    binary, built = bench.build_ir_driver_binary(
+        "selfhost/emit_rust.rvl", "emit_rust_src",
+        tmp_path / "native_chain_driver", "revl_native_chain_driver",
+        whole_chain=True)
+    assert binary is not None, (
+        "the native SOURCE -> rust driver did not build:\n"
+        + (built.stderr or built.stdout or "").strip()[-3000:])
+
+    documents = [
+        # RUST_FUNCTION_DOCS
+        "arith.rvl", "control.rvl", "lists.rvl", "strings.rvl", "variants.rvl",
+        "float_pub.rvl",
+        # RUST_COMPONENT_DOCS
+        "service.rvl", "services_multi.rvl", "requires.rvl", "effect_emit.rvl",
+        "effect_undo.rvl", "config.rvl", "config_effect.rvl",
+    ]
+    for rel in documents:
+        path = CORPUS_DIR / rel
+        run = subprocess.run([str(binary)], input=path.read_text(encoding="utf-8"),
+                             text=True, capture_output=True, timeout=300)
+        assert run.returncode == 0, (
+            f"the native chain exited nonzero on {rel}:\n"
+            + (run.stderr or "").strip()[-2000:])
+        assert not run.stdout.startswith("REFUSED|"), (
+            f"the native gate refused {rel} on the rust tier: "
+            f"{run.stdout[:120]!r}")
+        want = reference.emit(compile_files([str(path)]))
+        assert run.stdout == want, (
+            f"the NATIVE chain diverged from the reference compile on {rel}\n"
+            f"--- lengths ref={len(want)} got={len(run.stdout)} ---")
+
+    # non-vacuity, as above.
+    path = CORPUS_DIR / documents[0]
+    got = subprocess.run([str(binary)], input=path.read_text(encoding="utf-8"),
+                         text=True, capture_output=True, timeout=300).stdout
+    corrupted = _one_byte_corrupted(reference.emit(compile_files([str(path)])))
+    assert len(corrupted) == len(got) and corrupted != got, (
+        "the byte comparison above cannot fail — it is a tautology, not evidence")

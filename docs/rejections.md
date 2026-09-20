@@ -456,6 +456,63 @@ fn f() -> Int {
 Fix: put the `fail` in a component activation body, or model the outcome as
 `Result[T]`.
 
+## A9 — the `provides` clause and the `provide` blocks name the same keys
+
+The `provides` clause is the source of truth for what a component offers:
+the linker computes G2's provider table and G3's layering from it. A9 holds
+the clause and the body to each other in both directions.
+
+A block keyed outside the clause is a provision the composition never
+announced (the sibling of A6, which bounds the *methods* of a declared key
+against its service):
+
+```revl reject A9
+service Skin { fn name() -> Str }
+
+component S provides skin1: Skin {
+  provide skin { fn name() = "x" }
+}
+```
+
+```
+`skin` is not declared in the `provides` clause of S (A9)
+  rename the provide block to a declared key (declared: `skin1`), or add `skin: <Service>` to the `provides` clause of S
+```
+
+The converse: a key the clause declares that no block installs. Before this
+rule the linker admitted the component as the provider of the key, a consumer
+linked against it, and at run time the consumer stayed PENDING (R2), with the
+failure reported one hop away from its cause (issue #1172):
+
+```revl reject A9
+service Skin { fn name() -> Str }
+
+component S provides skin: Skin {
+  let x = effect Map.new() undo x.drop()
+}
+
+component User requires skin: Skin provides out: Skin {
+  provide out { fn name() = skin.name() }
+}
+```
+
+```
+`skin` is declared in the `provides` clause of S but no `provide skin { … }` block installs it (A9)
+  add a `provide skin { … }` block to the body of S, or drop `skin` from its `provides` clause; as declared, S would link as the provider of `skin` and every consumer of `skin` would stay PENDING (R2) at run time
+```
+
+Fix: make the clause and the blocks agree. Rename the block to a declared key
+or add the key (with its service) to the clause; add the missing block, or
+drop the key from the clause.
+
+One shape installs a declared key with no block and is exempt by its own
+syntax: the multi-realm bind `isolate <key> in realms(...)` (`routes` in the
+IR). A component carrying it is realized as a routing proxy at load and never
+plugged as a fiber, so the proxy is the provider of the key and a hand-written
+block for it is refused instead (item 449; the routes-only Router of
+stdlib/router.rvl, docs/router.md). `handoff`, `isolate <key> in realm(...)`
+and `intercept` decorate a key; none of them installs one.
+
 ## T1 — declared types are checked
 
 The workhorse family: argument types, arity, returns, exhaustiveness,

@@ -90,16 +90,17 @@ RevL.CapCeilings.confinement_within_ceiling	instance	RevL.CapCeilings.capceiling
 RevL.CapCeilings.no_star_amplification	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	the lineage above, whose root holds only the star-free fs cone
 RevL.CapCeilings.parameter_widening_refused	concrete	-	five points of the path order, computed
 RevL.CapCeilings.ceiling_check_not_subsumed	concrete	-	a pair the resource fold admits and the ceiling check refuses
-RevL.CapCeilings.derived_held_tokens_are_declared_keys	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	NameableEmission holds of the child's whole body, on a component with a non-empty requires
+RevL.CapCeilings.derived_held_tokens_are_declared_keys	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.same_key_different_boundary_refused	NameableEmission holds of the child's whole body, on a component with a non-empty requires; the two columns the theorem states really do differ, since the bound column identifies two distinct declared boundaries
 RevL.CapCeilings.derived_reach_is_emit_surface	instance	RevL.CapCeilings.derivation_non_vacuous	the derived reach is non-empty on a real component shape
 RevL.CapCeilings.unnameable_receiver_is_star	instance	RevL.CapCeilings.derivation_refuses_unnameable	a handle receiver that derives star, and a wiring key that resolves
 RevL.CapCeilings.derived_lineage	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	SpawnsAdmitted, program membership and a spawn edge hold together on wProgGood
 RevL.CapCeilings.derived_attenuation_monotone	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	the same, plus a Descends instance
 RevL.CapCeilings.derived_lineage_ceiling_le	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.ceiling_lineage_is_inhabited,RevL.CapCeilings.derived_ceiling_check_not_subsumed	the spawn hypotheses hold on wProgGood; the ceiling side condition is exhibited on the calls lineage, since the corpus fs cone declares none
 RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.ceiling_lineage_is_inhabited	the same pairing, with the counter run
-RevL.CapCeilings.derived_confinement_within_ceiling	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.derivation_refuses_unnameable	Resolves, the spawn edge, TypedIn and NameableEmission are all exhibited, and dropping NameableEmission has a concrete price
-RevL.CapCeilings.derived_no_star_amplification	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	the star-free and nameable side conditions both hold on wProgGood
+RevL.CapCeilings.derived_confinement_within_ceiling	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited,RevL.CapCeilings.derivation_refuses_unnameable,RevL.CapCeilings.same_key_different_boundary_refused	Resolves, the spawn edge, TypedIn and NameableEmission are all exhibited, dropping NameableEmission has a concrete price, and the key namespace clause (a) keeps is one the capability clause (b) refuses to use
+RevL.CapCeilings.derived_no_star_amplification	instance	RevL.CapCeilings.capceilings_hypotheses_are_inhabited	the nameable and no-declared-star side conditions both hold on wProgGood; the wiring keys need no side condition since a reserved key: element is never star
 RevL.CapCeilings.derivation_non_vacuous	concrete	-	four facts computed from component shapes, none supplied by hand
+RevL.CapCeilings.same_key_different_boundary_refused	concrete	-	a parent and child spelling one requires key over two different declared boundaries: the bound column derives the same list on both sides and attenuates, the capability column refuses the edge
 RevL.CapCeilings.derivation_refuses_unnameable	concrete	-	a handle emission derives star and is refused
 RevL.CapCeilings.derived_ceiling_check_not_subsumed	concrete	-	both relations still load-bearing once the sets are derived
 RevL.G9.origin_persists_or_is_declassified	instance	RevL.G9.g9_not_vacuous	an inhabited Flow carrying a declared origin
@@ -194,3 +195,33 @@ RevL.CapCeilings.ceiling_lineage_is_inhabited	concrete	-	a spawn edge that narro
 RevL.G9.g9_context_hypotheses_are_inhabited	concrete	-	a TypedIn crossing with a non-empty head list, an untrusted-free scope and an untrusted one
 RevL.R4.r4_side_conditions_are_inhabited	concrete	-	the freshness and disjointness side conditions hold at both traces, with the emitted set empty on one and not the other
 RevL.A8.a8_hypotheses_are_inhabited	concrete	-	SemLog, a fork-free log, a discharged seq, and a WAFrom run that really fires an undeclared inverse under a unique seq space
+RevL.A9.a9B_iff	instance	RevL.A9.a9_not_vacuous,RevL.A9.a9_converse_not_vacuous,RevL.A9.a9_row_not_vacuous	the A9 decision the oracle prints, both directions: false on both fixtures, true on the renamed twin and on RoundRobin, and it moves with the block and with the route alone
+RevL.A9.noDoubleInstallB_iff	instance	RevL.A9.a9_rules_are_distinct	the double-install decision: false on skin1 installed twice, true on the fixture
+RevL.A9.installed_block_is_slot	instance	RevL.A9.a9_not_vacuous	A9OK holds of the renamed twin, whose one block is then the slot (skin1, shared)
+RevL.A9.undeclared_block_is_no_slot	instance	RevL.A9.a9_not_vacuous,RevL.A9.a9_directions_are_distinct	the first fixture fails BlocksDeclared (a9_not_vacuous through a9B_iff; extraBlockS directly), and its block skin is a slot of S in no realm
+RevL.A9.installed_block_uniquely_provided	instance	RevL.A9.a9_not_vacuous	the renamed twin links on its own (LinkOK [S]) and satisfies A9OK, so both hypotheses hold together
+RevL.A9.installed_slots_nodup	instance	RevL.A9.a9_rules_are_distinct	NoDoubleInstall holds of the fixture (one block), and fails of the twice-installed twin
+RevL.A9.a9_not_vacuous	concrete	-	the first fixture refused; the renamed twin admitted and linking; the hint's second fix admitted once the orphan is dropped and refused by the converse when taken literally
+RevL.A9.a9_rules_are_distinct	concrete	-	A9OK and NoDoubleInstall separated in both directions: the double install passes A9 and fails Nodup, the fixture the reverse
+RevL.A9.a9_row_not_vacuous	concrete	-	three same-manifest pairs with different verdicts (renamed block, added block, dropped route): the oracle A9 row reads the PB and PR facts, not the C fact
+RevL.A9.blocksDeclaredB_iff	instance	RevL.A9.a9_directions_are_distinct	direction 1's decider: true on halfDeclaredS, false on extraBlockS
+RevL.A9.declaredInstalledB_iff	instance	RevL.A9.a9_directions_are_distinct	direction 2's decider: false on halfDeclaredS, true on extraBlockS
+RevL.A9.declared_uninstalled_refused	necessity	RevL.A9.a9_converse_not_vacuous,RevL.A9.a9_not_vacuous	the three hypotheses hold together on the second fixture (skin declared, no block, no route), and the refusal is not universal: the renamed twin and RoundRobin are admitted
+RevL.A9.unrouted_needs_a_block	instance	RevL.A9.a9_not_vacuous	the renamed twin has no route and satisfies A9OK, so both hypotheses hold and its one declared key has a block
+RevL.A9.routed_installs_without_block	instance	RevL.A9.a9_converse_not_vacuous	RoundRobin: no block, every declared key routed, admitted
+RevL.A9.a9_converse_not_vacuous	concrete	-	the second fixture refused, RoundRobin admitted with no block, a backend with a block admitted
+RevL.A9.a9_directions_are_distinct	concrete	-	the two directions separated: halfDeclaredS passes 1 and fails 2, extraBlockS fails 1 and passes 2
+RevL.A2.a2Fold_iff	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_refused	both sides inhabited: the fold from a clear flag accepts okBody and A2OK holds of it; the fixture is refused by the fold and by the rule
+RevL.A2.a2B_iff	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_refused	a2B decides true on okBody (which satisfies A2OK) and false on the fixture, so the printed A2 verdict is mutation-sensitive
+RevL.A2.labels_distinct	necessity	RevL.A2.a2_not_vacuous	the two labels are different Expr literals; both are exhibited on the stack of okBody
+RevL.A2.stack_all_brackets	instance	RevL.A2.a2_not_vacuous	the stack of okBody is [release, withdrawal], two brackets
+RevL.A2.phase1_of_brackets	instance	RevL.A2.a2_not_vacuous	the all-bracket hypothesis holds of okBody's stack and the settling one of commit and abort; the halted pass is empty, so settling is load-bearing
+RevL.A2.stack_of_no_acquire	instance	RevL.A2.a2_not_vacuous	a body of provisions only is [provide]'s suffix of okBody; the hypothesis is not the empty body's alone
+RevL.A2.stack_shape	instance	RevL.A2.a2_not_vacuous	A2OK holds of okBody and its stack is one release then one withdrawal, both counts 1
+RevL.A2.proof_pass_is_withdrawals_then_releases	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_opens_the_window	A2OK and settles hold together on okBody under commit and abort, where the pass is [withdrawal, release]; the fixture shows the A2OK hypothesis excludes a real body
+RevL.A2.withdrawals_precede_releases	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_opens_the_window	the same instance; the fixture's pass violates the conclusion, so the ordering claim is not true of every body
+RevL.A2.teardown_labels	instance	RevL.A2.a2_not_vacuous	okBody's commit teardown is the two labels in that order, and the halted teardown is empty
+RevL.A2.fixture_refused	concrete	-	the fold refuses [acquire, provide, acquire], the shape of a2_acquire_after_provide.rvl
+RevL.A2.fixture_release_before_withdrawal	concrete	-	the fixture's proof pass under commit and abort runs a release before the withdrawal: the window docs/rejections.md#a2 describes
+RevL.A2.fixture_opens_the_window	necessity	RevL.A2.fixture_release_before_withdrawal,RevL.A2.a2_not_vacuous	the refused pass is computed, and the refusal is not universal: okBody's pass satisfies the ordering claim
+RevL.A2.a2_not_vacuous	concrete	-	okBody = [acquire, provide]: admitted by the fold and the rule, stack [release, withdrawal], commit and abort passes [withdrawal, release], halted pass empty

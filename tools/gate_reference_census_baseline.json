@@ -1,40 +1,17 @@
 {
  "buckets": {
-  "false-admit/G1": [
-   "examples/rejections/g1_template_undeclared.rvl",
-   "examples/rejections/v2_undeclared_fn_var.rvl"
-  ],
-  "false-admit/G4": [
-   "examples/rejections/g4_spawn_widens_budget.rvl",
-   "examples/rejections/g4_spawn_widens_parameter.rvl"
-  ],
   "false-admit/T1": [
    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-   "examples/rejections/t16_provide_method_missing_return.rvl",
    "examples/rejections/t17_arrow_body_unchecked.rvl",
-   "examples/rejections/t1_service_arg_type.rvl",
-   "examples/rejections/t30_field_read_on_any_provide_method.rvl",
-   "examples/rejections/t31_index_non_int_provide_method.rvl",
    "examples/rejections/t32_arrow_value_result_flows.rvl",
    "examples/rejections/t33_arrow_value_arity.rvl",
    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-   "examples/rejections/t3_config_default_type.rvl",
-   "examples/rejections/t4_field_arg_type.rvl",
-   "examples/rejections/t6_bare_generic.rvl",
-   "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
    "examples/rejections/v2_match_nonexhaustive.rvl"
   ],
   "false-admit/TYPE": [
    "examples/rejections/t13_unknown_match_case.rvl",
    "examples/rejections/t18_type_alias_cycle.rvl",
    "examples/rejections/t5_destructure_nonrecord.rvl"
-  ],
-  "false-reject/G1": [
-   "backends/go/testdata/stream_130.rvl",
-   "backends/go/testdata/stream_event_130.rvl",
-   "backends/java/scenarios/stream_130.rvl",
-   "backends/java/scenarios/stream_event_130.rvl",
-   "backends/rust/scenarios/stream.rvl"
   ]
  },
  "corpus_dirs": [
@@ -48,102 +25,6 @@
   "dogfood"
  ],
  "details": {
-  "backends/go/testdata/stream_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`sub` is not a declared requirement of Parked"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/go/testdata/stream_event_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`on` is not a declared requirement of Handler"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/java/scenarios/stream_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`sub` is not a declared requirement of Parked"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/java/scenarios/stream_event_130.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`on` is not a declared requirement of Handler"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/rust/scenarios/stream.rvl": {
-   "bucket": "false-reject/G1",
-   "gate": {
-    "code": "G1",
-    "kind": "refused",
-    "message": "`sub` is not a declared requirement of Parked"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/rejections/g1_template_undeclared.rvl": {
-   "bucket": "false-admit/G1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`nobody` is not declared in this function",
-    "tag": "G1"
-   }
-  },
-  "examples/rejections/g4_spawn_widens_budget.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)",
-    "tag": "G4"
-   }
-  },
-  "examples/rejections/g4_spawn_widens_parameter.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` \u2014 a spawn may narrow a child's capabilities, never widen them",
-    "tag": "G4"
-   }
-  },
   "examples/rejections/t13_unknown_match_case.rvl": {
    "bucket": "false-admit/TYPE",
    "gate": {
@@ -165,18 +46,6 @@
    },
    "reference": {
     "message": "`?.` needs an optional on the left, got `Row`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t16_provide_method_missing_return.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`get` implements `Store.get`, which returns `Str`, but this body never returns a value",
     "tag": "T1"
    }
   },
@@ -202,42 +71,6 @@
    "reference": {
     "message": "type alias cycle: Handle -> Ref -> Handle",
     "tag": "TYPE"
-   }
-  },
-  "examples/rejections/t1_service_arg_type.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`db.query` argument `sql` expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t30_field_read_on_any_provide_method.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "field read `.kind` on a value of type `Any` \u2014 an erased value has no known fields",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t31_index_non_int_provide_method.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "index expects `Int`, got `Str`",
-    "tag": "T1"
    }
   },
   "examples/rejections/t32_arrow_value_result_flows.rvl": {
@@ -276,30 +109,6 @@
     "tag": "T1"
    }
   },
-  "examples/rejections/t3_config_default_type.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "config field `n` default expects `Int`, got `Str`",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t4_field_arg_type.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`s.take` argument `s` expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
   "examples/rejections/t5_destructure_nonrecord.rvl": {
    "bucket": "false-admit/TYPE",
    "gate": {
@@ -312,30 +121,6 @@
     "tag": "TYPE"
    }
   },
-  "examples/rejections/t6_bare_generic.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Opt` takes 1 type argument(s), got 0 (`Opt`)",
-    "tag": "T1"
-   }
-  },
-  "examples/rejections/t7_provide_param_annotation_mismatch.rvl": {
-   "bucket": "false-admit/T1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`",
-    "tag": "T1"
-   }
-  },
   "examples/rejections/v2_match_nonexhaustive.rvl": {
    "bucket": "false-admit/T1",
    "gate": {
@@ -346,18 +131,6 @@
    "reference": {
     "message": "non-exhaustive match: missing case `Invalid`",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/v2_undeclared_fn_var.rvl": {
-   "bucket": "false-admit/G1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`missing` is not declared in this function",
-    "tag": "G1"
    }
   }
  },

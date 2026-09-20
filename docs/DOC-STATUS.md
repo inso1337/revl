@@ -164,7 +164,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 46 | yes |
-| rejections.md | needs-work | 67 |  |
+| rejections.md | needs-work | 68 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |
@@ -175,7 +175,7 @@ was corrected by hand and had drifted back within a day.
 | scaffold.md | needs-work | 2 |  |
 | schedule-testing.md | needs-work | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |
-| selfhost-compile.md | stale-fixed | 2 |  |
+| selfhost-compile.md | stale-fixed | 9 |  |
 | selfhost-findings.md | live-owned (not audited) | 246 |  |
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |

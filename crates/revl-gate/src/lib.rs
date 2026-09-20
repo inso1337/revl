@@ -277,6 +277,12 @@ pub const LANGUAGE_VERSION: &str = "2.0.0";
 /// drawn from is [`FRONTIER_ID`].
 pub const SYMBOLS_API_VERSION: &str = "0.1.0";
 
+/// The semver of the NATIVE EMITTER surface ([`emit_ir`]), versioned on its own
+/// for the same reason the navigation surface is: it issues no verdicts and has
+/// no `revl.gate` twin to stay in lockstep with. The bytes it produces are
+/// pinned to the reference by the emitter corpus, not by this number.
+pub const EMIT_API_VERSION: &str = "0.1.0";
+
 /// What this gate actually decides, in one line. The reference type layer is
 /// deliberately absent — see the crate docs, "The verdict surface issues no
 /// admissions", and [`ADMITTED_LAYER`] for the sliver it is sound to admit in.
@@ -700,24 +706,104 @@ fn verdict_from_wire(wire: &str) -> Verdict {
     }
 }
 
-/// Verdict plus emitted target source — **Stage 4, not available**.
+/// Emitted target source for a previously-compiled IR document — the NATIVE
+/// EMITTER arm (roadmap item 146 condition 4).
 ///
-/// Always `Err(Verdict::OutsideFrontier)` today: the crate carries the FRONTEND
-/// only (`selfhost/lower.rvl` and its `use` closure, emitted into `selfhost`),
-/// so there is no emitter in it to call. What each tier still needs differs, and
-/// the refusal names it rather than stating one reason for both:
+/// `ir_document` is a staged interchange IR document as JSON text, the shape
+/// `revl compile --emit-ir` writes and `crate::ir` guards. `Tier::Rust` runs it
+/// through `selfhost/emit_rust.rvl`, emitted into this crate's `selfhost`
+/// module and called behind its IR constructor
+/// (`stdlib/json.rvl::json_parse`). No Python, no reference compiler, no
+/// cordis runtime: the document in, rust source out.
+///
+/// **What this arm claims, and what it does not.** It claims byte agreement
+/// with the reference rust backend (`backends/rust/emit.py`) over the corpus
+/// that backend's own self-host oracle is held to — 34 documents, no
+/// exclusions, driven through THIS crate by
+/// `tests/test_gate_crate_admit.py::test_emit_ir_is_byte_identical_to_the_reference`.
+/// It claims nothing about a document the reference did not produce, and it is
+/// not an admission: an emission is not a verdict, and this function never
+/// returns one that reads `admitted:true`.
+///
+/// The FRONTEND is deliberately not in this path. That is the whole reason this
+/// arm exists and [`compile_to`] still fails closed: the self-host's
+/// `lower_to_ir` is behind the reference's (roadmap item 391), so a source
+/// lowered natively and then emitted natively can differ from the reference
+/// compile on most of the covered corpus. Handed a REFERENCE-produced IR, the
+/// emitter half has no such gap: that is the whole of what this arm claims.
+///
+/// Fails closed, never silently:
+///
+/// * a document above [`MAX_SOURCE_BYTES`], or one `crate::ir::check_ir_boundary`
+///   refuses (an unknown top-level field, an unknown schema revision, a
+///   non-object) — refused by name rather than decoded under the wrong shape;
+/// * `Tier::Py` — `selfhost/emit_py.rvl`'s six helper externs (`py_repr`,
+///   `mangle`, `snake`, `pascal`, `upper`, `newline`) carry `@py` bodies only,
+///   so that emitter has no rust form at all and is not in this crate;
+/// * an abort inside the native emitter, caught and reported as a frontier gap.
+pub fn emit_ir(ir_document: &str, tier: Tier) -> Result<String, Verdict> {
+    if let Tier::Py = tier {
+        return Err(Verdict::OutsideFrontier {
+            reason: String::from(
+                "emit_ir(py) is not available in this crate: selfhost/emit_py.rvl carries @py-only helper externs (py_repr, mangle, snake, pascal, upper, newline) and has no rust form, so there is no native py emitter to generate into the crate. Emit with the reference `revl compile --backend py`.",
+            ),
+        });
+    }
+    if ir_document.len() > MAX_SOURCE_BYTES {
+        return Err(Verdict::OutsideFrontier {
+            reason: format!(
+                "IR document is {} bytes, above the {}-byte bound this crate will emit (the native emitter walks the document recursively and an overflow aborts rather than refusing); emit with the reference `revl` toolchain",
+                ir_document.len(),
+                MAX_SOURCE_BYTES
+            ),
+        });
+    }
+    // The same boundary guard the verdict surface uses on a re-entering IR
+    // document: an unknown field or revision is refused BY NAME, never ignored.
+    if let Err(refusal) = ir::check_ir_boundary(ir_document) {
+        return Err(Verdict::Refused {
+            code: refusal.code,
+            message: refusal.message,
+        });
+    }
+    let owned = ir_document.to_string();
+    // As with `admit`: the emitted stage is total over the surface it was
+    // written for, and "written for" is the thing this crate refuses to assume.
+    match std::panic::catch_unwind(move || selfhost::emit_rust_from_ir(owned)) {
+        Ok(source) => Ok(source),
+        Err(_) => Err(Verdict::OutsideFrontier {
+            reason: String::from(
+                "the native emitter aborted on this IR document, so no target source was produced; this is a frontier gap — emit with the reference `revl` toolchain",
+            ),
+        }),
+    }
+}
+
+/// Verdict plus emitted target source for revl SOURCE — **not available**.
+///
+/// Always `Err(Verdict::OutsideFrontier)`. The blocker is no longer packaging:
+/// since roadmap item 146 condition 4 the native rust emitter IS generated into
+/// this crate and is callable as [`emit_ir`]. What is missing is the FRONTEND
+/// half of the chain, and the two tiers are missing different halves:
 ///
 /// * `py` — `selfhost/emit_py.rvl`'s six helper externs (`py_repr`, `mangle`,
 ///   `snake`, `pascal`, `upper`, `newline`) carry `@py` bodies only, so that
-///   emitter has no rust form at all;
-/// * `rust` — `selfhost/emit_rust.rvl` now BUILDS as rust (every extern carries
-///   an `@rs` body, and roadmap item 146 closed the `Any`-erasure boxing that
-///   left it failing `cargo build`; pinned by
-///   `tests/test_selfhost_emit_rust.py::test_the_rust_emitter_builds_as_rust`).
-///   What is missing is the rest of the chain in this crate: the emitter is not
-///   generated into it, and its entry point takes the interchange IR as an
-///   `Any`, which erases to `cordis::Value` with no rust-side constructor to
-///   build one from source.
+///   emitter has no rust form at all and cannot be generated into this crate;
+/// * `rust` — the emitter is here, but the self-host's own `lower_to_ir` is
+///   behind the reference's (roadmap item 391), so source compiled end to end
+///   by the native chain is NOT the reference compile. Measured through this
+///   the document set `tests/test_selfhost_compile.py` pins it byte-exact on
+///   (`RUST_FUNCTION_DOCS` + `RUST_COMPONENT_DOCS`), which is far narrower than
+///   this crate's covered corpus. Outside it the native lowering drops a
+///   `.clone()` on a reused binding, drops a `provide` method when a callable is
+///   named as a value, and omits a host-object preamble. None of those is an
+///   emitter defect and none is visible to a caller, which is exactly why this
+///   arm refuses instead of handing them back.
+///
+/// So the honest surface is [`emit_ir`]: hand this crate an IR document the
+/// REFERENCE frontend produced and the emission is the reference's, byte for
+/// byte. `compile_to` becomes available when the self-host frontend closes
+/// item 391, not before.
 ///
 /// The signature is fixed here so its arrival is additive.
 pub fn compile_to(_source: &str, tier: Tier) -> Result<String, Verdict> {
@@ -728,12 +814,12 @@ pub fn compile_to(_source: &str, tier: Tier) -> Result<String, Verdict> {
     // The two tiers are blocked by different things, and a consumer reading this
     // reason should be told which, not one summary that fits neither.
     let tier_detail = match tier {
-        Tier::Py => "selfhost/emit_py.rvl carries @py-only helper externs and has no rust form",
-        Tier::Rust => "selfhost/emit_rust.rvl builds as rust but is not generated into this crate, and its entry takes the interchange IR as an erased cordis::Value with no rust-side constructor",
+        Tier::Py => "selfhost/emit_py.rvl carries @py-only helper externs and has no rust form, so no py emitter is in this crate",
+        Tier::Rust => "the native rust emitter IS in this crate (call emit_ir with a reference-produced IR document), but the self-host frontend that would produce that IR from source is behind the reference (roadmap item 391), so a native end-to-end compile is not the reference compile",
     };
     Err(Verdict::OutsideFrontier {
         reason: format!(
-            "compile_to({}) is not available in this crate: it carries the frontend only, so there is no native emitter in it to run ({}) (roadmap item 332 Stage 4). Emit with the reference `revl compile --backend {}`.",
+            "compile_to({}) is not available in this crate: it has no native FRONTEND whose IR byte-agrees with the reference ({}) (roadmap item 332 Stage 4). Emit with the reference `revl compile --backend {}`, or hand emit_ir a reference-produced IR document.",
             tier_name, tier_detail, tier_name
         ),
     })

@@ -142,6 +142,7 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.derived_confinement_within_ceiling \
   RevL.CapCeilings.derived_no_star_amplification \
   RevL.CapCeilings.derivation_non_vacuous \
+  RevL.CapCeilings.same_key_different_boundary_refused \
   RevL.CapCeilings.derivation_refuses_unnameable \
   RevL.CapCeilings.derived_ceiling_check_not_subsumed \
   RevL.G9.origin_persists_or_is_declassified \
@@ -210,7 +211,37 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.ceiling_lineage_is_inhabited \
   RevL.G9.g9_context_hypotheses_are_inhabited \
   RevL.R4.r4_side_conditions_are_inhabited \
-  RevL.A8.a8_hypotheses_are_inhabited < .axioms.out
+  RevL.A8.a8_hypotheses_are_inhabited \
+  RevL.A9.a9B_iff \
+  RevL.A9.noDoubleInstallB_iff \
+  RevL.A9.installed_block_is_slot \
+  RevL.A9.undeclared_block_is_no_slot \
+  RevL.A9.installed_block_uniquely_provided \
+  RevL.A9.installed_slots_nodup \
+  RevL.A9.a9_not_vacuous \
+  RevL.A9.a9_rules_are_distinct \
+  RevL.A9.a9_row_not_vacuous \
+  RevL.A9.blocksDeclaredB_iff \
+  RevL.A9.declaredInstalledB_iff \
+  RevL.A9.declared_uninstalled_refused \
+  RevL.A9.unrouted_needs_a_block \
+  RevL.A9.routed_installs_without_block \
+  RevL.A9.a9_converse_not_vacuous \
+  RevL.A9.a9_directions_are_distinct \
+  RevL.A2.a2Fold_iff \
+  RevL.A2.a2B_iff \
+  RevL.A2.labels_distinct \
+  RevL.A2.stack_all_brackets \
+  RevL.A2.phase1_of_brackets \
+  RevL.A2.stack_of_no_acquire \
+  RevL.A2.stack_shape \
+  RevL.A2.proof_pass_is_withdrawals_then_releases \
+  RevL.A2.withdrawals_precede_releases \
+  RevL.A2.teardown_labels \
+  RevL.A2.fixture_refused \
+  RevL.A2.fixture_release_before_withdrawal \
+  RevL.A2.fixture_opens_the_window \
+  RevL.A2.a2_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -250,6 +281,9 @@ python3 scripts/axioms_gate.py \
   RevLOracle.discharged_not_reissued \
   RevLOracle.fenced_not_reissued \
   RevLOracle.declared_idempotent_reissued \
-  RevLOracle.reportedSeqLabels_nil_iff_clean < .oracle-axioms.out
+  RevLOracle.reportedSeqLabels_nil_iff_clean \
+  RevLOracle.a9RowB_iff \
+  RevLOracle.parseStep_stepName \
+  RevLOracle.a2OKB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

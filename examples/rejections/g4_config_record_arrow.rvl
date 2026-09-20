@@ -1,0 +1,45 @@
+// REJECTED - item 378: a config field whose declared type REACHES an arrow.
+//
+// A config value is injected as static data at plug/spawn/load time, so a
+// config field's declared type must be built, TRANSITIVELY, out of data. An
+// arrow field is a live callable the body can invoke past every authority
+// fold: no ticket, no reach attribution, no `emission[...]` bound to exceed.
+//
+// The indirection is the point. `Hooks` is a record of data except for one
+// field, so nothing about the type as WRITTEN (`hooks: Hooks`) says anything
+// is wrong - the refusal only exists once the declaration is resolved and
+// descended into. Reading the spelling is not enough; a checker, or a model
+// of one, has to walk.
+//
+// Everything else here is accepted: drop `tail` from `Hooks` and the file
+// compiles, so the only refusal this fixture carries is the config one.
+//
+// This is the fixture the formal harness grew its config-is-data row for
+// (issue 1161). The model's two other G4 rules both judge a CROSSING -
+// `Oracle.g4OK` the emission marker, `Oracle.hostAcquireOK` the acquire
+// bracket - and there is no crossing here to judge: the offence is in a
+// DECLARED TYPE, which is a fact of a kind the export did not carry. Until it
+// did, this refusal read as `missed-G4` wherever the file was put, since
+// `diff_corpus.CORPUS_DIRS` is `("examples", "tck", "tests")` and the fatal
+// followed the file into every one of them.
+//
+// expected error:
+//   config field `hooks` of component `Loader` has type `Hooks`, which
+//   reaches an arrow (function) type; a config field must be static data
+
+type Hooks = { head: Str, tail: (Str) -> Str }
+
+service Sink {
+  emission[log] fn write(row: Str) -> Int
+}
+
+component Loader requires log: Sink provides out: Sink {
+  config { source: Str, hooks: Hooks }
+
+  provide out {
+    fn write(row) {
+      emit log.write(row)
+      return 1
+    }
+  }
+}

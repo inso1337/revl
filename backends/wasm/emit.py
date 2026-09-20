@@ -158,6 +158,18 @@ class EmitError(ValueError):
     """The IR document cannot be lowered to the wasm tier."""
 
 
+#: The tiers that DO lower the item-130 subscription protocol, named by the two
+#: stream refusals below so a reader is sent somewhere that works. This tier's
+#: refusal is correct behaviour and not a gap (design §4.6, §8: wasm has no
+#: async host seam and skips `advance`), which is exactly why the list has to
+#: stay true: the refusal's only remaining job is to route the author. It read
+#: "py, go, rust" while ts and java had both graduated onto the surface, so it
+#: was telling two tiers that lower a stream that they do not.
+#: `tests/test_stream_reactive.py::test_the_wasm_refusal_names_every_tier_that_
+#: lowers_a_stream` holds it to the emitters rather than to this comment.
+_STREAM_TIERS = "py, ts, go, java, rust"
+
+
 def _refuse_required_stream(component: dict, tier: str) -> None:
     """Refuse a component that declares a required `Stream[T]` coeffect on a
     tier that does not lower one (item 130 §6b).
@@ -908,7 +920,7 @@ class _ComponentEmitter:
                     f"{where}: `{fn}` opens a stream; a stream subscription "
                     f"suspends a fiber, but this tier awaits only `Job.run(name)` "
                     f"— streams live on the tiers that lower the subscription "
-                    f"protocol (py, go, rust); try `--backend py`"
+                    f"protocol ({_STREAM_TIERS}); try `--backend py`"
                 )
             raise EmitError(
                 f"{where}: host builtin {node.get('fn')!r} is not available on "
@@ -1435,7 +1447,7 @@ class _ComponentEmitter:
                 raise EmitError(
                     f"{where}: a stream subscription suspends a fiber; this tier "
                     f"awaits only `Job.run(name)`; streams live on the tiers that "
-                    f"lower the subscription protocol (py, go, rust) — try "
+                    f"lower the subscription protocol ({_STREAM_TIERS}) — try "
                     f"`--backend py`"
                 )
             if kind in ("let-effect", "effect", "emit") and step.get("async"):
