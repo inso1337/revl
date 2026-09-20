@@ -72,6 +72,11 @@ from .taint import (
     strip_qualifiers,
 )
 from . import model_route as _model_route
+from .decode_grammar import (
+    GrammarDerivationError,
+    decode_grammar_for,
+    grammar_refusal_reason,
+)
 from .mcp.schema import (
     _parse_type as _schema_parse_type,
     expressibility_reason,
@@ -3946,12 +3951,18 @@ def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: s
         _scan(fns[name].body, name)
 
 
-def _validated_response_schema(name: str, returns: str | None, is_emission: bool,
-                               types: dict, filename: str, line: int,
-                               kind_word: str) -> dict:
-    """Item 257 (§2, §3): check a `validated` emission and derive its boundary
-    schema, refusing at COMPILE TIME when the response type is not fully
-    expressible.
+def _validated_response_ir(name: str, returns: str | None, is_emission: bool,
+                           types: dict, filename: str, line: int,
+                           kind_word: str) -> dict:
+    """Items 257 and 513: check a `validated` emission and derive the two
+    response-shape IR keys, refusing at COMPILE TIME when the response type has
+    no exact schema (257) or no unambiguous decoding grammar (513).
+
+    Returns `{"response_schema": ..., "response_grammar": ...}`. The schema is
+    what the boundary validates a completion against; the grammar is what a
+    provider constrains the decode with. Both are compile-time constants derived
+    from the same declared type, and the grammar is rendered FROM the schema so
+    the two cannot drift.
 
     Two surface rules (the same place the sibling modifier-validity rules live):
     `validated` is EMISSION-ONLY (a `pure`/`acquire`/`witnessed` classification
@@ -3994,6 +4005,26 @@ def _validated_response_schema(name: str, returns: str | None, is_emission: bool
                  "than ship a vacuous guarantee "
                  "(docs/design/257-typed-model-boundary.md, §3.3)",
             code="G4", category="validated")
+    # Item 513 (§4): the grammar gate, which runs on the SURFACE type and after
+    # the expressibility gate. A type can have an exact schema and still have no
+    # unambiguous grammar: the schema derivation collapses a null-ambiguous
+    # `Opt` (`Opt[Opt[Str]]` and `Opt[Str]` derive the same schema), so the
+    # validator cannot see the ambiguity and this is the only place it is
+    # visible. Refusing here is the fail-closed half of the item: a response
+    # type is never demoted to an unconstrained decode.
+    grammar_reason = grammar_refusal_reason(stripped, types)
+    if grammar_reason is not None:
+        raise RevlError(
+            filename, line,
+            f"`validated` emission `{name}` has response type `{stripped}`, which "
+            f"{grammar_reason}",
+            hint="a validated crossing compiles its response type to a decoding "
+                 "grammar, and a grammar that derives one string from two values "
+                 "cannot tell a constrained decode which one to produce. Refuse "
+                 "it at compile time rather than fall back to an unconstrained "
+                 "decode the caller believes is constrained "
+                 "(docs/design/542-grammar-constrained-decoding.md, §4)",
+            code="G4", category="validated")
     schema = json_schema_for(stripped, types, validated=True)
     # Defense in depth (§3.3): the `fully_expressible` predicate already accepted
     # this type, so the renderer must leave no unconstrained `x-revlType` stub. A
@@ -4005,7 +4036,19 @@ def _validated_response_schema(name: str, returns: str | None, is_emission: bool
             f"internal: `validated` emission `{name}` derived an unconstrained "
             f"schema for `{stripped}` despite passing the expressibility gate "
             f"(renderer/predicate drift, item 257 §3.3)")
-    return schema
+    # Item 513: the decoding grammar, rendered from the schema object above
+    # rather than from a second walk over the surface type, so grammar and
+    # validator cannot drift. A node the renderer does not recognise raises
+    # rather than rendering a permissive rule (item 513, §3).
+    try:
+        grammar = decode_grammar_for(schema)
+    except GrammarDerivationError as exc:
+        raise RevlError(
+            filename, line,
+            f"internal: `validated` emission `{name}` could not derive a decoding "
+            f"grammar for `{stripped}` despite passing both gates ({exc}; "
+            f"renderer/predicate drift, item 513 §4)") from exc
+    return {"response_schema": schema, "response_grammar": grammar}
 
 
 def _validated_retry_ir(name: str, validated: bool, retry: int, filename: str,
@@ -4036,7 +4079,8 @@ def _validated_retry_ir(name: str, validated: bool, retry: int, filename: str,
 
 
 def _method_validated_ir(m, types: dict, filename: str) -> dict:
-    """Item 257: the additive `validated` + `response_schema` (+ Slice 2 `retry`)
+    """Items 257 and 513: the additive `validated` + `response_schema` +
+    `response_grammar` (+ 257 Slice 2 `retry`)
     IR keys for a service-method emission, or `{}` (byte-identical) when the method
     is neither `validated` nor carries a `retry` clause. Refuses an unexpressible
     return type, and a `retry` without `validated`, at compile time. `m.returns` is
@@ -4046,9 +4090,9 @@ def _method_validated_ir(m, types: dict, filename: str) -> dict:
         filename, m.line, "operation")
     if not getattr(m, "validated", False):
         return {}
-    schema = _validated_response_schema(
+    response_ir = _validated_response_ir(
         m.name, m.returns, m.emission, types, filename, m.line, "operation")
-    return {"validated": True, "response_schema": schema, **retry_ir}
+    return {"validated": True, **response_ir, **retry_ir}
 
 
 # ------------------------------------------------------------ item 457: routes
@@ -4504,9 +4548,9 @@ def _lower_externs(program: Program, filename: str, types: dict,
         # and derive the boundary schema on the qualifier-stripped return type
         # (already stripped in place by extract_and_normalize; re-stripped for
         # order-robustness). Refuses an unexpressible return type at compile time.
-        validated_schema: dict | None = None
+        validated_response_ir: dict = {}
         if decl.validated:
-            validated_schema = _validated_response_schema(
+            validated_response_ir = _validated_response_ir(
                 decl.name, decl.returns, decl.classification == "emission",
                 types, filename, decl.line, "extern")
         # item 257 (Slice 2): the `retry N` budget, legal only alongside
@@ -4879,9 +4923,11 @@ def _lower_externs(program: Program, filename: str, types: dict,
                if decl.config else {}),
             # item 257: the `validated` flag and the derived response schema, a
             # compile-time-constant dict the emit-side validate seam checks the
-            # completion against. ADDITIVE: absent unless the author wrote
-            # `validated`, so every existing extern's IR is byte-identical.
-            **({"validated": True, "response_schema": validated_schema}
+            # completion against, plus item 513's derived decoding grammar, the
+            # compile-time-constant a provider constrains the decode with.
+            # ADDITIVE: absent unless the author wrote `validated`, so every
+            # existing extern's IR is byte-identical.
+            **({"validated": True, **validated_response_ir}
                if decl.validated else {}),
             # item 257 (Slice 2): the retry budget (§5.2), a static crossing
             # attribute. Absent unless `retry N` was written, so byte-identical.
@@ -8079,8 +8125,10 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # is byte-identical.
                         **({"cache": _cache_ir(m.cache)} if m.cache else {}),
                         # item 257: `validated` + the derived `response_schema`,
-                        # additive (byte-identical when absent). The gate refuses
-                        # an unexpressible return type at compile time.
+                        # plus item 513's `response_grammar`; additive
+                        # (byte-identical when absent). The gates refuse an
+                        # unexpressible return type, and one with no unambiguous
+                        # grammar, at compile time.
                         **_method_validated_ir(m, types, program.filename),
                         # item 457: the `route` clause resolved to a bind table +
                         # return classification, additive (byte-identical when the
