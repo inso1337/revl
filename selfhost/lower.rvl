@@ -13835,8 +13835,58 @@ fn cir_expr(e: Expr, sc: List[Str], hostSc: List[Str], reqSet: List[Str]) -> IrR
     // emission: the reference (`_lower_component_pure_expr` EmitExpr) strips the
     // marker and lowers the inner call, so the IR node is just that call.
     Emit(u)     => cir_expr(u.e, sc, hostSc, reqSet),
+    // A `${…}` template in a component or provide-method body lowers to a
+    // `format` node, NOT to the fn body's `interp` concat: the reference's
+    // component path (`_lower_component_pure_expr`'s Interp arm) walks the
+    // parts in the CURRENT lexical scope and builds a positional template, and
+    // each tier renders it through its own `fmt` runtime helper. Lowering it as
+    // an `interp` here would be a silently different node for the same source.
+    Templ(t)    => cir_format(t.parts, sc, hostSc, reqSet),
     _           => mk_irres(false, ""),
   }
+}
+
+// Every literal `$` in a template's TEXT is doubled, so a `$` the author wrote
+// can never be read back as a positional slot (A4). The reference spells this
+// `value.replace("$", "$$")`; the frontend exposes no `replace`, so it is a
+// character walk here.
+fn dollar_escape(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < s.length()) {
+    let c = s.charAt(i)
+    out = c == "$" ? out.concat("$$") : out.concat(c)
+    i += 1
+  }
+  return out
+}
+
+// The parts of a component-body template -> `{kind: "format", template, args}`.
+// Text segments are escaped and concatenated; each `${…}` becomes `$<n>` and
+// appends its lowered expression to `args`, in order. An operand the component
+// expression lowering cannot read fails the WHOLE node rather than dropping a
+// slot — a template missing an argument is not the program the author wrote.
+fn cir_format(parts: List[PartN], sc: List[Str], hostSc: List[Str],
+              reqSet: List[Str]) -> IrRes {
+  var tmpl = ""
+  var args = ""
+  var n = 0
+  var i = 0
+  while (i < parts.length()) {
+    let p = parts[i]
+    if (p.kind == "t") {
+      tmpl = tmpl.concat(dollar_escape(p.text))
+    } else {
+      let v = cir_expr(p.e, sc, hostSc, reqSet)
+      if (!v.ok) { return mk_irres(false, "") }
+      tmpl = tmpl.concat("$").concat(n.to_str())
+      args = args == "" ? v.js : args.concat(", ").concat(v.js)
+      n += 1
+    }
+    i += 1
+  }
+  return mk_irres(true, "{\"kind\": \"format\", \"template\": ".concat(jstr(tmpl))
+    .concat(", \"args\": [").concat(args).concat("]}"))
 }
 
 fn cir_args(args: List[Expr], i: Int, sc: List[Str], hostSc: List[Str], reqSet: List[Str], acc: Str) -> IrRes {
