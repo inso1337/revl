@@ -80,9 +80,12 @@ def test_the_demo_shows_both_a_refusal_and_an_uncompensated_step():
     assert "`revl compile` refuses" in out, out
     assert "the boundary policy REFUSES admission" in out, out
     # `ui.download` is irreversible and `ui.click` is unknown; item 522 treats
-    # unknown exactly as irreversible, so neither may report compensated.
-    assert "[BARE]         LegacyAgent  host fetch_receipt()" in out, out
-    assert "[BARE]         LegacyAgent  host actuate()" in out, out
+    # unknown exactly as irreversible, so neither may report compensated - and
+    # under item 522's five residue states neither may report `bare` either,
+    # because that word also covers the reads. Both are `uncompensated`: an
+    # inverse was possible to ask for and none exists.
+    assert "[UNCOMPENSATED] LegacyAgent  host fetch_receipt()" in out, out
+    assert "[UNCOMPENSATED] LegacyAgent  host actuate()" in out, out
     assert "Compensation is not inversion" in out, out
     # and the demo refuses the one-word summary item 546 rules out.
     assert "rolled back cleanly" in out, out

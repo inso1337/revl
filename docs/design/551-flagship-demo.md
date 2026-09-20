@@ -105,17 +105,31 @@ a `compensate` and neither can be reported as undone. `ui.text` is
 erasure report prints the difference and refuses to collapse it:
 
 ```
-[2] BOUNDARY CROSSINGS - 7 (1 compensated, 6 bare)
-    [BARE]         LegacyAgent  host actuate()
-    [BARE]         LegacyAgent  host fetch_receipt()
-    [compensated]  LegacyAgent  host type_amount()
+[2] BOUNDARY CROSSINGS — 7 (1 compensated, 6 bare)  [computer-use crossings are counted coarsely here; the split below is the finding]
+    [BARE]         LegacyAgent  emit ledger.adjust
+    [BARE]         LegacyAgent  emit peer.adjust
+    [UNCOMPENSATED] LegacyAgent  host actuate()
+    [UNCOMPENSATED] LegacyAgent  host fetch_receipt()
+    [untouched]    LegacyAgent  host locate()
+    [untouched]    LegacyAgent  host read_pane()
+    [restored]     LegacyAgent  host type_amount()
+    computer-use revert split (item 522) — aggregate: UNCOMPENSATED (the WEAKEST part, not the average)
+      uncompensated  actuate, fetch_receipt
+      restored       type_amount
+      untouched      locate, read_pane
+      compensate LIFO: type_amount
 ```
+
+The headline counts are the two-state ones a consumer already gates on, and
+they are COARSE: they count a READ as bare. Item 522 (PR #1287) says so on the
+same line rather than leaving the headline number to be read as the finding.
 
 Item 546 (PR #1256) settled the vocabulary and this demo holds to it: a revert
 restores some layers and only compensates others, and "rolled back" is not one
 word covering both. Nothing in this demo may be summarised as "and then it
-rolled back cleanly". A compensated crossing still left the system, and a bare
-one had nothing done about it at all.
+rolled back cleanly". A compensated crossing still left the system, and an
+uncompensated one has no inverse to run - which is a different fact from a read
+that changed nothing, and item 522 (PR #1287) splits the two apart.
 
 ---
 
@@ -327,8 +341,9 @@ the review itself drew, and section 5 is the list of what the other side owes".
   source file's path, because the compiled IR carries `"source"`, so the demo
   asserts the verdict and the accept/reject pair rather than a hash value.
   Whether that is intended is not decided here.
-* The `[compensated]` row for `ui.text` records that an inverse was declared.
-  Nothing in this demo runs it, and the erasure report's own text is that
-  compensation is not inversion.
+* The `[restored]` row for `ui.text` records that an inverse was DECLARED.
+  Nothing in this demo runs it: `restored` here is the residue state item 522
+  assigns a step whose inverse exists, not an observation that the field came
+  back. No phase executes anywhere in this demo.
 * The `@py` bodies are never executed, so nothing here exercises any backend
   emitter.

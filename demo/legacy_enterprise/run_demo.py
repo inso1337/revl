@@ -257,12 +257,12 @@ def main() -> int:
     _check(proc.returncode == 0, "`revl erase-report` renders the realm")
     report = proc.stdout
     _artifact("revl erase-report ladder.rvl --realm billing", report, keep=24)
-    _check("[BARE]         LegacyAgent  host fetch_receipt()" in report,
-           "the `ui.download` crossing reports BARE - nothing was done about it")
-    _check("[BARE]         LegacyAgent  host actuate()" in report,
-           "the `ui.click` crossing reports BARE too, because unknown is not clean")
-    _check("[compensated]  LegacyAgent  host type_amount()" in report,
-           "the `ui.text` crossing reports compensated - an offset landed")
+    _check("[UNCOMPENSATED] LegacyAgent  host fetch_receipt()" in report,
+           "the `ui.download` crossing reports UNCOMPENSATED - no inverse exists")
+    _check("[UNCOMPENSATED] LegacyAgent  host actuate()" in report,
+           "the `ui.click` crossing reports UNCOMPENSATED too, because unknown is not clean")
+    _check("[restored]     LegacyAgent  host type_amount()" in report,
+           "the `ui.text` crossing reports restored - its inverse puts the field back")
     _check("Compensation is not inversion" in report,
            "the report itself refuses to call a compensation a restore")
     print("     read it in item 546's vocabulary: `type_amount` was COMPENSATED,")

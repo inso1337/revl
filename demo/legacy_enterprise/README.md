@@ -59,8 +59,12 @@ Each of those has a named owner, two of them upstream in the harness, and none
 of them is stubbed here. A stub in a demo becomes a claim the project did not
 earn.
 
-`ui.text` reports `[compensated]`, which is not the same as restored. Nothing
-here may be summarised as "it rolled back cleanly".
+`ui.text` reports `[restored]` - its declared inverse puts the field back.
+`ui.click` and `ui.download` report `[uncompensated]`: an inverse was possible
+to ask for and none exists. The reads report `[untouched]`. Those are three
+different facts and item 522 gives them three different words, because the
+aggregate over a step set is its WEAKEST part. Nothing here may be summarised
+as "it rolled back cleanly".
 
 ## The files
 
