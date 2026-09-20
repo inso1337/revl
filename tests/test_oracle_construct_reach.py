@@ -155,7 +155,6 @@ def test_the_gate_census_row_does_not_read_the_census_baseline(data):
     """The two halves have no shared input. The baseline's bucket names are
     what the row used to call its reference constructs, so their absence is the
     defect's own signature."""
-    tool = _tool()
     report = data["gate_census"]
     baseline = json.loads(
         (ROOT / "tools" / "gate_reference_census_baseline.json").read_text())
