@@ -340,15 +340,15 @@ def named_guarantees() -> list[str]:
 #: `diagnostics` (the catalogue the codes are drawn from). Their bytes are what
 #: :func:`ruleset_digest` identifies.
 #:
-#: `retention` is here for a different reason than the rest, and the difference
-#: is the point: it raises no refusal of its own, but `PERSISTENCE_SINK_SCOPES`
-#: — the crossings at which a past-deadline `Retained[T, P]` value is refused
-#: under `G-RETAIN` — is read by `taint.py` to decide whether to refuse at all.
-#: A member whose BYTES move the set of programs that are refused is a rule, so
-#: its bytes are part of the digest: without it two artifacts could carry the
-#: same ruleset digest while having been admitted under different retention
-#: rules, which is the drift the digest exists to catch (issue #989). It cites
-#: no numbered `(Gn)` tag, so listing it here adds it to the digest without
+#: THE MEMBERSHIP RULE (issue #989): a module whose BYTES move the set of
+#: programs the frontend refuses is a rule, and its bytes are part of the
+#: digest. A module does not have to raise to meet it. `retention` raises no
+#: refusal of its own, but `PERSISTENCE_SINK_SCOPES`, the crossings at which a
+#: past-deadline `Retained[T, P]` value is refused under `G-RETAIN`, is read by
+#: `taint.py` to decide whether to refuse at all. Without it two artifacts could
+#: carry the same ruleset digest while having been admitted under different
+#: retention rules, which is the drift the digest exists to catch. It cites no
+#: numbered `(Gn)` tag, so listing it here adds it to the digest without
 #: changing the cited set :func:`discharged_guarantees` reads.
 #:
 #: `model_route` and `model_council` are here on that same rule, and each meets
@@ -361,10 +361,113 @@ def named_guarantees() -> list[str]:
 #: under `model_route.CODE`. Neither cites a `(Gn)` tag, so both are digest
 #: inputs and not cited codes, exactly as `retention` is.
 #: `tests/test_1311_model_routes_not_in_ir.py` pins it.
+#:
+#: The eleven members after `model_council` were found by AUDITING THE WHOLE
+#: LIST against the rule rather than by adding the two that a feature happened
+#: to touch. Each was established the same way: neutralise the module's
+#: contribution in one line (empty a table, make a predicate constant) and re-run
+#: the reference frontend over `examples/rejections/` and the module's own
+#: tests. Every one of them moved the refusal set while `ruleset_digest()` did
+#: not move at all, which is the definition of a missing member. What each one
+#: decides:
+#:
+#:   `typecheck`       the type relation itself. `lower`, `taint`, `admission`,
+#:                     `compiler`, `emission_analysis`, `placement` and
+#:                     `composition` all import it and refuse on its answer.
+#:   `lexer`           the token alphabet `parser` refuses from. `parser` is a
+#:                     member and its tokenizer was not.
+#:   `composition`     computes the per-row `AdmissionProfile` that
+#:                     `compile_files` then enforces (426 S4), so it decides
+#:                     whether a non-first-party row is confined at all. Its
+#:                     resolution checks stay off the trusted path, but the
+#:                     profile it produces is an INPUT to the trusted path.
+#:   `hostref`         the jail an `extern` host-module ref resolves under.
+#:   `hostfile`        the jail an `extern` host-body file resolves under.
+#:   `cap_order`       the closed registry of capability parameters and the
+#:                     `covers` relation; `parser` turns its `CapError` into a
+#:                     refusal, so the registry table decides the refusal.
+#:   `ui_family`       item 521's reserved computer-use namespace, a table
+#:                     `parser` reads at the declaration site. Pure table, no
+#:                     raise of its own: the `retention` shape exactly.
+#:   `resources`       item 308's R0 predicate, enforced at extern admission in
+#:                     `lower`. Also a pure table.
+#:   `kernel_boundary` item 544's kernel capability enumeration, the authority a
+#:                     candidate may not hold, read by `lower` and
+#:                     `admit_profile`.
+#:   `cardinality`     item 260's per-activation crossing bound, which `lower`
+#:                     refuses a declared `calls` ceiling against on the count
+#:                     axis.
+#:   `decode_grammar`  item 513's grammar renderer. A schema node it does not
+#:                     recognise is a refusal in `lower` rather than a permissive
+#:                     rule, so its coverage decides which `validated` emissions
+#:                     are admitted.
+#:
+#: None of the eleven cites a numbered `(Gn)` tag, so all eleven are digest
+#: inputs and not cited codes, exactly as `retention` is:
+#: :func:`discharged_guarantees` is unchanged by adding them.
+#:
+#: WHY THIS IS STILL A LIST. Membership is reachability plus effect, and neither
+#: is a property of the bytes of this file: a module refuses only when the
+#: frontend reaches it on some program, which only a run settles. An import-time
+#: derivation would have to either run a corpus (too slow, and it would make the
+#: digest depend on the corpus) or take the whole import closure of the frontend
+#: (which reaches `deploy`, `synthesize` and the per-tier runners, and would move
+#: every attested digest on a change to code that refuses nothing). So the list
+#: stays, and `tests/test_ruleset_modules_completeness.py` derives membership
+#: instead of restating it: it computes the modules that ORIGINATE a refusal
+#: over the committed rejection corpus, and it computes the sibling modules the
+#: rule modules IMPORT, and it fails on anything in either set that is neither a
+#: member nor classified in :data:`NOT_A_RULE`.
 RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "taint", "retention", "placement", "emission_analysis",
                    "admit_profile", "holes", "diagnostics",
-                   "model_route", "model_council")
+                   "model_route", "model_council",
+                   "typecheck", "lexer", "composition", "hostref", "hostfile",
+                   "cap_order", "ui_family", "resources", "kernel_boundary",
+                   "cardinality", "decode_grammar")
+
+#: The sibling modules a rule module imports that are NOT rules, each with the
+#: reason it is not one. This is the argued half of the membership question and
+#: it is deliberately small: `tests/test_ruleset_modules_completeness.py`
+#: asserts SET EQUALITY between this table and the import fringe of
+#: :data:`RULESET_MODULES`, so a new import into the frontend cannot be left
+#: unclassified and an entry that stops being reachable cannot be left behind.
+#: An entry here is a claim that the module's bytes leave the refusal set
+#: unchanged, and the two entries that could be argued either way were measured
+#: rather than argued: neutralising `ownership.annotate_ir` and `why.render`
+#: each left the admit/refuse verdict identical on all 194 programs under
+#: `examples/`.
+NOT_A_RULE = {
+    "errors": "the RevlError carrier itself. It transports a refusal; it "
+              "decides none.",
+    "why": "the why-trace attached to a refusal as evidence. Measured: "
+           "neutralising `render` moves no verdict.",
+    "navigate": "the nearest-allowed-space projection of a refusal that "
+                "already happened. It grants nothing and decides nothing "
+                "(item 274 design section 4).",
+    "ownership": "annotates the IR with in-place accumulation facts and "
+                 "refuses nothing. Measured: neutralising `annotate_ir` moves "
+                 "no verdict. It does change emitted IR bytes, which the "
+                 "attestation's own content hash already covers.",
+    "boundary": "the G8 boundary walk used by `audit`, `plan` and `query`. "
+                "Reporting surface, not an admission decision.",
+    "_paths": "resolves where `backends/` and `stdlib/` sit under a checkout "
+              "or a wheel. It carries no rule. The stdlib SOURCES it points at "
+              "are outside the digest too, which is the deliberate bound: this "
+              "digest identifies the checker, not the library it checks.",
+    "attest": "this module: the consumer of the digest, not a checker.",
+    "intent": "declared-intent reporting on an already-admitted document.",
+    "policy": "the runtime policy evaluator; it runs after admission.",
+    "erasure_receipt": "an after-the-fact receipt over a completed erasure.",
+    "estop": "the runtime emergency stop.",
+    "deploy": "the deploy driver, reached from `placement`'s conductor.",
+    "distribute": "process-seam distributability for `placement`, reported "
+                  "rather than refused at admission.",
+    "peer_offer": "the federation offer surface, reached from `placement`.",
+    "sandbox_runtime": "the child-process sandbox `placement` launches.",
+    "synthesize": "`revl synthesize`, a generator rather than a checker.",
+    "tee_attestation": "TEE quote verification at run time.",
+}
 
 #: The modules SCANNED for the G-codes the ruleset cites. `diagnostics` is
 #: excluded on purpose: it is the catalogue, and reading the list off the
