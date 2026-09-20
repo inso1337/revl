@@ -63,7 +63,12 @@ VERBS: dict[str, dict[str, str]] = {
         "find": "resolve a semantic target from observed content; the result "
                 "is a claim requiring verification, not authority",
         "click": "actuate a semantic target",
-        "type": "generate key input into a semantic target",
+        # `text`, not `type`: `type` is a RESERVED KEYWORD, so `ui.type` cannot
+        # be spelled in a dotted capability token at the declaration site OR in
+        # a `secret K for C` binding. A verb that can be declared but not
+        # selected by the surfaces that bound it is worse than a verb with a
+        # different name (design §3, "what the issue's sketch called `ui.type`").
+        "text": "generate key input into a semantic target",
         "download": "a file arrives on the host - a real emission with its "
                     "own capability, never a side effect of a click",
     },
