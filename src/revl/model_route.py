@@ -72,6 +72,34 @@ unrankable one a fallback lands on.
 What revl still does NOT know is whether the declared device exists. The
 profile is a claim about hardware, checked against arms and ceilings and
 against nothing else.
+
+WHAT ITEM 519 ADDS HERE
+-----------------------
+`docs/design/541-model-in-attenuation.md` is the design. A second optional
+clause states the capability tokens a call to the role can itself reach, which
+is what puts the role in the capability attenuation product:
+
+    model role fast on_device device gpu memory 6144 quant q4_k_m
+                              reaches [net, fs.read]
+
+Omitting it leaves the reach UNDECLARED, which is `UNDECLARED_REACH` and not
+an empty set. The fold itself is `revl.lower`'s, beside the spawn-edge fold it
+reuses; what lives here is the reading of silence.
+
+THE TWO CLAUSES AFTER A RESIDENCE
+---------------------------------
+`device ...` is written first and `reaches [...]` second, each independently
+omittable, and the parser refuses the other order rather than accepting two
+spellings of one declaration. The order follows the reading: `device` refines
+the residence in front of it, since both answer where the call runs, and the
+bracketed capability list reads last, where `requires` and `emission` have
+already taught a reader to expect one.
+
+They also fail in opposite directions, which is why neither defaults to the
+other. An omitted `device` clause is a role making no resource claim, refused
+only where a claim is needed (an ordered candidate set has to be rankable). An
+omitted `reaches` clause is a reach nobody wrote down, refused wherever it is
+read.
 """
 
 from __future__ import annotations
@@ -111,23 +139,71 @@ _RESIDENCE_VOCABULARY = ", ".join(RESIDENCES)
 _DEVICE_VOCABULARY = ", ".join(DEVICE_CLASSES)
 
 
+# The reach of a role that declares none. UNDECLARED IS NOT EMPTY: a model is
+# an authority surrogate, so the question "how far does this role reach" always
+# has an answer, and the answer a declaration does not give is the unnameable
+# `*` - the one token no `requires` key can name and that `cap_order.covers`
+# therefore covers with nothing (item 519).
+#
+# This is the whole failure direction of the item. Reading an undeclared reach
+# as EMPTY would make an unknown model inert in the product, which is the
+# fail-open shape: the component that consults a model it has said nothing
+# about is exactly the one whose effective ceiling is unknown, and an unknown
+# ceiling is refused here rather than assumed to be zero. It is the same choice
+# `_spawn_emission_surface` already makes for a service method that declares
+# `emission` with no capability list, where `None` becomes `*` and not `set()`.
+UNDECLARED_REACH = ("*",)
+
+
 @dataclass(frozen=True)
 class Role:
     """A validated `model role` declaration.
+
+    A role carries two independently optional clauses, and both default to
+    `None`, so `Role(name, residence, line)` is still the whole declaration
+    for a role written against item 512 alone.
 
     `profile` is the item-515 device clause, or `None` for a role declared
     without one. It is the resource the placement DEMANDS; what a member is
     actually loaded onto is the provider's published profile and reaches revl
     only inside an opaque `placement_digest` (`revl.model_profile`).
+
+    `reach` is the `reaches [...]` clause of item 519, as declared: a tuple of
+    capability tokens, `("*",)` for `reaches [*]`, `()` for `reaches []`, and
+    `None` when the clause was omitted. Read it through `reach_tokens` rather
+    than directly, which is what resolves `None` to `UNDECLARED_REACH`.
+
+    The two mean different things when omitted, and deliberately so. An
+    omitted `device` clause is a role that makes no resource claim, which is
+    refused only where a claim is needed (an ordered candidate set); an
+    omitted `reaches` clause is a role whose reach is UNDECLARED, which is the
+    unnameable `*` and is refused wherever it is read.
     """
     name: str
     residence: str
     line: int
     profile: DeviceProfile | None = None
+    reach: tuple | None = None
 
     @property
     def off_device(self) -> bool:
         return self.residence == "off_device"
+
+    @property
+    def reach_declared(self) -> bool:
+        """Whether the role wrote a `reaches [...]` clause at all.
+
+        The diagnostic reads this so it can say `declares no reach` instead of
+        claiming the author wrote `reaches [*]`, which they did not."""
+        return self.reach is not None
+
+    @property
+    def reach_tokens(self) -> tuple:
+        """The capability tokens a call to this role can reach.
+
+        `UNDECLARED_REACH` when the clause is absent. Every consumer goes
+        through here, so the fail-closed reading of silence is decided once."""
+        return UNDECLARED_REACH if self.reach is None else self.reach
 
 
 def roles(program, filename: str | None = None) -> dict[str, Role]:
@@ -165,7 +241,8 @@ def roles(program, filename: str | None = None) -> dict[str, Role]:
                 code=CODE, category=CATEGORY,
             )
         table[decl.name] = Role(decl.name, decl.residence, decl.line,
-                                _profile(decl, filename))
+                                _profile(decl, filename),
+                                getattr(decl, "reach", None))
     return table
 
 
@@ -296,11 +373,12 @@ def _check_candidate_set(where, comp, stmt, arm, resolved) -> None:
 def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
     """Check every `route model` block in the program against its role table.
 
-    Returns `{component: {action: {origin: {role, residence, candidates}}}}`
-    for the blocks that passed. `role` and `residence` are the arm's HEAD and
-    are what item 514's flow walk reads; `candidates` is the item-515 ordered
-    set, a one-tuple for an arm written with a single role. A program with no
-    block gets `{}`.
+    Returns `{component: {action: {origin: {role, residence, candidates,
+    line}}}}` for the blocks that passed. `role` and `residence` are the arm's
+    HEAD and are what item 514's flow walk reads; `candidates` is the item-515
+    ordered set, a one-tuple for an arm written with a single role; `line` is
+    the arm's line, which item 519's attenuation refusal points at. A program
+    with no block gets `{}`.
     """
     from .parser import ModelRouteStmt  # noqa: PLC0415 - import cycle
 
@@ -459,10 +537,15 @@ def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
                 head = resolved[0]
                 if len(resolved) > 1:
                     _check_candidate_set(where, comp, stmt, arm, resolved)
+                # `line` is additive (item 519): the attenuation refusal
+                # points at the ARM that routes through the role, not at the
+                # component head. A consumer reading `role`/`residence`/
+                # `candidates` is unaffected.
                 arms[arm.origin] = {
                     "role": head.name,
                     "residence": head.residence,
                     "candidates": tuple(r.name for r in resolved),
+                    "line": arm.line,
                 }
             actions[stmt.action] = arms
         if actions:
