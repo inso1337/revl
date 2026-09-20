@@ -7560,7 +7560,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # program declaring no role and no route walks two empty lists and is
     # byte-identical through here; nothing is written to the IR either way
     # (docs/design/531-model-placement.md).
-    _model_route.check(program)
+    # item 514: the VALUE side reads this table rather than re-deriving one from
+    # the AST (`docs/design/531-model-placement.md` section 9 built `check()`'s
+    # return shape for it). Handing it to the taint model here is what makes the
+    # flow walk able to ask, at a `model.*` crossing, where this action's model
+    # calls are declared to go. A program with no block hands over `{}` and
+    # every lookup in the walk misses, so nothing moves.
+    taint_model.model_routes = _model_route.check(program)
 
     ambient_services = {
         name: _service_from_ir(name, spec)

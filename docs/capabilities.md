@@ -124,9 +124,19 @@ something that emits. The capability version is the same fixed point over
 *sets* (`_emitting_capabilities`):
 
 ```
-caps(extern emission fn e) = { e }
-caps(fn f)                 = ⋃ { caps(g) | f calls g }
+caps(extern emission fn e)       = { e }
+caps(extern emission[C] fn e)    = C
+caps(extern witnessed[C] fn e)   = C
+caps(fn f)                       = ⋃ { caps(g) | f calls g }
 ```
+
+The seed is `capabilities or (name,)`, §2's rule written out: a scope replaces
+the name, so the token G4 refuses on is the token `policy.component_reach`
+reports and a `capability <glob>` rule names. Seeding a scoped extern by its
+name instead made G4 refuse a provider that was exactly in bounds
+(`emission[db]` implemented through `extern emission[db] fn pg_write`) and hand
+the author a repair that widened a correct declaration toward a token no rule
+can select.
 
 iterated to the least fixed point, so a capability propagates through any
 depth of `fn` calls and recursion terminates. A provide-method's capability
