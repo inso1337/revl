@@ -570,6 +570,21 @@ def plans(ir: dict, approval_tokens=frozenset()) -> list[dict]:
         return []
     out: list[dict] = []
     for comp in ir.get("components") or []:
+        # the ACTIVATION body first. It is the one place `await approval[C]`
+        # can mint an `Approval[C]`, so it is the one place a computer-use
+        # crossing can be `confirmed-per-crossing` today. Reading it is not a
+        # completeness detail: without it this function could only ever report
+        # `unconfirmed`, and a gate that can only report one value is not a
+        # measurement.
+        activation = {"name": "<activation>",
+                      "body": [s for s in (comp.get("body") or [])
+                               if isinstance(s, dict)
+                               and s.get("step") != "provide"]}
+        plan = method_plan(activation, externs, approval_tokens)
+        if plan is not None:
+            plan["component"] = comp.get("name")
+            plan["key"] = "<activation>"
+            out.append(plan)
         for entry in comp.get("body") or []:
             if not isinstance(entry, dict) or entry.get("step") != "provide":
                 continue
