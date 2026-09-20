@@ -51,7 +51,7 @@ _BASE = (
     "    return\n"
     "}\n"
     "service Ops {\n"
-    "  emission fn shout(sink: Str, msg: Str)\n"
+    "  emission[announce] fn shout(sink: Str, msg: Str)\n"
     "}\n"
     "component Agent provides ops: Ops {\n"
     "  provide ops {\n"
@@ -62,7 +62,7 @@ _BASE = (
 
 # The untrusted turn: NO host code of its own, it only forwards to `ops`.
 _TURN_FORWARD = (
-    "service Turn { emission fn run(sink: Str, msg: Str) }\n"
+    "service Turn { emission[ops] fn run(sink: Str, msg: Str) }\n"
     "component TurnComp requires ops: Ops provides turn: Turn {\n"
     "  provide turn {\n"
     '    fn run(sink, msg) { emit ops.shout(sink, msg) }\n'
@@ -73,7 +73,7 @@ _TURN_FORWARD = (
 # The sharper shape: the crossing sits in the turn's ACTIVATION body, so it
 # fires the moment the turn is wired — no call is ever made.
 _TURN_ACTIVATION = (
-    "service Turn {{ emission fn run() }}\n"
+    "service Turn {{ emission[ops] fn run() }}\n"
     "component TurnComp requires ops: Ops provides turn: Turn {{\n"
     '  emit ops.shout("{sink}", "activation")\n'
     "  provide turn {{ fn run() {{ }} }}\n"
@@ -418,7 +418,7 @@ _WITNESSED = (
     "        _f.write('announce:' + msg + '\\n')\n"
     "    return\n"
     "}\n"
-    "service Ops { emission fn shout(sink: Str, msg: Str) }\n"
+    "service Ops { emission[announce] fn shout(sink: Str, msg: Str) }\n"
     "component Agent provides ops: Ops {\n"
     "  let seen = effect Map.new() undo seen.drop()\n"
     "  provide ops {\n"
