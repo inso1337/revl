@@ -121,11 +121,42 @@ SUBJECT_ROOTS = (
     "stdlib/",
 )
 
-# Files this tool reads that are not python modules, and so do not appear in
-# `sys.modules` for the closure check to find.
+# Repo files a scoring run loads that `sys.modules` does not show, because they
+# are read as data or executed through `spec_from_file_location` without being
+# registered. They are listed rather than discovered so the closure check can
+# be complete; `tests/test_heldout_scoring.py` classifies each one.
 DATA_INPUTS = (
     "selfhost/lower.rvl",
+    "backends/python/emit.py",
+    "tools/build_gate_crate.py",
 )
+
+# Repo paths the census names that a scoring run never reaches: they belong to
+# `--check`, `--record`, `--fuzz` and `--engine crate`, modes `run()` does not
+# call. Declared rather than assumed, so a future edit that starts reaching one
+# fails the classification test instead of widening the fence silently.
+SCORING_UNREACHED = (
+    "tools/gate_reference_census_baseline.json",
+    "tools/fuzz_frontend.py",
+)
+
+
+def classify(path: str):
+    """`"fence"`, `"subject"`, `"unreached"` or None for a repo-relative path.
+
+    None is the answer that matters: an in-repo file a scoring run loads and
+    that is in no category is a hole in the fence, and the classification test
+    turns it into a RED rather than leaving it to be noticed.
+    """
+    norm = path.replace("\\", "/")
+    if norm in HELD_OUT_FENCE:
+        return "fence"
+    if norm in SCORING_UNREACHED:
+        return "unreached"
+    for root in SUBJECT_ROOTS:
+        if norm.startswith(root):
+            return "subject"
+    return None
 
 # A seed shorter than this is not searched for in the tree: a short string
 # matches somewhere by accident and the refusal would be noise rather than a
@@ -423,7 +454,15 @@ ZERO_TOLERANCE = ("false-admission", "gate-fault")
 
 
 def score(cases, census, engine=None, reference=None):
-    """`{bucket: [case_id]}` over the draw."""
+    """`(buckets, liveness)` over the draw.
+
+    `liveness` is the half that keeps a clean verdict from being a vacuum. The
+    census bucket `agree-admit` conflates two different gate answers -- an
+    ISSUED admission and a mere no-objection where the reference also admits --
+    so an empty `false-admission` bucket is consistent both with a sound gate
+    and with a draw that never reached the admission arm at all. The counters
+    below separate those, and `run()` refuses on the second.
+    """
     try:
         if reference is None:
             reference, _oracle = census._reference()
@@ -435,13 +474,29 @@ def score(cases, census, engine=None, reference=None):
         raise Refusal("engine-unavailable:" + type(exc).__name__)
     sources = [src for _, src in cases]
     buckets = {}
+    issued = 0
+    refused_by_reference = 0
+    near_miss_refused = 0
     for (case_id, source), verdict in zip(cases, engine.verdicts(sources)):
-        name = census.bucket(reference(source), verdict)
+        ref = reference(source)
+        name = census.bucket(ref, verdict)
         buckets.setdefault(name, []).append(case_id)
-    return buckets
+        if verdict[0] == "admitted":
+            issued += 1
+        if ref[0] != "":
+            refused_by_reference += 1
+            if case_id.startswith("near:"):
+                near_miss_refused += 1
+    liveness = {
+        "issued_admissions": issued,
+        "reference_refusals": refused_by_reference,
+        "near_miss_reference_refusals": near_miss_refused,
+    }
+    return buckets, liveness
 
 
-def verdict_record(buckets, *, seed, source, count, fence, changed_count):
+def verdict_record(buckets, liveness, *, seed, source, count, fence,
+                   changed_count):
     findings = {name: buckets.get(name, []) for name in ZERO_TOLERANCE}
     clean = not any(findings.values())
     return {
@@ -454,6 +509,7 @@ def verdict_record(buckets, *, seed, source, count, fence, changed_count):
         "seed_source": source,
         "fence": list(fence),
         "candidate_changed_files": changed_count,
+        "liveness": liveness,
         "zero_tolerance": findings,
         "buckets": {name: len(ids) for name, ids in sorted(buckets.items())},
     }
@@ -470,6 +526,7 @@ def refusal_record(reason: str):
         "seed_source": None,
         "fence": list(HELD_OUT_FENCE),
         "candidate_changed_files": None,
+        "liveness": {},
         "zero_tolerance": {name: [] for name in ZERO_TOLERANCE},
         "buckets": {},
     }
@@ -492,11 +549,22 @@ def run(*, argv_seed, env, count, changed, root=ROOT, census=None,
         cases = draw(seed, count)
         if census is None:
             census = load_census()
-        buckets = score(cases, census, engine=engine, reference=reference)
+        buckets, liveness = score(cases, census, engine=engine,
+                                  reference=reference)
+        # A clean verdict on a draw that never reached the guard is the
+        # vacuous-pass shape, so it is a refusal rather than a pass. The gate
+        # has to have ISSUED at least one admission (the arm ran) and the draw
+        # has to carry at least one near miss the reference refuses (there was
+        # something the arm could have got wrong).
+        if liveness["issued_admissions"] == 0:
+            raise Refusal("draw-reached-no-admission-arm")
+        if liveness["near_miss_reference_refusals"] == 0:
+            raise Refusal("draw-carries-no-refused-near-miss")
     except Refusal as exc:
         return refusal_record(exc.reason), REFUSED
     record = verdict_record(
         buckets,
+        liveness,
         seed=seed_digest(seed),
         source=source,
         count=len(cases),
@@ -519,6 +587,11 @@ def render(record) -> str:
     lines.append("  seed " + str(record["seed_digest"])
                  + " from " + str(record["seed_source"]))
     lines.append("  draw " + str(record.get("draw_digest")))
+    live = record.get("liveness", {})
+    lines.append("  liveness: " + str(live.get("issued_admissions"))
+                 + " issued admissions, "
+                 + str(live.get("near_miss_reference_refusals"))
+                 + " near misses the reference refuses")
     for name, ids in record["zero_tolerance"].items():
         mark = "!!" if ids else "  "
         lines.append("  " + mark + " " + name + ": " + str(len(ids)))
