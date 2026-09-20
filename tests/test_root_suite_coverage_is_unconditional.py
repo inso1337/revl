@@ -765,8 +765,18 @@ def test_the_selector_returns_a_non_empty_selection_for_every_fixture():
                 )
     for diff in SKIPPABLE_DIFFS:
         result = at.select(list(diff), ROOT)
-        assert result["pytest"] == ["tests/test_doc_examples.py"], (
-            f"a documentation-only diff is not mapped to the doc-example sweep: "
+        # Two modules, and both are load-bearing for a docs-only pull request.
+        # `test_doc_examples.py` compiles the fenced examples. `test_check_
+        # vision_claims.py` arrived with item 534 and is here for a reason that
+        # reads like a tautology and is not: `tools/docgen.py --check` runs in
+        # the `frontend` job, which a documentation-only diff SKIPS, so on
+        # exactly the pull request that moves a document, the gate that judges
+        # documents would not run. The selector is what collects it.
+        assert sorted(result["pytest"]) == [
+            "tests/test_check_vision_claims.py",
+            "tests/test_doc_examples.py",
+        ], (
+            f"a documentation-only diff is not mapped to the doc sweep: "
             f"pytest={result['pytest']!r} reason={result['reason']!r}. If this "
             "changed, re-cost the fast path: documentation-only pull requests "
             "still skip the matrix, so this selection is the only thing that "

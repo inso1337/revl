@@ -16,6 +16,19 @@
     "is identical under CI's python 3.11 and a 3.14 developer venv, and a",
     "`--write` from either is a safe diff."
   ],
+  "_gate_census": [
+    "The `gate_census` entries are guarantee TAGS the gate/reference census",
+    "can name and no DOCUMENT in its corpus draws from the gate. They were",
+    "an empty list until issue #1215, not because the census reached",
+    "everything but because that row took its reference set and its reach",
+    "from the same map, so its gap could not exist.",
+    "",
+    "The census also runs hand-written programs that are not documents",
+    "(`ACCEPTED_PROGRAMS`, `REJECTED_PROGRAMS`, `ADMISSION_PROGRAMS`), and",
+    "four of these five families are exercised by those. So each line is",
+    "owed a real `.rvl` in the tree that spells it, not a claim the family",
+    "is untested anywhere."
+  ],
   "compile": [
     "tests"
   ],
@@ -269,7 +282,13 @@
     "subscribe=<true>",
     "witness=Str"
   ],
-  "gate_census": [],
+  "gate_census": [
+    "BOOT",
+    "HANDOFF",
+    "HOST-ARITY",
+    "ROUTE",
+    "SPAWN"
+  ],
   "lower_ir": [
     "kind=hole",
     "kind=host",
