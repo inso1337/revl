@@ -1039,7 +1039,7 @@ componentless + 28 refused at parse**, and **5400 verdicts compared (225
 files + 339 components + 67 provide methods + 18 spawn edges + 28 parse
 refusals + 267 teardown scenarios + 1620 recoveries + 917 confinements +
 917 surfaces + 337 teardowns + 245 provide-clause components + 81 config
-fields + 339 A2 bodies)**.
+fields + 339 A2 bodies), 5400 agree, 0 mismatches**.
 
 Checker alignment over the 225 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model

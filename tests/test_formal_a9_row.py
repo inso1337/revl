@@ -244,8 +244,12 @@ def _align(harness, verdicts, rel):
     buf = io.StringIO()
     with redirect_stdout(buf):
         fatal = harness.checker_alignment({rel: {}}, [], verdicts)
-    counts = dict(re.findall(r"^  ([a-zA-Z0-9-]+)\s+(\d+)(?:\s+FATAL)?$",
-                             buf.getvalue(), re.MULTILINE))
+    # The report prints every fatal bucket, including the empty ones, so the
+    # reader can see that `missed-A9` really was 0 rather than absent. Only
+    # the non-zero ones are a classification of this file.
+    counts = {k: n for k, n in re.findall(
+        r"^  ([a-zA-Z0-9-]+)\s+(\d+)(?:\s+FATAL)?$",
+        buf.getvalue(), re.MULTILINE) if n != "0"}
     return counts, fatal
 
 

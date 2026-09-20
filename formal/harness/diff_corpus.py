@@ -3340,8 +3340,15 @@ STATUS_END = "<!-- END GENERATED alignment -->"
 
 
 def status_block(census: dict, file_facts: dict, componentless: list[str],
-                 refusals: dict, ref: Verdicts, align: dict) -> str:
-    """The generated census + alignment section of `formal/STATUS.md`."""
+                 refusals: dict, ref: Verdicts, align: dict,
+                 mismatches: int = 0) -> str:
+    """The generated census + alignment section of `formal/STATUS.md`.
+
+    `mismatches` is the differential's own count, which only `main` has (it
+    needs the Lean side). `--write-status` renders 0, and that is not a claim
+    it measured: the gate returns non-zero on ANY mismatch, so a census can
+    only reach a green main saying zero, and a `main` run with a mismatch
+    renders the real number and reports the drift as well."""
     parts = [
         f"{len(ref.files)} files", f"{len(ref.comps)} components",
         f"{len(ref.providers)} provide methods", f"{len(ref.spawns)} spawn edges",
@@ -3369,7 +3376,8 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             f"components -> {census['statements']} statements = "
             f"{len(file_facts)} modeled + {len(componentless)} componentless "
             f"+ {len(refusals)} refused at parse**, and **{ref.total()} "
-            f"verdicts compared ({' + '.join(parts)})**."),
+            f"verdicts compared ({' + '.join(parts)}), "
+            f"{ref.total() - mismatches} agree, {mismatches} mismatches**."),
         "",
         para(
             f"Checker alignment over the {len(file_facts)} modeled files. "
@@ -3542,7 +3550,8 @@ def main() -> int:
 
     fatal = checker_alignment(file_facts, componentless, formal, tsv)
     drift = sync_status(
-        status_block(census, file_facts, componentless, refusals, ref, _ALIGN),
+        status_block(census, file_facts, componentless, refusals, ref, _ALIGN,
+                     len(mismatches)),
         write=False)
     if drift:
         fatal.append(drift)
