@@ -86,6 +86,22 @@ class PinError(RuntimeError):
     """The endpoint answered, but not in a shape the pin can be built from."""
 
 
+def _load_average():
+    """The one-minute load average, or None where the platform has none.
+
+    Recorded per sample so a throughput number carries the machine's state at
+    the moment it was taken. A run that does not reproduce a quoted figure on a
+    loaded machine is a weaker refutation than one taken on an idle machine,
+    and this field is what lets a reader tell those two apart rather than
+    trusting an adjective.
+    """
+    try:
+        import os  # noqa: PLC0415
+        return round(os.getloadavg()[0], 2)
+    except (AttributeError, OSError):
+        return None
+
+
 def _machine() -> str:
     """A coarse machine string: enough to read a throughput number in context,
     and no more. Throughput is machine-bound, so a number without one is not
@@ -273,14 +289,29 @@ def _ollama_sample(endpoint: str, model: str, sampling: dict,
     pc, pd = body.get("prompt_eval_count"), body.get("prompt_eval_duration")
     if not (isinstance(ec, int) and isinstance(ed, int) and ed > 0):
         raise PinError("model pin: ollama reported no usable eval_count/duration")
+    total_ms = (body.get("total_duration") or 0) / 1e6
+    load_ms = (body.get("load_duration") or 0) / 1e6
+    prompt_ms = (body.get("prompt_eval_duration") or 0) / 1e6
+    eval_ms = ed / 1e6
     sample = {
         "generation_tps": ec / (ed / 1e9),
         "generation_tokens": ec,
         # Load time is reported separately and is excluded on purpose: a cold
         # load of a multi-gigabyte weights file dominates wall clock and has
         # nothing to do with the model's throughput.
-        "load_ms": (body.get("load_duration") or 0) / 1e6,
-        "total_ms": (body.get("total_duration") or 0) / 1e6,
+        "load_ms": load_ms,
+        "total_ms": total_ms,
+        # The gap between the wall clock for the request and the work the server
+        # accounts for. It is recorded because "the machine was busy" is
+        # otherwise an excuse rather than a number: a sample whose accounted
+        # work is a fraction of its wall clock was contended, and a reader can
+        # see by how much instead of taking the operator's word for it. It is
+        # NOT subtracted from anything, and the throughput figure above is the
+        # server's own accounted rate either way.
+        "unaccounted_ms": max(0.0, total_ms - load_ms - prompt_ms - eval_ms),
+        "accounted_fraction": (
+            (load_ms + prompt_ms + eval_ms) / total_ms if total_ms > 0 else None),
+        "load_average_1m": _load_average(),
     }
     if isinstance(pc, int) and isinstance(pd, int) and pd > 0:
         sample["prompt_tps"] = pc / (pd / 1e9)
@@ -330,6 +361,10 @@ def measure_throughput(endpoint: str, model: str, kind: str, samples: int,
     warm = [r for r in rows if not r["cold"]] or rows
     gen = [r["generation_tps"] for r in warm]
     prompt = [r["prompt_tps"] for r in warm if "prompt_tps" in r]
+    accounted = [r["accounted_fraction"] for r in warm
+                 if r.get("accounted_fraction") is not None]
+    loads = [r["load_average_1m"] for r in warm
+             if r.get("load_average_1m") is not None]
     out = {
         "samples": rows,
         "n_warm": len(warm),
@@ -337,6 +372,17 @@ def measure_throughput(endpoint: str, model: str, kind: str, samples: int,
         "generation_tps_sd": statistics.stdev(gen) if len(gen) > 1 else None,
         "cold_sample_included_in_mean": warm is rows,
     }
+    if accounted:
+        out["accounted_fraction_mean"] = statistics.fmean(accounted)
+        out["contention_note"] = (
+            "the fraction of each request's wall clock that the server "
+            "accounted for as load, prompt eval or generation. Well under 1 "
+            "means the request spent most of its time waiting, which is a "
+            "contended machine. The throughput figures are the server's "
+            "accounted rates and are not adjusted by this.")
+    if loads:
+        out["load_average_1m_mean"] = statistics.fmean(loads)
+        out["load_average_1m_max"] = max(loads)
     if prompt:
         out["prompt_tps_mean"] = statistics.fmean(prompt)
         out["prompt_tps_sd"] = statistics.stdev(prompt) if len(prompt) > 1 else None

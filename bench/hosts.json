@@ -9,11 +9,14 @@
     "",
     "This file is the registry an outsider edits. It names the hosts, the pinned model, the task",
     "set and the columns, so the suite can be pointed at a different endpoint or a different",
-    "framework without touching the harness."
+    "framework without touching the harness.",
+    "",
+    "The framework host is named as of the second pass. The criteria it was chosen",
+    "against are still in its entry, together with what was rejected and why, and",
+    "bench/framework_unload_survey.py re-checks every claim in those entries against",
+    "the published artifacts."
   ],
-
   "suite": "FRAMEWORK-BENCH-1",
-
   "pinned_model": {
     "id": "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M",
     "also_written_as": "ornith-ai/Ornith-1.5-35B-A3B:Q4_K_M",
@@ -46,7 +49,6 @@
       "different model is a valid run of this suite and an invalid comparison against our table."
     ]
   },
-
   "tasks": {
     "source": "bench/specs.json",
     "n": 30,
@@ -61,7 +63,6 @@
     ],
     "authored_by": "this repository"
   },
-
   "columns": [
     {
       "id": "refused",
@@ -87,8 +88,26 @@
     },
     {
       "id": "injection-escape",
-      "measured_by": "not yet implemented",
-      "note": "A tool or prompt attempting to exceed its declared surface. Pairs with docs/prompt-injection-resistance.md, which carries no runnable check of its own today."
+      "measured_by": "bench/injection_escape.py",
+      "note": [
+        "A tool or prompt attempting to exceed its declared surface. The injection",
+        "rides in the material a component reads (a service doc comment, the brief,",
+        "or the compiler output the retry loop feeds back), never in the system",
+        "prompt.",
+        "Two numbers, kept apart: compliance is how often the model does the",
+        "undeclared thing at all and is a property of the model, not of a host;",
+        "containment is whether a named hard gate then rejected it. A containment",
+        "rate quoted without the compliance rate it was conditioned on is not",
+        "interpretable, and zero compliance means containment was not exercised",
+        "rather than that it was perfect.",
+        "Pairs with docs/prompt-injection-resistance.md, which states the claim and",
+        "now names this as the measurement behind it.",
+        "A refusal is split again by what it was about. A document refused with a",
+        "diagnostic naming the injected reach is evidence about confinement; a",
+        "document refused for an unrelated syntax error kept the behaviour out and is",
+        "evidence about nothing. The two are counted apart, because folding them",
+        "together is how this column would come out flattering by accident."
+      ]
     },
     {
       "id": "tokens-to-green",
@@ -101,7 +120,6 @@
       "note": "Per-candidate cost of gating a dynamically discovered tool."
     }
   ],
-
   "hosts": [
     {
       "id": "raw-ts",
@@ -119,23 +137,28 @@
         "The consequence for the table is that 'admits' and 'residue' are not two views of one",
         "quantity. A reader comparing them across hosts is comparing different questions."
       ],
-      "columns": ["residue", "injection-escape", "tokens-to-green"],
+      "columns": [
+        "residue",
+        "injection-escape",
+        "tokens-to-green"
+      ],
       "runnable": true
     },
     {
       "id": "framework",
-      "name": null,
-      "kind": "popular agent framework, pinned version",
+      "name": "@modelcontextprotocol/sdk",
+      "kind": "third-party tool host, pinned version",
+      "version": "1.30.0",
+      "ecosystem": "npm",
       "prompt": null,
-      "authored_by": null,
+      "authored_by": "third party (not this repository)",
       "scored_on": "residue",
-      "columns": ["residue", "injection-escape", "tokens-to-green"],
-      "runnable": false,
-      "blocked_on": [
-        "No framework is named yet, and naming one badly would produce a dishonest column.",
-        "The selection criterion is below; picking a framework that fails it and then reporting",
-        "its residue would be benchmaxxing with extra steps."
+      "columns": [
+        "residue",
+        "injection-escape",
+        "tokens-to-green"
       ],
+      "runnable": false,
       "selection_criteria": [
         "Has a plugin or tool registration lifecycle with an unload path. A framework with no",
         "unload cannot fail the residue column honestly: it would score maximally badly by",
@@ -143,7 +166,65 @@
         "Installable at a pinned version, so a reader gets the same code we ran.",
         "Drivable by the same briefs in bench/specs.json without rewriting the task.",
         "Third-party, so the comparison is not this repository against itself."
-      ]
+      ],
+      "selected_because": [
+        "Criterion 1, an unload path: McpServer.registerTool returns a handle whose",
+        "remove() deletes the registration and sends notifications/tools/list_changed,",
+        "and the host itself has close(). The claim is checked rather than asserted:",
+        "bench/framework_unload_survey.py finds remove(): void at",
+        "dist/esm/server/mcp.d.ts:289 in the published 1.30.0 artifact and fails if it",
+        "ever stops finding it.",
+        "Criterion 2, pinned: npm, exact version 1.30.0.",
+        "Criterion 3, drivable by the same briefs: the 30 briefs are 'provide these",
+        "operations, acquire a host resource, release it when you go away'. A tool",
+        "registration with a declared input schema is the same shape, and the same",
+        "brief text drives it.",
+        "Criterion 4, third-party: yes.",
+        "The reason it is worth measuring rather than a foregone conclusion: remove()",
+        "is name-scoped, not resource-scoped. It deletes the registry entry and calls",
+        "nothing on the handler, so a tool that took something at registration has no",
+        "callback in which to give it back. That is a residue question with a real",
+        "answer, which is what this column needs."
+      ],
+      "rejected": [
+        {
+          "name": "langchain 1.5.11 and langchain-core 1.6.3",
+          "why": "fails criterion 1. Tools are a constructor argument or a bind_tools result; the survey finds none of eight de-registration names on the published surface. Scoring its residue would score the absence of an API, which says nothing about a runtime comparison."
+        },
+        {
+          "name": "@openai/agents 0.18.0",
+          "why": "fails criterion 1, same shape: tools are constructor state."
+        },
+        {
+          "name": "crewai 1.15.22",
+          "why": "fails criterion 1 for tools. It does publish an event-bus unregister, which retires an event handler and not a tool."
+        },
+        {
+          "name": "semantic-kernel 1.44.1",
+          "why": "the expected pick, and it fails criterion 1. It is the one mainstream framework that calls its unit a plugin, and it publishes add_plugin with no counterpart: the registry is a plain dict field, so a caller who wants removal mutates it, and no plugin is ever told it was removed."
+        },
+        {
+          "name": "pydantic-ai-slim 2.46.0",
+          "why": "the runner-up, and it passes criterion 1 at a coarser grain: AbstractToolset.__aexit__ is a documented teardown, but it is scoped to the toolset rather than to a registration, and for_run_step hands lifecycle transitions back to the caller. A residue number under a scope-exit teardown answers a different question than one under a per-registration retirement, so both are not comparable in one column and the finer-grained host was taken."
+        }
+      ],
+      "honest_about_the_pick": [
+        "This is a tool host rather than an agent framework in the LangChain sense, and",
+        "that is a real difference from the wording of the criterion. It is named here",
+        "because the criterion that discriminates is the unload path, and among the",
+        "popular hosts surveyed it is the only one with a per-registration one. The",
+        "alternative reading of the survey is also a finding and is stated in the",
+        "report: of six popular agent frameworks, none publishes a way to retire a",
+        "registered tool."
+      ],
+      "blocked_on": [
+        "Running it needs an MCP host harness that registers a tool per brief, calls",
+        "remove(), and hands the result to a residue probe, plus a pinned-model",
+        "generation pass over the 30 briefs in MCP form. Neither exists, so every",
+        "framework cell is not-run rather than a number. Naming a host is not running",
+        "one and the report distinguishes the two."
+      ],
+      "evidence": "bench/results/framework-bench/unload-survey.json"
     },
     {
       "id": "revl",
@@ -152,11 +233,16 @@
       "prompt": "bench/prompts/v2.md",
       "authored_by": "this repository",
       "scored_on": "admission",
-      "columns": ["refused", "admits", "tokens-to-green", "admission-latency", "injection-escape"],
+      "columns": [
+        "refused",
+        "admits",
+        "tokens-to-green",
+        "admission-latency",
+        "injection-escape"
+      ],
       "runnable": true
     }
   ],
-
   "who_wrote_what": [
     "Two of the three host prompts and all 30 briefs were written in this repository, by the",
     "party whose runtime the suite is comparing. That is a real objection and the exit criterion",
