@@ -316,9 +316,10 @@ be read as claiming any.
 argues it cannot cause a false reject, which is a property of the two revl-side
 derivations and is tested. Whether a particular decoder finds a fully ordered
 object grammar easy to compile, or whether the ordering degrades sample quality,
-is a provider question this note still does not answer. Section 11 observed one
-provider's ordering behaviour on one model, which is an observation and not an
-answer.
+is a provider question this note still does not answer. What section 11.3 did
+measure is narrower and sharper: a provider honouring the OTHER dialect returned
+a different member order on two of three samples, which is why the two dialects
+are held to different standards.
 
 **That the honoured-check is sufficient.** Section 9.5 states the opposite
 outright: it is necessary and not sufficient, and says exactly what it cannot
@@ -554,3 +555,121 @@ refused from one that claimed either dialect.
 What the `json-schema` dialect does *not* buy is the member order, which is the
 only part of the GBNF's language that the wire schema cannot express. A reader
 who wants that part verified wants `gbnf`.
+
+---
+
+## 11. What a real provider actually did
+
+Slice 1's section 8 said nothing in the item observes a decoder, and called that
+its single largest unverified claim. This section is the observation. It was
+taken with `bench/decode_grammar_probe.py` against a local OpenAI-shaped endpoint
+(Ollama 0.33.3) serving a 35B-A3B Q4 local model, on the flagship `AgentTurn`
+response type, at temperature 0. Small numbers: the endpoint answered in four to
+eleven minutes per call, so the sample is three prompts per arm and is reported
+as three, not generalised.
+
+### 11.1 A real provider ignores a GBNF grammar in silence
+
+Two calls, the derived grammar attached as `grammar` at the top level and again
+inside `options`, which are the two places a llama.cpp-shaped server would read
+it. Both returned HTTP 200 and an ordinary unconstrained completion. No error, no
+warning, no field-unknown response.
+
+This is worth stating as a result rather than as a footnote. The fail-open case
+section 9.2 is about is not hypothetical and is not rare: it is what the most
+widely deployed local runtime does by default with the dialect this item emits.
+
+### 11.2 The same provider honours a JSON Schema
+
+Three prompts, run twice: once with nothing attached, once with the wire schema
+of section 10.2 attached as `format`.
+
+```
+control      n=3   valid 1/3   inside the stated GBNF 1/3
+json-schema  n=3   valid 3/3   inside the stated GBNF 1/3
+```
+
+The control arm is not vacuous. Its two failures are the same failure and it is
+an instructive one: asked in prose for a tagged JSON object, the model answered
+twice in its own native tool-call syntax,
+
+```
+<tool_call>
+<function=search>
+<parameter=query>
+today's tin price per metric ton LME spot
+</parameter>
+</function>
+</tool_call>
+```
+
+which is not JSON at all, so item 257's validator refuses it before schema
+validity is even in question. With the constraint attached, the same prompts at
+the same temperature produced a well-formed tagged object every time. That is
+section 1's argument, measured once: the shape stopped being something the model
+had to get right.
+
+### 11.3 The result that decided the design
+
+Look at the third column. **Two of the three correctly constrained completions
+are outside the GBNF this crossing states**, and both for the same reason:
+
+```
+$.value[0]: the stated grammar pins the members ['tool', 'args'];
+            the completion has ['args', 'tool']
+```
+
+The nested `Call` object came back with its members transposed. The value is
+schema-valid, the provider honoured exactly the artifact it was handed, and the
+completion is still outside the language of the GBNF, because the GBNF pins a
+member order (section 5) and JSON Schema cannot express one.
+
+The likely mechanism is visible in the data and is worth naming: `args` sorts
+before `tool`, `tag` sorts before `value`, and the one sample that *did* land
+inside the grammar is the one whose declared order happens to be alphabetical.
+A schema that crosses a transport as an unordered map comes out with its keys
+sorted, so the property order the wire schema was written with does not survive
+the trip.
+
+This is the measurement that answers the question slice 1 left open, and it
+answers it against the simpler design. Had slice 2 verified every completion
+against the grammar revl states, this provider -- which did the right thing, with
+the artifact revl gave it, on the first try -- would have been refused on two of
+its three samples. A named refusal of a correct completion is not an improvement
+on a silent acceptance of a correct completion; it is the false reject section 5
+forbids, arriving through the front door.
+
+So the contract is per dialect, and section 10.3 is not a hedge. `gbnf` promises
+a member order and is held to it. `json-schema` promises schema validity, is held
+to the wire schema it was handed, and is not held to an order it never carried.
+
+### 11.4 End to end through the seam
+
+The numbers above come from a probe that attaches the artifact itself. The seam
+was also run end to end, by the provider sketch of section 9.3: compile a
+validated crossing, register its grammars, let a provider take the constraint
+through `revl_constrain`, and judge the claim in `validate_response`. The same
+prompt, twice, differing only in whether the taken artifact was attached to the
+request:
+
+* **attached** -- `{"tag": "ToolCalls", "value": [{"args": "...", "tool":
+  "search"}]}`, accepted, with the claim judged against the wire schema and the
+  member order correctly not enforced;
+* **taken and not attached** -- the `<tool_call>` XML again, which does not parse
+  as JSON.
+
+That second row is the trap section 9.3 warns about, and it confirms the shape of
+the failure: a provider that takes the constraint and forgets to attach it does
+not get a subtly wrong value, it gets an unconstrained one.
+
+### 11.5 What this still does not show
+
+* **That the emitted GBNF parses in llama.cpp.** The endpoint ignores the
+  grammar field, so no GBNF parser saw these bytes. Section 8's entry stands.
+* **Anything about retry counts.** The crossings were not run under a declared
+  `retry N`, and no before-and-after re-issue counts are reported.
+* **Anything about a 7B-class model**, which is section 1's motivating case. This
+  is a 35B mixture-of-experts, and it failed the unconstrained arm twice out of
+  three anyway.
+* **A general rate.** Three prompts per arm is enough to show that each of these
+  outcomes happens, and is not enough to say how often.
