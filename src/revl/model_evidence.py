@@ -335,6 +335,14 @@ EVIDENCE_CANDIDATES = "candidate-set"
 #: it must not. The evidence-layer restatement of the runtime's digest gate.
 EVIDENCE_DISCLOSURE = "disclosure"
 
+#: The sealed record does not name the crossing it was FOUND at. Its MAC can be
+#: perfectly valid and it can still be a genuine record of another crossing,
+#: lifted onto this one — the `cert.affirm_key_id` reading, applied to the join
+#: instead of to the signer. Only a reader that holds both sides (the WAL's
+#: index key and the sealed body) can see this, which is why it is a link here
+#: and not a check inside :func:`verify`.
+EVIDENCE_CROSSING = "crossing"
+
 #: The record's declared placement contradicts item 512's own route table, or
 #: names a role that table does not declare. Distinct from
 #: :data:`EVIDENCE_VOCABULARY`, which is about the closed word list: a record
@@ -343,7 +351,7 @@ EVIDENCE_DISCLOSURE = "disclosure"
 EVIDENCE_PLACEMENT = "placement"
 
 #: Every link this module can return, for a caller that wants to enumerate.
-EVIDENCE_LINKS = (EVIDENCE_CANDIDATES, EVIDENCE_DISCLOSURE,
+EVIDENCE_LINKS = (EVIDENCE_CANDIDATES, EVIDENCE_CROSSING, EVIDENCE_DISCLOSURE,
                   EVIDENCE_ENVELOPE, EVIDENCE_INCOMPLETE, EVIDENCE_PLACEMENT,
                   EVIDENCE_SIGNATURE, EVIDENCE_SIGNER, EVIDENCE_VOCABULARY)
 
@@ -1083,6 +1091,18 @@ class CrossingSealer:
         members["component"] = component
         members["step_index"] = step_index
         members["outcome"] = outcome
+        if outcome != "validated":
+            # The crossing owns the outcome, so it owns the coherence of the
+            # choice WITH the outcome. A provider declares from inside the host
+            # body, before the validation seam has decided anything, so it can
+            # legitimately name the candidate the host returned and the retry
+            # can then exhaust around it. `_check_candidates` already says what
+            # the record means in that case — "an outcome of 'exhausted' took
+            # no candidate" — so this states it rather than refusing a run for
+            # a contradiction the provider could not have foreseen. Nothing is
+            # lost: the candidate set is still on the record in the order it
+            # was offered; what changes is the claim that one was TAKEN.
+            members["chosen"] = None
         if self.route_table is not None:
             try:
                 verdict = check_placement(members, self.route_table)
@@ -1162,7 +1182,8 @@ def from_wal_record(decision: Any) -> Any:
     return decision.get(WAL_EVIDENCE_MEMBER)
 
 
-def reconstruct(record: Any, key: bytes, *, roles: Any = None) -> dict:
+def reconstruct(record: Any, key: bytes, *, roles: Any = None,
+                at: Any = None) -> dict:
     """Rebuild one model decision FROM THE ARTIFACT ALONE — the roadmap item's
     own exit clause, and the half Slice 1 explicitly did not claim.
 
@@ -1183,8 +1204,26 @@ def reconstruct(record: Any, key: bytes, *, roles: Any = None) -> dict:
     the MAC verifies. Offline it is optional for the same reason it is optional
     on the sealer: an offline reader may not hold the program's table, and a
     reader that does hold it gets the stronger claim.
+
+    ``at`` is the crossing the reader FOUND this record at — for a WAL, the
+    ``(component, stepIndex)`` :func:`revl.wal.model_decisions` indexed it by.
+    Supplying it engages the join check: a record whose sealed body names
+    another crossing is refused with :data:`EVIDENCE_CROSSING` even when its
+    MAC is valid, because a genuine record of one crossing lifted onto another
+    is still a false account of this one. :func:`verify` cannot make this check
+    — it sees one side — and a reader that holds both and does not make it is
+    the fail-open half.
     """
     verdict = verify(record, key)
+    if verdict.ok and at is not None:
+        found = tuple(at)
+        named = crossing_key(record)
+        if found != named:
+            verdict = Verdict(
+                False, EVIDENCE_CROSSING,
+                f"the record was found at crossing {list(found)} and its "
+                f"sealed body names {list(named)}; the MAC is valid, so this "
+                "is a genuine record of another crossing lifted onto this one")
     if verdict.ok and roles is not None:
         try:
             placement = check_placement(record, roles)
