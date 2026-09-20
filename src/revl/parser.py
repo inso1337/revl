@@ -30,6 +30,7 @@ import contextlib
 import re
 import sys
 
+from . import ui_family
 from .errors import RevlError
 from .lexer import Token, lex
 
@@ -2954,6 +2955,21 @@ class Parser:
             self.expect("ident", "approval",
                         what="`approval` after `requires` (item 246)")
             requires_approval = True
+        # item 522: the computer-use reversibility classes. A UI verb's class
+        # is registry-owned (revl.ui_family), and the declaration's
+        # `compensate` slot has to agree with it: a verb with no inverse may
+        # not declare one, and a compensatable verb must. This is the one
+        # point where the capability scope, the extern NAME and the
+        # `compensate` clause are all in hand, which is why the check sits
+        # here rather than in `_capability_list` (a service method's scope
+        # parses there and declares an interface, not a crossing).
+        for token in capabilities:
+            teardown = ui_family.teardown_refusal(
+                token, classification, name, compensate is not None)
+            if teardown is not None:
+                message, hint = teardown
+                raise RevlError(self.filename, line, message, hint,
+                                code="G4", category="reversibility")
         # item 379: an optional typed `config { ... }` block, reusing the same
         # `config_block()` a component uses (parser.py:1352-1365). It sits after
         # the teardown/approval clauses and before the `= @backend` bodies, the
@@ -3108,11 +3124,26 @@ class Parser:
         line = self.expect("[").line
         names: list[str] = []
         while not self.at("]"):
+            tok_line = self.peek().line
             parts = [self.expect("ident", what="a capability name").value]
             while self.at("."):
                 self.next()
                 parts.append(self.expect("ident").value)
-            names.append(self._capability_params(".".join(parts)))
+            dotted = ".".join(parts)
+            # item 521: the reserved computer-use namespace. This is the
+            # DECLARATION site for a capability token (an `extern
+            # emission[...]`/`witnessed[...]` scope and a service method's
+            # `emission[...]` scope both funnel here), which is where a
+            # program states what it may reach. A `capability <glob>` policy
+            # rule and a `secret K for C` binding parse elsewhere and are
+            # SELECTORS rather than reach, so a policy written against
+            # `ui.click` keeps working while `emission[ui]` does not parse.
+            ui_refusal = ui_family.refusal(dotted, kind)
+            if ui_refusal is not None:
+                message, hint = ui_refusal
+                raise RevlError(self.filename, tok_line, message, hint,
+                                code="G8", category="boundary")
+            names.append(self._capability_params(dotted))
             if self.at(","):
                 self.next()
         self.expect("]")

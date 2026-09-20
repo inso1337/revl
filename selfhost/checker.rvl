@@ -1777,12 +1777,13 @@ fn ret_at(ts: List[Token], i: Int) -> RetR {
 // stepped over their matching bracket, exactly as `selfhost/lower.rvl` does.
 //
 // THE SEEDED CAPABILITY. `_emitting_capabilities` (emission_analysis.py) seeds
-// an `emission` extern with its own NAME — the extern IS the boundary, and the
-// `[caps]` scope on it bounds where it may be reached FROM, not what it is. A
-// `witnessed` extern crosses the same boundary (item 243) and seeds too, but
-// with its DECLARED SCOPE, falling back to its own name when unscoped. Reading
-// both as "the extern's name" would have called `witnessed[fs] fn stash` the
-// capability `stash`, which no service bound can name.
+// a boundary-crossing extern with its DECLARED SCOPE, falling back to its own
+// name when it declares none — the extern IS the boundary only until it says
+// which boundary it goes to (docs/capabilities.md §2, "a scope replaces the
+// name; it does not join it"). `emission` and `witnessed` seed alike: both
+// cross the same boundary (item 243), and reading either as "the extern's name"
+// names a capability no service bound can be written against, so a provider
+// exactly in bounds is refused and told to widen a correct declaration.
 fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var j = i + 1
   var em = false
@@ -1796,11 +1797,9 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
     if (atw(ts, j, "emission")) { em = true }
     if (ati(ts, j, "witnessed")) { wit = true }
     if (atk(ts, j, "[")) {
+      scope = cap_list(ts, j, ts.length())
       var k = j + 1
-      while (k < ts.length() && !atk(ts, k, "]")) {
-        if (atk(ts, k, "ident")) { scope = scope.push(tkc(ts, k).text) }
-        k += 1
-      }
+      while (k < ts.length() && !atk(ts, k, "]")) { k += 1 }
       j = k + 1
     } else if (atk(ts, j, "(")) {
       let e = close_paren(ts, j)
@@ -1820,7 +1819,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, f).text
   let ps = params_at(ts, skip_type_params(ts, f + 1) + 1)
   let rt = ret_at(ts, ps.i)
-  let seed = wit && scope.length() > 0 ? scope : [nm]
+  let seed = scope.length() > 0 ? scope : [nm]
   // Skip any `= @host { ... }` bodies without letting a brace end the
   // declaration early. The stop set has to name every DECLARATION head, not
   // only the ones this slice decides, because `k` is where `p_top` resumes:
@@ -1839,6 +1838,31 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
     } else { k += 1 }
   }
   return mk_step(push_fn(pg, mk_fn_d(nm, ps.ps, em || wit, seed)), k)
+}
+
+// The capability tokens inside a `[...]` scope bracket, spelled as the
+// reference spells them: ONE token per comma, and a dotted token (`net.edge`)
+// joined rather than split into its segments. Both halves of the capability
+// namespace read it — the extern that declares a scope and the service
+// operation that bounds one — so the two cannot drift apart on a realm-style
+// token. `i` is the index of the `[`; the scan stops at the matching `]` or at
+// `end`, whichever comes first.
+fn cap_list(ts: List[Token], i: Int, end: Int) -> List[Str] {
+  var out: List[Str] = []
+  var cur = ""
+  var k = i + 1
+  while (k < end && !atk(ts, k, "]")) {
+    if (atk(ts, k, "ident")) {
+      cur = cur == "" ? tkc(ts, k).text : cur.concat(".").concat(tkc(ts, k).text)
+    }
+    if (atk(ts, k, ",")) {
+      if (cur != "") { out = out.push(cur) }
+      cur = ""
+    }
+    k += 1
+  }
+  if (cur != "") { out = out.push(cur) }
+  return out
 }
 
 // A dotted capability token, `db` or `net.edge_api`, as one step.
@@ -1936,11 +1960,9 @@ fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MethSig]) -> MethsR {
       em = true
       j += 1
       if (atk(ts, j, "[")) {
+        caps = cap_list(ts, j, end)
         var k = j + 1
-        while (k < end && !atk(ts, k, "]")) {
-          if (atk(ts, k, "ident")) { caps = caps.push(tkc(ts, k).text) }
-          k += 1
-        }
+        while (k < end && !atk(ts, k, "]")) { k += 1 }
         j = k + 1
       }
     } else if (ati(ts, j, "endorse")) {
