@@ -1626,10 +1626,13 @@ class _FlowChecker:
         the thing meant to bound it, failing open, and a ceiling that admits
         when it cannot place the value is precisely that.
 
-        A value carrying the `secret` origin never arrives here: item 256's
-        bound-key rule refuses it at every crossing kind upstream, and
-        `check()` refuses an arm that names it citing `G-SECRET-FLOW`. The
-        ceiling does not contradict either.
+        The `secret` origin is NOT judged here (`model_route.CEILING_ORIGINS`
+        holds `confidential` alone). Item 256 refuses a bound provider key at
+        every crossing kind but one, and that one - the section-4b re-entry
+        into the same bound capability's own extern body - is the provider
+        making its own call, which this rule has no business refusing. The
+        declaration half is unaffected: `check()` still refuses an ARM naming
+        `secret` and still cites `G-SECRET-FLOW` for it.
         """
         from . import model_route as _mr  # noqa: PLC0415 - import cycle
 
@@ -1643,7 +1646,7 @@ class _FlowChecker:
         for offset, at in enumerate(arg_taints):
             index = first_index + offset
             for origin in sorted(at.origins):
-                if origin not in _mr.CONFIDENTIALITY_ORIGINS:
+                if origin not in _mr.CEILING_ORIGINS:
                     continue
                 verdict = _mr.admits(self.route_arms, origin,
                                      self.routed_component)
