@@ -137,6 +137,19 @@ _SINK_CLASS_SCOPES = {"shell", "exec", "terminal", "policy"}
 _SOURCE_CLASS_SCOPES = {"web", "net", "fs", "model", "input"}
 
 
+def _model_crossing_of(capabilities) -> str | None:
+    """The `model.*` capability token a crossing declares, or None (item 514).
+
+    A thin forwarder to `model_route.model_crossing_of`, imported lazily
+    because `revl.model_route` reads `ORIGIN_CLASSES` from this module and a
+    top-level import would close the cycle. The rule itself lives beside the
+    other placement rules, which is where a reader looks for it.
+    """
+    from . import model_route as _mr  # noqa: PLC0415 - import cycle
+
+    return _mr.model_crossing_of(capabilities)
+
+
 def _sink_of(capabilities) -> str | None:
     """The derived sink-class a crossing's capability scope grants (Slice D), or
     `None` when the scope is not a sink. Sibling of `_origin_of`: a shell / exec /
@@ -457,6 +470,20 @@ class TaintModel:
     # against (`retention.evaluation_instant`). Held on the model so the whole
     # program is checked against one clock reading rather than one per call site.
     retention_as_of: object = None
+    # item 514: callable name -> the `model.*` capability token its declared
+    # capability grants (`model_route.model_crossing_of`). The model-placement
+    # sibling of `persistence_sinks`, derived the same way and for the same
+    # reason: a crossing is a MODEL crossing because of the capability the
+    # granting side declared, never because of its name or an author
+    # annotation. This is the crossing set the origin ceiling fires at.
+    model_crossings: dict[str, str] = field(default_factory=dict)
+    # item 514: the route table `model_route.check` returns, as
+    # `{component: {action: {origin: {role, residence}}}}`. Taken from the
+    # checker that already validated it (design note section 9: 514 inherits
+    # this shape and must NOT re-derive it from the AST). Empty for every
+    # program that declares no `route model` block, and a component absent from
+    # it declared none, which is the fact the `unrouted` verdict reads.
+    model_routes: dict = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
@@ -712,6 +739,13 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         _persist = _retention.persistence_sink_of(ext.capabilities)
         if _persist is not None:
             model.persistence_sinks[ext.name] = _persist
+        # item 514: the model crossings, derived from the crossing's DECLARED
+        # capability scope exactly as the persistence sinks above are. A
+        # `model.*` grant means the argument becomes a prompt, so the origin
+        # ceiling of the action that reaches here applies to it.
+        _model_cap = _model_crossing_of(ext.capabilities)
+        if _model_cap is not None:
+            model.model_crossings[ext.name] = _model_cap
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -873,6 +907,15 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
             # derived sink under strict mode, exactly as an extern is — a granted
             # tool surface annotates nothing yet still refuses untrusted input.
+            # item 514: a `model.*`-scoped service operation is a model crossing
+            # too, and NOT only under strict mode - an `emit llm.complete(x)`
+            # against a declared model capability is the crossing this item
+            # exists for, whether or not the author opted into the derived-sink
+            # tier. Keyed by the operation name, so a call site resolves to it
+            # the way `secret_receivers` does.
+            _mcap = _model_crossing_of(getattr(method, "capabilities", None))
+            if _mcap is not None:
+                model.model_crossings.setdefault(method.name, _mcap)
             if taint_strict and getattr(method, "emission", False) \
                     and _sink_of(getattr(method, "capabilities", None)) is not None:
                 for i, (pname, ptype) in enumerate(new_params):
@@ -1189,10 +1232,19 @@ class _Signature:
     reaches_sink: dict = field(default_factory=dict)
     persists_at: dict = field(default_factory=dict)
     clears: dict = field(default_factory=dict)
+    # item 514: parameter index -> `(crossing_name, capability, via)`, the MODEL
+    # crossings an argument reaches transitively. The placement sibling of
+    # `persists_at`, and the reason the origin ceiling does not stop at a helper
+    # fn or a service seam: the action that carries the `route model` block is a
+    # provide method, and the `model.*` crossing it is judged by is very often
+    # one hop further in, inside a top-level fn or a provider body that names no
+    # route of its own.
+    models_at: dict = field(default_factory=dict)
 
     def merge(self, flows: set, mints: set, sink_hits: dict,
               clears: dict | None = None,
-              persistence_hits: dict | None = None) -> bool:
+              persistence_hits: dict | None = None,
+              model_hits: dict | None = None) -> bool:
         """Fold one body-walk's findings in. Returns whether the monotone part
         (the parameter sets, the per-parameter cleared-origin sets, and the sink
         key set) grew — the fixed point's `changed` signal. A shorter `via` for an
@@ -1225,6 +1277,13 @@ class _Signature:
                 changed = True
             elif len(hit[2]) < len(prev[2]):
                 self.persists_at[index] = hit  # shorter chain, not a growth
+        for index, hit in (model_hits or {}).items():
+            prev = self.models_at.get(index)
+            if prev is None:
+                self.models_at[index] = hit
+                changed = True
+            elif len(hit[2]) < len(prev[2]):
+                self.models_at[index] = hit  # shorter chain, not a growth
         return changed
 
 
@@ -1252,10 +1311,28 @@ class _FlowChecker:
                  provide_return: bool = False,
                  secret_config: frozenset = frozenset(),
                  config_env: dict | None = None,
-                 comp_config: dict | None = None) -> None:
+                 comp_config: dict | None = None,
+                 component: str = "", action: str = "") -> None:
         self.model = model
         self.filename = filename
         self.line = line
+        # item 514: which component and which ACTION this body is, so a model
+        # crossing reached from here can be judged against the `route model`
+        # block that places that action. Empty for a top-level fn and for a
+        # component activation body, neither of which is an action a route can
+        # name - a crossing reached from one of those carries no ceiling here
+        # and is judged at the routed call site that reaches it, through
+        # `_Signature.models_at`.
+        self.component = component
+        self.action = action
+        # The action's arms out of `check()`'s already-validated table, and
+        # whether the component routed anything at all. Looked up ONCE per body
+        # rather than per crossing, and read from the table rather than
+        # re-derived from the AST (design note section 9).
+        _routes = self.model.model_routes or {}
+        _comp_routes = _routes.get(component) if component else None
+        self.routed_component = bool(_comp_routes)
+        self.route_arms = (_comp_routes or {}).get(action) if action else None
         # item 274: whether the AUTHOR is untrusted (the untrusted-author
         # profile). Under it the author cannot mint a declassifier
         # (`no_declassify`), so a G9 sink refusal has no author-side path — the
@@ -1342,6 +1419,10 @@ class _FlowChecker:
         # follow a retained value through a service seam whose interface says
         # nothing. See `_on_persistence`.
         self.persistence_hits: dict[int, tuple] = {}
+        # inference-mode accumulator (item 514): per parameter index, the MODEL
+        # crossing an argument reaches with the naming chain behind it. The
+        # placement sibling of `persistence_hits`. See `_on_model_crossing`.
+        self.model_hits: dict[int, tuple] = {}
         # inference-mode accumulator (item 249, Finding 1): per parameter index,
         # the concrete origins a body-internal `endorse[<origin>]` on that
         # parameter downgrades. Folded into the callable's `_Signature.clears` so
@@ -1425,6 +1506,16 @@ class _FlowChecker:
                 if index < len(arg_taints):
                     self._on_persistence(sink_name, scope,
                                          [arg_taints[index]], node, via)
+            # item 514: the same for a MODEL crossing one hop further in. This
+            # is the arm that makes the ceiling survive a helper fn and a
+            # service seam - the `route model` block is on the ACTION, and the
+            # crossing very often is not in the action's own body.
+            for index, (cross, cap, via) in sig.models_at.items():
+                if index < len(arg_taints):
+                    self._on_model_crossing(cross, cap, [arg_taints[index]],
+                                            node, via)
+                    self._check_model_ceiling(cross, cap, [arg_taints[index]],
+                                              node, via, first_index=index)
 
     def _on_sink(self, sink_name: str, kind: str, index: int, arg_taint: Taint,
                  node, internal_via: tuple) -> None:
@@ -1487,6 +1578,88 @@ class _FlowChecker:
                 prev = self.persistence_hits.get(pidx)
                 if prev is None or len(via) < len(prev[2]):
                     self.persistence_hits[pidx] = (sink_name, scope, via)
+
+    def _on_model_crossing(self, crossing: str, capability: str,
+                           arg_taints: list, node, internal_via: tuple) -> None:
+        """A parameter of this body reaches a MODEL crossing (item 514).
+
+        Inference mode only, and the exact shape of `_on_persistence`. The
+        refusal needs the CONCRETE origin and the route table of the ACTION the
+        value crossed from, and neither is in hand while a body is walked for
+        its shape - a symbolic parameter marker is. Recording the reach on this
+        callable's signature is what lets the ceiling refuse at the routed
+        provide method that hands the value in, rather than nowhere: a helper
+        `fn` and a provider body carry no `route model` block of their own, and
+        a component's route is keyed to its ACTION.
+        """
+        if not self.infer:
+            return
+        for at in arg_taints:
+            for origin in at.origins:
+                pidx = _param_index(origin)
+                if pidx is None:
+                    continue
+                via = (self.qualname,) + internal_via if self.qualname else internal_via
+                prev = self.model_hits.get(pidx)
+                if prev is None or len(via) < len(prev[2]):
+                    self.model_hits[pidx] = (crossing, capability, via)
+
+    def _check_model_ceiling(self, crossing: str, capability: str,
+                             arg_taints: list, node,
+                             internal_via: tuple = (),
+                             first_index: int = 0) -> None:
+        """The origin ceiling on the model role (roadmap item 514, issue #1188).
+
+        A value whose taint carries a confidentiality origin has reached a
+        `model.*` crossing. Item 249 knows what the value IS and item 512 knows
+        where this action's model calls may GO; this is the join of the two, and
+        it is the half that makes `* -> cloud` a confinement statement about a
+        VALUE rather than a definition about a written arm.
+
+        WHICH WAY IT FAILS. `model_route.admits` returns an admitting verdict
+        on exactly one path - an arm names the origin and its role is declared
+        `on_device`. An action a routed component did not route, an origin no
+        arm names, and a placement that is `off_device` all refuse. There is no
+        path on which an undetermined placement admits, which is the failure
+        direction this whole item exists to correct: the shape the repository
+        keeps finding on the wrong side is state keyed to a thing that outlived
+        the thing meant to bound it, failing open, and a ceiling that admits
+        when it cannot place the value is precisely that.
+
+        A value carrying the `secret` origin never arrives here: item 256's
+        bound-key rule refuses it at every crossing kind upstream, and
+        `check()` refuses an arm that names it citing `G-SECRET-FLOW`. The
+        ceiling does not contradict either.
+        """
+        from . import model_route as _mr  # noqa: PLC0415 - import cycle
+
+        if self.infer or not self.enforce:
+            return
+        if not self.action:
+            # a top-level fn or an activation body: no action, so no route to
+            # be judged against here. The reach is recorded on the signature
+            # (`_on_model_crossing`) and refused at the routed caller instead.
+            return
+        for offset, at in enumerate(arg_taints):
+            index = first_index + offset
+            for origin in sorted(at.origins):
+                if origin not in _mr.CONFIDENTIALITY_ORIGINS:
+                    continue
+                verdict = _mr.admits(self.route_arms, origin,
+                                     self.routed_component)
+                if verdict.ok:
+                    continue
+                chain_parts = at.via + internal_via + (crossing,)
+                chain = (" -> ".join(chain_parts) if chain_parts
+                         else f"a {origin} value")
+                message, hint = _mr.ceiling_refusal(
+                    verdict, origin, self.action,
+                    self.component or "this component", crossing, capability,
+                    index, chain)
+                raise RevlError(
+                    self.filename, self._line_of(node), message,
+                    hint=hint, code=_mr.CODE, category=_mr.CATEGORY,
+                )
 
     def _refuse_secret(self, sink_name: str, kind: str, index: int | None,
                        arg_taint: Taint, node) -> None:
@@ -2001,6 +2174,26 @@ class _FlowChecker:
                     self._refuse_confidential(
                         callee, "an extern host call (a disclosure sink)",
                         index, at, node)
+
+        # item 514: the ORIGIN CEILING. A confidentiality origin reaching a
+        # `model.*` crossing is judged against the `route model` block of the
+        # action it crossed from. Checked HERE, in the same position as the
+        # disclosure crossing above and BEFORE the `model.sources` early
+        # return, for the same reason: a `model.*` extern is itself a source
+        # under strict mode and would otherwise return before its own argument
+        # was judged.
+        #
+        # This fires on the residue the item-256 rule admits. A confidential
+        # value crossing to an UNDECLARED receiver was already refused above
+        # with G-SECRET-FLOW; what reaches here is the value a declared
+        # `Secret[T]` receiver admits, which is exactly the hole item 514
+        # names - the receiver declaration says the crossing may RECEIVE a
+        # confidential value and says nothing whatever about where the model
+        # behind it runs.
+        _mcap = self.model.model_crossings.get(callee)
+        if _mcap is not None:
+            self._on_model_crossing(callee, _mcap, arg_taints, node, (callee,))
+            self._check_model_ceiling(callee, _mcap, arg_taints, node)
 
         # item 472: a retained value reaching a PERSISTENCE SINK. Checked in the
         # same position as the disclosure crossing above, and before the
@@ -2589,7 +2782,8 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
                      if _param_index(o) is None}
             if signatures[key].merge(flows, mints, checker.sink_hits,
                                      checker.endorse_clears,
-                                     checker.persistence_hits):
+                                     checker.persistence_hits,
+                                     checker.model_hits):
                 changed = True
     return signatures
 
@@ -2950,7 +3144,11 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     state_env=state_env if state_env is not None else {},
                     state_names=state_names, untrusted=untrusted,
                     provide_return=True, secret_config=secret_config,
-                    comp_config=comp_config)
+                    comp_config=comp_config,
+                    # item 514: the action this body IS, so a model crossing it
+                    # reaches is judged against the `route model` block keyed to
+                    # this name.
+                    component=component, action=mname or "")
                 env: dict = {}
                 _seed_param_env(model, mname, method.get("params"), env)
                 checker.run(method.get("body") or [], env)

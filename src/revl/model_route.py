@@ -41,14 +41,28 @@ names `confidential`, or it is not placed at all. Writing `* -> cloud` can
 therefore never be the sentence that sends a confidential input off the
 device.
 
+THE VALUE SIDE (item 514)
+-------------------------
+`check()` decides the DECLARATION. `admits()` at the bottom of this file
+decides a VALUE: given one action's arms and the origin a value actually
+carries, it says whether that value may cross into this action's model call.
+`revl.taint` calls it at every `model.*` crossing, which is what makes the `*`
+rule above bite on a real value rather than on a written arm.
+
+Its three refusing verdicts all fail closed, and the ordering is deliberate:
+an action a routed component did not route places nothing, an origin no arm
+names is not placed by `*`, and a placement that is `off_device` is refused
+even though `check()` already refused writing it. None of them defaults to
+"permitted because the placement could not be determined".
+
 WHAT THIS MODULE DOES NOT DO
 ----------------------------
-It checks the DECLARATION. It does not yet look at the values that flow into
-the action - that is the origin ceiling of item 514, which is what makes the
-`*` rule above bite on a real value rather than on a written arm. It does not
-select a model at run time either: item 512 is a permission, not a scheduler
-(item 515 owns the scheduling inside the boundary this draws). See the design
-doc's non-goals.
+It does not select a model at run time: item 512 is a permission, not a
+scheduler (item 515 owns the scheduling inside the boundary this draws). The
+ceiling is a CONFIDENTIALITY ceiling: it is the item-514 join of item 249's
+lattice with a declared residence, and it says nothing about which roles an
+action's non-confidential origins reach. That is the crossing side, slice 4.
+See the design doc's non-goals.
 """
 
 from __future__ import annotations
@@ -81,6 +95,14 @@ CONFIDENTIALITY_ORIGINS = ("confidential", "secret")
 # cites the guarantee that already forbids it.
 CODE = "G-MODEL-PLACE"
 CATEGORY = "model-placement"
+
+# The capability scope head that makes a crossing a MODEL crossing (item 343's
+# `model.<op>` token, already in `taint._SOURCE_CLASS_SCOPES`). A crossing is a
+# model call because of the capability it declares, never because of its name
+# or an author annotation - the `retention.persistence_sink_of` discipline, and
+# for the same reason: the side that grants the authority is the side that
+# knows what the crossing is.
+MODEL_SCOPE = "model"
 
 _ORIGIN_VOCABULARY = ", ".join(sorted(ORIGIN_CLASSES) + ["*"])
 _RESIDENCE_VOCABULARY = ", ".join(RESIDENCES)
@@ -280,3 +302,148 @@ def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
         if actions:
             placed[comp.name] = actions
     return placed
+
+
+def model_crossing_of(capabilities) -> str | None:
+    """The `model.*` capability token a crossing declares, or None when the
+    crossing is not a model call.
+
+    The exact shape of `retention.persistence_sink_of` on this module's scope:
+    only the FIRST capability with a matching head is reported, because a
+    crossing declares one resource scope.
+    """
+    for cap in capabilities or ():
+        if str(cap).split(".", 1)[0] == MODEL_SCOPE:
+            return str(cap)
+    return None
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What an action's route table says about one value's origin (item 514).
+
+    `ok` is the only admitting value and it is reached by exactly one path:
+    the block names an arm for this origin and that arm's role is declared
+    `on_device`. Everything else is a refusal, including every case where the
+    placement could not be determined.
+
+    `reason` is one of:
+
+    * `ok`          - an arm names the origin and its role stays on the device;
+    * `unrouted`    - the component declares a `route model` block for some
+                      other action and none for this one, so this action's
+                      model calls have no declared placement;
+    * `unplaced`    - the block names no arm for this origin. `*` does not
+                      cover a confidentiality origin (section 2.1 of the design
+                      note), so this is the verdict `* -> cloud` gets;
+    * `off_device`  - an arm names the origin and places it off the device.
+                      `check()` refuses writing that arm, so this is the
+                      belt-and-braces path: if a future slice ever admits such
+                      an arm, the VALUE is still refused here.
+
+    `role` and `residence` name the placement the value would have reached, so
+    the diagnostic can name both the origin and the role the exit test asks
+    for. Under `unplaced` they carry the `*` arm's role when the block has one,
+    which is the role the author believes the value is going to.
+    """
+    ok: bool
+    reason: str
+    role: str | None = None
+    residence: str | None = None
+
+
+_OK = Verdict(True, "ok")
+
+
+def admits(arms: dict | None, origin: str, routed_component: bool) -> Verdict:
+    """Whether a value carrying `origin` may cross into this action's model
+    call (roadmap item 514, design note section 2.1 and slice S2).
+
+    `arms` is one action's entry from `check()`'s return value - the
+    `{origin: {role, residence}}` table built FOR this - or None when the
+    action carries no `route model` block. `routed_component` says whether the
+    component declares a block for any action at all.
+
+    The ceiling is a CONFIDENTIALITY ceiling: an origin that is not a
+    confidentiality origin is not this rule's business (which roles an action's
+    other origins reach is the crossing side, slice 4), so it admits. Every
+    other path either names an on-device placement or refuses.
+    """
+    if origin not in CONFIDENTIALITY_ORIGINS:
+        return _OK
+    if arms is None:
+        # An unrouted action in an UNROUTED component is the state of the world
+        # before item 512: the program declared no placement anywhere, so there
+        # is no ceiling to be above and item 256's own disclosure fence is the
+        # whole rule. An unrouted action in a component that DID route is the
+        # fail-open shape this item exists to remove - the author declared that
+        # placement is a property of this component, and this action's model
+        # calls escaped it.
+        return _OK if not routed_component else Verdict(False, "unrouted")
+    placement = arms.get(origin)
+    if placement is None:
+        star = arms.get("*") or {}
+        return Verdict(False, "unplaced", star.get("role"),
+                       star.get("residence"))
+    if placement.get("residence") == "off_device":
+        return Verdict(False, "off_device", placement.get("role"),
+                       placement.get("residence"))
+    return Verdict(True, "ok", placement.get("role"),
+                   placement.get("residence"))
+
+
+def ceiling_refusal(verdict: Verdict, origin: str, action: str,
+                    component: str, crossing: str, capability: str,
+                    index: int, chain: str) -> tuple[str, str]:
+    """The message and hint for a refused value-level placement.
+
+    Written here rather than in `revl.taint` so the sentence a ceiling refusal
+    says sits beside the rule that decides it, and so `check()`'s eleven
+    declaration refusals and this one stay recognisably the same diagnostic.
+    """
+    where = f"argument {index + 1} of `{crossing}` (`{capability}`)"
+    if verdict.reason == "unrouted":
+        message = (
+            f"a `{origin}` value reaches the model crossing {where} in action "
+            f"`{action}` ({component}), which declares no `route model` "
+            f"placement: {component} routes some of its actions and not this "
+            f"one, so where this value's prompt goes is undeclared "
+            f"({CODE})")
+        hint = (
+            f"an undeclared placement is refused rather than assumed, the way "
+            f"an undeclared role is: add `route model on {action} {{ "
+            f"{origin} -> <an on_device role> }}` to {component}, or take the "
+            f"`{origin}` value out of this crossing. The path is {chain}.")
+    elif verdict.reason == "unplaced" and verdict.role:
+        message = (
+            f"a `{origin}` value reaches the model crossing {where} in action "
+            f"`{action}` ({component}), whose `route model` block places it "
+            f"through no arm: the catch-all `*` routes to model role "
+            f"`{verdict.role}` (declared `{verdict.residence}`) and `*` never "
+            f"covers a confidentiality origin ({CODE})")
+        hint = (
+            f"`*` stands for the origins no other arm names AND that are not "
+            f"confidentiality origins, so `* -> {verdict.role}` is not the "
+            f"sentence that places this value. Name it: `{origin} -> <an "
+            f"on_device role>` in `route model on {action}`, or keep the "
+            f"`{origin}` value out of the crossing. The path is {chain}.")
+    elif verdict.reason == "unplaced":
+        message = (
+            f"a `{origin}` value reaches the model crossing {where} in action "
+            f"`{action}` ({component}), whose `route model` block names no arm "
+            f"for the `{origin}` origin ({CODE})")
+        hint = (
+            f"an origin no arm names is not placed at all, which is a refusal "
+            f"and not a default: add `{origin} -> <an on_device role>` to "
+            f"`route model on {action}`, or keep the `{origin}` value out of "
+            f"the crossing. The path is {chain}.")
+    else:
+        message = (
+            f"a `{origin}` value reaches the model crossing {where} in action "
+            f"`{action}` ({component}), which routes the `{origin}` origin to "
+            f"model role `{verdict.role}`, declared `{verdict.residence}`: a "
+            f"{origin} input may not leave the device ({CODE})")
+        hint = (
+            f"route `{origin}` to a role declared `on_device`, or keep the "
+            f"`{origin}` value out of this crossing. The path is {chain}.")
+    return message, hint
