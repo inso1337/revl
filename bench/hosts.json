@@ -1,0 +1,170 @@
+{
+  "_about": [
+    "FRAMEWORK-BENCH-1: the named three-host comparison of roadmap item 548 (issue #1267).",
+    "One model, one task set, three hosts. The axis under test is the RUNTIME, not the model:",
+    "the claim this suite exists to check is that a mediocre model still cannot ship residue,",
+    "capability widening or unmarked emissions through the gate, which is the opposite of what",
+    "a model leaderboard measures. A high compile-rate bought by loosening G1-G9 would falsify",
+    "the claim rather than support it.",
+    "",
+    "This file is the registry an outsider edits. It names the hosts, the pinned model, the task",
+    "set and the columns, so the suite can be pointed at a different endpoint or a different",
+    "framework without touching the harness."
+  ],
+
+  "suite": "FRAMEWORK-BENCH-1",
+
+  "pinned_model": {
+    "id": "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M",
+    "also_written_as": "ornith-ai/Ornith-1.5-35B-A3B:Q4_K_M",
+    "resolution_note": [
+      "The roadmap and issue #1267 name the model as 'ornith-ai/Ornith-1.5-35B-A3B:Q4_K_M'.",
+      "An ollama pull from Hugging Face registers it under a longer tag carrying the registry",
+      "prefix and the -GGUF repository suffix. The two names are the same weights; the longer",
+      "one is recorded here because it is the string the endpoint answers to, and",
+      "bench/model_pin.py records which of the two a run actually resolved."
+    ],
+    "endpoint_kind": "ollama",
+    "endpoint": "http://127.0.0.1:11434",
+    "why_local": [
+      "An API model drifts under a fixed name, so a reader who reruns this suite against 'the",
+      "same model' is not running the same model and the table silently re-baselines. Local",
+      "weights have a content digest, which bench/model_pin.py records, so a reader can check",
+      "that they ran what we ran instead of taking our word for it.",
+      "It also means nothing in this suite talks to a third party."
+    ],
+    "sampling": {
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "seed": 0,
+      "max_output_tokens": 8192
+    },
+    "substitutable": true,
+    "substitution_note": [
+      "Any endpoint may be substituted with --endpoint/--model. The suite does not require our",
+      "model; it requires that the report say which model produced each number. A run against a",
+      "different model is a valid run of this suite and an invalid comparison against our table."
+    ]
+  },
+
+  "tasks": {
+    "source": "bench/specs.json",
+    "n": 30,
+    "note": [
+      "The 30 component specs of the syntax-2.0 acceptance benchmark. Each gives a brief plus",
+      "service interfaces to use verbatim, so the interfaces are pinned and the implementation",
+      "is the model's.",
+      "n=30 is the current task set. Issue #1205 landed tools/evolve_curriculum.py, which derives",
+      "266 tasks from repository artifacts with a computed difficulty tier; retiring n=30 in",
+      "favour of that curriculum is a named remaining gate, not something this file pretends to",
+      "have done."
+    ],
+    "authored_by": "this repository"
+  },
+
+  "columns": [
+    {
+      "id": "refused",
+      "lead": true,
+      "measured_by": "bench/refusal_inventory.py",
+      "note": [
+        "Leads the table. Every other column is one revl is designed to win, so a suite whose",
+        "author picked the axes is benchmaxxing whatever the intent. What repairs it is",
+        "publishing the cost of the guarantee: the documents and constructs this project",
+        "refuses that the other hosts run without objection. If the finished table shows revl",
+        "winning every column, that is a finding about the table."
+      ]
+    },
+    {
+      "id": "admits",
+      "measured_by": "bench/run.py + bench/rescore.py",
+      "note": "First-pass admission rate. revl may lose this column and that is a valid result."
+    },
+    {
+      "id": "residue",
+      "measured_by": "bench/score_raw_ts.py via tools/residue-probe",
+      "note": "Leaked categories (registry / provisions / effects / listeners) after N load-unload cycles."
+    },
+    {
+      "id": "injection-escape",
+      "measured_by": "not yet implemented",
+      "note": "A tool or prompt attempting to exceed its declared surface. Pairs with docs/prompt-injection-resistance.md, which carries no runnable check of its own today."
+    },
+    {
+      "id": "tokens-to-green",
+      "measured_by": "bench/tokens.py",
+      "note": "Output tokens spent per admitted component."
+    },
+    {
+      "id": "admission-latency",
+      "measured_by": "bench/admission_latency.py",
+      "note": "Per-candidate cost of gating a dynamically discovered tool."
+    }
+  ],
+
+  "hosts": [
+    {
+      "id": "raw-ts",
+      "name": "raw Cordis / TypeScript",
+      "kind": "hand-written plugin, no gate",
+      "prompt": "bench/prompts/raw-ts.md",
+      "authored_by": "this repository",
+      "scored_on": "residue",
+      "not_scored_on": "compile-rate",
+      "asymmetry": [
+        "This host is scored on leaks rather than on compile-rate because TypeScript always",
+        "compiles. The asymmetry is not hidden and is not a flaw in the method: it is the",
+        "finding. There is no first-pass compile number to put in this row, because the number",
+        "would be 100% for every attempt including the ones that leak on unload.",
+        "The consequence for the table is that 'admits' and 'residue' are not two views of one",
+        "quantity. A reader comparing them across hosts is comparing different questions."
+      ],
+      "columns": ["residue", "injection-escape", "tokens-to-green"],
+      "runnable": true
+    },
+    {
+      "id": "framework",
+      "name": null,
+      "kind": "popular agent framework, pinned version",
+      "prompt": null,
+      "authored_by": null,
+      "scored_on": "residue",
+      "columns": ["residue", "injection-escape", "tokens-to-green"],
+      "runnable": false,
+      "blocked_on": [
+        "No framework is named yet, and naming one badly would produce a dishonest column.",
+        "The selection criterion is below; picking a framework that fails it and then reporting",
+        "its residue would be benchmaxxing with extra steps."
+      ],
+      "selection_criteria": [
+        "Has a plugin or tool registration lifecycle with an unload path. A framework with no",
+        "unload cannot fail the residue column honestly: it would score maximally badly by",
+        "construction, for a reason that says nothing about the runtime comparison.",
+        "Installable at a pinned version, so a reader gets the same code we ran.",
+        "Drivable by the same briefs in bench/specs.json without rewriting the task.",
+        "Third-party, so the comparison is not this repository against itself."
+      ]
+    },
+    {
+      "id": "revl",
+      "name": "revl",
+      "kind": "gated: G1-G9 plus the no-residue proof at compile time",
+      "prompt": "bench/prompts/v2.md",
+      "authored_by": "this repository",
+      "scored_on": "admission",
+      "columns": ["refused", "admits", "tokens-to-green", "admission-latency", "injection-escape"],
+      "runnable": true
+    }
+  ],
+
+  "who_wrote_what": [
+    "Two of the three host prompts and all 30 briefs were written in this repository, by the",
+    "party whose runtime the suite is comparing. That is a real objection and the exit criterion",
+    "of issue #1267 answers it by requiring the harness to be runnable BY THE OTHER SIDE: the",
+    "commands are in bench/README.md, the artifacts are committed beside the summary, and the",
+    "residue oracle (tools/residue-probe) mounts plugins on a real cordis runtime rather than on",
+    "anything this repository can bias.",
+    "It does not fully answer it. A residue result on a fixture we authored remains dismissible",
+    "until somebody who is not us runs it, and the report says so rather than arguing otherwise."
+  ]
+}
