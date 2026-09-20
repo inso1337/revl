@@ -14991,12 +14991,12 @@ fn tk_no_field() -> FieldN {
 }
 
 fn tk_arrow(a: ArrowN, env: Vec<Bind>) -> TInf {
-    if ty_mentions_async(&a.ret) {
-        return tk_ok(String::from(""));
-    }
     let inner = tk_arrow_env(a.params.clone(), 0i64, env.clone());
     let indep = (!tk_arrow_dependent(&a.params, 0i64, a.body.clone()));
     let ret = tk_solid(tk_arrow_ann(taint_strip(a.ret.clone()), &env), &env);
+    if (ty_mentions_async(&a.ret) || ty_mentions_async(&ret)) {
+        return tk_ok(String::from(""));
+    }
     if ((a.ret != "") && indep) {
         let c = tk_check(a.body.clone(), ret.clone(), inner.clone(), "the body of this arrow (from its return annotation)");
         if (c.v != "") {
@@ -25628,6 +25628,30 @@ fn the_stamps_land_in_the_ir_the_emitters_read() {
     assert!((ir.revl_index_of("\"name\": \"t\", \"type\": \"Str\", \"secret\": true") != (0i64).checked_sub(1i64).expect("revl: Int overflow")));
     assert!((ir.revl_index_of("\"name\": \"n\", \"type\": \"Int\"}") != (0i64).checked_sub(1i64).expect("revl: Int overflow")));
     assert!((ir.revl_index_of("Secret[") == (0i64).checked_sub(1i64).expect("revl: Int overflow")));
+}
+
+#[test]
+fn _3_2__an_arrow_whose_body_depends_on_a_bottom_parameter_claims_no_result() {
+    let v = admit_src(String::from("fn takes_int(n: Int) -> Int {\n  return n\n}\n\nfn demo() -> Int {\n  let f = (x) => x\n  return takes_int(f(1))\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_arrow_value_called_at_its_arity_with_compatible_arguments_is_admitted() {
+    let v = admit_src(String::from("fn demo() -> Str {\n  let f = (x: Str): Str => x\n  return f(\"s\")\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_call_through_an_arrow_value_with_no_arguments_names_the_arity() {
+    let v = admit_src(String::from("fn demo() -> Str {\n  let f = (x) => \"s\"\n  return f()\n}"));
+    assert!((v == "T1|`f` is a `(Any) -> Str` and takes 1 argument(s), 0 given"));
+}
+
+#[test]
+fn _____on_an_actual_optional_is_admitted() {
+    let v = admit_src(String::from("type Row = { name: Str }\n\nfn label(r: Opt[Row]) -> Opt[Str] {\n  return r?.name\n}"));
+    assert!((v == ""));
 }
 
 #[test]
