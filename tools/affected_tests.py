@@ -147,7 +147,15 @@ SELFHOST_ORACLE_TESTS = {
     "emit_ts": ("tests/test_selfhost_emit_ts.py",),
     "emit_wasm": ("tests/test_selfhost_emit_wasm.py",),
     "lexer": ("tests/test_selfhost_lexer.py",),
-    "lower": ("tests/test_selfhost_lower_ir.py",),
+    # tests/test_oracle_construct_reach.py rides with lower.rvl because the
+    # `gate_census` row of tools/oracle_construct_reach.py RUNS `admit_src`
+    # over the census corpus and reports the guarantee families no document
+    # draws (issue #1215). A refusal this file stops issuing is a construct
+    # that becomes unreached, which is the ratchet's RED — and the dependents
+    # walk below carries the same selection to lexer/parser/types.rvl, the
+    # rest of `admit_src`'s `use` closure.
+    "lower": ("tests/test_selfhost_lower_ir.py",
+              "tests/test_oracle_construct_reach.py"),
     "parser": ("tests/test_selfhost_parser.py",),
     "types": ("tests/test_selfhost_types.py",),
 }
@@ -664,6 +672,16 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_check_vision_claims.py")
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
+            continue
+        # issue #1215: the `gate_census` row of tools/oracle_construct_reach.py
+        # imports this file for its corpus walk and its fast engine, so a change
+        # to either moves what that row measures and what its ledger records.
+        # The generic `tools/*.py` rule below matches on the file STEM and would
+        # select tests/test_gate_reference_census.py alone.
+        if f == "tools/gate_reference_census.py":
+            pytest_nodes.add("tests/test_gate_reference_census.py")
+            pytest_nodes.add("tests/test_oracle_construct_reach.py")
+            reasons.append("tools/gate_reference_census.py")
             continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
