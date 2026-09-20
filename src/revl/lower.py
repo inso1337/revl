@@ -71,6 +71,7 @@ from .taint import (
     splice_declassifiers,
     strip_qualifiers,
 )
+from . import model_council as _model_council
 from . import model_route as _model_route
 from .mcp.schema import (
     _parse_type as _schema_parse_type,
@@ -7575,6 +7576,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # note promised item 514. An empty table leaves every `model.*` crossing
     # the operation token it has always been.
     taint_model.model_roles = _model_route.roles(program)
+
+    # Model councils (roadmap item 516). After the routes, because a council's
+    # members are `model role` declarations and `roles()` is the table both
+    # read; before any component is lowered, for the reason above. A council is
+    # a DECLARATION checked at admission and writes no IR, exactly as a route
+    # does: slice 1 binds a council to no action, so an admitted program is
+    # byte-identical to the same program with the declaration deleted
+    # (docs/design/543-model-council.md).
+    _model_council.check(program)
 
     ambient_services = {
         name: _service_from_ir(name, spec)
