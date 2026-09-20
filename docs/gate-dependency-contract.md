@@ -258,22 +258,33 @@ issued over a refusal or a frontier gap; and the source must be inside the
 ADMISSION SURFACE named by `ADMISSION_SURFACE_ID`, described in one line by
 `ADMITTED_LAYER`, and implemented in the crate's generated `src/admission.rs`.
 
-That surface is deliberately tiny: interface declarations only, meaning
-`service` method signatures and scalar `type` aliases over a closed scalar
-vocabulary derived from the reference's own table. It holds no function body,
-no expression, no literal and no generic head, which is exactly why a
-no-objection over it is the whole answer rather than a partial one. Anything
-else is `Admission::Withheld`, carrying the verdict verbatim, so switching from
-`admit` to `issue_admission` can only ADD the admitted wire.
+That surface is deliberately tiny, and it has two halves. The first is
+interface declarations: `service` method signatures and scalar `type` aliases
+over a closed scalar vocabulary derived from the reference's own table, holding
+no function body, no expression, no literal and no generic head, which is why a
+no-objection over it is the whole answer rather than a partial one. The second
+is a `component` whose body is `provide` blocks and whose provide methods are
+each `fn <op>(<param>, …) = <expr>` over two productions — a bound parameter
+read, and a call `<required key>.<op>(…)` on a service the component requires
+(issue #346, docs/design/457 T6). Those bodies carry terms, and `admission.rs`
+does not defer them: it types every method against the signature it implements,
+every call against the signature it reaches, and every argument and return by
+equality over the scalar set. No literal, no operator, no `let`, no `effect`, no
+block body, no service operation carrying a marking. Anything else is
+`Admission::Withheld`, carrying the verdict verbatim, so switching from `admit`
+to `issue_admission` can only ADD the admitted wire.
 
 `issue_admission_into(source, manifest)` asks the same question against a
 running composition. The empty manifest is the empty composition and reduces to
-the standalone question. Against a non-empty one the candidate carries one
-obligation more: nothing it declares may REDECLARE a service the running
-composition already declares. That is the only interaction the reference has
-between an interface-only candidate and a running manifest, and it gates a
-redeclaration on the compatibility relation the type layer decides, so a
-redeclaration is withheld here while a fresh interface is admitted.
+the standalone question. Against a non-empty one the candidate carries two
+obligations more. Nothing it declares may REDECLARE a service the running
+composition already declares, which gates a redeclaration on the compatibility
+relation the type layer decides, so a redeclaration is withheld here while a
+fresh interface is admitted. And no component it declares may take the name of
+one the wire NAMES: a same-name component is a replacement, whose handoff and
+unmet-consumer reasoning belongs to the fold. A running component the wire names
+nowhere carries no provision and no requirement row, so replacing it hands off
+no state and strands no consumer.
 
 The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
 header followed by one `:S,op,op` row per declared service, carrying its name
@@ -292,7 +303,14 @@ running declaration rather than only resolve its name. Two things the block does
 not buy. A redeclaration stays withheld: the compatibility relation of
 `_admit_service_replacement` is not ported, and the parameter lists the block
 carries are a partial source anyway - they are withheld for a spelling the wire
-cannot carry, and they carry no return type, emission or async marking. And a wire carrying a WITHDRAWAL row (`-C`, the replacement wave) is
+cannot carry, and they carry no emission or async marking. A PLAIN operation's
+token also carries its declared RETURN (`:S,op(k:Str):Str`, issue #346), which
+is what lets the admission surface type a candidate's provide-method body
+against the running declaration; an operation carrying any marking has its
+return withheld, so silence there is silence about the result and no certified
+body can call it. The fold READS that return and does not use it - its readers
+on that side are the refusal rules, which is a separate slice with its own
+census rows. And a wire carrying a WITHDRAWAL row (`-C`, the replacement wave) is
 declined outright: the fold decides a withdrawal in full, and re-deriving which
 provisions survive it on this side would be a second implementation of that
 reasoning.

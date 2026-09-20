@@ -98,8 +98,15 @@ def test_the_crate_states_what_it_decides_and_does_not_decide():
     assert meta["verdict_arms"] == ["refused", "no_objection", "outside_frontier"]
     assert "admitted" not in meta["verdict_arms"]
     assert meta["admitted_layer"] == GEN.ADMITTED_LAYER
-    assert "interface declarations only" in GEN.ADMITTED_LAYER
-    assert "no term the reference type layer decides" in GEN.ADMITTED_LAYER
+    # The admission surface grew past interface declarations at docs/design/457
+    # T6: a component whose provide-method bodies are parameter reads and calls
+    # on a required service is inside it, because the certifier TYPES those
+    # bodies rather than deferring them. Both halves have to be named, or a
+    # reader cannot tell which claim the sentence is making.
+    assert "interface declarations" in GEN.ADMITTED_LAYER
+    assert "provide-method" in GEN.ADMITTED_LAYER
+    assert "every term in the region is one this gate types itself" \
+        in GEN.ADMITTED_LAYER
     # Both halves must be spelled out, or a reader cannot know where the gap is.
     assert "composition" in GEN.COVERED_LAYER and "guarantee" in GEN.COVERED_LAYER
     assert "NOT the reference type layer" in GEN.COVERED_LAYER

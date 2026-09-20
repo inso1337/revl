@@ -303,7 +303,7 @@ pub const ADMISSION_SURFACE_ID: &str = admission::SURFACE_ID;
 /// What [`issue_admission`] is willing to admit, in one line. Read it before
 /// treating an [`Admission::Withheld`] as a defect: outside this region the
 /// honest answer is to withhold.
-pub const ADMITTED_LAYER: &str = "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides";
+pub const ADMITTED_LAYER: &str = "interface declarations, and components whose provide-method bodies are parameter reads and calls on a required service, over a closed scalar type vocabulary; every term in the region is one this gate types itself";
 
 /// The three values a host can branch on (design "Versioning").
 #[derive(Debug, Clone, PartialEq, Eq)]

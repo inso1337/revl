@@ -286,12 +286,25 @@ def test_the_running_signature_is_read_rather_than_ignored(native, running):
 
 def test_the_wire_carries_the_signature_it_claims_to(running):
     """The renderer's half, pinned on the bytes: the running `Store`'s row
-    carries each operation's declared parameter list, names and types."""
+    carries each operation's declared parameter list, names and types, and —
+    for a PLAIN operation — its declared return (issue #346, docs/design/457
+    T6).
+
+    `put` is the contrast that makes the return a claim rather than a default:
+    it is an `emission`, so its return is WITHHELD and its token stops at the
+    parameter list. Every marking `lower.py` can stamp on a service operation
+    withholds the same way, because the wire has no spelling for any of them
+    and a reader deciding a call against a declaration that lost its marking
+    would be deciding it against a declaration nobody sent.
+    """
     _, wire = running
     rows = wire.split(";")
     assert "!services" in rows, "the exhaustiveness header is the claim"
-    assert ":Store,get(key:Str),bump(n:Int),put(key:Str|value:Str)" in rows
-    assert ":AppSvc,ping()" in rows, "an operation with no parameter is `op()`"
+    assert ":Store,get(key:Str):Str,bump(n:Int):Int,put(key:Str|value:Str)" \
+        in rows
+    assert ":AppSvc,ping():Str" in rows, (
+        "an operation with no parameter is `op()`, and its return is still a "
+        "claim")
 
 
 def test_a_signature_the_wire_cannot_spell_is_withheld_not_mangled():

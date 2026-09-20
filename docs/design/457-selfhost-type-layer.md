@@ -457,6 +457,19 @@ reference does it and the messages differ.
 
 ### 4.5 The manifest value for `admit_into`
 
+**SUPERSEDED BY THE TREE.** This subsection is the 2026-08 draft and it was
+resolved the other way round: `admit_into` takes the item-186 ROW WIRE, not a
+JSON document, and has done since #860. The T5 PARTIAL and T6 LANDED entries in
+section 5 carry what is actually shipped, and the section 8 bullet records the
+decision. `stdlib/json.rvl` is not in the crate closure and `serde_json` is not
+a dependency. What survives here is the FIELD LIST — which halves of a running
+declaration a gate needs — and the wire has grown to carry them one slice at a
+time: operation names (T4b), parameter lists (T5), and a plain operation's
+declared return (T6). A slice that wants the JSON document back has to argue
+against three landed slices, not against a draft nobody implemented.
+
+The draft, kept for the field list:
+
 `admit_into(src: Str, manifest_json: Str) -> Str` takes the same JSON the py
 gate takes: a compiled IR document, or its `{manifest, services}` projection.
 Parsed with `stdlib/json.rvl` (`json_parse` has `@py` and `@rs` bodies; the
@@ -939,6 +952,93 @@ which is the seam 337 Seam 2/3 would have to cross.
 bucket; `bench/inprocess_gate_rust` manifest batch; the crate README. Oracle:
 section 6. Rust template and Python only, no `.rvl`. ~400 lines.
 
+**T6 LANDED — the provide-method admitted layer.** Read three shape decisions
+first, because none of them is the paragraph above's.
+
+The first: there is no `Verdict` rewrite and no api `2.0.0`. Between this
+design and the slice, #987 landed the admission arm as a separate TYPE and a
+separate entry point — `issue_admission` / `issue_admission_into` return an
+`Admission`, whose `Admitted` arm writes `{"verdict":"admitted",
+"admitted":true,"code":null,"message":null}`, byte-identical to what
+`revl.gate`'s own `Verdict.to_json()` writes for a py admission. The
+`Verdict` surface keeps its three admission-free arms, and every consumer that
+narrowed `admitted` to the literal `false` (the js consumer's TS types, the rust
+consumer's ESCALATE branch) keeps compiling. So section 6 clause 2's "`admit_
+into(cache_layer, manifest)` on rust is `Admitted`" is met by the ADMISSION verb
+asked with the manifest, not by a fourth arm on the refusal verb. Adding one
+would be a fail-open change to three shipped consumers in exchange for nothing
+the separate type does not already give.
+
+The second: the layer that was withheld. `ADMITTED_LAYER` was "interface
+declarations only", so a component with a provide-method body was outside it and
+`cache_layer` was withheld whatever the manifest said. It now reads "interface
+declarations, and components whose provide-method bodies are parameter reads and
+calls on a required service, over a closed scalar type vocabulary; every term in
+the region is one this gate types itself". The certifier does not DEFER those
+bodies to the native gate — the native gate does not decide them, which is the
+whole reason the region was closed. It TYPES them: `crates/revl-gate/src/
+admission.rs` walks each provide method against the operation it implements,
+each call against the declared signature it reaches, each argument and each
+return by equality over the scalar set, with no arm that guesses a type and no
+arm that skips a token. A component body carrying anything else — a literal, an
+operator, a `let`, an `effect`, a block body, a call on anything but a required
+key, a service operation carrying any marking — leaves the surface whole.
+
+The third, and it is the one that changed a WIRE: a body's return cannot be
+typed against a running declaration the wire does not carry. `revl.manifest.
+manifest_wire` now renders a PLAIN operation as `get(key:Str):Str`, where plain
+means an IR method entry whose key set is exactly `{params, returns, emission}`
+with `emission` false (`revl.manifest._PLAIN_METHOD_KEYS`). Every marking —
+`async`, `capabilities`, `commutative`, `idempotent`, `termination`, `cache`,
+`validated`, `route` — withholds the return, and so does a marking added to
+`lower.py` later, without an edit to the renderer. `put` is the case in the
+bench composition: it is an `emission`, its token stops at the parameter list,
+and no certified body can call it.
+
+The fold READS the return and DROPS it, deliberately. `selfhost/lower.rvl`'s
+`parse_optok` validates the new suffix so that the two sides accept exactly the
+same token shape — a token the fold refused the wire over while the admission
+surface read it would be a green nobody checked — and stores `""` in `MSig.ret`
+beside the inert `isEm`/`caps`/`isAsync`. Its readers on that side are the ones
+the T5 entry lists as withheld (`tk_infer`'s `Call` arm, `prov_missing_return`,
+`a6_annotation_verdict`), and turning them on against a wire-built declaration
+changes which sources the gate REFUSES, which is its own slice with its own
+census rows. This one changes only what it ADMITS.
+
+Measured. `tools/gate_reference_census.py --check` over 854 programs:
+`false-admission` empty, `false-reject` empty, `false-admit` 9 — unchanged from
+before the slice, and the same over `--engine crate` (the real crate, 8m35s) and
+over a 2000-draw fuzz sweep (2854 programs, `false-admission` still empty).
+`agree-admit` grew by the three new `ADMISSION_PROGRAMS` entries that are inside
+the widened surface; `near_miss_component` was one of the old near misses and is
+now one of them. The RETURN near miss is deliberately not a corpus entry: the
+reference refuses it `T1` and `admit_src` raises no objection, so it is a real
+pre-existing `false-admit/T1` (T4's gap, not this slice's) and putting it in the
+corpus would widen a fail-open baseline with a program that is not in the tree.
+It is held by hand instead, in the census test and in `admission.rs`'s own unit
+tests.
+
+What it buys, on the exit test's own bytes:
+`issue_admission_into(bench/admission_latency.py::CANDIDATE, manifest_wire(
+RUNNING))` returns `Admitted` with the basis `admission surface
+admission-interface:424698f4c8d00140: services=1 aliases=0 methods=1
+components=1 bodies=1, none of them redeclaring one of the running composition's
+2 declared services; its 2 provision rows resolve its 1 requirement rows; every
+term in it typed by this surface, and the composition/guarantee gate raised no
+objection`, and the wire `{"verdict":"admitted","admitted":true,"code":null,
+"message":null}` — equal to `revl.gate.admit_into(...).to_json()` byte for byte.
+`calls_missing_method` and `ambient_provision_conflict` are withheld against the
+same manifest, because the admission arm is gated on the refusal surface first.
+
+What it does NOT buy. Ownership, taint, holes, approvals, events, secrets and
+poly externs stay named families in the frontier, and the family registry and
+post-gate family scan of 3.6 are NOT built: the surface is a closed grammar that
+those families cannot be written in, which is a stronger argument than a
+reachability table and is why the table was not needed to close section 6. An
+`emission`, an `async` operation, a capability, a `let`, an `effect` and a
+handoff are each outside the grammar rather than judged inside it. And the
+`Verdict` surface still issues nothing, so `COVERED_LAYER` is unchanged.
+
 Dependency order: T0 -> T1 -> {T2a, T2d} -> T2b -> T2c -> T3a -> {T3b, T3c,
 T4} -> T5 -> T6. Parallelisable pairs: T2a with T2d; T3b with T3a once the
 channel exists; T4 with T3c. Stage 4 `compile_to` (item 332) starts after T3c
@@ -980,6 +1080,38 @@ family, never refused) and `REJECTED_PROGRAMS` (none admitted). The census
 `--check` holds `false-admission == []` and `false-admit/* == []` over the
 whole corpus and the fuzz draw. When all of that is green on the landed sha,
 item 417's remaining exit is met and 332 Stage 4 is unblocked.
+
+**What the T6 slice actually did to this section, clause by clause.** Read the
+T6 LANDED entry in section 5 first; this is the accounting against the wording
+above, which was drafted before #987 split the admission out into its own type.
+
+1. Clause 1 was met by T4a and is unchanged: `admit(cache_layer)` on rust is
+   `Refused G1` with the reference's own sentence.
+2. Clause 2 is met, by the ADMISSION verb rather than by a fourth `Verdict`
+   arm: `issue_admission_into(cache_layer, manifest_wire(base_manifest()))` is
+   `Admitted` and its wire reads `"admitted":true`, byte-equal to
+   `py_gate.admit_into(...).to_json()`. Both are asserted on the bytes.
+3. Clause 3 is met for the three candidates the manifest batch carries
+   (`cache_layer` admitted, `calls_missing_method` refused `A6`,
+   `ambient_provision_conflict` refused `G2`, each agreeing with
+   `revl.gate.admit_into` on tag and message).
+
+The RENAMES in this section were NOT taken, and that is deliberate.
+`test_the_manifest_gap_is_priced_not_hidden` was TIGHTENED in place rather than
+replaced by `test_the_manifest_gap_is_closed`: it is the gate that measured the
+distance, so it is the gate that should pin its absence, and a rename is a
+deletion as far as a suite's history is concerned. Its last clause now reads
+"rust issues exactly this" where it read "rust cannot issue this".
+`test_the_measured_layer_gap_is_real_and_never_reads_as_an_admission` is kept
+as written — it is a claim about the VERDICT surface, which still issues
+nothing — and `test_every_rust_admission_is_a_py_admission` was ADDED beside
+it, over the whole batch, with a non-vacuity assertion so it cannot stop being
+able to fire. `test_the_gate_surfaces_are_kept_in_lockstep` is unchanged: no
+api bump happened, and `COVERED_LAYER` still says `NOT the reference type
+layer`, which is still true of the refusal surface.
+
+`TYPE_LAYER_GAP` is untouched: it is a refusal-surface gap, which this slice
+does not close.
 
 ## 7. The hardest sub-problems, and how each is de-risked
 
@@ -1041,14 +1173,27 @@ item 417's remaining exit is met and 332 Stage 4 is unblocked.
 
 * `checker.rvl` slice two retired into a wrapper at T4 (3.5), versus kept as
   a frozen second oracle.
-* `NoObjection` removed at T6 with an api bump to `2.0.0` on both tiers,
-  versus kept as a never-returned arm under `1.1.0`.
+* ~~`NoObjection` removed at T6 with an api bump to `2.0.0` on both tiers,
+  versus kept as a never-returned arm under `1.1.0`.~~ RESOLVED as NEITHER,
+  by #987 and then by the T6 slice: the admission is a separate TYPE
+  (`Admission`) behind a separate entry point, so `Verdict` keeps all three
+  arms, `NoObjection` keeps meaning "nothing to refuse, and not a green", and
+  the api string does not move. A fourth arm would have been a fail-open change
+  to the js and rust consumers, both of which narrow `admitted` to the literal
+  `false`.
 * The `TYPE` tag as an oracle-only vocabulary, versus giving the reference a
   `code` on every code-less type-layer refusal so `Verdict.code` agrees on
   py and rust without a classifier (preferred long-term; changes
   `revl compile --json` output, so it is its own reference-side item).
-* `admit_into` takes JSON through `stdlib/json.rvl` (adds `serde_json` to the
-  crate), versus a purpose-built line format the py side would render.
+* ~~`admit_into` takes JSON through `stdlib/json.rvl` (adds `serde_json` to the
+  crate), versus a purpose-built line format the py side would render.~~
+  RESOLVED as the LINE FORMAT, by the tree rather than by this draft: the
+  item-186 ROW WIRE has been the manifest verb since #860, and the T5 PARTIAL
+  entry records it. T6 extended that wire (a plain operation's declared return)
+  rather than revisiting the decision, so `stdlib/json.rvl` stays out of the
+  crate closure and `serde_json` stays off the dependency list. A slice that
+  wants the JSON document back has to argue against three landed slices, not
+  against this bullet.
 * Ownership's `Admitted` trigger is `effect` in any component (coarse) until
   item 308 ports O1/B1.
 
