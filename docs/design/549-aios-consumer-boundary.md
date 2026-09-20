@@ -121,8 +121,9 @@ permission. Item 512 (`docs/design/531-model-placement.md`,
 declared role an origin class may reach, refusing under `G-MODEL-PLACE`, whose
 published text in `src/revl/diagnostics.py` is "a model role declared
 `off_device` never receives a confidentiality origin, and an action reaches
-only the roles its `route model` block names". Item 514 adds the origin
-ceiling. Item 516 (PR #1257) adds the council and the rule that disagreement
+only the roles its `route model` block names". Item 514 (PR #1243, open) adds
+the origin ceiling, checked on a value rather than on a
+declaration. Item 516 (PR #1257) adds the council and the rule that disagreement
 can never be silently resolved toward allow. Item 519 (PR #1253) puts the model
 role in the attenuation product so the effective ceiling is an intersection
 rather than what the component alone holds.
@@ -164,7 +165,10 @@ the review's sentence most depends on, that a screenshot or a window title is
 attacker-influenced input which may not become an action, is **not enforced
 today**. `docs/design/532-typed-computer-use.md` §12 records that `screen` and
 `ui` are not in `_SOURCE_CLASS_SCOPES` or `_SINK_CLASS_SCOPES`, "so nothing yet
-refuses an observed string flowing into a click", and
+refuses an observed string flowing into a click". That was re-measured on
+`main` for this note rather than carried over: the two sets in
+`src/revl/taint.py` are `{"shell", "exec", "terminal", "policy"}` and
+`{"web", "net", "fs", "model", "input"}`, and neither contains either name.
 `docs/design/538-ui-transactions.md` §11 records that slice 1 "does not stop a
 click. It stops a program from claiming a click is clean." Both are inside
 items 521 and 522 as later slices. A consumer reading the review's sentence and
@@ -521,11 +525,13 @@ them. Measured in §6 above, two do not. Suggested replacement for that clause:
   turned up nothing that covers the commit protocol. A mechanism could exist
   somewhere those four lists do not reach, in which case row 7 is wrong in the
   direction of understating the tree.
-* **Four items are read from branches, not from `main`.** Items 515, 516, 519
-  and 544 are PRs #1252, #1257, #1253 and #1264. Anything this note attributes
-  to them is attributed to an unlanded branch and can change before it lands.
-  PR #1266 reconciles the clause order of 515 and 519, so the surface syntax
-  quoted from either may move.
+* **Five items named here are not on `main`.** Items 515, 516, 519 and 544 are
+  PRs #1252, #1257, #1253 and #1264, and their branches were read with
+  `git show`; item 514 is PR #1243 and its **branch was not read**, only its
+  title and the description of it in item 515's note. Anything this note
+  attributes to any of the five is attributed to an unlanded branch and can
+  change before it lands. PR #1266 reconciles the clause order of 515 and 519,
+  so the surface syntax quoted from either may move.
 * **Item 517's landed half is `src/revl/model_evidence.py`, and its unlanded
   half is most of the item.** The record exists and verifies; nothing writes
   one during a run. Every sentence here about evidence at runtime is about a
