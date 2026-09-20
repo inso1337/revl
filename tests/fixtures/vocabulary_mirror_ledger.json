@@ -1,0 +1,687 @@
+{
+  "//": "Issue #1285. Every closed vocabulary this tree declares in more than one place, with the reason it is still declared twice. Written by `python3 tools/check_vocabulary_mirrors.py --write`, which no routine regeneration command calls; widening it is an edit a reviewer reads. Shrink-only: resolving a mirror into one definition deletes its entry.",
+  "classes": [
+    {
+      "sites": [
+        "src/revl/bundle.py::DEFAULT_BACKENDS",
+        "src/revl/cli/parser.py::BUNDLE_BACKENDS",
+        "tools/affected_tests.py::BACKEND_TIERS",
+        "tools/affected_tests.py::REFERENCE_EMITTER_ORACLE",
+        "tools/check_roadmap_markers.py::TIER_ALIASES",
+        "tools/conformance.py::TIERS",
+        "tools/reserved_lexicon_sweep.py::ALL_TIERS",
+        "tools/validate.py::VALIDATORS"
+      ],
+      "tokens": [
+        "go",
+        "java",
+        "python",
+        "rust",
+        "typescript",
+        "wasm"
+      ],
+      "note": "The six backend names in their long spelling, re-declared in eight places. Real mirror, not yet resolved: one of these should be the definition and the rest should import it. Drift here mis-selects a backend or a CI lane."
+    },
+    {
+      "sites": [
+        "src/revl/bundle.py::_canonical_ir",
+        "src/revl/registry.py::_normalize_ir_for_attest"
+      ],
+      "tokens": [
+        "components",
+        "file",
+        "manifest",
+        "source"
+      ],
+      "note": "Issue #1276, instance 2 of issue #1285. Two copies of the IR path normalization an attestation binds. Two of the three original copies had already drifted and one drift left `truc reproduce`'s attestation tier structurally dead; `truc.reproduce._normalized_ir` now calls `registry._normalize_ir_for_attest` rather than re-implementing it. These two remain: bundle also basenames the top-level `components[*].source`/`file` the compiler stamps. Resolving them to one definition is PR #1281's work; until then this entry is the differential."
+    },
+    {
+      "sites": [
+        "src/revl/cap_order.py::_DURATION_UNITS",
+        "src/revl/parser.py::Parser._duration_literal",
+        "src/revl/policy.py::_TTL_UNITS",
+        "src/revl/policy.py::_parse_ttl"
+      ],
+      "tokens": [
+        "h",
+        "m",
+        "ms",
+        "s"
+      ],
+      "note": "The four duration suffixes, declared by `cap_order` and by `policy` and spelled again by each of their parsers. A unit accepted by one spelling and not the other silently changes a TTL by three orders of magnitude."
+    },
+    {
+      "sites": [
+        "src/revl/cli/observe.py::_run_explain",
+        "src/revl/diagnostics.py::explain"
+      ],
+      "tokens": [
+        "code",
+        "fix",
+        "guarantee",
+        "known",
+        "message",
+        "ok"
+      ],
+      "note": "The `explain` result envelope, produced by `diagnostics.explain` and re-spelled field by field by the CLI renderer. A field added to the producer and not read by the renderer is invisible."
+    },
+    {
+      "sites": [
+        "src/revl/cli/parser.py::REPLAY_MODES",
+        "src/revl/replay_modes.py::MODES",
+        "src/revl/replay_modes.py::MODE_EXECUTOR_REQUIRES",
+        "src/revl/replay_modes.py::MODE_INTENT",
+        "src/revl/replay_modes.py::MODE_RECORD_REQUIRES"
+      ],
+      "tokens": [
+        "counterfactual",
+        "exact",
+        "model-substitute",
+        "tool-only"
+      ],
+      "note": "The four replay modes. `cli/parser.REPLAY_MODES` re-declares `replay_modes.MODES` to avoid importing the runtime into argument parsing; the three `MODE_*` maps beside it are parallel tables over the same enum in one module, which is not drift but is what makes the class this size."
+    },
+    {
+      "sites": [
+        "src/revl/composition.py::_KNOWN_BACKENDS",
+        "src/revl/placement.py::KNOWN_BACKENDS"
+      ],
+      "tokens": [
+        "go",
+        "java",
+        "node",
+        "py",
+        "rust",
+        "ts"
+      ],
+      "note": "The six backend names in their short spelling, declared twice. Same vocabulary as the `DEFAULT_BACKENDS` class under a different spelling, which is itself part of why both survive."
+    },
+    {
+      "sites": [
+        "src/revl/erase_report.py::HONEST_SCOPE",
+        "src/revl/erasure_receipt.py::SCOPE",
+        "src/revl/slo.py::SCOPE"
+      ],
+      "tokens": [
+        "doesNotProve",
+        "proves",
+        "reference",
+        "title"
+      ],
+      "note": "The honest-scope document shape (`proves`/`doesNotProve`/`reference`/`title`) declared once per report kind. The shape is the contract a reader relies on, so a field added to one report and not the others is a real gap."
+    },
+    {
+      "sites": [
+        "src/revl/export_client.py::_ClientExporter.__init__",
+        "src/revl/export_wit.py::_Exporter.__init__"
+      ],
+      "tokens": [
+        "class",
+        "externs",
+        "returns",
+        "services",
+        "types"
+      ],
+      "note": "Two exporter constructors reading the same five IR sections. Near-clones of one another; a section added to the IR reaches one and not the other."
+    },
+    {
+      "sites": [
+        "src/revl/export_client.py::_ClientExporter._nominal_refs",
+        "src/revl/export_openapi.py::_OpenApiExporter._nominal_refs",
+        "src/revl/export_wit.py::_Exporter._nominal_refs"
+      ],
+      "tokens": [
+        "List",
+        "Map",
+        "Opt",
+        "Result",
+        "Unit"
+      ],
+      "note": "The structural type heads, walked identically by three exporters. A head added to the surface language and taught to two of the three leaves the third silently emitting a nominal reference for a structural type."
+    },
+    {
+      "sites": [
+        "src/revl/export_client.py::_ClientExporter._type_decl",
+        "src/revl/export_wit.py::_Exporter._type_decl",
+        "src/revl/typecheck.py::check_ast"
+      ],
+      "tokens": [
+        "cases",
+        "fields",
+        "kind",
+        "name",
+        "payload"
+      ],
+      "note": "The type-declaration IR shape. The two `_type_decl` bodies are near-clones of each other; `typecheck.check_ast` is an unrelated reader of the same field names and is why the class has a third member."
+    },
+    {
+      "sites": [
+        "src/revl/export_client.py::_ClientExporter.ts_type",
+        "src/revl/resources.py::_STRUCTURAL_HEADS",
+        "src/revl/typecheck.py::_CONFIG_DATA_CONTAINERS",
+        "src/revl/typecheck.py::_GENERIC_ARITY"
+      ],
+      "tokens": [
+        "List",
+        "Map",
+        "Opt",
+        "Result"
+      ],
+      "note": "The four structural heads, declared three times as a constant and spelled again inside the TypeScript renderer."
+    },
+    {
+      "sites": [
+        "src/revl/export_client.py::_SCALARS",
+        "src/revl/mcp/schema.py::_JSON_TYPES"
+      ],
+      "tokens": [
+        "Bool",
+        "Bytes",
+        "Float",
+        "Int",
+        "Str",
+        "Unit"
+      ],
+      "note": "Issue #1272, instance 1 of issue #1285, the six-scalar half. `mcp/schema._JSON_TYPES` is the MCP projection's scalar table and `export_client._SCALARS` the client exporter's; both are kept, for the reasons PR #1283 records, and PR #1283's differential walks the pair driven by the surface type. See also the four-scalar class carrying `export_openapi._SCALARS`, which is the SAME vocabulary two scalars short."
+    },
+    {
+      "sites": [
+        "src/revl/export_client.py::_WebuiFaceExporter._rpc_signature",
+        "src/revl/export_wit.py::_Exporter._func_decl",
+        "src/revl/mcp/fillspec.py::_render_signature"
+      ],
+      "tokens": [
+        "name",
+        "params",
+        "returns",
+        "type"
+      ],
+      "note": "FALSE POSITIVE. Three renderers that each read a function signature out of the IR. Nothing is re-declared: they are readers of one schema, so a renderer that starts reading a fourth field is a correct one-sided edit and would red this entry with no defect behind it."
+    },
+    {
+      "sites": [
+        "src/revl/export_openapi.py::_SCALARS",
+        "src/revl/run.py::_ENV_TYPE_CHECKS",
+        "tools/fuzz_cross_tier.py::BASE"
+      ],
+      "tokens": [
+        "Bool",
+        "Float",
+        "Int",
+        "Str"
+      ],
+      "note": "Issue #1272, instance 1 of issue #1285, the four-scalar half. `export_openapi._SCALARS` is `mcp/schema._JSON_TYPES` two scalars short (`Bytes`, `Unit`), which is exactly the drift the issue describes and is why exact-vocabulary matching puts the two halves in different classes. `run._ENV_TYPE_CHECKS` and `fuzz_cross_tier.BASE` are third and fourth declarations of the same four scalars."
+    },
+    {
+      "sites": [
+        "src/revl/fault.py::_PROP_PRIMITIVES",
+        "src/revl/lower.py::_GENERATABLE_PRIMITIVES"
+      ],
+      "tokens": [
+        "Bool",
+        "F64",
+        "Float",
+        "Int",
+        "Int32",
+        "Num",
+        "Str"
+      ],
+      "note": "The primitives a value can be generated for, declared by the fault sweep and by the lowering check. A primitive added to one and not the other means the checker admits a type the generator cannot produce, or the reverse."
+    },
+    {
+      "sites": [
+        "src/revl/fault.py::_SWEEP_ALL_TIERS",
+        "src/revl/gate.py::_KNOWN_TIERS",
+        "src/revl/run.py::KNOWN_BACKENDS",
+        "src/revl/run.py::RUNNABLE_BACKENDS",
+        "src/revl/test.py::_RAW_RUNNERS",
+        "tools/conformance_cert.py::ALL_TIERS",
+        "tools/docgen.py::VISION_TIER_RUNTIME",
+        "tools/fuzz_cross_tier.py::detect_tiers",
+        "tools/selfhost_coverage.py::TIERS",
+        "tools/selfhost_line_coverage.py::TIERS"
+      ],
+      "tokens": [
+        "go",
+        "java",
+        "py",
+        "rust",
+        "ts",
+        "wasm"
+      ],
+      "note": "The six tier names in their short spelling, re-declared in ten places, the largest mirror class in the tree. Real mirror, not yet resolved."
+    },
+    {
+      "sites": [
+        "src/revl/fault.py::_drive_roundtrip",
+        "src/revl/fault.py::_prune_dependents",
+        "src/revl/run_go.py::_load_order",
+        "src/revl/run_java.py::_load_order",
+        "src/revl/run_rust.py::_load_order",
+        "src/revl/run_ts.py::_load_order",
+        "src/revl/run_wasm.py::_load_order"
+      ],
+      "tokens": [
+        "components",
+        "loadOrder",
+        "manifest",
+        "name"
+      ],
+      "note": "The manifest load-order fields. The five `_load_order` bodies are per-backend copies of one another, which is the copy-paste form of this defect: a manifest field added for one runtime and not the others changes load order on five tiers unevenly."
+    },
+    {
+      "sites": [
+        "src/revl/fault.py::_snapshot",
+        "src/revl/mocks.py::_residue_delta",
+        "src/revl/schedule.py::ScheduleResult.fingerprint",
+        "src/revl/schedule.py::_snapshot_residue"
+      ],
+      "tokens": [
+        "effects",
+        "listeners",
+        "provisions",
+        "registry"
+      ],
+      "note": "The four residue sections. Declared once per producer, so a section added to the residue reaches the snapshot that names it and not the others."
+    },
+    {
+      "sites": [
+        "src/revl/formatter.py::_COMPOUND_ASSIGN",
+        "src/revl/lower.py::_TYPED_ARITH_OPS",
+        "src/revl/parser.py::Parser._arrow_body",
+        "src/revl/parser.py::Parser._assign_ahead"
+      ],
+      "tokens": [
+        "%",
+        "*",
+        "+",
+        "-",
+        "/"
+      ],
+      "note": "The five arithmetic operators, declared by the formatter and by lowering and spelled again in the parser. An operator added to the language and not to one of these formats or lowers wrongly."
+    },
+    {
+      "sites": [
+        "src/revl/gate.py::AdmitResult.as_dict",
+        "src/revl/mcp/admit_bridge.py::admit",
+        "src/revl/mcp/session.py::AdmitVerdict.as_dict"
+      ],
+      "tokens": [
+        "admitted",
+        "code",
+        "keys",
+        "message"
+      ],
+      "note": "The admit-verdict envelope, rendered by two `as_dict` bodies in different modules and re-spelled by the MCP bridge that reads them."
+    },
+    {
+      "sites": [
+        "src/revl/holes.py::collect",
+        "src/revl/lower.py::_lower_hole"
+      ],
+      "tokens": [
+        "file",
+        "kind",
+        "line",
+        "message",
+        "type"
+      ],
+      "note": "The hole record: `lower._lower_hole` writes the fields and `holes.collect` reads them back. A field the producer adds and the reader does not know about is dropped silently."
+    },
+    {
+      "sites": [
+        "src/revl/import_cordis.py::_BUILTIN_CASES",
+        "src/revl/import_openapi.py::_BUILTIN_CASES",
+        "src/revl/import_wit.py::_BUILTIN_CASES",
+        "src/revl/lower.py::_BUILTIN_CONSTRUCTORS"
+      ],
+      "tokens": [
+        "Err",
+        "None",
+        "Ok",
+        "Some"
+      ],
+      "note": "The four builtin constructors, declared once per importer plus once in lowering. A constructor added to the language reaches whichever of the four was edited."
+    },
+    {
+      "sites": [
+        "src/revl/import_cordis.py::_BUILTIN_TYPES",
+        "src/revl/import_openapi.py::_BUILTIN_TYPES",
+        "src/revl/import_wit.py::_BUILTIN_TYPES"
+      ],
+      "tokens": [
+        "Bool",
+        "Bytes",
+        "Float",
+        "Int",
+        "List",
+        "Map",
+        "Opt",
+        "Result",
+        "Str",
+        "Unit"
+      ],
+      "note": "The ten builtin type names, declared once per importer. Same shape as the builtin-cases class beside it."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_BUILTIN_METHODS",
+        "src/revl/typecheck.py::_BUILTIN_SIG"
+      ],
+      "tokens": [
+        "charAt",
+        "charCodeAt",
+        "checked_div_euclid",
+        "checked_div_floor",
+        "checked_div_trunc",
+        "checked_mod",
+        "codepoint_at",
+        "concat",
+        "div_euclid",
+        "div_floor",
+        "div_trunc",
+        "endsWith",
+        "field",
+        "has",
+        "indexOf",
+        "is_alnum",
+        "is_alpha",
+        "is_digit",
+        "is_space",
+        "join",
+        "keys",
+        "length",
+        "list",
+        "lookup",
+        "mod",
+        "push",
+        "remove",
+        "repeat",
+        "set",
+        "size",
+        "slice",
+        "split",
+        "startsWith",
+        "str",
+        "to_int",
+        "to_int32",
+        "to_str"
+      ],
+      "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_RELATIONAL_OPS",
+        "src/revl/parser.py::Parser._cmp"
+      ],
+      "tokens": [
+        "<",
+        "<=",
+        ">",
+        ">="
+      ],
+      "note": "The four relational operators, declared in lowering and spelled again in the parser's comparison rule."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_check_generatable",
+        "src/revl/mcp/schema.py::expressibility_reason",
+        "src/revl/mcp/schema.py::fully_expressible",
+        "src/revl/resources.py::resource_taint"
+      ],
+      "tokens": [
+        "cases",
+        "fields",
+        "kind",
+        "payload"
+      ],
+      "note": "FALSE POSITIVE. Four readers of the type-spec field names. The two `mcp/schema` members are the two halves of one predicate and mirror each other by design, but they share a module; the cross-module members are unrelated readers, so a one-sided edit here is correct and would red this entry with no defect behind it."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_inject_opt",
+        "src/revl/lower.py::_o1_check",
+        "src/revl/mcp/approval.py::_call_arg_lists",
+        "src/revl/ownership.py::_arg_retention",
+        "src/revl/taint.py::splice_declassifiers"
+      ],
+      "tokens": [
+        "args",
+        "callee",
+        "kind",
+        "name"
+      ],
+      "note": "FALSE POSITIVE. Five unrelated functions that each read the call node's fields out of the IR. Nothing is re-declared, so a function that starts reading a fifth field is a correct one-sided edit and would red this entry with no defect behind it."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_lower_type_decls",
+        "src/revl/lower.py::_validate_declared_types",
+        "src/revl/typecheck.py::_walk_config_type"
+      ],
+      "tokens": [
+        "cases",
+        "fields",
+        "kind",
+        "name",
+        "params",
+        "payload"
+      ],
+      "note": "FALSE POSITIVE. Three readers of the type-declaration field names, two of them in one module. Nothing is re-declared."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_node_local_name",
+        "src/revl/taint.py::_FlowChecker._note_fn_ref"
+      ],
+      "tokens": [
+        "id",
+        "kind",
+        "name",
+        "var"
+      ],
+      "note": "FALSE POSITIVE. Two unrelated functions that read the same four node fields. Nothing is re-declared."
+    },
+    {
+      "sites": [
+        "src/revl/lsp/protocol.py::error",
+        "src/revl/mcp/composed.py::_error",
+        "src/revl/mcp/server.py::_error"
+      ],
+      "tokens": [
+        "code",
+        "error",
+        "id",
+        "jsonrpc",
+        "message"
+      ],
+      "note": "The JSON-RPC error envelope, built by three servers. The envelope is fixed by the protocol, so the risk is not the shape drifting but one server's copy falling behind a repo-wide change to how errors are populated."
+    },
+    {
+      "sites": [
+        "src/revl/mcp/approval.py::ClassMap.static_taint",
+        "src/revl/taint.py::OriginIndex.__init__"
+      ],
+      "tokens": [
+        "components",
+        "name",
+        "reaches",
+        "taint"
+      ],
+      "note": "Issue #1195, the neighbourhood of instance 3. `ClassMap.static_taint` reads the same component/taint fields `taint.OriginIndex` writes, and intersects the result with `policy.TAINT_FOLD_ORIGINS` (the class recorded below), so an origin missing from either side is dropped from the taint an auto-approve decision is made against."
+    },
+    {
+      "sites": [
+        "src/revl/mcp/http_face.py::_err",
+        "src/revl/mcp/query_tools.py::_require",
+        "src/revl/mcp/query_tools.py::_run",
+        "src/revl/mcp/server.py::_session_error"
+      ],
+      "tokens": [
+        "category",
+        "code",
+        "diagnostics",
+        "message",
+        "ok",
+        "severity"
+      ],
+      "note": "The MCP error envelope, spelled in four places across three modules."
+    },
+    {
+      "sites": [
+        "src/revl/mcp/query_tools.py::_VERBS",
+        "src/revl/query.py::QUERIES",
+        "src/revl/query.py::_VERB_FN"
+      ],
+      "tokens": [
+        "depends-on",
+        "drift",
+        "emits-to",
+        "reaches",
+        "withdraw"
+      ],
+      "note": "The five query verbs, declared by the MCP tool surface and twice by the query engine. A verb added to the engine and not to the tool surface is unreachable over MCP, and the reverse dispatches to nothing."
+    },
+    {
+      "sites": [
+        "src/revl/policy.py::TAINT_FOLD_ORIGINS",
+        "src/revl/taint.py::_SOURCE_CLASS_SCOPES"
+      ],
+      "tokens": [
+        "fs",
+        "input",
+        "model",
+        "net",
+        "web"
+      ],
+      "note": "Issue #1195, instance 3 of issue #1285. `policy.TAINT_FOLD_ORIGINS` is a hand-kept mirror of `taint._SOURCE_CLASS_SCOPES`, kept rather than imported so the policy parser does not pull in the type checker, and the reason is recorded at the declaration. `mcp/approval.py::static_taint` INTERSECTS against it, so a source class added to one and not the other silently drops an origin from the taint an auto-approve decision is made against. This entry is the differential: the two sets are recorded as one vocabulary and a one-sided addition reds."
+    },
+    {
+      "sites": [
+        "src/revl/run_go.py::_resolve_probe",
+        "tools/validate.py::GoValidator._go_build"
+      ],
+      "tokens": [
+        "./...",
+        "GOFLAGS",
+        "GOPROXY",
+        "build",
+        "go",
+        "stc-go is not in the local module cache and proxy.golang.org is unreachable — run `go build` once with network to populate the module cache"
+      ],
+      "note": "Two copies of the go offline-resolve probe, one in the runner and one in the validator, including the operator-facing message. Near-clones."
+    },
+    {
+      "sites": [
+        "src/revl/run_rust.py::_OFFLINE_RESOLVE_MARKERS",
+        "tools/bench_selfhost_rust.py::_OFFLINE_RESOLVE_MARKERS",
+        "tools/build_gate_wasm.py::_OFFLINE_RESOLVE_MARKERS",
+        "tools/validate.py::_OFFLINE_RESOLVE_MARKERS"
+      ],
+      "tokens": [
+        "--offline was specified",
+        "failed to select a version",
+        "no matching package",
+        "registry index was not found",
+        "without the offline flag",
+        "you're using offline mode"
+      ],
+      "note": "The cargo offline-resolve markers, copied into four tools. A cargo release that rewords one of these leaves three tools reporting a network failure as a real build failure."
+    },
+    {
+      "sites": [
+        "tools/bench_selfhost.py::_canon_reference_tokens",
+        "tools/fuzz_frontend.py::_canonical_reference_tokens"
+      ],
+      "tokens": [
+        "",
+        "eof",
+        "float",
+        "int",
+        "template"
+      ],
+      "note": "Two copies of the reference token canonicaliser, one in the benchmark and one in the fuzzer. Near-clones; a token class added to one changes what the two tools consider agreement."
+    },
+    {
+      "sites": [
+        "tools/bench_selfhost_rust.py::_REAL_FAILURE_MARKERS",
+        "tools/validate.py::_REAL_FAILURE_MARKERS"
+      ],
+      "tokens": [
+        "could not compile",
+        "error[e",
+        "panicked at",
+        "test result: failed"
+      ],
+      "note": "The cargo real-failure markers, copied into two tools. Counterpart of the offline-resolve class above."
+    },
+    {
+      "sites": [
+        "tools/check_roadmap_markers.py::TIER_SUBJECTS",
+        "tools/tier_guarantees.py::SUBJECT_CODES"
+      ],
+      "tokens": [
+        "approval",
+        "attenuation",
+        "attestation",
+        "audit surface",
+        "authority",
+        "capability",
+        "confinement",
+        "jail",
+        "policy",
+        "privilege",
+        "provenance",
+        "redact",
+        "redaction",
+        "sandbox",
+        "secret",
+        "symlink",
+        "taint",
+        "traversal",
+        "witnessed"
+      ],
+      "note": "The nineteen guarantee subjects, declared by the roadmap marker checker and by `tier_guarantees`. A subject added to one and not the other either cannot be spelled in the roadmap or cannot be resolved to a code."
+    },
+    {
+      "sites": [
+        "tools/check_site_wheel.py::_tracked_members",
+        "tools/check_wheel_manifest.py::_tracked"
+      ],
+      "tokens": [
+        "--",
+        "-z",
+        "git",
+        "ls-files"
+      ],
+      "note": "Two copies of the tracked-files listing, one per wheel checker. Near-clones down to the git argument vector."
+    },
+    {
+      "sites": [
+        "tools/evolution_controller.py::measured_diff",
+        "tools/evolution_reward.py::changed_files"
+      ],
+      "tokens": [
+        "--exclude-standard",
+        "--name-only",
+        "--others",
+        "diff",
+        "ls-files"
+      ],
+      "note": "Two copies of the changed-files listing, one in the controller and one in the reward. Near-clones down to the git argument vector; a flag added to one changes what one half of the loop measures."
+    },
+    {
+      "sites": [
+        "tools/selfhost_coverage.py::_GENERIC_REASONS",
+        "tools/selfhost_line_coverage.py::_GENERIC_REASONS"
+      ],
+      "tokens": [
+        "NEVER ENTERED",
+        "NOT TRIAGED",
+        "PARTIALLY EXERCISED",
+        "UNDECLARED GAP"
+      ],
+      "note": "The four generic triage reasons a coverage row may not use, declared once per coverage tool. A reason rejected by one tool and accepted by the other is a hole in the triage discipline both enforce."
+    }
+  ]
+}
