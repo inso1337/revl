@@ -1181,6 +1181,28 @@ fn mkstmt_spawn_unbound(target: Str) -> Stmt {
 
 fn int_lit0() -> Expr { return IntLit("0") }
 
+// The expression of a statement that exists ONLY to bind a name — an iteration
+// head (`every <x> in <sub>`, and the same node read for `on <Event> as <x> in
+// <sub>`). It carries no value, and it must therefore carry no TYPE either.
+//
+// `int_lit0()` used to stand here, and `IntLit("0")` infers `Int`: the type
+// walker binds an untyped statement's name to the inferred type of its `e`
+// (`mth_type_verdict`), so the loop item became `Int` and `emit sink.write(o)`
+// was refused with a T1 (`argument expects Str, got Int`) that the reference
+// never draws. The reference leaves the item deliberately untyped — a plain
+// `every`'s item is bound with no entry in its type environment (lower.py
+// `_lower_stream_iter_step`: "a plain `every`'s untyped item admits either"),
+// and the typed form gets its type from the event record, which is a separate
+// slice. A placeholder that is a type is a fake refusal on every element.
+//
+// `Hole` is the one expression that answers no type at all: `tk_infer` returns
+// its (empty) `ty`, so the bind stays unresolved exactly as the reference
+// leaves it, and every other walker over `Expr` already treats it as inert
+// (no emission, no reach, no acquisition, no call).
+fn expr_bind_only() -> Expr {
+  return Hole({ ty: "", msg: "", hasMsg: false, line: 0 })
+}
+
 // `[await] <expr>` in an operand position. `await` is a keyword, so the
 // expression grammar stops dead on it: `let h = effect await fetch()` parsed as
 // a bad expression, the statement became a `skip`, and the reader jumped to the
@@ -1201,6 +1223,92 @@ fn operand_at(ts: List[Token], k: Int) -> AwOperand {
   }
   let r2 = expr_at(ts, k)
   return { e: r2.e, i: r2.i, aw: false }
+}
+
+// ------------------------------------------------ item 130: stream statements
+//
+// Three statement forms the reader had no case for at all — `let x = subscribe
+// …`, `every <x> in <sub> { … }`, and `on <Event> as <x> [in <sub>] { … }` —
+// each of which ended the same way: `expr_at` stopped dead on the keyword (or,
+// for the contextual `on`, read the word as a bare name), the statement became
+// a `skip`, and the reader jumped to the end of the line. The names those runs
+// BOUND then existed nowhere, so every later mention of them drew the G1
+// undeclared-access refusal against a program the reference admits.
+//
+// Reading them is not only a false-rejection fix, and that is the point. A
+// skipped run is a run whose heads are never resolved, so `let sub = subscribe
+// nostream undo sub.close()` — an undeclared stream the reference refuses under
+// G1 — raised NO OBJECTION here. `subscribe merge(a, nob)` did the same. That
+// is the direction this crate may never err in, and it was open only because
+// the corpus held no document in these forms to measure it with.
+
+// The expressions a `subscribe` head contributes, and the index just past it.
+type SubHead = { es: List[Expr], i: Int, ok: Bool }
+
+// `subscribe <stream>[.<stage>…]`, or the Slice 3 fan-in `merge(a, b)`.
+//
+// `merge` is NOT a call in this position. The reference parses it before the
+// expression grammar ever runs (parser.py `_at_stream_merge`/`_stream_merge`)
+// into a `StreamMergeExpr` whose OPERANDS are the expressions it resolves; the
+// word `merge` itself names nothing and is not a declared callable. Reading it
+// as an ordinary call would refuse `merge`, which is the very false rejection
+// this branch exists to remove, so the operands are collected and the head word
+// is dropped. Operands nest (`merge(merge(a, b), c)`), so this recurses exactly
+// as the reference's `_stream_operand` does.
+fn p_sub_head(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  if (atk(ts, k, "ident") && tkc(ts, k).text == "merge" && atk(ts, k + 1, "(")) {
+    let ops = p_sub_ops(ts, k + 2, acc)
+    if (!ops.ok) { return ops }
+    return p_sub_chain(ts, ops.i, ops.es)
+  }
+  let r = expr_at(ts, k)
+  if (is_bad(r.e)) { return { es: acc, i: k, ok: false } }
+  return { es: acc.push(r.e), i: r.i, ok: true }
+}
+
+fn p_sub_ops(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  let one = p_sub_head(ts, k, acc)
+  if (!one.ok) { return one }
+  if (atk(ts, one.i, ",")) { return p_sub_ops(ts, one.i + 1, one.es) }
+  if (atk(ts, one.i, ")")) { return { es: one.es, i: one.i + 1, ok: true } }
+  return { es: one.es, i: one.i, ok: false }
+}
+
+// The derived-stream combinator chain (`.filter(f).map(g).take(2)`) that may
+// follow a fan-in head. A bare-name head is an ordinary postfix expression and
+// `expr_at` reads its chain already; only the fan-in form, which `expr_at`
+// cannot read at all, needs this. A stage NAME resolves nowhere — the reference
+// reads the chain as `StreamStage`s, not as method calls (parser.py
+// `_stream_chain`) — so only a stage's ARGUMENTS carry heads.
+fn p_sub_chain(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  if (!atk(ts, k, ".") || !atk(ts, k + 1, "ident") || !atk(ts, k + 2, "(")) {
+    return { es: acc, i: k, ok: true }
+  }
+  let ar = p_sub_args(ts, k + 3, acc)
+  if (!ar.ok) { return ar }
+  return p_sub_chain(ts, ar.i, ar.es)
+}
+
+fn p_sub_args(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  if (atk(ts, k, ")")) { return { es: acc, i: k + 1, ok: true } }
+  let r = expr_at(ts, k)
+  if (is_bad(r.e)) { return { es: acc, i: k, ok: false } }
+  let nx = acc.push(r.e)
+  if (atk(ts, r.i, ",")) { return p_sub_args(ts, r.i + 1, nx) }
+  if (atk(ts, r.i, ")")) { return { es: nx, i: r.i + 1, ok: true } }
+  return { es: nx, i: r.i, ok: false }
+}
+
+// The subscribe QUALIFIER tail — `policy <p>`, `buffer <n>`, `drain <n><unit>`,
+// `replay(…)` (parser.py `_subscribe_quals`). Every word in it is matched
+// verbatim against a closed set of bare idents, so none of it names anything to
+// resolve and the tail is stepped over to the bracket's `undo`. The one operand
+// that IS an expression, `replay(cursor: <e>)`, is not resolved here; that
+// residual is bounded by the `undo` this stops at, and it is strictly smaller
+// than the whole statement the reader skipped before.
+fn skip_sub_quals(ts: List[Token], k: Int, hi: Int) -> Int {
+  if (k >= hi || atw(ts, k, "undo")) { return k }
+  return skip_sub_quals(ts, k + 1, hi)
 }
 
 // One statement run and the index just PAST the tokens it consumed. Item 168:
@@ -1239,6 +1347,35 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
         kd = "effect"
         j += 1
       }
+    }
+    // item 130: `let <x> = subscribe <stream> [policy … buffer … drain …]
+    // undo <x>.close()`. A subscription IS an acquisition — parser.py builds
+    // the same `EffectStmt` an `effect` bracket builds, with `subscribe: true`
+    // — so the statement carries the `effect` kind here and its inverse is read
+    // exactly as an `effect`'s `undo` is. The head contributes one expression
+    // per stream it names (more than one only for the Slice 3 fan-in); the
+    // first rides the binding statement, the rest are ordinary expression
+    // statements, so every source's head is resolved.
+    if (atw(ts, j, "subscribe")) {
+      let sh = p_sub_head(ts, j + 1, [])
+      if (!sh.ok || sh.es.length() == 0) {
+        return mk_srun([mkstmt("skip", int_lit0())], hi)
+      }
+      let q = skip_sub_quals(ts, sh.i, hi)
+      var subs: List[Stmt] = [mkstmt_aw("effect", sh.es[0], bn, false, "")]
+      var si = 1
+      while (si < sh.es.length()) {
+        subs = subs.push(mkstmt("expr", sh.es[si]))
+        si += 1
+      }
+      if (atw(ts, q, "undo")) {
+        let su = operand_at(ts, q + 1)
+        if (!is_bad(su.e)) {
+          return mk_srun(subs.push(mkstmt_aw("undo", su.e, "", su.aw, "")), su.i)
+        }
+        return mk_srun(subs, hi)
+      }
+      return mk_srun(subs, q)
     }
     // `let h = effect spawn <Comp> with { … } [undo …]` — an instance
     // acquisition (docs/design-v2-instances.md). parser.rvl has no spawn
@@ -1357,6 +1494,72 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
       return mk_srun([mkstmt_spawn_unbound(tgt)], hi)
     }
     return mk_srun([mkstmt_spawn_unbound(tgt)], sk)
+  }
+  // item 130 Slice 4: `every <x> in <sub> { <emit>* }` — the async-iteration
+  // form, told apart from the `every <n><unit>` timer by exactly the one token
+  // of lookahead the reference uses (parser.py `_at_stream_iter`): the timer's
+  // delay is a NUMBER, the iteration's bind is an IDENT followed by `in`. It is
+  // tested BEFORE the timer branch below, which would otherwise swallow it.
+  //
+  // The item binding is a declared name inside the body, exactly as a match
+  // arm's payload binding is, so the head statement carries it, and the body is
+  // read out inline the way a timer body is.
+  //
+  // The SUBJECT is deliberately not walked as an expression. The reference
+  // never resolves it as a head: `_iteration_subject` admits only a bare
+  // identifier and the lowering resolves that against its live-subscription
+  // table, so an unresolvable subject draws "`every o in nosub` needs a live
+  // subscription", which `_classify` leaves OUT-OF-SLICE — not the G1 an
+  // ordinary head would draw. Walking it would trade this bucket's false
+  // rejection for a tag mismatch, which is the same broken promise in a
+  // different column.
+  //
+  // It is NOT marked `inTimer`. That mark prunes the two A1 surfaces the
+  // reference prunes for `step == "timer"`, and a `stream-iter` step is not one
+  // of the three `_async_reached_outside_provide` returns on — the reference
+  // walks it. Marking it would have this gate admit an async reach the
+  // reference refuses, which is why the timer branch's blind `{`-scan could not
+  // simply be left to catch this form.
+  if (t.kind == "kw" && t.text == "every" && atk(ts, lo + 1, "ident")
+      && atw(ts, lo + 2, "in")) {
+    if (atk(ts, lo + 3, "ident") && atk(ts, lo + 4, "{")) {
+      let iend = close_brace(ts, lo + 4)
+      if (iend != 0 - 1) {
+        let ihead: List[Stmt] = [mkstmtb("expr", expr_bind_only(),
+                                         tkc(ts, lo + 1).text)]
+        return mk_srun(
+          append_stmts(ihead, p_stmts(ts, lo + 5, iend - 1, [])), iend)
+      }
+    }
+  }
+  // item 130 Slice 5: `on <Event> as <x> [in <sub>] { <emit>* }` — the typed-
+  // event handler, which parses to the same node the Slice 4 iteration does
+  // (parser.py `event_handler`), so it is read the same way here. `on` is a
+  // CONTEXTUAL keyword: it heads a statement only in the shape `on IDENT as
+  // IDENT`, which is why neither lexer's keyword table carries it and why the
+  // reader must recognise the SHAPE rather than the word. Without this branch
+  // `on` was read as a bare name and drew a G1 refusal naming `on` itself.
+  //
+  // The `in <sub>` clause is optional (§6b). Without it the reference resolves
+  // the source from the component's `requires <k>: Stream[<Event>]` coeffect
+  // and refuses a component that declares none — a refusal `_classify` leaves
+  // OUT-OF-SLICE, so this gate carries no verdict for it and only binds the
+  // item name.
+  if (t.kind == "ident" && t.text == "on" && atk(ts, lo + 1, "ident")
+      && atw(ts, lo + 2, "as") && atk(ts, lo + 3, "ident")) {
+    let ebn = tkc(ts, lo + 3).text
+    let ehead: List[Stmt] = [mkstmtb("expr", expr_bind_only(), ebn)]
+    var eb = lo + 4
+    // the subject, when the clause is present, is the same bare-identifier
+    // subscription name Slice 4's is, and is stepped over for the same reason.
+    if (atw(ts, eb, "in") && atk(ts, eb + 1, "ident")) { eb = eb + 2 }
+    if (atk(ts, eb, "{")) {
+      let eend = close_brace(ts, eb)
+      if (eend != 0 - 1) {
+        return mk_srun(
+          append_stmts(ehead, p_stmts(ts, eb + 1, eend - 1, [])), eend)
+      }
+    }
   }
   // `every <n><unit> { … }` / `after <n><unit> { … }` — a timer block. Its body
   // is an ordinary statement sequence and the reference resolves the heads in
@@ -14132,9 +14335,18 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
       if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
-        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+        // the declared type is read with `type_at`, not as the bare head ident.
+        // A requirement can be PARAMETERIZED — item 130's required-stream
+        // coeffect `requires feed: Stream[OrderPlaced]` is the one in the
+        // language today — and the reference carries the whole spelling into
+        // `requires`. Reading only the head rendered it `Stream`, one entry
+        // short of the reference on every document that declares one, which no
+        // corpus document did until `emit_py_corpus/streams.rvl`.
+        let rt = type_at(ts, k + 2)
+        let pair = { name: tkc(ts, k).text,
+                     ty: rt.ok ? rt.ty : tkc(ts, k + 2).text }
         if (isReq) { reqs = reqs.push(pair) } else { provs = provs.push(pair) }
-        k += 3
+        k = rt.ok ? rt.i : k + 3
       } else { k += 1 }
     }
     j = k
@@ -19352,4 +19564,111 @@ test "a destructuring let is read, not refused" {
   // full agreement, and that one deliberately diverges.
   let v = admit_src("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }")
   assert v == ""
+}
+
+// ------------------------------------------------ item 130: stream statements
+//
+// The three forms the reader had no case for. Each test below is one half of a
+// pair: the form is read (so a name it BINDS resolves), and reading it does not
+// stop refusing what the reference refuses inside it. The second half is the
+// one that matters here — reading a statement the reader used to skip WIDENS
+// what this gate admits, and the last two of these were no-objections before.
+
+test "a subscription bracket binds its name" {
+  // `await sub.next()` resolved against nothing while the whole run was
+  // skipped, so this drew "`sub` is not a declared requirement of Parked" —
+  // the false rejection five backend fixtures carried.
+  let v = admit_src("""component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}""")
+  assert v == ""
+}
+
+test "an undeclared stream in a subscribe head is refused (G1)" {
+  // the other side of reading the form: the head is an ordinary expression the
+  // reference resolves, and a skipped run resolved nothing in it. This was a
+  // NO-OBJECTION before the branch existed.
+  let v = admit_src("""component C {
+  let sub = subscribe nostream undo sub.close()
+}""")
+  assert v == "G1|`nostream` is not a declared requirement of C"
+}
+
+test "a fan-in operand is resolved even though `merge` is not (G1)" {
+  // `merge` names nothing — the reference parses the fan-in before its
+  // expression grammar runs — so the exemption is the WORD, and the operands
+  // under it stay ordinary heads. Also a no-objection before.
+  let v = admit_src("""component C {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe merge(a, nob) undo sub.close()
+}""")
+  assert v == "G1|`nob` is not a declared requirement of C"
+}
+
+test "an `every … in` body still refuses an undeclared name (G1)" {
+  let v = admit_src("""service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(nope) }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of C"
+}
+
+test "an `on … as` body still refuses an undeclared name (G1)" {
+  let v = admit_src("""event E(key: k) { k: Str }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on E as e in sub { emit sink.write(nope) }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of C"
+}
+
+test "an `every … in` body is not pruned the way a timer body is (A1)" {
+  // the two `every` forms differ on more than their header. A timer body
+  // carries its own in-flight window, so the reference prunes it from the A1
+  // name fence and this gate marks it `inTimer` to match. A `stream-iter` step
+  // is NOT one of the three the reference's prune returns on — it walks the
+  // body — so reading the iteration through the timer branch's blind `{`-scan
+  // would have admitted this.
+  let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(hf(o)) }
+}""")
+  assert v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"
+}
+
+test "the timer body's prune survives the iteration branch" {
+  // the same reach under `every <n><unit>`, which the reference admits and
+  // colours async (item 170). The pair pins the disambiguation, not just the
+  // parse: one token of lookahead decides which of the two answers is right.
+  let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  every 15s { emit sink.write(hf("x")) }
+}""")
+  assert v == ""
+}
+
+test "an unmarked emission inside an iteration body is still G4" {
+  // the body is a setup-mode effect context, so its emission rules are the
+  // ones the statements around it get; the `provide` tail proves the walk
+  // came back out of the block rather than swallowing the rest of the
+  // component with it.
+  let v = admit_src("""service Sink { emission fn write(v: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires sink: Sink provides api: Api {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+  provide api { fn go() { return sink.write("x") } }
+}""")
+  assert v == "G4|call to emission `sink.write` must be marked `emit` (G4)"
 }

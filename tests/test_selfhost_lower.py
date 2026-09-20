@@ -1417,6 +1417,23 @@ fn f() -> Int {
   return 1
 }
 """),
+    # The iteration HEAD binds its item; it does not TYPE it. `every o in sub`
+    # reads the head as a statement whose expression is a placeholder, and a
+    # placeholder that IS a value (`IntLit("0")`) infers `Int`: the type walker
+    # binds an untyped statement's name to its expression's type, so the item
+    # became `Int` and `emit sink.write(o)` was refused T1 (`argument `v`
+    # expects `Str`, got `Int`) — a refusal the reference does not draw, since
+    # it leaves a plain `every`'s item deliberately untyped (lower.py
+    # `_lower_stream_iter_step`). Nothing else in this program refuses, so the
+    # pair is the pin; the item's type is the only thing in question.
+    ("a plain every iteration's item stays untyped", """
+service Sink { emission fn write(v: Str) -> Int }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+}
+"""),
 ]
 
 
@@ -2697,6 +2714,21 @@ fn f() -> Int {
   let n = 2
 }
 """, "T1"),
+    # The same iteration head, now with a real refusal in the program: the
+    # unmarked emission the G4 walk must still reach (the loop body is read out
+    # inline, so a reader that stepped over it would lose this too). The
+    # reference draws ONE refusal here — the G4 — and naming the item `Int`
+    # added a T1 that outranked it, which is the whole shape of the defect.
+    ("an iteration body is still walked for its own refusal", """
+service Sink { emission fn write(v: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires sink: Sink provides api: Api {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+  provide api { fn go() { return sink.write("x") } }
+}
+""", "G4"),
 ]
 
 
