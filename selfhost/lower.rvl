@@ -10797,14 +10797,21 @@ fn tk_no_field() -> FieldN { return { target: NullLit, name: "" } }
 // the reference message for message. Reading such an annotation HERE as an
 // ordinary return would hold the body to `Async[...]` and could draw a second,
 // different verdict on the same node, so the whole arrow is declined instead.
+//
+// BOTH spellings are asked, the written one and the alias-erased one, because
+// issue #1151 is precisely that the two can differ: the colour phase reads the
+// written annotation and the reference erases first, so `-> Later` over
+// `type Later = Async[Int]` draws the reference's A1 and no verdict here. That
+// issue is not closed by this walk — declining on either spelling only keeps it
+// from turning a missing refusal into a DIFFERENT one.
 fn tk_arrow(a: ArrowN, env: List[Bind]) -> TInf {
-  if (ty_mentions_async(a.ret)) { return tk_ok("") }
   let inner = tk_arrow_env(a.params, 0, env)
   let indep = !tk_arrow_dependent(a.params, 0, a.body)
   // `tk_solid` for the same reason every other declared spelling passes through
   // it: an annotation naming a type this walk cannot resolve is answered "",
   // and "" is the inference position, so the body is walked and not compared.
   let ret = tk_solid(tk_arrow_ann(taint_strip(a.ret), env), env)
+  if (ty_mentions_async(a.ret) || ty_mentions_async(ret)) { return tk_ok("") }
   if (a.ret != "" && indep) {
     // the annotation is a claim about the body, so check it — but only where
     // the body cannot mention a ⊥ parameter, under which the claim could only
@@ -19752,6 +19759,55 @@ service V { fn take(t: Secret[Str]) -> Int  fn plain(n: Int) -> Int }""")
   assert ir.indexOf("\"name\": \"t\", \"type\": \"Str\", \"secret\": true") != 0 - 1
   assert ir.indexOf("\"name\": \"n\", \"type\": \"Int\"}") != 0 - 1
   assert ir.indexOf("Secret[") == 0 - 1
+}
+
+// ------------- arrows, function values and `?.` (docs/design/457 T2c / T2d)
+//
+// The four arrow documents and the optional-chain one are pinned on tag AND
+// message by `tests/test_selfhost_lower.py`'s `REJECTED_PROGRAMS`, off the
+// fixtures in `examples/rejections/`. What the fixture corpus does NOT spell is
+// below: the three shapes that must stay ADMITTED, because this slice's whole
+// risk is refusing one of them, and the zero-argument spelling of the arity
+// refusal.
+
+test "§3.2: an arrow whose body depends on a bottom parameter claims no result" {
+  // `(x) => x` types under an UNKNOWN `x`, so its result is unknown too and
+  // nothing flows from it. Reading it as a `Str` — or as anything — would refuse
+  // this program, which the reference admits.
+  let v = admit_src("""fn takes_int(n: Int) -> Int {
+  return n
+}
+
+fn demo() -> Int {
+  let f = (x) => x
+  return takes_int(f(1))
+}""")
+  assert v == ""
+}
+
+test "an arrow value called at its arity with compatible arguments is admitted" {
+  let v = admit_src("""fn demo() -> Str {
+  let f = (x: Str): Str => x
+  return f("s")
+}""")
+  assert v == ""
+}
+
+test "a call through an arrow value with no arguments names the arity" {
+  let v = admit_src("""fn demo() -> Str {
+  let f = (x) => "s"
+  return f()
+}""")
+  assert v == "T1|`f` is a `(Any) -> Str` and takes 1 argument(s), 0 given"
+}
+
+test "`?.` on an actual optional is admitted" {
+  let v = admit_src("""type Row = { name: Str }
+
+fn label(r: Opt[Row]) -> Opt[Str] {
+  return r?.name
+}""")
+  assert v == ""
 }
 
 // ------------------------------- the fn-body binding discipline (item 391, G6)
