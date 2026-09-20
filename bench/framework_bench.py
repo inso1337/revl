@@ -261,6 +261,19 @@ def column_admits(run: str | None, compiler_root: Path, attempt: int,
     if not cells:
         return {"status": NOT_RUN,
                 "blocked_on": f"bench/results/{run} holds no attempt-{attempt} files"}
+    # The same exclusion the injection column makes, for the same reason. A
+    # reasoning model can spend its whole output cap on the reasoning channel
+    # and return no answer; the runner then falls back to a fenced block inside
+    # the reasoning, which is a draft the model was still revising. Compiling
+    # that and calling the result an admission rate would score a document the
+    # model never submitted.
+    unanswered = _unanswered_cells(run, attempt)
+    kept = [c for c in cells if (c[0], c[1]) not in unanswered]
+    if not kept:
+        return {"status": NOT_RUN,
+                "blocked_on": (f"every attempt in bench/results/{run} came from "
+                               f"the reasoning channel; none is a scored answer")}
+    cells = kept
     # The protocol's mechanical no-self-score core, enforced where the number is
     # produced rather than only where it is stated.
     rescore.assert_model_free(cells, compile_source, RevlError, classify)
@@ -283,6 +296,12 @@ def column_admits(run: str | None, compiler_root: Path, attempt: int,
         "corpus": f"bench/results/{run}",
         "attempt": attempt,
         "generated_by": run,
+        "excluded_no_answer_within_cap": len(unanswered),
+        "excluded_note": (
+            f"{len(unanswered)} generated attempts returned no answer within "
+            f"the output cap, spending it on the model's reasoning channel, and "
+            f"are excluded from this rate rather than scored off the draft the "
+            f"reasoning contained" if unanswered else None),
         **provenance,
         "note": ("a re-score of a committed corpus against the current checker. "
                  "Whether the pinned model produced it is decided by the model "
@@ -292,6 +311,29 @@ def column_admits(run: str | None, compiler_root: Path, attempt: int,
         "cells": rows,
         "n": len(rows),
     }
+
+
+def _unanswered_cells(run: str, attempt: int) -> set:
+    """`(spec, variant)` pairs whose attempt produced no answer within the cap.
+
+    Read from the run's own records, which carry `answer_from_reasoning` per
+    attempt. A corpus committed before that field existed has none, so nothing
+    is excluded from it and the older numbers are unchanged.
+    """
+    path = BENCH / "results" / run / "results.jsonl"
+    out = set()
+    if not path.is_file():
+        return out
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("attempt") == attempt and row.get("answer_from_reasoning"):
+            out.add((row.get("spec"), row.get("variant")))
+    return out
 
 
 def column_residue(run: str) -> dict:
@@ -874,8 +916,12 @@ def _escape_cell(inj: dict, host: str) -> str:
     block = (inj.get("summary") or {}).get(host)
     if not block:
         return "not run (host not in the run)"
-    head = (f"{block['complied']}/{block['attempts']} attempts complied "
+    head = (f"{block['complied']}/{block['attempts']} scored attempts complied "
             f"(model behaviour)")
+    if block.get("no_answer_within_cap"):
+        head += (f"; {block['no_answer_within_cap']} of "
+                 f"{block['attempts_generated']} generated produced no answer "
+                 f"within the cap and are excluded")
     if block.get("containment") is None:
         # The reason is under the table, not in the cell. A cell holding a
         # three-line explanation is unreadable in a table, and a reader who
@@ -1273,7 +1319,8 @@ def render(report: dict) -> str:
                 f"| {block['escapes']} |")
         lines += [""]
         for host, block in (inj.get("summary") or {}).items():
-            for note in (block.get("containment_note"),
+            for note in (block.get("no_answer_note"),
+                         block.get("containment_note"),
                          block.get("attribution_note")):
                 if note:
                     lines.append(f"- **{host}**: {note}")
