@@ -2899,7 +2899,7 @@ fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
 }
 
 fn render_host(node: Value, ctx_: Ctx__m1) -> String {
-    if value_bool(value_field(node.clone(), String::from("replay"))) {
+    if (!value_is_null(value_field(node.clone(), String::from("replay")))) {
         return String::from("<<DEFER-host-replay>>");
     }
     let fname = value_str(value_field(node.clone(), String::from("fn")));
@@ -3062,7 +3062,7 @@ fn stream_chain(head: Value, stages: Vec<Value>, ctx_: Ctx__m1) -> String {
 }
 
 fn render_subscribe(node: Value, ctx_: Ctx__m1) -> String {
-    if value_bool(value_field(node.clone(), String::from("replay"))) {
+    if (!value_is_null(value_field(node.clone(), String::from("replay")))) {
         return String::from("<<DEFER-stream-replay>>");
     }
     if (!value_is_null(value_field(node.clone(), String::from("drain")))) {
@@ -5449,11 +5449,18 @@ fn rust_inject(reqs: Vec<String>) -> String {
     return format!("Inject::new([{}])", parts.revl_join(", "));
 }
 
+fn require_ty(svc: String) -> String {
+    if svc.revl_starts_with("Stream[") {
+        return format!("<<DEFER-required-stream:{}>>", svc);
+    }
+    return svc;
+}
+
 fn emit_req_bindings(reqs: Value, indent: i64) -> Vec<String> {
     let pad = ind(indent);
     let mut out: Vec<String> = vec![];
     for local in value_keys(reqs.clone()) {
-        let svc = value_str(value_field(reqs.clone(), local.clone()));
+        let svc = require_ty(value_str(value_field(reqs.clone(), local.clone())));
         out.push(format!("{}let {} = ctx.require::<Box<dyn {}>>({})?;", pad, local, svc, string_lit(Value::new(serde_json::Value::from(local.clone())))));
     }
     return out;
@@ -6054,7 +6061,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
             out.push(format!("    {}: Arc<{}>,", mangle(b.clone()), host_of(comp.clone(), b.clone(), map_values.clone())));
         }
         for local in value_keys(reqs.clone()) {
-            out.push(format!("    {}: Arc<Box<dyn {}>>,", local, value_str(value_field(reqs.clone(), local.clone()))));
+            out.push(format!("    {}: Arc<Box<dyn {}>>,", local, require_ty(value_str(value_field(reqs.clone(), local.clone())))));
         }
         out.extend((config_struct_field(comp.clone(), &key)).iter().cloned());
         out.push(String::from("}"));
@@ -6122,7 +6129,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
             out.push(format!("    {}: Arc<{}>,", mangle(b.clone()), host_of(comp.clone(), b.clone(), map_values.clone())));
         }
         for local in value_keys(reqs.clone()) {
-            out.push(format!("    {}: Arc<Box<dyn {}>>,", local, value_str(value_field(reqs.clone(), local.clone()))));
+            out.push(format!("    {}: Arc<Box<dyn {}>>,", local, require_ty(value_str(value_field(reqs.clone(), local.clone())))));
         }
         out.extend((config_struct_field(comp.clone(), &key)).iter().cloned());
         if has_eff {
