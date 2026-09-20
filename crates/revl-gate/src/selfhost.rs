@@ -14053,7 +14053,7 @@ fn tk_call(c: CallN, env: Vec<Bind>) -> TInf {
     if nmd.hit {
         return nmd.r;
     }
-    let fv = tk_fnvalue(c.clone(), env.clone(), a.tys.clone());
+    let fv = tk_fnvalue(c.clone(), &env, &a.tys, tv.ty.clone());
     if fv.hit {
         return fv.r;
     }
@@ -14085,7 +14085,7 @@ fn tk_callee(callee: Expr, env: Vec<Bind>) -> TInf {
     return match callee.clone() {
     Expr::Var(n) => tk_ok(String::from("")),
     Expr::Field(f) => { let f = *f; tk_infer(f.target, env.clone()) },
-    _ => tk_sub(callee.clone(), env.clone()),
+    _ => tk_infer(callee.clone(), env.clone()),
 };
 }
 
@@ -15167,11 +15167,11 @@ fn tk_mentions_parts(ps: &[PartN], i: i64, n: &str) -> bool {
     return tk_mentions_parts(ps, (i).checked_add(1i64).expect("revl: Int overflow"), n);
 }
 
-fn tk_fnvalue(c: CallN, env: Vec<Bind>, argTys: Vec<String>) -> TCall {
+fn tk_fnvalue(c: CallN, env: &[Bind], argTys: &[String], calleeTy: String) -> TCall {
     return match c.target.clone() {
-    Expr::Var(n) => tk_fnvalue_named(&n, c.clone(), &env, &argTys),
+    Expr::Var(n) => tk_fnvalue_named(&n, c.clone(), env, argTys),
     Expr::Field(f) => { let f = *f; tk_miss() },
-    _ => tk_fnvalue_expr(c.clone(), env.clone(), argTys.clone()),
+    _ => if tk_is_fn_ty(&calleeTy) { tk_hit(tk_fn_call(calleeTy.clone(), "this call's callee", &c.args, argTys)) } else { tk_miss() },
 };
 }
 
@@ -15190,17 +15190,6 @@ fn tk_fnvalue_named(n: &str, c: CallN, env: &[Bind], argTys: &[String]) -> TCall
         return tk_miss();
     }
     return tk_hit(tk_fn_call(t.clone(), &((String::from("`").revl_concat(&n)).revl_concat("`")), &c.args, argTys));
-}
-
-fn tk_fnvalue_expr(c: CallN, env: Vec<Bind>, argTys: Vec<String>) -> TCall {
-    let t = tk_infer(c.target.clone(), env.clone());
-    if (t.v != "") {
-        return tk_hit(t.clone());
-    }
-    if (!tk_is_fn_ty(&t.ty)) {
-        return tk_miss();
-    }
-    return tk_hit(tk_fn_call(t.ty.clone(), "this call's callee", &c.args, &argTys));
 }
 
 fn tk_fn_call(fnTy: String, what: &str, args: &[Expr], argTys: &[String]) -> TInf {
