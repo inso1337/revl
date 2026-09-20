@@ -1,0 +1,8 @@
+{
+  "_what": "Documents in tests/fixtures/emit_rust_corpus/ that the emitter embedded in crates/revl-gate (`selfhost/emit_rust.rvl`) does NOT emit byte-identically to the reference `backends/rust/emit.py`. Every OTHER document in that directory is asserted byte-identical by tests/test_gate_crate_admit.py::test_emit_ir_is_byte_identical_to_the_reference, whether or not the port declares it.",
+  "_ratchet": "SHRINK ONLY. A document that diverges without being listed here is a RED (recording it is a deliberate edit to this file, reviewed on its own). A document listed here that stops diverging is also a RED: delete it instead of leaving a stale record.",
+  "_why": "`selfhost/emit_rust.rvl` is a deliberate SUBSET port of the reference emitter: its docstring enumerates the surfaces left OUT and deferred to the remaining Rust Path B slices. The directory is the REFERENCE emitter's corpus, so it can hold documents outside that subset. The crate oracle compares the port's own declaration (tests/test_selfhost_emit_rust.py::CORPUS) and records the rest here.",
+  "diverged": [
+    "loop_moves.rvl"
+  ]
+}
