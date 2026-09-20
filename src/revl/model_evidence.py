@@ -1106,6 +1106,41 @@ class CrossingSealer:
 # Slice 3: reading the decision back out of the artifact alone
 # ---------------------------------------------------------------------------
 
+#: Where a model-evidence key comes from when one is not passed explicitly.
+#: Domain-separated from `revl.attest`'s pair for the same reason
+#: :func:`key_id` is: these are two protocols that may share key material, and
+#: an operator who points one at the other's key should get a key-identity
+#: refusal, not a silent cross-protocol verification. A secret is NEVER
+#: hardcoded here.
+KEY_ENV = "REVL_MODEL_EVIDENCE_KEY"
+KEY_FILE_ENV = "REVL_MODEL_EVIDENCE_KEY_FILE"
+
+
+def resolve_key(key_path: Optional[str], *, env=None) -> Optional[bytes]:
+    """The evidence key from, in order: an explicit path, :data:`KEY_FILE_ENV`
+    (a path), :data:`KEY_ENV` (the secret bytes) — or ``None``.
+
+    ``None`` is a legal answer here and is NOT a hole. `revl attest` raises
+    without a key because signing without one is impossible; an offline reader
+    with no key has a real and useful job, which is to report that a seal is
+    present and was not checked. Reading nothing out of an unchecked seal is
+    the fail-closed behaviour; refusing to run at all would only push the
+    reader to skip the command."""
+    if env is None:
+        import os  # noqa: PLC0415 - lazy, so the module keeps no import effect
+        env = os.environ
+    from .attest import load_key  # noqa: PLC0415 - one key-file reader, not two
+    if key_path:
+        return load_key(key_path)
+    file_env = env.get(KEY_FILE_ENV)
+    if file_env:
+        return load_key(file_env)
+    inline = env.get(KEY_ENV)
+    if inline:
+        return inline.encode("utf-8")
+    return None
+
+
 #: The member of a `model-decision` WAL record that carries the sealed evidence
 #: object, and the member that carries the refusal when sealing was engaged and
 #: failed. Absent by default on both counts: a WAL written by a run that never

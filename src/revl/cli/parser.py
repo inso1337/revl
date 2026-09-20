@@ -1539,6 +1539,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", default=None, choices=list(REPLAY_MODES),
         help="report readiness for one mode only, instead of all four")
     replay_cmd.add_argument(
+        "--evidence-key", metavar="PATH", default=None,
+        help="the key the run's model-decision evidence objects were sealed "
+             "with (roadmap item 517). With it, every sealed crossing on the "
+             "WAL is verified and its decision is reconstructed from the "
+             "record alone: the placement, what answered, how the prompt was "
+             "bound, the candidate set and the choice, the sampling "
+             "parameters and the policy in force. Without it a seal is "
+             "reported present and UNCHECKED and nothing is read out of it; a "
+             "seal that does not verify yields no reading at all. Falls back "
+             "to REVL_MODEL_EVIDENCE_KEY_FILE (a path) or "
+             "REVL_MODEL_EVIDENCE_KEY (the secret); never hardcoded")
+    replay_cmd.add_argument(
         "--under", metavar="POLICY", default=None,
         help="counterfactual incident replay (roadmap item 467): recompute this "
              "policy's reach rules over the crossings the WAL recorded and name "
