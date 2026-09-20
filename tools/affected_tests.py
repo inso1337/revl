@@ -210,6 +210,56 @@ PROGRESS_COUNTER_SOURCES = {
     "tools/gate_reference_census.py",   # CORPUS_DIRS / _SKIP_DIRS
 }
 
+# The held-out scorer's fence (roadmap item 537). Every file it names is read
+# by `tests/test_heldout_scoring.py`, which asserts that every repo path those
+# files name is classified fence, subject or unreached. That test is what turns
+# a new dependency into a red, so it has to be SELECTED when one of them moves.
+#
+# DERIVED from the tool, by AST rather than by import: a copy here is exactly
+# the drift the selection exists to catch. Issue #1307 landed because
+# `tools/gate_reference_census.py` began naming `tools/corpus_provenance.py`
+# and the tests selected for that file did not include the one that holds the
+# classification, so main went red on a path nobody ran.
+_FENCE_CACHE: dict[Path, frozenset] = {}
+
+
+def held_out_fence(root: Path) -> frozenset[str]:
+    """`HELD_OUT_FENCE` as written in `tools/heldout_scoring.py`.
+
+    An empty result is returned rather than raised: the caller treats it as "no
+    fence file changed", and the tool's own suite holds the parse. A scorer
+    file that is renamed away is a rename the generic rules still cover.
+
+    Cached per root, same shape and same reason as `_READ_CACHE` below: this
+    runs once per changed file, and `select()` is called a few hundred times in
+    a single run of `tests/test_affected_tests.py`.
+    """
+    if root in _FENCE_CACHE:
+        return _FENCE_CACHE[root]
+    _FENCE_CACHE[root] = _held_out_fence(root)
+    return _FENCE_CACHE[root]
+
+
+def _held_out_fence(root: Path) -> frozenset[str]:
+    source = root / "tools" / "heldout_scoring.py"
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return frozenset()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "HELD_OUT_FENCE" not in names:
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            return frozenset()
+        return frozenset(
+            e.value for e in node.value.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    return frozenset()
+
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -530,6 +580,13 @@ def select(changed, root) -> dict:
         if f in PROGRESS_COUNTER_SOURCES:
             pytest_nodes.add("tests/test_evolution_progress.py")
             reasons.append(f"{f} (self-evolution progress counter input)")
+
+        # --- the held-out scoring fence (issue #1307) ---------------------- #
+        # Here for the same reason as the block above: every file named by the
+        # fence also has its own rule further down that ends in `continue`.
+        if f in held_out_fence(root):
+            pytest_nodes.add("tests/test_heldout_scoring.py")
+            reasons.append(f"{f} (held-out scoring fence)")
 
         # --- structural: always FULL --------------------------------------- #
         if f == "Makefile":

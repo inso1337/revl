@@ -139,13 +139,32 @@ DATA_INPUTS = (
     "tools/build_gate_crate.py",
 )
 
-# Repo paths the census names that a scoring run never reaches: they belong to
-# `--check`, `--record`, `--fuzz` and `--engine crate`, modes `run()` does not
-# call. Declared rather than assumed, so a future edit that starts reaching one
-# fails the classification test instead of widening the fence silently.
+# Repo paths the fenced files name that a scoring run never reaches: they
+# belong to `--check`, `--record`, `--fuzz`, `--engine crate` and crate
+# generation, modes `run()` does not call. Declared rather than assumed, so a
+# future edit that starts reaching one fails the classification test instead of
+# widening the fence silently.
+#
+# `corpus_provenance.py` is loaded by `gate_reference_census.py::_provenance`,
+# which only `provenance_report()` calls and only the census's own `main()`
+# calls that; `run()` reaches neither, and the census says in its own docstring
+# that provenance is reporting-only and moves no verdict.
+#
+# `pyproject.toml` is read by `build_gate_crate.py::language_version()`, called
+# from `build()` when the crate is generated. A scoring run executes that
+# module for its frontier and admission tables and never calls `build()`.
+#
+# `affected_tests.py` is loaded by `tests/test_heldout_scoring.py` to hold the
+# pre-merge selection, never by `run()`. It is NOT fenced: it decides nothing
+# about what is drawn or what counts as a divergence, and a candidate that
+# adds a test has to be able to change it, which is the line
+# `test_the_fence_is_not_the_subject` draws.
 SCORING_UNREACHED = (
     "tools/gate_reference_census_baseline.json",
     "tools/fuzz_frontend.py",
+    "tools/corpus_provenance.py",
+    "tools/affected_tests.py",
+    "pyproject.toml",
 )
 
 
