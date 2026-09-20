@@ -238,9 +238,10 @@ The six host columns share their verdict wherever a register does not separate t
 | `A6` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/a6_method_not_in_service.rvl`](../examples/rejections/a6_method_not_in_service.rvl) |
 | `A8` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/v2_fail_in_pure_fn.rvl`](../examples/rejections/v2_fail_in_pure_fn.rvl) |
 | `A9` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/a9_provide_key_not_declared.rvl`](../examples/rejections/a9_provide_key_not_declared.rvl) |
-| `T1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/t1_service_arg_type.rvl`](../examples/rejections/t1_service_arg_type.rvl) |
+| `T1` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/t1_service_arg_type.rvl`](../examples/rejections/t1_service_arg_type.rvl) |
 | `T2` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/t2_null_in_expression.rvl`](../examples/rejections/t2_null_in_expression.rvl) |
 | `T3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/gate.py`](../src/revl/gate.py) |
+| `G-MODEL-PLACE` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/model_route.py`](../src/revl/model_route.py) |
 | `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_expired_at_persistence_sink.rvl`](../examples/rejections/gretain_expired_at_persistence_sink.rvl) |
 | `G-SECRET` | **div** | **div** | no repro | **div** | **div** | **div** | no repro | [`src/revl/taint.py`](../src/revl/taint.py) |
 | `G-SECRET-FLOW` | **div** | **div** | proved | **div** | **div** | **div** | unimpl | [`examples/rejections/gsecret_service_return_discloses.rvl`](../examples/rejections/gsecret_service_return_discloses.rvl) |
@@ -248,20 +249,20 @@ The six host columns share their verdict wherever a register does not separate t
 
 | tier | proved | div | no repro | unimpl |
 |---|---|---|---|---|
-| py | 17 | 2 | 4 | 0 |
-| ts | 17 | 2 | 4 | 0 |
-| rust | 18 | 0 | 5 | 0 |
-| java | 17 | 2 | 4 | 0 |
-| wasm | 17 | 2 | 4 | 0 |
-| go | 17 | 2 | 4 | 0 |
-| revl | 4 | 6 | 5 | 8 |
+| py | 17 | 2 | 5 | 0 |
+| ts | 17 | 2 | 5 | 0 |
+| rust | 18 | 0 | 6 | 0 |
+| java | 17 | 2 | 5 | 0 |
+| wasm | 17 | 2 | 5 | 0 |
+| go | 17 | 2 | 5 | 0 |
+| revl | 5 | 5 | 6 | 8 |
 
 **Why a cell is not `proved`.** Every non-`proved` cell above, with the register or the reason that decided it:
 
 - `G1` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G1 reproducers; the rest it admits.
 - `G2` on revl is a **recorded divergence**. The self-host gate agrees on 2 of 3 G2 reproducers; the rest it admits.
 - `G3` on revl is a **recorded divergence**. The self-host gate agrees on 1 of 2 G3 reproducers; the rest it admits.
-- `G4` on revl is a **recorded divergence**. The self-host gate agrees on 16 of 17 G4 reproducers; the rest it admits.
+- `G4` on revl is a **recorded divergence**. The self-host gate agrees on 18 of 19 G4 reproducers; the rest it admits.
 - `G5` on revl is **unimplemented**. The self-host gate answers every G5 reproducer under G4 (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `G6` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G6 reproducers; the rest it admits.
 - `G7` on revl is **unimplemented**. The self-host gate answers every G7 reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
@@ -271,8 +272,17 @@ The six host columns share their verdict wherever a register does not separate t
 - `A5` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Compensation accompanies an emission by construction: the grammar attaches `compensate` to the `emit` that carries it, so a violating program is not expressible and cannot be written as a fixture.
 - `A8` on revl is **unimplemented**. The self-host gate raises no objection to any A8 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `A9` on revl is **unimplemented**. The self-host gate raises no objection to any A9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `T1` on revl is a **recorded divergence**. The self-host gate agrees on 24 of 30 T1 reproducers; the rest it admits.
 - `T3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. An open hole is refused at the ADMISSION gate rather than by `compile_files`, so a hole fixture compiles here and is refused one stage later; the reproducers live with the gate (`src/revl/holes.py`, `docs/holes.md`).
+- `G-MODEL-PLACE` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Item 512 lands the rule with its reproducers as INLINE
+                      strings in `tests/test_model_placement_512.py` and
+                      `tests/test_model_ceiling_514.py` rather than as fixture
+                      files, deliberately: `examples/rejections/` is a census
+                      corpus root, and the self-host port of `route model` is
+                      slice 3, so until a named `MODEL` marker exists the
+                      self-host answers a fixture here `BAD|unexpected token at
+                      top level` and it would enter the census as
+                      `refuse-out-of-slice/BAD`. Remove this entry when slice 3
+                      lands; a stale acknowledgement fails this gate.
 - `G-RETAIN` on revl is **unimplemented**. The self-host gate answers every G-RETAIN reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `G-SECRET` on py, ts, java, wasm, go is a **recorded divergence**. Roadmap item 421 F6 claims closure citing only `backends/rust/` and never names this tier (`--check-tier-parity`, subjects: redact, secret); and the confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
 - `G-SECRET` on rust, revl has **no reproducer**. The confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
