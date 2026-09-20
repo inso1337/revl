@@ -1244,11 +1244,28 @@ def pool_command(args) -> int:
     from .attest import resolve_key  # noqa: PLC0415 — lazy
     from .errors import RevlError  # noqa: PLC0415
 
+    import sys  # noqa: PLC0415
+
     verb = args.pool_command
+
+    # Reading the roster needs no key. That is the point of the ledger being a
+    # product surface: an operator inspects membership without touching the
+    # secret that admits, so `pool status` is safe to put in a dashboard or a
+    # health check.
+    if verb == "status":
+        charter_record, roster = load_pool(args.dir)
+        if getattr(args, "json", False):
+            print(json.dumps({"charter": charter_record,
+                              "roster": roster.as_dict()},
+                             indent=2, sort_keys=True))
+        else:
+            print(render_status(charter_record, roster))
+        return 0
+
     try:
         key = resolve_key(getattr(args, "key", None))
     except RevlError as error:
-        print(f"error: {error}", file=__import__("sys").stderr)
+        print(f"error: {error}", file=sys.stderr)
         return 2
 
     if verb == "init":
@@ -1268,16 +1285,31 @@ def pool_command(args) -> int:
         print(render_status(record, roster))
         return 0
 
-    charter_record, roster = load_pool(args.dir)
+    if verb == "request":
+        # The PEER side. It reads the charter it was handed and pins its digest,
+        # so the terms it agreed to are the terms the gate checks it against.
+        import secrets  # noqa: PLC0415
 
-    if verb == "status":
-        if getattr(args, "json", False):
-            print(json.dumps({"charter": charter_record,
-                              "roster": roster.as_dict()},
-                             indent=2, sort_keys=True))
-        else:
-            print(render_status(charter_record, roster))
+        charter_record = _read_json(args.charter)
+        offer = peer_offer.PeerOffer(
+            peer_id=args.peer_id,
+            attestation=peer_offer.Attestation(
+                trust=args.trust, region=args.region, hardware=args.hardware),
+            grant_ceiling=tuple(args.ceiling or ()))
+        join = JoinRequest(
+            pool_id=charter_record["pool_id"],
+            charter_digest=canonical_digest(charter_record),
+            peer_id=args.peer_id,
+            offer=peer_offer.sign_offer(offer, key),
+            artifact_digest=args.artifact,
+            nonce=secrets.token_hex(16),
+            issued_at=_iso(_utc_now()))
+        _write_json(args.out, sign_join(join, key))
+        print(f"wrote join request for {args.peer_id} against charter "
+              f"{join.charter_digest[:16]} to {args.out}")
         return 0
+
+    charter_record, roster = load_pool(args.dir)
 
     if verb == "join":
         join_record = _read_json(args.join)
