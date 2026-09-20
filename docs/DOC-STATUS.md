@@ -97,7 +97,7 @@ was corrected by hand and had drifted back within a day.
 | boundary-policy.md | needs-work | 22 |  |
 | bundle.md | needs-work | 0 |  |
 | capabilities.md | needs-work | 28 |  |
-| capability-attenuation.md | needs-work | 21 |  |
+| capability-attenuation.md | needs-work | 24 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
@@ -164,7 +164,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 46 | yes |
-| rejections.md | needs-work | 68 |  |
+| rejections.md | needs-work | 69 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |
