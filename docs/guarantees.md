@@ -92,7 +92,20 @@ groups "the `Secret` families" with G9 as the same no-paper-anchor family.
 | G9 | untrusted data cannot create authority without a declared declassification (`endorse`, or a `verified` checked parser) | lower (taint flow) | revl-original (no paper anchor; roadmap item 249) |
 | [G-SECRET](rejections.md#the-families) | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
 | [G-SECRET-FLOW](rejections.md#the-families) | a `Secret[T]` value never reaches a disclosure sink; it crosses only at a declared `Secret[T]` receiver and downgrades only at a declared `endorse[confidential]` | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
+| [G-MODEL-PLACE](rejections.md#the-families) | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration; `src/revl/model_route.py`) | revl-original (item 512); no paper anchor |
 | [G-RETAIN](rejections.md#the-families) | a `Retained[T, P]` value past `P`'s retention deadline never reaches a persistence sink (a `db`/`fs`/`store`/`kv`/`blob`/`archive`/`index`/`cache`/`queue`/`wal` crossing), unless `P` declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) | revl-original (item 472); no paper anchor |
+
+`G-MODEL-PLACE` is the placement half of the same family. A model role is a
+DECLARED PLACEMENT (`model role local on_device`) and a `route model on
+<action>` block places one action's model calls by the origin class of what the
+action is given. The catch-all `*` is defined NOT to cover a confidentiality
+origin, so `* -> cloud` can never be the sentence that sends a confidential
+input off the device: such an input is placed by an arm that names it, or it is
+not placed. The `secret` origin reaches no role at any residence, and that
+refusal cites `G-SECRET-FLOW` rather than this code, because an LLM prompt was
+already a disclosure sink for a bound secret. Today the code refuses the
+DECLARATION; the value side is roadmap item 514. See
+`docs/design/531-model-placement.md`.
 
 A declared receiver is not a licence to RECORD. A `Secret[T]` declaration
 authorises disclosure to the receiver it names; it says nothing about a durable
