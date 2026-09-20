@@ -509,7 +509,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../examples/java_match.rvl",
         "../../../backends/typescript/tests/fixtures/async_http.rvl",
         "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
-        # component edge shapes (async coloring inside a provide method)
+        # component edge shapes. Everything this document spells is byte-exact
+        # through the native chain except its ONE async provide method: the
+        # guard `if`/`fail` pair, the bare `fn` effect bracket, the `emit …
+        # compensate …` step with its `compensate_captures`, the host-map
+        # bracket and the per-invocation method bracket all reproduce. What is
+        # left is the async colour, which is the same lower.rvl gap the five
+        # documents above are waiting on.
         "component_edges.rvl",
         # (`services_composite.rvl` left this list when lower.rvl grew the
         # list literal, `property_edges.rvl` when the `.length` PROPERTY form
@@ -539,7 +545,8 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     ),
     "rust": (
         # component edge shapes; the host-root and realm-placement documents
-        # left this list when lower.rvl grew those two surfaces.
+        # left this list when lower.rvl grew those two surfaces. What is left
+        # of this one is its async provide method (see the ts entry).
         "component_edges.rvl",
         # issue 1153's two component documents. Neither is an EMITTER residual:
         # the rust byte oracle in tests/test_selfhost_emit_rust.py holds both

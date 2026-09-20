@@ -14477,7 +14477,15 @@ fn cir_emit_step(ts: List[Token], lo: Int, reqSet: List[Str], sc: List[Str], hos
     if (is_bad(cmp.e)) { return { ok: false, js: "", i: lo } }
     let ce = cir_expr(cmp.e, sc, hostSc, insts, tenv, tkc(ts, r.i + 1).line, reqSet)
     if (!ce.ok) { return { ok: false, js: "", i: lo } }
+    // the compensation is a DERIVED INVERSE like an `undo`, so the mutable
+    // locals it reads are named on the step the same way
+    // (`_pin_inverse_captures` walks both slots).
+    let caps = inverse_captures(ce.js, tenv)
+    if (!caps.ok) { return { ok: false, js: "", i: lo } }
     step = step.concat(", \"compensate\": ").concat(ce.js)
+    if (caps.js != "") {
+      step = step.concat(", \"compensate_captures\": [").concat(caps.js).concat("]")
+    }
     nx = cmp.i
   }
   return { ok: true, js: step.concat("}"), i: nx }
