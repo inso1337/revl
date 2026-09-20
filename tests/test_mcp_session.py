@@ -45,11 +45,16 @@ component MemCache provides cache: Cache {
 
 # The same service, with a component whose activation body cannot complete.
 # Loading it is allowed and observable (item 372); making it the rollback
-# target is what the activation health gate refuses.
+# target is what the activation health gate refuses. It carries a real
+# `provide cache` block: a declared key with no block is refused at the
+# checker (A9, issue #1172), and this fixture must fail at ACTIVATION.
 BROKEN_ACTIVATION = """
 service Cache { fn get(key: Str) -> Opt[Str]
                 fn size() -> Int }
 component MemCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache { fn get(key) = store.get(key)
+                  fn size() = 0 }
   fail "activation cannot complete"
 }
 """

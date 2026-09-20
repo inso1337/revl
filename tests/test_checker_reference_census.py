@@ -174,6 +174,10 @@ UNMASKED_UNDECIDED = {
     # component at a time --
     "examples/rejections/a2_acquire_after_provide.rvl",
     "examples/rejections/a9_provide_key_not_declared.rvl",
+    # issue #1172: the converse of A9 (a declared key no block installs) is
+    # decided by the lowering gate, not this slice, for the same reason as the
+    # direct half above.
+    "examples/rejections/a9_provides_without_block.rvl",
     "examples/rejections/g2_provision_conflict.rvl",
     "examples/rejections/g3_dependency_cycle.rvl",
     "examples/rejections/service_compat_duplicate.rvl",
