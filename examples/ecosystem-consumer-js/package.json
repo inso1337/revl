@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "A third-party JavaScript consumer of the revl admission gate, as a wasm component transpiled by jco. Refuses locally; never admits.",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "bin": {
     "agent-prefilter-js": "./prefilter.mjs"
   },
