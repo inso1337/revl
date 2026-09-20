@@ -99,6 +99,7 @@ was corrected by hand and had drifted back within a day.
 | capabilities.md | needs-work | 28 |  |
 | capability-attenuation.md | needs-work | 21 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
+| census-artifact.md | current | 0 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
 | commands-reference.md | current | 8 |  |
