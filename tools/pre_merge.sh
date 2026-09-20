@@ -270,6 +270,18 @@ else
     note "docs drift      (docgen --check)"
 fi
 
+# issue #1204: docs/vision.md's commands, links and paths, resolved against the
+# tree, plus the generated six-tier block re-checked against docs/conformance.md.
+# The self-test plants a rename per rule first, so a gate that stopped firing is
+# a red here rather than a green line that checked nothing. CI runs both in
+# `lint`; this mirrors them. It resolves the commands, it does not run them.
+if want gate docs; then
+    step "vision claims   (self-test)"  python3 tools/check_vision_claims.py --self-test
+    step "vision claims   (--check)"    python3 tools/check_vision_claims.py --check
+else
+    note "vision claims   (--check)"
+fi
+
 # 5. Lint (the CI `lint` job): ruff at the pinned version. Prefer a ruff already
 #    on PATH; else fetch the pinned one with uvx; else loud-skip.
 if ! want gate ruff; then
