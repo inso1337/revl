@@ -8635,14 +8635,42 @@ fn not_a_method_msg(what: &str, svcName: &str) -> String {
     return ((String::from("`").revl_concat(&what)).revl_concat("` is not a method of service ")).revl_concat(&svcName);
 }
 
+fn handle_head_ref(e: Expr, cx: Ctx__m2) -> bool {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Field(fl) => { let fl = *fl; match fl.target {
+    Expr::Field(inner) => { let inner = *inner; match inner.target {
+    Expr::Var(h) => cx.handles.contains_key(&h),
+    _ => false,
+} },
+    Expr::Var(v) => cx.provAlias.contains_key(&v),
+    _ => false,
+} },
+    _ => false,
+} },
+    _ => false,
+};
+}
+
+fn note_handle_emission(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
+    if ((s.kind != "emit") || (s.bind != "")) {
+        return a;
+    }
+    if (!handle_head_ref(s.e.clone(), cx.clone())) {
+        return a;
+    }
+    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), vec![String::from("a host emission")]), ecaps: union_into(a.ecaps.clone(), vec![String::from("*")]), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
+}
+
 fn walk_one_stmt(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
     let marked = ((s.kind == "emit") || (s.kind == "compensate"));
     let scx = ctx_acq(cx.clone(), stmt_acq_where(&s.kind));
+    let na0 = note_handle_emission(s.clone(), cx.clone(), a.clone());
     let root_ = acq_root_of(s.clone());
     if root_.hit {
-        return walk_exprs(&root_.args, 0i64, marked.clone(), scx.clone(), a.clone());
+        return walk_exprs(&root_.args, 0i64, marked.clone(), scx.clone(), na0.clone());
     }
-    return walk_expr(s.e.clone(), marked.clone(), if (s.kind == "emit") { ctx_emit_pos(scx.clone(), String::from("head")) } else { scx.clone() }, a.clone());
+    return walk_expr(s.e.clone(), marked.clone(), if (s.kind == "emit") { ctx_emit_pos(scx.clone(), String::from("head")) } else { scx.clone() }, na0.clone());
 }
 
 fn ctx_emit_pos(cx: Ctx__m2, pos: String) -> Ctx__m2 {

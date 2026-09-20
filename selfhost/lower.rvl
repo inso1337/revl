@@ -3128,14 +3128,81 @@ fn not_a_method_msg(what: Str, svcName: Str) -> Str {
 // is what makes the exemption identity-shaped (see `acq_root_of`). Factored out
 // so the per-statement A1 rules and the setup async-name fence measure a
 // statement's reach the same way `walk_stmts` accumulates it.
+// ---- an `emit` through a spawn handle (issue #1261) ------------------------
+//
+// `_method_emissions` reads an `emit` step's head off `expr.target` and has
+// THREE arms, not two: a required-key crossing names its wiring key, and
+// EVERYTHING ELSE notes `a host emission` and, when the step reaches no
+// emitting name it could have named instead, the unnameable capability `*`.
+// A spawn-handle provision call (`emit w.<key>.<op>(…)`) is in that second
+// arm: the handle's component is a separate activation, so from this method's
+// side the crossing has no key to name.
+//
+// `handle_emit` recorded nothing at all, so a provide method whose only
+// crossing went through a handle carried an EMPTY reach, and the G4 provider
+// bound had nothing to refuse. Two consequences, in order of weight:
+//
+//   * `Sup.run` declared `emission[net]` spawning a `Worker` whose provision
+//     op is declared `emission[net]`, with `emit w.task.go()` in the body:
+//     the reference refuses it (the crossing is unnameable, and no
+//     `emission[…]` list names `*`) and this gate raised NO OBJECTION;
+//   * where the spawn-emission bound refused the same program on its own, the
+//     two engines rendered different text — the reference the body's own
+//     crossing, this gate the spawn statement's:
+//       reference:  … emits through an unnameable host boundary
+//                     (reaching `a host emission`)
+//       this gate:  … but it spawns `Worker`, which emits through `net`
+//
+// The gate's wording is not a nicer rendering of the same verdict, which is
+// why the port goes this way round: it is the WEAKER one. It resolves the
+// crossing through the spawn graph to the child's own capability, and that
+// resolution is what admits the first program above. Adopting it on the
+// reference would mean adopting the rule that produced it.
+//
+// The unit is the STEP, as it is for every other arm: a `let r = emit
+// w.task.go()` binds an emit-marked VALUE, which the reference lowers through
+// its expression path rather than into an `emit` step, so it notes nothing.
+fn handle_head_ref(e: Expr, cx: Ctx) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        // `h.<key>.<op>(…)` — the direct spelling.
+        Field(inner) => match inner.target {
+          Var(h) => cx.handles.has(h),
+          _      => false,
+        },
+        // a local that ALIASES a provision (`let t = w.task`), which
+        // `alias_call` resolves to the same crossing.
+        Var(v) => cx.provAlias.has(v),
+        _      => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn note_handle_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
+  if (s.kind != "emit" || s.bind != "") { return a }
+  if (!handle_head_ref(s.e, cx)) { return a }
+  // `union_into`, not `push`: `note` dedups on its `seen` set, so a body with
+  // two handle emissions carries the label once.
+  return { msg: a.msg, tag: a.tag,
+           labels: union_into(a.labels, ["a host emission"]),
+           ecaps: union_into(a.ecaps, ["*"]),
+           areach: a.areach, aops: a.aops, avals: a.avals }
+}
+
 fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
   let scx = ctx_acq(cx, stmt_acq_where(s.kind))
+  let na0 = note_handle_emission(s, cx, a)
   let root = acq_root_of(s)
-  if (root.hit) { return walk_exprs(root.args, 0, marked, scx, a) }
+  if (root.hit) { return walk_exprs(root.args, 0, marked, scx, na0) }
   // an `emit` step's marker covers its head call alone (issue #1175); a
   // compensate slot is a teardown region and stays marked throughout
-  return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, a)
+  return walk_expr(s.e, marked,
+                   s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, na0)
 }
 
 // ---- one `emit` marker per crossing (issue #1175) --------------------------
