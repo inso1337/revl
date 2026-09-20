@@ -480,6 +480,12 @@ def revl_reset_run_trace_state() -> None:
     _revl_validated_completions.set(None)
     _revl_last_emission_index.set(None)
     _revl_pending_produced_by.set(None)
+    # item 517 Slice 2: the evidence sealer is per-RUN state, so a generation
+    # boundary drops it. A `--watch` reload that re-engages gets a fresh one; a
+    # reload that does not is a run with no evidence, which reads as exactly
+    # that rather than inheriting the previous generation's engagement.
+    _revl_model_evidence_sealer.set(None)
+    _revl_model_evidence_draft.set(None)
 
 
 # item 242: the model-hop observations live in THIS fiber, KEYED BY THE CROSSING
@@ -525,6 +531,111 @@ _revl_recorded_crossing: "contextvars.ContextVar[Optional[tuple]]" = \
 # decision lives only on the trace (item 121) as before.
 _revl_model_decision_sink: "contextvars.ContextVar[Optional[Callable]]" = \
     contextvars.ContextVar("_revl_model_decision_sink", default=None)
+
+# ---------------------------------------------------------------------------
+# item 517 Slice 2: the model decision as a SIGNED evidence object, sealed at
+# the crossing that produced it.
+#
+# This module is stdlib-only by construction — it ships with the cordis-py
+# runtime and imports nothing from `revl` — so it cannot take a MAC and must
+# not learn how. A second copy of `revl.model_evidence`'s construction living
+# here, beside a signing key, is the item 272 duplication mistake in the worst
+# possible place. So the runtime holds a CALLABLE and knows nothing about what
+# it does: exactly the shape Slice 3a's WAL sink already uses, and for the same
+# reason (the runtime holds no WAL handle either).
+#
+#   `_revl_model_evidence_sealer`  the run's sealer, or None. Installed by
+#                                  `revl_engage_model_evidence`. Its contract is
+#                                  `(crossing, draft, outcome) -> (record, None)`
+#                                  or `(None, {"link", "reason"})`; it is TOTAL,
+#                                  so a malformed declaration is an answer here
+#                                  and never an exception the runtime would have
+#                                  to classify without the vocabulary to do it.
+#   `_revl_model_evidence_draft`   what the PROVIDER declared for the crossing
+#                                  it is making: which weights answered, on what
+#                                  host profile, how the prompt was bound, what
+#                                  the candidates were, under which policy. revl
+#                                  cannot see any of that through an opaque host
+#                                  body, so it is declared or it is absent, and
+#                                  absent is a refusal rather than a guess.
+#
+# Both are contextvars for the reason every register above is: a child Task
+# copies rather than shares, so two live activations never cross-attribute.
+# ---------------------------------------------------------------------------
+
+_revl_model_evidence_sealer: "contextvars.ContextVar[Optional[Callable]]" = \
+    contextvars.ContextVar("_revl_model_evidence_sealer", default=None)
+
+_revl_model_evidence_draft: "contextvars.ContextVar[Optional[dict]]" = \
+    contextvars.ContextVar("_revl_model_evidence_draft", default=None)
+
+
+class RevlModelEvidenceRefused(RuntimeError):
+    """A model crossing could not be sealed while evidence was ENGAGED.
+
+    Raised out of the crossing, which is the whole point: a run that asked for
+    every model decision to be accountable and then made one it cannot account
+    for must not proceed as though it had. The refusal reaches the WAL FIRST
+    (`evidenceRefused` on the crossing's `model-decision` record), so a
+    post-mortem reader of the artifact sees which crossing refused and why even
+    though the process died here.
+
+    Carries `link` and `reason` verbatim from the sealer, so a caller branches
+    on the check that fired rather than on the wording."""
+
+    def __init__(self, link: str, reason: str, crossing=None):
+        super().__init__(f"{link}: {reason}")
+        self.link = link
+        self.reason = reason
+        self.crossing = crossing
+
+
+def revl_engage_model_evidence(sealer: "Optional[Callable]") -> None:
+    """Engage (or, with None, disengage) signed model-decision evidence for
+    this run.
+
+    OPT-IN, and that is a decision rather than a default. A run that does not
+    engage writes precisely the `model-decision` record item 250 Slice 3a
+    writes, byte for byte, and an offline reader reports "not sealed" instead
+    of inferring anything — the same absent-by-default discipline the rest of
+    the WAL keeps. A run that DOES engage has said every model crossing must be
+    accountable, and from here a crossing that cannot be sealed stops the run
+    (`RevlModelEvidenceRefused`) rather than degrading quietly to the unsigned
+    record. Those are the only two behaviours; there is no third one where a
+    crossing is silently unsealed on an engaged run.
+
+    `sealer` is `revl.model_evidence.CrossingSealer` in this tree. It is passed
+    as a bare callable so this module stays stdlib-only and holds no key."""
+    _revl_model_evidence_sealer.set(sealer)
+
+
+def revl_model_evidence_engaged() -> bool:
+    """Whether this fiber's run has a sealer installed."""
+    return _revl_model_evidence_sealer.get() is not None
+
+
+def revl_declare_model_decision(**members) -> None:
+    """The PROVIDER's declaration for the crossing it is about to make.
+
+    Called from inside the host body that performs the completion, which is the
+    only place that knows what this names: which weights answered
+    (`model_digest`), on what host profile (`placement_digest`, item 538's own
+    digest, opaque to revl), how the prompt was bound (`prompt_binding`), what
+    the input carried (`origins`), what the candidates were and which was taken
+    (`candidates`, `chosen`), how it was asked (`sampling`), under which rule
+    (`policy_digest`, `fallback_depth`) and where it ran (`role`, `residence`).
+
+    It may NOT name `component`, `step_index` or `outcome`: the crossing is the
+    one the recorder just made and the outcome is the one the validation seam
+    measured, so a provider able to set them could seal a record about a
+    crossing that never happened, or call an exhausted budget a validated
+    answer. The sealer refuses a declaration that restates any of the three.
+
+    CONSUMED by the crossing that follows, exactly like the keyed observation
+    and the `producedBy` marker above: a later crossing never inherits an
+    earlier provider's declaration. Declaring on a run with no sealer engaged
+    is harmless and does nothing."""
+    _revl_model_evidence_draft.set(dict(members))
 
 # ---------------------------------------------------------------------------
 # Slice 2: the value-flow token that gates `producedSeq` (§2.2, the NEW
@@ -586,7 +697,10 @@ def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]",
 
     Item 250 Slice 3a rides it too: `sink`, when the recorder has a WAL
     attached, is the callable that appends THIS crossing's `model-decision`
-    record (`sink(llm, outcome)`). It is published beside the key rather than
+    record (`sink(llm, outcome, evidence=None, evidence_refused=None)`; item
+    517 Slice 2 added the two keyword members, both absent by default so a run
+    that seals nothing writes the Slice-3a record unchanged). It is published
+    beside the key rather than
     looked up later because the seam that writes it runs after `make_call`
     returns, in the same fiber, with no WAL handle of its own. Absent (the
     default) means no durable sink: the decision stays trace-only."""
@@ -666,9 +780,44 @@ def _revl_write_model_decision(obs: tuple, validated: bool) -> None:
     exist on the WAL. Neither the prompt nor the response text is ever written.
     `outcome` says whether the response VALIDATED or the retry budget was
     EXHAUSTED (item 257): the crossing happened and cost tokens either way, so
-    the record is written either way."""
+    the record is written either way.
+
+    Item 517 Slice 2 rides the same call. With a sealer engaged
+    (`revl_engage_model_evidence`) the provider's declaration for this crossing
+    is sealed into an evidence object and handed to the sink beside the `llm`
+    payload, so one WAL record carries both the observation and the signed
+    account of it and `revl.wal.model_decisions` indexes them together. Three
+    outcomes, and no fourth:
+
+    * **no sealer** — unchanged, byte for byte. The decision is recorded and
+      not sealed, and an offline reader says exactly that.
+    * **sealed** — the record carries `evidence`.
+    * **engaged and unsealable** — the record carries `evidenceRefused` (the
+      link and the reason), and `RevlModelEvidenceRefused` is then raised out
+      of the crossing. The run does not continue as though the decision had
+      been accounted for. The write happens BEFORE the raise, so the artifact
+      states the refusal even though the process stops here."""
     sink = _revl_model_decision_sink.get()
+    sealer = _revl_model_evidence_sealer.get()
+    crossing = _revl_recorded_crossing.get()
+    draft = _revl_model_evidence_draft.get()
+    # The declaration is consumed whatever happens next, so a crossing that
+    # carried no completion, or one on a run with no sealer, can never inherit
+    # an earlier provider's declaration and seal it as its own.
+    _revl_model_evidence_draft.set(None)
     if sink is None:
+        if sealer is not None:
+            # Engaged, and nowhere durable to put the record. This is the
+            # fail-closed case that looks most like a no-op and is not one: the
+            # run asked for every model decision to be accountable, and an
+            # evidence object that is never written is not evidence.
+            raise RevlModelEvidenceRefused(
+                "incomplete",
+                "model-decision evidence is engaged for this run and this "
+                "crossing has no durable sink (no WAL is attached, or it was "
+                "closed), so the sealed record would exist nowhere. An "
+                "unwritten evidence object is not evidence",
+                crossing)
         return
     _revl_model_decision_sink.set(None)
     latency, attempts, ceiling, raw = obs
@@ -677,7 +826,19 @@ def _revl_write_model_decision(obs: tuple, validated: bool) -> None:
         model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost=cost,
         latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
         verified_by=[])
-    sink(llm, "validated" if validated else "exhausted")
+    outcome = "validated" if validated else "exhausted"
+    if sealer is None:
+        sink(llm, outcome)
+        return
+    record, refusal = sealer(crossing, draft, outcome)
+    # Write FIRST, raise second. The artifact is the thing a post-mortem reader
+    # is handed, and it must say which crossing refused and why even when the
+    # process stops here — otherwise a refused crossing is indistinguishable
+    # from a run that never engaged evidence at all.
+    sink(llm, outcome, evidence=record, evidence_refused=refusal)
+    if refusal is not None:
+        raise RevlModelEvidenceRefused(refusal.get("link", "incomplete"),
+                                       refusal.get("reason", ""), crossing)
 
 
 _REVL_ANY_CROSSING = object()
