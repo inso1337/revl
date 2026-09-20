@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/emitted%20code-validated%20by%20real%20compilers-2dd4bf" alt="validated by real compilers">
   <img src="https://img.shields.io/badge/self--hosting-native-2dd4bf" alt="self-hosting">
   <img src="https://img.shields.io/badge/agent--native-MCP-a78bfa" alt="MCP native">
-  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
+  <img src="https://img.shields.io/badge/license-AGPL--3.0%20%2B%20MIT-blue" alt="AGPL-3.0 with MIT exception">
 </p>
 
 <p>
@@ -307,4 +307,9 @@ build and validate every tier ([pytest](https://github.com/pytest-dev/pytest),
 
 ## License
 
-[MIT](LICENSE).
+The compiler, the admission gate and the tooling are
+[AGPL-3.0-only](LICENSE). Everything that ends up inside your program, the
+`stdlib/`, the runtime shims under `backends/`, the examples, is
+[MIT](LICENSES/MIT.txt), and the code revl emits from your source is yours.
+The split, file by file, is in [LICENSING.md](LICENSING.md). The names revl and
+truc and the logo are trademarks; see [TRADEMARK.md](TRADEMARK.md).

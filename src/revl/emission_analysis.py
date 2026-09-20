@@ -155,7 +155,8 @@ def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
 
 
 def _emitting_capabilities(fns: list, externs: list,
-                           witness: dict | None = None) -> dict[str, set]:
+                           witness: dict | None = None, *,
+                           by_name: bool = False) -> dict[str, set]:
     """`_emitting_fns` refined from a boolean to a *set*: name -> the
     capabilities its call reaches (docs/capabilities.md).
 
@@ -165,17 +166,33 @@ def _emitting_capabilities(fns: list, externs: list,
     point is the same least one `_emitting_fns` took, now over sets instead of
     a flag, which is why a capability propagates through a chain of `fn`s.
 
+    An extern that declares a SCOPE contributes that scope instead of its name:
+    `extern emission[db] fn pg_write` contributes `db` and nothing else
+    (docs/capabilities.md §2, "a scope replaces the name; it does not join
+    it"). This is the `capabilities or (name,)` rule every other authority
+    surface over the same crossing already keys on —
+    `lower._extern_emission_caps`, the witnessed seed below,
+    `audit_diff._capability_registers`, the approval `ClassMap` and, since item
+    343's policy-reach slice, `policy.component_reach`. Keying the emission
+    seed by NAME here made the G4 subset check the last surface reading a
+    scoped crossing in a namespace of its own, so a provider that was exactly
+    in bounds (`emission[db]` implementing `emission[db]`) was refused and told
+    to widen its declaration to `emission[db, pg_write]` — a token no policy
+    rule can select. `_emitting_extern_names` is the name-keyed twin for the
+    consumers that enumerate HOST CODE rather than authority.
+
     `witness` is filled in place as the same walk proceeds — the set and the
     derivation come from one traversal, so they cannot disagree."""
-    caps: dict[str, set] = {ext["name"]: {ext["name"]}
-                            for ext in externs if ext.get("class") == "emission"}
     # A witnessed extern crosses the same boundary as an emission (item 243): it
     # seeds the fixed point too, so an unregistered witnessed reach is never
     # mistaken for revertible. Its capability is the declared scope (`fs`), or
-    # its own name when unscoped — the same "the extern is the boundary" rule.
-    for ext in externs:
-        if ext.get("class") == "witnessed":
-            caps[ext["name"]] = set(ext.get("capabilities") or [ext["name"]])
+    # its own name when unscoped — the same "the extern is the boundary" rule
+    # the emission seed above follows.
+    caps: dict[str, set] = {
+        ext["name"]: ({ext["name"]} if by_name
+                      else set(ext.get("capabilities") or [ext["name"]]))
+        for ext in externs
+        if ext.get("class") in ("emission", "witnessed")}
     calls: dict[str, set] = {}
     passed: dict[str, set] = {}  # first-class callable references per fn body
     for fn in fns:
@@ -228,6 +245,27 @@ def _emitting_capabilities(fns: list, externs: list,
                 caps.setdefault(name, set()).update(reached)
                 changed = True
     return caps
+
+
+def _emitting_extern_names(fns: list, externs: list) -> dict[str, set]:
+    """The same fixed point, keyed by EXTERN NAME instead of declared token.
+
+    Two different questions share one traversal. "Which boundaries may this
+    call cross" is the authority question, and item 343's policy-reach slice
+    settled that a scoped crossing answers it with its declared token:
+    `_emitting_capabilities`. "Which host code does this call reach" is the
+    enumeration question, and it answers with the name the host body is
+    declared under, whatever scope sits beside it — the G8 audit's per-
+    component `externs` table and the cardinality ceilings both read that one,
+    and both stay keyed by name (item 343, the "not changed" note).
+
+    Folding the token map into a name table is what produced a phantom host
+    extern: a scoped crossing reached through a helper `fn` enumerated a
+    boundary called `db` with no class and no bodies, beside the real
+    `pg_write` entry. `*` is carried through unchanged in both keyings, so an
+    unnameable first-class dispatch is still marked in either.
+    """
+    return _emitting_capabilities(fns, externs, by_name=True)
 
 
 def _async_callables(fns: list, externs: list, witness: dict | None = None) -> set:

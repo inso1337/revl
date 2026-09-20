@@ -200,6 +200,12 @@ UNMASKED_UNDECIDED = {
     "examples/rejections/g4_arrow_param_emission.rvl",
     "examples/rejections/g4_unmarked_alias_emission.rvl",
     "examples/rejections/g4_unmarked_handle_emission.rvl",
+    # -- one `emit` marker per crossing (issue #1175): an emission evaluated
+    # to build an emit head's argument, unmarked or marked in place. The
+    # checker's marker rule reads a statement's head call and never its
+    # argument list --
+    "examples/rejections/g4_nested_unmarked_emission.rvl",
+    "examples/rejections/g4_nested_emit_expression.rvl",
     # -- the type layer past the expression slice: a config-field default.
     # `t7_provide_param_annotation_mismatch.rvl` stood here too — the PARAMETER
     # twin of the return annotation #1063 taught the parser to read — until

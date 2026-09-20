@@ -140,3 +140,128 @@ def refusal(token: str, kind: str) -> tuple[str, str] | None:
             f"(G8, roadmap item 521, {DESIGN} §4)",
         )
     return None
+
+
+# ------------------------------------------------- the reversibility classes
+#
+# Roadmap item 522 (issue #1196), docs/design/538-ui-transactions.md, Slice 1.
+#
+# A UI transaction that treats an unclassified step as reversible is the
+# fail-open shape: the "clean teardown" claim outlives the thing that was
+# meant to bound it. So every computer-use verb carries a REVERSIBILITY CLASS,
+# and the class is REGISTRY-OWNED. An author states what a verb is FOR; an
+# author does not get to state that a click is reversible, for the same reason
+# item 249 derives sink-ness from the granting side: a classification an
+# author can lower is a classification a careless author lowers.
+
+REVERSIBLE = "reversible"
+COMPENSATABLE = "compensatable"
+CONFIRM_REQUIRED = "confirm-required"
+IRREVERSIBLE = "irreversible"
+UNKNOWN = "unknown"
+
+#: The five classes, and what the system does with each. The text is the rule,
+#: not a comment: `docs/rejections.md` and the refusals below quote it.
+OBLIGATION: dict[str, str] = {
+    REVERSIBLE: "the step changes no state the target owns, so the "
+                "transaction needs nothing from it: no compensation is "
+                "registered and none is required",
+    COMPENSATABLE: "an inverse exists but revl cannot synthesise it, so the "
+                   "declaration MUST carry `compensate` - a compensatable "
+                   "step with nothing registered is residue that was "
+                   "avoidable, and the LIFO run would skip it silently",
+    CONFIRM_REQUIRED: "the step may proceed only behind an explicit human "
+                      "confirmation. No verb is BORN in this class: it is the "
+                      "class a token is RAISED to by the operator's existing "
+                      "approval authority, and Slice 1 does not implement the "
+                      "raise (design doc §6, with the measurement)",
+    IRREVERSIBLE: "no inverse exists. The transaction may not claim a clean "
+                  "teardown for it: it reports `uncompensated`, and a "
+                  "declared `compensate` is REFUSED rather than believed",
+    UNKNOWN: "revl cannot tell, which the transaction must treat exactly as "
+             "`irreversible` - the direction that is safe when the answer is "
+             "missing. A click may trigger something no inverse describes, so "
+             "a declared `compensate` is REFUSED here too",
+}
+
+CLASSES: tuple[str, ...] = (
+    REVERSIBLE, COMPENSATABLE, CONFIRM_REQUIRED, IRREVERSIBLE, UNKNOWN)
+
+#: token -> class. Every admissible spelling appears exactly once; the
+#: exhaustiveness is a test, not a convention (an unclassified verb would
+#: default to "not checked", which is the fail-open default this item exists
+#: to remove).
+#:
+#: `screen.observe` and `ui.find` READ. Nothing in the target changes, so
+#: there is nothing to undo. `ui.text` generates key input into a named field:
+#: the inverse is restoring that field, which the author knows and revl does
+#: not. `ui.click` actuates a control whose effect the application never
+#: published, so revl has no answer at all. `ui.download` lands a file on the
+#: host; deleting it afterwards does not un-fetch it, and the fetch may
+#: already have been metered or logged on the other side.
+REVERSIBILITY: dict[str, str] = {
+    "screen.observe": REVERSIBLE,
+    "ui.find": REVERSIBLE,
+    "ui.text": COMPENSATABLE,
+    "ui.click": UNKNOWN,
+    "ui.download": IRREVERSIBLE,
+}
+
+#: The classes for which a declared inverse is a FALSE CLEANLINESS CLAIM. An
+#: extern-declared `compensate` is what the residue and erase reports read to
+#: mark a crossing compensated (item 254), so admitting one here would make
+#: `no_residue` printable for a step that left residue - the exact outcome
+#: the item's exit test forbids.
+NO_INVERSE: frozenset[str] = frozenset({IRREVERSIBLE, UNKNOWN})
+
+
+def reversibility(token: str) -> str | None:
+    """The reversibility class of an admissible computer-use token, or `None`
+    when the token is not one. Parameters (item 294) are stripped: a narrowed
+    `ui.click(...)` is the same operation as `ui.click`, and a valuation that
+    could change the class would be an author-side opt-out."""
+    return REVERSIBILITY.get(token.split("(", 1)[0])
+
+
+def teardown_refusal(token: str, kind: str, name: str,
+                     has_compensate: bool) -> tuple[str, str] | None:
+    """`(message, hint)` if this extern declaration's compensation does not
+    match its verb's reversibility class, else `None`.
+
+    Two refusals, both fail-closed, both G4 (`every mutation carries an
+    inverse, or admits irreversibility`):
+
+    1. A verb with NO INVERSE may not declare one. The declared `compensate`
+       is not decoration: it is the fact the residue and erase reports read,
+       so believing it turns `uncompensated` into `no_residue` for a step
+       that left residue.
+
+    2. A COMPENSATABLE verb must declare one. Its inverse exists and only the
+       author can write it; a missing compensation is residue the transaction
+       could have avoided and will not even be able to name.
+
+    A service method's `emission[...]` scope does NOT come through here. The
+    obligation belongs to the declaration that actually crosses, and a service
+    method declares an interface, not a crossing."""
+    cls = reversibility(token)
+    if cls is None:
+        return None
+    if cls in NO_INVERSE and has_compensate:
+        return (
+            f"`{kind}[{token}]` is {cls}, so extern `{name}` may not declare "
+            f"`compensate`",
+            f"{OBLIGATION[cls]}; drop the `compensate` clause - a UI "
+            f"transaction over this step must report `uncompensated`, and a "
+            f"registered inverse revl cannot honour would let it print "
+            f"`no_residue` instead (G4, roadmap item 522, "
+            f"docs/design/538-ui-transactions.md)",
+        )
+    if cls == COMPENSATABLE and not has_compensate:
+        return (
+            f"`{kind}[{token}]` is compensatable, so extern `{name}` must "
+            f"declare `compensate`",
+            f"{OBLIGATION[cls]}; write `compensate <inverse>()` before the "
+            f"`= @backend` body (G4, roadmap item 522, "
+            f"docs/design/538-ui-transactions.md)",
+        )
+    return None
