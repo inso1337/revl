@@ -160,6 +160,35 @@ def _classify(e: RevlError) -> str:
     if e.code in ("G4", "A1"):
         return e.code
     m = e.message
+    # ---- item 512 slice 3: model placement, the DECLARATION half ------------
+    # `selfhost/lower.rvl`'s model-placement section decides `model role` and
+    # `route model` and tags every refusal "MODEL". First in this function, and
+    # not because it is important: two of its messages are substrings of the
+    # ROUTE family's ("`<x>` is routed twice in <C>"), so a later arm would
+    # answer ROUTE for a refusal the gate spells MODEL and turn an agreement
+    # into a tag-mismatch.
+    #
+    # The markers are POSITIVE, the extern-declaration discipline further down:
+    # each is a substring the gate now spells byte for byte. That is what keeps
+    # the item-514 VALUE side OUT — its messages all open "a `<origin>` value
+    # reaches the model crossing", the gate has no flow walk to decide one
+    # with, and two of them end in the same "may not leave the device
+    # (G-MODEL-PLACE)" tail the declaration refusal ends in. Naming those here
+    # would claim an agreement that does not exist, and would report a
+    # no-objection the gate is entitled to as a bypass.
+    if " value reaches the model crossing " not in m and (
+            m.startswith("unknown residence `")
+            or m.startswith("unknown origin class `")
+            or (m.startswith("model role `")
+                and " is declared twice (first on line " in m)
+            or (m.startswith("action `") and " is routed twice in " in m)
+            or " is routed twice in `route model on " in m
+            or " origin to model role `" in m
+            or m.endswith(") names no declared model role")
+            or (m.startswith("`route model on ")
+                and (m.endswith(" names no role")
+                     or " names no action of " in m))):
+        return "MODEL"
     if "provision conflict" in m and "(G2)" in m:
         return "G2"
     # item 186, the replacement wave: the unmet-consumer refusal of
