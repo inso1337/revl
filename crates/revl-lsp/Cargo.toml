@@ -2,6 +2,7 @@
 name = "revl-lsp"
 version = "0.0.0"
 edition = "2021"
+license = "AGPL-3.0-only"
 
 # `preserve_order`: a Diagnostic/Hover/Location computed by the reference front
 # end travels through this binary as JSON and must come out in the SAME key

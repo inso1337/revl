@@ -408,9 +408,19 @@ Fix, when the collision was deliberate: rename the source binding.
 
 No refusing example: `compensate` is an *optional* slot (DESIGN.md §3.5 —
 an emission "may declare" one) that the grammar binds only to an `emit`,
-and `emit` requires a declared `emission` (G4). There is no
-"compensation required but missing" program; the guarantee is by
-construction. The lowering test is `test_a5_compensate_lowering`.
+and `emit` requires a declared `emission` (G4). For every ordinary
+capability there is no "compensation required but missing" program; the
+guarantee is by construction. The lowering test is
+`test_a5_compensate_lowering`.
+
+One family is the exception, and it refuses under G4 rather than here
+(roadmap item 522, `docs/design/538-ui-transactions.md`). A computer-use
+verb carries a reversibility class that the registry owns, not the
+author, so the `compensate` slot is no longer free: `ui.text` is
+compensatable and must declare one, while `ui.click` (unknown) and
+`ui.download` (irreversible) may not, because the declared slot is what
+the residue and erase reports read and a transaction over a step with no
+inverse has to report `uncompensated` rather than a clean teardown.
 
 ## A6 — provide-methods match the service signature
 
