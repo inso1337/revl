@@ -607,11 +607,15 @@ def test_a_revoked_peer_that_rejoins_starts_at_the_entry_tier_with_no_evidence()
     peer = PEERS[0]
     assert admit(record, identity_join(record, peer, IDENTITIES[peer]),
                  roster=roster, directory=directory)["verdict"] == pp.ADMIT
-    roster.members[peer] = pp.Membership(
-        **{**roster.members[peer].as_dict(),
+    row = {**roster.members[peer].as_dict(),
            "caps": roster.members[peer].caps,
            "budgets": roster.members[peer].budgets,
-           "evidence": 7, "receipts": 9, "effects_witnessed": 4})
+           "evidence_digests": tuple(f"{n:064x}" for n in range(7)),
+           "receipts": 9, "effects_witnessed": 4}
+    # `evidence` is derived from the digests now, so it is not a constructor
+    # argument and the rendered row carries it only for a reader.
+    row.pop("evidence")
+    roster.members[peer] = pp.Membership(**row)
 
     receipt = pp.withdraw(record, peer, "host seized", charter_key=OP_KEY,
                           roster=roster, directory=directory,
