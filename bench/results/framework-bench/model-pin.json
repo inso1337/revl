@@ -1,0 +1,82 @@
+{
+  "endpoint_kind": "ollama",
+  "endpoint": "http://127.0.0.1:11434",
+  "endpoint_is_local": true,
+  "sampling": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "seed": 0,
+    "max_output_tokens": 8192
+  },
+  "machine": "Darwin 25.2.0 arm64 \u00b7 Python 3.14.3",
+  "probe_prompt": "Count from one to twenty in English words, one per line.",
+  "model": {
+    "requested": "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M",
+    "resolved": "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M",
+    "resolution": "exact",
+    "digest": "e418857d056538b10aaffb08e62148e1841fed50ed8c0ba44b6d2de0036e332e",
+    "quantisation": "unknown",
+    "quantisation_reported_by_endpoint": "unknown",
+    "quantisation_from_tag": "Q4_K_M",
+    "parameter_size": "35.5B",
+    "context_length": 262144,
+    "family": "qwen35moe",
+    "format": "gguf",
+    "size_bytes": 22616286186,
+    "capabilities": [
+      "completion",
+      "vision"
+    ]
+  },
+  "reachable": true,
+  "throughput": {
+    "samples": [
+      {
+        "generation_tps": 18.29907522478198,
+        "generation_tokens": 128,
+        "load_ms": 57.456042,
+        "total_ms": 54236.841209,
+        "prompt_tps": 80.28791946074445,
+        "prompt_tokens": 23,
+        "index": 0,
+        "cold": true
+      },
+      {
+        "generation_tps": 19.531908653535833,
+        "generation_tokens": 128,
+        "load_ms": 5.493584,
+        "total_ms": 73166.254625,
+        "prompt_tps": 76.29333793304761,
+        "prompt_tokens": 23,
+        "index": 1,
+        "cold": false
+      },
+      {
+        "generation_tps": 17.832349721355605,
+        "generation_tokens": 128,
+        "load_ms": 2.859459,
+        "total_ms": 55949.511167,
+        "prompt_tps": 75.3342548132038,
+        "prompt_tokens": 23,
+        "index": 2,
+        "cold": false
+      },
+      {
+        "generation_tps": 18.00867399038168,
+        "generation_tokens": 128,
+        "load_ms": 24.816334,
+        "total_ms": 82714.71125,
+        "prompt_tps": 70.85665698292354,
+        "prompt_tokens": 23,
+        "index": 3,
+        "cold": false
+      }
+    ],
+    "n_warm": 3,
+    "generation_tps_mean": 18.457644121757706,
+    "generation_tps_sd": 0.9345083066186481,
+    "cold_sample_included_in_mean": false,
+    "prompt_tps_mean": 74.16141657639166,
+    "prompt_tps_sd": 2.9019023218669795
+  }
+}
