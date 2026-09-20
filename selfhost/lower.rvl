@@ -10801,7 +10801,10 @@ fn tk_arrow(a: ArrowN, env: List[Bind]) -> TInf {
   if (ty_mentions_async(a.ret)) { return tk_ok("") }
   let inner = tk_arrow_env(a.params, 0, env)
   let indep = !tk_arrow_dependent(a.params, 0, a.body)
-  let ret = tk_arrow_ann(a.ret, env)
+  // `tk_solid` for the same reason every other declared spelling passes through
+  // it: an annotation naming a type this walk cannot resolve is answered "",
+  // and "" is the inference position, so the body is walked and not compared.
+  let ret = tk_solid(tk_arrow_ann(taint_strip(a.ret), env), env)
   if (a.ret != "" && indep) {
     // the annotation is a claim about the body, so check it — but only where
     // the body cannot mention a ⊥ parameter, under which the claim could only
@@ -10826,20 +10829,26 @@ fn tk_arrow(a: ArrowN, env: List[Bind]) -> TInf {
 // so the shadow is the row.
 fn tk_arrow_env(ps: List[ParamN], i: Int, env: List[Bind]) -> List[Bind] {
   if (i >= ps.length()) { return env }
-  let ty = tk_arrow_ann(taint_strip(ps[i].ty), env)
+  let ty = tk_solid(tk_arrow_ann(taint_strip(ps[i].ty), env), env)
   return tk_arrow_env(ps, i + 1, tenv_put(env, ps[i].name, ty))
 }
 
-// Rule G's resolution, as a spelling transform: a name the ENCLOSING `fn`
-// quantifies is marked `?T` and is a wildcard downstream; every other name is
+// Rule G's resolution, as a spelling transform, in the reference's own order:
+// a TRANSPARENT ALIAS is erased first (an arrow's annotations live inside a
+// body, so `_subst_body_annotations` rewrites them rather than the declaration
+// sweep, but the substitution is the same one), then a name the ENCLOSING `fn`
+// quantifies is marked `?T` and is a wildcard downstream. Every other name is
 // left exactly as written, which is what makes `(x: Q): Q => x` a `(Q) -> Q`
 // that `Int` does not flow into.
 fn tk_arrow_ann(ty: Str, env: List[Bind]) -> Str {
   if (ty == "") { return "" }
   let p = ty_parse(ty)
   if (p.args.length() == 0) {
-    return tenv_get(env, tk_tparam_key(p.head)) != "" ? "?".concat(p.head)
-                                                      : p.head
+    let ex = tenv_get(env, tk_alias_key(p.head))
+    // the alias table is already expanded to its FIXED POINT, so an expansion
+    // names no alias and the marking below is all that is left to do.
+    if (ex != "") { return tk_mark_ann(ex, env) }
+    return tk_mark_ann(p.head, env)
   }
   var out: List[Str] = []
   var k = 0
@@ -10850,7 +10859,37 @@ fn tk_arrow_ann(ty: Str, env: List[Bind]) -> Str {
   return ty_render(p.head, out)
 }
 
+// `mark_tparams` over the enclosing `fn`'s rows rather than a list.
+fn tk_mark_ann(ty: Str, env: List[Bind]) -> Str {
+  if (ty == "") { return "" }
+  let p = ty_parse(ty)
+  if (p.args.length() == 0) {
+    return tenv_get(env, tk_tparam_key(p.head)) != "" ? "?".concat(p.head)
+                                                      : p.head
+  }
+  var out: List[Str] = []
+  var k = 0
+  while (k < p.args.length()) { out = out.push(tk_mark_ann(p.args[k], env))  k += 1 }
+  return ty_render(p.head, out)
+}
+
 fn tk_tparam_key(n: Str) -> Str { return "tparam ".concat(n) }
+fn tk_alias_key(n: Str) -> Str { return "alias ".concat(n) }
+
+// The document's transparent aliases as environment rows, from the same fixed-
+// point table the declaration sweep substitutes with. The key is not a legal
+// revl identifier, so no program can collide with it.
+fn tk_alias_rows(al: Map[Str, Str], env: List[Bind]) -> List[Bind] {
+  if (al.size() == 0) { return env }
+  let ks = al.keys()
+  var out = env
+  var i = 0
+  while (i < ks.length()) {
+    out = tenv_put(out, tk_alias_key(ks[i]), alias_at(al, ks[i]))
+    i += 1
+  }
+  return out
+}
 
 // The enclosing `fn`'s quantified names, as environment rows. The key is not a
 // legal revl identifier, so no program can collide with it.
@@ -11977,7 +12016,11 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
   let al = alias_map(ts)
-  return fb_refusal_at(ts, i, nr_binds(ts, sig_binds(ts, case_binds(ts, al), al)), al)
+  // the alias table rides the environment too, because an ARROW's annotations
+  // are the one declared spelling this walk meets without a token span to
+  // substitute over (docs/design/457 T2c).
+  return fb_refusal_at(ts, i,
+    tk_alias_rows(al, nr_binds(ts, sig_binds(ts, case_binds(ts, al), al))), al)
 }
 
 fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind],
