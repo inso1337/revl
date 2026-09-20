@@ -327,6 +327,37 @@ An editable install registers a meta-path finder consulted before `sys.path`, so
 a run launched from the wrong interpreter can score against a different checkout
 than the one it was pointed at and produce plausible, wrong numbers.
 
+### 6.4 What the live run reached, and what it did not
+
+The injection run completed: 8 of 8 vectors generated against the pinned model
+on spec `01-kv-provider`, and the artifacts are committed. It is the first cell
+in this benchmark produced by the pinned model.
+
+The admission run over the 30 bench specs did not. It was started three times
+and abandoned. At the first two output caps it produced no completed spec in
+twenty-odd minutes each; at the third the first spec exceeded the runner's
+1800-second per-call timeout and the run was stopped rather than left to
+accumulate timeouts. Its empty directory was deleted rather than committed as a
+corpus with nothing in it.
+
+That is a fact about the machine rather than about the model or the harness, and
+the same machine served the injection run's eight attempts at roughly nine
+minutes each an hour earlier. It is recorded because a reader deciding whether
+to reproduce this suite needs to know what it costs: on a contended machine,
+thirty specs against a 35B model at around 24 t/s is several hours, and the
+per-call timeout has to be sized for it.
+
+The consequence for the table is that `admits` and `tokens-to-green` remain
+re-scores of a corpus another model generated. They say so inside the cell
+rather than beside it, and the provenance is computed from the model ids in the
+corpus's own records rather than written by hand.
+
+An attempt to close the idle-machine throughput gate failed the same way: after
+the admission run was stopped the load average fell to 11, and a 128-token probe
+still exceeded its 600-second timeout, most likely because the abandoned
+generation was still being served. The pin recorded `measured: false` with the
+reason rather than a number, which is the behaviour the pin was built for.
+
 ### 6.4 Throughput, measured twice, reproduced neither time
 
 The first pass measured 18.5 t/s generation against a quoted 51.4, on a busy
