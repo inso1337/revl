@@ -46,7 +46,7 @@ WHAT THIS MODULE DOES NOT DO
 It checks the DECLARATION. It does not bind a council to an action - a
 `route model` arm naming a council instead of a role is slice 2 - and there is
 no runtime aggregator here: the answer type `Aggregate[T]` of the design's
-section 4 is described and not written. See the design doc's slice plan for
+section 3 is described and not written. See the design doc's slice plan for
 what each of those adds and in which order.
 """
 
@@ -258,7 +258,7 @@ def _check_one(decl, role_table, seen, where) -> Council:
                 f"may read an origin the cloud proposer may not, and item 514 "
                 f"decides that per member. An undeclared name has no residence, "
                 f"so the member cannot be placed and the council is refused "
-                f"rather than assumed. Declare it — `model role {raw.role} "
+                f"rather than assumed. Declare it: `model role {raw.role} "
                 f"on_device` or `model role {raw.role} off_device`. Declared "
                 f"roles: {known}",
             )
