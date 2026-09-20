@@ -1,12 +1,12 @@
 # Design: the self-evolution reward, and when a trajectory is retained
 
-Design-doc id 531 (next free number under `docs/design/`; the roadmap item of
-the same number is unrelated, which is the established convention here). Roadmap
-item served: **536** (issue #1206). Neighbours it must not duplicate: item 520
-owns the evolution lifecycle and the authority boundary, item 535 (issue #1205)
-owns the curriculum a candidate draws tasks from, item 537 (issue #1207) owns the
-held-out scoring set. This document owns the reward and the retention rule, and
-nothing else.
+Design-doc id 534 (531 went to another design doc that landed in the same
+wave; the roadmap item of the same number is unrelated, which is the
+established convention here). Roadmap item served: **536** (issue #1206).
+Neighbours it must not duplicate: item 520 owns the evolution lifecycle and
+the authority boundary, item 535 (issue #1205) owns the curriculum a
+candidate draws tasks from, item 537 (issue #1207) owns the held-out scoring
+set. This document owns the reward and the retention rule, and nothing else.
 
 Sources studied, all at `52fb8ef3`: `tools/gate_reference_census.py` (`bucket`,
 `compare`, `main`'s `--record` writer, `NEVER_BASELINED`, `TRACKED`),

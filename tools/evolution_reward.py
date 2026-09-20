@@ -70,7 +70,7 @@ Four of the eight components read their real artifacts:
 The other four (`compiles`, `tests`, `conformance`, `formal`) have no probe and
 therefore FAIL. That is the honest state: until they are implemented, nothing is
 retained, and the scorecard names them as the blockers. See
-`docs/design/531-evolution-reward.md` for the slice plan.
+`docs/design/534-evolution-reward.md` for the slice plan.
 
 USAGE
 -----
@@ -451,10 +451,10 @@ PROBES = {
     "compiles": _unimplemented(
         "compiles",
         "the crate build and the six-tier matrix are slice 2 "
-        "(docs/design/531-evolution-reward.md)"),
+        "(docs/design/534-evolution-reward.md)"),
     "tests": _unimplemented(
         "tests",
-        "the affected suite is slice 2 (docs/design/531-evolution-reward.md)"),
+        "the affected suite is slice 2 (docs/design/534-evolution-reward.md)"),
     "no-new-false-admits": probe_no_new_false_admits,
     "conformance": _unimplemented(
         "conformance",
@@ -465,7 +465,7 @@ PROBES = {
     "formal": _unimplemented(
         "formal",
         "the formal/ ledger read is slice 3 "
-        "(docs/design/531-evolution-reward.md)"),
+        "(docs/design/534-evolution-reward.md)"),
     "scope": probe_scope,
     "documentation": probe_documentation,
 }

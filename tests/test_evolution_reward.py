@@ -316,7 +316,7 @@ def test_an_unreadable_base_fails_rather_than_scoring_nothing(reward, tiny_repo)
     ("tools/**", "tools/sub/x.py", True),
     ("tools/**", "toolsx/x.py", False),
     ("tools/*.py", "tools/sub/x.py", False),
-    ("docs/design/**", "docs/design/531-evolution-reward.md", True),
+    ("docs/design/**", "docs/design/534-evolution-reward.md", True),
     ("docs/design/**", "docs/v2.0-roadmap.md", False),
 ])
 def test_scope_globs_cross_separators_only_for_double_star(
