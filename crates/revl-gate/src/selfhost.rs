@@ -526,6 +526,41 @@ pub struct NoLink {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MRole {
+    rname: String,
+    rres: String,
+    rline: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MArm {
+    aorig: String,
+    arole: String,
+    aline: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MBlock {
+    bact: String,
+    barms: Vec<MArm>,
+    bline: i64,
+    bok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MArmR {
+    xarms: Vec<MArm>,
+    xok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MSpan {
+    sname: String,
+    slo: i64,
+    shi: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cut {
     s: String,
     rest: String,
@@ -6719,8 +6754,38 @@ fn qual_test_end(ts: &[Token], i: i64) -> i64 {
     return close_brace(ts, j);
 }
 
+fn at_model_role(ts: &[Token], i: i64) -> bool {
+    let t = tkc(ts, i);
+    if (!((t.kind == "ident") && (t.text == "model"))) {
+        return false;
+    }
+    let r = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    if (!((r.kind == "ident") && (r.text == "role"))) {
+        return false;
+    }
+    return (atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "ident") && atk(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "ident"));
+}
+
+fn model_role_end(ts: &[Token], i: i64) -> i64 {
+    let mut j = (i).checked_add(4i64).expect("revl: Int overflow");
+    while ((((j < ts.revl_length()) && (!atk(ts, j.clone(), "eof"))) && (!atk(ts, j.clone(), "}"))) && (!at_top_decl(ts, j.clone()))) {
+        if atk(ts, j.clone(), "[") {
+            let e = match_bracket(ts, j.clone());
+            j = if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { (e).checked_add(1i64).expect("revl: Int overflow") };
+        } else {
+            if atk(ts, j.clone(), "{") {
+                let e = close_brace(ts, j.clone());
+                j = if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { e };
+            } else {
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+    }
+    return j;
+}
+
 fn at_top_decl(ts: &[Token], i: i64) -> bool {
-    return (((((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i)) || at_event(ts, i)) || at_qual_test(ts, i));
+    return ((((((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i)) || at_event(ts, i)) || at_qual_test(ts, i)) || at_model_role(ts, i));
 }
 
 fn at_pub_prefix(ts: &[Token], i: i64) -> bool {
@@ -8282,6 +8347,22 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         }
         return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.revl_push(key.clone()), hoff.clone(), action);
     }
+    if (ati(&ts, i, "route") && ati(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "model")) {
+        if action {
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("PRELUDE", &prelude_msg("route model")), skip_line(&ts, i), true);
+        }
+        let mut rk = (i).checked_add(2i64).expect("revl: Int overflow");
+        while ((rk < end) && (!atk(&ts, rk.clone(), "{"))) {
+            rk = (rk).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if atk(&ts, rk.clone(), "{") {
+            let rce = close_brace(&ts, rk.clone());
+            if (rce != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return p_comp_body(ts.clone(), rce, end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
+            }
+        }
+        return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
+    }
     if (atw(&ts, i, "config") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{")) {
         let ce = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
         if (ce != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
@@ -8444,6 +8525,9 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
         if (qe != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return p_top(ts.clone(), qe, pg.clone());
         }
+    }
+    if at_model_role(&ts, i) {
+        return p_top(ts.clone(), model_role_end(&ts, i), pg.clone());
     }
     if (t.kind != "kw") {
         return p_top(ts.clone(), skip_line(&ts, i), bad_prog(pg.clone(), String::from("unexpected token at top level")));
@@ -16182,8 +16266,349 @@ fn closure_assign_scan(ts: &[Token]) -> Verd {
     return no_verd();
 }
 
+fn model_residences() -> Vec<String> {
+    return vec![String::from("on_device"), String::from("off_device")];
+}
+
+fn model_origin_classes() -> Vec<String> {
+    return vec![String::from("confidential"), String::from("fs"), String::from("input"), String::from("model"), String::from("net"), String::from("secret"), String::from("web")];
+}
+
+fn model_confidentiality_origins() -> Vec<String> {
+    return vec![String::from("confidential"), String::from("secret")];
+}
+
+fn mres_msg(res: &str, name: &str) -> String {
+    return (((String::from("unknown residence `").revl_concat(&res)).revl_concat("` for model role `")).revl_concat(&name)).revl_concat("`");
+}
+
+fn mrole_twice_msg(name: &str, fline: i64, fres: &str, res: &str) -> String {
+    return (((((((String::from("model role `").revl_concat(&name)).revl_concat("` is declared twice (first on line ")).revl_concat(&(fline).to_string())).revl_concat(", as `")).revl_concat(&fres)).revl_concat("`; here as `")).revl_concat(&res)).revl_concat("`)");
+}
+
+fn maction_twice_msg(act: &str, cname: &str) -> String {
+    return ((String::from("action `").revl_concat(&act)).revl_concat("` is routed twice in ")).revl_concat(&cname);
+}
+
+fn mempty_block_msg(act: &str, cname: &str) -> String {
+    return (((String::from("`route model on ").revl_concat(&act)).revl_concat("` in ")).revl_concat(&cname)).revl_concat(" names no role");
+}
+
+fn mno_action_msg(act: &str, cname: &str) -> String {
+    return ((String::from("`route model on ").revl_concat(&act)).revl_concat("` names no action of ")).revl_concat(&cname);
+}
+
+fn morigin_msg(orig: &str, act: &str) -> String {
+    return (((String::from("unknown origin class `").revl_concat(&orig)).revl_concat("` in `route model on ")).revl_concat(&act)).revl_concat("`");
+}
+
+fn morigin_twice_msg(orig: &str, act: &str, cname: &str) -> String {
+    return (((((String::from("origin `").revl_concat(&orig)).revl_concat("` is routed twice in `route model on ")).revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(")");
+}
+
+fn mundeclared_role_msg(orig: &str, role: &str, act: &str, cname: &str) -> String {
+    return (((((((String::from("`").revl_concat(&orig)).revl_concat(" -> ")).revl_concat(&role)).revl_concat("` in `route model on ")).revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") names no declared model role");
+}
+
+fn msecret_arm_msg(act: &str, cname: &str, role: &str) -> String {
+    return ((((((String::from("action `").revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") routes the `secret` origin to model role `")).revl_concat(&role)).revl_concat("`: a capability-bound secret never reaches a model prompt, on ")).revl_concat("the device or off it (G-SECRET-FLOW)");
+}
+
+fn moff_device_msg(act: &str, cname: &str, orig: &str, role: &str, res: &str, rline: i64) -> String {
+    return (((((((((((((String::from("action `").revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") routes the `")).revl_concat(&orig)).revl_concat("` origin to model role `")).revl_concat(&role)).revl_concat("`, which is declared `")).revl_concat(&res)).revl_concat("` on line ")).revl_concat(&(rline).to_string())).revl_concat(": a ")).revl_concat(&orig)).revl_concat(" input may not leave the device (G-MODEL-PLACE)");
+}
+
+fn mundecided_msg(act: &str, cname: &str) -> String {
+    return (((String::from("`route model on ").revl_concat(&act)).revl_concat("` in ")).revl_concat(&cname)).revl_concat(" is written in a form this gate does not decide");
+}
+
+fn mverd(msg: &str, line: i64) -> Verd {
+    return mk_verd(tagged("MODEL", msg), line);
+}
+
+fn model_roles_of(ts: &[Token]) -> Vec<MRole> {
+    let mut i = 0i64;
+    let mut depth = 0i64;
+    let mut out: Vec<MRole> = vec![];
+    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
+        if atk(ts, i, "{") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if atk(ts, i, "}") {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if ((depth == 0i64) && at_model_role(ts, i)) {
+            out.push(MRole { rname: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, rres: tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text, rline: tkc(ts, i).line });
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn mrole_at(rs: &[MRole], n: &str, i: i64) -> i64 {
+    if (i >= rs.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if ((rs)[(i) as usize].rname == n) {
+        return i;
+    }
+    return mrole_at(rs, n, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn model_roles_refusal(rs: &[MRole]) -> Verd {
+    let mut i = 0i64;
+    while (i < rs.revl_length()) {
+        let r = (rs)[(i) as usize].clone();
+        if (!contains__m2(&model_residences(), &r.rres)) {
+            return mverd(&mres_msg(&r.rres, &r.rname), r.rline);
+        }
+        let p = mrole_at(rs, &r.rname, 0i64);
+        if (p != i) {
+            return mverd(&mrole_twice_msg(&r.rname, (rs)[(p) as usize].rline.clone(), &(rs)[(p) as usize].rres, &r.rres), r.rline);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn model_comp_spans(ts: &[Token]) -> Vec<MSpan> {
+    let mut i = 0i64;
+    let mut depth = 0i64;
+    let mut out: Vec<MSpan> = vec![];
+    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
+        if (((depth == 0i64) && atw(ts, i, "component")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+            let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+            while (((j < ts.revl_length()) && (!atk(ts, j.clone(), "{"))) && (!atk(ts, j.clone(), "eof"))) {
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if (!atk(ts, j.clone(), "{")) {
+                i = j.clone();
+            } else {
+                let e = close_brace(ts, j.clone());
+                if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                    i = ts.revl_length();
+                } else {
+                    out.push(MSpan { sname: tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, slo: (j).checked_add(1i64).expect("revl: Int overflow"), shi: (e).checked_sub(1i64).expect("revl: Int overflow") });
+                    i = e;
+                }
+            }
+        } else {
+            if atk(ts, i, "{") {
+                depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atk(ts, i, "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn model_fn_names_in(ts: Vec<Token>, lo: i64, hi: i64, acc: Vec<String>) -> Vec<String> {
+    let mut i = lo;
+    let mut depth = 0i64;
+    let mut out = acc;
+    while (i < hi) {
+        if (((depth == 0i64) && atw(&ts, i, "fn")) && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+            let n = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+            if (!contains__m2(&out, &n)) {
+                out.push(n.clone());
+            }
+        }
+        if atk(&ts, i, "{") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if atk(&ts, i, "}") {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn model_action_names(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<String> {
+    let mut i = lo;
+    let mut depth = 0i64;
+    let mut out: Vec<String> = vec![];
+    while (i < hi) {
+        if (((depth == 0i64) && atw(&ts, i, "provide")) && atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{")) {
+            let e = close_brace(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+            if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                i = hi;
+            } else {
+                out = model_fn_names_in(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"), out.clone());
+                i = e;
+            }
+        } else {
+            if atk(&ts, i, "{") {
+                depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atk(&ts, i, "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn model_arms_in(ts: &[Token], lo: i64, hi: i64) -> MArmR {
+    let mut i = lo;
+    let mut out: Vec<MArm> = vec![];
+    while (i < hi) {
+        if (atk(ts, i, ",") || atk(ts, i, ";")) {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            let mut orig = String::from("");
+            if atk(ts, i, "*") {
+                orig = String::from("*");
+            } else {
+                if atk(ts, i, "ident") {
+                    orig = tkc(ts, i).text;
+                } else {
+                    return MArmR { xarms: out.clone(), xok: false };
+                }
+            }
+            if (!atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "arrow")) {
+                return MArmR { xarms: out.clone(), xok: false };
+            }
+            if (!atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "ident")) {
+                return MArmR { xarms: out.clone(), xok: false };
+            }
+            out.push(MArm { aorig: orig.clone(), arole: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, aline: tkc(ts, i).line });
+            i = (i).checked_add(3i64).expect("revl: Int overflow");
+        }
+    }
+    return MArmR { xarms: out.clone(), xok: true };
+}
+
+fn model_blocks_in(ts: &[Token], lo: i64, hi: i64) -> Vec<MBlock> {
+    let mut i = lo;
+    let mut depth = 0i64;
+    let mut out: Vec<MBlock> = vec![];
+    while (i < hi) {
+        if ((((((depth == 0i64) && ati(ts, i, "route")) && ati(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "model")) && ati(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "on")) && atk(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "ident")) && atk(ts, (i).checked_add(4i64).expect("revl: Int overflow"), "{")) {
+            let e = close_brace(ts, (i).checked_add(4i64).expect("revl: Int overflow"));
+            if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                i = hi;
+            } else {
+                let r = model_arms_in(ts, (i).checked_add(5i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
+                out.push(MBlock { bact: tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text, barms: r.xarms.clone(), bline: tkc(ts, i).line, bok: r.xok });
+                i = e;
+            }
+        } else {
+            if atk(ts, i, "{") {
+                depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atk(ts, i, "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn marm_origin_at(as__: &[MArm], o: &str, i: i64) -> i64 {
+    if (i >= as__.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if ((as__)[(i) as usize].aorig == o) {
+        return i;
+    }
+    return marm_origin_at(as__, o, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn model_arms_refusal(b: MBlock, cname: &str, rs: &[MRole]) -> Verd {
+    let mut i = 0i64;
+    while (i < b.barms.revl_length()) {
+        let a = (b.barms)[(i) as usize].clone();
+        if ((a.aorig != "*") && (!contains__m2(&model_origin_classes(), &a.aorig))) {
+            return mverd(&morigin_msg(&a.aorig, &b.bact), a.aline);
+        }
+        if (marm_origin_at(&b.barms, &a.aorig, 0i64) != i) {
+            return mverd(&morigin_twice_msg(&a.aorig, &b.bact, cname), a.aline);
+        }
+        let ri = mrole_at(rs, &a.arole, 0i64);
+        if (ri == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return mverd(&mundeclared_role_msg(&a.aorig, &a.arole, &b.bact, cname), a.aline);
+        }
+        if (a.aorig == "secret") {
+            return mverd(&msecret_arm_msg(&b.bact, cname, &a.arole), a.aline);
+        }
+        if (contains__m2(&model_confidentiality_origins(), &a.aorig) && ((rs)[(ri) as usize].rres == "off_device")) {
+            return mverd(&moff_device_msg(&b.bact, cname, &a.aorig, &a.arole, &(rs)[(ri) as usize].rres, (rs)[(ri) as usize].rline.clone()), a.aline);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn mblock_action_at(bs: &[MBlock], a: &str, i: i64) -> i64 {
+    if (i >= bs.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if ((bs)[(i) as usize].bact == a) {
+        return i;
+    }
+    return mblock_action_at(bs, a, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn model_comp_refusal(ts: Vec<Token>, sp: MSpan, rs: Vec<MRole>) -> Verd {
+    let bs = model_blocks_in(&ts, sp.slo, sp.shi);
+    if (bs.revl_length() == 0i64) {
+        return no_verd();
+    }
+    let acts = model_action_names(ts.clone(), sp.slo, sp.shi);
+    let mut i = 0i64;
+    while (i < bs.revl_length()) {
+        let b = (bs)[(i) as usize].clone();
+        if (mblock_action_at(&bs, &b.bact, 0i64) != i) {
+            return mverd(&maction_twice_msg(&b.bact, &sp.sname), b.bline);
+        }
+        if (!b.bok) {
+            return mverd(&mundecided_msg(&b.bact, &sp.sname), b.bline);
+        }
+        if (b.barms.revl_length() == 0i64) {
+            return mverd(&mempty_block_msg(&b.bact, &sp.sname), b.bline);
+        }
+        if (!contains__m2(&acts, &b.bact)) {
+            return mverd(&mno_action_msg(&b.bact, &sp.sname), b.bline);
+        }
+        let av = model_arms_refusal(b.clone(), &sp.sname, &rs);
+        if (av.v != "") {
+            return av;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn model_place_refusal(ts: Vec<Token>) -> Verd {
+    let rs = model_roles_of(&ts);
+    let rv = model_roles_refusal(&rs);
+    if (rv.v != "") {
+        return rv;
+    }
+    let sps = model_comp_spans(&ts);
+    let mut i = 0i64;
+    while (i < sps.revl_length()) {
+        let cv = model_comp_refusal(ts.clone(), (sps)[(i) as usize].clone(), rs.clone());
+        if (cv.v != "") {
+            return cv;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
     let base = ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone())), amb_ops_map(&ambOps, 0i64, std::collections::HashMap::new()));
+    let mdlv = model_place_refusal(ts.clone());
+    if (mdlv.v != "") {
+        return NoLink { done: true, refs: vec![mdlv.clone()] };
+    }
     let wfv = declared_types_refusal(ts.clone());
     if (wfv.v != "") {
         return NoLink { done: true, refs: vec![wfv.clone()] };
@@ -25616,6 +26041,67 @@ fn the_timer_body_s_prune_survives_the_iteration_branch() {
 fn an_unmarked_emission_inside_an_iteration_body_is_still_g4() {
     let v = admit_src(String::from("service Sink { emission fn write(v: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires sink: Sink provides api: Api {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(o) }\n  provide api { fn go() { return sink.write(\"x\") } }\n}"));
     assert!((v == "G4|call to emission `sink.write` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_model_placement_that_keeps_a_confidential_input_on_the_device_admits() {
+    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify {\n    confidential -> local,\n    * -> cloud\n  }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn routing_a_confidential_origin_off_the_device_is_refused_by_name() {
+    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn the_residence_vocabulary_is_closed__so_a_typo_is_a_refusal() {
+    let v = admit_src(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown residence `on_devise` for model role `local`"));
+    assert!((admit_tag(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "MODEL"));
+}
+
+#[test]
+fn a_role_is_declared_once__and_the_refusal_names_both_residences() {
+    let v = admit_src(String::from("model role local on_device\nmodel role local off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|model role `local` is declared twice (first on line 1, as `on_device`; here as `off_device`)"));
+}
+
+#[test]
+fn an_arm_names_an_origin_from_the_lattice_and_a_declared_role() {
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidental -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|unknown origin class `confidental` in `route model on classify`"));
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> edge }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`confidential -> edge` in `route model on classify` (Classifier) names no declared model role"));
+}
+
+#[test]
+fn an_origin_is_routed_once__an_action_is_routed_once__a_block_names_a_role() {
+    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { web -> local, web -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|origin `web` is routed twice in `route model on classify` (Classifier)"));
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { web -> local }\n  route model on classify { net -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` is routed twice in Classifier"));
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`route model on classify` in Classifier names no role"));
+}
+
+#[test]
+fn a_route_keyed_to_an_action_the_component_renamed_away_protects_nothing() {
+    let v = admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify_text { web -> local }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|`route model on classify_text` names no action of Classifier"));
+}
+
+#[test]
+fn the_secret_origin_reaches_no_role__at_either_residence() {
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { secret -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `secret` origin to model role `local`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"));
+}
+
+#[test]
+fn a_model_placement_is_a_prelude_declaration() {
+    let v = admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n  route model on classify { web -> local }\n}"));
+    assert!((v == "PRELUDE|`route model` must precede every effect, emit, await, and provide statement"));
+}
+
+#[test]
+fn _model__and__route__stay_ordinary_identifiers() {
+    assert!((admit_src(String::from("service Model { fn c(x: Str) -> Str }\nservice M { fn go(x: Str) -> Str }\ncomponent C requires model: Model provides out: M {\n  provide out { fn go(x) = x }\n}")) == ""));
+    assert!((admit_src(String::from("service M { fn go(model: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(model) = model }\n}")) == ""));
 }
 
 #[test]
