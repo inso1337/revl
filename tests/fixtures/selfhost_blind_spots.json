@@ -259,11 +259,6 @@
   },
   "rust": {
     "blind": {
-      "Entrances to the host-runtime gate other than the one the corpus takes. `emit_host_stubs` rides the R1 live-resource counter along for a lifecycle test or an armed timer as well as for a host object, and pulls the DEFERRED stream runtime in for an `on <Event>` handler; the corpus reaches the gate through the host-`Map` door, so the counter and the block selection ARE exercised, and these three are the remaining ways in (issue 1153).": [
-        "lifecycle=<true>",
-        "step=stream-iter",
-        "step=timer"
-      ],
       "Named only in order to REFUSE loudly. A witnessed-extern acquisition registers the extern's DECLARED inverse transactionally rather than the site-spelled bracket, and a `spawn` acquisition binds a live-instance handle over a runtime ABI this port does not assemble; both select a `<<DEFER-*>>` marker instead. Mirrored so the refusal is precise, not so the lowering is (issue 1153).": [
         "class=witnessed",
         "kind=spawn"
@@ -284,8 +279,11 @@
       "The reference emits record/list destructuring in _v3_let_pattern, including a temporary name derived from output position. The self-host emitter tracks let_pattern names for lexical analysis but deliberately has no matching statement renderer.": [
         "step=let_pattern"
       ],
-      "The reference lowers activation `await` through the async plugin/runtime scheduler and host `let-effect` through acquisition, undo, and frame registration. The self-host Rust emitter only detects these steps to emit explicit DEFER markers; it does not assemble that runtime ABI.": [
-        "step=await"
+      "The one entrance to the host-runtime gate the corpus cannot take. `emit_host_stubs` rides the R1 live-resource counter along for a lifecycle test as well as for a host object, an armed timer or a stream; the corpus reaches the gate through the host-`Map`, timer and stream doors, so the counter and the block selection ARE exercised. The lifecycle door is not reachable while agreeing, because the port defers the in-file test section that declares a lifecycle test (issue 1153).": [
+        "lifecycle=<true>"
+      ],
+      "The `advance` step, read ONLY to decide whether the clock/timer preamble rides along: a lifecycle test that drives the clock needs `revl_clock_advance`/`revl_clock_reset` even when no component arms a timer (item 112), so the preamble gate reads the step name. Nothing renders it. No corpus document can reach it while agreeing, for the same reason the lifecycle door above is unreachable: the port defers the in-file test section the step lives in, so a document declaring one diverges on the missing section rather than on this gate (issue 1153).": [
+        "step=advance"
       ]
     },
     "unported": {
@@ -297,7 +295,6 @@
         "interp_type=Float"
       ],
       "Reference host Map construction and access use runtime descriptors and borrowed-key conventions. The self-host pure-v3 port has no host Map value representation, so its Map names and get/next operations are not renderable.": [
-        "method=next",
         "name=Map",
         "name=remove"
       ],
@@ -314,16 +311,8 @@
         "pattern=record"
       ],
       "Witnessed effects, lifecycle tests, streams, child instances, timers, and host scheduling terminate in reference-only frame/router/runtime emission. The self-host module emitter does not implement those runtime protocols and reports them through explicit refusal or DEFER paths. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all.": [
-        "fn=Job.run",
         "kind=instance-get",
-        "kind=stream-merge",
-        "kind=subscribe",
-        "mode=every",
         "secret_witness=<true>",
-        "stage=filter",
-        "stage=map",
-        "stage=take",
-        "step=advance",
         "step=assert_no_residue",
         "step=call",
         "step=load",

@@ -276,7 +276,13 @@ type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
 // emission); `isEm`/`isAsync` are the declared emission/async properties.
-type MSig = { name: Str, isEm: Bool, caps: List[Str], isAsync: Bool }
+// `ps`/`ret` are the DECLARED signature (docs/design/457, the provide-method
+// slice): the service is the source of truth for a provider's parameter types
+// and its return, so a provide method's body types its unannotated parameters
+// out of this row and a `provide` that never returns is judged against it.
+// `ret` is "" for an operation that declares no return type.
+type MSig = { name: Str, isEm: Bool, caps: List[Str], isAsync: Bool,
+              ps: List[ParamN], ret: Str }
 type SvcD = { name: Str, methods: List[MSig] }
 
 // A body statement. kind: emit | effect | undo | return | expr | skip. The
@@ -309,13 +315,35 @@ type SvcD = { name: Str, methods: List[MSig] }
 // the body into setup instead, so the marker is what carries the same prune.
 // Every OTHER verdict — G1, G4, the G8 audit reach — reads a timer body exactly
 // as it reads the statements around it, which is the reference's rule too.
-type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool }
+// `bindTy` is the ANNOTATION a `let x: T = …` / `var x: T = …` writes, "" when
+// the binding leaves its type to inference. The type layer over a component body
+// reads it (docs/design/457): an annotated local is the one name in such a body
+// whose type is written down rather than resolved through a table this walk does
+// not carry.
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool, bindTy: Str }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
 // the method's own `async fn` modifier — checked for signature parity against
 // the service op it implements (lower.py's `method.async_ != decl.async_`).
-type ProvM   = { name: Str, params: List[Str], body: List[Stmt], isAsync: Bool }
+// `ps` is the method's OWN parameter list, annotations included ("" for an
+// unannotated one); `params` stays the name-only projection the G1 scope reads.
+// `ret` is a restated `-> T`, "" when the method leaves it to the service.
+// `isArrow` marks the `fn m(p) = expr` shorthand, whose single expression IS
+// the result — the reference turns it into a return, so the missing-return rule
+// does not apply to one. `line` is the `fn` keyword's source line, the line the
+// reference's signature diagnostics carry (`method.line`).
+// `mayRet` is read off the body's TOKEN span rather than off `body`, and it is
+// deliberately an over-approximation: true when a `return` keyword appears at any
+// depth in the method, and true as well for a `while`, whose `while (true) { … }`
+// form terminates a body without one. The statement reader collapses a control
+// form it cannot model into a `skip` and steps to the end of the source LINE, so
+// a `return` written inside a one-line `if (c) { return x }` is not in `body` at
+// all — deciding the missing-return rule off `body` would refuse a program the
+// reference admits, which is the one direction this gate may not err in.
+type ProvM   = { name: Str, params: List[Str], body: List[Stmt], isAsync: Bool,
+                 ps: List[ParamN], ret: Str, isArrow: Bool, line: Int,
+                 mayRet: Bool }
 type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
 // A declared provision key and the realm it lives in ("" = the shared realm).
 type ProvKey = { key: Str, rlm: Str }
@@ -356,10 +384,17 @@ type SvcRef  = { key: Str, svc: Str, line: Int, clause: Str }
 // `svcRefs` and `hoff` are independent halves of the same header: one is every
 // `<key>: <Service>` annotation the header resolves, the other is the single
 // `handoff` clause it may carry. Neither subsumes the other.
+// One `config { <name>: <Type> = <literal> }` row that WRITES a default.
+// `litTy` is the surface type of the literal (`_config_default_type`), "" for a
+// default this reader does not spell — a non-literal one is deferred by the
+// reference's own reader too. `line` is the field name's line, the line the
+// reference's diagnostic carries (`cfg.line`).
+type CfgDflt = { fname: Str, fty: Str, litTy: Str, line: Int }
+
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
                  reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey],
                  routes: List[Route], hoff: Bind, refuse: Str, line: Int,
-                 svcRefs: List[SvcRef] }
+                 svcRefs: List[SvcRef], cfgDflts: List[CfgDflt] }
 
 type Bind = { name: Str, ty: Str }
 
@@ -1075,16 +1110,18 @@ fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
            line: ln }
 }
 
-fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
-  return { name: nm, isEm: em, caps: cs, isAsync: asy }
+fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
+             ps: List[ParamN], ret: Str) -> MSig {
+  return { name: nm, isEm: em, caps: cs, isAsync: asy, ps: ps, ret: ret }
 }
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
             rq: List[Bind], su: List[Stmt], iso: List[ProvKey],
             rts: List[Route], ho: Bind, refuse: Str, ln: Int,
-            srefs: List[SvcRef]) -> CompD {
+            srefs: List[SvcRef], cdfs: List[CfgDflt]) -> CompD {
   return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso,
-           routes: rts, hoff: ho, refuse: refuse, line: ln, svcRefs: srefs }
+           routes: rts, hoff: ho, refuse: refuse, line: ln, svcRefs: srefs,
+           cfgDflts: cdfs }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
@@ -1106,21 +1143,21 @@ fn concat_refs(reqs: List[SvcRef], provs: List[SvcRef], i: Int) -> List[SvcRef] 
 
 fn mkstmt(kind: Str, e: Expr) -> Stmt {
   return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false, line: 0,
-           inTimer: false }
+           inTimer: false, bindTy: "" }
 }
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false, line: 0,
-           inTimer: false }
+           inTimer: false, bindTy: "" }
 }
 
 // A forward `effect`/`emit`/`undo`/`compensate` statement carrying its item-131
 // `await` marker (`aw`). Replaces the free-standing `await` marker statement:
 // the marker belongs to the acquisition/emission it pairs with, not the
 // position after it, so per-statement pairing can read it directly.
-fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
+fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool, ty: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0,
-           inTimer: false }
+           inTimer: false, bindTy: ty }
 }
 
 // A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
@@ -1129,7 +1166,7 @@ fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
   return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target,
-           awaited: false, line: 0, inTimer: false }
+           awaited: false, line: 0, inTimer: false, bindTy: "" }
 }
 
 // An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
@@ -1139,10 +1176,32 @@ fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
 // composes); the post-parse `spawn_form_verdict` reports it.
 fn mkstmt_spawn_unbound(target: Str) -> Stmt {
   return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target,
-           awaited: false, line: 0, inTimer: false }
+           awaited: false, line: 0, inTimer: false, bindTy: "" }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
+
+// The expression of a statement that exists ONLY to bind a name — an iteration
+// head (`every <x> in <sub>`, and the same node read for `on <Event> as <x> in
+// <sub>`). It carries no value, and it must therefore carry no TYPE either.
+//
+// `int_lit0()` used to stand here, and `IntLit("0")` infers `Int`: the type
+// walker binds an untyped statement's name to the inferred type of its `e`
+// (`mth_type_verdict`), so the loop item became `Int` and `emit sink.write(o)`
+// was refused with a T1 (`argument expects Str, got Int`) that the reference
+// never draws. The reference leaves the item deliberately untyped — a plain
+// `every`'s item is bound with no entry in its type environment (lower.py
+// `_lower_stream_iter_step`: "a plain `every`'s untyped item admits either"),
+// and the typed form gets its type from the event record, which is a separate
+// slice. A placeholder that is a type is a fake refusal on every element.
+//
+// `Hole` is the one expression that answers no type at all: `tk_infer` returns
+// its (empty) `ty`, so the bind stays unresolved exactly as the reference
+// leaves it, and every other walker over `Expr` already treats it as inert
+// (no emission, no reach, no acquisition, no call).
+fn expr_bind_only() -> Expr {
+  return Hole({ ty: "", msg: "", hasMsg: false, line: 0 })
+}
 
 // `[await] <expr>` in an operand position. `await` is a keyword, so the
 // expression grammar stops dead on it: `let h = effect await fetch()` parsed as
@@ -1166,6 +1225,92 @@ fn operand_at(ts: List[Token], k: Int) -> AwOperand {
   return { e: r2.e, i: r2.i, aw: false }
 }
 
+// ------------------------------------------------ item 130: stream statements
+//
+// Three statement forms the reader had no case for at all — `let x = subscribe
+// …`, `every <x> in <sub> { … }`, and `on <Event> as <x> [in <sub>] { … }` —
+// each of which ended the same way: `expr_at` stopped dead on the keyword (or,
+// for the contextual `on`, read the word as a bare name), the statement became
+// a `skip`, and the reader jumped to the end of the line. The names those runs
+// BOUND then existed nowhere, so every later mention of them drew the G1
+// undeclared-access refusal against a program the reference admits.
+//
+// Reading them is not only a false-rejection fix, and that is the point. A
+// skipped run is a run whose heads are never resolved, so `let sub = subscribe
+// nostream undo sub.close()` — an undeclared stream the reference refuses under
+// G1 — raised NO OBJECTION here. `subscribe merge(a, nob)` did the same. That
+// is the direction this crate may never err in, and it was open only because
+// the corpus held no document in these forms to measure it with.
+
+// The expressions a `subscribe` head contributes, and the index just past it.
+type SubHead = { es: List[Expr], i: Int, ok: Bool }
+
+// `subscribe <stream>[.<stage>…]`, or the Slice 3 fan-in `merge(a, b)`.
+//
+// `merge` is NOT a call in this position. The reference parses it before the
+// expression grammar ever runs (parser.py `_at_stream_merge`/`_stream_merge`)
+// into a `StreamMergeExpr` whose OPERANDS are the expressions it resolves; the
+// word `merge` itself names nothing and is not a declared callable. Reading it
+// as an ordinary call would refuse `merge`, which is the very false rejection
+// this branch exists to remove, so the operands are collected and the head word
+// is dropped. Operands nest (`merge(merge(a, b), c)`), so this recurses exactly
+// as the reference's `_stream_operand` does.
+fn p_sub_head(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  if (atk(ts, k, "ident") && tkc(ts, k).text == "merge" && atk(ts, k + 1, "(")) {
+    let ops = p_sub_ops(ts, k + 2, acc)
+    if (!ops.ok) { return ops }
+    return p_sub_chain(ts, ops.i, ops.es)
+  }
+  let r = expr_at(ts, k)
+  if (is_bad(r.e)) { return { es: acc, i: k, ok: false } }
+  return { es: acc.push(r.e), i: r.i, ok: true }
+}
+
+fn p_sub_ops(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  let one = p_sub_head(ts, k, acc)
+  if (!one.ok) { return one }
+  if (atk(ts, one.i, ",")) { return p_sub_ops(ts, one.i + 1, one.es) }
+  if (atk(ts, one.i, ")")) { return { es: one.es, i: one.i + 1, ok: true } }
+  return { es: one.es, i: one.i, ok: false }
+}
+
+// The derived-stream combinator chain (`.filter(f).map(g).take(2)`) that may
+// follow a fan-in head. A bare-name head is an ordinary postfix expression and
+// `expr_at` reads its chain already; only the fan-in form, which `expr_at`
+// cannot read at all, needs this. A stage NAME resolves nowhere — the reference
+// reads the chain as `StreamStage`s, not as method calls (parser.py
+// `_stream_chain`) — so only a stage's ARGUMENTS carry heads.
+fn p_sub_chain(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  if (!atk(ts, k, ".") || !atk(ts, k + 1, "ident") || !atk(ts, k + 2, "(")) {
+    return { es: acc, i: k, ok: true }
+  }
+  let ar = p_sub_args(ts, k + 3, acc)
+  if (!ar.ok) { return ar }
+  return p_sub_chain(ts, ar.i, ar.es)
+}
+
+fn p_sub_args(ts: List[Token], k: Int, acc: List[Expr]) -> SubHead {
+  if (atk(ts, k, ")")) { return { es: acc, i: k + 1, ok: true } }
+  let r = expr_at(ts, k)
+  if (is_bad(r.e)) { return { es: acc, i: k, ok: false } }
+  let nx = acc.push(r.e)
+  if (atk(ts, r.i, ",")) { return p_sub_args(ts, r.i + 1, nx) }
+  if (atk(ts, r.i, ")")) { return { es: nx, i: r.i + 1, ok: true } }
+  return { es: nx, i: r.i, ok: false }
+}
+
+// The subscribe QUALIFIER tail — `policy <p>`, `buffer <n>`, `drain <n><unit>`,
+// `replay(…)` (parser.py `_subscribe_quals`). Every word in it is matched
+// verbatim against a closed set of bare idents, so none of it names anything to
+// resolve and the tail is stepped over to the bracket's `undo`. The one operand
+// that IS an expression, `replay(cursor: <e>)`, is not resolved here; that
+// residual is bounded by the `undo` this stops at, and it is strictly smaller
+// than the whole statement the reader skipped before.
+fn skip_sub_quals(ts: List[Token], k: Int, hi: Int) -> Int {
+  if (k >= hi || atw(ts, k, "undo")) { return k }
+  return skip_sub_quals(ts, k + 1, hi)
+}
+
 // One statement run and the index just PAST the tokens it consumed. Item 168:
 // the reader must end a run at a STRUCTURAL boundary, not only a newline, so a
 // single-line body (`let x = a() let y = b() isolate d …`) parses into the same
@@ -1184,7 +1329,12 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     var eq = lo + 2
-    if (atk(ts, eq, ":")) { eq = type_at(ts, eq + 1).i }
+    var ann = ""
+    if (atk(ts, eq, ":")) {
+      let ta = type_at(ts, eq + 1)
+      if (ta.ok) { ann = taint_strip(ta.ty) }
+      eq = ta.i
+    }
     if (!atk(ts, eq, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
     let bn = tkc(ts, lo + 1).text
     var j = eq + 1
@@ -1197,6 +1347,35 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
         kd = "effect"
         j += 1
       }
+    }
+    // item 130: `let <x> = subscribe <stream> [policy … buffer … drain …]
+    // undo <x>.close()`. A subscription IS an acquisition — parser.py builds
+    // the same `EffectStmt` an `effect` bracket builds, with `subscribe: true`
+    // — so the statement carries the `effect` kind here and its inverse is read
+    // exactly as an `effect`'s `undo` is. The head contributes one expression
+    // per stream it names (more than one only for the Slice 3 fan-in); the
+    // first rides the binding statement, the rest are ordinary expression
+    // statements, so every source's head is resolved.
+    if (atw(ts, j, "subscribe")) {
+      let sh = p_sub_head(ts, j + 1, [])
+      if (!sh.ok || sh.es.length() == 0) {
+        return mk_srun([mkstmt("skip", int_lit0())], hi)
+      }
+      let q = skip_sub_quals(ts, sh.i, hi)
+      var subs: List[Stmt] = [mkstmt_aw("effect", sh.es[0], bn, false, "")]
+      var si = 1
+      while (si < sh.es.length()) {
+        subs = subs.push(mkstmt("expr", sh.es[si]))
+        si += 1
+      }
+      if (atw(ts, q, "undo")) {
+        let su = operand_at(ts, q + 1)
+        if (!is_bad(su.e)) {
+          return mk_srun(subs.push(mkstmt_aw("undo", su.e, "", su.aw, "")), su.i)
+        }
+        return mk_srun(subs, hi)
+      }
+      return mk_srun(subs, q)
     }
     // `let h = effect spawn <Comp> with { … } [undo …]` — an instance
     // acquisition (docs/design-v2-instances.md). parser.rvl has no spawn
@@ -1221,17 +1400,31 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     }
     let r = operand_at(ts, j)
     if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
-    let out: List[Stmt] = [mkstmt_aw(kd, r.e, bn, r.aw)]
+    let out: List[Stmt] = [mkstmt_aw(kd, r.e, bn, r.aw, ann)]
     if (atw(ts, r.i, "undo")) {
       let u = operand_at(ts, r.i + 1)
       if (!is_bad(u.e)) {
-        return mk_srun(out.push(mkstmt_aw("undo", u.e, "", u.aw)), u.i)
+        return mk_srun(out.push(mkstmt_aw("undo", u.e, "", u.aw, "")), u.i)
       }
       return mk_srun(out, hi)
     }
     return mk_srun(out, r.i)
   }
   if (t.kind == "kw" && t.text == "return") {
+    // A BARE `return` writes no value, and the component-body twin of T2b's
+    // rule applies: it is a `return` for a totality question and NOT an
+    // expression to type. The bound matters twice over here, because the
+    // expression reader does not stop at the end of a line: `return` alone on
+    // its line, followed by a statement that begins with an identifier, would
+    // otherwise read that next statement as this return's operand and hold the
+    // body to its type. `hi` is the statement run's end, so `lo + 1 >= hi` IS
+    // "nothing follows on this line".
+    //
+    // The reference's own refusal for a bare return in an operation that
+    // declares a result ("`m` returns `T` but this `return` carries no value")
+    // belongs to the same totality slice and is not spelled here; leaving it is
+    // a no-objection, which is the direction this gate may take.
+    if (lo + 1 >= hi) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
     let rr = expr_at(ts, lo + 1)
     if (is_bad(rr.e)) { return mk_srun([mkstmt("skip", rr.e)], hi) }
     return mk_srun([mkstmt("return", rr.e)], rr.i)
@@ -1248,11 +1441,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   if (t.kind == "kw" && t.text == "emit") {
     let re1 = operand_at(ts, lo + 1)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", re1.aw)]
+    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", re1.aw, "")]
     if (atw(ts, re1.i, "compensate")) {
       let uc = operand_at(ts, re1.i + 1)
       if (!is_bad(uc.e)) {
-        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw)), uc.i)
+        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw, "")), uc.i)
       }
       return mk_srun(oute, hi)
     }
@@ -1267,11 +1460,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   if (t.kind == "kw" && t.text == "await" && atw(ts, lo + 1, "emit")) {
     let re1 = expr_at(ts, lo + 2)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", true)]
+    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", true, "")]
     if (atw(ts, re1.i, "compensate")) {
       let uc = operand_at(ts, re1.i + 1)
       if (!is_bad(uc.e)) {
-        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw)), uc.i)
+        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw, "")), uc.i)
       }
       return mk_srun(oute, hi)
     }
@@ -1302,6 +1495,72 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     }
     return mk_srun([mkstmt_spawn_unbound(tgt)], sk)
   }
+  // item 130 Slice 4: `every <x> in <sub> { <emit>* }` — the async-iteration
+  // form, told apart from the `every <n><unit>` timer by exactly the one token
+  // of lookahead the reference uses (parser.py `_at_stream_iter`): the timer's
+  // delay is a NUMBER, the iteration's bind is an IDENT followed by `in`. It is
+  // tested BEFORE the timer branch below, which would otherwise swallow it.
+  //
+  // The item binding is a declared name inside the body, exactly as a match
+  // arm's payload binding is, so the head statement carries it, and the body is
+  // read out inline the way a timer body is.
+  //
+  // The SUBJECT is deliberately not walked as an expression. The reference
+  // never resolves it as a head: `_iteration_subject` admits only a bare
+  // identifier and the lowering resolves that against its live-subscription
+  // table, so an unresolvable subject draws "`every o in nosub` needs a live
+  // subscription", which `_classify` leaves OUT-OF-SLICE — not the G1 an
+  // ordinary head would draw. Walking it would trade this bucket's false
+  // rejection for a tag mismatch, which is the same broken promise in a
+  // different column.
+  //
+  // It is NOT marked `inTimer`. That mark prunes the two A1 surfaces the
+  // reference prunes for `step == "timer"`, and a `stream-iter` step is not one
+  // of the three `_async_reached_outside_provide` returns on — the reference
+  // walks it. Marking it would have this gate admit an async reach the
+  // reference refuses, which is why the timer branch's blind `{`-scan could not
+  // simply be left to catch this form.
+  if (t.kind == "kw" && t.text == "every" && atk(ts, lo + 1, "ident")
+      && atw(ts, lo + 2, "in")) {
+    if (atk(ts, lo + 3, "ident") && atk(ts, lo + 4, "{")) {
+      let iend = close_brace(ts, lo + 4)
+      if (iend != 0 - 1) {
+        let ihead: List[Stmt] = [mkstmtb("expr", expr_bind_only(),
+                                         tkc(ts, lo + 1).text)]
+        return mk_srun(
+          append_stmts(ihead, p_stmts(ts, lo + 5, iend - 1, [])), iend)
+      }
+    }
+  }
+  // item 130 Slice 5: `on <Event> as <x> [in <sub>] { <emit>* }` — the typed-
+  // event handler, which parses to the same node the Slice 4 iteration does
+  // (parser.py `event_handler`), so it is read the same way here. `on` is a
+  // CONTEXTUAL keyword: it heads a statement only in the shape `on IDENT as
+  // IDENT`, which is why neither lexer's keyword table carries it and why the
+  // reader must recognise the SHAPE rather than the word. Without this branch
+  // `on` was read as a bare name and drew a G1 refusal naming `on` itself.
+  //
+  // The `in <sub>` clause is optional (§6b). Without it the reference resolves
+  // the source from the component's `requires <k>: Stream[<Event>]` coeffect
+  // and refuses a component that declares none — a refusal `_classify` leaves
+  // OUT-OF-SLICE, so this gate carries no verdict for it and only binds the
+  // item name.
+  if (t.kind == "ident" && t.text == "on" && atk(ts, lo + 1, "ident")
+      && atw(ts, lo + 2, "as") && atk(ts, lo + 3, "ident")) {
+    let ebn = tkc(ts, lo + 3).text
+    let ehead: List[Stmt] = [mkstmtb("expr", expr_bind_only(), ebn)]
+    var eb = lo + 4
+    // the subject, when the clause is present, is the same bare-identifier
+    // subscription name Slice 4's is, and is stepped over for the same reason.
+    if (atw(ts, eb, "in") && atk(ts, eb + 1, "ident")) { eb = eb + 2 }
+    if (atk(ts, eb, "{")) {
+      let eend = close_brace(ts, eb)
+      if (eend != 0 - 1) {
+        return mk_srun(
+          append_stmts(ehead, p_stmts(ts, eb + 1, eend - 1, [])), eend)
+      }
+    }
+  }
   // `every <n><unit> { … }` / `after <n><unit> { … }` — a timer block. Its body
   // is an ordinary statement sequence and the reference resolves the heads in
   // it exactly as it resolves the statements around it, so the block's
@@ -1329,11 +1588,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
                         || t.text == "compensate")) {
     let rf = operand_at(ts, lo + 1)
     if (is_bad(rf.e)) { return mk_srun([mkstmt("skip", rf.e)], hi) }
-    let out2: List[Stmt] = [mkstmt_aw(t.text, rf.e, "", rf.aw)]
+    let out2: List[Stmt] = [mkstmt_aw(t.text, rf.e, "", rf.aw, "")]
     if (atw(ts, rf.i, "undo")) {
       let u2 = operand_at(ts, rf.i + 1)
       if (!is_bad(u2.e)) {
-        return mk_srun(out2.push(mkstmt_aw("undo", u2.e, "", u2.aw)), u2.i)
+        return mk_srun(out2.push(mkstmt_aw("undo", u2.e, "", u2.aw, "")), u2.i)
       }
       return mk_srun(out2, hi)
     }
@@ -1365,7 +1624,7 @@ fn stamp_lines(ss: List[Stmt], ln: Int) -> List[Stmt] {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited, line: ln,
-                     inTimer: s.inTimer })
+                     inTimer: s.inTimer, bindTy: s.bindTy })
     i += 1
   }
   return out
@@ -1388,7 +1647,7 @@ fn mark_timer(ss: List[Stmt]) -> List[Stmt] {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited,
-                     line: s.line, inTimer: true })
+                     line: s.line, inTimer: true, bindTy: s.bindTy })
     i += 1
   }
   return out
@@ -1877,8 +2136,17 @@ fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MSig]) -> MethsR {
   if (!atw(ts, j, "fn")) { return mk_meths(acc, j, false) }
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
+  // the DECLARED return, read off the same `-> T` slot `ret_at` steps: the
+  // service is the source of truth for a provider's signature, so the type layer
+  // needs the spelling and not only the position past it.
+  var mret = ""
+  if (atk(ts, ps.i, "arrow")) {
+    let tr = type_at(ts, ps.i + 1)
+    if (tr.ok) { mret = taint_strip(tr.ty) }
+  }
   let rti = cache_clause_end(ts, ret_at(ts, ps.i))
-  return p_methods(ts, rti, end, acc.push(mk_msig(nm, em, caps, isAsync)))
+  return p_methods(ts, rti, end,
+                   acc.push(mk_msig(nm, em, caps, isAsync, ps.ps, mret)))
 }
 
 fn p_service(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -1930,6 +2198,18 @@ fn param_names(ps: List[ParamN]) -> List[Str] {
 // reference refuses with a G4 came back tagged BAD from a parse stage that
 // never reached the guarantee. `ret_at` is the same step `p_methods` already
 // takes over a service declaration's return type.
+// Does this token span carry a `return`, or a `while` whose infinite form ends a
+// body without one? Both keywords are read at ANY depth: a `return` nested in a
+// control arm is still a return the reference sees.
+fn span_may_return(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var i = lo
+  while (i < hi) {
+    if (atw(ts, i, "return") || atw(ts, i, "while")) { return true }
+    i += 1
+  }
+  return false
+}
+
 fn p_prov_methods(ts: List[Token], i: Int, end: Int,
                   acc: List[ProvM]) -> ProvMR {
   if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
@@ -1942,6 +2222,15 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
   let nm = tkc(ts, h + 1).text
   let ps = params_at(ts, h + 3)
   let pnames = param_names(ps.ps)
+  // the RESTATED return annotation, if the method writes one. `ret_at` already
+  // steps the slot; this reads what stands in it, which is what the A6 return
+  // rule compares against the service's own.
+  var pret = ""
+  if (atk(ts, ps.i, "arrow")) {
+    let tr = type_at(ts, ps.i + 1)
+    if (tr.ok) { pret = taint_strip(tr.ty) }
+  }
+  let mline = tkc(ts, h).line
   let si = ret_at(ts, ps.i)
   if (atk(ts, si, "=")) {
     let le = line_end(ts, si + 1, end)
@@ -1949,7 +2238,9 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
     let nx = r.i > si + 1 ? r.i : le
     return p_prov_methods(ts, nx, end,
                           acc.push({ name: nm, params: pnames, body: r.ss,
-                                     isAsync: masync }))
+                                     isAsync: masync, ps: ps.ps, ret: pret,
+                                     isArrow: true, line: mline,
+                                     mayRet: true }))
   }
   if (!atk(ts, si, "{")) { return { xs: acc, i: si, ok: false } }
   let bend = close_brace(ts, si)
@@ -1957,7 +2248,9 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
   let bbody = p_stmts(ts, si + 1, bend - 1, [])
   return p_prov_methods(ts, bend, end,
                         acc.push({ name: nm, params: pnames, body: bbody,
-                                   isAsync: masync }))
+                                   isAsync: masync, ps: ps.ps, ret: pret,
+                                   isArrow: false, line: mline,
+                                   mayRet: span_may_return(ts, si + 1, bend - 1) }))
 }
 
 // The names bound by a list of `key: Service` pairs (a header row).
@@ -2447,8 +2740,54 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
                  mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso,
                           body.routes, body.hoff, body.refuse,
                           tkc(ts, i).line,
-                          concat_refs(reqRefs, provRefs, 0))),
+                          concat_refs(reqRefs, provRefs, 0),
+                          cfg_defaults_in(ts, j + 1, end - 1))),
                  end)
+}
+
+// The surface type of a config default LITERAL, `_config_default_type`'s four
+// answers. Anything else — a name, a call, a container, an interpolation — is
+// "", the reference's `None`: a non-literal default is deferred there too and
+// the field is not judged against it.
+fn cfg_lit_ty(e: Expr) -> Str {
+  return match e {
+    IntLit(_)   => "Int",
+    FloatLit(_) => "Float",
+    BoolLit(_)  => "Bool",
+    StrLit(_)   => "Str",
+    _           => "",
+  }
+}
+
+// The `config { … }` rows of one component that WRITE a default, read off the
+// same `<name>: <Type> [= <expr>]` shape `ir_config` lowers. Rows without a
+// default contribute nothing: there is no literal to disagree with the type.
+fn cfg_defaults_in(ts: List[Token], lo: Int, hi: Int) -> List[CfgDflt] {
+  var j = lo
+  while (j < hi && !(atw(ts, j, "config") && atk(ts, j + 1, "{"))) { j += 1 }
+  if (j >= hi) { return [] }
+  let ce = close_brace(ts, j + 1)
+  let cend = ce == 0 - 1 ? hi : ce - 1
+  var k = j + 2
+  var out: List[CfgDflt] = []
+  while (k < cend) {
+    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+      let nm = tkc(ts, k).text
+      let tr = type_at(ts, k + 2)
+      var nx = tr.i
+      if (atk(ts, tr.i, "=")) {
+        let r = expr_at(ts, tr.i + 1)
+        let lt = cfg_lit_ty(r.e)
+        if (lt != "") {
+          out = out.push({ fname: nm, fty: taint_strip(tr.ty), litTy: lt,
+                           line: tkc(ts, k).line })
+          nx = r.i
+        }
+      }
+      k = nx > k ? nx : k + 1
+    } else { k += 1 }
+  }
+  return out
 }
 
 fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
@@ -2709,7 +3048,7 @@ fn ac_refuse(a: Ac, tag: Str, m: Str) -> Ac {
 
 fn find_msig(svc: SvcD, nm: Str, i: Int) -> MSig {
   if (i >= svc.methods.length()) {
-    return { name: "", isEm: false, caps: [], isAsync: false }
+    return { name: "", isEm: false, caps: [], isAsync: false, ps: [], ret: "" }
   }
   if (svc.methods[i].name == nm) { return svc.methods[i] }
   return find_msig(svc, nm, i + 1)
@@ -3781,28 +4120,415 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   return refusal_line(ss, i + 1, cx, na)
 }
 
+// ============================ the provide-method SIGNATURE (docs/design/457)
+//
+// `_lower_provide`'s two annotation rules. A provide method may RESTATE what
+// the service already declares — `fn query(sql: Str) -> Int` against
+// `service Db { fn query(sql: Str) -> Int }` — and the service is the source of
+// truth for both halves (A6), so a restatement that disagrees is a T1.
+//
+// Both tests run in BOTH directions, as the reference's do: an annotation that
+// merely WIDENS the declared type is still not the signature the service
+// published, and a one-way test would admit `sql: Any` against a declared `Str`.
+// An UNWRITTEN annotation ("") is not a disagreement — the reference skips a
+// `None` annotation outright.
+//
+// The rules are gated on the signature already AGREEING in shape. The reference
+// raises the arity, colour, duplicate-method and unknown-operation refusals
+// ahead of these, and this gate decides only the colour one; running the
+// annotation test over a signature whose arity does not match would answer a
+// program with the wrong one of two real refusals, which is the mismatch
+// direction rather than the silent one.
+fn a6_param_msg(pm: ProvM, decl: MSig, svcName: Str, i: Int,
+                gtys: List[Bind]) -> Str {
+  if (i >= pm.ps.length() || i >= decl.ps.length()) { return "" }
+  // an alias and its expansion are the SAME type to the reference, and this walk
+  // cannot tell them apart, so a spelling it cannot resolve is not compared.
+  let ann = tk_solid(taint_strip(pm.ps[i].ty), gtys)
+  let dt = tk_solid(taint_strip(decl.ps[i].ty), gtys)
+  if (ann != "" && dt != ""
+      && !(tk_compatible(dt, ann) && tk_compatible(ann, dt))) {
+    return "parameter `".concat(pm.ps[i].name).concat("` of `")
+      .concat(pm.name).concat("` (from service `").concat(svcName)
+      .concat("`) expects `").concat(tk_render(dt)).concat("`, got `")
+      .concat(tk_render(ann)).concat("`")
+  }
+  return a6_param_msg(pm, decl, svcName, i + 1, gtys)
+}
+
+// Has a method of this name already been provided earlier in the same
+// provision? The reference refuses the duplicate before it reaches either
+// annotation rule, so a second `fn get` is left to that refusal.
+fn prov_dup_before(ms: List[ProvM], upto: Int, nm: Str, i: Int) -> Bool {
+  if (i >= upto) { return false }
+  if (ms[i].name == nm) { return true }
+  return prov_dup_before(ms, upto, nm, i + 1)
+}
+
+// `_lower_provide`'s missing-return rule, the twin of the module-`fn` one on the
+// other surface that declares a return: a provider must produce what its service
+// promises, or the emitted java method and rust trait impl both fall off the end
+// while python hands the caller a silent `None`.
+//
+// Only the "never returns a value" half is decided. Its sibling ("control can
+// reach the end of its body without a `return`") answers a body that DOES return
+// somewhere but not on every path, which needs the control-flow shape
+// `span_may_return` deliberately refuses to guess at; a body carrying one is left
+// to the slice that models those arms.
+fn prov_missing_return(pv: Provide, mi: Int, decl: MSig) -> Verd {
+  let pm = pv.methods[mi]
+  if (decl.name == "" || taint_strip(decl.ret) == "" || pm.isArrow || pm.mayRet
+      || pm.ps.length() != decl.ps.length()
+      || prov_dup_before(pv.methods, mi, pm.name, 0)) {
+    return no_verd()
+  }
+  return mk_verd(tagged("T1",
+    "`".concat(pm.name).concat("` implements `").concat(pv.svcName)
+      .concat(".").concat(pm.name).concat("`, which returns `")
+      .concat(tk_render(decl.ret))
+      .concat("`, but this body never returns a value")), pm.line)
+}
+
+// ======================= the REQUIRED-SERVICE call's arguments (docs/design/457)
+//
+// `_component_req_call`'s last rule. A call through a requirement handle is held
+// to the service's declared signature, and the wiring half of that — the handle
+// resolves, the operation exists, an emission is marked — is already decided by
+// the Ac walk above. What was never decided is the ARGUMENTS: a `Str` parameter
+// handed an `Int` literal compiled clean and failed (or silently coerced) on the
+// host.
+//
+// The rule runs AFTER the wiring walk, for the reason the provide-method type
+// layer runs after it: a body carrying both a wiring verdict and a type one
+// reports the wiring verdict, which is the under-refusing direction. Inside one
+// statement the order is the reference's own — the expression is typed first
+// (an inner refusal is the reference's first too), then the arguments are
+// judged against the declaration.
+
+fn ct_no_msig() -> MSig {
+  return { name: "", isEm: false, caps: [], isAsync: false, ps: [], ret: "" }
+}
+
+// The service operation `<root>.<op>(…)` resolves to through the component's
+// requirement map, or the empty signature. A spawn-handle provision alias takes
+// the instance path instead and is not a requirement read, exactly as
+// `call_check` separates the two.
+fn ct_req_decl(tg: Expr, cx: Ctx) -> MSig {
+  return match tg {
+    Field(fl) => match fl.target {
+      Var(v)   => cx.reqMap.has(v) && !cx.provAlias.has(v)
+        ? find_msig(svc_of(cx, match cx.reqMap.lookup(v) {
+            Some(sv) => sv, None => "" }), fl.name, 0)
+        : ct_no_msig(),
+      _        => ct_no_msig(),
+    },
+    _         => ct_no_msig(),
+  }
+}
+
+fn ct_req_root(tg: Expr) -> Str {
+  return match tg { Field(fl) => match fl.target { Var(v) => v, _ => "" }, _ => "" }
+}
+
+fn ct_req_op(tg: Expr) -> Str {
+  return match tg { Field(fl) => fl.name, _ => "" }
+}
+
+// One call's arguments against the declared parameter list, positionally. An
+// argument whose own type this walk cannot decide ("" — the gradual frontier)
+// and a parameter the declaration leaves unspelled are both skipped rather than
+// guessed at; an argument that REFUSES is left to the expression walk, which has
+// already reported it.
+fn ct_args(root: Str, meth: Str, decl: MSig, args: List[Expr],
+           env: List[Bind], i: Int) -> Str {
+  if (i >= args.length() || i >= decl.ps.length()) { return "" }
+  let pt = tk_solid(taint_strip(decl.ps[i].ty), env)
+  let inf = tk_infer(args[i], env)
+  if (inf.v == "" && pt != "" && inf.ty != "" && !tk_compatible(pt, inf.ty)) {
+    return tagged("T1", "`".concat(root).concat(".").concat(meth)
+      .concat("` argument `").concat(decl.ps[i].name).concat("` expects `")
+      .concat(tk_render(pt)).concat("`, got `")
+      .concat(tk_render(inf.ty)).concat("`"))
+  }
+  return ct_args(root, meth, decl, args, env, i + 1)
+}
+
+// The first non-empty of two verdicts, in source order.
+fn ct_first(a: Str, b: Str) -> Str { return a != "" ? a : b }
+
+fn ct_exprs(xs: List[Expr], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let v = ct_scan(xs[i], cx, env)
+  if (v != "") { return v }
+  return ct_exprs(xs, i + 1, cx, env)
+}
+
+fn ct_inits(xs: List[InitN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let v = ct_scan(xs[i].value, cx, env)
+  if (v != "") { return v }
+  return ct_inits(xs, i + 1, cx, env)
+}
+
+fn ct_arms(xs: List[ArmN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let v = ct_scan(xs[i].body, cx, env)
+  if (v != "") { return v }
+  return ct_arms(xs, i + 1, cx, env)
+}
+
+fn ct_parts(xs: List[PartN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  if (xs[i].kind == "expr") {
+    let v = ct_scan(xs[i].e, cx, env)
+    if (v != "") { return v }
+  }
+  return ct_parts(xs, i + 1, cx, env)
+}
+
+// Every requirement call in one expression, INNERMOST first: the reference
+// lowers an argument before it builds the call node around it, so a bad call
+// nested in an argument reports ahead of the call that carries it.
+fn ct_call(c: CallN, cx: Ctx, env: List[Bind]) -> Str {
+  let inner = ct_exprs(c.args, 0, cx, env)
+  if (inner != "") { return inner }
+  let decl = ct_req_decl(c.target, cx)
+  if (decl.name != "" && c.args.length() == decl.ps.length()) {
+    let v = ct_args(ct_req_root(c.target), ct_req_op(c.target), decl, c.args,
+                    env, 0)
+    if (v != "") { return v }
+  }
+  return ct_scan(c.target, cx, env)
+}
+
+fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
+  return match e {
+    IntLit(_)   => "",
+    FloatLit(_) => "",
+    StrLit(_)   => "",
+    BoolLit(_)  => "",
+    NullLit     => "",
+    Var(_)      => "",
+    Hole(_)     => "",
+    Asset(_)    => "",
+    Bad(_)      => "",
+    Bin(b)      => ct_exprs([b.l, b.r], 0, cx, env),
+    Un(u)       => ct_scan(u.e, cx, env),
+    Emit(u)     => ct_scan(u.e, cx, env),
+    Call(c)     => ct_call(c, cx, env),
+    Field(f)    => ct_scan(f.target, cx, env),
+    OptField(f) => ct_scan(f.target, cx, env),
+    OptCall(c)  => ct_first(ct_scan(c.target, cx, env),
+                            ct_exprs(c.args, 0, cx, env)),
+    Index(x)    => ct_exprs([x.target, x.idx], 0, cx, env),
+    If(x)       => ct_exprs([x.cond, x.then_, x.els], 0, cx, env),
+    Rec(r)      => ct_inits(r.fields, 0, cx, env),
+    Lst(l)      => ct_exprs(l.items, 0, cx, env),
+    // an arrow's body is walked under the same environment: its parameters are
+    // names this walk does not type, so they stay on the gradual frontier.
+    Arrow(a)    => ct_scan(a.body, cx, env),
+    Match(m)    => ct_first(ct_scan(m.scrut, cx, env),
+                            ct_arms(m.arms, 0, cx, env)),
+    Templ(t)    => ct_parts(t.parts, 0, cx, env),
+    RecUpd(r)   => ct_first(ct_scan(r.base, cx, env),
+                            ct_inits(r.upds, 0, cx, env)),
+  }
+}
+
+// A config default must FIT the declared field type. The reference decides this
+// at the head of `_lower_component`, before the `provides` clause is resolved and
+// before a single body statement is lowered, so it runs first here too.
+//
+// A `null` default is the documented optional exception: `cfg_lit_ty` answers ""
+// for it, exactly as the reference's reader answers `None`, and an unspelled
+// literal type is never judged.
+fn cfg_default_verdict(comp: CompD, i: Int, gtys: List[Bind]) -> Verd {
+  if (i >= comp.cfgDflts.length()) { return no_verd() }
+  let f = comp.cfgDflts[i]
+  let fty = tk_solid(f.fty, gtys)
+  if (fty != "" && !tk_compatible(fty, f.litTy)) {
+    return mk_verd(tagged("T1",
+      "config field `".concat(f.fname).concat("` default expects `")
+        .concat(tk_render(fty)).concat("`, got `")
+        .concat(tk_render(f.litTy)).concat("`")), f.line)
+  }
+  return cfg_default_verdict(comp, i + 1, gtys)
+}
+
+fn a6_annotation_verdict(pv: Provide, mi: Int, decl: MSig,
+                         gtys: List[Bind]) -> Verd {
+  let pm = pv.methods[mi]
+  if (decl.name == "" || pm.ps.length() != decl.ps.length()
+      || prov_dup_before(pv.methods, mi, pm.name, 0)) {
+    return no_verd()
+  }
+  let pmsg = a6_param_msg(pm, decl, pv.svcName, 0, gtys)
+  if (pmsg != "") { return mk_verd(tagged("T1", pmsg), pm.line) }
+  let pr = tk_solid(taint_strip(pm.ret), gtys)
+  let dr = tk_solid(taint_strip(decl.ret), gtys)
+  if (pr != "" && dr != ""
+      && !(tk_compatible(dr, pr) && tk_compatible(pr, dr))) {
+    return mk_verd(tagged("T1",
+      "return type of `".concat(pm.name).concat("` (from service `")
+        .concat(pv.svcName).concat("`) expects `").concat(tk_render(dr))
+        .concat("`, got `").concat(tk_render(pr)).concat("`")), pm.line)
+  }
+  return no_verd()
+}
+
 // The line for an inline body refusal, with the component line as the fallback
 // for a refusal that is not a plain statement walk (0 from `refusal_line`).
-// The type layer over one provide-method body (docs/design/457 T3a). The TYPE
-// ENVIRONMENT is deliberately EMPTY: a method's names come from the component's
-// requirement handles, its activation locals, its config fields and the service
-// signature, none of which this walk carries, and inventing types for them is
-// how a gate starts refusing programs the reference admits. Over the empty
-// environment `tk_infer` knows only what the literals themselves determine, so
-// what it decides here is the environment-free half of the algebra — `null` in
-// an expression position (T2), a Float literal outside binary64 — and it is
-// silent about everything a name would have had to answer for.
-fn mth_type_verdict(body: List[Stmt], i: Int, fallback: Int) -> Verd {
+// The type layer over one provide-method body (docs/design/457). The reference
+// lowers such a body with the ordinary fn-body machinery and runs the SAME
+// raising oracle over it (`_lower_provide`'s `_sweep`, item 404), so every
+// expression in one is typed exactly as a module `fn`'s is.
+//
+// WHAT THE ENVIRONMENT CARRIES, and what it leaves on the gradual frontier.
+// Three name families are written down in the source and so are known here:
+//
+//   * the method's PARAMETERS, at the service's declared types. The service is
+//     the source of truth for a provider's signature (A6), which is why an
+//     unannotated `fn read(s)` still types `s` — the reference seeds
+//     `env.type_env` from `decl.params` before it lowers a single statement.
+//   * the body's own ANNOTATED bindings (`let v: Any = …`), the annotation
+//     being what the reference writes into `env.type_env` for them.
+//   * an unannotated binding at the type its value INFERS to, which is the
+//     reference's `elif swept is not None` arm. An undecidable value contributes
+//     nothing and the name stays unknown.
+//
+// Everything else — a requirement handle, a config field, an activation local —
+// resolves through tables this walk does not carry, and an unknown name is the
+// gradual frontier's "": silent, never guessed at. `gtys` is the program-wide
+// declared-type table (the `field <Type>.<name>` rows and the module `fn`
+// signatures) the module-`fn` walk already builds once per admission.
+fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
+                    ret: Str, mname: Str, fallback: Int) -> Verd {
   if (i >= body.length()) { return no_verd() }
   let s = body[i]
   // a `skip` carries the parser's failure node and a spawn an inert placeholder;
   // neither is an expression the reference types.
   if (s.kind == "skip" || s.spawnTarget != "") {
-    return mth_type_verdict(body, i + 1, fallback)
+    return mth_type_verdict(body, i + 1, env, cx, ret, mname, fallback)
   }
-  let r = tk_infer(s.e, [])
-  if (r.v != "") { return mk_verd(r.v, s.line == 0 ? fallback : s.line) }
-  return mth_type_verdict(body, i + 1, fallback)
+  let ln = s.line == 0 ? fallback : s.line
+  // a `return` in a provide method is a CHECKING position against the service's
+  // declared result (`_do_return`'s `check_ir`), exactly as a module `fn`'s is
+  // against its own annotation. The activation body has no return to check, and
+  // a method whose service leaves the result unspelled has nothing to check
+  // against; both pass `ret` "" and fall through to the infer position.
+  // a bare `return` carries no expression to check (see `p_stmt_run`); its
+  // parse leaves a `skip`, and `is_bad` is the second fence on the same rule.
+  if (s.kind == "return" && ret != "" && !is_bad(s.e)) {
+    let rc = tk_check(s.e, ret, env, "`".concat(mname).concat("` returns"))
+    if (rc.v != "") { return mk_verd(rc.v, ln) }
+    return mth_type_verdict(body, i + 1, env, cx, ret, mname, fallback)
+  }
+  // WHICH STATEMENTS THE REFERENCE SWEEPS. `_sweep` (item 404's raising oracle)
+  // runs from `_do_let` and `_do_return` and from nowhere else: a
+  // statement-level `effect`/`emit`/`undo` in a component body is lowered
+  // without it, so `effect m.insert("k", w.to_str())` with `w: Int32` is
+  // ADMITTED there while the same call in a `let` or a `return` is refused. A
+  // walk that sweeps every statement refuses programs the reference admits, and
+  // `tests/fixtures/emit_java_corpus/map_inference_builtins.rvl` is thirteen of
+  // them in one document.
+  //
+  // The REQUIREMENT-call argument rule is not part of that: it lives in
+  // `_component_req_call`, which every crossing statement goes through, so
+  // `ct_scan` runs over all of them.
+  let r = ct_swept(s) ? tk_infer(s.e, env) : tk_ok("")
+  if (r.v != "") { return mk_verd(r.v, ln) }
+  let rq = ct_scan(s.e, cx, env)
+  if (rq != "") { return mk_verd(rq, ln) }
+  var next = env
+  if (s.bind != "") {
+    // the type a binding takes: its own annotation first, then the declared
+    // RETURN of the requirement call it binds (`let r = effect s.get()` binds
+    // the service's declared result, which is what the reference writes into
+    // `type_env` for it), then what the value itself infers to.
+    var bound = tk_solid(s.bindTy, env)
+    if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
+    if (bound == "" && !ct_crossing(s)) { bound = r.ty }
+    if (bound != "") { next = tenv_put(env, s.bind, bound) }
+  }
+  return mth_type_verdict(body, i + 1, next, cx, ret, mname, fallback)
+}
+
+// A statement that CROSSES the boundary: an `effect` acquisition or an `emit`.
+// What such a binding names is a host-frontier value, and the reference's type
+// for one is ADVISORY — `infer_ir` answers nothing for a host acquire node, so
+// `let store = effect Map.new()` leaves `store` untyped and `store.size()` is
+// admitted even though `Map` has no `size` on its stdlib surface. Reading the
+// handle as a `Map` instead applies the stdlib surface, arity and argument rules
+// to a value the reference never claimed was one, which refuses programs it
+// admits. The one type such a binding DOES take is the declared return of a
+// REQUIREMENT call, which is a published signature rather than a host value —
+// `ct_stmt_req_ret` above, and it is consulted first for that reason.
+fn ct_crossing(s: Stmt) -> Bool {
+  return s.kind == "effect" || s.kind == "emit"
+}
+
+// The statements the reference runs its RAISING type oracle over, measured
+// rather than assumed:
+//
+//   * a BINDING (`_do_let`'s `_sweep`) and a `return` (`_do_return`'s
+//     `check_ir`) — `let z = 1 + "s"` and `return 1 + "s"` are both refused
+//     inside a provide method;
+//   * an `emit`, whose operand is lowered as an ordinary pure expression —
+//     `emit lg(!k)` with `k: Str` draws the reference's `!` refusal, bound or
+//     not.
+//
+// and NOT: a statement-level `effect`/`undo`/`compensate`, nor a bare
+// expression statement. `effect m.insert("x", !k)` and the arrow-form body
+// `fn count() = store.size()` are both ADMITTED by the reference, and sweeping
+// them refused seventeen corpus documents.
+//
+// A CROSSING binding (`let h = effect …`) is excluded for the same reason its
+// TYPE is: what it names is the boundary's result, lowered through the host or
+// provision path rather than as an expression this walk typed.
+fn ct_swept(s: Stmt) -> Bool {
+  return s.kind == "return" || s.kind == "emit"
+    || (s.bind != "" && !ct_crossing(s))
+}
+
+// The declared RETURN of the requirement call an expression is, or "". An
+// `emit`-marked operand is the same call with the marker in front of it.
+fn ct_stmt_req_ret(e: Expr, cx: Ctx) -> Str {
+  return match e {
+    Call(c) => taint_strip(ct_req_decl(c.target, cx).ret),
+    Emit(u) => ct_stmt_req_ret(u.e, cx),
+    _       => "",
+  }
+}
+
+// The environment one body LEAVES BEHIND: the same binding rule the verdict walk
+// applies, run for its environment rather than its refusal. The activation body's
+// map is what each provide method starts from.
+fn mth_body_tys(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind] {
+  if (i >= body.length()) { return env }
+  let s = body[i]
+  if (s.kind == "skip" || s.spawnTarget != "" || s.bind == "") {
+    return mth_body_tys(body, i + 1, env, cx)
+  }
+  var bound = tk_solid(s.bindTy, env)
+  if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
+  if (bound == "" && ct_swept(s)) { bound = tk_infer(s.e, env).ty }
+  return mth_body_tys(body, i + 1,
+                      bound == "" ? env : tenv_put(env, s.bind, bound), cx)
+}
+
+// The method's parameters at the types the SERVICE declares, over the
+// program-wide table. A method's own annotation is preferred where it wrote one
+// (the two have already been held to each other by `a6_annotation_verdict`, so
+// they agree wherever both are present), and a parameter neither side spells
+// contributes nothing.
+fn mth_param_tys(pm: ProvM, decl: MSig, i: Int, acc: List[Bind]) -> List[Bind] {
+  if (i >= pm.params.length()) { return acc }
+  var ty = ""
+  if (i < pm.ps.length()) { ty = taint_strip(pm.ps[i].ty) }
+  if (ty == "" && i < decl.ps.length()) { ty = taint_strip(decl.ps[i].ty) }
+  ty = tk_solid(ty, acc)
+  return mth_param_tys(pm, decl, i + 1,
+                       ty == "" ? acc : tenv_put(acc, pm.params[i], ty))
 }
 
 fn body_line(ss: List[Stmt], cx: Ctx, fallback: Int) -> Int {
@@ -4676,7 +5402,7 @@ fn mth_rebind(pm: ProvM, scope: List[Str], i: Int) -> Verd {
 // statement's line (`body_line`), every whole-component verdict — signature
 // parity, the aggregate G4/A1 over a walked body, the setup async-reach — the
 // component's declaration line, matching the reference.
-fn check_component(comp: CompD, cx: Ctx) -> Verd {
+fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // setup gets G4/A1/G1 too: an undeclared access or unmarked emission in
   // setup is refused exactly as in a provide body, bare values included (see
   // `var_check`). There is no longer a per-body-kind context: the two bodies
@@ -4686,6 +5412,10 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
   // provision provenance is per BODY: setup's aliases are visible to every
   // provide method (the reference lowers setup first and restores to that map
   // after each method), a method's own are not visible to the next one.
+  // the config-default rule runs ahead of every body verdict, which is where the
+  // reference raises it (`_lower_component`, before the provision loop).
+  let cdv = cfg_default_verdict(comp, 0, gtys)
+  if (cdv.v != "") { return cdv }
   let setupAlias = alias_in(comp.setup, 0, cx.handles, Map.empty())
   // local arrows are scoped per body exactly as provision aliases are: setup's
   // are visible to every provide method, a method's own are not visible to the
@@ -4696,6 +5426,16 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
   if (sa.msg != "") {
     return mk_verd(tagged(sa.tag, sa.msg), body_line(comp.setup, scx, comp.line))
   }
+  // the ACTIVATION body's own type layer, run where the reference runs it: the
+  // setup statements are lowered with the same machinery a provide-method body
+  // is (`_lower_component_setup_stmt`'s `_sweep`), and a requirement call in one
+  // is held to its service signature exactly as a method-body call is. The
+  // environment it leaves behind is what every provide method starts from — the
+  // reference lowers setup first and restores to that map after each method.
+  let setupTv = mth_type_verdict(comp.setup, 0, ir_stratum_env(gtys), scx,
+                                 "", "", comp.line)
+  if (setupTv.v != "") { return setupTv }
+  let setupTys = mth_body_tys(comp.setup, 0, ir_stratum_env(gtys), scx)
   // rule C1 on the component lowering path (`_assert_colour_is_positional`): a
   // self-declared arrow colour in setup is refused as it is anywhere else.
   let setupSda = self_async_body(comp.setup, 0)
@@ -4724,6 +5464,11 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
         return mk_verd(tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
                                           pm.isAsync, decl.isAsync)), comp.line)
       }
+      // the two RESTATED-annotation rules, decided where the reference decides
+      // them: after the colour parity above and before a single body statement
+      // is lowered.
+      let sigv = a6_annotation_verdict(pv, mi, decl, gtys)
+      if (sigv.v != "") { return sigv }
       let mcx = ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
         arrows_in(pm.body, 0, setupArrows))
@@ -4746,8 +5491,15 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
       // walk is the one that runs in statement order; a body carrying both a
       // wiring verdict and a type one reports the wiring verdict, which is the
       // under-refusing direction.
-      let mtv = mth_type_verdict(pm.body, 0, comp.line)
+      let mtv = mth_type_verdict(pm.body, 0,
+                                 mth_param_tys(pm, decl, 0, setupTys), mcx,
+                                 tk_solid(taint_strip(decl.ret), gtys), pm.name,
+                                 comp.line)
       if (mtv.v != "") { return mtv }
+      // the missing-return rule, which the reference raises once the whole body
+      // is lowered and so after every statement verdict above.
+      let mrv = prov_missing_return(pv, mi, decl)
+      if (mrv.v != "") { return mrv }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
       // provide-method arrow may not name its own async colour either.
@@ -8545,7 +9297,143 @@ fn tk_struct_compat(expected: Str, actual: Str) -> Bool {
 
 // ------------------------------------------------- the refusing expression walk
 
+// ------------------------------------------------------- the two STRATA
+//
+// The reference types a module `fn` body with `infer_ast` and a component /
+// provide-method body with `infer_ir`, and the two are not the same oracle. One
+// difference reaches this walk: `infer_ast` reads the bare name `None` as the
+// empty optional `Opt[Any]` BEFORE it consults the environment, while
+// `infer_ir` looks it up like any other name and finds nothing. So
+// `effect up.read(None)` against a `Str` parameter is ADMITTED by the
+// reference, and a walk that carries the `Opt[Any]` reading into a component
+// body refuses a program the reference admits.
+//
+// The marker rides the environment rather than the signature because every
+// position in a body already threads one, and a body's stratum is fixed for the
+// whole walk. `ir_stratum_env` seeds it; nothing else writes the row, and the
+// name is not a legal revl identifier so no program can collide with it.
+fn ir_stratum_key() -> Str { return "!stratum ir" }
+
+fn ir_stratum(env: List[Bind]) -> Bool {
+  return tenv_get(env, ir_stratum_key()) != ""
+}
+
+fn ir_stratum_env(env: List[Bind]) -> List[Bind] {
+  return tenv_put(env, ir_stratum_key(), "1")
+}
+
+// ------------------------------------------ the OPAQUE nominal, and why it
+// launders
+//
+// A bare nominal name this walk can resolve is a declared RECORD: the
+// declaration scan contributes its `field <Type>.<name>` rows and every rule
+// below reads the shape through them. A DECLARED name with no such rows is a
+// TRANSPARENT TYPE ALIAS or a variant, and from a spelling the two are the same
+// thing — which matters because of the alias:
+//
+//   `type Idx = Int` is ERASED by the reference before it compares anything, so
+//   `xs[i]` with `i: Idx` is an `Int` index and is admitted. Reading the alias
+//   as a type of its own refuses a program the reference admits — a false
+//   rejection, the one direction this gate may not err in, and it reaches every
+//   rule at once: `assert b` with `type Flag = Bool`, `i + 1` with
+//   `type Idx = Int`, an argument, a return, a record's own field type.
+//
+// Alias erasure is its own slice. Until it lands, a spelling that MENTIONS such
+// a name anywhere inside it is answered "" — the gradual frontier — rather than
+// guessed at, which turns the whole family into silence instead of a wrong
+// refusal.
+//
+// The `decl <Name>` row is what bounds this to the alias question. A name the
+// document never declares is not an alias — it is a name the REFERENCE has no
+// type for either, and it keeps the reading it had, because laundering it would
+// trade a divergent refusal for a no-objection on a program the reference
+// refuses. (A name imported through a `use` is the residual: this gate steps
+// over module declarations, so an imported alias is still read as itself. Every
+// other verdict on such a document is already out of slice for the same
+// reason.)
+fn ty_has_opaque(t: Str, env: List[Bind]) -> Bool {
+  if (t == "" || t.slice(0, 1) == "?" || tk_builtin_head(t)) { return false }
+  if (tk_is_struct(t)) {
+    return ty_fields_opaque(tk_split_depth(t.slice(1, t.length() - 1)), 0, env)
+  }
+  if (tk_is_fn_ty(t)) { return ty_any_opaque(ty_fn_parts(t), 0, env) }
+  let args = tk_args(t)
+  if (args.length() > 0) {
+    if (ty_any_opaque(args, 0, env)) { return true }
+    return ty_declared_nonrecord(parse_head(t), env)
+  }
+  return tk_nominal_name(t) && ty_declared_nonrecord(t, env)
+}
+
+// A TRANSPARENT ALIAS, as closely as a spelling can be narrowed to one: a name
+// the document declares (`decl <Name>`) that is neither a record (its
+// `field <Name>.<x>` rows) nor a variant (a `case <C>` row naming it). Built-in
+// heads are none of these, and neither is a name nothing declares.
+//
+// Excluding the VARIANT is what keeps a refusal's SENTENCE the reference's.
+// Laundering `type Body = Text(Str) | Empty` would leave a record carrying one
+// spelled `{body: Any, …}` where the reference writes `{body: Body, …}` — the
+// same refusal with a different message, which the crate promises never to
+// issue. A variant is a nominal type of its own, so reading it as one is right.
+fn ty_declared_nonrecord(h: Str, env: List[Bind]) -> Bool {
+  return !tk_builtin_head(h) && !tk_record_base(h, env)
+    && tenv_get(env, "decl ".concat(h)) != "" && !ty_variant_decl(h, env)
+}
+
+// Does any declared ADT CASE name this type? The declaration scan records one
+// `case <Case>` row per case, valued with the type it belongs to.
+fn ty_variant_decl(h: Str, env: List[Bind]) -> Bool {
+  var i = 0
+  while (i < env.length()) {
+    if (env[i].ty == h && env[i].name.slice(0, 5) == "case ") { return true }
+    i += 1
+  }
+  return false
+}
+
+fn ty_any_opaque(ts: List[Str], i: Int, env: List[Bind]) -> Bool {
+  if (i >= ts.length()) { return false }
+  if (ty_has_opaque(ty_trim(ts[i]), env)) { return true }
+  return ty_any_opaque(ts, i + 1, env)
+}
+
+// the `<name>: <Type>` rows of a structural record spelling, each row's TYPE
+fn ty_fields_opaque(rows: List[Str], i: Int, env: List[Bind]) -> Bool {
+  if (i >= rows.length()) { return false }
+  let ci = rows[i].indexOf(":")
+  let fty = ci == 0 - 1 ? rows[i] : rows[i].slice(ci + 1, rows[i].length())
+  if (ty_has_opaque(ty_trim(fty), env)) { return true }
+  return ty_fields_opaque(rows, i + 1, env)
+}
+
+// `(A, B) -> R` split into its parameter types plus the result.
+fn ty_fn_parts(t: Str) -> List[Str] {
+  let close = t.indexOf(")")
+  if (close == 0 - 1) { return [] }
+  let inner = ty_trim(t.slice(1, close))
+  let ps = inner == "" ? [] : tk_split_depth(inner)
+  let ar = t.indexOf("->")
+  if (ar == 0 - 1) { return ps }
+  return ps.push(ty_trim(t.slice(ar + 2, t.length())))
+}
+
+// A type spelling as this walk may USE it: itself, or "" when it mentions a
+// nominal name whose structure the walk does not carry.
+fn tk_solid(t: Str, env: List[Bind]) -> Str {
+  return ty_has_opaque(t, env) ? "" : t
+}
+
+// Every type this walk decides over passes through here, which is what makes
+// the opaque-nominal launder above a single rule rather than one per predicate:
+// a sub-expression's type is itself a `tk_infer` result, so the whole tree is
+// normalised by normalising each node.
 fn tk_infer(e: Expr, env: List[Bind]) -> TInf {
+  let r = tk_infer_raw(e, env)
+  if (r.v != "" || r.ty == "") { return r }
+  return tk_ok(tk_solid(r.ty, env))
+}
+
+fn tk_infer_raw(e: Expr, env: List[Bind]) -> TInf {
   return match e {
     IntLit(v)   => tk_ok("Int"),
     FloatLit(v) => tk_float_lit(v),
@@ -8559,7 +9447,7 @@ fn tk_infer(e: Expr, env: List[Bind]) -> TInf {
     // BEFORE the environment. The annotation engine leaves it unknown, which
     // cost every rule downstream of it its operand: `~None`, `!None`,
     // `assert None` and `let b: Int32 = None` all went unrefused.
-    Var(n)      => tk_ok(n == "None" ? "Opt[Any]"
+    Var(n)      => tk_ok(n == "None" && !ir_stratum(env) ? "Opt[Any]"
                      : (tenv_get(env, n) != "" ? tenv_get(env, n)
                                                : infer_bare_case(n, env))),
     Bin(b)      => tk_bin(b, env),
@@ -8875,6 +9763,19 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // level, which compounds with nesting.
   let tv = tk_callee(c.target, env)
   if (tv.v != "") { return tv }
+  // THE HOST-OBJECT CALL, in a component body. An untyped method receiver there
+  // is an acquired handle, a requirement handle or a provision alias, and the
+  // reference lowers a call on one through the host / provision path — which
+  // runs no pure-expression type oracle over the receiver, the call, OR ITS
+  // ARGUMENTS. `effect m.insert("x", !k)` and `let z = m.get(!k)` with `k: Str`
+  // are both admitted; the same `!k` in an ordinary call is refused. So the
+  // whole subtree is left undecided rather than only its head — descending into
+  // the arguments is what refused those two.
+  //
+  // The requirement call's own ARGUMENT rule is untouched: it lives in
+  // `ct_args`, which infers each argument itself against the service's declared
+  // parameter type, exactly where `_component_req_call` does.
+  if (ir_stratum(env) && ct_host_object_call(c.target, env)) { return tk_ok("") }
   let a = tk_arg_walk(c.args, 0, env, [])
   if (a.v != "") { return a.r }
   // docs/design/457 T2b: a bare-name callee against the signature table, and a
@@ -8952,6 +9853,17 @@ fn tk_host_root(e: Expr) -> Bool {
   return match e { Var(n) => is_host_root(n), _ => false, }
 }
 
+// A method call whose RECEIVER this walk has no type for, in a component body.
+// The host family ROOTS (`Map.new()`, `Map.empty()`) are excluded: those are
+// constructors, not calls on an acquired value, and the reference types them.
+fn ct_host_object_call(callee: Expr, env: List[Bind]) -> Bool {
+  return match callee {
+    Field(f) => !tk_host_root(f.target) && !is_empty_map_callee(callee)
+                && tk_wild(tk_infer(f.target, env).ty),
+    _        => false,
+  }
+}
+
 fn tk_items(xs: List[Expr], i: Int, env: List[Bind], ty: Str) -> TInf {
   if (i >= xs.length()) { return tk_ok(ty) }
   let r = tk_infer(xs[i], env)
@@ -9007,9 +9919,13 @@ fn tk_if(cond: Expr, then_: Expr, els: Expr, env: List[Bind]) -> TInf {
   return tk_ok(join_ty(a.ty, b.ty))
 }
 
+// `p_template` tags an interpolation part `"e"` and a literal one `"t"`; the
+// two walks below tested for `"expr"`, which no part carries, so every
+// `${...}` body went untyped and unlowered — the reference infers and lowers
+// each of them like any other expression.
 fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
   if (i >= parts.length()) { return tk_ok("Str") }
-  if (parts[i].kind == "expr") {
+  if (parts[i].kind == "e") {
     let r = tk_infer(parts[i].e, env)
     if (r.v != "") { return r }
   }
@@ -9794,7 +10710,20 @@ fn tk_method(c: CallN, env: List[Bind], argTys: List[Str],
   if (list_transform_free(f.name) != "" && !tk_is_host_family(recv)) {
     return tk_miss()
   }
-  if (recv == "" || tk_wild(recv)) { return tk_unknown_recv_check(f.name, argTys) }
+  // The unknown-receiver fallback is an AST-STRATUM rule. In a module `fn` body
+  // an untyped receiver really is a stdlib value the walk failed to type, and
+  // the reference runs `builtin_check` with `target_type None` over it. In a
+  // COMPONENT body it is not: an untyped receiver there is a requirement handle,
+  // a provision alias, a spawn handle or an acquired host object, and the
+  // reference resolves the call through the component's own tables
+  // (`_component_req_call` and its neighbours) without ever reaching the builtin
+  // rows. Running them anyway read `kv.set(7, 100)` on `service Kv { fn set(k:
+  // Int, v: Int) }` as the `Map` builtin and refused it — a program the
+  // reference admits.
+  if (recv == "" || tk_wild(recv)) {
+    if (ir_stratum(env)) { return tk_miss() }
+    return tk_unknown_recv_check(f.name, argTys)
+  }
   return tk_hit(tk_builtin_check(f.name, recv, argTys))
 }
 
@@ -9849,8 +10778,15 @@ fn tk_low_stdlib_proven(t: Str) -> Bool {
 fn tk_low_untyped_recv(e: Expr, env: List[Bind]) -> Bool {
   let n = match e { Var(v) => v, _ => "", }
   if (n == "") { return false }
-  return tenv_get(env, n) == ""
-      && tenv_get(env, "unk ".concat(n)) == "1"
+  if (tenv_get(env, n) != "") { return false }
+  // A name NOTHING declares is not in the reference's `type_env` either, so
+  // `_expr_static_type` answers the wildcard this refusal tests for — and the
+  // reference raises it at the METHOD node, ahead of lowering the receiver,
+  // which is why it outranks the receiver's own G1. The name-resolution rule
+  // below is what turns "this walk could not type it" into "nothing declares
+  // it", so this arm is only a proof where that rule is switched on.
+  if (nr_refuse(n, env) != "") { return true }
+  return tenv_get(env, "unk ".concat(n)) == "1"
 }
 
 // Whether a `let` initialiser PROVES its binding has no type on either side.
@@ -9896,7 +10832,12 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
   if (tk_is_host_family(root) && tenv_get(env, root) == "") { return "" }
   let recv = tk_infer(f.target, env).ty
   if (tk_is_host_family(recv)) { return "" }
-  if (list_transform_free(f.name) != "") { return "" }
+  // item 383: a receiver-first list transform is SUGAR for its generic free
+  // function, and `_lower_pure_expr` redirects to that call before it reaches
+  // the builtin table — so the next thing the reference resolves is the FREE
+  // NAME, and an undeclared one is an ordinary G1 read at this position.
+  let lt = list_transform_free(f.name)
+  if (lt != "") { return nr_refuse(lt, env) }
   let untyped = tk_low_untyped_recv(f.target, env)
   if (!is_builtin_method(f.name)) {
     // the reference refuses this for ANY non-host receiver; the gate needs the
@@ -9932,8 +10873,116 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
   return ""
 }
 
+// ------------------------------------------------- name resolution (G1, §2.3)
+//
+// `_lower_pure_expr`'s `ExprVar` arm, the last thing the reference does with a
+// name: a READ must land in the fn's `scope` or in `callables`
+// (`_HOST_CALLABLES` u `_BUILTIN_CONSTRUCTORS` u `_DECLASSIFY_BUILTINS` u the
+// module's `fn`s u its `extern`s), else "`x` is not declared in this function".
+//
+// It is a LOWERING refusal and not an inference one — `infer_ast` answers
+// "unknown" for a name it has never seen and raises nothing — so it belongs in
+// this walk beside the method rules, and a statement that both mis-types and
+// mis-names draws the TYPE refusal on both tiers.
+//
+// The callable side is read off the token stream and is deliberately an
+// OVER-approximation: every identifier that follows an `fn` keyword anywhere in
+// the text counts as declared, which covers a module `fn`, an `extern`'s own
+// `fn` and a declaration this reader could not otherwise spell in full. A name
+// too many withholds a refusal; a name too few would refuse a program the
+// reference admits, which this gate may not do.
+//
+// Three exemptions, each because the reference's own answer is not G1:
+//
+//   * a `use` declaration switches the rule off for the WHOLE text — the
+//     imported module's `pub fn`s join `callables` (`program.fn_scopes`) and an
+//     aliased `alias.f(..)` call resolves before the name resolver runs, so the
+//     universe stops being knowable from this text alone;
+//   * a name in the item-384 foreign table (`len`, `print`, `and`, ...) draws
+//     the redirect's own sentence. The token-level scanner that ports those
+//     redirects runs ahead of the parse and is deliberately conservative, so a
+//     spelling it declines to claim is left unrefused here rather than refused
+//     with the wrong message;
+//   * an ADT case name and a declared type name are let through without asking
+//     which shape they are: `_tagged_case` returns ahead of the resolver for a
+//     payload-free case, and distinguishing the rest would trade a withheld
+//     refusal for the risk of a wrong one.
+
+fn nr_bnd(n: Str) -> Str { return "bnd ".concat(n) }
+fn nr_dcl(n: Str) -> Str { return "dclfn ".concat(n) }
+
+// Every `fn <name>` in the stream: the module `fn`s and, through their own `fn`
+// keyword, the `extern`s. A `fn` TOKEN appears nowhere else — a function type is
+// spelled `(P) -> R` — so this is exhaustive by construction, which is the
+// property the rule needs and the signature table (which spells a header in
+// full or not at all) does not have.
+fn nr_fn_names(ts: List[Token], base: List[Bind]) -> List[Bind] {
+  var out = base
+  var i = 0
+  while (i + 1 < ts.length()) {
+    if (atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      out = tenv_put(out, nr_dcl(tkc(ts, i + 1).text), "1")
+    }
+    i += 1
+  }
+  return out
+}
+
+fn nr_has_use(ts: List[Token]) -> Bool {
+  var i = 0
+  while (i < ts.length()) {
+    if (atw(ts, i, "use")) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The program-level rows: the declared callables, and the switch that says the
+// universe is complete enough to refuse against.
+fn nr_binds(ts: List[Token], base: List[Bind]) -> List[Bind] {
+  if (nr_has_use(ts)) { return base }
+  return tenv_put(nr_fn_names(ts, base), "g1 on", "1")
+}
+
+fn nr_builtin_callable(n: Str) -> Bool {
+  return fb_host_root(n) || n == "Some" || n == "None" || n == "Ok"
+      || n == "Err" || n == "endorse"
+}
+
+fn nr_known(n: Str, env: List[Bind]) -> Bool {
+  if (n == "") { return true }
+  if (nr_builtin_callable(n)) { return true }
+  // the binding scope: every parameter, `let`/`var` and loop binder, recorded
+  // whether or not this walk could TYPE it.
+  if (tenv_get(env, nr_bnd(n)) == "1") { return true }
+  if (tenv_get(env, nr_dcl(n)) == "1") { return true }
+  // anything the type table itself knows the name of is something the program
+  // declared: a module `fn` binds its own name to its function type.
+  if (tenv_get(env, n) != "") { return true }
+  // An ADT case name read BARE is a value only where the reference's own
+  // `ExprVar` arm makes it one: a NULLARY user case, never a payload-carrying
+  // one and never a `Result`/`Opt` case. `infer_bare_case` is that exact guard,
+  // so the read rule and the type this walk gives the node agree by
+  // construction. A payload-carrying case read bare falls through to
+  // `callables`, which no case name joins, and the reference refuses it — the
+  // CALL position is exempted in `tk_low_call`, where the reference exempts it.
+  if (infer_bare_case(n, env) != "") { return true }
+  if (tenv_get(env, "decl ".concat(n)) == "1") { return true }
+  if (contains(foreign_names(), n)) { return true }
+  // a builtin spec argument (`@elem`, `@member`, `@self`) is not a name read.
+  if (n.slice(0, 1) == "@") { return true }
+  return false
+}
+
+fn nr_refuse(n: Str, env: List[Bind]) -> Str {
+  if (tenv_get(env, "g1 on") != "1") { return "" }
+  if (nr_known(n, env)) { return "" }
+  return tagged("G1", fb_undeclared_msg(n))
+}
+
 fn tk_low(e: Expr, env: List[Bind]) -> Str {
   return match e {
+    Var(n)      => nr_refuse(n, env),
     Bin(b)      => tk_low2(b.l, b.r, env),
     Un(u)       => tk_low(u.e, env),
     Field(f)    => tk_low(f.target, env),
@@ -9961,12 +11010,24 @@ fn tk_low3(a: Expr, b: Expr, c: Expr, env: List[Bind]) -> Str {
   return tk_low(c, env)
 }
 
+// Whether a callee name is an ADT CONSTRUCTOR at this position, which the
+// reference's `ExprCall` arm answers ahead of the name resolver: a case name
+// that no local binding shadows builds an `adt` node and its own name is never
+// resolved. Unlike the bare-read rule this one does NOT ask about the payload —
+// `Ok(x)` and `NrSquare(1)` are constructions exactly as `NrCircle()` is.
+fn nr_ctor_callee(e: Expr, env: List[Bind]) -> Bool {
+  let n = match e { Var(v) => v, _ => "", }
+  if (n == "") { return false }
+  if (tenv_get(env, nr_bnd(n)) == "1") { return false }
+  return tagged_case_adt(env, n) != ""
+}
+
 // The node's own refusal FIRST: the reference raises before it lowers the
 // receiver and the arguments.
 fn tk_low_call(c: CallN, env: List[Bind]) -> Str {
   let own = tk_low_method(c, env)
   if (own != "") { return own }
-  let t = tk_low(c.target, env)
+  let t = nr_ctor_callee(c.target, env) ? "" : tk_low(c.target, env)
   if (t != "") { return t }
   return tk_low_items(c.args, 0, env)
 }
@@ -9993,7 +11054,7 @@ fn tk_low_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> Str {
 
 fn tk_low_parts(ps: List[PartN], i: Int, env: List[Bind]) -> Str {
   if (i >= ps.length()) { return "" }
-  let r = ps[i].kind == "expr" ? tk_low(ps[i].e, env) : ""
+  let r = ps[i].kind == "e" ? tk_low(ps[i].e, env) : ""
   if (r != "") { return r }
   return tk_low_parts(ps, i + 1, env)
 }
@@ -10278,8 +11339,6 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
                                       "`let ".concat(s.name).concat(": ")
                                         .concat(tk_render(s.declTy)).concat("`"))
     if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
-    let lo = tk_low(s.value, tys)
-    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
     let bound = s.declTy == "" ? r.ty : s.declTy
     let tys2 = bound == "" ? tys : tenv_put(tys, s.name, bound)
     // a binding the REFERENCE also has no type for (docs/design/457 T2b): its
@@ -10288,7 +11347,14 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     // merely failed to infer is one the reference may well have.
     let tys3 = bound == "" && tk_def_unknown(s.value, tys)
                  ? tenv_put(tys2, "unk ".concat(s.name), "1") : tys2
-    return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth), tys3, ret)
+    // `_lower_pure_stmt` writes `scope[name]` and `type_env[name]` BEFORE it
+    // lowers the initialiser, so `let x = x` resolves and an annotated
+    // `let g: (Int) -> Int = ...` lowers under its own declared type. The
+    // lowering walk therefore runs on the POST-binding environment.
+    let tysL = tenv_put(tys3, nr_bnd(s.name), "1")
+    let lo = tk_low(s.value, tysL)
+    if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+    return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth), tysL, ret)
   }
   if (s.kind == "assign") {
     let held = tenv_get(scope, s.name)
@@ -10346,12 +11412,17 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
   if (s.kind == "if") {
     let c = tk_cond(s.value, tys, "if")
     if (c.v != "") { return fb_type_refuse(c.v, s.line, scope, tys) }
-    let clo = tk_low(s.value, tys)
-    if (clo != "") { return fb_type_refuse(clo, s.line, scope, tys) }
+    // `_lower_pure_stmt` type-checks the condition (`_bool_cond`) FIRST and
+    // then lowers the two arms before it lowers the condition itself, so an
+    // arm's lowering refusal outranks the condition's. `while` and `for` do
+    // the opposite (their controlling expression is lowered ahead of the
+    // body), which is why only this arm reorders.
     let a = fb_walk(s.then_, 0, scope, tys, ret)
     if (a.v.v != "") { return a }
     let b = fb_walk(s.els, 0, scope, tys, ret)
     if (b.v.v != "") { return b }
+    let clo = tk_low(s.value, tys)
+    if (clo != "") { return fb_type_refuse(clo, s.line, scope, tys) }
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
   if (s.kind == "while") {
@@ -10372,8 +11443,9 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     let ilo = tk_low(s.value, tys)
     if (ilo != "") { return fb_type_refuse(ilo, s.line, scope, tys) }
     let elem = parse_head(it.ty) == "List" ? type_arg1(it.ty) : ""
-    let a = fb_walk(s.body, 0, tenv_put(scope, s.name, "let"),
-                    elem == "" ? tys : tenv_put(tys, s.name, elem), ret)
+    let tysB = tenv_put(elem == "" ? tys : tenv_put(tys, s.name, elem),
+                        nr_bnd(s.name), "1")
+    let a = fb_walk(s.body, 0, tenv_put(scope, s.name, "let"), tysB, ret)
     if (a.v.v != "") { return a }
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
@@ -10402,9 +11474,18 @@ fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
   // seed that kept the alias spelling refused the document's own arithmetic
   // with "operand of `+` expects `Int`, got `Count`" and reported a
   // false-reject divergence the reference does not have.
-  let ty = mark_tparams(alias_subst(taint_strip(ps[i].ty), al), tps)
+  //
+  // an annotation mentioning a nominal name this walk cannot resolve is left
+  // out rather than read as a type of its own (`tk_solid`). The erasure runs
+  // FIRST, so a transparent alias arrives as the type the reference sees and
+  // is kept rather than read as opaque.
+  let ty = tk_solid(mark_tparams(alias_subst(taint_strip(ps[i].ty), al), tps), acc)
+  // the name-resolution row is written for EVERY parameter, including one this
+  // reader cannot type: a parameter is in `scope` on the reference's side
+  // whatever its annotation says.
+  let b = tenv_put(acc, nr_bnd(ps[i].name), "1")
   return fb_params_tys(ps, i + 1,
-                       ty == "" ? acc : tenv_put(acc, ps[i].name, ty), tps, al)
+                       ty == "" ? b : tenv_put(b, ps[i].name, ty), tps, al)
 }
 
 // One module `fn` located from its `fn` keyword (`pub` already stepped over by
@@ -10608,9 +11689,14 @@ fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind],
   let tps = collect_tparams(sp.ps, sp.ret, gtys, explicit_tparams(ts, i))
   let steps = fb_scan(ts, sp.lo, sp.hi, al)
   // the body first, then the return question — `_lower_fns`' own order.
+  // The declared return passes through `tk_solid`: a spelling that names a
+  // transparent alias is one the reference has already erased, so holding the
+  // body to it refuses a program the reference admits. The RETURN-PATH rule
+  // below reads `sp.retDecl`, not this, because "does every path return" does
+  // not depend on what the return type means.
   let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []),
                   fb_params_tys(sp.ps, 0, gtys, tps, al),
-                  mark_tparams(alias_subst(sp.ret, al), tps)).v
+                  tk_solid(mark_tparams(alias_subst(sp.ret, al), tps), gtys)).v
   if (v.v != "") { return v }
   return rp_refusal(ts, sp, steps)
 }
@@ -10626,7 +11712,7 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
   let al = alias_map(ts)
-  return fb_refusal_at(ts, i, sig_binds(ts, case_binds(ts, al), al), al)
+  return fb_refusal_at(ts, i, nr_binds(ts, sig_binds(ts, case_binds(ts, al), al)), al)
 }
 
 fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind],
@@ -11015,6 +12101,17 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // malformed annotation on a `fn`/`extern` signature is decided before it.
   let wfv = declared_types_refusal(ts)
   if (wfv.v != "") { return { done: true, refs: [wfv] } }
+  // the program-wide declared-type table (the `field <Type>.<name>` rows, the
+  // case/payload rows, the module `fn` and extern SIGNATURE rows), built ONCE:
+  // it reads the whole token stream, so rebuilding it per component would be
+  // quadratic. `sig_binds` is the second pass `fb_refusal` takes for the same
+  // reason it takes it — the type-parameter marking a signature carries depends
+  // on the declared type names, which a `type` written after the `fn` still
+  // joins.
+  let al = alias_map(ts)
+  // the reference erases transparent aliases BEFORE the checker runs, so the
+  // signature rows this walk reads carry the erased spelling (`alias_subst`).
+  let gtys = sig_binds(ts, case_binds(ts, al), al)
   let cfgv = config_data_refusal(ts, pg)
   if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
   // the SHADOWED MODULE CALLABLE (item 391): `_refuse_callable_shadowing` runs
@@ -11029,7 +12126,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // than this, while the classification word is the parser's and so is earlier;
   // the merged `extern_decl_refusal` below carries both, and no corpus program
   // trips one of them together with a binding violation.
-  let fbv = fb_refusal(ts, 0)
+  let fbv = fb_refusal_at(ts, 0, nr_binds(ts, gtys), al)
   if (fbv.v != "") { return { done: true, refs: [fbv] } }
   // the extern DECLARATION: its classification word (G8, refused by the
   // reference's parser) and its `undo`/`compensate` slots (G4,
@@ -11097,7 +12194,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
         poisoned = poisoned.push(comp.name)
       } else {
         let cx = ctx_for(base, comp)
-        let v = check_component(comp, cx)
+        let v = check_component(comp, cx, gtys)
         if (v.v != "") {
           refs = refs.push(v)
           poisoned = poisoned.push(comp.name)
@@ -13322,9 +14419,18 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
       if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
-        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+        // the declared type is read with `type_at`, not as the bare head ident.
+        // A requirement can be PARAMETERIZED — item 130's required-stream
+        // coeffect `requires feed: Stream[OrderPlaced]` is the one in the
+        // language today — and the reference carries the whole spelling into
+        // `requires`. Reading only the head rendered it `Stream`, one entry
+        // short of the reference on every document that declares one, which no
+        // corpus document did until `emit_py_corpus/streams.rvl`.
+        let rt = type_at(ts, k + 2)
+        let pair = { name: tkc(ts, k).text,
+                     ty: rt.ok ? rt.ty : tkc(ts, k + 2).text }
         if (isReq) { reqs = reqs.push(pair) } else { provs = provs.push(pair) }
-        k += 3
+        k = rt.ok ? rt.i : k + 3
       } else { k += 1 }
     }
     j = k
@@ -18542,4 +19648,111 @@ test "a destructuring let is read, not refused" {
   // full agreement, and that one deliberately diverges.
   let v = admit_src("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }")
   assert v == ""
+}
+
+// ------------------------------------------------ item 130: stream statements
+//
+// The three forms the reader had no case for. Each test below is one half of a
+// pair: the form is read (so a name it BINDS resolves), and reading it does not
+// stop refusing what the reference refuses inside it. The second half is the
+// one that matters here — reading a statement the reader used to skip WIDENS
+// what this gate admits, and the last two of these were no-objections before.
+
+test "a subscription bracket binds its name" {
+  // `await sub.next()` resolved against nothing while the whole run was
+  // skipped, so this drew "`sub` is not a declared requirement of Parked" —
+  // the false rejection five backend fixtures carried.
+  let v = admit_src("""component Parked {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  await sub.next()
+}""")
+  assert v == ""
+}
+
+test "an undeclared stream in a subscribe head is refused (G1)" {
+  // the other side of reading the form: the head is an ordinary expression the
+  // reference resolves, and a skipped run resolved nothing in it. This was a
+  // NO-OBJECTION before the branch existed.
+  let v = admit_src("""component C {
+  let sub = subscribe nostream undo sub.close()
+}""")
+  assert v == "G1|`nostream` is not a declared requirement of C"
+}
+
+test "a fan-in operand is resolved even though `merge` is not (G1)" {
+  // `merge` names nothing — the reference parses the fan-in before its
+  // expression grammar runs — so the exemption is the WORD, and the operands
+  // under it stay ordinary heads. Also a no-objection before.
+  let v = admit_src("""component C {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe merge(a, nob) undo sub.close()
+}""")
+  assert v == "G1|`nob` is not a declared requirement of C"
+}
+
+test "an `every … in` body still refuses an undeclared name (G1)" {
+  let v = admit_src("""service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(nope) }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of C"
+}
+
+test "an `on … as` body still refuses an undeclared name (G1)" {
+  let v = admit_src("""event E(key: k) { k: Str }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on E as e in sub { emit sink.write(nope) }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of C"
+}
+
+test "an `every … in` body is not pruned the way a timer body is (A1)" {
+  // the two `every` forms differ on more than their header. A timer body
+  // carries its own in-flight window, so the reference prunes it from the A1
+  // name fence and this gate marks it `inTimer` to match. A `stream-iter` step
+  // is NOT one of the three the reference's prune returns on — it walks the
+  // body — so reading the iteration through the timer branch's blind `{`-scan
+  // would have admitted this.
+  let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(hf(o)) }
+}""")
+  assert v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"
+}
+
+test "the timer body's prune survives the iteration branch" {
+  // the same reach under `every <n><unit>`, which the reference admits and
+  // colours async (item 170). The pair pins the disambiguation, not just the
+  // parse: one token of lookahead decides which of the two answers is right.
+  let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
+service Sink { emission fn write(v: Str) }
+component C requires sink: Sink {
+  every 15s { emit sink.write(hf("x")) }
+}""")
+  assert v == ""
+}
+
+test "an unmarked emission inside an iteration body is still G4" {
+  // the body is a setup-mode effect context, so its emission rules are the
+  // ones the statements around it get; the `provide` tail proves the walk
+  // came back out of the block rather than swallowing the rest of the
+  // component with it.
+  let v = admit_src("""service Sink { emission fn write(v: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires sink: Sink provides api: Api {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub { emit sink.write(o) }
+  provide api { fn go() { return sink.write("x") } }
+}""")
+  assert v == "G4|call to emission `sink.write` must be marked `emit` (G4)"
 }
