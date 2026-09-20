@@ -448,6 +448,43 @@ extern emission validated fn complete(h: Str) -> AgentTurn = @py {
     assert emit._grammar_registry(ir.get("services") or {}) == {}
 
 
+def test_every_call_site_key_names_a_registered_crossing():
+    """The one way this seam can be wrong without any test noticing: the emitter
+    computes the call-site key from the require key's resolved service, and the
+    registry from the services table. If those ever disagree, a provider takes
+    the constraint for a crossing that states none and every claim silently
+    stops being judged."""
+    src = """
+type Call = { tool: Str, args: Str }
+type AgentTurn = Final(Str) | ToolCalls(List[Call])
+service Model { emission[model] validated fn complete(h: List[Str]) -> AgentTurn
+                emission[model] validated retry 2 fn judge(h: Str) -> Call
+                emission[model] fn plain(h: Str) -> Str }
+service Other { emission[model] validated fn summarise(h: Str) -> Str }
+service Loop { emission fn run(p: Str) -> Int }
+component Agent requires model: Model, other: Other provides agent: Loop {
+  provide agent {
+    fn run(session_id) {
+      let t = emit model.complete(["p"])
+      let j = emit model.judge("x")
+      let s = emit other.summarise("y")
+      let p = emit model.plain("z")
+      return 1
+    }
+  }
+}
+"""
+    ir = compile_source(src, "m.rvl")
+    registry = emit._grammar_registry(ir["services"])
+    assert sorted(registry) == ["Model.complete", "Model.judge", "Other.summarise"]
+    code = emit.emit(ir)
+    assert code.count("_revl_register_grammars(") == 1
+    for key in registry:
+        assert f"grammar='{key}'" in code or f", '{key}')" in code
+    # the unvalidated crossing states nothing and takes no key
+    assert "Model.plain" not in code.replace("def plain", "")
+
+
 def test_the_registry_carries_both_dialects():
     ir = compile_source(_program(validated=True), "t.rvl")
     entry = emit._grammar_registry(ir["services"])["Model.complete"]

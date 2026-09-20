@@ -445,7 +445,7 @@ def grammar_honoured_error(value, schema, path: str = "$"):
     separately: everything else the grammar says about a value, the validator has
     already said.
 
-    It is therefore necessary and not sufficient, and §9.4 says so plainly rather
+    It is therefore necessary and not sufficient, and §9.5 says so plainly rather
     than letting "the grammar was honoured" read as a proof.
     """
     if not isinstance(schema, dict):
