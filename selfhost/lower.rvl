@@ -14125,6 +14125,9 @@ fn cir_expr(e: Expr, sc: List[Str], hostSc: List[Str], insts: List[Inst], tenv: 
     Emit(u)     => cir_expr(u.e, sc, hostSc, insts, tenv, ln, reqSet),
     // a list literal carries no type annotation in either dialect
     Lst(l)      => cir_list(l.items, sc, hostSc, insts, tenv, ln, reqSet),
+    // a record literal: `fields` is a list of [name, value] PAIRS, in the
+    // order written (the component path's shape, not the module-fn path's).
+    Rec(r)      => cir_record(r.fields, 0, sc, hostSc, insts, tenv, ln, reqSet, ""),
     // a `${…}` template. The component dialect renders it as a `format` node
     // (template + positional args), NOT as the module-fn path's `interp`.
     Templ(t)    => cir_format(t.parts, 0, sc, hostSc, insts, tenv, ln, reqSet, "", ""),
@@ -14169,6 +14172,19 @@ fn cir_format(parts: List[PartN], i: Int, sc: List[Str], hostSc: List[Str],
 fn count_slots(parts: List[PartN], i: Int, hi: Int, acc: Int) -> Int {
   if (i >= hi) { return acc }
   return count_slots(parts, i + 1, hi, parts[i].kind == "t" ? acc : acc + 1)
+}
+
+fn cir_record(fs: List[InitN], i: Int, sc: List[Str], hostSc: List[Str],
+              insts: List[Inst], tenv: List[Bind], ln: Int, reqSet: List[Str],
+              acc: Str) -> IrRes {
+  if (i >= fs.length()) {
+    return mk_irres(true, "{\"kind\": \"record\", \"fields\": [".concat(acc).concat("]}"))
+  }
+  let v = cir_expr(fs[i].value, sc, hostSc, insts, tenv, ln, reqSet)
+  if (!v.ok) { return mk_irres(false, "") }
+  let e = "[".concat(jstr(fs[i].name)).concat(", ").concat(v.js).concat("]")
+  return cir_record(fs, i + 1, sc, hostSc, insts, tenv, ln, reqSet,
+                    acc == "" ? e : acc.concat(", ").concat(e))
 }
 
 fn cir_list(items: List[Expr], sc: List[Str], hostSc: List[Str], insts: List[Inst],
