@@ -56,11 +56,18 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    what revl actually does, and it fails `make formal`.
 4. report checker alignment: compile each file with the real checker
    (`revl.compiler.compile_files`, the path the CLI takes, so a `use`
-   resolves) and compare its refusal codes against
-   the formal verdicts. Informational, EXCEPT `missed-G4`, `missed-G2`,
-   `missed-A9` and `missed-A2` (`FATAL_BUCKETS`) — the checker refusing
-   where the model sees nothing is the dangerous direction and fails the
-   gate.
+   resolves) and compare its refusal codes against the formal verdicts.
+   Every DISAGREEING bucket is a gate failure (`FATAL_BUCKETS`): the
+   `missed-*` ones because the checker refusing where the model sees
+   nothing is the model being weaker than what revl enforces, and
+   `formal-strict` / `formal-found-other` because the model refusing what
+   revl accepts, or for a reason revl does not give, is a claim about a
+   different language than the one that ships (issue #1169). Only the
+   `agree-*` and `out-of-fragment*` buckets are informational.
+5. render the census and those buckets into `formal/STATUS.md` between the
+   `GENERATED alignment` markers, and fail the gate when the checked-in
+   block is not what this run produced. The document's "0 formal-strict"
+   is then this run's own output rather than a sentence somebody typed.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -76,6 +83,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 from typing import NamedTuple
 
@@ -3022,17 +3030,27 @@ def a9_coverage() -> list[str]:
     return findings
 
 
-# The buckets that are GATE FAILURES, not findings (item 418 step 7). All
-# are the DANGEROUS direction: the real checker REFUSES a file and the model
-# sees nothing wrong with it, so the model is weaker than what revl enforces
-# and the "the model agrees with the checker" claim would be false.
-# `formal-strict` — the model refusing what the checker accepts — stays
-# informational: it is the safe direction and names fragment gaps.
-# `missed-A9` (issues 1167 / #1172) is the same direction for the
-# provide-block rule: the checker refuses an undeclared block key or a
-# declared key nothing installs, and the model's A9 row says `ok`.
-# `missed-A2` (issue 1166): the checker's A2 refusal with the A2 row `ok`.
-FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-A9", "missed-A2")
+# The buckets that are GATE FAILURES, not findings (item 418 step 7).
+#
+# The `missed-*` half is the DANGEROUS direction: the real checker REFUSES a
+# file and the model sees nothing wrong with it, so the model is weaker than
+# what revl enforces and the "the model agrees with the checker" claim would
+# be false. `missed-A9` (issues 1167 / #1172) is that direction for the
+# provide-block rule, `missed-A2` (issue 1166) for the A2 ordering rule, and
+# `missed-G5` (issue #1169 F4) for a teardown crossing the `Prog` CAN resolve.
+#
+# `formal-strict` and `formal-found-other` were informational until issue
+# #1169, and that is how three files sat in them for a year: agreement failed
+# loudly, strictness did not, so nobody read them. They are the OTHER
+# direction — the model refusing what revl accepts (`formal-strict`), or
+# refusing a file revl refuses for a different reason (`formal-found-other`) —
+# and that direction is not harmless: a model stricter than the checker is a
+# model of a different language, and every theorem proved over it is proved
+# about that other language. Both are 0 on the corpus, so both are fatal; a
+# genuine fragment gap has `out-of-fragment*` to land in, which is the bucket
+# that says "the model has no fact here" rather than "the model disagrees".
+FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-G5", "missed-A9",
+                 "missed-A2", "formal-strict", "formal-found-other")
 
 
 def checker_code(rel: str) -> tuple[str, str]:
@@ -3056,8 +3074,69 @@ def checker_code(rel: str) -> tuple[str, str]:
         return (info.get("code") or "UNCODED"), (info.get("category") or "")
 
 
+#: The last `checker_alignment` run's buckets and per-bucket file lists, for
+#: the STATUS.md renderer. Filled by `checker_alignment`, read by
+#: `status_block`: the document's numbers are this run's own output, never a
+#: second count.
+_ALIGN: dict[str, int] = {}
+_ALIGN_SAMPLES: dict[str, list[str]] = {}
+#: `rel -> "U5" | "G"`, which witness carried a file into `agree-G5`.
+_G5_WITNESS: dict[str, str] = {}
+
+
+def g5_files_the_prog_resolves(tsv) -> set[str]:
+    """Corpus files carrying an effect statement whose `undo` the model's
+    `Prog` can RESOLVE, for the G5 arm of `checker_alignment`.
+
+    G5 is stated over a `Prog` — the extern table plus the fn call graph — so
+    the U5 row can only count a teardown crossing it reaches through a NAMED
+    fn or extern. An `undo w.task.run(...)` (a spawn handle), an
+    `undo store.drop()` (a host receiver), an `undo f()` (an arrow parameter)
+    and an `undo dispatch1(...)` whose `dispatch1` calls its own parameter all
+    leave the `Prog` at the first hop: the fold has no declaration to follow
+    and counts nothing. A zero there is the model having no fact, not the
+    model disagreeing, and filing it as `missed-G5` would red the gate over a
+    documented fragment boundary.
+
+    A statement is resolvable when some inverse head is a declared fn or
+    extern AND its whole transitive callee closure is declared too — exactly
+    the condition under which `_prog_reach`'s answer is a judgment rather than
+    a fail-open default. A file is resolvable when ANY of its effect
+    statements is, so a clean `undo store.drop()` beside a real
+    `undo wrap(...)` does not exempt the file.
+
+    Empty `tsv` (the no-toolchain tests call `checker_alignment` with the
+    verdicts alone) means no `Prog` facts at all, hence nothing resolvable —
+    the fail-closed reading for a caller that supplied no program."""
+    rows = [r.split("\t") for r in tsv]
+    externs: dict[str, dict[str, tuple[str, list[str]]]] = {}
+    fns: dict[str, dict[str, list[str]]] = {}
+    for r in rows:
+        if r[0] == "EX" and len(r) >= 7:
+            externs.setdefault(r[1], {})[r[2]] = (
+                r[3], [c for c in r[6].split(",") if c])
+        elif r[0] == "FN" and len(r) >= 5:
+            fns.setdefault(r[1], {})[r[2]] = [c for c in r[3].split(",") if c]
+    resolved: set[str] = set()
+    cache: dict[str, tuple[dict[str, set[str]], set[str]]] = {}
+    for r in rows:
+        if r[0] != "I" or len(r) < 7 or r[4] != "effect" or r[1] in resolved:
+            continue
+        rel = r[1]
+        if rel not in cache:
+            _caps, _crosses, names = _prog_reach(externs.get(rel, {}),
+                                                 fns.get(rel, {}))
+            cache[rel] = (names, set(externs.get(rel, {})) | set(fns.get(rel, {})))
+        names, declared = cache[rel]
+        for h in (x for x in r[6].split(",") if x):
+            if h in names and names[h] <= declared:
+                resolved.add(rel)
+                break
+    return resolved
+
+
 def checker_alignment(file_facts: dict, componentless: list[str],
-                      v: Verdicts) -> list[str]:
+                      v: Verdicts, tsv=()) -> list[str]:
     """Compile each file with the real checker and compare refusal codes
     against the formal verdicts. Returns the fatal-bucket findings.
 
@@ -3072,6 +3151,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     provision conflict, G3 self-provision and cycles) and are compared."""
     align: dict[str, int] = {}
     samples: dict[str, list[str]] = {}
+    _ALIGN.clear()
+    _ALIGN_SAMPLES.clear()
+    _G5_WITNESS.clear()
+    g5_resolved = g5_files_the_prog_resolves(tsv)
 
     def record(key: str, rel: str) -> None:
         align[key] = align.get(key, 0) + 1
@@ -3139,6 +3222,50 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             record("agree-A9" if a9_fail else "missed-A9", rel)
         elif code == "A2":
             record("agree-A2" if a2_found else "missed-A2", rel)
+        elif code == "G5":
+            # G5 (issue #1169 F4). The model sees a teardown crossing two
+            # ways, and the bucket says WHICH: the `U5` row counting a
+            # registration (the row the G5 guarantee is stated over), or the
+            # `G` row refusing the component outright — `undo w.task.run(...)`
+            # is an unmarked call to an `emission` method, so the marker rule
+            # reaches the same file by a different door.
+            u5_rows = [x for k, x in v.g5reg.items() if k[0] == rel]
+            comp_fail = any(x == "fail" for _, x in comp_rows)
+            if any(isinstance(x, int) and x > 0 for x in u5_rows):
+                record("agree-G5", rel)
+                _G5_WITNESS[rel] = "U5"
+            elif comp_fail:
+                record("agree-G5", rel)
+                _G5_WITNESS[rel] = "G"
+            elif rel not in g5_resolved:
+                # Every `undo` in the file leaves the `Prog` at the first hop
+                # (a handle, a host receiver, an arrow or a dispatched
+                # parameter), so the U5 row has no declaration to follow and
+                # its zero is an absence of fact. Named in full below, never
+                # counted silently.
+                record("out-of-fragment-G5" if formal_clean
+                       else "formal-found-other", rel)
+            else:
+                # The `undo` resolves inside the `Prog` and the fold still
+                # counted nothing: that IS the model being weaker than the
+                # checker, and fatal.
+                record("missed-G5", rel)
+        elif code == "G6":
+            # DELIBERATELY not an `agree-G6` on a `C` row fail, which is what
+            # issue #1169 F4 proposed. revl's G6 is "purity outside effect
+            # forms" and the duplicate-binding refusal (`diagnostics.py`); the
+            # model's `C` row is the issue-276 CONFINEMENT surface
+            # (`Oracle.confinedB`: every statement head root is a declared
+            # require local or require-held binding). They are different
+            # judgments about different things, and the `C` row `fail`s on a
+            # hundred-odd corpus files the checker ACCEPTS — a host root like
+            # `Map.new` is not a declared require, and STATUS.md says so. An
+            # agreement keyed on it could not fail, which is the informational
+            # bucket this issue is about, one level down. The model states no
+            # rule about purity outside an effect form or about a duplicate
+            # binding, so a G6 refusal is honestly outside its fragment.
+            record("out-of-fragment-G6" if formal_clean
+                   else "formal-found-other", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -3153,15 +3280,21 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     for rel in componentless:
         nm_codes.setdefault(checker_code(rel)[0], []).append(rel)
 
+    _ALIGN.update(align)
+    _ALIGN_SAMPLES.update(samples)
+
     total = sum(align.values())
-    print(f"checker alignment ({total} modeled files, informational except "
-          f"{'/'.join(FATAL_BUCKETS)}):")
-    for k in sorted(align):
-        mark = "  FATAL" if k in FATAL_BUCKETS and align[k] else ""
-        print(f"  {k:20} {align[k]}{mark}")
-    for k in ("formal-strict", "formal-found-other", *FATAL_BUCKETS):
+    print(f"checker alignment ({total} modeled files; every disagreeing "
+          f"bucket is FATAL: {'/'.join(FATAL_BUCKETS)}):")
+    for k in sorted(set(align) | set(FATAL_BUCKETS)):
+        n = align.get(k, 0)
+        mark = "  FATAL" if k in FATAL_BUCKETS and n else ""
+        print(f"  {k:20} {n}{mark}")
+    for k in (*FATAL_BUCKETS, "out-of-fragment-G5", "out-of-fragment-G6"):
         for rel in samples.get(k, []):
             print(f"  ALIGN {k}: {rel}")
+    for rel in samples.get("agree-G5", []):
+        print(f"  ALIGN agree-G5 via {_G5_WITNESS.get(rel, '?')}: {rel}")
 
     print(f"no-manifest ({len(componentless)} files parsed with no component, "
           f"outside the model's fragment):")
@@ -3185,6 +3318,141 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     print(f"  (complete list: {full.relative_to(FORMAL)})")
 
     return [f"{k}: {rel}" for k in FATAL_BUCKETS for rel in samples.get(k, [])]
+
+
+# --------------------------------------------- the census STATUS.md prints
+#
+# `formal/STATUS.md` used to STATE the census and the alignment buckets in
+# prose somebody typed after reading a gate run. It drifted, as prose does:
+# at issue #1169 the document claimed "0 formal-strict, 0 formal-found-other"
+# while the gate printed 1 and 2, and quoted 654 verdicts over 305 files while
+# the gate printed 4526 over 216. Nothing compared the two, so the claim was
+# unbacked in both directions at once.
+#
+# The block between these markers is now RENDERED from the same run that
+# prints the buckets, and `main` fails the gate when the checked-in text is
+# not what this run produced. Generating is what makes the drift impossible;
+# the check is what makes forgetting to regenerate loud.
+STATUS_PATH = FORMAL / "STATUS.md"
+STATUS_BEGIN = ("<!-- BEGIN GENERATED alignment: regenerate with "
+                "`python3 formal/harness/diff_corpus.py --write-status` -->")
+STATUS_END = "<!-- END GENERATED alignment -->"
+
+
+def status_block(census: dict, file_facts: dict, componentless: list[str],
+                 refusals: dict, ref: Verdicts, align: dict) -> str:
+    """The generated census + alignment section of `formal/STATUS.md`."""
+    parts = [
+        f"{len(ref.files)} files", f"{len(ref.comps)} components",
+        f"{len(ref.providers)} provide methods", f"{len(ref.spawns)} spawn edges",
+        f"{len(ref.refused)} parse refusals",
+        f"{len(ref.dispositions)} teardown scenarios",
+        f"{len(ref.recoveries)} recoveries",
+        f"{len(ref.confinements)} confinements", f"{len(ref.g8surface)} surfaces",
+        f"{len(ref.g5reg)} teardowns",
+        f"{len(ref.a9)} provide-clause components",
+        f"{len(ref.configs)} config fields", f"{len(ref.a2)} A2 bodies",
+    ]
+    def para(text: str) -> str:
+        # The document is hand-wrapped at 72; a generated block that is not
+        # would show up as a wall of diff noise every time the corpus grows.
+        # `break_on_hyphens` off, or `out-of-fragment*` splits mid-token and
+        # markdown stops reading the code span.
+        return textwrap.fill(" ".join(text.split()), width=72,
+                             break_on_hyphens=False, break_long_words=False)
+
+    lines = [
+        STATUS_BEGIN,
+        "",
+        para(
+            f"**{census['files']} .rvl files -> {census['components']} "
+            f"components -> {census['statements']} statements = "
+            f"{len(file_facts)} modeled + {len(componentless)} componentless "
+            f"+ {len(refusals)} refused at parse**, and **{ref.total()} "
+            f"verdicts compared ({' + '.join(parts)})**."),
+        "",
+        para(
+            f"Checker alignment over the {len(file_facts)} modeled files. "
+            "Every bucket recording a DISAGREEMENT fails the gate, in both "
+            "directions: `missed-*` is the model weaker than the checker, "
+            "`formal-strict` and `formal-found-other` are the model stricter "
+            "than the language that ships. `agree-*` and `out-of-fragment*` "
+            "are informational, and `out-of-fragment*` means the model has "
+            "no fact about the rule the checker refused under, not that it "
+            "disagrees."),
+        "",
+        "| bucket | files | gate |",
+        "| --- | --- | --- |",
+    ]
+    for k in sorted(set(align) | set(FATAL_BUCKETS)):
+        gate = "**FATAL**" if k in FATAL_BUCKETS else "informational"
+        lines.append(f"| `{k}` | {align.get(k, 0)} | {gate} |")
+    lines.append("")
+    named = [(k, rel)
+             for k in ("out-of-fragment-G5", "out-of-fragment-G6",
+                       *FATAL_BUCKETS)
+             for rel in sorted(_ALIGN_SAMPLES.get(k, []))]
+    if named:
+        lines.append(para("Nothing is counted without being named; the files "
+                          "in the non-`agree` buckets are:"))
+        lines.append("")
+        for k, rel in named:
+            lines.append(f"- `{k}`: `{rel}`")
+        lines.append("")
+    if _G5_WITNESS:
+        lines.append(para(
+            "`agree-G5` says which row saw the crossing: the `U5` "
+            "registration count, or the `G` row refusing the component "
+            "through the marker rule."))
+        lines.append("")
+        for rel in sorted(_G5_WITNESS):
+            lines.append(f"- `{_G5_WITNESS[rel]}`: `{rel}`")
+        lines.append("")
+    lines.append(STATUS_END)
+    return "\n".join(lines)
+
+
+def sync_status(block: str, write: bool) -> str | None:
+    """Compare the generated block against `formal/STATUS.md`, rewriting it
+    when `write`. Returns a gate-failure string on drift, else `None`."""
+    text = STATUS_PATH.read_text(encoding="utf-8")
+    if STATUS_BEGIN not in text or STATUS_END not in text:
+        return (f"formal/STATUS.md has no {STATUS_BEGIN!r} .. {STATUS_END!r} "
+                "block to hold the generated census")
+    head, rest = text.split(STATUS_BEGIN, 1)
+    _old, tail = rest.split(STATUS_END, 1)
+    current = STATUS_BEGIN + _old + STATUS_END
+    if current == block:
+        return None
+    if write:
+        STATUS_PATH.write_text(head + block + tail, encoding="utf-8")
+        print("formal/STATUS.md: generated alignment block rewritten")
+        return None
+    return ("formal/STATUS.md's generated census is not what this run "
+            "produced — rerun `python3 formal/harness/diff_corpus.py "
+            "--write-status` and commit the result")
+
+
+def write_status() -> int:
+    """`--write-status`: regenerate the block without the Lean toolchain.
+
+    The alignment arms read verdicts, and the gate's own differential proves
+    the reference and the oracle produce the SAME ones, so the reference side
+    alone is enough to render the document. A divergence between them is not
+    a STATUS.md question; it fails `main` long before this."""
+    tsv, file_facts, census = export()
+    if not tsv:
+        print("nothing extracted — nothing to write")
+        return 1
+    ref = reference_from_tsv(tsv)
+    checker_alignment(file_facts, census["componentless"], ref, tsv)
+    block = status_block(census, file_facts, census["componentless"],
+                         census["refusals"], ref, _ALIGN)
+    problem = sync_status(block, write=True)
+    if problem:
+        print(f"  GATE-FAILURE {problem}")
+        return 1
+    return 0
 
 
 def main() -> int:
@@ -3272,11 +3540,16 @@ def main() -> int:
     if len(mismatches) > 10:
         print(f"  ... and {len(mismatches) - 10} more")
 
-    fatal = checker_alignment(file_facts, componentless, formal)
+    fatal = checker_alignment(file_facts, componentless, formal, tsv)
+    drift = sync_status(
+        status_block(census, file_facts, componentless, refusals, ref, _ALIGN),
+        write=False)
+    if drift:
+        fatal.append(drift)
     for f in fatal:
         print(f"  GATE-FAILURE {f}")
     return 1 if (mismatches or fatal) else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(write_status() if "--write-status" in sys.argv[1:] else main())
