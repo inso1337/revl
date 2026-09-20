@@ -231,7 +231,11 @@ class WorkingTreeView(TreeView):
             return None
         names = {line for line in tracked.splitlines() if line}
         names |= {line for line in untracked.splitlines() if line}
-        return tuple(sorted(names))
+        # `git ls-files` lists the INDEX. A document the candidate deleted is
+        # still in it, and counting it would hide exactly the corpus deletion
+        # the universe exists to catch, so the walk is filtered to what is on
+        # disk: the tree the trajectory actually produced.
+        return tuple(sorted(n for n in names if (self.tree / n).is_file()))
 
     def materialise(self, path: str, into: Path) -> Path | None:
         target = self.tree / path
