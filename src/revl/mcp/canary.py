@@ -15,6 +15,18 @@ rather than reinventing it.
     the second provider is legal precisely because it is somewhere else.
     Selection is `placement.slice_partition`.
 
+  * **The authority diff is a PRECONDITION of the comparison, not a stage
+    beside it (item 543, issue #1222).** A canary decides on what its slice
+    exhibits, and capability reach and taint edges are static properties of the
+    program, so the rare path that widens them is exactly the one the slice
+    does not take. `judge_authority` therefore runs before the timelines are
+    built: a candidate that widens the G8 boundary surface is refused by name
+    and its divergence result is never computed, so there is no expression in
+    this module in which a clean comparison and a widened reach both appear.
+    The diff is `src/revl/audit_diff.py`'s, the tree's existing
+    authority-drift gate, reused the way `promote_admission` reuses
+    `placement.swap_admission`.
+
   * **Divergence is a replay comparison, not a metric.** Both generations'
     activations are recorded *worlds* — ordered timelines of effects,
     provisions and boundary crossings (docs/replay.md), the same `replay.Step`
@@ -330,6 +342,150 @@ def revert(ir: dict, realm: str, *, prove_residue: bool = True) -> dict:
     }
 
 
+# ------------------------------------------- the authority precondition (543)
+
+#: Which authority axis each of `audit_diff`'s drift buckets belongs to. The
+#: axis names are `promotion_barrier.AUTHORITY_AXES`, so a canary's authority
+#: verdict is readable by the other promotion paths in the tree rather than
+#: being a fourth private vocabulary.
+_AXIS_OF_BUCKET = {
+    "capability": ("host_added", "scope_widened", "backends_added"),
+    "taint": ("emit_added",),
+    "realm": ("reach_weakened",),
+    "budget": ("cardinality_widened",),
+    "retention": ("retention_added",),
+}
+
+
+def _retention_added(prev: dict, new: dict) -> list:
+    """Retention rows in `new` and not in `prev`, as stable tokens.
+
+    `resources.retention_surface` is one row per declared position where a
+    resource handle leaves revl's sight, sorted so the surface is diffable
+    (its own words). `audit_diff` reports the surface and compares no two of
+    them, so this is the additions-only read, in the direction every other
+    bucket takes: a new position where a handle escapes is a retention
+    authority gained, and a position that disappeared gave one up.
+    """
+    def _tokens(audit):
+        out = set()
+        for row in audit.get("retention") or []:
+            if not isinstance(row, dict):
+                continue
+            out.add("retention:{}:{}:{}:{}".format(
+                row.get("kind"), row.get("callee"), row.get("param"),
+                row.get("resource")))
+        return out
+
+    return sorted(_tokens(new) - _tokens(prev))
+
+
+def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
+    """The authority diff between two generations, per
+    `promotion_barrier.AUTHORITY_AXES`.
+
+    Every number here comes from `src/revl/audit_diff.py`, the tree's existing
+    authority-drift gate, in the same way `promote_admission` reuses
+    `placement.swap_admission` rather than writing a second admission check.
+    The buckets map onto the axes as follows:
+
+      capability   a new `host:` crossing, a widened per-emission capability
+                   scope, or a host body appearing on a backend it was not on
+      taint        a new `emit:` crossing, which is a new boundary edge out
+      realm        a reach bound that loosened or moved (`confined(T)` to
+                   `unconfined`, or to a different bound)
+      budget       a per-capability emission ceiling that widened, including
+                   a bounded count becoming `unbounded`
+      retention    a new declared position where a resource handle leaves
+                   revl's sight (`resources.retention_surface`)
+
+    All five axes of `promotion_barrier.AUTHORITY_AXES` are measured, and the
+    return says which: an axis this function could not compare would be named
+    in `unmeasured`, and `judge_authority` refuses on `unmeasured` exactly as
+    it refuses on a non-empty axis. An axis nobody compared is not an axis that
+    came back empty, and keeping those two apart is what the barrier is for.
+    """
+    from ..audit_diff import (  # noqa: PLC0415 - read-only reuse
+        audit_report, diff_backends, diff_capability_scopes, diff_cardinality,
+        diff_crossings)
+    from ..promotion_barrier import AUTHORITY_AXES  # noqa: PLC0415
+
+    prev, new = audit_report(running_ir), audit_report(candidate_ir)
+    delta = diff_crossings(prev, new)
+    buckets = {
+        "host_added": sorted(c for c in delta["added"] if c.startswith("host:")),
+        "emit_added": sorted(c for c in delta["added"] if c.startswith("emit:")),
+        "reach_weakened": list(delta["reach_weakened"]),
+        "scope_widened": list(diff_capability_scopes(prev, new)["scope_widened"]),
+        "backends_added": list(diff_backends(prev, new)["backends_added"]),
+        "cardinality_widened": list(
+            diff_cardinality(prev, new)["cardinality_widened"]),
+        "retention_added": _retention_added(prev, new),
+    }
+    diff = {axis: sorted(t for bucket in names for t in buckets[bucket])
+            for axis, names in _AXIS_OF_BUCKET.items()}
+    unmeasured = sorted(set(AUTHORITY_AXES) - set(diff))
+    return {"diff": diff, "unmeasured": unmeasured, "buckets": buckets,
+            "gate": "src/revl/audit_diff.py (the G8 boundary surface) plus "
+                    "resources.retention_surface"}
+
+
+def judge_authority(running_ir: dict, candidate_ir: dict) -> dict:
+    """The canary's authority precondition. Item 543, issue #1222.
+
+    A canary serves a designated slice and compares the two generations'
+    recorded worlds. That comparison is an account of the paths the slice's
+    own provider takes, and capability reach and taint edges are STATIC
+    properties of the program, so the rare path that widens them is exactly the
+    one the slice does not exhibit. `run_canary` therefore asks this question
+    BEFORE it forms a recommendation, and the recommendation it forms when the
+    answer is "widened" does not depend on the divergence comparison at all.
+
+    Fail-closed. A generation whose audit cannot be built has not been shown to
+    keep its authority, so it is refused rather than compared.
+    """
+    from ..promotion_barrier import authority_moved  # noqa: PLC0415
+
+    try:
+        measured = authority_diff(running_ir, candidate_ir)
+    except Exception as error:  # noqa: BLE001 - fail-closed, never fail-open
+        return {
+            "ok": False, "widened": True, "moved": ["capability", "taint"],
+            "unmeasured": ["budget", "capability", "realm", "retention", "taint"],
+            "link": "authority-unmeasured",
+            "reason": f"the authority diff could not be built "
+                      f"({type(error).__name__}: {error}), so the candidate has "
+                      f"not been shown to keep the incumbent's authority. An "
+                      f"unmeasured axis is refused, never read as empty",
+        }
+    # The fail-closed reading, over the CANONICAL axis set and not over the
+    # keys this function happened to produce. An axis missing from the diff is
+    # therefore `moved`, which is the point: a gate that walked only its own
+    # keys could never notice that it had stopped measuring one.
+    moved, why = authority_moved(measured["diff"])
+    if not moved:
+        return {"ok": True, "widened": False, "moved": [],
+                "unmeasured": measured["unmeasured"], "diff": measured["diff"],
+                "gate": measured["gate"],
+                "reason": "the G8 boundary surface is unchanged on every axis "
+                          "this gate measures"}
+    named = "; ".join(f"{axis}: {', '.join(measured['diff'][axis])}"
+                      for axis in moved if measured["diff"][axis])
+    return {
+        "ok": False, "widened": True, "moved": moved,
+        "unmeasured": measured["unmeasured"], "diff": measured["diff"],
+        "gate": measured["gate"],
+        "link": "authority-widened",
+        "reason": f"the candidate widens authority on {', '.join(moved)} "
+                  f"({named or why}). Capability reach and taint edges are "
+                  f"static properties of the program and a canary measures the "
+                  f"paths its slice happens to take, so no divergence result, "
+                  f"however clean, is evidence about the path that widens "
+                  f"reach. The slice may not be promoted on it (item 543, "
+                  f"issue #1222)",
+    }
+
+
 # ------------------------------------------------------ promote (= swap)
 
 def promote_admission(files, running_ir: dict, remainder_providers: dict,
@@ -411,6 +567,28 @@ def run_canary(running_ir: dict, candidate_files=None, candidate_source=None,
                 "admitted": False,
                 "error": f"candidate refused by the admission gate: {error}"}
 
+    # ------------------------------------------------------------- BARRIER
+    # Item 543 (issue #1222). The authority diff gates ENTRY to the comparison
+    # rather than being weighed beside it, so this runs BEFORE the timelines
+    # are built and the refusal below returns before `divergence` exists. A
+    # widened candidate's divergence result is not weighed against anything
+    # here and is not reported as reassurance: it is never computed.
+    authority = judge_authority(running_ir, candidate_ir)
+    if not authority["ok"]:
+        return {
+            "ok": True, "kind": CANARY_KIND, "schema_version": CANARY_VERSION,
+            "realm": realm, "provider": provider, "admitted": True,
+            "slice": {
+                "providers": slice_.providers,
+                "members": slice_.members,
+                "remainderRealms": slice_.remainder_realms,
+            },
+            "authority": authority,
+            "divergenceRead": False,
+            "recommendation": "refuse",
+            "rationale": authority["reason"],
+        }
+
     baseline_tl = slice_timeline(running_ir, provider)
     candidate_tl = slice_timeline(candidate_ir, provider)
     divergence = compare_timelines(baseline_tl, candidate_tl)
@@ -447,6 +625,8 @@ def run_canary(running_ir: dict, candidate_files=None, candidate_source=None,
             "members": slice_.members,
             "remainderRealms": slice_.remainder_realms,
         },
+        "authority": authority,
+        "divergenceRead": True,
         "divergence": divergence,
         "revert": revert_report,
         "promote": promote,
@@ -477,6 +657,25 @@ def render(report: dict) -> str:
     rem = report["slice"]["remainderRealms"]
     out.append("  remainder realms (promote swaps these): "
                + (", ".join(rem) or "none"))
+
+    auth = report.get("authority") or {}
+    out.append("")
+    if not auth.get("ok", True):
+        # The barrier's own rendering. There is no divergence line because
+        # there is no divergence result: the comparison was never run, and the
+        # report says so rather than leaving a reader to infer it.
+        out.append(f"  [AUTHORITY WIDENED] on {', '.join(auth.get('moved') or [])}")
+        for axis in auth.get("moved") or []:
+            for token in (auth.get("diff") or {}).get(axis) or []:
+                out.append(f"      + {axis}: {token}")
+        out.append(f"      {auth.get('reason')}")
+        out.append("")
+        out.append("  [DIVERGENCE] not read. The authority diff is a "
+                   "precondition of the comparison, not a stage beside it, so "
+                   "no measured result was consulted (item 543, issue #1222).")
+        out.append("")
+        out.append("  RECOMMENDATION: refuse")
+        return "\n".join(out)
 
     div = report["divergence"]
     out.append("")

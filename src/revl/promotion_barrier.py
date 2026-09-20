@@ -378,12 +378,11 @@ _CANARY = PromotionPath(
     stages=("slice", "admit", "authority", "divergence", "revert"),
     measured=("divergence",),
     authority="authority",
-    covers=("capability", "taint", "realm", "budget"),
-    uncovered=("retention",),
+    covers=("capability", "taint", "realm", "budget", "retention"),
     note="the authority diff is `audit_diff`'s, over the G8 boundary surface "
-         "of the whole composition; retention rows are reported by the audit "
-         "and have no differ, so the axis is named as not covered rather than "
-         "counted as clean",
+         "of the whole composition, plus an additions-only read of "
+         "`resources.retention_surface` for the axis `audit_diff` reports and "
+         "does not compare",
 )
 
 REGISTRY = (_CANARY, _CONTROLLER, _SHADOW)
