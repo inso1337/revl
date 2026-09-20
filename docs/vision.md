@@ -34,13 +34,23 @@ than to raw native code (DESIGN.md §8 explains why native is deliberately not
 first — the paradigm's hardest requirement is reclaiming everything a
 component owned, which `dlopen`/`dlclose` cannot promise):
 
-| tier | runtime | what it proves |
-|---|---|---|
-| reference | cordis-py | the semantics + the checker, on a runtime whose paper-conformance suite doubles as ours |
-| portability | cordis (TypeScript, v4) | the same IR runs unchanged on a second host |
-| performance + enforcement | cordis-wasm | confinement becomes physical (sandbox), instances drop cleanly |
-| spikes | cordis-rs (Rust), cordis4j (Java) | the backend contract is small enough to target any Cordis runtime |
-| third-party runtime | cordis-go (Go) | the same contract holds for a Cordis runtime nobody on the project wrote ([stc-go](https://github.com/0xdenny218/stc-go)) |
+The `conformance today` column is **generated**, not written: it is the
+per-tier totals of the conformance register, which also generate the matrix in
+[conformance.md](conformance.md). `ok` is a construct the emitter produces,
+`limit` a deliberate tier limit, `gap` a construct the emitter has no case for.
+A guarantee that moves between those three moves this table too. Regenerate it
+with `make docs-gen`; never edit the block by hand.
+
+<!-- docgen:vision-tiers begin -->
+| runtime | tier | conformance today | what it proves |
+|---|---|---|---|
+| cordis-py | reference | 61 ok / 0 limit / 0 gap | the semantics + the checker, on a runtime whose paper-conformance suite doubles as ours |
+| cordis (TypeScript, v4) | portability | 61 ok / 0 limit / 0 gap | the same IR runs unchanged on a second host |
+| cordis-rs (Rust) | spike | 61 ok / 0 limit / 0 gap | the backend contract is small enough to target any Cordis runtime |
+| cordis4j (Java) | spike | 60 ok / 1 limit / 0 gap | the same contract, on a second spike nobody optimised for |
+| cordis-wasm | performance + enforcement | 51 ok / 10 limit / 0 gap | confinement becomes physical (sandbox), instances drop cleanly |
+| cordis-go (Go) | third-party runtime | 61 ok / 0 limit / 0 gap | the same contract holds for a Cordis runtime nobody on the project wrote ([stc-go](https://github.com/0xdenny218/stc-go)) |
+<!-- docgen:vision-tiers end -->
 
 One `.rvl` source, one IR, six emitters. The [2.0 roadmap](v2.0-roadmap.md)
 tracks per-tier coverage.
@@ -56,6 +66,17 @@ a command or it gets softened:
 | cordis-rs, cordis4j | `pytest backends/rust/test_emit_rust.py backends/java/test_emit_java.py -q` | needs cargo + a JDK; skips loudly otherwise |
 | cordis-go | `pytest backends/go/test_emit_go.py -q` | emitted code executes on real stc-go under `go test`; skips loudly otherwise |
 | the formal backbone | `make formal` (`sh formal/scripts/run_gate.sh`) | Lean 4: `formal/`, a layering gate plus an axioms gate (no `sorry`, no project-defined axiom). G2, G3 and G7 are `full` and oracle-checked against the shipped checker; G1 and G6 are `partial`, and G9's coverage is the one UNPROVED row. `formal/STATUS.md` is the per-theorem ledger, and it names each gap. Runs as CI's `formal` job |
+
+Those commands are themselves resolved against the tree, by
+`python3 tools/check_vision_claims.py` in CI's required `lint` job: the
+directory a `cd` names, the files a `pytest` line lists, the `make` target, the
+script a `sh` line runs and the package an `npx` tool comes from all have to
+still be here, so a rename or a move reds rather than rotting. The same tool
+resolves this file's links and backticked paths, and re-checks the generated
+tier table above. It does not RUN the commands, deliberately: the suites they
+name are required CI jobs already, and a `lint` job that provisioned cargo, a
+JDK, Go, node, wasmtime and elan to re-buy that answer would be narrowed the
+first time it got slow. CI runs them; this keeps them pointing at something.
 
 What every tier can and cannot *express* is measured by
 `python3 tools/conformance.py` and recorded in
