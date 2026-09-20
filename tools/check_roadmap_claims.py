@@ -31,9 +31,12 @@ is not, and it is the shape the roadmap uses most.
           `_v3_self_rebind_locals` is still cited at `backends/go/emit.py`
           and has lived in `src/revl/ownership.py` since item 445 shared it.
 
-  path    A `path:line` citation resolves to a file that exists. Only the file
-          half is judged. Line numbers drift under every edit and a drifted
-          line is not a false claim about the tree, it is a stale coordinate.
+  path    A cited repository path resolves to a file that exists, in either
+          of the two shapes the roadmap writes. `path:line`, where only the
+          file half is judged: line numbers drift under every edit and a
+          drifted line is not a false claim about the tree, it is a stale
+          coordinate. And a BARE backticked `path`, judged when the citation
+          is about THIS repository by the test in the next paragraph.
 
   absent  A SCOPED absence claim is actually true: "`path` has no `sym`" and
           "`sym` is absent from `container`". Scoped is the whole point; see
@@ -70,11 +73,35 @@ WHAT IS SKIPPED, ON PURPOSE.
   over `git ls-files`; when several files match, the claim PASSES if any one
   of them satisfies it. A path containing `...` is not judged at all.
 
-  Hypothetical paths. The roadmap writes example user projects
-  (`src/components/agent.rvl`, `./types.ts`, `root/app.rvl`). Backticked paths
-  are therefore never judged on their own — only as the anchor of a `symbol`
-  claim or with a `:line` attached, both of which are citation shapes a
-  hypothetical never takes.
+  Hypothetical and foreign paths, BY A RULE. The roadmap writes example user
+  projects (`src/components/agent.rvl`, `./types.ts`, `root/app.rvl`) and
+  cites sibling repositories (revl-harness' `tools/web_server.py`) in the same
+  backticks it cites this tree with. Until 2026-09-20 a bare backticked path
+  was therefore not collected at all, which exempted every citation that never
+  carried a line number: 421 distinct bare paths against 77 with a `:line`,
+  and 25 of the 421 resolving to nothing. Not looking is not a rule, and it
+  was how the roadmap came to name `tools/gate_verdict_parity.py` as machinery
+  "here" for a file that has never existed (issue #1233).
+
+  The rule that replaced it asks whether the citation points INTO A DIRECTORY
+  THIS REPOSITORY POPULATES WITH FILES OF THAT KIND. `tools/` holds 32 tracked
+  `.py` files, so `tools/gate_verdict_parity.py` is a claim about this tree and
+  is judged. `root/app.rvl`, `mtier/agent.rvl`, `wasm/service.rvl` and
+  `packages/host/plugin-inventory/src/index.ts` name directories this
+  repository does not have; `src/manifest.rvl` names one it has only as a
+  parent of other directories, holding no file of its own. A path spelled
+  relative to the reader (`./types.ts`, `../lib/x.rvl`) is never repo-relative
+  and is not judged either. Measured against the roadmap on 2026-09-20 the
+  rule judges 396 of the 421 bare paths and leaves 25 alone, and the 25 it
+  leaves are exactly the ones that resolve to nothing because they were never
+  about this tree.
+
+  The limit is worth saying out loud: a stale citation into a directory that
+  ALSO no longer exists (`tools/gone/x.py`) is not judged. The rule buys the
+  common case — a file renamed or never written under a directory that stays —
+  and refuses to guess at the rest. A citation this repository really owns
+  that the rule declines can be given a `:line`, which is judged
+  unconditionally.
 
 THE ALLOW-LIST. `tools/roadmap_claim_allowlist.json` holds citations that are
 genuinely unresolvable in this tree: a file that belongs to a sibling repo, a
@@ -144,6 +171,12 @@ BARE_TEST_RE = re.compile(r"`(test_[A-Za-z0-9_]+)`")
 # `path:line` and `path:line-line`.
 PATH_LINE_RE = re.compile(r"(?P<path>" + PATH + r"):(?P<line>\d+(?:-\d+)?)")
 
+# A backticked path and NOTHING else inside the ticks. The backticks are what
+# make it a citation rather than a word inside a sentence, and anchoring both
+# ends is what keeps `path:line` out of this shape: the `:line` sits before the
+# closing tick, so the two collectors never see the same token.
+BARE_PATH_RE = re.compile(r"`(?P<path>" + PATH + r")`")
+
 # The four pairings that cite a symbol together with the file it lives in.
 # Each entry is (compiled regex, symbol group, path group).
 SYMBOL_SITE_RES = (
@@ -173,13 +206,20 @@ ABSENT_RES = (
 # back out, because both are ordinary roadmap vocabulary ("rather than dropped
 # from the corpus") and each one silenced a citation that is genuinely stale.
 # A cue earns its place by naming the CITED ARTIFACT's own lifecycle.
+#
+# `never existed` joined on 2026-09-20 with the bare-path rule (issue #1233).
+# A roadmap that records a citation to a file which turned out never to have
+# been written has to spell the file to say so, and the sentence doing the
+# recording is the LAST one a citation gate should red. Measured before it was
+# added: it suppresses nothing in the roadmap on main (path stays at 408
+# claims) and nothing in any other rule, so it costs no coverage at all.
 HISTORY_RE = re.compile(
     r"""(
           \brenamed\b | \brename[sd]?\s+to\b
         | \bdelet(?:e|es|ed|ing|ion)\b
         | \bsuperseded\b | \breplaced\s+by\b | \bin\s+its\s+place\b
         | \bused\s+to\b | \bformerly\b | \bpreviously\b
-        | \bno\s+longer\s+exists\b
+        | \bno\s+longer\s+exists\b | \bnever\s+existed\b
         | \bwas\s+the\s+name\b | \bold\s+name\b
     )""",
     re.IGNORECASE | re.VERBOSE,
@@ -204,6 +244,13 @@ class Tree:
             parts = rel.split("/")
             for i in range(len(parts)):
                 self._by_suffix.setdefault("/".join(parts[i:]), []).append(rel)
+        # The extensions each directory holds DIRECTLY. `src` maps to the empty
+        # set: it carries `src/revl/...` and no file of its own, which is what
+        # tells `src/manifest.rvl` apart from `tools/docgen.py`.
+        self._dir_exts: Dict[str, Set[str]] = {}
+        for rel in self.files:
+            directory, _, base = rel.rpartition("/")
+            self._dir_exts.setdefault(directory, set()).add(_ext(base))
         self._text: Dict[str, str] = {}
 
     @classmethod
@@ -234,6 +281,14 @@ class Tree:
         if cited in self._by_suffix and cited in set(self.files):
             return [cited]
         return list(self._by_suffix.get(cited, ()))
+
+    def populates(self, directory: str, ext: str) -> bool:
+        """Does this repository hold a tracked `.ext` file directly in that
+        directory? This is the whole of the bare-path judgement rule: it asks
+        whether the citation points somewhere this tree really keeps files of
+        that kind, which a hypothetical user project and a sibling repository
+        both fail."""
+        return ext in self._dir_exts.get(directory, frozenset())
 
     def defines_test(self, name: str) -> bool:
         pat = re.compile(r"^\s*(?:async\s+)?def\s+" + re.escape(name) + r"\b", re.M)
@@ -273,6 +328,28 @@ def _line_of(source: str, index: int) -> int:
     return source.count("\n", 0, index) + 1
 
 
+def _ext(name: str) -> str:
+    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def _cites_this_tree(path: str, tree: Tree) -> bool:
+    """Is a BARE backticked path a claim about this repository?
+
+    Two ways to say no, both of them about the citation's own spelling rather
+    than about whether the file happens to be missing:
+
+      * it is spelled relative to the reader (`./types.ts`, `../lib/x.rvl`),
+        which is never how this repository's own files are cited; or
+      * its directory is not one this repository populates with files of that
+        kind, which is what every hypothetical user project and every
+        sibling-repo citation measured on 2026-09-20 has in common.
+    """
+    if path.startswith("./") or path.startswith("../"):
+        return False
+    directory, _, base = path.rpartition("/")
+    return tree.populates(directory, _ext(base))
+
+
 def _elided(path: str) -> bool:
     """`go/.../bridge.go` drops a middle segment. No lookup can honestly expand
     it, so it is not judged and not counted in the denominator either."""
@@ -285,7 +362,7 @@ def _is_historical(source: str, index: int) -> bool:
     return bool(HISTORY_RE.search(source[lo:hi]))
 
 
-def collect_test_claims(source: str) -> List[Claim]:
+def collect_test_claims(source: str, tree: Tree) -> List[Claim]:
     claims: List[Claim] = []
     seen: Set[str] = set()
     for m in NODE_ID_RE.finditer(source):
@@ -315,7 +392,7 @@ def collect_test_claims(source: str) -> List[Claim]:
     return claims
 
 
-def collect_symbol_claims(source: str) -> List[Claim]:
+def collect_symbol_claims(source: str, tree: Tree) -> List[Claim]:
     claims: List[Claim] = []
     seen: Set[str] = set()
     for pattern, sym_group, path_group in SYMBOL_SITE_RES:
@@ -333,23 +410,37 @@ def collect_symbol_claims(source: str) -> List[Claim]:
     return claims
 
 
-def collect_path_claims(source: str) -> List[Claim]:
+def collect_path_claims(source: str, tree: Tree) -> List[Claim]:
+    """Both citation shapes, in the order the gate learned them.
+
+    `path:line` is judged unconditionally: attaching a line number to a path is
+    something only a citation into a real tree does. A bare backticked path is
+    judged when `_cites_this_tree` says the spelling is a claim about this
+    repository; otherwise it is not collected, so it is not in the denominator
+    either and the reported count stays a count of claims that were RESOLVED.
+    """
     claims: List[Claim] = []
     seen: Set[str] = set()
-    for m in PATH_LINE_RE.finditer(source):
-        path = m.group("path")
-        if _elided(path):
-            continue
-        if _is_historical(source, m.start()):
-            continue
-        if path in seen:
-            continue
+
+    def add(path: str, index: int, text: str) -> None:
+        if _elided(path) or path in seen:
+            return
+        if _is_historical(source, index):
+            return
         seen.add(path)
-        claims.append(Claim("path", path, _line_of(source, m.start()), m.group(0)))
+        claims.append(Claim("path", path, _line_of(source, index), text))
+
+    for m in PATH_LINE_RE.finditer(source):
+        add(m.group("path"), m.start(), m.group(0))
+    for m in BARE_PATH_RE.finditer(source):
+        path = m.group("path")
+        if not _cites_this_tree(path, tree):
+            continue
+        add(path, m.start(), m.group(0))
     return claims
 
 
-def collect_absent_claims(source: str) -> List[Claim]:
+def collect_absent_claims(source: str, tree: Tree) -> List[Claim]:
     claims: List[Claim] = []
     seen: Set[str] = set()
     for pattern in ABSENT_RES:
@@ -478,7 +569,7 @@ def run(
     denominator: Dict[str, int] = {}
     findings: List[Tuple[Claim, str]] = []
     for rule in rules:
-        claims = COLLECTORS[rule](source)
+        claims = COLLECTORS[rule](source, tree)
         denominator[rule] = len(claims)
         for claim in claims:
             verdict = JUDGES[rule](claim, tree)
