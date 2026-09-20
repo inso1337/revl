@@ -20972,3 +20972,286 @@ component C provides out: M {
   provide out { fn go(model) = model }
 }""") == ""
 }
+
+// --------------------------------------------------- model councils (item 516)
+//
+// `docs/design/543-model-council.md`, the declaration slice. Every program here
+// rides through the differential oracle in `tests/test_selfhost_lower.py`
+// (`test_in_file_test_programs_agree`), so a message eyeballed in this file
+// cannot drift from the reference's.
+
+test "a council of three placed members with a written aggregation admits" {
+  let v = admit_src("""model role edge on_device
+model role local2 on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  verifier -> local2,
+  aggregate unanimous
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+  // the two optional clauses, written with their admitted values, and the
+  // `;` separator the reference also allows.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast; adversary -> edge;
+  aggregate majority quorum declared on_tie deny }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == ""
+}
+
+test "an aggregation that admits on a tie is refused by name" {
+  // roadmap item 516's exit test: the spelling PARSES so that the refusal can
+  // give the reason, and the tag is COUNCIL rather than the generic top-level
+  // parse marker this gate answered before the port.
+  let v = admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie allow
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "COUNCIL|`on_tie allow` in model council `Release` admits when the members disagree"
+  assert admit_tag("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie allow
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL"
+}
+
+test "a rule that picks one member's answer is refused, and so is a typo" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate first }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimus }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown aggregation rule `unanimus` in model council `Release`"
+}
+
+test "the floor is counted over the declared members, never the answering set" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate majority quorum answered
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`quorum answered` in model council `Release` counts the rule's floor over the members that answered"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate majority quorum declaired
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown quorum basis `declaired` in model council `Release`"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie splitt
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown tie outcome `splitt` in model council `Release`"
+}
+
+test "a council is several models, each with its own placement" {
+  // the four member rules, in the reference's own order: the function
+  // vocabulary, one member per function, the role's existence, one member per
+  // role. Each names the EARLIER member, which is what makes the diagnostic
+  // actionable.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, critic -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown council function `critic` in model council `Release`"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, proposer -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|council function `proposer` is declared twice in model council `Release` (first on line 3, as `vast`)"
+  assert admit_src("""model role edge on_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|member `proposer` of model council `Release` names model role `vast`, which is not declared"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> edge, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|members `proposer` and `adversary` of model council `Release` are both placed on model role `edge`"
+}
+
+test "one member wearing a council's name is refused, and so is no proposer" {
+  assert admit_src("""model role vast off_device
+model council Release { proposer -> vast, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares 1 member"
+  assert admit_src("""model role vast off_device
+model council Release { aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares 0 members"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { adversary -> vast, verifier -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares no `proposer`"
+}
+
+test "a council declares exactly one aggregation, written down" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares no `aggregate` rule"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous,
+  aggregate majority
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares two `aggregate` rules (`unanimous` on line 6, `majority` here)"
+}
+
+test "`veto` needs the adversary it is the veto of" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, verifier -> edge, aggregate veto }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`aggregate veto` in model council `Release`, which declares no `adversary`"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate veto }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == ""
+}
+
+test "a council has one name, and it is not a role's" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+model council Release { proposer -> edge, adversary -> vast, aggregate majority }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` is declared twice (first on line 3)"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council edge { proposer -> vast, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `edge` has the name of the model role declared on line 1"
+}
+
+test "the role table is decided before any council indexes it" {
+  // `check_and_lower` runs `model_route.check` (which calls `roles()`) before
+  // `model_council.check`, so a malformed role table is refused as a PLACEMENT
+  // and not as a council that names an undeclared member.
+  let v = admit_src("""model role edge on_devise
+model council Release { proposer -> edge, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|unknown residence `on_devise` for model role `edge`"
+}
+
+test "a council leaves the rest of the document checked, and `council` is a name" {
+  // the gap this port closes, measured from the other side: before it the
+  // whole document failed at its top-level parse, so the G1 below was never
+  // reached. And the contextual-keyword claim: `council` alone is still an
+  // ordinary identifier.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component C provides api: Api {
+  provide api { fn go(k) { return kv.get(k) } }
+}""") == "G1|`kv` is not a declared requirement of C"
+  assert admit_src("""service M { fn go(council: Str) -> Str }
+component C provides out: M {
+  provide out { fn go(council) = council }
+}""") == ""
+}
+
+test "a council and a route model block are decided in the same compilation" {
+  let v = admit_src("""model role local on_device
+model role cloud off_device
+model council Release { proposer -> cloud, adversary -> local, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> local, * -> cloud }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+  // and the placement refusal still outranks the council's, because the
+  // reference decides the routes first.
+  assert admit_src("""model role local on_device
+model role cloud off_device
+model council Release { proposer -> cloud, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> cloud }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"
+}
