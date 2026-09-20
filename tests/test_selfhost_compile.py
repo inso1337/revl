@@ -487,16 +487,21 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # a parser gap reached through lower.rvl, and it withholds the whole
         # component because one provide method of fourteen spells it.
         "branches.rvl",
-        # whole-program documents combining several of the above
+        # whole-program documents combining several of the above.
+        # (`../../../examples/v3_step_scheduler.rvl` left this list with the
+        # spawn/instance surface: it is the one py document whose components
+        # both spawn a child and read a provision back off the handle, and the
+        # component dialect's record literal and bare-name `fn` call closed the
+        # rest of it.)
         "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
-        "../../../examples/v3_step_scheduler.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         "../../../src/revl/truc/components/cli.rvl",
     ),
     "ts": (
-        # composite service dispatch and component expressions
-        "services_composite.rvl",
-        "component_exprs.rvl",
+        # (`services_composite.rvl` left this list when lower.rvl grew the
+        # component dialect's list literal, and `component_exprs.rvl` with its
+        # `format` template, bare-name `fn` call and tagged `adt` construction,
+        # which closed documents on the py and java tiers as well.)
         # (async coloring left this list entirely. `components_await.rvl` went
         # with the `await` activation STEP — the colouring itself is a
         # whole-program property the producer already stamped, and what was
@@ -507,19 +512,28 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # pieces: the `async fn` provide method, the `"async": true` stamp an
         # `effect await`/`await emit` step carries, and the item-92 coercion
         # that colours an arrow passed into an `(…) -> Async[T]` parameter.)
-        # spawn / instance-get
-        "spawn.rvl",
-        "instance_get.rvl",
+        # (spawn / instance-get left this list when `selfhost/lower.rvl` grew
+        # the instance surface: the `spawn <C> with { … }` acquire node, the
+        # handle's own verb tail, and the `<handle>.<key>` provision read that
+        # lowers to `instance-get`. `spawn.rvl` and `instance_get.rvl` now
+        # compile byte-exact through the fully-native chain.)
         # (realm placement metadata — isolate / intercept / routes — left this
         # list when lower.rvl grew the component-header prelude; the four ts
         # realm documents now compile byte-exact through the native chain.)
         # whole-program documents combining several of the above
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         "../../../examples/java_match.rvl",
-        # property/component edge shapes and the CAS runtime surface
-        "property_edges.rvl",
+        # component edge shapes. Everything this document spells is byte-exact
+        # through the native chain except its ONE async provide method: the
+        # guard `if`/`fail` pair, the bare `fn` effect bracket, the `emit …
+        # compensate …` step with its `compensate_captures`, the host-map
+        # bracket and the per-invocation method bracket all reproduce.
         "component_edges.rvl",
-        "cas_runtime.rvl",
+        # (`property_edges.rvl` left this list when the `.length` PROPERTY form
+        # on a sized receiver started carrying `sized_length`, and
+        # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
+        # bracket, the `assign` step and `undo_captures` landed in a provide
+        # method body.)
     ),
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
@@ -530,11 +544,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # component `format` node, the bare-name `fn` call and the `index`
         # node; `../emit_ts_corpus/services_async.rvl` with the `async fn`
         # provide method.)
-        # map inference
-        "map_inference.rvl",
-        # the stdlib builtin surface
-        "stdlib_builtins.rvl",
-        "../emit_ts_corpus/property_edges.rvl",
+        # (`map_inference.rvl` left this list when lower.rvl grew the component
+        # dialect's record literal, which was the last shape its activation body
+        # spelled that the walk could not read; the stdlib builtin surface —
+        # `stdlib_builtins.rvl` and the borrowed
+        # `../emit_ts_corpus/property_edges.rvl` — left it with the
+        # `sized_length` property form.)
+        # no residual: the fully-native chain reproduces the whole java corpus.
     ),
     "rust": (
         # component edge shapes; the host-root and realm-placement documents
