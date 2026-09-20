@@ -161,6 +161,8 @@ def _canonical_ir(ir: dict) -> dict:
     `registry._audit_document`, which rewrites file paths IN PLACE; the shared
     normalizer returns its argument untouched when there is nothing to rewrite,
     which would otherwise expose the caller's own IR to that mutation."""
+    from . import attest  # noqa: PLC0415
+
     return attest.path_normalized_ir(copy.deepcopy(ir))
 
 
