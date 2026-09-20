@@ -9792,7 +9792,7 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // name as a function type too, and that declaration's refusals are the
   // signature table's — `tk_named` declines exactly the names a body rebinds,
   // which is the set the reference reads out of `tenv` first.
-  let fv = tk_fnvalue(c, env, a.tys)
+  let fv = tk_fnvalue(c, env, a.tys, tv.ty)
   if (fv.hit) { return fv.r }
   let mth = tk_method(c, env, a.tys, tv.ty)
   if (mth.hit) { return mth.r }
@@ -9831,11 +9831,17 @@ fn tk_call_result(t: Str) -> Str {
 // the same kind: `xs.push(1)` reads no field `push` off `xs`, so a method
 // callee walks its RECEIVER and stops, while every other callee shape is an
 // ordinary expression.
+// Its TYPE is kept on the third arm, not discarded. A callee that is neither a
+// bare name nor a method receiver is the function-VALUE position, and the type
+// this descent already computed is the one that arm needs. Inferring the callee
+// a second time to get it costs a whole extra descent PER CALL LEVEL, which on
+// a call spine (`a()()()…`) is exponential rather than merely quadratic: at
+// depth 40 the walk does not finish.
 fn tk_callee(callee: Expr, env: List[Bind]) -> TInf {
   return match callee {
     Var(n)   => tk_ok(""),
     Field(f) => tk_infer(f.target, env),
-    _        => tk_sub(callee, env),
+    _        => tk_infer(callee, env),
   }
 }
 
@@ -10981,11 +10987,20 @@ fn tk_mentions_parts(ps: List[PartN], i: Int, n: Str) -> Bool {
 // local of function type BEFORE the case table and before the signature table,
 // so this arm is asked for a bare name only where `tk_named` has already
 // declined it (which it does on exactly the names the body rebinds).
-fn tk_fnvalue(c: CallN, env: List[Bind], argTys: List[Str]) -> TCall {
+// `calleeTy` is what `tk_callee` already inferred for this call's target, so
+// nothing here descends a second time. It is the RECEIVER's type on a method
+// callee, which is why that arm misses: a method call is not a function value.
+fn tk_fnvalue(c: CallN, env: List[Bind], argTys: List[Str],
+              calleeTy: Str) -> TCall {
   return match c.target {
     Var(n)   => tk_fnvalue_named(n, c, env, argTys),
     Field(f) => tk_miss(),
-    _        => tk_fnvalue_expr(c, env, argTys),
+    // any other callee expression: an arrow applied in place, a function value
+    // read out of a `let` chain, …
+    _        => tk_is_fn_ty(calleeTy)
+                  ? tk_hit(tk_fn_call(calleeTy, "this call's callee", c.args,
+                                      argTys))
+                  : tk_miss(),
   }
 }
 
@@ -11000,15 +11015,6 @@ fn tk_fnvalue_named(n: Str, c: CallN, env: List[Bind],
   let t = tenv_get(env, n)
   if (!tk_is_fn_ty(t)) { return tk_miss() }
   return tk_hit(tk_fn_call(t, "`".concat(n).concat("`"), c.args, argTys))
-}
-
-// any other callee expression: an arrow applied in place, a function value read
-// out of a `let` chain, …
-fn tk_fnvalue_expr(c: CallN, env: List[Bind], argTys: List[Str]) -> TCall {
-  let t = tk_infer(c.target, env)
-  if (t.v != "") { return tk_hit(t) }
-  if (!tk_is_fn_ty(t.ty)) { return tk_miss() }
-  return tk_hit(tk_fn_call(t.ty, "this call's callee", c.args, argTys))
 }
 
 fn tk_fn_call(fnTy: Str, what: Str, args: List[Expr],
