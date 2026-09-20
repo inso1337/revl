@@ -909,18 +909,32 @@ def _precondition_state(plan: ShadowPlan,
     return None
 
 
-#: The precondition walk, IN ORDER. `decide` returns on the first one that
-#: refuses, and the order is deliberate: the plan must be a plan, the route
-#: must admit the move, the evidence must be evidence about this promotion,
-#: the rule must be pinned, the authority must not have moved, and the state
-#: must be restorable. Only then is there a question a measurement can answer.
-PRECONDITIONS = (
+#: The one precondition that needs no evidence at all. It is a property of the
+#: DECLARATION: `docs/design/531-model-placement.md` section 9 says both roles
+#: must be routable by the action's own block "for the shadow to be admissible
+#: at all", so it is checked before a single record is read. A promotion to a
+#: role the block does not name is refused without ever asking what the shadow
+#: measured.
+PLAN_PRECONDITIONS = (
     ("route", _precondition_route),
+)
+
+#: The precondition walk over admitted evidence, IN ORDER. `decide` returns on
+#: the first one that refuses: the evidence must be evidence about this
+#: promotion, the rule must be pinned, the authority must not have moved, and
+#: the state must be restorable. Only then is there a question a measurement
+#: can answer.
+PRECONDITIONS = (
     ("evidence", _precondition_evidence),
     ("policy", _precondition_policy),
     ("authority", _precondition_authority),
     ("state", _precondition_state),
 )
+
+#: Every stage, in the order `decide` walks them. `_verdict` fills the ones a
+#: refusal never reached, so the artifact shows where the walk stopped.
+STAGES = (tuple(name for name, _ in PLAN_PRECONDITIONS)
+          + tuple(name for name, _ in PRECONDITIONS))
 
 
 # ---------------------------------------------------------------------------
@@ -1100,7 +1114,7 @@ def _verdict(plan: ShadowPlan, decision: str, refusal: Optional[Refusal],
     seen = {entry["stage"] for entry in trail}
     full = list(trail) + [
         {"stage": name, "status": "not reached"}
-        for name, _ in PRECONDITIONS if name not in seen]
+        for name in STAGES if name not in seen]
     return Promotion(
         kind=PROMOTION_KIND, version=PROMOTION_VERSION, decision=decision,
         action_class=plan.action_class if isinstance(plan, ShadowPlan)
@@ -1119,11 +1133,15 @@ def decide(plan: ShadowPlan, observations: Sequence[Observation], *,
 
     The shape, and the shape IS the argument:
 
-        plan -> admit -> route -> evidence -> policy -> authority -> state
-        --------------- preconditions ---------------------------------
+        plan -> route -> admit -> evidence -> policy -> authority -> state
+        ---------------- preconditions --------------------------------
         || BARRIER
         accumulate -> divergence / sample / threshold
         --------------- measured --------------------------------------
+
+    `route` comes before `admit` because it needs no evidence: a promotion to
+    a role the action's own block does not name is refused without a record
+    being read at all.
 
     Everything left of the barrier is a property of the declaration and of
     whether the evidence is evidence. Nothing left of it can see a tally,
@@ -1140,13 +1158,22 @@ def decide(plan: ShadowPlan, observations: Sequence[Observation], *,
     if malformed is not None:
         return _verdict(plan, REFUSE, malformed, [], None, None, observations)
 
+    trail = []
+    for name, check in PLAN_PRECONDITIONS:
+        refusal = check(plan, ())
+        if refusal is not None:
+            trail.append({"stage": name, "status": "refused",
+                          "link": refusal.link})
+            return _verdict(plan, REFUSE, refusal, trail, None, None,
+                            observations)
+        trail.append({"stage": name, "status": "satisfied"})
+
     pairs, refusal = admit(plan, observations, key=key, verifier=verifier)
     if refusal is not None:
-        trail = [{"stage": "evidence", "status": "refused",
-                  "link": refusal.link}]
+        trail.append({"stage": "evidence", "status": "refused",
+                      "link": refusal.link})
         return _verdict(plan, REFUSE, refusal, trail, None, None, observations)
 
-    trail = []
     for name, check in PRECONDITIONS:
         refusal = check(plan, pairs)
         if refusal is not None:
