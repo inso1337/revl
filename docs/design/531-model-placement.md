@@ -1,8 +1,10 @@
 # 531: Model placement as a checked route condition (`route model`)
 
 Roadmap: item 512 (issue #1186), from the 2026-09-19 external review, and
-item 514 (issue #1188), which is slice 2 of the same design. Slices 1 and 2
-are LANDED; slices 3 to 5 are designed here and not written.
+item 514 (issue #1188), which is slice 2 of the same design. Slices 1 to 4 are
+LANDED; slice 5 is designed here and not written.
+`docs/design/554-route-model-remaining.md` records slices 3 and 4, and is where
+section 7's measurement and section 8's S3/S4 entries below were answered.
 
 This is the foundation of the eight-item model cluster (512 to 519, issues
 \#1186 to \#1193). Every one of the other seven presupposes that a model call is
@@ -378,6 +380,12 @@ slice 3 lands, and moving it is then part of that slice's evidence.
 
 ## 7. The self-host question
 
+**Answered by slice 3, in `docs/design/554-route-model-remaining.md`.** The
+measurement below is what this slice found, and it is kept as the record of the
+state it found; the gate now DECIDES the declaration half and tags its refusals
+`MODEL`, both fixtures are in the corpus, and the `G-MODEL-PLACE`
+acknowledgement in `tools/tier_guarantees.py` is gone.
+
 `selfhost/*.rvl` is a second implementation that must agree with the reference,
 and its oracles catch divergence but not a missing feature. So the question is
 not whether the self-host implements `route model`, which it does not, but
@@ -438,7 +446,9 @@ the original plan was real and is what the measurement shows: the refusal fires
 with no arm naming `confidential` present, on a program that compiled on the
 tree before it.
 
-**S3. The self-host port.** Two halves, and the first is worth landing alone: a
+**S3. The self-host port. LANDED
+(`docs/design/554-route-model-remaining.md` sections 1 and 2).** Two halves,
+and the first is worth landing alone: a
 named `MODEL` marker in `selfhost/parser.rvl` so the gate says which construct
 it declines rather than "unexpected token", then the port itself. Both touch
 the crate closure, so both regenerate `crates/**` with `build_gate_crate.py`
@@ -448,7 +458,9 @@ failed `cargo` before. Oracle: `_classify` learns the tag, the census records
 `agree-refuse/MODEL` for a rejection fixture, and the admitting fixture moves
 from the test file into `examples/` (section 6.1).
 
-**S4. The crossing side.** S1 checks which roles an action MAY reach; nothing
+**S4. The crossing side. LANDED
+(`docs/design/554-route-model-remaining.md` section 3).** S1 checks which
+roles an action MAY reach; nothing
 yet checks which it DOES. Once a model crossing carries its role (the natural
 spelling is the existing `model.<role>` capability token, item 343, which
 already parses), the reach of a routed action is enumerable and a crossing to
@@ -481,7 +493,9 @@ Stated so the next agent on each does not redesign the seam.
   profile, the load and unload cost, the shared provision, and the question of
   which of two admissible roles to use. It must not be able to widen a
   placement: a scheduler that picks a role no arm names is the fail-open shape,
-  and S4 is what makes that refusable.
+  and S4 is what makes that refusable. S4 is LANDED, so that sentence is now a
+  refusal rather than a plan, and `model_route.reach_of` already reads the
+  `candidates` key an ordered candidate set will record.
 * **516, the council.** Places each member by 512 and 514, so a local adversary
   may read an origin the cloud proposer may not. It needs several roles bound
   in one aggregation, which is why roles are program-level here and not

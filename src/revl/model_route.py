@@ -460,3 +460,97 @@ def ceiling_refusal(verdict: Verdict, origin: str, action: str,
             f"route `{origin}` to a role declared `on_device`, or keep the "
             f"`{origin}` value out of this crossing. The path is {chain}.")
     return message, hint
+
+
+# ---------------------------------------------------------------------------
+# The crossing side (roadmap item 512, slice S4)
+# ---------------------------------------------------------------------------
+#
+# `check()` decides which roles an action MAY reach. This decides which it
+# DOES. The two are not the same question and the gap between them is the one
+# item 515's inheritance note names: a scheduler that picks a role no arm names
+# has widened the placement, and a permission that cannot be widened is the
+# only kind worth writing down.
+#
+# WHICH WAY IT FAILS. A crossing placed on a role the block does not name is
+# REFUSED, never accommodated by widening the block. An action with no block is
+# untouched, which is the same line `admits()` draws for an unrouted component:
+# a program that declared no placement here is judged by the rules that judged
+# it before item 512, and making `route model` mandatory would be a different
+# item. What this closes is the case where the author DID declare a placement
+# and a crossing went somewhere else.
+
+
+def role_of_crossing(capability, roles) -> str | None:
+    """The model role a crossing is placed on, or None.
+
+    A `model.<tail>` capability token (item 343, which already parses) names a
+    role exactly when `<tail>` is a DECLARED `model role`. That reading is
+    opt-in by construction and cannot disturb a shipped program: `model.complete`
+    is an OPERATION token, and it stays one in every compilation that does not
+    declare a role called `complete`. A program that declares `model role local
+    on_device` and writes `emission[model.local]` has said, in the program,
+    which placement the crossing is.
+
+    The ambiguity is real and is left visible rather than resolved by a second
+    syntax: naming a role after an operation word makes that operation token a
+    placement. It is the author's own choice of name, it is in the program, and
+    the alternative - a separate spelling for "this crossing is on role R" -
+    would be a second vocabulary for a fact item 343's token already carries.
+
+    A parameterised capability (item 294, `model.complete(calls=3)`) is read by
+    its token head, the same way every other reader of a capability token reads
+    one.
+    """
+    if not capability:
+        return None
+    head, _, tail = str(capability).partition(".")
+    if head != MODEL_SCOPE or not tail:
+        return None
+    tail = tail.split("(", 1)[0]
+    return tail if tail in (roles or {}) else None
+
+
+def reach_of(arms) -> frozenset:
+    """Every model role one action's `route model` block names.
+
+    Read off `check()`'s already-validated table rather than re-derived from
+    the AST, the discipline section 9 of the design note set for item 514.
+
+    `candidates` is read when a placement carries one, and no placement does
+    today. That is deliberate: roadmap item 515 turns an arm into an ORDERED
+    CANDIDATE SET (`<origin> -> a | b | c`), and every candidate in a set is a
+    role the action may reach. Reading the key here means the reach widens with
+    that surface the moment `check()` records it, instead of this rule refusing
+    a fallback the program plainly names. It is the one line that has to move
+    when the arm grows, and it is already written.
+    """
+    out: set[str] = set()
+    for placement in (arms or {}).values():
+        if not isinstance(placement, dict):
+            continue
+        if placement.get("role"):
+            out.add(placement["role"])
+        out.update(c for c in (placement.get("candidates") or ()) if c)
+    return frozenset(out)
+
+
+def reach_refusal(role: str, action: str, component: str, crossing: str,
+                  capability: str, arms) -> tuple[str, str]:
+    """The message and hint for a crossing placed outside its action's reach."""
+    reach = sorted(reach_of(arms))
+    named = ", ".join(f"`{r}`" for r in reach) or "no role at all"
+    message = (
+        f"the model crossing `{crossing}` (`{capability}`) in action "
+        f"`{action}` ({component}) is placed on model role `{role}`, which no "
+        f"arm of its `route model` block names: the block reaches {named} "
+        f"({CODE})")
+    hint = (
+        f"a `route model` block is the complete list of roles the action may "
+        f"reach, so a crossing on a role outside it widens the placement "
+        f"instead of using it - and a placement that can be widened is not a "
+        f"permission. Add an arm naming `{role}` to `route model on {action}`, "
+        f"or place this crossing on a role the block already names. Dropping "
+        f"the block is not the fix: it would leave the action with no declared "
+        f"placement at all (docs/design/554-route-model-remaining.md).")
+    return message, hint
