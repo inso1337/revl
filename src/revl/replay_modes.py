@@ -30,12 +30,44 @@ false`` on every offline plan, because execution needs the live driver; the
 useful signal is ``plannable`` (does the WAL carry enough to inform this mode
 at all) and the per-mode ``missing`` list (what the live executor would still
 need). Emptying a ``missing`` list is a claim the WAL now carries that input.
+
+What item 517 Slice 3 adds: the DECISION, read back
+---------------------------------------------------
+Re-EXECUTING a branch still needs the live driver, and that has not changed.
+But the roadmap item 517 exit clause asks for something an offline reader can
+in fact do — "a recorded run replays a model decision from the artifact alone"
+— and until Slice 2 there was nothing on the WAL to do it with. Slice 3a's
+record says a completion happened, which model answered and what it cost; it
+is silent by design about the prompt binding, the request parameters and the
+placement, so no reader could say WHY the run decided as it did.
+
+Since item 517 Slice 2 a run may seal an evidence object onto that same record
+(``evidence``, `revl.model_evidence`). :func:`plan` verifies it and rebuilds
+the decision here: the placement, what answered, what it was given, what it
+could have said and what it said, how it was asked, under which rule. That is
+a replay of the DECISION, not of the run, and the distinction is kept in the
+output rather than blurred — ``executable`` is still false for every mode.
+
+Fail-closed, in both directions:
+
+* a record whose MAC does not check out yields NO reading, not a reading with
+  a caveat. Editing a field on disk does not produce a wrong answer here, it
+  produces no answer (:func:`revl.model_evidence.reconstruct`);
+* with no key supplied the plan reports the seal as PRESENT and UNVERIFIED and
+  reads nothing out of it. An unverified seal is not evidence, and
+  ``sealedEvidence`` is met only by one that verified.
+
+A WAL whose decisions carry no evidence at all reads as "not sealed", which
+this module states in the same voice as :data:`PRE_3A_NOTE`: it reports what is
+on the record and never what a run might have done off it.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
+from .model_evidence import (WAL_EVIDENCE_MEMBER, WAL_REFUSAL_MEMBER,
+                             from_wal_record, reconstruct)
 from .wal import WALIntegrityError, read_wal
 
 #: The record kind Slice 3a writes for one durable model decision. Named here as
@@ -76,9 +108,24 @@ REQUIREMENTS = {
         "records the decision, never the text).",
     "promptDigest":
         "a digest of the prompt, needed to bind a substituted call to the "
-        "original request. Absent from the WAL: its suppression gate is the "
-        "compile-side taint certificate the driver holds (item 444), and a "
-        "digest without that gate is the confirmation oracle item 121 closes.",
+        "original request. The Slice-3a record does not carry one: its "
+        "suppression gate is the compile-side taint certificate the driver "
+        "holds (item 444), and a digest without that gate is the confirmation "
+        "oracle item 121 closes. Met only by a VERIFIED item 517 evidence "
+        "object whose prompt binding is `content-addressed` - the one mode "
+        "that is unsalted and therefore comparable across runs, and which that "
+        "object may carry only when its declared origins prove the input was "
+        "neither secret nor confidential. A `salted-within-run` binding does "
+        "NOT meet it: it is stable within one run and meaningless across "
+        "runs, so a cross-run replay bound to it is bound to nothing.",
+    "sealedEvidence":
+        "a sealed `revl.model-decision` evidence object on the crossing (item "
+        "517), carrying the placement, the prompt binding, the candidate set, "
+        "the sampling parameters and the policy in force, MAC-covered and "
+        "verified against a key the reader holds. This is what lets the "
+        "decision itself be reconstructed from the artifact alone. Met only "
+        "when a seal is present AND verified: an unverified seal is not "
+        "evidence, and no key is not a pass.",
     "toolCalls":
         "the tool calls the model requested, needed to replay tool-use turns. "
         "Made inside the opaque host body; revl does not see them and Slice 3a "
@@ -145,6 +192,16 @@ PRE_3A_NOTE = (
     "have done off it."
 )
 
+#: Stated on every plan alongside the reconstructed decisions: reading a
+#: decision back is not re-running it. Item 517's exit clause is met by the
+#: first and says nothing about the second.
+DECISION_NOTE = (
+    "a reconstructed decision is the account of what the model was asked and "
+    "what it chose, verified against its own seal. It is not a re-execution: "
+    "no model is called, no tool runs and no completion text is read, because "
+    "none is written. `executable` stays false for every mode."
+)
+
 #: Stated on every plan, the way :mod:`revl.branch` states it: an offline reader
 #: runs nothing. Every mode is `executable: false` here; the live executor is
 #: the second half of Slice 3b.
@@ -190,20 +247,88 @@ def _decision_entry(record: dict) -> dict:
     }
 
 
-def _present_inputs(records: list) -> dict:
-    """Which requirement inputs this WAL actually carries. Only
-    ``modelDecisions`` can ever be present on a Slice-3a WAL; the rest are the
-    inputs Slice 3a deliberately does not record, and ``liveComponent`` is never
-    present offline. Kept as a map so a later slice that records more (a prompt
-    digest behind item 444's gate, say) flips one entry with no other change."""
+def _present_inputs(records: list, readings: list) -> dict:
+    """Which requirement inputs this WAL actually carries.
+
+    Before item 517 Slice 2 only ``modelDecisions`` could ever be present on a
+    WAL; the rest were the inputs Slice 3a deliberately does not record, and
+    ``liveComponent`` is never present offline. The map was kept in this shape
+    so that a later slice recording more could flip one entry with no other
+    change. This is that slice, and it flips two:
+
+    * ``sealedEvidence`` — at least one crossing carries a seal that VERIFIED
+      against the key the reader supplied. Present and unverified is not
+      enough and no key is not enough, which is what keeps this from being a
+      field that says "trust me";
+    * ``promptDigest`` — at least one VERIFIED evidence object binds its prompt
+      ``content-addressed``. Only that mode: it is the unsalted digest, legal
+      only over an input whose declared origins carry neither ``secret`` nor
+      ``confidential``, and it is the only binding that means anything across
+      runs. ``salted-within-run`` and ``suppressed`` leave this false.
+
+    Nothing else moves. In particular the response TEXT is still never written
+    anywhere, so ``exact`` and ``tool-only`` remain out of reach from a WAL,
+    and an evidence object does not pretend otherwise: it binds what was asked
+    and what was chosen, by digest, and holds no completion text unless a run
+    explicitly decided to retain it."""
+    verified = [r for r in readings if r.get("verified")]
+    content_addressed = any(
+        (r.get("decision") or {}).get("promptBindingMode") == "content-addressed"
+        for r in verified)
     return {
         "modelDecisions": bool(_model_decisions(records)),
+        "sealedEvidence": bool(verified),
         "responseText": False,
-        "promptDigest": False,
+        "promptDigest": bool(content_addressed),
         "toolCalls": False,
         "seedsAndClock": False,
         "liveComponent": False,
     }
+
+
+def _reading(record: dict, key) -> dict:
+    """One model decision, read back out of the artifact (item 517 Slice 3).
+
+    Four states, kept apart on purpose, because collapsing any two of them is
+    how a reader ends up trusting something it did not check:
+
+    * **not sealed** — the crossing carries no evidence object. A run that
+      never engaged sealing looks exactly like this, and so does a WAL written
+      before Slice 2; this reader cannot tell them apart and does not try, the
+      same honesty :data:`PRE_3A_NOTE` keeps about Slice 3a;
+    * **refused at run time** — the run HAD engaged sealing and could not seal
+      this crossing. The record says so, with the link and the reason. That
+      run stopped at this crossing (`runtime.RevlModelEvidenceRefused`), so
+      this is a fact about a run that did not continue, not a missing feature;
+    * **sealed, unverified** — a seal is present and no key was supplied, so
+      nothing was checked and nothing is read out;
+    * **sealed and verified** — the decision is reconstructed.
+    """
+    crossing = [record.get("component"), record.get("stepIndex")]
+    refused = record.get(WAL_REFUSAL_MEMBER)
+    evidence = from_wal_record(record)
+    entry = {
+        "crossing": crossing,
+        "sealed": evidence is not None,
+        "refusedAtRun": dict(refused) if isinstance(refused, dict) else None,
+        "verified": None,
+        "link": "",
+        "reason": "",
+        "decision": None,
+        "reproducible": None,
+    }
+    if evidence is None:
+        entry["reason"] = (
+            "this crossing carries no `%s` member: the run did not seal it, or "
+            "it predates item 517 Slice 2. Both read the same way here"
+            % WAL_EVIDENCE_MEMBER)
+        return entry
+    if key is None:
+        entry["reason"] = ("a seal is present and no key was supplied, so it "
+                           "was not checked and nothing is read out of it")
+        return entry
+    entry.update(reconstruct(evidence, key))
+    return entry
 
 
 def _mode_plan(mode: str, present: dict) -> dict:
@@ -233,7 +358,8 @@ def _mode_plan(mode: str, present: dict) -> dict:
     }
 
 
-def plan(path: str, mode: Optional[str] = None) -> dict:
+def plan(path: str, mode: Optional[str] = None,
+         evidence_key: Optional[bytes] = None) -> dict:
     """The replay-mode readiness plan for one WAL (item 250, Slice 3b, offline).
 
     Reads the WAL, indexes its durable model decisions, and reports per mode
@@ -243,6 +369,13 @@ def plan(path: str, mode: Optional[str] = None) -> dict:
     Never runs a replay: an offline reader has no live component. The plan names
     the requirements the live executor would still need, so the two halves of
     Slice 3b agree on the contract.
+
+    ``evidence_key`` (item 517 Slice 3) is the key the run's evidence objects
+    were sealed with. With it, every sealed crossing is VERIFIED and the
+    decision is reconstructed into ``decisions``; without it, a seal is
+    reported as present and unchecked and nothing is read out of it. The key is
+    never written to the plan — only its fingerprint, which is already a member
+    of each record.
     """
     if mode is not None and mode not in MODE_RECORD_REQUIRES:
         raise ReplayPlanError(
@@ -251,7 +384,8 @@ def plan(path: str, mode: Optional[str] = None) -> dict:
     wal = _load(path)
     records = wal["records"]
     decisions = _model_decisions(records)
-    present = _present_inputs(records)
+    readings = [_reading(r, evidence_key) for r in decisions]
+    present = _present_inputs(records, readings)
 
     modes = MODES if mode is None else (mode,)
     plans = [_mode_plan(m, present) for m in modes]
@@ -262,12 +396,14 @@ def plan(path: str, mode: Optional[str] = None) -> dict:
         "complete": wal.get("complete"),
         "torn": wal.get("torn"),
         "modelDecisions": [_decision_entry(r) for r in decisions],
+        "decisions": readings,
         "modes": plans,
         "present": present,
         "requirements": {req: REQUIREMENTS[req]
                          for m in modes for req in _mode_requires(m)},
         "offlineNote": OFFLINE_NOTE,
         "pre3aNote": PRE_3A_NOTE,
+        "decisionNote": DECISION_NOTE,
     }
 
 
@@ -286,6 +422,40 @@ def render(doc: dict) -> str:
             f"model {entry.get('model') or '(unreported)'}  "
             f"{entry.get('outcome')}  "
             f"attempts {entry.get('attempts')}/{entry.get('attemptCeiling')}")
+    for entry in doc.get("decisions") or []:
+        crossing = entry.get("crossing") or [None, None]
+        head = f"      {crossing[0]}#{crossing[1]}  "
+        if entry.get("verified"):
+            d = entry["decision"]
+            repro = entry.get("reproducible") or {}
+            lines.append(head + "evidence VERIFIED")
+            lines.append(f"          ran on  : {d['role']} ({d['residence']})")
+            lines.append(f"          answered: model {d['modelDigest'][:16]} "
+                         f"on profile "
+                         f"{(d['placementDigest'] or '(unreported)')[:16]}")
+            lines.append(f"          given   : prompt {d['promptBindingMode']}"
+                         + (f" ({d['promptSuppressionReason']})"
+                            if d["promptSuppressionReason"] else "")
+                         + f", origins {d['origins'] or '[]'}")
+            lines.append(f"          chose   : {d['chosen']} of "
+                         f"{len(d['candidates'])} candidate(s), "
+                         f"{d['outcome']}, fallback depth "
+                         f"{d['fallbackDepth']}")
+            lines.append(f"          asked   : {d['sampling']}")
+            lines.append(f"          rule    : policy "
+                         f"{d['policyDigest'][:16]}, key {d['keyId']}")
+            if not repro.get("ok", True):
+                lines.append("          re-runnable: no, missing "
+                             + ", ".join(repro.get("missing") or []))
+        elif entry.get("refusedAtRun"):
+            refusal = entry["refusedAtRun"]
+            lines.append(head + "evidence REFUSED AT RUN TIME "
+                         f"({refusal.get('link')}): {refusal.get('reason')}")
+        elif entry.get("sealed"):
+            lines.append(head + "evidence sealed but NOT read: "
+                         + entry.get("reason", ""))
+        else:
+            lines.append(head + "no evidence on the record")
     lines.append("")
     for mode in doc["modes"]:
         mark = "plannable" if mode["plannable"] else "not plannable"
@@ -297,10 +467,13 @@ def render(doc: dict) -> str:
             lines.append("      missing: nothing on the record; needs only the "
                          "live executor")
     lines += ["", "  " + doc["offlineNote"], "  " + doc["pre3aNote"]]
+    if doc.get("decisionNote"):
+        lines.append("  " + doc["decisionNote"])
     return "\n".join(lines)
 
 
 __all__ = [
     "MODES", "MODE_RECORD_REQUIRES", "MODE_EXECUTOR_REQUIRES", "MODE_INTENT",
-    "REQUIREMENTS", "RECORD_MODEL_DECISION", "ReplayPlanError", "plan", "render",
+    "REQUIREMENTS", "RECORD_MODEL_DECISION", "DECISION_NOTE", "ReplayPlanError",
+    "plan", "render",
 ]
