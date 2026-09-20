@@ -51,14 +51,35 @@ path on which this tool falls back to scoring against the in-tree corpus: a
 gate that silently scores a readable set when the held-out one is unavailable
 is the fail-open shape, and it is the shape this tool refuses to have.
 
-WHAT SLICE 1 SCORES
--------------------
-The zero-tolerance direction only: `false-admission` (the gate ISSUED an
-admission for a program the reference refuses) and `gate-fault` (the gate
+WHAT IS SCORED
+--------------
+Two directions, and they are scored against different things because the
+census treats them differently.
+
+The ZERO-TOLERANCE direction, against zero: `false-admission` (the gate ISSUED
+an admission for a program the reference refuses) and `gate-fault` (the gate
 crashed). Those are the two buckets `tools/gate_reference_census.py` gives no
-allowance at all. The `false-admit` bypass direction is deliberately out of
-this slice: its allowance is a baselined family list, and a random draw
-re-finds the families already in it -- measured, see the design doc.
+allowance at all.
+
+The BYPASS direction, against the baseline's families: `false-admit/<tag>`, the
+no-objection bypass. It has an allowance in the census and it gets the same one
+here, read from `tools/gate_reference_census_baseline.json` rather than copied.
+A tag the baseline already carries is the known gap re-found on new programs; a
+tag it does not carry is a bypass family nobody has read, on a program nobody
+could read, and it is a divergence. Scoring this direction against ZERO would
+red on `false-admit/TYPE`, which a prototype draw hit with `type Str = Str` --
+the same family as an already-baselined fixture.
+
+WHAT IS MEASURED BUT NOT SCORED
+-------------------------------
+The surface tells. `SURFACE_TELLS` makes the attack design 2.1.4 names
+executable: a predicate over a program's bytes that a candidate could key a
+shortcut on. SEPARATION -- the gap between a tell's rate on the `near:` half
+and on the `inside:` half -- is enforced, because a tell that separates answers
+the whole scoring question without parsing anything. RECOGNITION is reported
+and not enforced, because `draw()` reads no file and so its vocabulary is a
+literal in a public file: a candidate can always tell a drawn program from a
+real one, and that is the residual this tool does not close.
 
 USAGE
 -----
@@ -107,6 +128,14 @@ HELD_OUT_FENCE = (
     "tools/gate_reference_census.py",
     "tools/build_gate_crate.py",
     "tests/test_selfhost_lower.py",
+    # Slice 2 reads this: it is the ALLOWANCE the `false-admit` direction is
+    # compared against, so it decides what counts as a divergence and belongs
+    # on the fence by the same rule as the tools above. Before slice 2 it was
+    # in `SCORING_UNREACHED` -- a scoring run never opened it -- and moving it
+    # here is the visible consequence of starting to read it. A candidate that
+    # widens its own allowance by re-recording the baseline is REFUSED, which
+    # is the routing item 537 asks for rather than a silent pass.
+    "tools/gate_reference_census_baseline.json",
 )
 
 # The subject: the top-level directories a candidate is allowed to change and
@@ -144,7 +173,6 @@ DATA_INPUTS = (
 # call. Declared rather than assumed, so a future edit that starts reaching one
 # fails the classification test instead of widening the fence silently.
 SCORING_UNREACHED = (
-    "tools/gate_reference_census_baseline.json",
     "tools/fuzz_frontend.py",
 )
 
@@ -301,6 +329,32 @@ _WORDS = (
 )
 _SUFFIXES = ("", "_a", "_b", "_c", "_hi", "_lo", "2", "3", "x")
 
+# The lexer's keyword table, FROZEN HERE rather than imported.
+#
+# The invariant is the one the bring-up defect taught: a generated identifier
+# that is a keyword is a parse error wearing the label `inside:`, and eight of
+# two hundred programs were exactly that before the word list was checked. The
+# check has to survive the language growing a keyword, so it is a check and not
+# a one-time audit -- `_ident` refuses a reserved word at generation time.
+#
+# It is a literal copy and NOT `from revl.lexer import KEYWORDS` on purpose.
+# `draw()` is a pure function of `(seed, count)` that reads no file, which is
+# what answers the attack "the candidate makes the generator depend on
+# something it controls" (design 2.1.2): `src/revl/lexer.py` is SUBJECT, so a
+# candidate that could make the draw depend on it could narrow the draw by
+# editing it. The copy is held against the real table by
+# `test_the_reserved_set_covers_every_lexer_keyword`, so a new keyword reds the
+# suite here instead of silently degrading a draw.
+_RESERVED = frozenset((
+    "acquire", "after", "as", "assert", "async", "await", "break",
+    "commutative", "compensate", "component", "config", "continue", "effect",
+    "else", "emission", "emit", "every", "extern", "fail", "false", "fn",
+    "for", "handoff", "hole", "idempotent", "if", "in", "intercept",
+    "isolate", "let", "match", "null", "of", "provide", "provides", "pub",
+    "pure", "realm", "requires", "return", "service", "spawn", "subscribe",
+    "test", "true", "type", "undo", "use", "var", "verified", "while", "with",
+))
+
 # The near-miss families. Each is one token outside the admission surface, and
 # each is a refusal the reference issues, so an issued admission for any of
 # them is a `false-admission` -- the bucket with no allowance at all. These
@@ -320,9 +374,10 @@ NEAR_MISS_FAMILIES = (
 def _ident(rng, used):
     for _ in range(64):
         word = rng.choice(_WORDS) + rng.choice(_SUFFIXES)
-        if word not in used:
-            used.add(word)
-            return word
+        if word in _RESERVED or word in used:
+            continue
+        used.add(word)
+        return word
     raise Refusal("draw-exhausted-identifiers")
 
 
@@ -331,7 +386,14 @@ def _cap(word: str) -> str:
 
 
 def _inside(rng):
-    """A program strictly inside the admission surface."""
+    """`(source, service_names, used_identifiers)` strictly inside the surface.
+
+    `used` is returned rather than discarded because `_near_miss` builds on
+    this program and has to draw its own identifiers from the same vocabulary
+    without colliding with the names already declared here. Slice 1 spelled the
+    near-miss names as literals; see `SURFACE_TELLS` for why that was the
+    tell that mattered and this is not.
+    """
     used = set()
     lines = []
     aliases = []
@@ -362,42 +424,65 @@ def _inside(rng):
         lines.append("}")
         lines.append("")
     if rng.random() < 0.3:
-        lines.insert(0, "// " + rng.choice(_WORDS) + " surface")
-    return "\n".join(lines).rstrip() + "\n", services
+        lines.insert(0, "// " + rng.choice(_WORDS) + " " + rng.choice(_WORDS))
+    return "\n".join(lines).rstrip() + "\n", services, used
 
 
-def _near_miss(rng, family, base, services):
+def _near_miss(rng, family, base, services, used):
     """`base` pushed one token outside the surface, or None when `base` has no
-    site for `family` (a draw with no service cannot duplicate one)."""
-    tag = str(rng.randint(10, 99))
+    site for `family` (a draw with no service cannot duplicate one).
+
+    EVERY NAME HERE IS DRAWN, none is a literal. Slice 1 spelled them out --
+    `twice`, `Box`, `Row`, `Mystery`, `Edge`, `Comp`, `dup`, `probe`, `id`,
+    `all` -- and those ten words separated `near:` from `inside:` perfectly,
+    with a regex and without parsing anything. That is the whole scoring
+    question answered by a lookup, which is the `SURFACE_TELLS` entry
+    `near-miss-name-literals` and the reason it is now measured.
+
+    What stays fixed is STRUCTURE, not names: a generic application, a record
+    body, a fn body, a component block, a duplicate declaration. Those are what
+    puts the program outside the admission surface, so a gate that keys on them
+    is giving the right answer for the right reason rather than shortcutting.
+    """
     if family == "duplicate_service":
         if not services:
             return None
         name = rng.choice(services)
-        return base + "\nservice " + name + " {\n  fn probe(x: Int) -> Int\n}\n"
+        return (base + "\nservice " + name + " {\n  fn " + _ident(rng, used)
+                + "(" + _ident(rng, used) + ": " + rng.choice(_SCALARS)
+                + ") -> " + rng.choice(_SCALARS) + "\n}\n")
     if family == "duplicate_method":
         marker = "\n  fn "
         if marker not in base:
             return None
         head, rest = base.split(marker, 1)
         name = rest.split("(", 1)[0]
-        line = marker + name + "(dup: Str) -> Str"
+        line = (marker + name + "(" + _ident(rng, used) + ": "
+                + rng.choice(_SCALARS) + ") -> " + rng.choice(_SCALARS))
         return head + line + marker + rest
     if family == "fn_body":
-        return base + "\nfn twice" + tag + "(x: Int) -> Int { return x + x }\n"
+        arg = _ident(rng, used)
+        return (base + "\nfn " + _ident(rng, used) + "(" + arg
+                + ": Int) -> Int { return " + arg + " + " + arg + " }\n")
     if family == "generic_type":
-        return base + "\nservice Box" + tag + " {\n  fn all() -> List[Int]\n}\n"
+        return (base + "\nservice " + _cap(_ident(rng, used)) + " {\n  fn "
+                + _ident(rng, used) + "() -> List[" + rng.choice(_SCALARS)
+                + "]\n}\n")
     if family == "record_alias":
-        return base + "\ntype Row" + tag + " = { id: Int }\n"
+        return (base + "\ntype " + _cap(_ident(rng, used)) + " = { "
+                + _ident(rng, used) + ": " + rng.choice(_SCALARS) + " }\n")
     if family == "unknown_type":
-        return (base + "\nservice Edge" + tag + " {\n  fn a(x: Mystery"
-                + tag + ") -> Int\n}\n")
+        return (base + "\nservice " + _cap(_ident(rng, used)) + " {\n  fn "
+                + _ident(rng, used) + "(" + _ident(rng, used) + ": "
+                + _cap(_ident(rng, used)) + ") -> " + rng.choice(_SCALARS)
+                + "\n}\n")
     if family == "component":
         if not services:
             return None
         name = services[0]
-        return (base + "\ncomponent Comp" + tag + " provides s: " + name
-                + " {\n  provide s {\n  }\n}\n")
+        port = _ident(rng, used)
+        return (base + "\ncomponent " + _cap(_ident(rng, used)) + " provides "
+                + port + ": " + name + " {\n  provide " + port + " {\n  }\n}\n")
     raise Refusal("draw-unknown-family:" + family)
 
 
@@ -414,12 +499,12 @@ def draw(seed: str, count: int):
     cases = []
     index = 0
     while len(cases) < count:
-        base, services = _inside(rng)
+        base, services, used = _inside(rng)
         cases.append(("inside:" + str(index), base))
         if len(cases) == count:
             break
         family = rng.choice(NEAR_MISS_FAMILIES)
-        variant = _near_miss(rng, family, base, services)
+        variant = _near_miss(rng, family, base, services, used)
         if variant is not None:
             cases.append(("near:" + family + ":" + str(index), variant))
         index += 1
@@ -436,6 +521,152 @@ def draw_digest(cases) -> str:
         hasher.update(source.encode("utf-8"))
         hasher.update(b"\0")
     return "sha256:" + hasher.hexdigest()
+
+
+# -------------------------------------------------------- the surface tells
+
+# The attack design 2.1.4 names and slice 1 left untested: a candidate that
+# reads the public grammar and SPECIAL-CASES ITS SURFACE would score clean
+# while being wrong on everything else. A tell is that attack made executable
+# -- a predicate over a program's bytes, computable by anyone holding this
+# file, that a candidate could key a shortcut on.
+#
+# Two different quantities come out of a tell, and conflating them is how this
+# stayed unmeasured. RECOGNITION is how often the tell fires on the draw at
+# all: "is this program generated". SEPARATION is the gap between its rate on
+# the `near:` half and its rate on the `inside:` half: "is this program the one
+# I am supposed to refuse".
+#
+# SEPARATION is the dangerous one and it is the one that is enforced. A tell
+# that separates answers the entire scoring question without parsing anything,
+# so a gate keying on it scores clean with no correctness at all. A draw
+# carrying one is not the set it claims to be, so it is REFUSED -- the same
+# treatment `draw-inside-refused-by-reference` gives a draw that mislabels
+# itself.
+#
+# RECOGNITION is measured and reported and deliberately NOT enforced, because
+# it cannot be driven down by this mechanism and a bound nobody can meet is a
+# bound somebody deletes. `draw()` reads no file, by construction (2.1.2), so
+# its vocabulary is a literal in a public file and `closed-vocabulary` fires on
+# every program it will ever emit. Closing that needs the draw to be
+# in-distribution with real programs, which is a property of the grammar and
+# needs the type layer; it stays the named residual and the number is now in
+# the record instead of in prose.
+
+# The ten names slice 1 spelled as literals in `_near_miss`. Kept here, after
+# they were removed from the generator, precisely so the tell stays executable:
+# a measurement whose subject has been deleted measures nothing, and this one
+# has to keep reding if a later edit reintroduces a fixed near-miss name.
+_SLICE1_NEAR_MISS_NAMES = (
+    "twice", "Box", "Row", "Mystery", "Edge", "Comp", "dup", "probe",
+    "id", "all",
+)
+
+_IDENT_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+
+def _identifiers(source: str):
+    """Every identifier-shaped token in `source`, comments included.
+
+    Deliberately a scanner and not the real lexer: the question a tell asks is
+    what a candidate can compute from the bytes cheaply, and a candidate
+    writing a shortcut writes a regex, not a parser.
+    """
+    out = []
+    token = []
+    for char in source:
+        if char in _IDENT_CHARS:
+            token.append(char)
+            continue
+        if token:
+            out.append("".join(token))
+            token = []
+    if token:
+        out.append("".join(token))
+    return [t for t in out if t and not t[0].isdigit()]
+
+
+def _tell_near_miss_name_literals(source: str) -> bool:
+    """A fixed name that only ever appeared in a near miss."""
+    words = set(_identifiers(source))
+    return any(name in words for name in _SLICE1_NEAR_MISS_NAMES)
+
+
+def _closed_vocabulary():
+    out = set()
+    for word in _WORDS:
+        for suffix in _SUFFIXES:
+            out.add(word + suffix)
+            out.add(_cap(word + suffix))
+    return out
+
+
+def _tell_closed_vocabulary(source: str) -> bool:
+    """Every identifier comes from this file's own word list.
+
+    The un-closeable one. `_WORDS` x `_SUFFIXES` is 252 spellings and it is
+    printed above, so a candidate builds the lookup table in one line.
+    """
+    vocabulary = _closed_vocabulary() | set(_SCALARS) | {"List"} | _RESERVED
+    words = [w for w in _identifiers(source) if w not in _RESERVED]
+    return bool(words) and all(w in vocabulary for w in words)
+
+
+def _tell_fixed_comment_template(source: str) -> bool:
+    """A comment matching the one template slice 1 emitted."""
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("//") and stripped.endswith(" surface"):
+            return True
+    return False
+
+
+SURFACE_TELLS = {
+    "near-miss-name-literals": _tell_near_miss_name_literals,
+    "closed-vocabulary": _tell_closed_vocabulary,
+    "fixed-comment-template": _tell_fixed_comment_template,
+}
+
+# How far a tell's `near:` rate may sit from its `inside:` rate before the draw
+# is refused. A tell that separates perfectly scores 1.0; slice 1's
+# `near-miss-name-literals` did exactly that. The bound is not 0.0 because a
+# tell can correlate slightly by chance on a small draw -- a near miss is a
+# longer program and any length-sensitive predicate drifts -- and a bound that
+# reds on noise is a bound somebody widens until it means nothing.
+SEPARATION_BOUND = 0.25
+
+
+def tell_report(cases):
+    """`{tell: {recognition, inside_rate, near_rate, separation}}` over a draw.
+
+    Pure string work over the draw, so it costs nothing next to a scoring run
+    and can be computed on every invocation rather than in a test that a
+    candidate's CI might not run.
+    """
+    report = {}
+    inside = [src for cid, src in cases if cid.startswith("inside:")]
+    near = [src for cid, src in cases if cid.startswith("near:")]
+    for name, predicate in sorted(SURFACE_TELLS.items()):
+        inside_hits = sum(1 for src in inside if predicate(src))
+        near_hits = sum(1 for src in near if predicate(src))
+        inside_rate = (inside_hits / len(inside)) if inside else 0.0
+        near_rate = (near_hits / len(near)) if near else 0.0
+        total = len(inside) + len(near)
+        report[name] = {
+            "recognition": ((inside_hits + near_hits) / total) if total else 0.0,
+            "inside_rate": inside_rate,
+            "near_rate": near_rate,
+            "separation": abs(near_rate - inside_rate),
+        }
+    return report
+
+
+def separating_tells(report, bound=SEPARATION_BOUND):
+    """The tells that answer the scoring question on their own, worst first."""
+    over = [(name, stats["separation"]) for name, stats in report.items()
+            if stats["separation"] > bound]
+    return [name for name, _ in sorted(over, key=lambda pair: -pair[1])]
 
 
 # -------------------------------------------------------------------- the score
@@ -464,6 +695,75 @@ def load_census():
 # its `NEVER_BASELINED`, and a `gate-fault` is a crash rather than a verdict.
 ZERO_TOLERANCE = ("false-admission", "gate-fault")
 
+# ------------------------------------------------------ the bypass direction
+
+# `false-admit/<tag>` is the census's no-objection bypass: the reference
+# refuses in-slice and the gate raises no objection. Unlike `false-admission`
+# it HAS an allowance, and slice 1 left it out of the predicate for a measured
+# reason -- a prototype family drew `type Str = Str`, produced
+# `false-admit/TYPE`, and that is the same tag and family as the in-tree
+# `examples/rejections/t18_type_alias_cycle.rvl` that is already one of the
+# baseline's three. Scoring this direction against ZERO would red on a gap the
+# repository has already recorded and read, which is a finding about the
+# baseline and not about the candidate.
+#
+# So the predicate is the same one `tests/test_gate_crate_admit.py` uses on the
+# crate: compare against the BASELINE'S FAMILIES, by name. A `false-admit/<tag>`
+# whose tag the baseline already carries is the known gap re-found on new
+# programs and is reported without being a finding. A tag the baseline does NOT
+# carry is a bypass family nobody has read, found on a program nobody could
+# read, and it is a divergence.
+BYPASS_BUCKET = "false-admit"
+
+
+def bypass_allowance(root=ROOT):
+    """The `false-admit` tags the census baseline already allows.
+
+    Read from the baseline FILE rather than copied into this tool: a second
+    list would drift, and the claim this makes is precisely "no family beyond
+    the ones the repository has already recorded and read". The baseline is on
+    `HELD_OUT_FENCE` for the same reason, so a candidate cannot widen its own
+    allowance without being refused.
+
+    An empty allowance is a legitimate answer and is not a refusal; an
+    unreadable one is, because a scorer that cannot find its allowance would
+    otherwise have to choose between failing every candidate and passing every
+    one, and both of those are worse than declining to answer.
+    """
+    path = root / "tools" / "gate_reference_census_baseline.json"
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Refusal("bypass-allowance-unavailable:" + type(exc).__name__)
+    buckets = blob.get("buckets")
+    if not isinstance(buckets, dict):
+        raise Refusal("bypass-allowance-unavailable:no-buckets")
+    return frozenset(tag for tag in (_bypass_tag(name) for name in buckets)
+                     if tag)
+
+
+def _bypass_tag(name: str):
+    """The `<tag>` of a `false-admit/<tag>` bucket, else None.
+
+    Split on the separator, never `startswith`: `false-admission` carries
+    `false-admit` as a string prefix and the census's own helper documents the
+    same trap.
+    """
+    head, sep, tag = name.partition("/")
+    if head == BYPASS_BUCKET and sep and tag:
+        return tag
+    return None
+
+
+def bypass_families(buckets):
+    """`{tag: [case_id]}` for every `false-admit/<tag>` on the draw."""
+    out = {}
+    for name, ids in buckets.items():
+        tag = _bypass_tag(name)
+        if tag:
+            out.setdefault(tag, []).extend(ids)
+    return {tag: sorted(ids) for tag, ids in sorted(out.items())}
+
 
 def score(cases, census, engine=None, reference=None):
     """`(buckets, liveness)` over the draw.
@@ -489,6 +789,7 @@ def score(cases, census, engine=None, reference=None):
     issued = 0
     refused_by_reference = 0
     near_miss_refused = 0
+    in_slice_refused = 0
     inside_refused = []
     for (case_id, source), verdict in zip(cases, engine.verdicts(sources)):
         ref = reference(source)
@@ -498,6 +799,13 @@ def score(cases, census, engine=None, reference=None):
             issued += 1
         if ref[0] != "":
             refused_by_reference += 1
+            # `false-admit` is reachable ONLY from an IN-SLICE reference
+            # refusal: `bucket()` routes a no-objection against an `OUT:`
+            # refusal to `no-objection-out-of-slice`, because a no-objection is
+            # explicitly not a green. Counting these separately is what keeps
+            # the bypass direction from looking live when it is not.
+            if not ref[0].startswith("OUT:"):
+                in_slice_refused += 1
             if case_id.startswith("near:"):
                 near_miss_refused += 1
             else:
@@ -506,15 +814,19 @@ def score(cases, census, engine=None, reference=None):
         "issued_admissions": issued,
         "reference_refusals": refused_by_reference,
         "near_miss_reference_refusals": near_miss_refused,
+        "in_slice_reference_refusals": in_slice_refused,
         "inside_reference_refusals": len(inside_refused),
     }
     return buckets, liveness
 
 
 def verdict_record(buckets, liveness, *, seed, source, count, fence,
-                   changed_count):
+                   changed_count, allowance, tells):
     findings = {name: buckets.get(name, []) for name in ZERO_TOLERANCE}
-    clean = not any(findings.values())
+    families = bypass_families(buckets)
+    new_families = {tag: ids for tag, ids in families.items()
+                    if tag not in allowance}
+    clean = not any(findings.values()) and not new_families
     return {
         "verdict": "clean" if clean else "divergent",
         "refusal": None,
@@ -527,6 +839,23 @@ def verdict_record(buckets, liveness, *, seed, source, count, fence,
         "candidate_changed_files": changed_count,
         "liveness": liveness,
         "zero_tolerance": findings,
+        "bypass": {
+            "allowance": sorted(allowance),
+            "families": {tag: len(ids) for tag, ids in families.items()},
+            "new_families": new_families,
+            # Whether this direction COULD have fired on this draw, recorded
+            # next to its result so a reader cannot mistake an empty bucket for
+            # a live guard. On `admission-surface/v1` it is false: every
+            # refusal the reference issues over the draw is `OUT:`, so
+            # `bucket()` routes the whole direction to
+            # `no-objection-out-of-slice` and `false-admit` cannot be reached.
+            # The predicate is implemented and tested; the grammar it needs to
+            # become live is slice 3's. Stated in the artifact rather than in
+            # prose because "the check ran" and "the check could have failed"
+            # are the two things this repository has most often confused.
+            "reachable": liveness.get("in_slice_reference_refusals", 0) > 0,
+        },
+        "tells": tells,
         "buckets": {name: len(ids) for name, ids in sorted(buckets.items())},
     }
 
@@ -544,6 +873,9 @@ def refusal_record(reason: str):
         "candidate_changed_files": None,
         "liveness": {},
         "zero_tolerance": {name: [] for name in ZERO_TOLERANCE},
+        "bypass": {"allowance": [], "families": {}, "new_families": {},
+                   "reachable": False},
+        "tells": {},
         "buckets": {},
     }
 
@@ -562,7 +894,16 @@ def run(*, argv_seed, env, count, changed, root=ROOT, census=None,
         reached = fence_verdict(changed)
         if reached:
             raise Refusal("diff-reaches-fence:" + ",".join(sorted(reached)))
+        allowance = bypass_allowance(root)
         cases = draw(seed, count)
+        # The slice-3 enforcement, before any engine is built because it is
+        # pure string work and a draw that answers its own question is not
+        # worth scoring. A tell that separates `near:` from `inside:` hands a
+        # candidate the whole verdict without parsing anything.
+        tells = tell_report(cases)
+        separating = separating_tells(tells)
+        if separating:
+            raise Refusal("draw-separable-by-tell:" + ",".join(separating))
         if census is None:
             census = load_census()
         buckets, liveness = score(cases, census, engine=engine,
@@ -591,6 +932,8 @@ def run(*, argv_seed, env, count, changed, root=ROOT, census=None,
         count=len(cases),
         fence=HELD_OUT_FENCE,
         changed_count=len(changed),
+        allowance=allowance,
+        tells=tells,
     )
     record["draw_digest"] = draw_digest(cases)
     return record, OK if record["verdict"] == "clean" else DIVERGENT
@@ -618,6 +961,26 @@ def render(record) -> str:
         lines.append("  " + mark + " " + name + ": " + str(len(ids)))
         for case_id in ids[:6]:
             lines.append("        " + case_id)
+    bypass = record.get("bypass", {})
+    new_families = bypass.get("new_families", {})
+    mark = "!!" if new_families else "  "
+    lines.append("  " + mark + " false-admit families beyond the baseline: "
+                 + str(len(new_families))
+                 + "  (allowance: "
+                 + (", ".join(bypass.get("allowance", ())) or "none")
+                 + "; direction "
+                 + ("live" if bypass.get("reachable") else
+                    "NOT REACHABLE on this grammar") + ")")
+    for tag, ids in sorted(new_families.items()):
+        lines.append("        " + tag + ": " + str(len(ids)) + " "
+                     + ", ".join(ids[:4]))
+    for tag, size in sorted(bypass.get("families", {}).items()):
+        if tag not in new_families:
+            lines.append("        baselined family " + tag + ": " + str(size))
+    for name, stats in sorted(record.get("tells", {}).items()):
+        lines.append("     tell " + name
+                     + ": separation " + ("%.2f" % stats["separation"])
+                     + ", recognition " + ("%.2f" % stats["recognition"]))
     for name, size in record["buckets"].items():
         lines.append("     " + str(size).rjust(6) + "  " + name)
     return "\n".join(lines)
