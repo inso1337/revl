@@ -659,6 +659,20 @@ def select(changed, root) -> dict:
         # covering test. Without the gate here the generic tools/*.py rule below
         # would select the pytest module and skip the gate that actually runs
         # against the committed document.
+        # issue #1233: the claims gate's covering test is named for the
+        # DOCUMENT it reads, `tests/test_roadmap_claims_gate.py`, so the
+        # generic tools/*.py rule below looks for a `test_check_roadmap_
+        # claims.py` that does not exist and falls back to FULL; its
+        # allow-list is a non-python file under tools/ and falls back the same
+        # way. Both are cheap to select exactly. `check_vision_claims.py`
+        # imports this module for its Tree, its Claim and its retrospective
+        # window, so its module comes along.
+        if f in ("tools/check_roadmap_claims.py",
+                 "tools/roadmap_claim_allowlist.json"):
+            pytest_nodes.add("tests/test_roadmap_claims_gate.py")
+            pytest_nodes.add("tests/test_check_vision_claims.py")
+            reasons.append(f)
+            continue
         if f == "tools/check_vision_claims.py":
             gates.add("docs")
             pytest_nodes.add("tests/test_check_vision_claims.py")

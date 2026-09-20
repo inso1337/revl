@@ -367,9 +367,14 @@ and the working TREE did not: a test renamed out from under its citation, a
 function lifted into a shared module while four paragraphs kept pointing at the
 old file, a named xfail registry emptied because its gap closed. `make
 roadmap-claims` (`tools/check_roadmap_claims.py`) resolves the roadmap's
-citations against the tree instead. It is advisory today and not in `lint`;
+citations against the tree instead, and its `--check` line runs in `lint`.
 `tools/roadmap_claim_allowlist.json` carries the citations that name a sibling
-project, each with a written reason.
+project, each with a written reason. A cited path is judged whether or not it
+carries a `:line`, and a bare one is judged when it points into a directory
+this repository populates with files of that kind, so an example user project
+or a revl-harness script stays out by a rule rather than by not being looked
+at (issue #1233). Line numbers are still never judged: a drifted coordinate is
+not a false claim about the tree.
 
 1. **State lives in GitHub issues. The roadmap holds the reasoning.** Whether
    something is open, assigned, in flight or closed is a tracker's job, and a

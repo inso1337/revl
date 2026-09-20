@@ -358,12 +358,24 @@ jobs:
       # "did not, and cannot, check that any landed branch actually closed the
       # finding it is attached to". This resolves its CITATIONS against the
       # tree -- a cited pytest node must exist, a symbol cited beside a
-      # backticked path must live in that file, a `path:line` must resolve.
+      # backticked path must live in that file, and a cited path must resolve
+      # to a file, whether it carries a `:line` or not.
       #
       # It is enforced from here rather than left advisory because the six
-      # stale citations it found on 2026-09-15 were paid down in #1110, so it
-      # reports 253 claims and 0 stale on main. An advisory gate that nobody
-      # runs is the defect class this repo closed five of this month.
+      # stale citations it found on 2026-09-15 were paid down in #1110. An
+      # advisory gate that nobody runs is the defect class this repo closed
+      # five of this month.
+      #
+      # issue #1233: until 2026-09-20 the path rule collected only `path:line`
+      # citations, so a backticked path that never carried a line number was
+      # never made into a claim and never resolved -- 94 of 682 path citations
+      # judged, and the roadmap naming `tools/gate_verdict_parity.py` as
+      # machinery "here" for a file that has never existed. A bare path is now
+      # judged when it points into a directory this repository populates with
+      # files of that kind, which is what tells a citation apart from the
+      # example user projects and sibling-repo paths the roadmap writes in the
+      # same backticks. Line drift stays out of scope, for the reason the
+      # tool's own docstring gives.
       #
       # It deliberately does not rewrite a stale citation for you: auto-
       # rewriting turns every stale claim into a fresh-looking claim with

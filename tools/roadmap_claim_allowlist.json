@@ -9,7 +9,15 @@
     "An entry is NOT a way to silence a stale sentence. The checker reports any",
     "entry that stops matching, so an allow-list line cannot outlive its reason.",
     "A claim key is `<key>` for the path rule and `<symbol>@<path>` for the symbol",
-    "rule, printed verbatim by the checker."
+    "rule, printed verbatim by the checker.",
+    "",
+    "Most of the path entries below name revl-HARNESS files. That repository is",
+    "this one's dogfood workload: the roadmap cites its scripts as the place a",
+    "gap was reproduced, and each sentence says `in revl-harness` or `the harness`",
+    "in plain words. They became findings on 2026-09-20 (issue #1233) when the",
+    "path rule started judging bare backticked paths, which is the point: a",
+    "foreign citation is now distinguishable BY A RULE plus a written exception,",
+    "rather than by never being looked at."
   ],
   "entries": [
     {
@@ -26,6 +34,31 @@
       "rule": "symbol",
       "claim": "_start_automations@tools/web_server.py",
       "reason": "Item 57's gap is described against the revl-HARNESS dogfood workload, whose `tools/web_server.py` is a separate repository. The citation is to that project's host-side timer pump, which is the whole point of the finding: the behaviour cannot be expressed in-language and lives host-side, there."
+    },
+    {
+      "rule": "path",
+      "claim": "tools/timer_demo.py",
+      "reason": "Item 102's gap is that no lifecycle test can advance the clock, and the sentence names its counter-example in place: `tools/timer_demo.py` in revl-harness, the host driver that calls `Clock.advance` directly because nothing in-language can. It is that workload's file and naming it is the evidence."
+    },
+    {
+      "rule": "path",
+      "claim": "tools/canonical_demo.py",
+      "reason": "Item 103's repro is a PASS-vs-REFUSED pair across the canonical ABI, and the PASS half is `tools/canonical_demo.py` in revl-harness, stated with the repository name in the same clause. The REFUSED half, `mtier/toolbox.rvl`, is the same workload."
+    },
+    {
+      "rule": "path",
+      "claim": "tools/dsh_plugin_demo.py",
+      "reason": "Item 104 contrasts what the HARNESS can already launch end-to-end with what DSH's real plugins do at this repository's importer. `tools/dsh_plugin_demo.py` is the harness-side launcher on the working side of that contrast, and the finding is about the importer here, not about that script."
+    },
+    {
+      "rule": "path",
+      "claim": "tools/web_server.py",
+      "reason": "Item 170's async timer gap is described against the revl-HARNESS dogfood workload, whose `tools/web_server.py` drives the scheduled automations HOST-SIDE. This is the path half of the `_start_automations@tools/web_server.py` entry above, made a claim of its own when the path rule began judging bare backticked citations."
+    },
+    {
+      "rule": "path",
+      "claim": "tools/mcp_client.py",
+      "reason": "Item 367's hostage list is explicitly all measured in revl-harness lane H24, and the 268-line protocol-decode half it counts is that workload's MCP client. The item is about this repository's field-read totality; the file it counts the cost in is the harness's."
     }
   ]
 }

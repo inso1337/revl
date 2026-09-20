@@ -51,6 +51,10 @@ def tree(tmp_path: Path) -> gate.Tree:
         "backends/typescript/runtime.ts": "export class StreamSource {}\n",
         "bench/codegen/typescript/runtime.ts": "// no Stream here\n",
         "selfhost/parser.rvl": "fn parse() -> Int { return 0 }\n",
+        # `tools/` holds a tracked .py, so a bare `tools/*.py` citation is a
+        # claim about this tree. `src/` holds only `src/revl/ownership.py` and
+        # no file of its own, which is what tells `src/manifest.rvl` apart.
+        "tools/docgen.py": "def main():\n    return 0\n",
     }
     for rel, body in files.items():
         path = tmp_path / rel
@@ -171,12 +175,83 @@ def test_a_drifted_line_number_is_not_a_finding(tree):
                      tree, "path") == []
 
 
-def test_a_backticked_path_with_no_line_is_not_judged(tree):
-    """The roadmap writes hypothetical user projects in the same backticks
-    (`src/components/agent.rvl`, `root/app.rvl`). Only a citation SHAPE — a
-    `:line` or a symbol pairing — is judged."""
-    assert _findings("a workload lays out `src/components/agent.rvl`.\n",
+# --------------------------------------------------------------------------
+# (path, bare) A backticked path with NO line number. Issue #1233: until
+# 2026-09-20 this shape was not collected at all, so the roadmap named
+# `tools/gate_verdict_parity.py` as machinery "here" for a file that has never
+# existed and the gate passed on it every day. The rule that replaced "do not
+# look" asks whether the citation points into a directory this repository
+# populates with files of that kind.
+# --------------------------------------------------------------------------
+_BARE_BITES = ("conformance and cross-tier divergence is "
+               "`tools/gate_verdict_parity.py`; byte stability is elsewhere.\n")
+
+
+def test_a_bare_backticked_path_into_a_populated_directory_bites(tree):
+    """The issue-1233 sentence, reduced. `tools/` holds tracked `.py` files,
+    so a `tools/*.py` citation is a claim about this tree."""
+    assert "is not a file in the tree" in _one(_BARE_BITES, tree, "path")
+
+
+def test_the_same_bare_path_passes_once_it_names_a_file_that_exists(tree):
+    """The escape hatch: cite the machinery that does exist."""
+    assert _findings(_BARE_BITES.replace("gate_verdict_parity", "docgen"),
                      tree, "path") == []
+
+
+def test_a_hypothetical_user_project_path_is_not_judged(tree):
+    """`src` carries `src/revl/ownership.py` and no file of its own, so
+    `src/components/agent.rvl` and `src/manifest.rvl` name a directory this
+    repository does not populate with `.rvl` files. Both are example user
+    projects in the real roadmap."""
+    for cited in ("src/components/agent.rvl", "src/manifest.rvl",
+                  "root/app.rvl", "mtier/toolbox.rvl"):
+        denominator, findings, _ = gate.run(
+            "a workload lays out `%s`.\n" % cited, tree, ["path"])
+        assert denominator["path"] == 0 and findings == [], cited
+
+
+def test_a_reader_relative_path_is_not_judged(tree):
+    """`./types.ts` and `../lib/x.rvl` are spelled relative to a reader sitting
+    in some other project. Nothing in this repository is cited that way."""
+    denominator, findings, _ = gate.run(
+        "the generator writes `./types.ts` beside `../lib/x.rvl`.\n",
+        tree, ["path"])
+    assert denominator["path"] == 0 and findings == []
+
+
+def test_a_bare_path_is_judged_on_its_extension_not_just_its_directory(tree):
+    """`tools/` holds `.py` and, in this fixture, nothing else. A `.rvl` cited
+    there is not a claim this rule can honestly resolve, because the tree gives
+    no evidence that `tools/` is where such a file would live."""
+    denominator, _, _ = gate.run("see `tools/plugin.rvl`.\n", tree, ["path"])
+    assert denominator["path"] == 0
+    denominator, _, _ = gate.run("see `tools/plugin.py`.\n", tree, ["path"])
+    assert denominator["path"] == 1
+
+
+def test_a_bare_path_inside_a_longer_backtick_run_is_not_a_citation(tree):
+    """The collector anchors both backticks, which is what keeps `path:line`
+    out of this shape and prose out of it entirely."""
+    denominator, _, _ = gate.run(
+        "run `python3 tools/gate_verdict_parity.py --check`.\n", tree, ["path"])
+    assert denominator["path"] == 0
+
+
+def test_a_citation_saying_the_file_never_existed_is_not_judged(tree):
+    """The retrospective excision, in the form this rule needs. A roadmap that
+    records a citation to a file which turned out never to have been written
+    has to spell the file to say so, and that sentence is the last one a
+    citation gate should red."""
+    source = ("NOT the `tools/gate_verdict_parity.py` this item named when it "
+              "was written: that file has never existed in this tree.\n")
+    assert _findings(source, tree, "path") == []
+
+
+def test_the_same_sentence_without_the_cue_IS_judged(tree):
+    assert "is not a file in the tree" in _one(
+        "the conformance component is `tools/gate_verdict_parity.py`.\n",
+        tree, "path")
 
 
 # --------------------------------------------------------------------------
@@ -288,8 +363,93 @@ def test_every_rule_finds_claims_in_the_real_roadmap(real):
     # absent 1) and well over zero, which is the failure this pins.
     assert denominator["test"] >= 40
     assert denominator["symbol"] >= 30
-    assert denominator["path"] >= 30
+    assert denominator["path"] >= 250
     assert denominator["absent"] >= 1
+
+
+def test_the_path_rule_judges_the_bulk_of_the_roadmap_s_bare_citations(real):
+    """Issue #1233's measurement, turned into a floor.
+
+    On 2026-09-20 the rule judged 408 path citations where the `path:line`
+    shape alone had reached 79, and the bare paths it declines are the
+    reader-relative and foreign-project spellings. The failure this pins is a
+    regex that stops matching the live document and quietly returns the gate
+    to judging 14 percent of its own citations, which is how it read for the
+    five days before this test existed.
+    """
+    source, tree = real
+    bare = [c for c in gate.collect_path_claims(source, tree)
+            if not gate.PATH_LINE_RE.fullmatch(c.text.strip("`"))]
+    assert len(bare) >= 250, len(bare)
+
+
+def test_the_rule_declines_the_spellings_that_were_never_about_this_tree(real):
+    """The other half of the same measurement. These are real roadmap
+    citations: three example user projects, one sibling-repo layout and two
+    reader-relative spellings. Each one resolves to nothing, and each one is
+    correct prose. A rule that judged them would red CI on six true
+    sentences."""
+    source, tree = real
+    for cited in ("root/app.rvl", "mtier/toolbox.rvl", "src/manifest.rvl",
+                  "packages/host/plugin-inventory/src/index.ts",
+                  "./types.ts", "../lib/x.rvl"):
+        assert "`%s`" % cited in source, "citation moved; re-pick it: %s" % cited
+        assert tree.resolve(cited) == [], cited
+        assert not gate._cites_this_tree(cited, tree), cited
+
+
+def test_renaming_a_cited_file_in_the_TREE_reds_the_gate(real):
+    """The gate seen to fail for the reason it exists, against the live
+    document, with a CONTROL rule that must not move.
+
+    The mutation is on the TREE side rather than the document side: every
+    other test here plants a bad sentence, and a gate can pass those while
+    being blind to the change that actually happens, which is a file getting
+    renamed under a citation nobody re-read.
+    """
+    source, tree = real
+    allow = gate.load_allowlist(gate.DEFAULT_ALLOWLIST)
+    # A citation the roadmap makes in the BARE shape, resolving to exactly one
+    # file. Picked from the document rather than hard-coded, so an edit to any
+    # one sentence re-picks instead of reddening.
+    bare = [c.key for c in gate.collect_path_claims(source, tree)
+            if not gate.PATH_LINE_RE.fullmatch(c.text.strip("`"))]
+    cited = next(k for k in bare if tree.resolve(k) == [k])
+    assert "`%s`" % cited in source and cited in tree.files
+
+    def count(t, rules):
+        _, findings, _ = gate.run(source, t, rules, allow)
+        return len(findings)
+
+    renamed = gate.Tree(ROOT, [f for f in tree.files if f != cited]
+                        + [cited.replace(".", "_renamed.", 1)])
+    assert count(renamed, ["path"]) > count(tree, ["path"]), (
+        "renaming %s did not red the path rule" % cited)
+    # The control: a rule that has nothing to do with the rename reads the
+    # same on both trees. Without it, "the gate went red" proves only that
+    # something went red.
+    assert count(renamed, ["absent"]) == count(tree, ["absent"])
+    assert count(renamed, ["test"]) == count(tree, ["test"])
+
+
+def test_the_issue_1233_sentence_would_have_been_caught_when_it_was_written(real):
+    """The regression this rule exists to prevent, quoted from item 536 as it
+    read before the correction: a tool named as machinery `here` that has never
+    existed in this tree, inside a sentence that claims all eight reward
+    components are already built."""
+    _, tree = real
+    sentence = (
+        "All eight components already have machinery here, and the mapping is "
+        "the point rather than a formality: compiles is the crate build and "
+        "the six-tier matrix; tests is the affected suite; conformance and "
+        "cross-tier divergence is `tools/gate_verdict_parity.py`; byte "
+        "stability of unrelated goldens is `tools/regen_goldens.py`.\n")
+    _, findings, _ = gate.run(sentence, tree, gate.RULES,
+                              gate.load_allowlist(gate.DEFAULT_ALLOWLIST))
+    assert [c.key for c, _ in findings] == ["tools/gate_verdict_parity.py"]
+    # `tools/regen_goldens.py`, cited in the same clause, resolves. The gate
+    # separates the two halves of one sentence, which is the whole claim.
+    assert tree.resolve("tools/regen_goldens.py")
 
 
 def test_the_shipped_allowlist_still_matches_something(real):
@@ -330,6 +490,9 @@ def test_a_stale_claim_planted_in_the_REAL_roadmap_is_caught(real):
         # path: a file:line whose file is gone.
         ("`crates/revl-gate/src/session.rs:1`",
          "`crates/revl-gate/src/layer2.rs:1`"),
+        # path, bare: the shape issue #1233 added. No line number, nothing
+        # around it but backticks, and a directory this repository populates.
+        ("`tools/regen_goldens.py`", "`tools/regen_goldens_v2.py`"),
     ]
     for old, new in plants:
         assert old in source, "the control sentence moved; re-pick it: %r" % old
