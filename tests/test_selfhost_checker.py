@@ -940,6 +940,67 @@ component C {
 }
 ''',
      "argument 1 of `secret_put(...)` expects `Str`, got `Int`"),
+    # ---- the `a host emission` reach label (issue #1254) -------------------
+    # `_method_emissions` notes `a host emission` for every `emit` STEP whose
+    # head is not a required-key crossing, ahead of the emitting names the same
+    # statement reaches. Every G4 document above crosses through a wiring key,
+    # which has a key to name and so draws no label — so no document held this
+    # slice's reach renderer to the reference on the HOST shape, and it rendered
+    # `(reaching `pg_write()`)` where the reference renders `(reaching `a host
+    # emission`, `pg_write()`)`. Same tag, same offending token, both refusing;
+    # the divergence was on the message alone.
+    #
+    # The extern is unscoped so the offending token it quotes is its own name
+    # under every reading of `_emitting_capabilities`.
+    ("g4 excess through a host extern", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit pg_write(row)
+      return 0
+    }
+  }
+}
+""",
+     "`Ledger.post` is declared `emission[db]`, but this implementation emits "
+     "through `pg_write` (reaching `a host emission`, `pg_write()`)"),
+    # The plain-declaration half: the label lands in the upper-bound arm's
+    # "reaches" list as well, which is rendered separately.
+    ("g4 plain provider reaching a host extern", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit pg_write(row)
+      return 0
+    }
+  }
+}
+""",
+     "`Ledger.post` is declared plain, but this implementation reaches "
+     "`a host emission`, `pg_write()`"),
+    # Control: the same host extern reached from an emit-marked BINDING. A
+    # `let receipt = emit …` binds an emit-marked value, which the reference
+    # lowers through its expression path rather than into an `emit` step, so
+    # neither engine notes the label. A fix that labelled every emit-marked
+    # call instead of every emit step would fail here.
+    ("g4 excess through an emit-marked binding", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let receipt = emit pg_write(row)
+      return receipt
+    }
+  }
+}
+""",
+     "`Ledger.post` is declared `emission[db]`, but this implementation emits "
+     "through `pg_write` (reaching `pg_write()`)"),
 ]
 
 

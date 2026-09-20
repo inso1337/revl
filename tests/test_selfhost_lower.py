@@ -2729,6 +2729,105 @@ component C requires sink: Sink provides api: Api {
   provide api { fn go() { return sink.write("x") } }
 }
 """, "G4"),
+    # ---- the `a host emission` reach label (issue #1254) -------------------
+    # A G4 excess refusal THROUGH A HOST EXTERN. No document in the corpus had
+    # this shape, so nothing measured the reach list on it, and the two engines
+    # rendered it differently: the reference's `_method_emissions` notes
+    # `a host emission` for an `emit` step that is not a required-key crossing
+    # and the gate noted nothing, leaving
+    #   reference:  … (reaching `a host emission`, `pg_write()`)
+    #   gate:       … (reaching `pg_write()`)
+    # Same tag, same offending token, both refusing — a divergence on the
+    # MESSAGE half of the agreement alone, which is why the census (which sees
+    # only the documents in the tree) reported no `msg-mismatch`.
+    #
+    # Here rather than in a dedicated test file on purpose. `REJECTED_PROGRAMS`
+    # is what `gate_reference_census.load_corpus` reads and what
+    # `test_rejected_programs_agree` compares byte for byte, so a document here
+    # holds the two reach renderers together on tag AND message. The lane that
+    # found this (issue #1240) kept its own out-of-bounds controls out of this
+    # list precisely because the divergence was still open; with the label
+    # carried, that constraint is lifted.
+    #
+    # The extern is UNSCOPED on purpose: an unscoped emission extern is its own
+    # capability token under every reading of `_emitting_capabilities`, so the
+    # offending token this message quotes does not depend on how a DECLARED
+    # scope is seeded.
+    ("a G4 excess through a host extern", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit pg_write(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # The plain-declaration half of the same crossing: the label lands in the
+    # "reaches" list of the upper-bound refusal as well as the "(reaching …)"
+    # tail of the capability one, and the two are rendered by different arms.
+    ("a plain provider reaching a host extern", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit pg_write(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # Control 1: the same excess through a REQUIRED KEY. The crossing has a
+    # wiring key to name, so neither engine notes the label — a renderer that
+    # started spelling it on every emission would show up here.
+    ("a G4 excess through a required key carries no host label", """
+service Store { emission fn append(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires fs: Store provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit fs.append(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # Control 2: the same host extern, reached from an emit-marked BINDING.
+    # `let receipt = emit pg_write(row)` is a binding whose value carries the
+    # marker; the reference lowers it through its expression path and never
+    # builds an `emit` step from it, so there is no label on either side. This
+    # is the control a fix that labelled every emit-marked call would fail.
+    ("an emit-marked binding carries no host label", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let receipt = emit pg_write(row)
+      return receipt
+    }
+  }
+}
+""", "G4"),
+    # Control 3: an ordinary statement that merely REACHES the same extern
+    # through a helper, with no `emit` marker of its own. It is not an emit
+    # step, so it draws `helper()` and nothing more on both sides.
+    ("an unmarked reach through a helper carries no host label", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+fn helper(row: Str) -> Int { return pg_write(row) }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let receipt = helper(row)
+      return receipt
+    }
+  }
+}
+""", "G4"),
 ]
 
 
