@@ -351,7 +351,7 @@ def test_admit_allowlist_enumerates_the_granted_set_under_untrusted():
     set is the author's own contract, already observable from the program's
     successes, so it is enumerated even for the untrusted author."""
     prof = _untrusted()
-    src = ("service Net { emission fn call(u: Str) -> Int }\n"
+    src = ("service Net { emission[net] fn call(u: Str) -> Int }\n"
            "service Ops { fn go() }\n"
            "component A requires net: Net provides ops: Ops {\n"
            "  provide ops { fn go() { } }\n"
