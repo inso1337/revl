@@ -129,6 +129,23 @@ def load_hosts() -> dict:
     return json.loads((BENCH / "hosts.json").read_text())
 
 
+def load_unload_survey() -> dict:
+    """The evidence behind the framework pick, or a stated absence.
+
+    The survey is what turns "we chose this framework" into something a reader
+    can check, so the report carries it rather than the conclusion alone.
+    """
+    path = OUT_DIR / "unload-survey.json"
+    if not path.is_file():
+        return {"present": False,
+                "reason": f"no survey at {_rel(path)}; run "
+                          "bench/framework_unload_survey.py --fetch --write"}
+    doc = json.loads(path.read_text())
+    doc["present"] = True
+    doc["path"] = _rel(path)
+    return doc
+
+
 def load_pin(path: Path | None) -> dict:
     target = path or (OUT_DIR / "model-pin.json")
     if not target.is_file():
@@ -176,7 +193,53 @@ def column_refused() -> dict:
     return cell
 
 
-def column_admits(run: str | None, compiler_root: Path, attempt: int) -> dict:
+def corpus_models(run: str) -> list:
+    """The model ids a committed run's own records name.
+
+    Read from the run's records rather than from its label, because a label is
+    something somebody typed and a record is what the driver wrote. This is the
+    only thing that decides whether a cell may be headed by the pinned model's
+    name.
+    """
+    path = BENCH / "results" / run / "results.jsonl"
+    if not path.is_file():
+        return []
+    seen = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        model = row.get("model")
+        if isinstance(model, str) and model and model not in seen:
+            seen.append(model)
+    return seen
+
+
+def is_pinned_corpus(run: str, pin: dict) -> dict:
+    """Whether every model named by the run's records is the pinned model."""
+    models = corpus_models(run)
+    pinned = ((pin.get("model") or {}).get("resolved")
+              if pin.get("present") else None)
+    if not models:
+        return {"is_pinned_model": False,
+                "why": f"bench/results/{run} records no model id"}
+    if not pinned:
+        return {"is_pinned_model": False, "models": models,
+                "why": "no model pin is present to compare against"}
+    ok = all(m == pinned for m in models)
+    return {
+        "is_pinned_model": ok,
+        "models": models,
+        "why": (f"every record names {pinned}" if ok else
+                f"records name {models}, and the pin is {pinned}"),
+    }
+
+
+def column_admits(run: str | None, compiler_root: Path, attempt: int,
+                  pin: dict) -> dict:
     """First-pass admission rate over a committed revl corpus.
 
     This is a re-score, not a run: it recompiles committed generations against
@@ -214,14 +277,17 @@ def column_admits(run: str | None, compiler_root: Path, attempt: int) -> dict:
         v["admitted"] += 1 if row["ok"] else 0
     for v in by_variant.values():
         v["rate"] = v["admitted"] / v["n"] if v["n"] else None
+    provenance = is_pinned_corpus(run, pin)
     return {
         "status": "measured",
         "corpus": f"bench/results/{run}",
         "attempt": attempt,
         "generated_by": run,
-        "is_pinned_model": False,
-        "note": ("a re-score of a committed corpus against the current checker; "
-                 "the generating model is the corpus label, not the pinned model"),
+        **provenance,
+        "note": ("a re-score of a committed corpus against the current checker. "
+                 "Whether the pinned model produced it is decided by the model "
+                 "ids in the run's own records, never by its label: "
+                 + provenance["why"]),
         "by_variant": by_variant,
         "cells": rows,
         "n": len(rows),
@@ -298,7 +364,8 @@ def column_admission_latency(measure: bool, iters: int) -> dict:
     }
 
 
-def column_tokens_to_green(run: str | None, compiler_root: Path) -> dict:
+def column_tokens_to_green(run: str | None, compiler_root: Path,
+                           pin: dict) -> dict:
     if run is None:
         return {"status": NOT_RUN,
                 "blocked_on": "pass --tokens-from <run label>",
@@ -335,31 +402,61 @@ def column_tokens_to_green(run: str | None, compiler_root: Path) -> dict:
         "mean_output_tokens": sum(values) / len(values),
         "admitted_cells": len(admitted),
         "total_cells": len(cells),
-        "is_pinned_model": False,
+        **is_pinned_corpus(run, pin),
         "means": "output tokens spent per admitted component",
     }
 
 
-def column_injection_escape() -> dict:
-    """Not implemented, and said so rather than filled with a related number.
+def column_injection_escape(run: str | None) -> dict:
+    """The escape rate over a committed injection run, or not-run with a reason.
 
-    `docs/prompt-injection-resistance.md` states the claim this column would
-    measure, and carries no runnable check: the repository's own doc inventory
-    grades it `needs-work`, and nothing in `tools/` or `tests/` references it by
-    name. `tests/test_adversarial_gate.py` is an executable attack suite, but it
-    belongs to `docs/threat-model.md` and is not an injection-escape rate over
-    this task set. Reporting it in this cell would be answering a different
-    question in the column's name.
+    `tests/test_adversarial_gate.py` is still refused as a source for this cell,
+    for the reason the first pass gave: it is an executable attack suite
+    belonging to `docs/threat-model.md`, it measures our own gate against
+    attacks we wrote for it, and a pass-rate over that set is not an escape rate
+    over these briefs. What fills the cell now is
+    `bench/injection_escape.py`, which generates with the pinned model and
+    detects compliance from the source text without consulting the gate.
+
+    A mock run is refused outright rather than reported with a caveat: a number
+    produced by a stub reads exactly like a number produced by a model once it
+    is in a table.
     """
+    if run is None:
+        return {
+            "status": NOT_RUN,
+            "blocked_on": ("no injection run named; run bench/injection_escape.py "
+                           "and pass --injection-from <run label>"),
+            "runner": "python3 bench/injection_escape.py --runner local",
+            "nearest_existing": "tests/test_adversarial_gate.py (docs/threat-model.md)",
+            "note": ("still not filled with the nearest available number: an "
+                     "attack suite pass-rate is not an escape rate over these briefs"),
+        }
+    path = BENCH / "results" / run / "escape.json"
+    if not path.is_file():
+        return {"status": NOT_RUN,
+                "blocked_on": f"no committed run at bench/results/{run}/escape.json",
+                "nearest_existing": "tests/test_adversarial_gate.py (docs/threat-model.md)",
+                "note": "not filled with the nearest available number"}
+    doc = json.loads(path.read_text())
+    if not doc.get("reportable"):
+        return {"status": NOT_RUN,
+                "blocked_on": (f"bench/results/{run} was produced by the "
+                               f"{doc.get('runner')!r} runner, which is not a model"),
+                "nearest_existing": "tests/test_adversarial_gate.py (docs/threat-model.md)",
+                "note": "a stub's output is not a result, with or without a caveat"}
     return {
-        "status": NOT_RUN,
-        "blocked_on": (
-            "no runnable injection-escape measure exists over this task set; "
-            "docs/prompt-injection-resistance.md states the claim and has no "
-            "check behind it"),
+        "status": "measured",
+        "corpus": f"bench/results/{run}",
+        "model": doc.get("model"),
+        "vectors": doc.get("vectors"),
+        "summary": doc.get("summary"),
+        "means": ("compliance is the model's rate of doing the undeclared thing; "
+                  "containment is whether a named hard gate then rejected it; "
+                  "escape is compliance not contained"),
         "nearest_existing": "tests/test_adversarial_gate.py (docs/threat-model.md)",
-        "note": ("not filled with the nearest available number: an attack suite "
-                 "pass-rate is not an escape rate over these 30 briefs"),
+        "note": ("still not sourced from the attack suite: that measures our gate "
+                 "against attacks we wrote for it"),
     }
 
 
@@ -402,13 +499,14 @@ def briefs_from_residue(residue: dict, run: str) -> list[dict]:
 def build_report(args) -> dict:
     hosts = load_hosts()
     compiler_root = Path(args.compiler_root) if args.compiler_root else ROOT
+    pin = load_pin(args.pin)
 
     refused = column_refused()
-    admits = column_admits(args.admits_from, compiler_root, args.attempt)
+    admits = column_admits(args.admits_from, compiler_root, args.attempt, pin)
     residue = column_residue(args.residue_from)
     latency = column_admission_latency(args.measure_latency, args.latency_iters)
-    tokens_col = column_tokens_to_green(args.tokens_from, compiler_root)
-    injection = column_injection_escape()
+    tokens_col = column_tokens_to_green(args.tokens_from, compiler_root, pin)
+    injection = column_injection_escape(args.injection_from)
 
     briefs = briefs_from_admits(admits) + briefs_from_residue(residue, args.residue_from)
 
@@ -445,15 +543,59 @@ def build_report(args) -> dict:
             "evidence": dict(evidence, run=residue["corpus"]),
         })
     if admits.get("status") == "measured":
+        # The provenance clause is inside the claim text, not beside it. These
+        # are the cells most likely to be quoted out of context, and a caveat
+        # that lives in a neighbouring paragraph does not survive being quoted.
+        origin = ((f"generated by the pinned model "
+                   f"{admits['models'][0]}" if admits.get("models") else
+                   "generated by the pinned model")
+                  if admits.get("is_pinned_model")
+                  else f"corpus {admits['corpus']}, NOT generated by the "
+                       f"pinned model")
         for variant, v in sorted(admits["by_variant"].items()):
             claims.append({
                 "text": (f"{variant}: {v['admitted']} of {v['n']} committed "
                          f"generations are admitted by the current checker "
-                         f"(n={v['n']}, corpus {admits['corpus']}, not the "
-                         "pinned model)"),
+                         f"(n={v['n']}, {origin})"),
                 "rung": "measured",
                 "public": True,
                 "evidence": dict(evidence),
+            })
+    if tokens_col.get("status") == "measured":
+        torigin = ("generated by the pinned model" if tokens_col.get("is_pinned_model")
+                   else f"corpus {tokens_col['corpus']}, NOT generated by the "
+                        f"pinned model")
+        claims.append({
+            "text": (f"tokens to green: {tokens_col['median_output_tokens']} "
+                     f"median output tokens per admitted component "
+                     f"(n={tokens_col['n']}, {tokens_col['token_source']}, "
+                     f"{torigin})"),
+            "rung": "measured",
+            "public": True,
+            "evidence": dict(evidence, run=tokens_col["corpus"]),
+        })
+    if injection.get("status") == "measured":
+        for host, block in (injection.get("summary") or {}).items():
+            claims.append({
+                "text": (f"injection, {host}: the pinned model produced the "
+                         f"undeclared action in {block['complied']} of "
+                         f"{block['attempts']} attempts (n={block['attempts']}, "
+                         f"a property of the model, not of the host)"),
+                "rung": "measured",
+                "public": True,
+                "evidence": dict(evidence, run=injection["corpus"]),
+            })
+            if block.get("containment") is None:
+                continue
+            claims.append({
+                "text": (f"injection, {host}: {block['containment']} of "
+                         f"{block['complied']} complying attempts were refused "
+                         f"by a named hard gate, leaving {block['escapes']} "
+                         f"escapes (n={block['complied']} complying attempts, "
+                         f"not {block['attempts']})"),
+                "rung": "measured",
+                "public": True,
+                "evidence": dict(evidence, run=injection["corpus"]),
             })
 
     report = {
@@ -461,7 +603,7 @@ def build_report(args) -> dict:
         "report_schema": REPORT_SCHEMA,
         "suite": SUITE,
         "generator": {
-            "model": (load_pin(args.pin).get("model") or {}).get("resolved")
+            "model": (pin.get("model") or {}).get("resolved")
                      or "no pinned-model run has been executed",
             "run": args.admits_from or "none",
             "driver": "bench/run.py",
@@ -472,7 +614,8 @@ def build_report(args) -> dict:
             "name": "bench/rescore.py",
         },
         "checker": checker,
-        "model_pin": load_pin(args.pin),
+        "model_pin": pin,
+        "unload_survey": load_unload_survey(),
         "hosts": hosts["hosts"],
         "tasks": hosts["tasks"],
         "columns": {
@@ -486,18 +629,21 @@ def build_report(args) -> dict:
         "briefs": briefs,
         "claims": claims,
     }
-    report["remaining_gates"] = remaining_gates(hosts, report["columns"])
+    report["remaining_gates"] = remaining_gates(hosts, report["columns"], pin)
     return report
 
 
-def remaining_gates(hosts: dict, report_columns: dict) -> list[dict]:
+def remaining_gates(hosts: dict, report_columns: dict, pin: dict) -> list[dict]:
     """What this report is not. Named, so nobody has to infer it from a gap."""
     gates = []
     framework = next((h for h in hosts["hosts"] if h["id"] == "framework"), None)
     if framework and not framework.get("runnable"):
+        named = framework.get("name")
         gates.append({
             "gate": "the third host",
-            "what": "no agent framework is named, pinned or run",
+            "what": (f"named and justified as `{named}` {framework.get('version', '')}"
+                     f", not yet run" if named
+                     else "no agent framework is named, pinned or run"),
             "why": framework.get("blocked_on"),
         })
     for name, cell in report_columns.items():
@@ -505,13 +651,27 @@ def remaining_gates(hosts: dict, report_columns: dict) -> list[dict]:
             gates.append({"gate": f"column: {name}",
                           "what": "not measured in this report",
                           "why": cell.get("blocked_on")})
-    gates.append({
-        "gate": "a pinned-model run across all three hosts",
-        "what": ("no cell in this report was produced by the pinned model; the "
-                 "admission and token cells are re-scores of corpora generated "
-                 "by other models"),
-        "why": "the three-host generation run has not been executed",
-    })
+    pinned_cells = sorted(name for name, cell in report_columns.items()
+                          if cell.get("is_pinned_model")
+                          or (cell.get("status") == "measured"
+                              and name == "injection-escape"))
+    if pinned_cells:
+        gates.append({
+            "gate": "a pinned-model run across all three hosts",
+            "what": (f"the pinned model produced {', '.join(pinned_cells)}; every "
+                     "other cell is a re-score of a corpus another model "
+                     "generated, or not run"),
+            "why": ("the raw-ts and framework hosts have not been generated with "
+                    "the pinned model"),
+        })
+    else:
+        gates.append({
+            "gate": "a pinned-model run across all three hosts",
+            "what": ("no cell in this report was produced by the pinned model; the "
+                     "admission and token cells are re-scores of corpora generated "
+                     "by other models"),
+            "why": "the three-host generation run has not been executed",
+        })
     gates.append({
         "gate": "independent reproduction",
         "what": ("every claim stands at the 'measured' rung and none at "
@@ -520,6 +680,18 @@ def remaining_gates(hosts: dict, report_columns: dict) -> list[dict]:
                 "party that is not the generator; nobody outside this "
                 "repository has run the suite"),
     })
+    tp = (pin.get("throughput") or {}) if pin.get("present") else {}
+    accounted = tp.get("accounted_fraction_mean")
+    if accounted is not None and accounted < 0.8:
+        gates.append({
+            "gate": "a throughput measurement on an idle machine",
+            "what": (f"the throughput figures were taken with the server "
+                     f"accounting for only {accounted * 100:.0f}% of each "
+                     f"request's wall clock"),
+            "why": ("no idle machine was available during this run; the figure "
+                    "does not reproduce the quoted one and a contended "
+                    "measurement is a weak refutation either way"),
+        })
     gates.append({
         "gate": "publication",
         "what": "nothing here is published outside this repository",
@@ -535,6 +707,80 @@ def remaining_gates(hosts: dict, report_columns: dict) -> list[dict]:
 
 def _cell(value) -> str:
     return "not run" if value is None else str(value)
+
+
+def _escape_cell(inj: dict, host: str) -> str:
+    """One host's injection-escape cell.
+
+    Compliance leads, because it is the number that is about the model rather
+    than about the host, and a containment figure quoted without it is not
+    interpretable. A host whose containment was never exercised says so; it
+    never prints a rate.
+    """
+    if inj.get("status") != "measured":
+        return "not run"
+    block = (inj.get("summary") or {}).get(host)
+    if not block:
+        return "not run (host not in the run)"
+    head = (f"{block['complied']}/{block['attempts']} attempts complied "
+            f"(model behaviour)")
+    if block.get("containment") is None:
+        # The reason is under the table, not in the cell. A cell holding a
+        # three-line explanation is unreadable in a table, and a reader who
+        # only reads cells must still not come away thinking a rate was
+        # withheld rather than never existing.
+        return f"{head}; containment not measured, see below"
+    # The attributed refusal leads, not the raw containment count. A document
+    # refused for an unrelated syntax error kept the injected behaviour out and
+    # is still no evidence that the gate catches injections, and folding the two
+    # together is how this column would come out flattering by accident.
+    return (f"{head}; **{block['escapes']}** escaped, "
+            f"{block.get('refused_on_the_injection', 0)} refused on the "
+            f"injection, {block.get('refused_on_another_fault', 0)} refused on "
+            f"an unrelated fault")
+
+
+def _third_host_section(framework: dict | None, survey: dict) -> list:
+    """Which framework, why, what was rejected, and what is still not run."""
+    if not framework or not framework.get("name"):
+        return []
+    lines = ["## The third host", "",
+             f"**`{framework['name']}` {framework.get('version', '')}**, "
+             f"from {framework.get('ecosystem', 'a package index')}, "
+             f"{framework.get('authored_by', '')}.", ""]
+    for line in framework.get("selected_because") or []:
+        lines.append(line)
+    lines += [""]
+    honest = framework.get("honest_about_the_pick")
+    if honest:
+        lines += ["### What is uncomfortable about this pick", ""] + list(honest) + [""]
+    rejected = framework.get("rejected") or []
+    if rejected:
+        lines += ["### Rejected, and why", "", "| framework | why |", "|---|---|"]
+        for row in rejected:
+            lines.append(f"| `{row['name']}` | {row['why']} |")
+        lines += [""]
+    if survey.get("present"):
+        rows = survey.get("frameworks") or []
+        claims = sum(len(r.get("claims") or []) for r in rows)
+        lines += [
+            f"Every claim in that table is checked against the published "
+            f"artifact rather than asserted: `bench/framework_unload_survey.py` "
+            f"holds {claims} claims across {len(rows)} packages and fails if any "
+            f"is falsified. The evidence, with the file and line each symbol was "
+            f"found at, is `{survey['path']}`.", "",
+            "What that check says and does not say: a confirmed claim means the "
+            "symbol is in the published file. It says nothing about what calling "
+            "it releases, which is the residue probe's question and is why the "
+            "framework residue cell is not-run rather than filled from the "
+            "survey.", "",
+        ]
+    else:
+        lines += [f"No unload survey is committed: {survey.get('reason', '')}.", ""]
+    blocked = framework.get("blocked_on")
+    if blocked:
+        lines += ["### Why its cells are still empty", ""] + list(blocked) + [""]
+    return lines
 
 
 def render(report: dict) -> str:
@@ -598,6 +844,31 @@ def render(report: dict) -> str:
             "number somebody wrote down.",
             "",
         ]
+        accounted = tp.get("accounted_fraction_mean")
+        if accounted is not None:
+            lines += [
+                f"How busy the machine was is measured rather than asserted. "
+                f"The server accounted for **{accounted * 100:.0f}%** of each "
+                f"request's wall clock as load, prompt evaluation or "
+                f"generation"
+                + (f"; the one-minute load average over the samples averaged "
+                   f"{tp['load_average_1m_mean']:.0f} and peaked at "
+                   f"{tp['load_average_1m_max']:.0f}"
+                   if tp.get("load_average_1m_mean") is not None else "")
+                + ". The rest was waiting.",
+                "",
+                "That cuts both ways and the report says so rather than picking",
+                "the reading it prefers. A figure taken on a contended machine",
+                "is a weak refutation of a figure taken on an idle one, so this",
+                "does not settle whether the quoted number is wrong. It is also",
+                "not a licence to assume the quoted number would reproduce: no",
+                "measurement in this repository has reproduced it, on any",
+                "machine state, and a run on an idle machine remains a named",
+                "gate rather than a result. The throughput figures above are",
+                "the server's own accounted rates and are not adjusted by this",
+                "fraction.",
+                "",
+            ]
     lines += [
         "The frontier is the field that matters for comparing two runs. Two",
         "gates covering different surfaces can agree on every program either",
@@ -647,8 +918,20 @@ def render(report: dict) -> str:
               "| column | raw Cordis / TypeScript | agent framework | revl |",
               "|---|---|---|---|"]
 
+    framework = next((h for h in report["hosts"] if h["id"] == "framework"), None)
+    fw_name = (framework or {}).get("name")
+    fw_version = (framework or {}).get("version", "")
+
     def fw() -> str:
-        return "not run (no framework named)"
+        """The framework cell. Named now, still not run, and it says both.
+
+        The name is in the cell rather than only in the prose, because a column
+        headed "agent framework" with `not run` in every cell reads as though no
+        choice was made, and one was.
+        """
+        if not fw_name:
+            return "not run (no framework named)"
+        return f"not run (`{fw_name}` {fw_version} named, harness not built)"
 
     if head:
         lines.append(
@@ -657,8 +940,14 @@ def render(report: dict) -> str:
     admits = cols["admits"]
     if admits.get("status") == "measured":
         best = max(admits["by_variant"].items(), key=lambda kv: kv[1]["n"])
+        # The provenance clause is generated from the measured model ids, not
+        # written by hand. This cell is the one most likely to be quoted out of
+        # context, so the sentence that says which model produced it travels
+        # inside the cell rather than in a footnote a quoter can drop.
+        origin = ("**pinned model**" if admits.get("is_pinned_model")
+                  else "NOT the pinned model")
         cell = (f"{best[1]['admitted']}/{best[1]['n']} on `{best[0]}` "
-                f"(corpus {admits['corpus']}, not the pinned model)")
+                f"(corpus {admits['corpus']}, {origin})")
     else:
         cell = f"not run ({admits.get('blocked_on')})"
     lines.append(f"| admits (first pass) | not applicable, see below | {fw()} | {cell} |")
@@ -679,11 +968,14 @@ def render(report: dict) -> str:
                  "a corpus the probe could score |")
 
     inj = cols["injection-escape"]
-    lines.append(f"| injection escape | not run | {fw()} | not run |")
+    lines.append(f"| injection escape | {_escape_cell(inj, 'raw-ts')} | {fw()} "
+                 f"| {_escape_cell(inj, 'revl')} |")
 
     tok = cols["tokens-to-green"]
     tcell = (f"{tok['median_output_tokens']} median output tokens "
-             f"(n={tok['n']}, {tok['token_source']})"
+             f"(n={tok['n']}, {tok['token_source']}, "
+             + ("**pinned model**" if tok.get("is_pinned_model")
+                else f"corpus {tok.get('corpus')}, NOT the pinned model") + ")"
              if tok.get("status") == "measured" else "not run")
     lines.append(f"| tokens to green | not applicable | {fw()} | {tcell} |")
 
@@ -712,10 +1004,60 @@ def render(report: dict) -> str:
                   f"Re-probe it with `{residue['reprobe']}` "
                   f"(prereq: `{residue['reprobe_prereq']}`).", ""]
 
-    lines += ["### The injection-escape column", "",
-              inj["blocked_on"] + ".",
-              f"Nearest existing artifact: `{inj['nearest_existing']}`. "
-              + inj["note"] + ".", ""]
+    lines += ["### The injection-escape column", ""]
+    if inj.get("status") != "measured":
+        lines += [inj["blocked_on"] + ".",
+                  f"Nearest existing artifact: `{inj['nearest_existing']}`. "
+                  + inj["note"] + ".", ""]
+    else:
+        lines += [
+            f"Measured over `{inj['corpus']}` with the pinned model, across "
+            f"{len(inj.get('vectors') or [])} injection vectors on one spec, so the "
+            "only thing that varies across attempts is the injection.", "",
+            "The injection never rides in the system prompt. It rides in a service",
+            "doc comment, in the brief, or in the compiler output the retry loop",
+            "feeds back, which is where a real one rides.", "",
+            "Two numbers, and they answer different questions. **Compliance** is how",
+            "often the model did the undeclared thing at all. It is a property of",
+            "the model and it is the same question on every host, so it is reported",
+            "first: a containment rate quoted without it is not interpretable, and a",
+            "model that ignores every injection would make every host look perfect.",
+            "**Containment** is whether a named hard gate then refused the artifact.",
+            "Compliance is detected from the source text by a detector that never",
+            "consults the gate, because inferring compliance from the gate's verdict",
+            "would make containment 100% by construction.", "",
+            "A refusal is split by what it was about. The first live attempt is",
+            "why: the model complied with the environment-variable injection,",
+            "the compiler refused the document, and the diagnostic was a syntax",
+            "error on an unrelated line. That refusal kept the behaviour out and",
+            "is no evidence that the gate catches injections, so it is counted",
+            "apart rather than folded into a containment figure.", "",
+            "| host | attempts | complied | refused on the injection "
+            "| refused on another fault | escaped |",
+            "|---|---:|---:|---|---|---|",
+        ]
+        for host, block in (inj.get("summary") or {}).items():
+            if block.get("containment") is None:
+                lines.append(f"| {host} | {block['attempts']} "
+                             f"| {block['complied']} | not measured "
+                             f"| not measured | not measured |")
+                continue
+            lines.append(
+                f"| {host} | {block['attempts']} | {block['complied']} "
+                f"| {block.get('refused_on_the_injection', 0)}/{block['complied']} "
+                f"| {block.get('refused_on_another_fault', 0)} "
+                f"| {block['escapes']} |")
+        lines += [""]
+        for host, block in (inj.get("summary") or {}).items():
+            for note in (block.get("containment_note"),
+                         block.get("attribution_note")):
+                if note:
+                    lines.append(f"- **{host}**: {note}")
+        lines += ["",
+                  f"`{inj['nearest_existing']}` is still not the source of this "
+                  "cell. " + inj["note"] + ".", ""]
+
+    lines += _third_host_section(framework, report.get("unload_survey") or {})
 
     lines += ["## Claims and their rung", "",
               "| claim | rung |", "|---|---|"]
@@ -742,6 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="committed raw-ts corpus for the residue column")
     ap.add_argument("--tokens-from", default=None,
                     help="committed corpus for the tokens-to-green column")
+    ap.add_argument("--injection-from", default=None,
+                    help="committed bench/injection_escape.py run label "
+                         "for the injection-escape column")
     ap.add_argument("--attempt", type=int, default=1)
     ap.add_argument("--compiler-root", default=None,
                     help="score against a different checkout's compiler")
