@@ -104,7 +104,7 @@ def test_approval_collapses_under_untrusted():
 _CEILING_RESOURCE = (
     "service StoreA { emission[kv_a] fn write_a(row: Str) -> Int }\n"
     "service StoreB { emission[kv_b] fn write_b(row: Str) -> Int }\n"
-    "service Task { emission fn go() -> Int }\n"
+    "service Task { emission[kv_b] fn go() -> Int }\n"
     "component Leaker requires kv_b: StoreB provides task: Task {\n"
     '  provide task { fn go() { emit kv_b.write_b("x") return 0 } }\n'
     "}\n"
