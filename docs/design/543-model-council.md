@@ -537,10 +537,16 @@ anything the other three lanes read.
 
 `selfhost/*.rvl` is a second implementation that must agree with the reference,
 and its oracles catch divergence but not a missing feature. So the question is
-not whether the self-host implements `model council`, which it does not, but
-whether it can SILENTLY ADMIT a program the reference decides.
+not whether the self-host implements `model council`, but whether it can
+SILENTLY ADMIT a program the reference decides.
 
-Measured, on the gate built from `selfhost/lower.rvl` at this branch:
+**Ported.** Issue #1291 carried the declaration across, and
+`docs/design/556-model-council-selfhost.md` records what it decided and what it
+deliberately left alone. What follows is the measurement that made the port a
+follow-up rather than part of this slice.
+
+Measured on the gate built from `selfhost/lower.rvl` at the branch that landed
+this note:
 
 | program | reference | gate |
 | ------- | --------- | ---- |
@@ -550,32 +556,44 @@ Measured, on the gate built from `selfhost/lower.rvl` at this branch:
 | the same council with `on_tie allow` | refuses `G-MODEL-PLACE` | `BAD\|unexpected token at top level` |
 | a shipped `retention` declaration (item 472) | admits | `BAD\|unexpected token at top level` |
 
-The gate refuses both, so it never admits a program whose aggregation it cannot
-decide. It errs in the false-reject direction, which is the direction the
-census docstring names as the one the crate is allowed to err in.
+The gate refused both councils, so it never admitted a program whose
+aggregation it could not decide. It erred in the false-reject direction, which
+is the direction the census docstring names as the one the crate is allowed to
+err in.
 
-The marker is the generic top-level parse refusal rather than a named one, for
-exactly the reason item 512's section 7 records: that is the state of every
-contextual top-level declaration the reference has added since the self-host's
+The marker was the generic top-level parse refusal rather than a named one, for
+exactly the reason item 512's section 7 records: that was the state of every
+contextual top-level declaration the reference had added since the self-host's
 top-level dispatch was written. The last two rows are the measurement that says
-so, on the same build: the gate gives the same answer to a shipped `retention`
-declaration and to `model role`, which item 512 landed. A named marker is item
-512's slice 3, and a `MODEL` marker covering both shapes `model` heads would
-serve this item too.
+so, on the same build: the gate gave the same answer to a shipped `retention`
+declaration and to `model role`, which item 512 landed.
 
-Because no `.rvl` in any corpus directory uses the construct, the census is
-unmoved: `--check` reports no change from the baseline, `false-reject` is still
-empty.
+The tag the port chose is `COUNCIL` rather than the `MODEL` marker this section
+originally expected to serve both shapes `model` heads. Section 1.1 of note 556
+records why: two constructs with two reference modules and two disjoint rule
+sets, both standing for the registered code `G-MODEL-PLACE`, so the tag is what
+tells a consumer which of them was refused.
 
-### 13.1 Why the fixtures are inline
+Because no `.rvl` in any corpus directory used the construct, the census was
+unmoved at this slice: `--check` reported no change from the baseline and
+`false-reject` was empty. It is still empty after the port, with the two
+fixtures section 13.1 was waiting for now in the corpus.
 
-The test programs live as strings in `tests/test_model_council_516.py` rather
-than in `examples/rejections/` or `tests/fixtures/`. Both are corpus roots for
-`tools/gate_reference_census.py`, and the self-host does not parse
-`model council`, so an ADMITTING fixture in either place would have become a
-`false-reject` census entry the moment it landed. This is item 512 section 6.1's
-decision, held for the same reason. A fixture belongs there when the self-host
-port lands, and moving it is then part of that slice's evidence.
+### 13.1 Why the fixtures were inline, and where they are now
+
+At this slice the test programs lived as strings in
+`tests/test_model_council_516.py` rather than in `examples/rejections/` or
+`tests/fixtures/`. Both are corpus roots for `tools/gate_reference_census.py`,
+and the self-host did not parse `model council`, so an ADMITTING fixture in
+either place would have become a `false-reject` census entry the moment it
+landed. This was item 512 section 6.1's decision, held for the same reason, and
+it ended "a fixture belongs there when the self-host port lands".
+
+The port landed, and two fixtures moved into the corpus with it:
+`examples/model_council.rvl`, the admitting program, and
+`examples/rejections/gmodelplace_council_on_tie_allow.rvl`, this item's exit
+test verbatim. `tests/test_model_council_516.py` keeps its inline programs and
+stays the standing guard.
 
 ---
 
