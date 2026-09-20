@@ -1636,11 +1636,46 @@ fn carries_pure_declarations(ir: Any) -> Bool {
   return value_list(value_field(ir, "externs")).length() > 0
 }
 
+// One case the suppression above must NOT cover: a component that declares a
+// required `Stream[T]` COEFFECT (item 130 §6b, issue #81).
+//
+// The suppression buys byte agreements, and an agreement is only worth
+// protecting where the reference PRODUCES BYTES. Here it produces none: the
+// reference refuses the whole document by name on this tier, because a
+// requirement resolves against a SERVICE and a `Stream[T]` is not one. So the
+// marker is free — there is no agreement left to cost — and without it this
+// port answered such a document with its banner plus whatever top-level
+// declarations came along and nothing else. Measured on `957e9b1b`, the
+// §6c coeffect program is 242 bytes here (banner + the event's record type),
+// against an `EmitError` from the reference, with no marker anywhere in the
+// output. A stated refusal made silent by the port is exactly the failure
+// item 130's exit names.
+//
+// The discriminant is a requirement's declared TYPE TEXT, not a stream step
+// spelling: this reads `requires`, which this port already walks, and does not
+// touch `subscribe` or `stream-iter`, so the blind-spot ledger's `unported`
+// baseline is untouched and no port of the stream lowering is claimed.
+fn requires_a_stream(comp: Any) -> Bool {
+  let rq = value_field(comp, "requires")
+  for (k of value_keys(rq)) {
+    if (value_str(value_field(rq, k)).startsWith("Stream[")) { return true }
+  }
+  return false
+}
+
+fn any_requires_a_stream(comps: List[Any]) -> Bool {
+  for (c of comps) {
+    if (requires_a_stream(c)) { return true }
+  }
+  return false
+}
+
 fn uncarried_components(ir: Any) -> List[Str] {
   let comps = value_list(value_field(ir, "components"))
   if (comps.length() == 0) { return [] }
   let deferred_tests = value_list(value_field(ir, "tests")).length() > 0
-  if (carries_pure_declarations(ir) && !deferred_tests) { return [] }
+  if (carries_pure_declarations(ir) && !deferred_tests
+      && !any_requires_a_stream(comps)) { return [] }
   var out = []
   for (c of comps) {
     out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
