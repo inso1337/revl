@@ -241,6 +241,60 @@ pixels; endorsing it is the adapter's pre-execution verification (section 6),
 and an endorsement revl cannot check is an endorsement it must not silently
 perform.
 
+### 5.1 Which arguments are sinks, settled in slice 2
+
+The head rule above is right for four of the five verbs and wrong for one, so
+the taint role is **registry-owned per verb** (`ui_family.TAINT_ROLES`),
+exactly as the item-522 reversibility class is and for the same reason: a
+classification an author can lower is a classification a careless author
+lowers.
+
+| token | role | why |
+| --- | --- | --- |
+| `screen.observe` | source | it reads pixels; this is the item's own premise |
+| `ui.find` | source, **not** a sink | it is the family's declared consumer of observed content |
+| `ui.click` | sink, every argument | the target IS the authority, the position a shell string occupies |
+| `ui.text` | sink, every argument | key input is not inert text |
+| `ui.download` | sink, every argument | the argument names what lands on the host |
+
+**`ui.find` is the exception, and it is load-bearing rather than a
+convenience.** If the head rule made its arguments sinks, the family's own
+canonical program - observe, find, click - could not be written at all without
+endorsing the observation *before anything had looked at it*. That inverts the
+discipline: a target must stay `Untrusted` all the way to the actuation, and
+the endorsement belongs at the actuation, where an operator can see what is
+being claimed about it. `ui.find` is instead a source that mints `screen` on
+its return, which is what stops a `ui_find` that ignores its arguments from
+laundering the observation and handing a clean target to the click.
+
+**`ui.text`'s value is a sink, and the reason is not that it resembles the
+target.** It does not. Two arguments were weighed. Against: an untrusted
+string typed into a field is data landing in an application's input, which is
+the same class as an untrusted body passed to a `web` crossing, and revl does
+not refuse that. For: `ui.text` generates KEY INPUT, and key input is not
+inert - a newline submits, a tab moves focus, a shortcut is a command - so
+observed content reaching it chooses *what happens* and not only what is
+written. That is the shell-string shape, and it decides the question.
+
+**The granularity is all-arguments, and that is a limit rather than a
+choice.** A capability token carries no parameter roles: item 294's parameters
+narrow the capability, they do not name the parameters, so revl cannot tell
+`ui.text(target, value)` from `ui.text(value, target)` and has no way to mark
+only the target. `shell`, `exec` and `terminal` already derive this way.
+Per-parameter precision remains reachable only through an explicit `Trusted[T]`
+annotation, which is author-side and therefore never the derivation.
+
+**One consequence outside this module, found by reading rather than by a test
+failing.** `policy.TAINT_FOLD_ORIGINS` is a hand-kept mirror of
+`_SOURCE_CLASS_SCOPES`, and `mcp.approval.static_taint` INTERSECTS a
+component's recorded taint with it. An origin missing from that mirror is an
+origin silently dropped from the taint an auto-approve decision is made
+against, so a screen-tainted crossing would have compared as clean and
+auto-approved without an operator ever writing the rule. `screen` joins the
+mirror too; every direction that reaches is fail-closed: the crossing prompts
+unless a rule names it, the unknown-taint floor grows, and every existing
+rule's `negative_guarantee` becomes truthfully wider.
+
 The binding a verified target carries is item 521's own list and is recorded
 here unchanged, because a design without it is a verb list: the window or
 application identity, an accessibility-tree identity where one exists, a
@@ -373,13 +427,24 @@ parser hook absent (it is the check): 7 fail, 13 pass. With the hook: 20 pass.
 The 13 that pass on both are the controls, the registry assertions and the
 audit enumeration.
 
-**Slice 2: the taint classes.** Add `screen` to `_SOURCE_CLASS_SCOPES` and
-`ui` to `_SINK_CLASS_SCOPES` in `src/revl/taint.py`. Oracle: a fixture where
-a `screen.observe` return flows to a `ui.click` argument with no declassifier
-and is refused with G9, and the same fixture with an `endorse` that admits.
-The control is a `db.write` crossing over the same shape, which must be
-unaffected. Failure direction: a derived class cannot be waived by an author
-qualifier.
+**Slice 2: the taint classes. LANDED.** `screen` in `_SOURCE_CLASS_SCOPES`
+and in `_ORIGIN_CLASSES` (an origin is resolved from the token's head, so a
+source scope that is not an origin class mints the literal `screen.observe`,
+which no source-class test, no `route model` arm and no `<origin>-taint` rule
+matches), `ui` in `_SINK_CLASS_SCOPES`, the per-verb roles of §5.1 in
+`ui_family.TAINT_ROLES`, and `screen` in `policy.TAINT_FOLD_ORIGINS` for the
+reason §5.1 ends on. Oracle: `tests/test_ui_taint_classes_521.py`, 20 tests.
+Failure direction: this WIDENS what is refused. A program that previously
+compiled because its author did not write `Untrusted[Str]` now sees a G9
+refusal naming the origin (`screen`) and the position (`a UI actuation`), and
+there is no qualifier that turns it back off. Non-vacuity measured on
+`dfecba2a`: 16 of the 20 fail there, 4 pass. The four are the controls -
+`ui.find` is not a sink, the `endorse[screen]` repair admits, a `db.write`
+crossing over the same shape is unaffected, and the landed §6 audit program
+still compiles without `taint_strict` (the derived classes are profile-gated,
+as every other Slice D class is). `tools/gate_reference_census.py --check`
+reports no change from the baseline with `false-reject` still empty: the
+widening refuses no program the reference corpus admits.
 
 **Slice 3: the ladder rungs.** Admit `ui.<verb>.selector` and
 `ui.<verb>.pixel`; check prefix-closure per component over the G8 reach.
@@ -388,6 +453,25 @@ by name; one declaring both is admitted; `revl audit` prints the deepest rung;
 and `capability ui.*.pixel requires approval` selects it. This is the slice
 that replaces the "not admissible yet" refusal of slice 1, and the refusal
 message is the thing that points an author at it.
+
+Re-examined when slice 2 landed, and still deferred. The two reasons are
+recorded so the next reader does not re-derive them. First, slice 1's hook is
+`parser._capability_list`, which sees ONE token with no component context,
+while prefix-closure is a per-component property over a SET of tokens: it
+needs a refusal site in the reach/boundary layer that does not exist yet, and
+nothing in the taint slice supplies one. Second, §9's obligation fires here
+and did not fire for slices 1 or 2, because this is the first slice that
+DECIDES ADMISSION on a UI token: `selfhost/lower.rvl` must then port the check
+or decline the program by a named marker, which carries a crate regeneration.
+Slice 2 needed neither, and `tools/build_gate_crate.py --check` reports
+in-sync on it.
+
+What slice 2 did leave for this slice: `ui_family.taint_roles` resolves by
+longest registered PREFIX rather than by exact match, so `ui.click.pixel`
+inherits `ui.click`'s sink role the moment the spelling becomes admissible. A
+rung is a strictly weaker way to name the same target, and an exact-match
+table would have given a rung no taint role at all - the fail-open direction,
+reached by adding a spelling in a different file.
 
 **Slice 4: the target type.** `UiTarget` as a record carrying the binding of
 section 5, and `ui.find` returning `Untrusted[UiTarget]` rather than a bare
