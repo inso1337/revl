@@ -1001,11 +1001,17 @@ def identity_backing(record: Mapping[str, Any]) -> Optional[str]:
     """Which identity backing a record's ``sign_alg`` names, or ``None``.
 
     ``None`` for anything not in :data:`_ALG_IDENTITY`, including a missing
-    member. Nothing is defaulted: a record whose backing could not be read is a
-    record nobody knows the strength of, and the gate refuses it."""
+    member and an unhashable one. Nothing is defaulted: a record whose backing
+    could not be read is a record nobody knows the strength of, and the gate
+    refuses it. The string check is not decoration: a hostile record can carry
+    an object where a name belongs, and a dict lookup on it would raise on the
+    refusal path, which is the one path that must not."""
     if not isinstance(record, Mapping):
         return None
-    return _ALG_IDENTITY.get(record.get("sign_alg"))
+    alg = record.get("sign_alg")
+    if not isinstance(alg, str):
+        return None
+    return _ALG_IDENTITY.get(alg)
 
 
 def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
@@ -1429,17 +1435,23 @@ def withdraw(charter_record: Mapping[str, Any], peer_id: str, reason: str, *,
     del roster.members[peer_id]
     roster.revoked.add(peer_id)
     roster.outstanding.pop(peer_id, None)
-    key_revoked = ""
-    if directory is not None and member.key_id and \
-            directory.lookup(peer_id, member.key_id) is not None:
-        key_revoked = directory.revoke(
-            peer_id, member.key_id,
-            reason=f"withdrawn from pool {charter.pool_id}: {reason}",
-            at=when).key_id
+    # EVERY key the peer holds, not only the one that signed its join. A peer
+    # that rotated after joining would otherwise leave the pool with an active
+    # key still pinned, which reads in `pool status` as an identity that may
+    # still act.
+    keys_revoked = []
+    if directory is not None:
+        for pinned in list(directory.keys.get(peer_id, ())):
+            if pinned.status == peer_identity.KEY_REVOKED:
+                continue
+            keys_revoked.append(directory.revoke(
+                peer_id, pinned.key_id,
+                reason=f"withdrawn from pool {charter.pool_id}: {reason}",
+                at=when).key_id)
     receipt = {
         "kind": RECEIPT_KIND, "version": RECEIPT_VERSION, "verdict": WITHDRAW,
         "pool_id": charter.pool_id, "revoked_by": revoking_key_id,
-        "key_revoked": key_revoked,
+        "keys_revoked": sorted(keys_revoked),
         **withdrawal.as_dict(),
     }
     if revoking_identity is not None:

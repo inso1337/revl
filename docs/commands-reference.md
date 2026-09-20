@@ -1251,9 +1251,9 @@ for the key lifecycle and what the signature binds.
 - `withdraw` - remove a peer and report, in three disjoint sets, what that
   revokes (an inverse exists), what it retains (no inverse: the work is done
   and the ledger keeps it) and what it orphans (outstanding work, handed to the
-  lawful-retry dispatcher). The member's pinned key is revoked: it confers no
-  authority and its past signatures still verify, so the ledger it signed stays
-  checkable.
+  lawful-retry dispatcher). Every key the directory pins for the peer is
+  revoked, not only the one that signed its join: each confers no authority and
+  each still verifies what it signed, so the ledger stays checkable.
   - `--dir DIR`, `--peer ID`, `--reason TEXT`, `--key PATH`
   - `--identity-key PATH` - sign the withdrawal receipt with an operator key
     pair, so any holder of the matching public key can check who removed whom.
