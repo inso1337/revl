@@ -234,9 +234,7 @@ class _Parser:
 
 
 def _parse_grammar(text):
-    toks = _tokenize(text)
     rules, parser = {}, _Parser(_tokenize(text))
-    del toks
     while parser.i < len(parser.toks):
         kind, name = parser.peek()
         assert kind == "id", f"expected a rule head, got {(kind, name)!r}"
