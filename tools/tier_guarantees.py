@@ -247,21 +247,33 @@ def reproducers() -> dict[str, list[str]]:
 # source 3: the self-host gate, run over the same reproducers
 # --------------------------------------------------------------------------
 
+_ADMIT_CACHE: list = []
+
+
 def _selfhost_admit():
     """`selfhost/lower.rvl`'s `admit_src`, or None when it will not load.
+
+    Cached for the process: loading it means compiling the self-host lowering
+    with the reference frontend and emitting it to python, which is about a
+    second, and a test file that builds the matrix several times should pay
+    that once.
 
     Imported from `tools/gate_reference_census.py` rather than restated: that
     file is what `tests/test_gate_crate_admit.py` holds the crate against, so
     the matrix and the census cannot disagree about what the gate decides.
     """
+    if _ADMIT_CACHE:
+        return _ADMIT_CACHE[0]
     spec = importlib.util.spec_from_file_location(
         "tier_guarantees_census", ROOT / "tools" / "gate_reference_census.py")
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
-        return module.build_selfhost_admit()
+        admit = module.build_selfhost_admit()
     except Exception:  # noqa: BLE001 — a gate that will not load is its own datum
         return None
+    _ADMIT_CACHE.append(admit)
+    return admit
 
 
 def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]:
@@ -450,7 +462,7 @@ def matrix() -> dict:
     runtime = runtime_divergences()
 
     rows = []
-    missing: list[str] = []
+    missing: list[tuple[str, str]] = []
     for code in guarantee_codes():
         paths = index.get(code, [])
         sites = enforcement_sites(code)
@@ -460,16 +472,22 @@ def matrix() -> dict:
 
         if paths:
             base = (PROVED, "the reference frontend refuses "
-                            f"`{paths[0]}` under {code} before any emitter runs")
-        elif sites:
+                            f"`{_evidence(code, paths, sites)}` under {code} "
+                            f"before any emitter runs")
+        else:
+            # NOT proved on a host tier, and that needs a reason on the record.
+            # Both spellings do: `no reproducer` (the rule is enforced, nothing
+            # in the corpus is refused under it) and `unimplemented` (no module
+            # raises under the code at all). The second is the more dangerous
+            # of the two — the register claims a code the frontend does not
+            # enforce — so it is emphatically not the one to let through
+            # silently.
+            verdict = NO_REPRODUCER if sites else UNIMPLEMENTED
             reason = ACKNOWLEDGED.get(code)
             if reason is None:
-                missing.append(code)
+                missing.append((code, verdict))
                 reason = "UNACKNOWLEDGED"
-            base = (NO_REPRODUCER, reason)
-        else:
-            base = (UNIMPLEMENTED,
-                    "no module under `src/revl/` raises under this code")
+            base = (verdict, reason)
 
         for tier in tiers:
             short = _short(tier)
@@ -498,14 +516,14 @@ def matrix() -> dict:
             + "; ".join(
                 f"guarantee {code} has no reproducer in examples/rejections/ "
                 f"and no ACKNOWLEDGED entry, so its row would read "
-                f"`{NO_REPRODUCER}` on every host tier with no reason"
-                for code in missing)
+                f"`{verdict}` on every host tier with no reason"
+                for code, verdict in missing)
             + ".\n    Add a reproducer under examples/rejections/, or record "
               "in tools/tier_guarantees.py::ACKNOWLEDGED why this rule has "
               "none. A guarantee must not get a blank row.")
 
-    stale = sorted(set(ACKNOWLEDGED) - {r["code"] for r in rows
-                                        if r["reproducers"] == 0})
+    stale = sorted(set(ACKNOWLEDGED) - {row["code"] for row in rows
+                                        if row["reproducers"] == 0})
     if stale:
         raise MatrixError(
             f"tier_guarantees: ACKNOWLEDGED still excuses {', '.join(stale)}, "
