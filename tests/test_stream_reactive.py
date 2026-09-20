@@ -3172,3 +3172,122 @@ def test_the_undeclared_refusal_still_names_the_source_for_a_local_stream():
     """)
     assert "requires a provider that declares it" in msg
     assert "let src = effect Stream.source() replay(<n>) undo src.close()" in msg
+
+
+# ---------------------------------------------------------------------------
+# The item-130 EXIT, as a table (roadmap item 130, issue #81)
+#
+# "For each of the nine named stream surfaces on each of the six tiers, the
+# answer is one of exactly two things and a test proves which: the tier LOWERS
+# it, or the tier REFUSES IT BY NAME. Nothing is silently dropped."
+#
+# Everything the surfaces below assert is already asserted one cell at a time
+# somewhere above. What was missing is the CLOSURE: nothing said that those
+# cells are all of them, so a tenth surface, or a seventh tier, or a surface
+# that quietly stopped being refused, cost nothing. The table is the closure --
+# it enumerates the nine surfaces and the six tiers and requires every one of
+# the 54 cells to be one of the two admitted answers, with the refusals pinned
+# to the word they refuse BY. A refusal that stops naming its surface reds here
+# even though it is still a refusal, because "refuses by name" is the half of
+# the exit that a bare `EmitError` does not deliver.
+# ---------------------------------------------------------------------------
+
+_POLICY = """
+component C {
+  let a = effect Stream.source() undo a.close()
+  let sub = subscribe a policy drop_oldest buffer 4 undo sub.close()
+  await sub.next()
+}
+"""
+
+_REPLAY_DECLARED = """
+component C {
+  let src = effect Stream.source() replay(4) undo src.close()
+  let sub = subscribe src replay(2) undo sub.close()
+  await sub.next()
+}
+"""
+
+#: surface -> the program that carries it. The nine of design §1 plus the two
+#: durability surfaces §4.5/§6c, which the exit holds to the same rule.
+_EXIT_SURFACES = {
+    "subscription bracket": _CONSUMER,
+    "map/filter/take chain": _CHAIN_HEAD,
+    "merge fan-in": _FANIN,
+    "backpressure policy": _POLICY,
+    "drain window": None,          # built from _DRAIN_HEAD below
+    "every..in iteration": _ITER,
+    "on..as typed event": _EVENT,
+    "replay declaration": _REPLAY_DECLARED,
+    "required Stream[T] coeffect": _COEFFECT,
+}
+
+_EXIT_TIERS = ("python", "typescript", "go", "rust", "java", "wasm")
+
+#: (surface, tier) -> the text the tier's refusal must carry. Every pair absent
+#: from this map must LOWER. Measured 2026-09-20; each entry is asserted one at
+#: a time by a test above, and this map is what makes the set of them closed.
+_EXIT_REFUSALS = {
+    # §4.6: wasm has no async, so it refuses the whole surface at the provider.
+    **{("wasm", surface): "streams live on the tiers that lower the "
+                          "subscription protocol"
+       for surface in _EXIT_SURFACES if surface != "required Stream[T] coeffect"},
+    # §8: rust's clock is thread-local, java has no `advance` lowering.
+    ("rust", "drain window"): "a `drain` window is not lowered",
+    ("java", "drain window"): "a `drain` window is not lowered",
+    # §4.5/§4.9: the durability claim whose recovery surface is the WAL's.
+    **{(tier, "replay declaration"): "a stream `replay(…)` is not lowered"
+       for tier in ("typescript", "go", "rust", "java")},
+    # §6b: a requirement resolves against a SERVICE on every non-reference tier.
+    **{(tier, "required Stream[T] coeffect"):
+       "a required `Stream[T]` coeffect is not lowered"
+       for tier in ("typescript", "go", "rust", "java", "wasm")},
+}
+
+
+def _exit_source(surface: str) -> str:
+    return _drain_program() if surface == "drain window" else _EXIT_SURFACES[surface]
+
+
+@pytest.mark.parametrize("surface", sorted(_EXIT_SURFACES))
+@pytest.mark.parametrize("tier", _EXIT_TIERS)
+def test_every_stream_surface_lowers_or_refuses_by_name_on_every_tier(tier, surface):
+    """One cell of the item-130 exit table: LOWER, or REFUSE naming the surface.
+
+    A tier that cannot carry a stream surface does not fail this exit by
+    refusing. It fails by being SILENT -- by answering a program it does not
+    carry with a module that looks complete and never subscribes. So the
+    assertion has two halves: the cell is one of the two admitted answers, and a
+    refusing cell names what it refused.
+    """
+    emit = _tier_emit(tier)
+    ir = compile_source(_exit_source(surface), "s.rvl")
+    want = _EXIT_REFUSALS.get((tier, surface))
+    if want is None:
+        code = emit.emit(ir)
+        assert "Stream" in code, (
+            f"{tier} is recorded as LOWERING `{surface}` and emitted no stream"
+        )
+        return
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(ir)
+    assert want in str(excinfo.value), (
+        f"{tier} still refuses `{surface}`, but no longer by name: a refusal "
+        f"that does not say what it refused is the half of the exit a bare "
+        f"EmitError does not deliver\n{excinfo.value}"
+    )
+
+
+def test_the_exit_table_covers_the_whole_named_surface_and_nothing_else():
+    """The table's own closure. A surface added to design §1 without a row here
+    would leave the exit asserting nine of ten cells per tier and calling it
+    complete, which is how this item carried two wrong tier lists before."""
+    assert len(_EXIT_SURFACES) == 9
+    assert len(_EXIT_TIERS) == 6
+    unknown = {cell for cell in _EXIT_REFUSALS
+               if cell[0] not in _EXIT_TIERS or cell[1] not in _EXIT_SURFACES}
+    assert not unknown, f"refusal recorded for a cell outside the table: {unknown}"
+    assert not [s for s in _EXIT_SURFACES
+                if ("python", s) in _EXIT_REFUSALS], (
+        "py is the reference tier and lowers all nine (design §4.6)"
+    )
