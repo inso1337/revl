@@ -1034,20 +1034,30 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**468 .rvl files -> 339 components -> 917 statements = 225 modeled + 215
-componentless + 28 refused at parse**, and **5400 verdicts compared (225
-files + 339 components + 67 provide methods + 18 spawn edges + 28 parse
-refusals + 267 teardown scenarios + 1620 recoveries + 917 confinements +
-917 surfaces + 337 teardowns + 245 provide-clause components + 81 config
-fields + 339 A2 bodies), 5400 agree, 0 mismatches**.
+**470 .rvl files -> 341 components -> 919 statements = 227 modeled + 215
+componentless + 28 refused at parse**, and **5410 verdicts compared (227
+files + 341 components + 67 provide methods + 18 spawn edges + 28 parse
+refusals + 267 teardown scenarios + 1620 recoveries + 919 confinements +
+919 surfaces + 337 teardowns + 245 provide-clause components + 81 config
+fields + 341 A2 bodies), 5410 agree, 0 mismatches**.
 
-Checker alignment over the 225 modeled files. Every bucket recording a
+Checker alignment over the 227 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
-the model stricter than the language that ships. `agree-*` and
-`out-of-fragment*` are informational, and `out-of-fragment*` means the
-model has no fact about the rule the checker refused under, not that it
-disagrees.
+the model stricter than the language that ships. `out-of-fragment*`
+means the model has no fact about the rule the checker refused under,
+not that it disagrees.
+
+An absence cannot disagree, so the two buckets aimed at a row the model
+does carry are `ratcheted` instead: `out-of-fragment-G5` and
+`out-of-fragment-G6` are held to the names in
+`formal/out_of_fragment_ledger.json`, which shrinks only. A file that
+JOINS one fails the gate, and a line no longer in its bucket fails it
+until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
+a new G6 fixture, cannot arrive while the model stays silent about it.
+`agree-*` and the generic `out-of-fragment` stay informational; that one
+collects every code the model states no row about at all, so it grows
+with corpus work that never touched this layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1055,7 +1065,7 @@ disagrees.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 17 | informational |
+| `agree-G4` | 19 | informational |
 | `agree-G5` | 2 | informational |
 | `agree-accept` | 151 | informational |
 | `formal-found-other` | 0 | **FATAL** |
@@ -1066,8 +1076,8 @@ disagrees.
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
 | `out-of-fragment` | 38 | informational |
-| `out-of-fragment-G5` | 10 | informational |
-| `out-of-fragment-G6` | 1 | informational |
+| `out-of-fragment-G5` | 10 | ratcheted |
+| `out-of-fragment-G6` | 1 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
