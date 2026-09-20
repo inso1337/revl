@@ -1,6 +1,7 @@
 {
   "name": "revl-backend-typescript",
   "private": true,
+  "license": "MIT",
   "version": "0.0.1",
   "description": "revl v0 backend targeting cordis v4 (TypeScript)",
   "type": "module",
