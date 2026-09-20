@@ -2592,6 +2592,31 @@ fn f(x: Async[Str]) -> Int {
     ("an async function type outside a module fn parameter",
      'extern pure fn e(cb: (Str) -> Async[Str]) -> Int = @py { return 1 }\n',
      "A1"),
+    # issue #1151: the same two position refusals on a transparent type ALIAS's
+    # right-hand side. `check_and_lower` runs `_resolve_type_aliases` one line
+    # ahead of `_validate_declared_types` and checks each alias target as it
+    # collects it, so the refusal is anchored at the ALIAS DECLARATION and the
+    # arrow that uses the alias never reaches the rule C1 question at all. The
+    # fixture carries that arrow, so the row would red on the arrow's own A1
+    # wording if the phase were placed after the body walk instead of before it.
+    ("an alias of Async[T] (fixture: refused at the declaration, not the arrow)",
+     _fixture("a1_alias_of_async"), "A1"),
+    ("an alias whose right-hand side is an async function type",
+     'type Handler = (Str) -> Async[Str]\nfn f(x: Int) -> Int { return x }\n',
+     "A1"),
+    # the alias walk recurses through the spelling exactly as the signature walk
+    # does, so `Async` nested inside an argument is refused too.
+    ("an alias with Async nested in a type argument",
+     'type Box = List[Async[Str]]\nfn f(x: Int) -> Int { return x }\n',
+     "A1"),
+    # the alias phase is ahead of the SIGNATURE phase, not a line-ordered peer:
+    # the bad alias sits BELOW the bad extern return and still wins, which is
+    # what `_resolve_type_aliases` running before `_validate_declared_types`
+    # means. Were the two swapped, this row would report T1.
+    ("a bad alias below a bad signature is still the alias",
+     'extern pure fn e(x: Int) -> List = @py { return [] }\n'
+     'type Later = Async[Str]\n',
+     "A1"),
     # a config field asks the WELLFORMED question before the is-data one.
     ("a bare builtin generic as a config field", """service S { fn q(a: Str) -> Int }
 component C provides s: S {
