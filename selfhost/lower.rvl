@@ -12682,15 +12682,28 @@ fn mk_ops_none() -> OpsR {
 
 // ONE operation token of a `:S,…` row. `op` is the NAME claim alone; `op(…)`
 // is the name AND its declared parameter list, parameters separated by `|` and
-// each spelled `name:Type` (src/revl/manifest.py's `_signature`). `sig` is
-// whether the token carried a list at all — `op()` is the empty list, which is
-// a claim, while `op` is silence about the arguments.
+// each spelled `name:Type` (src/revl/manifest.py's `_signature`); `op(…):Type`
+// adds the declared RETURN. `sig` is whether the token carried a list at all —
+// `op()` is the empty list, which is a claim, while `op` is silence about the
+// arguments.
 //
 // The type field is taken VERBATIM: it is a type spelling, not a name, and the
 // only thing entitled to judge it is the relation that compares it
 // (`tk_compatible`). The renderer withholds any signature whose text would need
 // one of the wire's own structural characters, so a spelling that arrives here
 // never has to be un-escaped.
+//
+// The RETURN is validated and DROPPED, and that is deliberate rather than
+// unfinished. Its readers on this side are the ones docs/design/457's T5 entry
+// lists as withheld — `tk_infer`'s `Call` arm, `prov_missing_return` and
+// `a6_annotation_verdict` — and turning them on against a wire-built
+// declaration changes which sources this gate REFUSES, which is its own slice
+// with its own census rows. What reads the return today is the crate's
+// admission surface (`crates/revl-gate/src/admission.rs`), which re-derives the
+// whole judgement from the wire rather than asking this fold. Parsing it here
+// anyway is the assertion that both sides accept the same token shape: a token
+// this fold refused the wire over, while the admission surface read it, would be
+// a green nobody checked.
 type OpTok = { name: Str, ps: List[ParamN], sig: Bool, ok: Bool }
 
 fn parse_optok(one: Str) -> OpTok {
@@ -12699,10 +12712,18 @@ fn parse_optok(one: Str) -> OpTok {
     return { name: one, ps: [], sig: false, ok: bare_ident(one, 0) }
   }
   let nm = one.slice(0, lp)
-  if (!bare_ident(nm, 0) || one.slice(one.length() - 1, one.length()) != ")") {
+  // Neither a parameter type nor a return type may spell a parenthesis (both
+  // are in the renderer's `_WIRE_STRUCTURE`), so the FIRST `)` is the one that
+  // closes the parameter list and everything after it is the return claim.
+  let rp = one.indexOf(")")
+  if (!bare_ident(nm, 0) || rp < lp) {
     return { name: "", ps: [], sig: false, ok: false }
   }
-  let inner = one.slice(lp + 1, one.length() - 1)
+  let tail = one.slice(rp + 1, one.length())
+  if (tail != "" && (tail.slice(0, 1) != ":" || tail.length() < 2)) {
+    return { name: "", ps: [], sig: false, ok: false }
+  }
+  let inner = one.slice(lp + 1, rp)
   if (inner == "") { return { name: nm, ps: [], sig: true, ok: true } }
   var ps: List[ParamN] = []
   var s = inner

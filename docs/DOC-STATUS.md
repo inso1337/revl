@@ -128,7 +128,7 @@ was corrected by hand and had drifted back within a day.
 | frontend-assets.md | needs-work | 13 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
-| gate-dependency-contract.md | stale-fixed | 0 |  |
+| gate-dependency-contract.md | stale-fixed | 1 |  |
 | gauntlet.md | needs-work | 18 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |

@@ -102,29 +102,40 @@ are necessary:
    gate ran and found nothing to refuse. An admission is never issued over a
    refusal or a frontier gap.
 2. the source is inside the ADMISSION SURFACE (`ADMISSION_SURFACE_ID`,
-   `src/admission.rs`) — the region where the covered layer is the WHOLE
-   question, because the source carries no term the type layer decides.
+   `src/admission.rs`) — the region where the covered layer, plus the terms
+   `src/admission.rs` types ITSELF, is the WHOLE question.
 
 The surface is deliberately tiny, and its one line is `ADMITTED_LAYER`:
 
-    interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides
+    interface declarations, and components whose provide-method bodies are parameter reads and calls on a required service, over a closed scalar type vocabulary; every term in the region is one this gate types itself
 
 That is not the covered layer read optimistically; it is the sliver of it where
-reading a no-objection as an admission is sound. No body, no expression, no
-literal, no generic head. A source outside it is `Admission::Withheld` carrying
-the verdict verbatim, so switching a consumer from `admit` to `issue_admission`
-can only ADD the admitted wire — every other answer is byte-identical to the one
-it already handled. Widening the surface is the self-host type layer's lane
+reading a no-objection as an admission is sound. Two kinds of source are in it.
+An interface declaration — `service` method signatures and scalar `type`
+aliases — carries no term at all. A `component` whose body is `provide` blocks,
+and whose provide methods are each `fn <op>(<param>, …) = <expr>` over two
+productions (a bound parameter read, and a call `<required key>.<op>(…)`),
+carries terms that `src/admission.rs` walks and types in full: every method
+against the signature it implements, every call against the signature it
+reaches, every argument and every return by equality over the scalar set. No
+literal, no operator, no `let`, no `effect`, no block body, no marked service
+operation. A source outside it is `Admission::Withheld` carrying the verdict
+verbatim, so switching a consumer from `admit` to `issue_admission` can only ADD
+the admitted wire — every other answer is byte-identical to the one it already
+handled. Widening the surface further is the self-host type layer's lane
 (`docs/design/457-selfhost-type-layer.md`).
 
 `issue_admission_into(source, manifest)` asks the same question against a running
 composition. The empty manifest is the empty composition, so it is
 `issue_admission` byte for byte. Against a NON-EMPTY manifest the candidate
-carries one obligation more: nothing it declares may REDECLARE a service the
-running composition already declares. That is the only interaction the reference
-has between an interface-only candidate and a running manifest, and it is gated
-there on the §5 compatibility relation — the type layer — so a redeclaration is
-withheld while a fresh interface is admitted.
+carries two obligations more. Nothing it declares may REDECLARE a service the
+running composition already declares: that is gated on the §5 compatibility
+relation — the type layer — so a redeclaration is withheld while a fresh
+interface is admitted. And no component it declares may take the name of one the
+wire names, because a same-name component is a REPLACEMENT whose handoff and
+unmet-consumer reasoning belongs to the fold. In exchange the wire's service
+block is what a certified provide-method body's calls are TYPED against, which
+is how a candidate requiring an ambient service can be admitted at all.
 
 The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
 header followed by one `:S,op,op` row per declared service
@@ -323,7 +334,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:7b0c12c7e6d44f15"
+    // frontier "selfhost-admit:0c88841ef9376448"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the

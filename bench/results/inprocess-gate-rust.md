@@ -7,7 +7,7 @@ buys and, just as load-bearing, what it does not. Produced by
 `bench/inprocess_gate_rust` (`cargo run --release --manifest-path
 bench/inprocess_gate_rust/Cargo.toml -- --write`).
 
-Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:ef07cdf723612cf8`.
+Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:0c88841ef9376448`.
 Layer decided: composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer.
 
 ## This gate issues no admissions - read this before wiring it in
@@ -34,7 +34,7 @@ arm, not an admission arm - it still reports `"admitted": false`, and it refuses
 what the py gate refuses, with the same code and the same why-trace.
 
 What that closes and what it does not, against `held_manifest` =
-`Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping` (the py harness's `base_manifest()` wire):
+`Kv/store/;App/app/;App<store;!services;:Store,get(key:Str):Str,bump(n:Int):Int,put(key:Str|value:Str);:AppSvc,ping():Str` (the py harness's `base_manifest()` wire):
 
 * **closed** - the ambient half of G2/G3: a candidate whose provides collide
   with a RUNNING key is refused. `ambient_provision_conflict` below is the exit
@@ -54,12 +54,16 @@ What that closes and what it does not, against `held_manifest` =
   shape calling an operation `Store` does declare - is not. Telling those two
   apart is the resolution; a gate reading the wire's service NAMES alone answers
   the same thing about both.
-* **still open** - ISSUING the admission. py's `admit_into` ADMITS
-  `cache_layer` into the running manifest; `revl_gate::Verdict` has no
-  `Admitted` arm at all, so the most this gate says is that it does not object.
-  Closing that is the self-host TYPE LAYER's remaining job (argument typing, the
-  compatibility relation on a redeclaration, and the admission arm itself), its
-  own roadmap lane, and is deliberately NOT attempted here.
+* **closed** - ISSUING the admission (docs/design/457 T6). py's `admit_into`
+  ADMITS `cache_layer` into the running manifest, and so does this gate:
+  `revl_gate::issue_admission_into` returns `Admitted` and writes
+  `"admitted": true` on a wire byte-identical to py's. It is a SECOND question
+  on a separate type, so `revl_gate::Verdict` still has no `Admitted` arm and
+  its manifest arm still reports `"admitted": false` - a consumer that never
+  asks the admission question sees exactly what it saw before. What stays open
+  is the refusal surface's type layer: the compatibility relation on a
+  redeclaration, and every construct outside the admission surface's closed
+  grammar.
 
 ## The batch, screened in-process
 
@@ -74,10 +78,10 @@ What that closes and what it does not, against `held_manifest` =
 | `undeclared_emission` | refuse (G4) | not asked | no | an undeclared emission is called from a body; py refuses (G4) |
 | `syntax_error` | no objection | not asked | yes | a genuine parse failure; py refuses |
 | `hole_draft` | no objection | not asked | yes | a draft with an open typed hole; py refuses (T3) |
-| `type_layer_miss` | no objection | not asked | no | a type error; py refuses (T1) |
+| `type_layer_miss` | refuse (T1) | not asked | no | a type error; py refuses (T1) |
 | `frontier_oversized` | declined (FRONTIER) | not asked | no | a source over the size bound; py ADMITS, this gate is not entitled to decide |
 
-4 refused, 6 no-objection, 1 declined. Every one of them
+5 refused, 5 no-objection, 1 declined. Every one of them
 serialises as `"admitted": false`; nothing in this batch produced anything a
 host could read as an admission, and every refusal it did issue is a refusal the
 py admission gate also issues, with the same guarantee tag
@@ -106,8 +110,9 @@ not declare). The other four come back as no-objections:
 
 Every one of those four is in the TOLERATED direction: a no-objection is never
 an admission, so none of them is a false admit. Together they are the reason the
-crate has no `Admitted` arm, and the reason an embedder that reads a
-no-objection as a green ships an unsafe host. The one candidate this gate
+crate's VERDICT surface has no `Admitted` arm, and the reason an embedder that
+reads a no-objection as a green ships an unsafe host. A green is a different
+call (`issue_admission`), answered only inside the admission surface. The one candidate this gate
 declines outright (`frontier_oversized`) is the fail-closed path working: `py`
 ADMITS it, and rather than decide a construct it does not cover, the gate says
 so.
@@ -125,11 +130,13 @@ NAME is resolved on both arms: standalone the gate refuses it in the reference's
 own words, and against the held manifest the `!services` block supplies `Store`
 and the refusal correctly lifts. Its REQUIREMENT is now resolved too, against the
 operations the same block carries - `calls_missing_method` is the contrast that
-proves it, refused `A6` where `cache_layer` is not. What py does that this gate
-still cannot is the step after that: ISSUING an admission. `revl_gate::Verdict`
-has no `Admitted` arm, so the most this gate says about `cache_layer` into the
-manifest is that it does not object. That last step is the rest of the self-host
-type layer, and this file is where the remaining distance is measured, not
+proves it, refused `A6` where `cache_layer` is not. And the step after that has
+now closed too: `issue_admission_into` ISSUES an admission for `cache_layer`
+against this manifest, because the admission surface types its provide-method
+body against the running `Store`'s declared signature and return. The VERDICT
+surface is unchanged and still says only that it does not object, which is why
+both numbers are reported here rather than merged. What remains is the refusal
+surface's type layer, and this file is where that distance is measured, not
 smoothed over.
 
 ## Fail closed
@@ -153,18 +160,18 @@ I/O, no network, no toolchain, no Python, no process hop. Nothing else is in it.
 
 | candidate size | bytes | median (ms) | p90 (ms) | p99 (ms) | samples |
 |---|---|---|---|---|---|
-| small (3 methods) | 218 | 0.845 | 0.862 | 0.878 | 25 |
-| medium (12 methods) | 636 | 5.904 | 6.018 | 6.039 | 25 |
-| large (48 methods) | 2364 | 69.021 | 71.517 | 147.575 | 25 |
+| small (3 methods) | 218 | 6.805 | 9.612 | 11.861 | 25 |
+| medium (12 methods) | 636 | 59.565 | 73.951 | 92.472 | 25 |
+| large (48 methods) | 2364 | 847.071 | 1227.468 | 1489.160 | 25 |
 
 The representative scenario (the py harness's `standalone_twin`, 276 B)
-measured median **0.899 ms** (p90 1.238 ms, p99 2.314 ms,
+measured median **7.004 ms** (p90 8.122 ms, p99 8.337 ms,
 n=25).
 
 **This does not inherit the py headline, and it must not be reported as if it
 did.** The py in-process round-trip is tenths of a millisecond and grows roughly
 with candidate size. This one starts in the milliseconds and grows far faster
-than the source does: 10.8x the bytes costs 82x the time
+than the source does: 10.8x the bytes costs 124x the time
 across the size cells, which is quadratic-shaped, not linear. At a few kilobytes
 - an ordinary model-authored component - a single screen costs on the order of a
 second. An agent loop that screens every candidate inline would feel that.
@@ -177,12 +184,12 @@ would be flat across these rows; it is not.
 
 | shape | bytes | verdict | median (ms) | samples |
 |---|---|---|---|---|
-| declaration-heavy | 1212 | no_objection | 18.474 | 6 |
-| statement-heavy | 1214 | no_objection | 16.061 | 6 |
-| comment-padded | 1248 | no_objection | 0.835 | 6 |
+| declaration-heavy | 1212 | no_objection | 190.684 | 6 |
+| statement-heavy | 1214 | no_objection | 144.685 | 6 |
+| comment-padded | 1248 | no_objection | 7.045 | 6 |
 
 The comment-padded shape - the same byte count, a fraction of the tokens - is
-roughly 22x cheaper than the declaration-heavy one, while the
+roughly 27x cheaper than the declaration-heavy one, while the
 statement-heavy shape, which carries ONE declaration and a body full of
 statements, costs the same order as the declaration-heavy one. So the cost
 tracks TOKENS: it lives in the emitted lexer/parser, not in the composition gate
