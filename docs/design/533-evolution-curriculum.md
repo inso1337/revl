@@ -1,7 +1,9 @@
 # Design: the evolution curriculum, derived and tiered
 
-Design-doc id 531 (next free number under `docs/design/`; the roadmap item of
-the same number is unrelated). Roadmap item served: 535 (issue #1205, the
+Design-doc id 533. 531 was the next free number under `docs/design/` when this
+was written and two concurrent lanes had already taken it, for issue #1206 and
+issue #1207; 531 and 532 are left to them in issue order. The roadmap item of
+the same number is unrelated. Roadmap item served: 535 (issue #1205, the
 curriculum). Siblings it must not contradict: 536 (issue #1206, the reward)
 and 537 (issue #1207, the held-out scoring set).
 
@@ -120,8 +122,12 @@ The `compile` and `gate_census` oracles are skipped: neither has a per-tier
 byte-agreement oracle behind it, and `compile` reports 5 of 5 constructs
 unreached at `52fb8ef3` because `_ir_reach` only records `key=value` pairs
 whose value is a string, so five top-level IR section names can never be
-reached by construction. That is a defect in the report, not 5 tasks, and it
-belongs to whoever owns that tool. Slice 2 below covers it.
+reached by construction. That is a defect in the report rather than 5 tasks.
+Issue #1203's in-flight change to the same tool (branch
+`agent/1203-construct-reach-ratchet`) fixes exactly that, measuring a section
+as reached when some corpus document's IR carries a non-empty value for it, so
+slice 2 picks the oracle up once that lands rather than restating the fix
+here.
 
 We consume `survey()` rather than the CLI text, so the shrink-only ledger that
 issue #1203 is concurrently adding to the same tool does not move this adapter.
@@ -353,7 +359,7 @@ expected to land on, and the oracle that would catch it going vacuous.
 | slice | source added | expected rung | fixture / oracle |
 |---|---|---|---|
 | 1 (landed) | known gaps, known historical bugs, the tree's own programs, formal obligations | medium, hard, easy, expert | `tests/test_evolve_curriculum.py`, 16 tests, gate firing proved both directions |
-| 2 | the `compile` and `gate_census` oracles of `tools/oracle_construct_reach.py`, after the `_ir_reach` string-value defect in section 3.1 is fixed | medium | the same reach report; the fix is the non-vacuity evidence |
+| 2 | the `compile` and `gate_census` oracles of `tools/oracle_construct_reach.py`, once issue #1203's fix for the `_ir_reach` string-value defect in section 3.1 has landed | medium | the same reach report, read through its shrink-only ledger |
 | 3 | cross-tier differential probes: `ACCEPTED_PROGRAMS` / `REJECTED_PROGRAMS` in `tests/test_selfhost_lower.py`, paired with the `no-objection-out-of-slice` bucket | hard | `tests/test_selfhost_lower.py`; a task must name a program in one list and a reference refusal the port does not raise |
 | 4 | design documents: a slice table row in `docs/design/*.md` whose named oracle does not exist in `tests/` | varies with the oracle named | the doc's own slice table; the gap is checkable by looking for the test file |
 | 5 | generated adversarial programs: `tools/fuzz_frontend.py` seeds that survive to a divergence | hard | the fuzz corpus; a seed is only a task while it still diverges |
