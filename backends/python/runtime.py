@@ -317,7 +317,212 @@ def _json_schema_error(value, schema, path: str = "$"):
 _VALIDATE_MISSING = object()
 
 
-def validate_response(value, schema, where: str = "", constructors=None):
+# ---------------------------------------------------------------------------
+# item 513 slice 2: the provider seam
+# (docs/design/542-grammar-constrained-decoding.md, §9)
+#
+# Slice 1 derived a decoding grammar and bound it in the IR, and nothing read
+# it. This is the half that lets a provider receive it, and the half that makes
+# an honoured decode a CHECKED claim rather than an assumed one.
+#
+# Three calls, and the split between them is the whole design:
+#
+#   `revl_decode_grammar(key)`  - look at the stated constraint. No claim.
+#   `revl_constrain(key, dialects)` - take it, in the first dialect the provider
+#       names that the crossing can supply. TAKING IT IS THE CLAIM: a provider
+#       that calls this is saying "I constrained this decode with exactly this
+#       artifact", and the claim is checked when the response settles.
+#   `validate_response(..., grammar=...)` - the existing seam, now also deciding
+#       whether a claim that was made is true.
+#
+# A provider that never calls `revl_constrain` claims nothing and is validated
+# exactly as it was before, and the crossing records that the grammar was stated
+# and not taken, so nothing downstream can read the crossing as constrained. A
+# provider that DOES claim and then returns something outside the artifact it
+# named gets a NAMED refusal (`GrammarNotHonouredError`) rather than a silent
+# downgrade. That is the fail-open direction closed at the only point where a
+# claim exists to be false.
+# ---------------------------------------------------------------------------
+
+class GrammarNotHonouredError(ResponseValidationError):
+    """Item 513 (§9.3): a provider took the crossing's decoding constraint and
+    returned a completion outside it.
+
+    A subclass of :class:`ResponseValidationError` on purpose. It is a response
+    fault of the same kind and the same retryability — a re-issued completion may
+    well be honoured — so it rides item 257's existing retry loop and the body
+    observes the same terminal typed fault on exhaustion. What the subclass adds
+    is a NAME: "the provider said it constrained this decode and it did not" is a
+    different operational problem from "the model answered badly", and a
+    diagnostic that cannot tell them apart sends the reader to the wrong place.
+    """
+
+
+#: Every validated crossing's stated grammar, keyed `"Service.method"` for a
+#: service operation and `"extern:name"` for an extern. Populated once at module
+#: import by the emitted document (`register_grammars`), so a provider can find
+#: the constraint for the crossing it is about to serve without the compiler
+#: having to thread it through a call signature it does not own.
+_revl_grammars: "dict[str, dict]" = {}
+
+#: The claim a provider made for the completion currently in flight: the digest
+#: of the artifact it took, or None. Fiber-local for the same reason the model-
+#: hop registers are: two crossings can be in flight in one process and a claim
+#: must not travel between them.
+_revl_grammar_claim: "contextvars.ContextVar[Optional[str]]" = \
+    contextvars.ContextVar("_revl_grammar_claim", default=None)
+
+
+def register_grammars(table: dict) -> None:
+    """Record the document's stated decoding grammars. Emitted once per module,
+    and only when some crossing is `validated`, so a document with no validated
+    crossing is byte-identical to one compiled before this slice."""
+    _revl_grammars.update(table)
+
+
+def revl_decode_grammar(key: str):
+    """The constraint revl states for crossing ``key``, or None when that
+    crossing states none. Reading it is not taking it: a provider that only
+    wants to look (to log it, to decide whether it can honour it, to cache a
+    compiled grammar under its digest) makes no claim and is verified exactly as
+    before."""
+    return _revl_grammars.get(key)
+
+
+def revl_constrain(key: str, dialects=("gbnf",)):
+    """Take crossing ``key``'s constraint in the first of ``dialects`` it can
+    supply, and CLAIM to honour it. Returns ``(dialect, artifact, digest)``, or
+    None when the crossing states no grammar or names no dialect the provider
+    asked for.
+
+    ``gbnf`` yields the grammar text; ``json-schema`` yields the schema object of
+    the second dialect (§10), derived from the same crossing and carrying its own
+    digest. The digest is returned so a provider may cache a compiled artifact
+    under it, and it is what the claim is recorded as: naming one dialect while
+    having constrained with the other is detectable rather than believed.
+
+    A provider that cannot honour ANY dialect must not call this. Ignoring the
+    grammar is a legitimate answer — constraining a decode is a host concern and
+    revl does not require a host to be able to — and the cost of ignoring it is
+    only that the crossing is no better off than it was before this item.
+    """
+    grammar = _revl_grammars.get(key)
+    if not grammar:
+        return None
+    for dialect in dialects:
+        if dialect == "gbnf" and grammar.get("format") == "gbnf":
+            _revl_grammar_claim.set(grammar["digest"])
+            return ("gbnf", grammar["text"], grammar["digest"])
+        if dialect == "json-schema":
+            wire = grammar.get("wire_schema")
+            if wire:
+                _revl_grammar_claim.set(wire["digest"])
+                return ("json-schema", wire["schema"], wire["digest"])
+    return None
+
+
+def _take_grammar_claim():
+    """Read and clear the in-flight claim. Cleared unconditionally so a claim
+    cannot outlive the completion it was made for and be spent on the next one."""
+    claim = _revl_grammar_claim.get()
+    if claim is not None:
+        _revl_grammar_claim.set(None)
+    return claim
+
+
+def grammar_honoured_error(value, schema, path: str = "$"):
+    """The part of "this completion is inside the stated grammar" that survives
+    into the DECODED value: every member of a closed object is present, and in
+    the order the grammar pins. Returns an error string or None.
+
+    Why this and not a grammar recogniser. The provider hands revl a decoded
+    value, not the bytes it decoded, so whitespace, number spelling and string
+    escaping are already gone and no recogniser can see them. What is NOT gone is
+    member order, because Python preserves a JSON object's key order on load —
+    and member order is exactly the thing the GBNF derivation pins (§5) and the
+    thing item 257's validator is blind to. So this check is precisely the DELTA
+    between the two derivations, which makes it the only part worth checking
+    separately: everything else the grammar says about a value, the validator has
+    already said.
+
+    It is therefore necessary and not sufficient, and §9.4 says so plainly rather
+    than letting "the grammar was honoured" read as a proof.
+    """
+    if not isinstance(schema, dict):
+        return None
+    if "oneOf" in schema:
+        for arm in schema["oneOf"]:
+            if _json_schema_error(value, arm, path) is None:
+                return grammar_honoured_error(value, arm, path)
+        return None                      # no arm matches: the validator's fault
+    if schema.get("nullable") and value is None:
+        return None
+    if "properties" in schema and isinstance(value, dict):
+        declared = list(schema["properties"])
+        observed = list(value)
+        if observed != declared:
+            return (f"{path}: the stated grammar pins the members "
+                    f"{declared!r}; the completion has {observed!r}")
+        for name, sub in schema["properties"].items():
+            err = grammar_honoured_error(value[name], sub, f"{path}.{name}")
+            if err is not None:
+                return err
+        return None
+    extra = schema.get("additionalProperties")
+    if isinstance(extra, dict) and isinstance(value, dict):
+        for name, item in value.items():
+            err = grammar_honoured_error(item, extra, f"{path}.{name}")
+            if err is not None:
+                return err
+        return None
+    items = schema.get("items")
+    if isinstance(items, dict) and isinstance(value, list):
+        for i, item in enumerate(value):
+            err = grammar_honoured_error(item, items, f"{path}[{i}]")
+            if err is not None:
+                return err
+    return None
+
+
+def _grammar_claim_error(value, schema, grammar):
+    """Judge the in-flight claim against what arrived. None when there is nothing
+    to judge (no grammar stated, or no provider claim) or when the claim holds."""
+    claim = _take_grammar_claim()
+    if isinstance(grammar, str):
+        # The emitted call site names the crossing's REGISTRY KEY; the grammar
+        # itself lives in the module's one registry.
+        grammar = _revl_grammars.get(grammar)
+    if not grammar or claim is None:
+        return None
+    digests = {grammar.get("digest")}
+    wire = grammar.get("wire_schema") or {}
+    digests.add(wire.get("digest"))
+    if claim not in digests:
+        # The provider constrained with SOMETHING, and not with what this
+        # crossing states. That is worse than not constraining at all: the
+        # caller would read the crossing as pinned to a type it was not pinned
+        # to.
+        return (f"the provider claims to have constrained this decode with "
+                f"grammar {claim[:12]}..., which is not the grammar this "
+                f"crossing states ({(grammar.get('digest') or '')[:12]}...)")
+    if claim == wire.get("digest"):
+        # The `json-schema` dialect promises schema-validity and nothing more,
+        # so it is NOT held to the GBNF member order: JSON Schema does not
+        # describe member order, and refusing a provider that honoured exactly
+        # what it was handed is the false reject §5 forbids.
+        #
+        # There is still a residue, and missing it would have been fail-open.
+        # The artifact the provider was handed is the WIRE schema, which is
+        # strictly tighter than the schema item 257 validates against: it closes
+        # the nested objects 257 leaves open and requires every member. So a
+        # json-schema claim is judged against the artifact that was actually
+        # handed over, not against the looser one the validator uses. §10.3.
+        return _json_schema_error(value, wire.get("schema") or {}, "$")
+    return grammar_honoured_error(value, schema)
+
+
+def validate_response(value, schema, where: str = "", constructors=None,
+                      grammar=None):
     """Item 257 (§4): the validate-on-response seam. Check ``value`` against the
     derived ``schema`` REGARDLESS of what the provider did, and on success
     construct the revl ADT value from the validated tag/value so the tagged wire
@@ -327,12 +532,26 @@ def validate_response(value, schema, where: str = "", constructors=None):
 
     ``constructors`` maps each case tag to its emitted ADT case class. Absent
     (a non-ADT validated return, e.g. a record or a primitive), the validated
-    value is returned as-is."""
+    value is returned as-is.
+
+    ``grammar`` (item 513 slice 2) is the constraint this crossing STATES. It
+    changes nothing for a provider that ignored it; for one that took it through
+    :func:`revl_constrain`, the claim is checked here and a false claim is a
+    named :class:`GrammarNotHonouredError`. The schema check runs FIRST either
+    way, so a response that is simply malformed is reported as malformed rather
+    than as a broken provider contract."""
     err = _json_schema_error(value, schema, "$")
     if err is not None:
+        _take_grammar_claim()
         raise ResponseValidationError(
             f"{where}: response failed validation: {err}"
             if where else f"response failed validation: {err}",
+            where=where, schema=schema, value=value)
+    claim_err = _grammar_claim_error(value, schema, grammar)
+    if claim_err is not None:
+        raise GrammarNotHonouredError(
+            f"{where}: stated decoding grammar not honoured: {claim_err}"
+            if where else f"stated decoding grammar not honoured: {claim_err}",
             where=where, schema=schema, value=value)
     if constructors and isinstance(value, dict) and "tag" in value:
         tag = value["tag"]
@@ -348,7 +567,8 @@ def validate_response(value, schema, where: str = "", constructors=None):
 
 
 def validate_retry(make_call, budget: int, schema, where: str = "",
-                   constructors=None, site: "Optional[str]" = None):
+                   constructors=None, site: "Optional[str]" = None,
+                   grammar=None):
     """Item 257 (Slice 2, §5.2): the read-with-a-cost validation-retry loop.
 
     Fire ``make_call`` — the model completion call, and ONLY it — and validate its
@@ -377,7 +597,8 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
     while True:
         value = make_call()
         try:
-            validated = validate_response(value, schema, where, constructors)
+            validated = validate_response(value, schema, where, constructors,
+                                          grammar)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
                 _revl_record_model_call(started, attempt + 1, budget + 1, value,
@@ -400,7 +621,8 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
 
 
 async def validate_retry_async(make_call, budget: int, schema, where: str = "",
-                               constructors=None, site: "Optional[str]" = None):
+                               constructors=None, site: "Optional[str]" = None,
+                               grammar=None):
     """Item 257 (Slice 2, §5.2): the async colour of :func:`validate_retry`.
 
     ``make_call`` returns a FRESH coroutine per attempt (the emitter passes the
@@ -415,7 +637,8 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
         if inspect.isawaitable(result):
             result = await result
         try:
-            validated = validate_response(result, schema, where, constructors)
+            validated = validate_response(result, schema, where, constructors,
+                                          grammar)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
                 _revl_record_model_call(started, attempt + 1, budget + 1, result,
