@@ -112,7 +112,6 @@ ACKNOWLEDGED: dict[str, str] = {
           "`compile_files`, so a hole fixture compiles here and is refused one "
           "stage later; the reproducers live with the gate "
           "(`src/revl/holes.py`, `docs/holes.md`).",
-    "G-MODEL-PLACE": "item 512 lands the rule with its reproducers as INLINE\n                      strings in `tests/test_model_placement_512.py` and\n                      `tests/test_model_ceiling_514.py` rather than as fixture\n                      files, deliberately: `examples/rejections/` is a census\n                      corpus root, and the self-host port of `route model` is\n                      slice 3, so until a named `MODEL` marker exists the\n                      self-host answers a fixture here `BAD|unexpected token at\n                      top level` and it would enter the census as\n                      `refuse-out-of-slice/BAD`. Remove this entry when slice 3\n                      lands; a stale acknowledgement fails this gate.",
     "T-UNRESOLVED": "refused by the checker (`src/revl/typecheck.py`) for a "
                     "type the compilation does not declare, which is a "
                     "multi-file condition a single-file fixture in this corpus "
