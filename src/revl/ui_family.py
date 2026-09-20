@@ -79,6 +79,144 @@ VERBS: dict[str, dict[str, str]] = {
 DESIGN = "docs/design/532-typed-computer-use.md"
 
 
+# ----------------------------------------------------------- the ladder rungs
+#
+# Roadmap item 521, design 532 §4, Slice 3. The item's open decision was how
+# far down the fallback ladder is admissible, and §4.2 settles it by making a
+# RUNG PART OF THE CAPABILITY TOKEN: descending is crossing a different
+# declared boundary, not retrying the same one.
+#
+#   ui.click              rung 0, a semantic target
+#   ui.click.selector     rung 1, a structural query over a rendered document
+#   ui.click.pixel        rung 2, a position
+#
+# WHY THE DEPTH HAS TO BE BOUNDED AT ALL, in §4.1's own terms. Rung 0 fails
+# CLOSED by nature: an identity the application publishes either resolves or
+# errors. Rungs 1 and 2 fail OPEN by nature: a selector matches a different
+# control that satisfies it, and a pixel always hits something. That asymmetry
+# is the reason, not a preference for typed APIs.
+#
+# WHICH VERBS CARRY RUNGS. The ones that ACT on a target, and only those. A
+# rung is a way of NAMING a target for an actuation, and §4.1 states both
+# lower rungs' failure direction as "the action succeeds on the wrong thing",
+# which is a sentence about an action. `screen.observe` has no target at all.
+# `ui.find` PRODUCES one from observed content, so a rung on it would name the
+# substrate's resolution strategy, and §4.3 and §7 put the strategy and the
+# order outside what revl claims. Slice 4's `bounds` field is the other half
+# of this: a target records the region it was resolved within, which is what a
+# lower rung has to stay inside.
+
+#: rung name -> what it names, and how it fails. The text is the rule: the
+#: refusals quote it, so an author learns the failure direction of the depth
+#: they asked for rather than only that it was refused.
+RUNGS: dict[str, str] = {
+    "selector": "a structural query over a document the application renders; "
+                "it is a derivation from content that may be "
+                "attacker-influenced, and when the binding is wrong the query "
+                "matches a DIFFERENT control that satisfies it and the action "
+                "succeeds on the wrong thing",
+    "pixel": "a position, which binds nothing at all: `(842, 611)` is not "
+             "authority, and the same pixel is Delete, Send or Approve after "
+             "a layout change",
+}
+
+#: rung name -> its depth below the semantic rung. A bare verb is depth 0.
+RUNG_DEPTH: dict[str, int] = {"selector": 1, "pixel": 2}
+
+
+def runged_verbs() -> tuple[str, ...]:
+    """The verbs a rung may be spelled on: the ones that take a target.
+
+    A function rather than a constant because `TARGET_CONSUMERS` is defined
+    with the target record further down, and the two answer the same question:
+    a rung names a target, and these are the verbs that receive one.
+    """
+    return TARGET_CONSUMERS
+
+
+def rung_of(token: str) -> str | None:
+    """The rung a declared token names, or `None` when it names the semantic
+    rung or is not in this family. `ui.click.pixel` -> `pixel`."""
+    segments = _bare(token).split(".")
+    if len(segments) != 3 or segments[0] not in ROOTS:
+        return None
+    return segments[2] if segments[2] in RUNGS else None
+
+
+def verb_of(token: str) -> str | None:
+    """The VERB a token names, with any rung and any item-294 valuation
+    stripped: `ui.click.pixel(app="Billing")` -> `ui.click`. `None` outside
+    the family.
+
+    This is what the per-verb tables in this module resolve through, so a rung
+    cannot arrive carrying a weaker obligation than the verb it descends from
+    just because it is spelled in a different file. `taint_roles` reaches the
+    same answer by longest-prefix resolution; this is the explicit form, for
+    the tables that are exact-match by nature.
+    """
+    segments = _bare(token).split(".")
+    if len(segments) < 2 or segments[0] not in ROOTS:
+        return None
+    verb = f"{segments[0]}.{segments[1]}"
+    return verb if segments[1] in VERBS.get(segments[0], {}) else None
+
+
+def depth_of(token: str) -> int:
+    """How far down the ladder a declared token reaches: 0 for a semantic
+    target, 1 for a selector, 2 for a pixel, and 0 for anything outside the
+    family - the answer that makes `max(depth_of(t) for t in reach)` safe over
+    a mixed capability set."""
+    rung = rung_of(token)
+    return RUNG_DEPTH[rung] if rung is not None else 0
+
+
+def prefix_of(token: str) -> str | None:
+    """The token one rung SHALLOWER than this one, or `None` when there is
+    none. `ui.click.pixel` -> `ui.click`; a semantic token has no shallower
+    spelling."""
+    return verb_of(token) if rung_of(token) is not None else None
+
+
+def prefix_closure_refusal(component: str,
+                           tokens) -> tuple[str, str] | None:
+    """`(message, hint)` when a component's reached UI tokens are not
+    prefix-closed, else `None`.
+
+    Design 532 §4.2(4): `ui.click.pixel` is admissible only where `ui.click`
+    is. A program that can reach pixels but not semantic targets has no
+    ladder, it has a PIXEL DRIVER, and the ordering claim would be vacuous for
+    it. This is the strongest form of "never inverts that order" revl can
+    honestly check: a property of the DECLARATION, not of the loop. §4.3 says
+    why the loop is not checkable here, and that is item 539's problem rather
+    than a gap in this one.
+
+    `tokens` is the component's reached capability tokens, off the G8 audit
+    reach. Parameters are stripped, so a narrowed `ui.click(app="Billing")`
+    closes a `ui.click.pixel`: item 294's valuations NARROW a capability, and
+    a component holding the narrower semantic token still holds a semantic
+    token. Reporting the lowest offending spelling first makes the diagnostic
+    stable across two components with the same defect.
+    """
+    bare = {_bare(str(t)) for t in tokens or ()}
+    for token in sorted(bare):
+        shallower = prefix_of(token)
+        if shallower is None or shallower in bare:
+            continue
+        rung = rung_of(token)
+        return (
+            f"component `{component}` reaches `{token}` without reaching "
+            f"`{shallower}`",
+            f"a rung is a strictly WEAKER way to name the same target "
+            f"({RUNGS[rung]}), so it is admissible only where the semantic "
+            f"target is too: a component that reaches {rung}s and not "
+            f"semantic targets has no fallback ladder, it has a {rung} "
+            f"driver, and the ordering a ladder claims is vacuous for it. "
+            f"Reach `{shallower}` as well, or drop `{token}` "
+            f"(G8, roadmap item 521, {DESIGN} §4.2)",
+        )
+    return None
+
+
 def spellings() -> list[str]:
     """Every admissible computer-use capability token, sorted. The refusal
     messages enumerate this rather than describing it, so the diagnostic and
@@ -129,16 +267,42 @@ def refusal(token: str, kind: str) -> tuple[str, str] | None:
             f"and escapes every policy rule written against the real one "
             f"(G8, roadmap item 521, {DESIGN})",
         )
-    if len(segments) > 2:
+    if len(segments) > 3:
+        rungs = ", ".join(f"`{r}`" for r in sorted(RUNGS))
         return (
-            f"`{token}` descends the computer-use fallback ladder, which is "
-            f"not admissible yet",
-            f"`{root}.{verb}` is the ladder's top rung, a semantic target; a "
-            f"selector or pixel rung is a DISTINCT declared capability whose "
-            f"prefix-closure is checked in a later slice, and it is refused "
-            f"until that check exists rather than admitted ahead of it "
-            f"(G8, roadmap item 521, {DESIGN} §4)",
+            f"`{token}` is deeper than the computer-use fallback ladder goes",
+            f"the ladder has exactly three rungs: `{root}.{verb}` is the "
+            f"semantic target and {rungs} are the two below it. A fourth "
+            f"level would be a depth with no failure direction written down "
+            f"for it, and an unbounded ladder is the same as no guarantee "
+            f"(G8, roadmap item 521, {DESIGN} §4.2)",
         )
+    if len(segments) == 3:
+        rung = segments[2]
+        if rung not in RUNGS:
+            rungs = ", ".join(f"`{root}.{verb}.{r}`" for r in sorted(RUNGS))
+            return (
+                f"`{token}` is not a declared rung of the computer-use "
+                f"fallback ladder",
+                f"the rung set is CLOSED ({rungs}); a rung names HOW a target "
+                f"is bound and each one carries its own failure direction, so "
+                f"an invented rung is a depth an auditor cannot grade and a "
+                f"`capability {root}.*.pixel` rule cannot select "
+                f"(G8, roadmap item 521, {DESIGN} §4.1)",
+            )
+        if f"{root}.{verb}" not in runged_verbs():
+            actuations = ", ".join(f"`{v}`" for v in runged_verbs())
+            return (
+                f"`{root}.{verb}` does not act on a target, so `{token}` "
+                f"names no rung of the ladder",
+                f"a rung is a way of NAMING A TARGET FOR AN ACTUATION, and "
+                f"both lower rungs fail by the ACTION succeeding on the wrong "
+                f"thing. The verbs that take a target are {actuations}; "
+                f"`screen.observe` has none, and `ui.find` PRODUCES one, so a "
+                f"rung there would name the substrate's resolution strategy, "
+                f"which revl does not claim ({DESIGN} §4.3 and §7) "
+                f"(G8, roadmap item 521, {DESIGN} §4.2)",
+            )
     return None
 
 
@@ -219,8 +383,19 @@ def reversibility(token: str) -> str | None:
     """The reversibility class of an admissible computer-use token, or `None`
     when the token is not one. Parameters (item 294) are stripped: a narrowed
     `ui.click(...)` is the same operation as `ui.click`, and a valuation that
-    could change the class would be an author-side opt-out."""
-    return REVERSIBILITY.get(token.split("(", 1)[0])
+    could change the class would be an author-side opt-out.
+
+    A LADDER RUNG resolves to its VERB's class (slice 3). `ui.click.pixel` is
+    the same operation as `ui.click` reached by a weaker naming, so it cannot
+    be more reversible than the verb it descends from; an exact-match lookup
+    would have given a rung no class at all, which `teardown_refusal` reads as
+    "not a computer-use verb" and lets past. That is the fail-open direction,
+    reached by adding a spelling in a different file."""
+    bare = token.split("(", 1)[0]
+    if bare in REVERSIBILITY:
+        return REVERSIBILITY[bare]
+    verb = verb_of(bare)
+    return REVERSIBILITY.get(verb) if verb is not None else None
 
 
 def teardown_refusal(token: str, kind: str, name: str,
@@ -571,7 +746,7 @@ def target_signature_refusal(token: str, kind: str, name: str,
     the declaration that actually crosses, and a service method declares an
     interface rather than a crossing.
     """
-    bare = _bare(token)
+    bare = verb_of(token) or _bare(token)
     if bare in TARGET_PRODUCERS:
         if strip_qualifiers_shallow(returns) != TARGET_TYPE:
             shown = f"`{returns}`" if returns else "nothing"
