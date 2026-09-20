@@ -143,6 +143,62 @@ discarded component output is not evidence of agreement.
 Review suggested inputs and remaining source branches; a zero-exit
 survey, byte agreement, or a coverage gain is not proof of correctness.
 
+## Declaring a closed vocabulary in a second module
+
+The self-host rule above is about two implementations of one semantics. The same
+thing happens one level down, inside the compiler's own helpers, and until issue
+#1285 nothing watched it: a set or mapping over a closed vocabulary gets
+re-declared in a second module rather than imported. Each copy is correct when
+written. They drift. Nothing reports the drift, because the only thing that
+would notice is a consumer comparing two of them, and no consumer does.
+
+Three instances were found by three unrelated lanes in one day, none of them by
+a gate: two independent surface-type to JSON Schema mappings (issue #1272), three
+copies of the IR path normalization an attestation binds, two of which had
+already drifted and one drift of which had left `truc reproduce`'s attestation
+tier structurally dead (issue #1276), and `policy.TAINT_FOLD_ORIGINS` mirroring
+`taint._SOURCE_CLASS_SCOPES` where `mcp/approval.py::static_taint` intersects
+against it, so a missing entry silently drops an origin from the taint an
+auto-approve decision is made against (issue #1195).
+
+`tools/check_vocabulary_mirrors.py` is the gate. It runs in `lint`, is
+stdlib-only, imports no revl and starts no subprocess, so it cannot be fooled by
+the dev venv's editable meta-path finder into measuring some other checkout.
+
+* **The inventory is produced by the tool**, not kept by hand. Run it with no
+  arguments for the current list.
+* **A mirror is an exact match.** Two sites mirror each other when the closed
+  vocabularies they spell are EQUAL and they live in different modules. A site
+  is a module-level collection constant, or a function whose body reads at least
+  four distinct string literals as mapping keys. Exact equality has no threshold
+  to tune and cannot chain, which the looser relations do: measured on this
+  tree, Jaccard at 0.9 over all string literals gives 117 pairs, a strict subset
+  relation with a 0.5 size guard gives 424, and the transitive closure of any
+  threshold below 0.7 merges 27 to 30 unrelated declarations into one blob
+  through the single shared token `rust`.
+* **The ledger is a ratchet, not an allowlist.** Every class in
+  `tests/fixtures/vocabulary_mirror_ledger.json` carries the sites, the
+  vocabulary they agree on, and a written reason, and every entry keeps being
+  checked in both directions. A recorded copy drifting reds and names the token
+  each side has and the other lacks. A recorded class growing a third copy reds.
+  An entry whose mirror is gone reds, and the fix is to DELETE it, which is what
+  makes the ledger shrink-only. A new class reds. A missing or unreadable
+  ledger reds, and so does a scan that finds nothing.
+* **`--write` is not a routine regeneration.** No `make` target and no
+  `regen_goldens.py` path calls it. Widening the ledger is an edit somebody
+  writes a reason into and a reviewer reads, because a ratchet that widens as a
+  side effect of normal work is not a ratchet.
+* **It has a measured false-positive rate.** On the tree it was written against,
+  42 classes, of which 5 are coincidence rather than re-declaration: several
+  readers of one schema that happen to name the same fields, where a correct
+  one-sided edit would red the entry with no defect behind it. Those five are
+  marked `FALSE POSITIVE` in their `note`. The remaining 37 are real.
+
+`python3 tools/check_vocabulary_mirrors.py --self-test` runs the gate against
+each of those failure modes and asserts the verdict. It runs in `lint` beside
+the gate, because a checker whose own teeth are never exercised is the gap it
+was written to close.
+
 ## What CI covers
 
 `lint`, `frontend`, `backend-python`, `frontend-cordis`, `sandbox-container`,
