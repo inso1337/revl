@@ -26,7 +26,7 @@
 // This file is also the self-host's ADMITTING reproducer. The gate built from
 // `selfhost/lower.rvl` answered every council program `BAD|unexpected token at
 // top level` until the declaration was ported; it now admits this one and
-// refuses `examples/rejections/gmodelplace_council_on_tie_allow.rvl` beside it
+// refuses `examples/rejections/gcouncilsplit_on_tie_allow.rvl` beside it
 // with the reference's own message.
 
 model role edge on_device

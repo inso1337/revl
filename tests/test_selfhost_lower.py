@@ -194,8 +194,13 @@ def _classify(e: RevlError) -> str:
     # tags every refusal "COUNCIL", a separate family from MODEL above: two
     # constructs, two reference modules (`revl.model_route` and
     # `revl.model_council`), so a consumer reading the wire learns which one was
-    # refused. Both stand for the same registered code, `G-MODEL-PLACE`, which
-    # is what `SELFHOST_TAG_CODES` records.
+    # refused. The two tags do NOT stand for one code: issue #1190 split the
+    # council's refusals across `G-COUNCIL-SPLIT` and `G-MODEL-PLACE` without
+    # moving the tag, so `SELFHOST_TAG_CODES` maps `COUNCIL` to both and the
+    # SENTENCE is what says which of them a refusal is evidence for
+    # (`docs/design/557-council-disagreement.md` section 3). This function does
+    # not care: it answers the FAMILY, and every marker below is a substring the
+    # gate spells byte for byte either way.
     #
     # Beside MODEL and not merged into it because two of these sentences share a
     # marker with it if either is written loosely: "model role `" opens MODEL's

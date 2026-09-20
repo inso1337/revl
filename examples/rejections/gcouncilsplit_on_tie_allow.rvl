@@ -1,6 +1,14 @@
-// REJECTED — G-MODEL-PLACE: an aggregation written to ADMIT when the council's
-// members disagree does not compile. This is roadmap item 516's exit test
-// (`docs/design/543-model-council.md`).
+// REJECTED — G-COUNCIL-SPLIT: an aggregation written to ADMIT when the
+// council's members disagree does not compile. This is roadmap item 516's exit
+// test (`docs/design/543-model-council.md`).
+//
+// The code is issue #1190's, not item 512's. A council refusal carries
+// `G-MODEL-PLACE` exactly when its subject is a `model role`; every other one
+// carries `G-COUNCIL-SPLIT`, because what it refuses would let the council
+// report agreement it does not have
+// (`docs/design/557-council-disagreement.md` section 3). The self-host gate
+// tags this refusal `COUNCIL` either way: the tag names the construct, and it
+// is the sentence below that says which of the two guarantees decided it.
 //
 // `on_tie allow` PARSES. That is deliberate, and it is the same discipline item
 // 512 uses for `*` on the right of an arrow: the author who reaches for
