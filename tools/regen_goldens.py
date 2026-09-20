@@ -685,11 +685,14 @@ def main(argv: list[str] | None = None) -> int:
     # "DRIFT" for both sends the next reader to regenerate something that was
     # never compared.
     if broken:
-        which = "Its producer" if len(broken) == 1 else "Their producers"
-        print(f"regen-goldens: COULD NOT CHECK {', '.join(broken)}. {which} failed to RUN")
-        print("               here, so nothing was compared. This is NOT a drift report and")
-        print("               regenerating will not fix it: read the BROKEN line(s) above")
-        print("               for the command that failed.")
+        which = "its producer" if len(broken) == 1 else "their producers"
+        print(f"regen-goldens: COULD NOT CHECK {', '.join(broken)}: nothing was compared.")
+        print(f"               Either {which} failed to RUN here, or the target's own")
+        print("               declarations were refused (an undeclared output, an "
+              "undeclared")
+        print("               twin pair, a twin group the producer does not back). This is")
+        print("               NOT a drift report and regenerating will not fix it: read the")
+        print("               refusal line(s) above.")
     if skipped:
         note = "ERROR" if args.strict else "not checked"
         print(f"regen-goldens: {', '.join(skipped)} SKIPPED for a missing tool ({note}).")
