@@ -127,7 +127,7 @@ service NotesApi {
   fn list_notes(limit: Opt[Int]) -> Result[List[Note], ApiError]
 
   route post "/notes"
-  emission fn create_note(note: NewNote) -> Result[Note, ApiError]
+  emission[store] fn create_note(note: NewNote) -> Result[Note, ApiError]
 }
 
 // The HTTP component wires the endpoints to the store. Status and outcome come
