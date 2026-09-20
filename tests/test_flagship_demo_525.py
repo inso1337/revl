@@ -91,6 +91,18 @@ def test_the_demo_shows_both_a_refusal_and_an_uncompensated_step():
     assert "rolled back cleanly" in out, out
 
 
+def test_the_residue_split_survives_the_default_render():
+    """Step 9 points at item 522's residue split, so an excerpt that truncates
+    before it leaves the step pointing at nothing. The DOES NOT PROVE block
+    above it carries one clause per residue state, so it grows whenever a state
+    is added - which is exactly when this would silently start cutting."""
+    proc = _run()
+    out = proc.stdout
+    assert "[2] BOUNDARY CROSSINGS" in out, out
+    assert "computer-use revert split (item 522)" in out, out
+    assert "compensate LIFO: type_amount" in out, out
+
+
 def test_the_demo_names_the_measured_gap_rather_than_hiding_it():
     """Item 521 slice 2 would derive a screen read's untrustedness from the
     capability. It has not landed, so the qualifier is the author's and the
