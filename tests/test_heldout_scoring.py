@@ -171,6 +171,15 @@ def test_a_scoring_run_writes_nothing_into_the_tree(engine, census, reference):
     assert _porcelain() == before
 
 
+def _tracked():
+    """The tracked tree, as a set of repo-relative paths."""
+    done = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files"],
+        capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    return set(done.stdout.splitlines())
+
+
 def _porcelain():
     done = subprocess.run(
         ["git", "-C", str(ROOT), "status", "--porcelain"],
@@ -293,6 +302,41 @@ def test_the_fence_is_not_the_subject():
         assert not heldout.fence_verdict([path])
 
 
+def test_a_change_to_a_fenced_file_selects_this_file(path=None):
+    """The fence's own test has to RUN when a fenced file moves.
+
+    This is how issue #1307 reached main. `tools/gate_reference_census.py`
+    began naming `tools/corpus_provenance.py`, the pre-merge selector mapped
+    that file to the census and provenance tests, and neither of those holds
+    the classification. The test that does was never selected, so the change
+    landed and main was red on a path no gate had run.
+
+    Derived on both sides: the selector reads `HELD_OUT_FENCE` out of the tool
+    by AST, and this holds every entry of the same tuple.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "affected_tests_under_heldout", ROOT / "tools" / "affected_tests.py")
+    affected = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(affected)
+
+    assert affected.held_out_fence(ROOT) == frozenset(heldout.HELD_OUT_FENCE)
+
+    missed, targeted = [], []
+    for fenced in heldout.HELD_OUT_FENCE:
+        chosen = affected.select([fenced], ROOT)
+        if chosen["full"]:
+            continue  # FULL runs it too, just not narrowly.
+        targeted.append(fenced)
+        if "tests/test_heldout_scoring.py" not in set(chosen["pytest"]):
+            missed.append(fenced)
+    assert not missed, (
+        "changing these fenced files does not select the test that holds the "
+        "fence: " + ", ".join(missed))
+    # Not vacuous: a fence whose every entry fell back to FULL would satisfy
+    # the loop above without the selector ever naming this file.
+    assert targeted, "no fenced file produced a targeted selection"
+
+
 def test_every_fenced_path_exists():
     """A fence entry that is a typo fences nothing at all."""
     for path in heldout.HELD_OUT_FENCE + heldout.DATA_INPUTS \
@@ -376,6 +420,15 @@ def test_the_whole_import_closure_of_a_scoring_run_is_classified():
     The run happens in a subprocess so the closure is the tool's own and not
     pytest's, and the assertion is on the closure rather than on a list
     somebody remembered to update.
+
+    "Repo file" means TRACKED file. The probe reports everything it loaded
+    from under `ROOT`, and a checkout whose virtualenv lives in it has
+    `site-packages` under `ROOT` too -- the probe imports
+    `tests/test_selfhost_lower.py`, which imports pytest, so that developer
+    gets a hundred `site-packages` paths reported as holes in the fence. They
+    are not holes. The fence is about what a candidate can read and change,
+    and that is the tracked tree: the same definition `seed_is_in_tree` uses,
+    for the same reason.
     """
     code = _CLOSURE_PROBE % (json.dumps(str(ROOT)), json.dumps(TEST_SEED))
     env = dict(os.environ)
@@ -389,13 +442,17 @@ def test_the_whole_import_closure_of_a_scoring_run_is_classified():
     payload = json.loads(done.stdout.strip().splitlines()[-1])
     assert payload["verdict"] == "clean", payload
 
-    unclassified = [f for f in payload["files"] if heldout.classify(f) is None]
+    tracked = _tracked()
+    loaded = [f for f in payload["files"] if f in tracked]
+    assert loaded, "the probe reported no tracked repo file at all"
+
+    unclassified = [f for f in loaded if heldout.classify(f) is None]
     assert not unclassified, (
         "a scoring run loads repo files in no category, so the fence has a "
         "hole: " + ", ".join(unclassified))
     # The fence has to be reached, or "classified" would be satisfied by a
     # closure that happens to be all subject.
-    assert any(heldout.classify(f) == "fence" for f in payload["files"])
+    assert any(heldout.classify(f) == "fence" for f in loaded)
     for path in heldout.DATA_INPUTS:
         assert heldout.classify(path) is not None, path
 
@@ -430,11 +487,21 @@ def test_every_repo_path_the_scorer_names_is_classified():
     `sys.modules` cannot see a file loaded through `spec_from_file_location`
     without being registered, which is how the census loads the crate
     generator and the python emitter. This reads the literal `ROOT / "..."`
-    joins out of the two fenced tools instead, so a newly named repo path has
-    to be classified before this passes.
+    joins out of the fenced files instead, so a newly named repo path has to
+    be classified before this passes.
+
+    The files scanned are DERIVED from `HELD_OUT_FENCE`. They used to be a
+    hand-written pair naming two of the five, and a path first named in
+    `tools/build_gate_crate.py` was therefore scanned by nothing: the same
+    drift this test exists to catch, one level up. A fence entry this scanner
+    cannot parse is a refusal rather than a silent skip.
     """
+    unscannable = [p for p in heldout.HELD_OUT_FENCE if not p.endswith(".py")]
+    assert not unscannable, (
+        "a fenced file this scanner cannot read, so paths it names are held "
+        "by nothing: " + ", ".join(unscannable))
     named = set()
-    for tool in ("tools/heldout_scoring.py", "tools/gate_reference_census.py"):
+    for tool in heldout.HELD_OUT_FENCE:
         named |= _root_joins(ROOT / tool)
     assert named, "the scanner found no ROOT-relative path at all"
     unclassified = sorted(p for p in named if heldout.classify(p) is None)
