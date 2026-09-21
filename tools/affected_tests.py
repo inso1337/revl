@@ -210,6 +210,56 @@ PROGRESS_COUNTER_SOURCES = {
     "tools/gate_reference_census.py",   # CORPUS_DIRS / _SKIP_DIRS
 }
 
+# The held-out scorer's fence (roadmap item 537). Every file it names is read
+# by `tests/test_heldout_scoring.py`, which asserts that every repo path those
+# files name is classified fence, subject or unreached. That test is what turns
+# a new dependency into a red, so it has to be SELECTED when one of them moves.
+#
+# DERIVED from the tool, by AST rather than by import: a copy here is exactly
+# the drift the selection exists to catch. Issue #1307 landed because
+# `tools/gate_reference_census.py` began naming `tools/corpus_provenance.py`
+# and the tests selected for that file did not include the one that holds the
+# classification, so main went red on a path nobody ran.
+_FENCE_CACHE: dict[Path, frozenset] = {}
+
+
+def held_out_fence(root: Path) -> frozenset[str]:
+    """`HELD_OUT_FENCE` as written in `tools/heldout_scoring.py`.
+
+    An empty result is returned rather than raised: the caller treats it as "no
+    fence file changed", and the tool's own suite holds the parse. A scorer
+    file that is renamed away is a rename the generic rules still cover.
+
+    Cached per root, same shape and same reason as `_READ_CACHE` below: this
+    runs once per changed file, and `select()` is called a few hundred times in
+    a single run of `tests/test_affected_tests.py`.
+    """
+    if root in _FENCE_CACHE:
+        return _FENCE_CACHE[root]
+    _FENCE_CACHE[root] = _held_out_fence(root)
+    return _FENCE_CACHE[root]
+
+
+def _held_out_fence(root: Path) -> frozenset[str]:
+    source = root / "tools" / "heldout_scoring.py"
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return frozenset()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "HELD_OUT_FENCE" not in names:
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            return frozenset()
+        return frozenset(
+            e.value for e in node.value.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    return frozenset()
+
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -531,6 +581,13 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_evolution_progress.py")
             reasons.append(f"{f} (self-evolution progress counter input)")
 
+        # --- the held-out scoring fence (issue #1307) ---------------------- #
+        # Here for the same reason as the block above: every file named by the
+        # fence also has its own rule further down that ends in `continue`.
+        if f in held_out_fence(root):
+            pytest_nodes.add("tests/test_heldout_scoring.py")
+            reasons.append(f"{f} (held-out scoring fence)")
+
         # --- structural: always FULL --------------------------------------- #
         if f == "Makefile":
             return _full("Makefile changed -> full")
@@ -704,7 +761,27 @@ def select(changed, root) -> dict:
             # is where a drift would land, not in either file alone.
             pytest_nodes.add("tests/test_gate_reference_census.py")
             pytest_nodes.add("tests/test_corpus_provenance.py")
+            # item 560: the published artifact reads BOTH of these, and its
+            # tests hold the committed report against what they now say. A
+            # change here that moves the allowance or the NEVER_BASELINED
+            # mechanism has to red the artifact's suite, or the published
+            # table goes stale silently, which is the whole defect it exists
+            # to prevent.
+            pytest_nodes.add("tests/test_census_artifact.py")
             reasons.append(f"{f} (census/provenance coupling)")
+            if f == "tools/gate_reference_census.py":
+                # issue #1215: the `gate_census` row of
+                # tools/oracle_construct_reach.py imports this file for its
+                # corpus walk and its fast engine, so a change to the census
+                # moves what that row measures and what its ledger records.
+                # This clause used to be a second `if f == ...` rule further
+                # down, which the `continue` above made unreachable -- the
+                # census kept selecting the coupling pair and never the
+                # construct-reach ledger the rule was added to cover.
+                pytest_nodes.add("tests/test_oracle_construct_reach.py")
+                reasons.append(
+                    "tools/gate_reference_census.py (construct-reach ledger)"
+                )
             continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
@@ -725,16 +802,6 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_check_vision_claims.py")
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
-            continue
-        # issue #1215: the `gate_census` row of tools/oracle_construct_reach.py
-        # imports this file for its corpus walk and its fast engine, so a change
-        # to either moves what that row measures and what its ledger records.
-        # The generic `tools/*.py` rule below matches on the file STEM and would
-        # select tests/test_gate_reference_census.py alone.
-        if f == "tools/gate_reference_census.py":
-            pytest_nodes.add("tests/test_gate_reference_census.py")
-            pytest_nodes.add("tests/test_oracle_construct_reach.py")
-            reasons.append("tools/gate_reference_census.py")
             continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
@@ -830,6 +897,15 @@ def select(changed, root) -> dict:
             # the REAL document against the REAL tree, so a doc edit that moves
             # a cited path has to re-run it.
             pytest_nodes.add("tests/test_check_vision_claims.py")
+            # issue #1300: and the self-host residual, for the same reason. The
+            # residual figure lived in prose in three documents and disagreed
+            # with `LOWER_GAP_DOCS` in all three; it is generated now, and the
+            # module below byte-compares the generated blocks and reads every
+            # remaining prose figure. `docgen --check` does that too, in the
+            # `frontend` job, which a documentation-only diff SKIPS -- so
+            # without this line the gate would miss precisely the pull request
+            # that moves one of these documents.
+            pytest_nodes.add("tests/test_selfhost_residual_is_generated.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 

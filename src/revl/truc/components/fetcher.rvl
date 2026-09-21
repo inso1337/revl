@@ -4,7 +4,7 @@
 use "../externs.rvl" { host_entry_read }
 
 pub service Fetch {
-  emission fn entry(registry: Str, name: Str) -> Str
+  emission[host_entry_read] fn entry(registry: Str, name: Str) -> Str
 }
 
 component Fetcher provides fetch: Fetch {

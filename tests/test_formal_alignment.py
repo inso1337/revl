@@ -34,6 +34,15 @@ And the promotion the first four were the precondition for: `formal-strict`
 and `formal-found-other` are in `FATAL_BUCKETS`. Informational is how the
 three files survived, and a bucket that cannot fire is not a gate.
 
+And the level below that, which the F4 work could not reach: the two
+`out-of-fragment-G5` / `out-of-fragment-G6` buckets record an ABSENCE, so
+neither can disagree with anything and neither could fail. What is
+checkable without judging their contents is MEMBERSHIP, so both are held to
+`formal/out_of_fragment_ledger.json`, which shrinks only: a file joining a
+bucket without a line in it fails the gate, and a line no longer in its
+bucket fails the gate until it is deleted. The tests at the end name the
+input that makes each direction fire.
+
 `make formal` needs a Lean toolchain; this module runs in the plain
 `pytest tests/` job and pins each fix on the file that exposed it, plus the
 reference behaviour each fix follows, so none of the three can quietly come
@@ -45,6 +54,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import re
 import shutil
 import sys
@@ -548,14 +558,15 @@ def status(harness, exported):
             facts, census["componentless"], ref, rows)
     block = harness.status_block(census, facts, census["componentless"],
                                  census["refusals"], ref, harness._ALIGN)
-    return block, fatal, dict(harness._ALIGN)
+    return (block, fatal, dict(harness._ALIGN),
+            {k: list(v) for k, v in harness._ALIGN_SAMPLES.items()})
 
 
 def test_the_corpus_has_no_disagreeing_bucket(status):
     """The exit criterion of the issue: with F1 to F4 in, every bucket that
     now fails the gate is empty, which is what makes the promotion a gate
     rather than a permanent red."""
-    _block, fatal, align = status
+    _block, fatal, align, _samples = status
     assert fatal == []
     assert {k: v for k, v in align.items() if k in
             ("formal-strict", "formal-found-other")} == {}
@@ -567,7 +578,7 @@ def test_status_md_carries_the_block_this_run_produces(harness, status):
     the gate's output. The numbers are rendered by the run that measures
     them, and a stale checkout of the block fails here and in `make
     formal`."""
-    block, _fatal, _align = status
+    block, _fatal, _align, _samples = status
     assert harness.sync_status(block, write=False) is None
     assert "| `formal-strict` | 0 | **FATAL** |" in block
     assert "| `formal-found-other` | 0 | **FATAL** |" in block
@@ -577,7 +588,7 @@ def test_a_stale_block_is_reported_as_drift(harness, status, tmp_path,
                                             monkeypatch):
     """The check bites. Edit the checked-in block and `sync_status` says so
     rather than agreeing; `--write-status` puts it back."""
-    block, _fatal, _align = status
+    block, _fatal, _align, _samples = status
     copy = tmp_path / "STATUS.md"
     copy.write_text(
         harness.STATUS_PATH.read_text(encoding="utf-8").replace(
@@ -593,9 +604,184 @@ def test_a_stale_block_is_reported_as_drift(harness, status, tmp_path,
 def test_a_document_with_no_markers_is_drift_too(harness, status, tmp_path,
                                                  monkeypatch):
     """Deleting the markers must not read as agreement."""
-    block, _fatal, _align = status
+    block, _fatal, _align, _samples = status
     copy = tmp_path / "STATUS.md"
     copy.write_text("nothing generated here\n", encoding="utf-8")
     monkeypatch.setattr(harness, "STATUS_PATH", copy)
     assert harness.sync_status(block, write=False) is not None
     assert harness.sync_status(block, write=True) is not None
+
+
+# ------------- the two buckets that recorded an absence, given a firing condition
+
+#: A name that is not in the corpus, standing in for a fixture somebody adds
+#: tomorrow whose `undo` the `Prog` cannot resolve.
+NEWCOMER = "examples/rejections/g5_undo_method_ref_map.rvl"
+
+
+@pytest.fixture
+def ledger(harness, tmp_path, monkeypatch):
+    """Point the ratchet at a scratch ledger and return
+    `(write(samples), check(samples))`."""
+    path = tmp_path / "out_of_fragment_ledger.json"
+    monkeypatch.setattr(harness, "OOF_LEDGER_PATH", path)
+
+    def write(samples):
+        with redirect_stdout(io.StringIO()):
+            harness.out_of_fragment_ratchet(samples, write=True)
+        return path
+
+    def check(samples):
+        with redirect_stdout(io.StringIO()):
+            return harness.out_of_fragment_ratchet(samples)
+    return write, check
+
+
+def test_the_committed_ledger_is_this_corpus_s_membership(harness, status):
+    """The ledger in the tree names exactly the files this corpus puts in
+    the two buckets. This is the assertion that turns both of them from a
+    printed list into something that can be wrong."""
+    _block, _fatal, _align, samples = status
+    with redirect_stdout(io.StringIO()):
+        assert harness.out_of_fragment_ratchet(samples) == []
+    committed = json.loads(
+        harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
+    for bucket in harness.OOF_RATCHET_BUCKETS:
+        assert committed[bucket] == sorted(samples.get(bucket, [])), bucket
+
+
+def test_a_file_joining_an_out_of_fragment_bucket_fails_the_gate(
+        harness, status, ledger):
+    """The input that makes `out-of-fragment-G5` FAIL, which issue #1169's
+    own report could not name. A new G5 fixture whose `undo` leaves the
+    `Prog` lands in the bucket, the ledger does not have it, and the gate
+    reds until somebody models it or writes the hole down."""
+    _block, _fatal, _align, samples = status
+    write, check = ledger
+    write(samples)
+    assert check(samples) == []
+    joined = {**samples,
+              "out-of-fragment-G5": [*samples["out-of-fragment-G5"], NEWCOMER]}
+    findings = check(joined)
+    assert findings == [f for f in findings if f.startswith(
+        "joined out-of-fragment-G5: ")]
+    assert len(findings) == 1 and NEWCOMER in findings[0]
+
+
+def test_a_file_joining_the_g6_bucket_fails_the_gate(harness, status, ledger):
+    """The same input for `out-of-fragment-G6`. The model states no rule
+    about purity outside an effect form, so it cannot judge a new G6
+    fixture's contents; it can still refuse to let one in unannounced."""
+    _block, _fatal, _align, samples = status
+    write, check = ledger
+    write(samples)
+    newcomer = "examples/rejections/g6_new_shape.rvl"
+    findings = check({**samples, "out-of-fragment-G6": [
+        *samples["out-of-fragment-G6"], newcomer]})
+    assert len(findings) == 1
+    assert findings[0].startswith(f"joined out-of-fragment-G6: {newcomer}")
+
+
+def test_a_stale_ledger_line_fails_the_gate_and_must_be_deleted(
+        harness, status, ledger):
+    """The other direction, which is what makes it SHRINK-ONLY. Teach the
+    `U5` fold to follow a handle and these files leave the bucket; their
+    lines are then a claim that the model has no fact where it now has one,
+    so each one reds until it is removed."""
+    _block, _fatal, _align, samples = status
+    write, check = ledger
+    write(samples)
+    shrunk = {**samples,
+              "out-of-fragment-G5": samples["out-of-fragment-G5"][1:]}
+    findings = check(shrunk)
+    assert len(findings) == 1
+    assert findings[0].startswith(
+        f"left out-of-fragment-G5: {samples['out-of-fragment-G5'][0]}")
+    write(shrunk)
+    assert check(shrunk) == []
+
+
+def test_a_missing_ledger_is_a_failure_not_a_pass(harness, status, ledger):
+    """Deleting the ratchet must not read as nothing to check. That is the
+    same failure mode as an informational bucket, spelled as a file."""
+    _block, _fatal, _align, samples = status
+    _write, check = ledger
+    findings = check(samples)
+    assert len(findings) == 1 and "is missing" in findings[0]
+
+
+def test_a_ledger_without_a_name_list_is_a_failure(harness, status, ledger):
+    """A bucket key replaced by something that is not a list of names is not
+    an empty expectation; it is an unreadable ratchet."""
+    _block, _fatal, _align, samples = status
+    write, check = ledger
+    path = write(samples)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["out-of-fragment-G6"] = 1
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    findings = check(samples)
+    assert len(findings) == 1 and "no list of names" in findings[0]
+
+
+def test_the_ledger_records_names_only(harness):
+    """Names, never counts or line numbers, so a `--write-ledger` under the
+    3.14 developer venv and under CI's 3.11 are the same bytes (the shape
+    PR #1214's construct-reach ledger settled on)."""
+    doc = json.loads(harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
+    assert set(doc) == {"_about", *harness.OOF_RATCHET_BUCKETS}
+    for bucket in harness.OOF_RATCHET_BUCKETS:
+        assert doc[bucket] == sorted(doc[bucket])
+        for rel in doc[bucket]:
+            assert isinstance(rel, str) and rel.endswith(".rvl")
+            assert (ROOT / rel).is_file(), rel
+
+
+def test_the_write_is_byte_stable(harness, status, ledger):
+    """Two writes of the same membership are the same bytes, and the bytes
+    in the tree are what this corpus writes."""
+    _block, _fatal, _align, samples = status
+    write, _check = ledger
+    first = write(samples).read_bytes()
+    assert write(samples).read_bytes() == first
+    assert harness.OOF_LEDGER_PATH.read_bytes() == first
+
+
+def test_the_census_writer_does_not_widen_the_ratchet(harness):
+    """`--write-status` is routine; widening the set of files the model
+    admits it has no fact about is not, and must not ride along on it. The
+    two writers are separate flags, and only one of them touches the
+    ledger."""
+    source = (ROOT / "formal" / "harness" / "diff_corpus.py").read_text(
+        encoding="utf-8")
+    body = source.split("def write_status(", 1)[1].split("\ndef ", 1)[0]
+    assert "ledger" in body
+    assert "out_of_fragment_ratchet(_ALIGN_SAMPLES, write=True)" in body
+    assert re.search(r'if "--write-ledger" in _argv', source)
+
+
+def test_the_alignment_arms_do_not_run_the_ratchet(align, verdicts, rows):
+    """The ratchet is a statement about the WHOLE corpus, so it lives in
+    `main()`. Run over one file it would read every other name in the
+    ledger as stale, which is why `checker_alignment` does not call it."""
+    _counts, fatal, _out = align(G5_OUT_OF_PROG, verdicts, rows)
+    assert fatal == []
+
+
+def test_the_gate_reports_the_ratchet_as_a_gate_failure(harness):
+    """`main()` appends the ratchet's findings to the fatal list, so they
+    print as `GATE-FAILURE` and the gate exits non-zero."""
+    source = (ROOT / "formal" / "harness" / "diff_corpus.py").read_text(
+        encoding="utf-8")
+    body = source.split("\ndef main()", 1)[1]
+    assert "fatal.extend(out_of_fragment_ratchet(_ALIGN_SAMPLES))" in body
+    assert "return 1 if (mismatches or fatal) else 0" in body
+
+
+def test_status_md_calls_the_two_buckets_ratcheted(status):
+    """The document stops saying `out-of-fragment*` is informational for the
+    two that are now held to a ledger."""
+    block, _fatal, _align, _samples = status
+    assert "| `out-of-fragment-G5` | 10 | ratcheted |" in block
+    assert "| `out-of-fragment-G6` | 1 | ratcheted |" in block
+    assert "| `out-of-fragment` | 38 | informational |" in block
+    assert "out_of_fragment_ledger.json" in block

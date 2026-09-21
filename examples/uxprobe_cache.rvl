@@ -4,7 +4,7 @@
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
-  emission fn put(key: Str, value: Str)
+  emission[cache] fn put(key: Str, value: Str)
 }
 
 service RateLimiter {

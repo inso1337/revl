@@ -9,12 +9,17 @@
 // bodies only if truc is ever wanted standalone-compiled (a non-goal).
 //
 // Capability labelling note (deviation from the design sketch, docs/design/
-// truc-architecture.md §2): the parser accepts `emission[cap]` on *service
-// methods*, not on `extern` declarations (parser.py::extern_decl), and an
-// extern contributes its own name as the capability (docs/capabilities.md
-// §2). truc therefore uses bare `emission` on its boundary — valid, and still
-// fully audited (the rim components carry the emissions, the core/pure ones do
-// not). Capability-scoped labels are a later refinement.
+// truc-architecture.md §2): an extern that declares no scope contributes its
+// OWN NAME as the capability (docs/capabilities.md §2), so the externs below
+// stay bare — the extern IS the boundary, and naming it twice would give one
+// crossing two spellings on the audit surface.
+//
+// The SERVICE methods in `components/` no longer do. A service method that
+// spells `emission` with no capability list declares an effect while declining
+// to say what it reaches (issue #1265), so each rim service now names the
+// extern(s) its providers actually cross — `emission[host_read] fn read(...)`
+// and so on. That is a bound the checker holds the providers to (G4), not a
+// label: a provider that reached a second extern would be refused.
 
 // ---- pure (no observable effect) ----
 

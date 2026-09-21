@@ -24,11 +24,11 @@
 
 service Tabs {
   fn active() -> Str
-  emission fn select(id: Str)
+  emission[ui_select] fn select(id: Str)
 }
 
 service Editor {
-  emission fn source() -> Str
+  emission[ui_editor_source] fn source() -> Str
 }
 
 service Skin {

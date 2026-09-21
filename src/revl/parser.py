@@ -2481,9 +2481,27 @@ class Parser:
         of naming the construct that swallowed the tokens.
 
         Only ever called AFTER a parse has already failed, so it can reword a
-        genuine error but never reject accepted source (additivity)."""
+        genuine error but never reject accepted source (additivity).
+
+        The reword is bounded to the CORRUPTED TAIL (issue #1310). A stray
+        close can only mis-parse the source between itself and the next
+        backtick; past that the lexer is back in step with the file, so a
+        failure there is an ordinary error carrying its own, usually far
+        better, diagnostic. As first written the bound was one-sided: any
+        failure at or after a flagged close was reworded. The flag itself is a
+        loose heuristic, and a single-line `` `// …` `` template, which is what
+        every emitter in `selfhost/` writes to emit a host comment, trips it.
+        The two together replaced an exact "`acquire` is a reserved keyword" at
+        `selfhost/emit_go.rvl:1711` with a template complaint at line 1341:
+        the wrong kind of error, 370 lines from the statement that caused it.
+        Keeping the reword inside the tail costs the item-365 case nothing,
+        since its failures land on the very next token after the stray close,
+        and it leaves every failure outside the tail with the diagnostic the
+        parser actually computed."""
+        if e.line is None:
+            return None
         best = None
-        for tok in self.toks:
+        for index, tok in enumerate(self.toks):
             if tok.kind != "template":
                 continue
             span = getattr(tok, "stray_backtick", None)
@@ -2491,8 +2509,9 @@ class Parser:
                 continue
             start_line, close_line = span
             # nearest suspect template whose stray close is at or before the
-            # point the parse gave out.
-            if e.line is not None and close_line > e.line:
+            # point the parse gave out, AND whose tail still covers that point.
+            tail_end = self._tail_end_line(index)
+            if tail_end is None or not close_line <= e.line <= tail_end:
                 continue
             if best is None or close_line > best[1]:
                 best = span
@@ -2510,6 +2529,25 @@ class Parser:
                  "backtick with an interpolation, `` ${\"`\"} ``, or move the "
                  "template's closing backtick to where the template really ends",
         )
+
+    def _tail_end_line(self, index: int) -> int | None:
+        """Last line the template at token `index` could have corrupted had its
+        close been stray (issue #1310), or `None` when it cannot have been.
+
+        If the close was stray, the host text after it lexed as revl up to the
+        next backtick in the file, and that backtick is where the NEXT
+        template token opens, because the template's real end re-lexes as the
+        start of one. So the damage stops at that token's line.
+
+        No template after it at all means no backtick after it at all, since
+        templates are what consume backticks. A stray close needs the real
+        close to be somewhere further on, so with nothing further on the close
+        cannot have been stray: the only source that fits is a template left
+        unterminated, and the lexer refuses that before the parser runs."""
+        for tok in self.toks[index + 1:]:
+            if tok.kind == "template":
+                return tok.line
+        return None
 
     def _parse_program(self) -> Program:
         program = Program(self.filename)
@@ -5499,11 +5537,23 @@ class Parser:
 
     def stmt(self, in_method: bool, in_async_method: bool = False):
         tok = self.peek()
-        # `y = expr` — assignment to a `var` bound earlier in this method
-        if in_method and tok.kind == "ident" and self.peek_ahead(1).kind == "=":
+        # `y = expr` — assignment to a `var` bound earlier in this method, and
+        # (issue #721) the compound forms `y += expr` / `-=` / `*=` / `/=` / `%=`.
+        # The method grammar carries `var`, assignment, `if`, `while` and `for`
+        # (items 548 and 681), so a loop that accumulates is ordinary code here;
+        # only the compound spelling of the same assignment was missing, and it
+        # failed as "expected a statement … found 'i'", which reads as though
+        # assignment itself were out of bounds. `_assign_ahead` is the same
+        # lookahead the fn grammar uses, so the two strata admit one spelling.
+        if in_method and tok.kind == "ident" and self._assign_ahead():
             self.next()
-            self.next()
-            return AssignStmt(tok.value, self.pure_expr(), tok.line)
+            op = "="
+            if self.at("="):
+                self.next()
+            else:
+                op = self.next().value + "="
+                self.next()
+            return AssignStmt(tok.value, self.pure_expr(), tok.line, op)
         if tok.kind == "kw" and tok.value in ("let", "var"):
             mutable = tok.value == "var"
             self.next()

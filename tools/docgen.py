@@ -454,6 +454,178 @@ def block_vision_tiers(current: str, root: Path | None = None) -> str:
     return "\n".join(out)
 
 
+class SelfhostResidualError(SystemExit):
+    """The self-host residual cannot be measured from the committed tables."""
+
+
+# The order the two self-host documents print the tiers in. It is the order the
+# corpora were built in, not alphabetical, and it is fixed here so the table is
+# a function of the ledger and nothing else.
+RESIDUAL_TIERS = ("py", "ts", "go", "java", "rust", "wasm")
+
+NATIVE_CHAIN_TEST = "tests/test_selfhost_compile.py"
+
+
+def _literal(rel: str, name: str, root: Path | None = None):
+    """A module-level literal assignment, read with `ast.literal_eval` rather
+    than by importing the module: the ledger and the six corpus lists live in
+    pytest modules that import revl, and every consumer of this number (the
+    docs, `tools/evolution_progress.py`, this gate) must be able to read them
+    with nothing installed."""
+    base = root if root is not None else ROOT
+    path = base / rel
+    if not path.is_file():
+        raise SelfhostResidualError(f"docgen: {rel} is not present")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            try:
+                return ast.literal_eval(value)
+            except ValueError as exc:
+                raise SelfhostResidualError(
+                    f"docgen: {rel} defines `{name}` as something this gate "
+                    f"cannot evaluate literally: {exc}") from exc
+    raise SelfhostResidualError(f"docgen: {rel} defines no `{name}`")
+
+
+def selfhost_residual(root: Path | None = None) -> list[tuple[str, int, int]]:
+    """`(tier, corpus size, residual size)` for each of the six tiers.
+
+    Both halves come from the tables the tests already gate. The corpus is
+    `tests/test_selfhost_emit_<tier>.py::CORPUS`, the enumerated document list
+    the byte-agreement oracle holds to identity. The residual is
+    `LOWER_GAP_DOCS[tier]` in `tests/test_selfhost_compile.py`, which
+    `test_the_residual_is_located_in_lower_not_in_the_emitter` RECOMPUTES over
+    that same corpus on every run: a document that starts or stops diverging
+    reds that test, so the ledger is a measurement and not a note.
+
+    This function exists because the number was not. Four places in the tree
+    stated the residual in prose and gave three different answers (issue
+    #1300): the ledger said 41, the roadmap said 59, and both self-host
+    documents said 63, all of them typed by hand from a measurement taken on a
+    day that has passed. Correcting the three would have reset the clock on the
+    same defect, so the prose is rendered from the ledger instead.
+    """
+    ledger = _literal(NATIVE_CHAIN_TEST, "LOWER_GAP_DOCS", root)
+    rows: list[tuple[str, int, int]] = []
+    for tier in RESIDUAL_TIERS:
+        if tier not in ledger:
+            raise SelfhostResidualError(
+                f"docgen: {NATIVE_CHAIN_TEST}'s LOWER_GAP_DOCS has no entry for "
+                f"the `{tier}` tier. A tier with no residual is `(),` not a "
+                "missing key: absent reads as zero and that is the one thing "
+                "this table must never invent.")
+        corpus = _literal(f"tests/test_selfhost_emit_{tier}.py", "CORPUS", root)
+        stray = [d for d in ledger[tier] if d not in corpus]
+        if stray:
+            raise SelfhostResidualError(
+                f"docgen: LOWER_GAP_DOCS[{tier!r}] names {stray}, which "
+                f"tests/test_selfhost_emit_{tier}.py::CORPUS does not contain. "
+                "The residual is only a fraction of that corpus while the two "
+                "enumerate the same documents.")
+        rows.append((tier, len(corpus), len(ledger[tier])))
+    for tier in ledger:
+        if tier not in RESIDUAL_TIERS:
+            raise SelfhostResidualError(
+                f"docgen: LOWER_GAP_DOCS has a tier `{tier}` that RESIDUAL_TIERS "
+                "(tools/docgen.py) does not list. Add it there so it reaches the "
+                "generated table, rather than leaving it out of the total.")
+    return rows
+
+
+def residual_totals(root: Path | None = None) -> tuple[int, int]:
+    """`(corpus, residual)` summed over the six tiers."""
+    rows = selfhost_residual(root)
+    return sum(c for _, c, _ in rows), sum(g for _, _, g in rows)
+
+
+def _residual_table(rows: list[tuple[str, int, int]]) -> list[str]:
+    head = ["tier", "corpus", "emitter vs the reference IR",
+            "the fully-native chain"]
+    out = ["| " + " | ".join(head) + " |",
+           "|" + "|".join(["-" * (len(head[0]) + 2)]
+                          + ["-" * (len(h) + 1) + ":" for h in head[1:]]) + "|"]
+    for tier, corpus, gap in rows:
+        exact = corpus - gap
+        cells = [tier.ljust(len(head[0])),
+                 str(corpus).rjust(len(head[1])),
+                 f"{corpus} (100%)".rjust(len(head[2])),
+                 f"{exact} ({exact / corpus * 100:.1f}%)".rjust(len(head[3]))]
+        out.append("| " + " | ".join(cells) + " |")
+    corpus = sum(c for _, c, _ in rows)
+    exact = corpus - sum(g for _, _, g in rows)
+    out.append(f"| **total** | **{corpus}** | **{corpus} (100%)** "
+               f"| **{exact} ({exact / corpus * 100:.1f}%)** |")
+    return out
+
+
+def block_selfhost_residual(current: str, root: Path | None = None) -> str:
+    """The per-tier residual table and its total, for `docs/selfhost-compile.md`
+    and `docs/selfhost-findings.md`.
+
+    Nothing is carried: every cell is a count of a committed list, so the block
+    is a rendering of `LOWER_GAP_DOCS` and the six `CORPUS` lists and a reader
+    who wants the documents themselves can read the same tables.
+
+    The middle column is the emitter half of roadmap item 146, and it reads
+    100% because `test_the_residual_is_located_in_lower_not_in_the_emitter`
+    asserts it per document, for every document, on every run. It is rendered
+    rather than counted separately on purpose: if that assertion ever fails the
+    suite is red, which is a louder answer than a column quietly dropping to
+    99%.
+    """
+    rows = selfhost_residual(root)
+    corpus = sum(c for _, c, _ in rows)
+    gap = sum(g for _, _, g in rows)
+    out = _residual_table(rows)
+    out += [
+        "",
+        f"Every one of the {corpus} documents is reproduced byte-for-byte by its",
+        "self-host emitter when the emitter is fed the **reference** IR. "
+        f"{corpus - gap} of",
+        f"them survive the **fully-native** chain, so all {gap} residual documents",
+        "are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter",
+        "gaps.",
+        "",
+        "Both columns and both totals are generated by `tools/docgen.py` from",
+        f"[`LOWER_GAP_DOCS`](../{NATIVE_CHAIN_TEST}) and from each tier's",
+        "`tests/test_selfhost_emit_<tier>.py::CORPUS`. Do not edit them here:",
+        "change the ledger, then run `make docs-gen`.",
+    ]
+    return "\n".join(out)
+
+
+def block_selfhost_residual_docs(current: str, root: Path | None = None) -> str:
+    """The residual named document by document, for `docs/selfhost-findings.md`.
+
+    The document this replaces grouped the java residual into families by hand
+    and put a count beside each. Every one of those counts, and most of the
+    documents, were stale within days: the families it named (realm placement,
+    host roots acquired in a component) have since left the ledger entirely.
+    The families are worth writing down, and they are written down, in the
+    comments of `LOWER_GAP_DOCS` itself, next to the documents they describe,
+    where the same edit that moves a document moves its explanation.
+    """
+    ledger = _literal(NATIVE_CHAIN_TEST, "LOWER_GAP_DOCS", root)
+    rows = selfhost_residual(root)
+    out: list[str] = []
+    for tier, corpus, gap in rows:
+        out.append(f"`{tier}`, {gap} residual of {corpus}:")
+        out.append("")
+        if not gap:
+            out.append("- none; the fully-native chain reproduces the whole corpus.")
+        else:
+            out += [f"- `{doc}`" for doc in ledger[tier]]
+        out.append("")
+    return "\n".join(out).strip("\n")
+
+
 BLOCKS: list[tuple[str, str, str, object]] = [
     ("doc-status", "docs/DOC-STATUS.md", "docs/*.md", block_doc_status),
     ("mcp-verbs", "docs/mcp-reference.md", "revl.mcp.server.TOOLS", block_mcp_verbs),
@@ -473,6 +645,12 @@ BLOCKS: list[tuple[str, str, str, object]] = [
     ("mcp-test-count", "docs/guide-humans.md", "tests/test_mcp.py", block_mcp_test_count),
     ("vision-tiers", "docs/vision.md", "docs/conformance.md per-tier totals",
      block_vision_tiers),
+    ("selfhost-residual", "docs/selfhost-compile.md",
+     "LOWER_GAP_DOCS + the six emitter corpora", block_selfhost_residual),
+    ("selfhost-residual", "docs/selfhost-findings.md",
+     "LOWER_GAP_DOCS + the six emitter corpora", block_selfhost_residual),
+    ("selfhost-residual-docs", "docs/selfhost-findings.md",
+     "LOWER_GAP_DOCS", block_selfhost_residual_docs),
 ]
 
 
@@ -523,7 +701,116 @@ def check_verbs_in_guide() -> list[str]:
     ]
 
 
+# --------------------------------------------------------------------------- #
+# The self-host residual, wherever a document states it in prose.              #
+# --------------------------------------------------------------------------- #
+#
+# The generated block above owns the table. This owns everything else: a
+# sentence, a bullet, a hand-copied row somewhere the block is not. Issue #1300
+# found four statements of one number and three different answers, and two of
+# the three wrong ones were prose beside the table rather than the table
+# itself, so gating only the block would have left the defect where it was.
+#
+# `docs/v2.0-roadmap.md` is excluded, for the reason DOC_STATUS_EXCLUDED gives:
+# it is the reasoning-of-record, appended to by nearly every PR, and it records
+# what was true when an item was written rather than what is true now. Its own
+# citations are gated by `tools/check_roadmap_claims.py`.
+RESIDUAL_PROSE_EXCLUDED = frozenset({"docs/v2.0-roadmap.md"})
+
+# A paragraph is only read for residual figures when it is about the native
+# chain. "Residual" is a word this repository uses for a dozen unrelated
+# leftovers (a residual risk, a residual whitespace drift, a residual jail
+# gap), and a rule that read all of them would fire on prose it knows nothing
+# about.
+#
+# WHAT THIS CANNOT KNOW, in the spirit of the note at the top of this file: a
+# paragraph that states the residual without naming the native chain, the
+# ledger or a residual document is not read at all, and no regular expression
+# over prose can promise otherwise. The claim here is the narrow one, that no
+# figure this gate CAN read disagrees with the ledger. The broad claim is made
+# structurally instead, by the generated block: the documents that state the
+# residual state it from `LOWER_GAP_DOCS`, so there is nothing left for a
+# reader to retype.
+_RESIDUAL_ANCHOR = re.compile(
+    r"fully[- ]native|native chain|LOWER_GAP_DOCS|residual document")
+
+_RESIDUAL_TOTAL = re.compile(r"\b(\d+)\s+residual(?:\s+documents?\b|s\b)")
+_RESIDUAL_SURVIVE = re.compile(
+    r"\b(\d+)\s+of\s+(\d+)\s+documents?\s+(?:survive|compile|reproduce|are)")
+_RESIDUAL_ONLY = re.compile(r"\bOnly\s+(\d+)\s+survive\b")
+_RESIDUAL_TIER = re.compile(
+    r"\b(\d+)\s+(py|ts|go|java|rust|wasm)\s+documents?\b")
+_RESIDUAL_ROW = re.compile(
+    r"^\|\s*(py|ts|go|java|rust|wasm)\s*\|\s*(\d+)\s*\|", re.M)
+
+_RESIDUAL_FIX = (
+    "the residual is generated: state it inside the "
+    "`<!-- docgen:selfhost-residual -->` block, or drop the figure. "
+    f"Source: LOWER_GAP_DOCS in {NATIVE_CHAIN_TEST}."
+)
+
+
+def _paragraphs(text: str):
+    """(paragraph, 1-based line number of its first line)."""
+    line = 1
+    for chunk in re.split(r"\n[ \t]*\n", text):
+        yield chunk, line
+        line += chunk.count("\n") + 2
+
+
+def check_residual_claims(root: Path | None = None) -> list[str]:
+    """Every hand-typed self-host residual figure agrees with the ledger."""
+    base = root if root is not None else ROOT
+    rows = selfhost_residual(root)
+    per_tier = {t: (c, g) for t, c, g in rows}
+    corpus = sum(c for _, c, _ in rows)
+    gap = sum(g for _, _, g in rows)
+    exact = corpus - gap
+
+    paths = sorted(base.glob("*.md")) + sorted(base.glob("docs/**/*.md"))
+    out: list[str] = []
+    for path in paths:
+        rel = path.relative_to(base).as_posix()
+        if rel in RESIDUAL_PROSE_EXCLUDED:
+            continue
+        for para, line in _paragraphs(path.read_text(encoding="utf-8")):
+            if not _RESIDUAL_ANCHOR.search(para):
+                continue
+            here = f"{rel}:{line}"
+
+            def bad(claim: str, want: int, what: str) -> None:
+                out.append(f"{here}: says {claim}, but {what} is {want}. "
+                           f"{_RESIDUAL_FIX}")
+
+            for m in _RESIDUAL_TOTAL.finditer(para):
+                if int(m.group(1)) != gap:
+                    bad(f"`{m.group(0)}`", gap, "the residual")
+            for m in _RESIDUAL_SURVIVE.finditer(para):
+                if (int(m.group(1)), int(m.group(2))) != (exact, corpus):
+                    bad(f"`{m.group(0)}`", exact,
+                        f"the number reproduced, of {corpus}")
+            for m in _RESIDUAL_ONLY.finditer(para):
+                if int(m.group(1)) != exact:
+                    bad(f"`{m.group(0)}`", exact, "the number reproduced")
+            for m in _RESIDUAL_TIER.finditer(para):
+                n, tier = int(m.group(1)), m.group(2)
+                tier_corpus, tier_gap = per_tier[tier]
+                if n not in (tier_corpus, tier_gap, tier_corpus - tier_gap):
+                    bad(f"`{m.group(0)}`", tier_gap,
+                        f"the {tier} residual (its corpus is {tier_corpus}, "
+                        f"{tier_corpus - tier_gap} reproduced)")
+            for m in _RESIDUAL_ROW.finditer(para):
+                tier, n = m.group(1), int(m.group(2))
+                if n != per_tier[tier][0]:
+                    bad(f"a `{tier}` table row opening `| {n} |`",
+                        per_tier[tier][0], f"the {tier} corpus")
+    return out
+
+
 CHECKS: list[tuple[str, str, str, object]] = [
+    ("residual-claims", "docs/*.md",
+     "no prose residual figure disagrees with LOWER_GAP_DOCS",
+     check_residual_claims),
     ("commands-documented", "docs/commands-reference.md",
      "every build_parser() subcommand has its own section", check_commands_documented),
     ("commands-in-guide", "docs/guide-humans.md",
@@ -629,11 +916,14 @@ def main() -> int:
         print("  If main is stale too, it is main's to fix (a regenerate "
               "commit), not yours.", file=sys.stderr)
     if failures:
-        print("docgen: documentation coverage FAILED. A subcommand or verb exists "
-              "in the code with nothing describing it.", file=sys.stderr)
+        print("docgen: a documentation CHECK FAILED. Either a subcommand or verb "
+              "exists in the code with nothing describing it, or a document "
+              "states a derived figure the source disagrees with.",
+              file=sys.stderr)
         for f in failures:
             print(f"  {f}", file=sys.stderr)
-        print("  fix: write the missing section or row. Never delete the check.",
+        print("  fix: write the missing section or row, or take the figure from "
+              "the block that generates it. Never delete the check.",
               file=sys.stderr)
     return 1
 

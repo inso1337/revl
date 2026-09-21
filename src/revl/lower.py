@@ -9129,7 +9129,12 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
                             hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
-        value = _lower_component_pure_expr(stmt.value, env, scope, callables,
+        # issue #721: the compound spelling desugars to the same assignment the
+        # fn grammar composes (`x += e` is `x = x + e`), so the IR carries one
+        # `assign` step whichever way the author wrote it.
+        assigned = stmt.value if stmt.op == "=" else ExprBin(
+            stmt.op[:-1], ExprVar(stmt.name, stmt.line), stmt.value, stmt.line)
+        value = _lower_component_pure_expr(assigned, env, scope, callables,
                                            pure_only=True)
         _sweep(value, stmt.line)
         out.append({"step": "assign", "name": scope[stmt.name], "value": value})
@@ -12395,7 +12400,14 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                 f"`{ms.name}` is not declared in `{method.name}`",
                                 hint="declare it with `let` (single-assignment) or "
                                      "`var` (mutable)")
-            assigned = _lower_expr(ms.value, env, mode="setup")
+            # issue #721: `x += e` is the same assignment as `x = x + e`, and
+            # the fn grammar already composes it that way (`_lower_stmt`). The
+            # method grammar admits the compound spelling now, so it desugars
+            # here too — the IR carries one `assign` step either way, so no
+            # emitter learns a second shape.
+            value = ms.value if ms.op == "=" else ExprBin(
+                ms.op[:-1], ExprVar(ms.name, ms.line), ms.value, ms.line)
+            assigned = _lower_expr(value, env, mode="setup")
             _sweep(assigned, ms.line)  # item 404
             out.append({"step": "assign", "name": method_locals[ms.name],
                         "value": assigned})

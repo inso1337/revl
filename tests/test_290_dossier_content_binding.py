@@ -49,7 +49,7 @@ POLICY = "mcp requires evidence [gauntlet admissible]\n"
 # `Foo` reaches the `db` boundary, so `audit_report(ir)["boundary"]` names it and
 # the evidence rule is in force for it.
 GRADED = """
-service Store { emission fn put(key: Str, value: Str) }
+service Store { emission[kv] fn put(key: Str, value: Str) }
 component Foo requires store: Store { emit store.put("a", "b") }
 """
 
