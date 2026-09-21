@@ -1080,3 +1080,40 @@ def test_the_unreachable_arm_check_reds_on_a_shadowed_arm(tmp_path):
     assert any("tools/check_site_wheel.py" in d for d in dead), (
         "the checker did not notice a deliberately shadowed arm; it cannot be "
         f"trusted to notice the next real one. Reported: {dead}")
+
+
+def test_a_candidate_the_filesystem_cannot_answer_for_is_not_an_exception():
+    """The defect this shipped with (issue #1342, repaired here).
+
+    A prose string containing a slash reaches `_named_paths` as ONE candidate,
+    and handing a 1.6 KB paragraph to `stat()` raises ENAMETOOLONG on Linux.
+    `Path.exists()` propagates that on python 3.12 and swallows it on 3.13+,
+    where pathlib was rewritten to catch OSError broadly -- so this passed on a
+    3.14 developer machine and raised in CI on 3.12, taking out all 40 tests in
+    this module plus four others, every one of them a caller of `select()`.
+
+    A selector decides whether a test runs. It may return the wrong answer and
+    be caught by a test; it may not RAISE, because then no gate that calls it
+    reports anything at all.
+    """
+    prose = '"""' + ("see bench/codegen/python/run.py " * 60) + '"""\nX = 1\n'
+    assert at._named_paths(ROOT, prose) == frozenset()
+
+    over_long = 'P = "' + "a" * 400 + '/b.py"\n'
+    assert at._named_paths(ROOT, over_long) == frozenset()
+
+    embedded_newline = 'P = "one/\\ntwo"\n'
+    assert at._named_paths(ROOT, embedded_newline) == frozenset()
+
+    # and the real shape: every test file in the tree, through the real walk.
+    # This is what actually raised, so it is what has to be exercised.
+    assert at.companion_paths(ROOT), "the walk found nothing; the probe is vacuous"
+
+
+def test_select_never_raises_on_the_real_tree():
+    """The non-vacuity anchor for the test above. `companion_paths` walks 623
+    modules; the failure was in one of them, not in a synthetic string."""
+    for changed in ("src/revl/parser.py", "src/revl/audit.py", "docs/arithmetic.md",
+                    "backends/go/emit.py", "weird/random_thing.xyz"):
+        r = sel(changed)
+        assert isinstance(r["pytest"], list)
