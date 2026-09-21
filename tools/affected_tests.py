@@ -513,13 +513,35 @@ def _named_paths(root: Path, source: str) -> frozenset[str]:
         # test-to-test edges, and a URL is not a repo path.
         if "/" not in rel or rel.startswith(("http:", "https:", "tests/")):
             continue
-        if ".." in rel.split("/"):
+        parts = rel.split("/")
+        if ".." in parts:
             continue
-        target = root / rel
-        if target.is_file():
-            out.add(rel)
-        elif target.is_dir() and _WALKS_A_DIRECTORY.search(source):
-            out.add(rel)
+        # Reject what cannot be a path BEFORE asking the filesystem. A prose
+        # string with a slash in it reaches here as one candidate, and handing
+        # a 1.6 KB paragraph to `stat()` raises ENAMETOOLONG on Linux -- which
+        # `Path.exists()` propagates on python 3.12 and swallows on 3.13+,
+        # where it was rewritten to catch OSError broadly. That difference is
+        # why this passed on a 3.14 developer machine and took out 44 tests in
+        # CI on 3.12: every caller of `select()` raised. Checked by name here
+        # rather than by catching the error, so the rule holds on every
+        # version, and the `except OSError` below is only the second line.
+        if any(not part or len(part.encode("utf-8")) > 255 for part in parts):
+            continue
+        if any(ch in rel for ch in "\n\r\x00"):
+            continue
+        try:
+            target = root / rel
+            if target.is_file():
+                out.add(rel)
+            elif target.is_dir() and _WALKS_A_DIRECTORY.search(source):
+                out.add(rel)
+        except OSError:
+            # A candidate the filesystem will not answer for is not evidence of
+            # a dependency. It must never be an exception either: `select()` is
+            # what decides whether a test runs, and a selector that raises on a
+            # string somebody wrote in a docstring stops every gate that calls
+            # it.
+            continue
     return frozenset(out)
 
 
@@ -552,7 +574,20 @@ def companion_paths(root: Path) -> dict[str, frozenset[str]]:
 # gives up is the coverage #431 already decided to give up; a general rule is
 # not a reason to reopen it silently. `tests/test_selfhost_lower_ir.py` holds
 # that file's IR narrowly and is selected instead.
-REVERSE_RULE_EXCLUDED = ("tests/test_selfhost_lower.py",)
+#
+# `tests/test_affected_tests.py` is excluded for a different reason: its path
+# literals are FIXTURES, not inputs. It spells `src/revl/parser.py`,
+# `docs/arithmetic.md`, `backends/go/emit.py` and thirty more to ask the
+# selector what it does with them, and it reads none of those files. Taking
+# that as a dependency put a 70-second module into every documentation-only
+# selection, which is the one selection the fast path exists to keep cheap. It
+# is already selected by name whenever `tools/affected_tests.py` changes, and
+# by BENCH_DEPENDENT_TESTS whenever `bench/` does, which is when its answers
+# can actually move.
+REVERSE_RULE_EXCLUDED = (
+    "tests/test_selfhost_lower.py",
+    "tests/test_affected_tests.py",
+)
 
 
 def tests_naming(root: Path, changed: str) -> set[str]:
