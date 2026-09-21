@@ -321,7 +321,7 @@ def test_an_argument_position_call_is_not_on_the_activation_surface(
     rows, _facts, _census = harness.export()
     surface = {r[3] for r in (x.split("\t") for x in rows)
                if r[0] == "A" and r[2] == "C"}
-    assert surface == {harness._wire_cap("a")}
+    assert surface == {harness._undeclared_cap("A")}
 
 
 # ------------------------------------ F3: a direct extern is nameable, once

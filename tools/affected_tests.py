@@ -78,6 +78,10 @@ DOCUMENTED_CORE = (
 # gate. Kept honest by tests/test_affected_tests.py, which recomputes the set
 # from the tree and fails if this tuple has drifted.
 BENCH_DEPENDENT_TESTS = (
+    # Censuses the whole tree's `.rvl` files to cost issue #1265's
+    # refuse-bare-`emission` arm, and most of that census is recorded model
+    # output under `bench/results/`, so a bench change must re-run it.
+    "tests/test_1265_undeclared_emission_boundary.py",
     # The guard below is itself bench-dependent: it validates this very
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",

@@ -168,9 +168,10 @@ Three summary readings of that map:
 | `RevL.CapCeilings.derived_lineage_ceiling_le` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | `lineage_ceiling_le` with its `Lineage` hypothesis discharged |
 | `RevL.CapCeilings.derived_budget_never_exceeds_root_ceiling` | TODO 2(a) — item 260 | **proved** | `propext, Quot.sound` | the end-to-end budget claim, rooted in a component shape |
 | `RevL.CapCeilings.derived_confinement_within_ceiling` | TODO 2(a) + G6 | **proved** | `propext, Quot.sound` | `TypedIn (capKeys Γ)` discharged from `TypedIn (reqKeys c)`; clause (a) reads the key namespace (`heldBounds`), clause (b) the declared one (`heldCaps`) |
-| `RevL.CapCeilings.derived_no_star_amplification` | TODO 2(a) — item 66 | **proved** | `propext, Classical.choice, Quot.sound` | the `*`-free side condition is itself derived, now from the declared cones; a reserved `key:` element is never `*` |
+| `RevL.CapCeilings.derived_no_star_amplification` | TODO 2(a) — item 66 | **proved** | `propext, Classical.choice, Quot.sound` | the `*`-free side condition is itself derived, now from the declared cones; a reserved `svc:` element is never `*` |
 | `RevL.CapCeilings.derivation_non_vacuous` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | derived sets carry valuations; `g4_spawn_widens_parameter` refused from the text |
 | `RevL.CapCeilings.same_key_different_boundary_refused` | TODO 2(a) — the namespace split | **proved** | `propext, Classical.choice, Quot.sound` | one `requires` key over two different declared boundaries: the bound column derives the same list on both sides and attenuates, the capability column refuses the edge |
+| `RevL.CapCeilings.same_key_undeclared_boundary_refused` | item 561 — the split where nothing is declared | **proved** | `propext, Classical.choice, Quot.sound` | the same pair with NEITHER service declaring a token, which is the spelling most of the corpus uses: the element is the service rather than the consumer's key, and the capability column refuses the edge the bound column attenuates |
 | `RevL.CapCeilings.derivation_refuses_unnameable` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | a handle emission derives `*` and is not folded into a held element |
 | `RevL.CapCeilings.derived_ceiling_check_not_subsumed` | TODO 2(a) — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | both relations still load-bearing once the sets are derived |
 | `RevL.G9.origin_persists_or_is_declassified` | G9 (item 249) — the core lemma | **proved** | `propext` | an origin survives a flow, or a declassifier on that path cleared it |
@@ -1034,14 +1035,14 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**470 .rvl files -> 341 components -> 919 statements = 227 modeled + 215
-componentless + 28 refused at parse**, and **5410 verdicts compared (227
-files + 341 components + 67 provide methods + 18 spawn edges + 28 parse
-refusals + 267 teardown scenarios + 1620 recoveries + 919 confinements +
-919 surfaces + 337 teardowns + 245 provide-clause components + 81 config
-fields + 341 A2 bodies), 5410 agree, 0 mismatches**.
+**477 .rvl files -> 349 components -> 940 statements = 234 modeled + 215
+componentless + 28 refused at parse**, and **5488 verdicts compared (234
+files + 349 components + 69 provide methods + 19 spawn edges + 28 parse
+refusals + 267 teardown scenarios + 1620 recoveries + 940 confinements +
+940 surfaces + 340 teardowns + 252 provide-clause components + 81 config
+fields + 349 A2 bodies), 5488 agree, 0 mismatches**.
 
-Checker alignment over the 227 modeled files. Every bucket recording a
+Checker alignment over the 234 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1065,9 +1066,9 @@ with corpus work that never touched this layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 19 | informational |
+| `agree-G4` | 20 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 151 | informational |
+| `agree-accept` | 155 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1075,7 +1076,7 @@ with corpus work that never touched this layer.
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
-| `out-of-fragment` | 38 | informational |
+| `out-of-fragment` | 40 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 
@@ -1288,9 +1289,10 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    read). `Iface` now carries a service's whole emission declaration, one
    `Decl` per declared capability and one `none` per emission method that
    names no capability list, which is `_held_capabilities_pairs` arm for
-   arm. An entry that declares nothing falls back to the key in the
-   reserved `key:` namespace (`lower._WIRE_NS`), so a key spelling is
-   never a bare fold element in the boundary namespace. The `capKeys` bridge stops being an
+   arm. An entry that declares nothing falls back to the SERVICE in the
+   reserved `svc:` namespace (`lower._UNDECLARED_NS`), so neither a key
+   nor a service spelling is ever a bare fold element in the boundary
+   namespace. The `capKeys` bridge stops being an
    assumption: `derived_held_tokens_are_declared_keys` proves the bound
    column's tokens are exactly the component's declared `requires` keys,
    and that no element of the capability column is a bare key.
@@ -1298,7 +1300,11 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    cosmetic: a parent wired `kv: KvA` spawning a child wired `kv: KvB`
    derives the SAME bound list on both sides — the fold over it
    attenuates and admits the edge — while the capability column refuses
-   it, which is what the reference does under G4
+   it, which is what the reference does under G4.
+   `same_key_undeclared_boundary_refused` (item 561) is the same pair
+   where NEITHER service declares a token: the capability column falls
+   back to the SERVICE rather than to the consumer's key, which is what
+   a bare `emission` names
    (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
    Running the fold in the key namespace, which this section did before
    issue 1142, made the derived layer a theory about a different language
@@ -1329,9 +1335,9 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    `derived_confinement_within_ceiling`, and
    `derivation_refuses_unnameable` is the concrete price of dropping it.
    `derived_no_star_amplification` no longer needs a side condition on
-   the wiring keys themselves: a key with nothing declared behind it is
-   folded in the reserved namespace, which `wireCap_token_ne_star` shows
-   is never `*`; what it needs instead is that no service behind a
+   the wiring keys themselves: a service with nothing declared on it is
+   folded in the reserved namespace, which `undeclCap_token_ne_star`
+   shows is never `*`; what it needs instead is that no service behind a
    declared key declares `*`.
    One precision loss: an L0 call head is the receiver ROOT, so a key's
    cone unions over the service's emission methods where the reference
