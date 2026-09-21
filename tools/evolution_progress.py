@@ -133,6 +133,19 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+
+# `Verdict` is item 536's, IMPORTED rather than restated (issue #1332). This
+# module's own copy of it had the same four fields and the same `as_dict`
+# spelling, with nothing holding the two in step -- and the third copy of the
+# shape, in `tools/evolution_controller.py`, had ALREADY grown a fifth field
+# (`code`) that neither of these two carries. A component answer that
+# serialises differently from the components it is scored beside is exactly the
+# translation layer the controller's own docstring says not to introduce.
+from evolution_reward import Verdict  # noqa: E402
+
 # ---------------------------------------------------------------- artifacts
 
 CENSUS_BASELINE = "tools/gate_reference_census_baseline.json"
@@ -647,24 +660,17 @@ def measure(tree: Path, base: str, counters=None) -> list:
 
 # -------------------------------------------------- the ninth conjunct
 
-@dataclass(frozen=True)
-class ProgressVerdict:
-    """The `progress` component, in the vocabulary of `tools/evolution_reward.py`.
-
-    Same four fields, same meaning, same single truth value, so registering this
-    in that module's `PROBES` table needs no adaptation and changes nothing about
-    how retention is computed: it stays `all()` over the components.
-    """
-
-    component: str
-    verified: bool
-    reason: str
-    evidence: tuple = ()
-
-    def as_dict(self) -> dict:
-        return {"component": self.component,
-                "verdict": "verified" if self.verified else "failed",
-                "reason": self.reason, "evidence": list(self.evidence)}
+#: The `progress` component's answer IS item 536's `Verdict`: same four fields,
+#: same meaning, same single truth value, so registering this in that module's
+#: `PROBES` table needs no adaptation and changes nothing about how retention is
+#: computed -- it stays `all()` over the components. The name is kept because it
+#: reads better at the call sites below and because `render` is typed on it.
+#:
+#: When the `PROBES` registration does land, `evolution_reward` must reach this
+#: module through a function-local import, the pattern the tree already uses for
+#: exactly this. The two files would otherwise import each other at module
+#: level, and this direction is the one that has to stay module-level.
+ProgressVerdict = Verdict
 
 
 def progress_verdict(deltas) -> ProgressVerdict:

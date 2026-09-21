@@ -215,7 +215,10 @@ component Parent requires notes: Notes {
         compile_source(src, "w.rvl")
     msg = str(exc.value)
     assert 'granting it `fs.write(path="/etc")`' in msg
-    assert "holds only `notes`" in msg
+    # the held element is the SERVICE, not the local key: `Notes` is what the
+    # parent actually wired, and `notes` is only what it chose to call it
+    # (item 561).
+    assert "holds only `Notes`" in msg
 
 
 def test_a_parent_bounded_to_tmp_refuses_a_child_writing_etc():
@@ -239,7 +242,7 @@ component Parent requires store: Tmp requires notes: Notes {
         compile_source(src, "w.rvl")
     msg = str(exc.value)
     assert 'granting it `fs.write(path="/etc")`' in msg
-    assert 'holds only `fs.write(path="/tmp")`, `notes`' in msg
+    assert 'holds only `Notes`, `fs.write(path="/tmp")`' in msg
 
 
 def test_a_key_named_boundary_is_not_a_declared_token_of_the_same_name():

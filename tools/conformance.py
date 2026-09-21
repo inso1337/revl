@@ -29,6 +29,25 @@ from revl.errors import RevlError  # noqa: E402
 
 TIERS = ("python", "typescript", "rust", "java", "wasm", "go")
 
+# --------------------------------------------------------------------------
+# which refusals may be published as `lim` (issue #1342, issue #1347)
+# --------------------------------------------------------------------------
+# `lim` in the published matrix reads as "this tier cannot express this
+# construct". An emitter also refuses for reasons that are about the DOCUMENT
+# this corpus built rather than about the construct under test, and both arrive
+# here as the tier's own EmitError: the exception cannot tell them apart. The
+# matrix used to print `lim` for either, which understates the tier -- a false
+# claim in the project's headline table, in the fail-open direction for anyone
+# reading it to decide whether revl suits them.
+#
+# So the corpus says which refusals are capability limits, and everything else
+# is UNCLASSIFIED. An unclassified cell is not downgraded: it STOPS the
+# generator (see `unclassified_refusals` and `_write_readme`). Refusing to
+# publish is the only honest answer while the question is open, and it keeps
+# the decision -- split the corpus, give the mixed shape its own row, or
+# something else -- with issue #1347 rather than settling it by default.
+TIER_LIMITS_FILE = Path(__file__).resolve().parent / "conformance_tier_limits.json"
+
 _EMITTERS: dict = {}
 
 
@@ -424,6 +443,47 @@ def executable_cases() -> list[tuple[str, str]]:
             out.append((label, program))
     return out
 
+_TIER_LIMITS_CACHE: dict | None = None
+
+
+def tier_limits() -> dict[str, dict]:
+    """The classified refusals, keyed `"<tier>::<case>"`."""
+    global _TIER_LIMITS_CACHE
+    if _TIER_LIMITS_CACHE is None:
+        try:
+            data = json.loads(TIER_LIMITS_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        _TIER_LIMITS_CACHE = data.get("limits", {})
+    return _TIER_LIMITS_CACHE
+
+
+def classify_refusal(tier: str, label: str, message: str) -> str:
+    """`limit` for a classified capability refusal, `refused` otherwise.
+
+    The entry is perishable on purpose: it applies only while the emitter still
+    refuses for the reason that was written down. A rewritten refusal drops
+    back to `refused` rather than inheriting a judgement made about different
+    words, which is what stops this table from becoming a place to silence a
+    cell once and forget it.
+    """
+    entry = tier_limits().get(f"{tier}::{label}")
+    if not entry:
+        return "refused"
+    prefix = entry.get("message_prefix") or ""
+    return "limit" if message.startswith(prefix) else "refused"
+
+
+def unclassified_refusals(report: dict) -> list[tuple[str, str, str]]:
+    """(tier, case, message) for every cell the matrix may not publish."""
+    out = []
+    for row in report["cases"]:
+        for tier in TIERS:
+            if row["emit_kind"][tier] == "refused":
+                out.append((tier, row["case"], row["tiers"][tier]))
+    return out
+
+
 def _emit_kwargs(tier: str, index: int) -> dict:
     """Per-tier emitter options needed to validate many cases side by side.
 
@@ -470,7 +530,14 @@ def run(all_cases: bool = False, validate: bool = False) -> dict:
                 # deliberate-vs-gap split, keyed on how the refusal was raised.
                 deliberate = isinstance(exc, getattr(emitter(tier), "EmitError", ()))
                 row["tiers"][tier] = message
-                row["emit_kind"][tier] = "limit" if deliberate else "gap"
+                # A deliberate refusal is still only a TIER LIMIT if the corpus
+                # says which limit it is (issue #1342). Otherwise it is
+                # `refused`: a fact the matrix records and refuses to publish
+                # as `lim`, because `lim` claims something about the tier that
+                # a refusal about this document's shape does not support.
+                row["emit_kind"][tier] = (
+                    classify_refusal(tier, label, message) if deliberate
+                    else "gap")
                 report["gaps"].setdefault(tier, []).append(
                     {"case": label, "message": message, "deliberate": deliberate})
         report["cases"].append(row)
@@ -774,7 +841,10 @@ def selfhost_column() -> dict[str, str] | None:
 # --------------------------------------------------------------------------
 
 _SHORT = {"python": "py", "typescript": "ts"}
-_GLYPH = {"ok": "ok", "limit": "lim", "gap": "**GAP**"}
+# `?` is deliberately not a verdict. A cell that reaches the renderer with this
+# glyph is a bug: `_write_readme` refuses before rendering (issue #1342). It
+# exists so `--markdown` on a working tree can still show the whole picture.
+_GLYPH = {"ok": "ok", "limit": "lim", "gap": "**GAP**", "refused": "?"}
 
 README_START = "<!-- CONFORMANCE-MATRIX:START -->"
 README_END = "<!-- CONFORMANCE-MATRIX:END -->"
@@ -821,7 +891,11 @@ def _perf_headline() -> str | None:
 
 
 def _summary_rows(report: dict, selfhost: dict[str, str] | None) -> list[tuple[str, int, int, int]]:
-    """(tier, ok, limit, gap) per host tier, then the revl self-host row."""
+    """(tier, ok, limit, gap) per host tier, then the revl self-host row.
+
+    There is no `refused` column: a block containing one is never written, so a
+    published summary counts only cells the corpus has classified.
+    """
     rows = []
     for tier in TIERS:
         kinds = [row["emit_kind"][tier] for row in report["cases"]]
@@ -1148,6 +1222,42 @@ def _write_readme(*, check_only: bool) -> int:
     happened to the sweep, which had been authored by hand).
     """
     report = run()
+
+    # Issue #1342. Before anything is written or diffed: a cell whose refusal
+    # the corpus has not classified may not be published. `lim` is read as a
+    # statement about the TIER, and a refusal about the shape of the document
+    # this corpus happens to build does not support that statement. Writing it
+    # anyway publishes a false claim in the project's headline table, in the
+    # direction that understates revl.
+    #
+    # This exits 2, not 1, and the difference is the point: 1 is "the committed
+    # block is stale, regenerate it", which is an instruction a reader can
+    # follow. 2 is "the block cannot be generated", which is not. Regenerating
+    # on a machine with every toolchain does not change this answer -- the
+    # refusals below are emitter verdicts, reproduced identically anywhere.
+    unclassified = unclassified_refusals(report)
+    if unclassified:
+        by_tier: dict[str, int] = {}
+        for tier, _case, _msg in unclassified:
+            by_tier[tier] = by_tier.get(tier, 0) + 1
+        print(
+            f"REFUSING to generate the conformance matrix: "
+            f"{len(unclassified)} cell(s) carry an emitter refusal that "
+            f"{TIER_LIMITS_FILE.name} does not classify ("
+            + ", ".join(f"{t}: {n}" for t, n in sorted(by_tier.items()))
+            + ").", file=sys.stderr)
+        print("`lim` claims the tier cannot express the construct. An "
+              "unclassified refusal has not been shown to mean that, and may "
+              "be a refusal about the document this corpus builds rather than "
+              "about the construct. The first three:", file=sys.stderr)
+        for tier, case, msg in unclassified[:3]:
+            print(f"  {tier:11s} {case}: {msg[:110]}", file=sys.stderr)
+        print(f"Classify each in {TIER_LIMITS_FILE.name} with the capability "
+              "limit it is, or change the corpus so the tier is asked a "
+              "question it can answer. Do not widen the table to make this "
+              "pass.", file=sys.stderr)
+        return 2
+
     selfhost = selfhost_column()
     block = readme_block(report, selfhost)
     # The full construct matrix lives in docs/conformance.md, not the README —

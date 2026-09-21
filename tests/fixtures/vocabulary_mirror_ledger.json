@@ -24,19 +24,6 @@
     },
     {
       "sites": [
-        "src/revl/bundle.py::_canonical_ir",
-        "src/revl/registry.py::_normalize_ir_for_attest"
-      ],
-      "tokens": [
-        "components",
-        "file",
-        "manifest",
-        "source"
-      ],
-      "note": "Issue #1276, instance 2 of issue #1285. Two copies of the IR path normalization an attestation binds. Two of the three original copies had already drifted and one drift left `truc reproduce`'s attestation tier structurally dead; `truc.reproduce._normalized_ir` now calls `registry._normalize_ir_for_attest` rather than re-implementing it. These two remain: bundle also basenames the top-level `components[*].source`/`file` the compiler stamps. Resolving them to one definition is PR #1281's work; until then this entry is the differential."
-    },
-    {
-      "sites": [
         "src/revl/cap_order.py::_DURATION_UNITS",
         "src/revl/parser.py::Parser._duration_literal",
         "src/revl/policy.py::_TTL_UNITS",
@@ -95,6 +82,22 @@
         "ts"
       ],
       "note": "The six backend names in their short spelling, declared twice. Same vocabulary as the `DEFAULT_BACKENDS` class under a different spelling, which is itself part of why both survive."
+    },
+    {
+      "sites": [
+        "src/revl/decode_grammar.py::grammar_refusal_reason",
+        "src/revl/lower.py::_check_generatable",
+        "src/revl/mcp/schema.py::expressibility_reason",
+        "src/revl/mcp/schema.py::fully_expressible",
+        "src/revl/resources.py::resource_taint"
+      ],
+      "tokens": [
+        "cases",
+        "fields",
+        "kind",
+        "payload"
+      ],
+      "note": "FALSE POSITIVE. Five readers of the type-spec field names. The two `mcp/schema` members are the two halves of one predicate and mirror each other by design, but they share a module; the cross-module members are unrelated readers, so a one-sided edit here is correct and would red this entry with no defect behind it. Issue #1332 adds a fifth reader, `decode_grammar.grammar_refusal_reason` (item 513): it walks the same surface-type spec as `fully_expressible`, which it runs after, and reads the same four field names off it. Same judgement as the four -- there is no definition to import, because the field names belong to the type spec these functions all read, and the spec is written by `lower.py` and consumed by each of them independently."
     },
     {
       "sites": [
@@ -365,6 +368,67 @@
     },
     {
       "sites": [
+        "src/revl/lexer.py::KEYWORDS",
+        "tools/heldout_scoring.py::_RESERVED"
+      ],
+      "tokens": [
+        "acquire",
+        "after",
+        "as",
+        "assert",
+        "async",
+        "await",
+        "break",
+        "commutative",
+        "compensate",
+        "component",
+        "config",
+        "continue",
+        "effect",
+        "else",
+        "emission",
+        "emit",
+        "every",
+        "extern",
+        "fail",
+        "false",
+        "fn",
+        "for",
+        "handoff",
+        "hole",
+        "idempotent",
+        "if",
+        "in",
+        "intercept",
+        "isolate",
+        "let",
+        "match",
+        "null",
+        "of",
+        "provide",
+        "provides",
+        "pub",
+        "pure",
+        "realm",
+        "requires",
+        "return",
+        "service",
+        "spawn",
+        "subscribe",
+        "test",
+        "true",
+        "type",
+        "undo",
+        "use",
+        "var",
+        "verified",
+        "while",
+        "with"
+      ],
+      "note": "DELIBERATE COPY, with the reason written at the declaration and a test holding it. `tools/heldout_scoring.py` generates the held-out programs, and `draw()` is required to be a pure function of `(seed, count)` that reads no file: `src/revl/lexer.py` is SUBJECT under item 537, so a candidate that could make the draw depend on it could narrow the draw by editing it. `from revl.lexer import KEYWORDS` is therefore the thing this copy exists to avoid, not an oversight. What holds the two sides together is `tests/test_heldout_scoring.py::test_the_reserved_set_covers_every_lexer_keyword`, which issue #1332 made two-directional: it was `KEYWORDS - _RESERVED` only, so a keyword the lexer DROPPED could sit in the frozen copy and narrow the draw silently. It now asserts set equality, so a one-sided edit on either side reds that test before it reaches this entry."
+    },
+    {
+      "sites": [
         "src/revl/lower.py::_BUILTIN_METHODS",
         "src/revl/typecheck.py::_BUILTIN_SIG"
       ],
@@ -421,21 +485,6 @@
         ">="
       ],
       "note": "The four relational operators, declared in lowering and spelled again in the parser's comparison rule."
-    },
-    {
-      "sites": [
-        "src/revl/lower.py::_check_generatable",
-        "src/revl/mcp/schema.py::expressibility_reason",
-        "src/revl/mcp/schema.py::fully_expressible",
-        "src/revl/resources.py::resource_taint"
-      ],
-      "tokens": [
-        "cases",
-        "fields",
-        "kind",
-        "payload"
-      ],
-      "note": "FALSE POSITIVE. Four readers of the type-spec field names. The two `mcp/schema` members are the two halves of one predicate and mirror each other by design, but they share a module; the cross-module members are unrelated readers, so a one-sided edit here is correct and would red this entry with no defect behind it."
     },
     {
       "sites": [
@@ -552,9 +601,10 @@
         "input",
         "model",
         "net",
+        "screen",
         "web"
       ],
-      "note": "Issue #1195, instance 3 of issue #1285. `policy.TAINT_FOLD_ORIGINS` is a hand-kept mirror of `taint._SOURCE_CLASS_SCOPES`, kept rather than imported so the policy parser does not pull in the type checker, and the reason is recorded at the declaration. `mcp/approval.py::static_taint` INTERSECTS against it, so a source class added to one and not the other silently drops an origin from the taint an auto-approve decision is made against. This entry is the differential: the two sets are recorded as one vocabulary and a one-sided addition reds."
+      "note": "Issue #1195, instance 3 of issue #1285. `policy.TAINT_FOLD_ORIGINS` is a hand-kept mirror of `taint._SOURCE_CLASS_SCOPES`, kept rather than imported so the policy parser does not pull in the type checker, and the reason is recorded at the declaration. `mcp/approval.py::static_taint` INTERSECTS against it, so a source class added to one and not the other silently drops an origin from the taint an auto-approve decision is made against. This entry is the differential: the two sets are recorded as one vocabulary and a one-sided addition reds. Re-recorded for `screen` (item 521 Slice 2, issue #1332): BOTH copies gained it in one commit, which is the vocabulary moving and not a drift, and the declaration comments on both sides say why it had to."
     },
     {
       "sites": [
@@ -682,6 +732,18 @@
         "UNDECLARED GAP"
       ],
       "note": "The four generic triage reasons a coverage row may not use, declared once per coverage tool. A reason rejected by one tool and accepted by the other is a hole in the triage discipline both enforce."
+    }
+  ],
+  "//claims": "Issue #1336. The CLAIM-ANCHORED near misses: a site whose prose says its vocabulary is another module's, where the closest vocabulary in that module is not quite the same one. Same ratchet, same shrink-only rule: a near miss that resolves has its entry DELETED.",
+  "claims": [
+    {
+      "site": "src/revl/mcp/session.py::Session._live_fingerprint",
+      "mirrors": "src/revl/apply.py::fingerprint",
+      "only_here": [],
+      "only_there": [
+        "manifest"
+      ],
+      "note": "The claim is about the OUTPUT shape and it holds: both return {components, loadOrder, provisions:[{key, provider}]}, and `apply._canon` reads exactly those three off either one, so the agreement is enforced where the two are compared. The extra token is `manifest`, which `apply.fingerprint` READS off the IR it is handed; the session copy reaches the same components through `run._components` and `run._load_order` and never names the manifest. An input key one side reads is not a field name the other is missing."
     }
   ]
 }

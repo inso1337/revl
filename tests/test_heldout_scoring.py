@@ -909,6 +909,15 @@ def test_the_reserved_set_covers_every_lexer_keyword():
     candidate cannot narrow the draw by editing `src/revl/lexer.py` -- which
     is SUBJECT, and must stay editable. The copy is worth nothing unless it is
     held against the real table, which is this.
+
+    BOTH directions, since issue #1332. The check used to be a one-sided
+    `KEYWORDS - _RESERVED`, which is the half that stops a parse error but
+    leaves a word the lexer DROPPED sitting in the frozen copy forever: the
+    generator would go on refusing to emit a now-legal identifier, quietly
+    narrowing the draw, and nothing in the tree would say so. That copy is the
+    reason the class is recorded in `tests/fixtures/vocabulary_mirror_ledger.
+    json` rather than collapsed, and a recorded mirror whose note says the two
+    sides are held together has to be held together in both directions.
     """
     from revl.lexer import KEYWORDS
 
@@ -916,6 +925,10 @@ def test_the_reserved_set_covers_every_lexer_keyword():
     assert not missing, (
         "the lexer grew a keyword the generator does not reserve: "
         + ", ".join(missing))
+    stale = sorted(set(heldout._RESERVED) - set(KEYWORDS))
+    assert not stale, (
+        "the generator reserves a word the lexer no longer treats as a "
+        "keyword, which narrows the draw for no reason: " + ", ".join(stale))
 
 
 def test_a_reserved_word_never_leaves_the_generator():

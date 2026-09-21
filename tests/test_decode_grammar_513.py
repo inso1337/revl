@@ -359,19 +359,60 @@ def test_scalar_and_container_grammars(surface, ok, bad):
     "Opt[Opt[Str]]", "Opt[Unit]", "Opt[Opt[Opt[Int]]]",
     "List[Opt[Opt[Str]]]", "Map[Str, Opt[Unit]]",
 ])
-def test_null_ambiguous_opt_has_a_schema_but_no_grammar(surface):
-    # item 257 accepts it, which is why this gate has to exist.
-    assert fully_expressible(surface, {}) is True
+def test_null_ambiguous_opt_is_refused_by_both_gates(surface):
+    """This gate was written on the premise that item 257 ACCEPTS a
+    null-ambiguous `Opt`, so the grammar walk was the only place the ambiguity
+    was visible. Issue #1263 (PR #1270) then made 257 refuse the same shape for
+    the stronger reason that it has no exact schema at all, and recorded the
+    grammar walk as staying with 257 upstream of it
+    (docs/design/1263-opt-nesting-at-a-json-boundary.md, "What follows").
+
+    Both gates hold. The grammar walk is pinned here on its own so that
+    relaxing 257 cannot retire it by accident.
+    """
+    assert fully_expressible(surface, {}) is False
     reason = grammar_refusal_reason(surface, {})
     assert reason is not None
     assert "`null`" in reason
 
 
-def test_the_schema_cannot_see_the_ambiguity():
-    """The reason the gate walks the surface type: the schema derivation has
-    already collapsed the two `Opt` layers into one `nullable`."""
-    assert (json_schema_for("Opt[Opt[Str]]", {}, validated=True)
-            == json_schema_for("Opt[Str]", {}, validated=True))
+def test_the_grammar_gate_is_shadowed_by_257_on_every_shape_it_refuses():
+    """Recorded, not celebrated. `decode_grammar._admits_null` and
+    `mcp.schema.admits_json_null` are the same predicate over the same surface
+    positions, so on a `validated` emission the grammar gate cannot be reached:
+    257 refuses first on every shape. This sweep is the evidence for that claim
+    and the alarm if it stops holding. A type that passes 257 and fails the
+    grammar walk is a real 513 admission and belongs in the list above."""
+    types = {
+        "Row": {"kind": "record", "fields": {"a": "Str", "b": "Opt[Unit]"}},
+        "Var": {"kind": "variant", "cases": [
+            {"name": "N", "payload": None},
+            {"name": "P", "payload": "Opt[Opt[Int]]"}]},
+        "Clean": {"kind": "record", "fields": {"a": "Str"}},
+    }
+    pool = {"Str", "Int", "Bool", "Float", "Bytes", "Unit",
+            "Row", "Var", "Clean", "Unknown"}
+    for _ in range(3):
+        pool |= {shape.format(t) for t in list(pool) for shape in
+                 ("Opt[{}]", "List[{}]", "Map[Str, {}]", "Map[Int, {}]",
+                  "Result[{}, Str]")}
+    reaches_the_grammar_gate = [
+        t for t in sorted(pool)
+        if fully_expressible(t, types) and grammar_refusal_reason(t, types)]
+    assert len(pool) > 1000
+    assert reaches_the_grammar_gate == []
+
+
+def test_the_schema_still_cannot_express_the_nesting():
+    """The reason the gate walks the surface type. The derivation used to
+    collapse the two `Opt` layers into one `nullable`, so `Opt[Opt[Str]]` and
+    `Opt[Str]` were one schema. Issue #1263 stopped it claiming that: it
+    degrades to the honest `x-revlType` stub instead. Either way the schema
+    carries no nesting a validator could check, which is why the ambiguity is
+    visible only on the surface type."""
+    nested = json_schema_for("Opt[Opt[Str]]", {}, validated=True)
+    assert nested == {"x-revlType": "Opt[Opt[Str]]"}
+    assert nested != json_schema_for("Opt[Str]", {}, validated=True)
 
 
 @pytest.mark.parametrize("surface", [
@@ -505,12 +546,18 @@ extern emission validated fn complete(h: Str) -> AgentTurn = @py {
     "List[Opt[Opt[Str]]]", "Map[Str, Opt[Unit]]",
 ])
 def test_a_null_ambiguous_response_type_is_refused_at_compile_time(ret):
+    """Refused at compile time with the position named. The sentence is item
+    257's, not this item's: issue #1263 put the expressibility gate upstream of
+    the grammar gate deliberately, and 257's refusal is the one that covers all
+    three validated consumers (an emission's response, an `event` item schema,
+    a routed endpoint's bound parameters) rather than only the emission this
+    item compiles a grammar for."""
     with pytest.raises(RevlError) as exc:
         compile_source(_method_program(ret), "g.rvl")
     message = str(exc.value)
     assert "`validated` emission `complete`" in message
-    assert "derives the string `null`" in message
-    assert "542-grammar-constrained-decoding" in message
+    assert "already accepts `null`" in message
+    assert "257-typed-model-boundary" in message
 
 
 @pytest.mark.parametrize("ret", ["Str", "Opt[Str]", "AgentTurn", "List[Call]"])
