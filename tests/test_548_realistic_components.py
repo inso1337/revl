@@ -29,10 +29,13 @@ closed:
   `div_trunc`/`mod`/`to_str` (c6).
 
 Per-tier remainders (pre-existing, documented, NOT #548 language gaps): the wasm
-tier does not lower a `Float` value (c2) or an Opt method (c8). Those two assert
-wasm refuses; the other six emit on all six tiers — item 458 landed the
-method-body `for (x of xs)` walk, so c4/c7 (the old #681 remainder) now emit and
-run on wasm too.
+tier does not lower a `Float` value (c2) or an Opt method (c8), and the go tier
+cannot carry a component in a document that also declares a top-level `fn`
+(lexer, money, normalizer — issue #721). Each remainder asserts a NAMED refusal
+rather than being skipped: go's used to be a silent component drop, so those
+three passed "emits on all six tiers" while go answered with a package that had
+no component in it. Item 458 landed the method-body `for (x of xs)` walk, so
+c4/c7 (the old #681 remainder) emit and run on wasm too.
 """
 
 import shutil
@@ -50,6 +53,14 @@ from _backend_import import backend_emitter  # noqa: E402
 from revl import RevlError, compile_files, compile_source  # noqa: E402
 
 ALL_TIERS = ["python", "typescript", "go", "java", "rust", "wasm"]
+# issue #721: the go tier cannot carry a component in a document that also
+# declares a top-level `fn` — it routes such a document to the pure typed-core
+# path, which renders the declarations and DROPS the component. It used to do
+# that silently, which is how `lexer`, `money` and `normalizer` passed
+# `test_component_emits_on_supported_tiers` for months while go answered them
+# with a package that had no component in it at all. It refuses by name now, so
+# those three name go here instead and are pinned as a remainder below.
+NO_GO = [tier for tier in ALL_TIERS if tier != "go"]
 
 
 # --------------------------------------------------------------------------- #
@@ -222,8 +233,8 @@ IN_MEMORY = [
     ("grader", GRADER, ALL_TIERS),
     ("stats", STATS, FIVE_TIERS),        # wasm: no Float value
     ("csv", CSV, ALL_TIERS),             # wasm method-body `for` landed (item 458)
-    ("lexer", LEXER, ALL_TIERS),
-    ("money", MONEY, ALL_TIERS),
+    ("lexer", LEXER, NO_GO),    # go: module `fn` + component (issue #721)
+    ("money", MONEY, NO_GO),    # go: module `fn` + component (issue #721)
     ("summarizer", SUMMARIZER, ALL_TIERS),  # wasm method-body `for` landed (item 458)
     ("config", CONFIG, FIVE_TIERS),      # wasm: no Opt method
 ]
@@ -271,8 +282,10 @@ def test_component_emits_on_supported_tiers(name, source, tiers):
 
 
 def test_normalizer_emits_on_all_tiers(tmp_path):
+    # `use`d stdlib functions are top-level `fn`s in the compiled document, so
+    # the normalizer is in the same go remainder as lexer and money (#721).
     ir = _compile_with_stdlib(NORMALIZER, tmp_path)
-    for tier in ALL_TIERS:
+    for tier in NO_GO:
         backend_emitter(tier).emit(ir)
 
 
@@ -290,6 +303,24 @@ def test_wasm_remainder_is_a_clear_refusal(name, source, reason):
     with pytest.raises(Exception) as excinfo:
         backend_emitter("wasm").emit(ir)
     assert reason in str(excinfo.value)
+
+
+@pytest.mark.parametrize("name,source,component", [
+    ("lexer", LEXER, "Describe"),
+    ("money", MONEY, "Price"),
+])
+def test_go_remainder_names_the_component_it_will_not_carry(name, source, component):
+    # issue #721: these two are "realistic" in exactly the way the review meant
+    # — a helper `fn` beside the component that uses it — and that is the shape
+    # go's pure typed-core routing drops. It is a remainder, not a refusal of
+    # the control flow: the same component with the helper inlined lowers on the
+    # live stc-go path. What matters here is that the answer NAMES the component
+    # instead of being a package that silently has none.
+    ir = compile_source(source)
+    with pytest.raises(Exception) as excinfo:
+        backend_emitter("go").emit(ir)
+    assert f"'{component}'" in str(excinfo.value)
+    assert "refuses by name" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #
