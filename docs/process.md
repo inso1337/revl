@@ -199,6 +199,56 @@ each of those failure modes and asserts the verdict. It runs in `lint` beside
 the gate, because a checker whose own teeth are never exercised is the gap it
 was written to close.
 
+### The near miss exact equality cannot see
+
+Exact equality is blind in one direction, and issue #1336 is the instance.
+`tools/evolution_controller.py` carried a third copy of item 536's four verdict
+field names and its docstring said so. It had already grown a fifth key, so
+equality grouped the two copies that still agreed and never looked at the one
+that had left. The rule is strongest against copies still in step and blind to
+the one that has already drifted, and the false claim sat where a reader is
+most likely to trust it.
+
+Relaxing the relation is the wrong repair, and it was measured rather than
+assumed. A strict superset with a bounded difference, at the tightest setting
+that still contains that case (one token of difference, a minimum vocabulary of
+four), gives **131 ordered pairs over this tree, of which one is the defect**,
+and a transitive closure of 27 components whose largest is 12 sites. Two tokens
+gives 248 pairs and a 30-site component, which is the blob above rebuilt.
+Raising the minimum vocabulary to five drops to 63 pairs but loses the target,
+whose smaller side is exactly four tokens. No setting keeps the true positive
+and suppresses the other 130.
+
+What works is a different anchor, not a fuzzier relation. A vocabulary that
+*says* it mirrors another is a strictly easier case than one that merely
+happens to.
+
+* **A claim is prose the gate can check.** A vocabulary site whose own
+  docstring, leading comment, or class docstring contains one of a fixed list
+  of literal cues AND names a scanned module in backticks is making a claim.
+  The claim is SATISFIED when some site in that module spells exactly its
+  vocabulary, a NEAR MISS when none does and the closest differs by at most one
+  token, and UNANCHORED otherwise.
+* **Only a near miss reds.** Unanchored is not a finding. Most prose containing
+  "mirrors" is about something that is not a vocabulary, and firing on it is the
+  blob by another route.
+* **It cannot chain.** A claim is one arrow from a named site to a named module,
+  and nothing takes a transitive closure, so the failure mode that rejected
+  every similarity threshold does not exist for this rule. There is one knob and
+  it is measured: one token of slack gives 1 near miss on this tree, two gives
+  2 and three gives 3.
+* **Measured on this tree:** 1590 vocabulary sites, 100 of which carry a cue, 28
+  of which also resolve a module. Of those 28: 4 satisfied, 1 near miss, 23
+  unanchored. The one near miss is recorded with a reason, and it is a false
+  positive about the claim while being a true one about the vocabulary:
+  `mcp/session.py::Session._live_fingerprint` claims the output shape
+  `apply.py::fingerprint` produces, which it does, and the extra token is an
+  input key `fingerprint` reads and the session copy reaches another way.
+* **The same ratchet.** Near misses live beside the classes in
+  `tests/fixtures/vocabulary_mirror_ledger.json`, each with a written reason.
+  An unrecorded near miss reds, a recorded one whose difference moved reds, and
+  a recorded one that resolves must have its entry DELETED.
+
 ## What CI covers
 
 `lint`, `frontend`, `backend-python`, `frontend-cordis`, `sandbox-container`,

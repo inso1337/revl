@@ -83,6 +83,14 @@ GRAMMAR_FORMAT = "gbnf"
 #: The start symbol of every derived grammar.
 GRAMMAR_ROOT = "root"
 
+#: The second dialect (slice 4). A provider whose structured-output mode takes a
+#: JSON Schema rather than a grammar reads this one. It is derived from the SAME
+#: schema object, needs no new IR key (`response_schema` is already bound beside
+#: `response_grammar`), and is negotiated at the seam rather than chosen by the
+#: compiler -- which is what "an added value under the existing key, not a
+#: reinterpretation of these bytes" means in practice.
+JSON_SCHEMA_FORMAT = "json-schema"
+
 #: Lexical rules, emitted only when the derivation actually reaches them, so a
 #: grammar stays as small as the type it came from. Order is fixed for a stable
 #: digest.
@@ -348,6 +356,82 @@ def grammar_digest(text: str) -> str:
     compiler owns and the provider never rewrites.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------- slice 4: the second dialect
+
+def _wire_json_schema(schema: dict) -> dict:
+    """Rewrite a derived boundary schema into the JSON Schema a structured-output
+    mode reads, so the two dialects describe the SAME language.
+
+    Three rewrites, and each one exists because leaving it out makes the dialects
+    disagree, which would mean a provider's choice of dialect changed the
+    verdict:
+
+    * `{"type": "string", "nullable": true}` becomes
+      `{"anyOf": [{"type": "string"}, {"type": "null"}]}`. `nullable` is an
+      OpenAPI 3.0 keyword, not a JSON Schema one. A converter that does not know
+      it drops it, and the resulting constraint cannot emit `null` at all -- a
+      NARROWING of an `Opt`, which refuses the one value the author added the
+      `Opt` for.
+    * an object with `properties` is closed (`additionalProperties: false`) and
+      every property is required. The GBNF derivation renders a record as a
+      closed object with every member present, so a wire schema that left the
+      object open would let an honouring provider emit an extra member that the
+      grammar's language excludes.
+    * `contentEncoding: base64` is dropped and the node stays a plain string.
+      This is the one place the dialects genuinely differ and it is not papered
+      over: a `Bytes` field is base64-constrained under `gbnf` and merely
+      string-constrained under `json-schema`. Item 257's validator does not check
+      base64 either, so nothing regresses; it is stated here rather than implied
+      away.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    if "nullable" in schema:
+        base = {k: v for k, v in schema.items() if k != "nullable"}
+        if not schema["nullable"]:
+            return _wire_json_schema(base)
+        return {"anyOf": [_wire_json_schema(base), {"type": "null"}]}
+    out: dict = {}
+    for key, value in schema.items():
+        if key in ("oneOf", "anyOf", "allOf") and isinstance(value, list):
+            out[key] = [_wire_json_schema(arm) for arm in value]
+        elif key == "properties" and isinstance(value, dict):
+            out[key] = {name: _wire_json_schema(sub) for name, sub in value.items()}
+        elif key in ("items", "additionalProperties") and isinstance(value, dict):
+            out[key] = _wire_json_schema(value)
+        elif key == "contentEncoding":
+            continue
+        else:
+            out[key] = value
+    if isinstance(out.get("properties"), dict):
+        out["required"] = list(out["properties"])
+        out["additionalProperties"] = False
+    return out
+
+
+def json_schema_grammar_for(schema: dict) -> dict:
+    """The `json-schema` dialect of a crossing's constraint (slice 4).
+
+    A pure function of the `response_schema` the crossing already carries, so
+    the second dialect adds NO IR: the same crossing offers `gbnf` from
+    `response_grammar["text"]` and `json-schema` from here, and a provider takes
+    whichever one it can honour.
+
+    The digest is over the canonical bytes of the wire schema, and is therefore
+    a DIFFERENT value from the GBNF digest for the same type. That is the point:
+    a provider's honoured-claim names the artifact it actually constrained with,
+    so claiming one dialect while having used the other is a detectable lie
+    rather than an accepted one.
+    """
+    wire = _wire_json_schema(schema)
+    text = json.dumps(wire, sort_keys=True, separators=(",", ":"))
+    return {
+        "format": JSON_SCHEMA_FORMAT,
+        "schema": wire,
+        "digest": grammar_digest(text),
+    }
 
 
 def decode_grammar_for(schema: dict) -> dict:

@@ -8,6 +8,7 @@ stdlib module picks only the tests that touch its public API.
 from __future__ import annotations
 
 import ast
+import subprocess
 import importlib.util
 import io
 import sys
@@ -361,6 +362,11 @@ def test_selfhost_emitter_dependents_stay_narrow():
     r = sel("selfhost/emit_go.rvl")
     assert sorted(x for x in r["pytest"] if "selfhost" in x) == [
         "tests/test_selfhost_compile.py",
+        # Added by the named-file rule (issue #1342): this module reads
+        # `selfhost/emit_go.rvl` to measure which reference constructs the
+        # self-host emitters cover, so the file's content is its input. The
+        # list is one entry longer than the #431 shape and still narrow.
+        "tests/test_selfhost_coverage.py",
         "tests/test_selfhost_emit_go.py",
         "tests/test_selfhost_line_coverage.py",
     ]
@@ -520,6 +526,32 @@ def test_every_site_wheel_input_selects_the_site_wheel_gate():
     )
 
 
+def test_every_selection_carries_the_vocabulary_gate():
+    """Issue #1332. `tools/check_vocabulary_mirrors.py` walks every `.py` under
+    `src/revl` and `tools` and reports a RELATION between two of them, so the
+    commit that creates a mirror is routinely neither of the two files the
+    ledger will name. There is no path set to select it on.
+
+    Four classes reached `main` that way and reddened the required `lint`
+    check. The four introducing commits selected, between them, `ruff`,
+    `conformance`, `docs`, `site-wheel` and once the FULL gate -- and the FULL
+    gate did not carry it either, because `tools/pre_merge.sh` did not run the
+    tool in any mode. So the rule is "always", and the inputs below are chosen
+    to be as far from a vocabulary as the tree gets.
+    """
+    for f in ("backends/rust/emit.py", "stdlib/json.rvl", "README.md",
+              "src/revl/lexer.py", "tools/heldout_scoring.py",
+              "docs/process.md", "tests/test_goldens.py"):
+        assert "vocabulary" in sel(f)["gates"], (
+            f"{f} does not select the vocabulary-mirror gate. It reads the "
+            "whole tree, so every selection has to carry it."
+        )
+    assert "vocabulary" in at.GATES_ALL, (
+        "the FULL gate does not carry the vocabulary-mirror gate, which is the "
+        "hole that let issue #1332's four classes past a FULL pre-merge run."
+    )
+
+
 def test_a_vendored_python_backend_module_selects_the_wheel_gate_narrowly():
     """The #1092 path itself: a py-tier module the wheel vendors picks up the
     wheel gate, and does so WITHOUT escalating to FULL. Widening the selector
@@ -585,6 +617,173 @@ def test_provenance_change_keeps_its_own_coupling_only():
         "the census's own coupling calls for"
     )
 
+
+# --- the corpus provenance manifest: issue #1331 --------------------------- #
+def _census():
+    """The real `tools/gate_reference_census.py`, loaded as a module."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_census_for_selector", ROOT / "tools" / "gate_reference_census.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_every_census_corpus_directory_reaches_the_provenance_manifest():
+    """A document arriving in a scoring corpus must name its generation, and
+    `tests/test_corpus_provenance.py` is the only thing that reads the manifest.
+    No import graph reaches from a `.rvl` to that test, so it has to be SELECTED
+    wherever a document can land, or the declaration requirement fires on main
+    instead of on the branch, which is the red issue #1331 reports. Measured
+    before this rule: a new document under `backends/<tier>/**` selected 243
+    nodes and none of them was the manifest; every other corpus directory
+    reached it only through the FULL fail-safe.
+
+    The probe paths are DERIVED: the census's own directory list, and for each
+    one the directory an existing document actually sits in, so the shape under
+    test is `backends/go/scenarios/<new>.rvl` rather than a path no corpus
+    document has ever used. A ninth corpus directory shows up here the day the
+    census starts walking it.
+    """
+    census = _census()
+    dirs = census.CORPUS_DIRS
+    assert dirs, "gate_reference_census.py reported no corpus directories"
+    probes = []
+    for d in dirs:
+        # The directory an existing document sits in, or the corpus root when
+        # the directory holds none yet (`tck/` today, which the census walks
+        # regardless and which a first document would land in).
+        where = d
+        for doc in sorted((ROOT / d).rglob("*.rvl")) if (ROOT / d).is_dir() else []:
+            if set(census._SKIP_DIRS) & set(doc.parts):
+                continue
+            where = doc.parent.relative_to(ROOT).as_posix()
+            break
+        probes.append(f"{where}/zz_selector_probe.rvl")
+    assert len(probes) == len(dirs)
+    missing = []
+    for f in probes:
+        r = sel(f)
+        if not r["full"] and "tests/test_corpus_provenance.py" not in r["pytest"]:
+            missing.append(f)
+    assert not missing, (
+        "the census walks these directories for scoring documents, but a new "
+        "`.rvl` beside an existing one selects neither the FULL gate nor "
+        f"tests/test_corpus_provenance.py:\n  {missing}\n"
+        "An undeclared document would then reach main green."
+    )
+
+
+def test_a_backend_scenario_document_selects_the_manifest_without_going_full():
+    """The arm that was actually open. `backends/**` is a census corpus
+    directory AND has its own narrow rule, so `backends/go/scenarios/<new>.rvl`
+    selected the go suite and stopped: 243 nodes, none of them the manifest.
+    Closing it must not turn a corpus document into a FULL trigger either --
+    the manifest test is 0.3s and the go suite is already selected."""
+    r = sel("backends/go/scenarios/zz_selector_probe.rvl")
+    assert r["full"] is False, "a backend scenario document escalated to FULL"
+    assert "tests/test_corpus_provenance.py" in r["pytest"]
+    assert set(r["backends"]) == {"go"}, "the backend set widened"
+
+
+def test_a_bench_document_is_not_a_scoring_corpus_document():
+    """`bench/` is in the census's `EXTRA_DIRS`, which `load_corpus` walks only
+    under `--everything`, and `corpus_provenance.enumerate_corpora` does not ask
+    for it. A bench document is in no scoring corpus, needs no manifest line,
+    and must not drag the manifest test into every bench change."""
+    census = _census()
+    assert "bench" in census.EXTRA_DIRS and "bench" not in census.CORPUS_DIRS
+    r = sel("bench/codegen/zz_selector_probe.rvl")
+    assert r["full"] is False
+    assert "tests/test_corpus_provenance.py" not in r["pytest"]
+
+# --- a test's substance can live outside tests/ (issue #1342) -------------- #
+def test_a_wrapper_test_inherits_the_vocabulary_of_what_it_runs():
+    """The measured gap. `tests/test_flagship_demo_525.py` is a wrapper around
+    `demo/legacy_enterprise/run_demo.py`, and the demo is what shells out to
+    `revl audit`. The wrapper never spells `audit`, so the leaf-module word
+    heuristic — which read `tests/**` and nothing else — selected 133 tests for
+    a `src/revl/audit.py` change and not the one test that runs `revl audit`
+    end to end. `main` shipped a demo exiting 1 with every gate green."""
+    r = sel("src/revl/audit.py")
+    assert r["full"] is False
+    assert "tests/test_flagship_demo_525.py" in r["pytest"], (
+        "a change to src/revl/audit.py does not select the test that runs "
+        "`revl audit` through demo/legacy_enterprise/run_demo.py"
+    )
+
+
+def test_the_derived_rule_does_not_replace_the_hand_written_tables():
+    """The honest limit of the derived rule, pinned so nobody deletes a table
+    believing this covers it.
+
+    `companion_paths` sees a path a test SPELLS. It does not see one the test
+    computes, walks to from a root it holds in a variable, or declares only in
+    prose. Of the 18 modules in BENCH_DEPENDENT_TESTS, exactly three spell a
+    `bench/` path, so the derived rule finds three of eighteen. It is a
+    complement to those tables, not their replacement."""
+    cp = at.companion_paths(ROOT)
+    spelled = {t for t, paths in cp.items()
+               if any(p.startswith("bench/") for p in paths)}
+    declared = set(at.BENCH_DEPENDENT_TESTS)
+    assert spelled, "no test spells a bench path; the extractor found nothing"
+    assert len(spelled) < len(declared), (
+        "the derived rule now finds at least as many bench-dependent modules "
+        "as the table declares. Re-read the table: it may be replaceable, "
+        "which would be worth doing deliberately."
+    )
+
+
+def test_prose_is_not_a_dependency():
+    """A path named only in a docstring is a citation, not a read.
+    `tests/test_71_codegen_perf_findings.py` cites `bench/codegen/python/run.py`
+    in its module docstring and is declared in BENCH_DEPENDENT_TESTS for it;
+    the derived rule must not double as a prose scanner, or every document that
+    mentions a file would select every test that mentions the document."""
+    named = at._named_paths(ROOT, '"""See bench/codegen/python/run.py."""\n')
+    assert named == frozenset(), named
+    assert "tests/test_71_codegen_perf_findings.py" in at.BENCH_DEPENDENT_TESTS
+
+
+def test_a_changed_file_selects_every_test_that_names_it():
+    """The reverse direction. `demo/legacy_enterprise/` is read by the item-521
+    tripwire, which globs the directory for a stale `MEASURED GAP` label — a
+    coupling no import graph and no word match can see."""
+    hits = at.tests_naming(ROOT, "demo/legacy_enterprise/run_demo.py")
+    assert "tests/test_ui_taint_classes_521.py" in hits
+    assert "tests/test_flagship_demo_525.py" in hits
+
+
+def test_the_slow_descent_test_stays_excluded_from_the_derived_rule():
+    """Issue #431's exclusion is a cost decision the derived rule must not
+    reopen: tests/test_selfhost_lower.py names selfhost/lower.rvl and runs for
+    >120s, which is what made the FULL fallback abort under the hook."""
+    r = sel("selfhost/lower.rvl")
+    assert r["full"] is False
+    assert "tests/test_selfhost_lower.py" not in r["pytest"]
+    assert "tests/test_selfhost_lower_ir.py" in r["pytest"]
+
+
+def test_named_paths_needs_a_separator_and_a_real_file():
+    """A bare `"src"` or `"demo"` is too coarse to be evidence of a read, and a
+    path that does not exist in the tree is prose. Both are dropped, or the
+    rule degenerates into selecting the whole suite for every change."""
+    named = at._named_paths(
+        ROOT, 'P = ROOT / "demo" / "legacy_enterprise" / "run_demo.py"\n')
+    assert "demo/legacy_enterprise/run_demo.py" in named
+    assert "demo" not in named
+    assert at._named_paths(ROOT, 'X = "src"\nY = "no/such/file.py"\n') == frozenset()
+
+
+def test_a_directory_counts_only_when_the_test_walks_it():
+    """Twenty modules name `src/revl`, almost all of them to put it on
+    `sys.path`. Reading that as "depends on every file under it" made a
+    one-module change select 213 tests against 92. A directory is evidence
+    only when the test enumerates one."""
+    holds = 'P = ROOT / "demo" / "legacy_enterprise"\n'
+    assert at._named_paths(ROOT, holds) == frozenset()
+    walks = holds + 'for f in P.glob("*.py"):\n    pass\n'
+    assert "demo/legacy_enterprise" in at._named_paths(ROOT, walks)
 
 # --- structural: no arm of the dispatch loop may be unreachable ------------ #
 # issue #1315. `select()` dispatches each changed path through a flat list of
@@ -652,6 +851,77 @@ def _conjunction(calls):
     return [p + name_prefix + _PROBE + suffix for p in prefixes]
 
 
+#: Dispatch arms whose condition is a NAMED predicate rather than a shape this
+#: checker can read off the AST. Each entry says how to build a path the
+#: predicate accepts, derived from the module rather than hard-coded, so the
+#: witness follows the predicate if its definition moves.
+#:
+#: This is a TABLE on purpose, exactly like `SELFHOST_TAG_CODES`: a predicate
+#: absent from it yields no witness, `_witnesses` returns None, and the arm is
+#: reported as unknown-reachability. Guessing a witness for an unrecognised
+#: predicate would be the fail-open direction - it would certify an arm nobody
+#: had shown to be reachable.
+def _witness_scoring_corpus_document(module):
+    """`_is_scoring_corpus_document(f, root)`: an `.rvl` the census walks."""
+    dirs = module.census_corpus_dirs(ROOT)
+    if not dirs:
+        return None
+    return [f"{sorted(dirs)[0].rstrip('/')}/zz_armprobe{_PROBE_RVL}"]
+
+
+def _witness_named_by_a_test(module):
+    """`named_by = tests_naming(root, f)` then `if named_by:` (issue #1342).
+
+    The arm fires for any repository path some test names in its own source.
+    The witness is ASKED of the selector rather than invented: walk the tracked
+    tools and source files and return the first the selector itself says a test
+    names. If nothing in the tree is named by any test, the rule is genuinely
+    unreachable and this returns None, which reds - the right answer.
+    """
+    for rel in _tracked_candidates():
+        try:
+            if module.tests_naming(ROOT, rel):
+                return [rel]
+        except Exception:
+            return None
+    return None
+
+
+def _tracked_candidates():
+    """Tracked `tools/*.py` and `src/revl/*.py`, in a stable order."""
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "tools/*.py", "src/revl/*.py"],
+        capture_output=True, text=True)
+    return [line for line in out.stdout.split("\n") if line.strip()]
+
+
+_PREDICATE_WITNESSES = {
+    "_is_scoring_corpus_document": _witness_scoring_corpus_document,
+}
+
+#: Arms whose condition is a plain NAME bound just above from a call this
+#: checker can attribute. Same table discipline as `_PREDICATE_WITNESSES`: a
+#: name absent from it stays unknown rather than being guessed reachable.
+_BOUND_NAME_WITNESSES = {
+    "named_by": _witness_named_by_a_test,
+}
+
+_PROBE_RVL = ".rvl"
+
+
+def _named_predicate_witnesses(module, cond):
+    """Witnesses for `somepredicate(f, ...)`, or None if it is not in the
+    table. A predicate this checker does not recognise stays unknown."""
+    if not isinstance(cond, ast.Call) or not isinstance(cond.func, ast.Name):
+        return None
+    build = _PREDICATE_WITNESSES.get(cond.func.id)
+    if build is None:
+        return None
+    if not cond.args or not _is_f(cond.args[0]):
+        return None
+    return build(module)
+
+
 def _witnesses(module, cond):
     """Every path an arm's condition says it wants, or None when this checker
     cannot read the condition's shape."""
@@ -665,7 +935,13 @@ def _witnesses(module, cond):
         return out
     if isinstance(cond, ast.BoolOp) and isinstance(cond.op, ast.And):
         return _conjunction(cond.values)
+    if isinstance(cond, ast.Name):
+        build = _BOUND_NAME_WITNESSES.get(cond.id)
+        return build(module) if build is not None else None
     if isinstance(cond, ast.Call):
+        named = _named_predicate_witnesses(module, cond)
+        if named is not None:
+            return named
         return _conjunction([cond])
     if isinstance(cond, ast.Compare) and _is_f(cond.left) and len(cond.ops) == 1:
         op, rhs = cond.ops[0], cond.comparators[0]
