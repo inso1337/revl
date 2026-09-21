@@ -68,6 +68,7 @@ from dataclasses import dataclass
 
 from ..errors import RevlError
 from ..placement import slice_partition, swap_admission
+from ..promotion_barrier import AUTHORITY_AXES
 from .session import replay_module
 
 CANARY_VERSION = "1.0"
@@ -344,16 +345,42 @@ def revert(ir: dict, realm: str, *, prove_residue: bool = True) -> dict:
 
 # ------------------------------------------- the authority precondition (543)
 
-#: Which authority axis each of `audit_diff`'s drift buckets belongs to. The
-#: axis names are `promotion_barrier.AUTHORITY_AXES`, so a canary's authority
-#: verdict is readable by the other promotion paths in the tree rather than
-#: being a fourth private vocabulary.
+#: Which authority axis each of `audit_diff`'s drift buckets belongs to.
+#:
+#: Written bucket-first, and the axis set comes from
+#: `promotion_barrier.AUTHORITY_AXES` rather than being spelled again here
+#: (issue #1332). A canary's authority verdict is then readable by the other
+#: promotion paths in the tree instead of being a private vocabulary that
+#: happens to agree today. An axis added to the barrier and given no bucket
+#: here is ABSENT from the derived table below, so `authority_diff` reports it
+#: as UNMEASURED and `judge_authority` refuses on it. That is the direction the
+#: barrier requires: an axis nobody compared is not an axis that came back
+#: empty, and the derivation must not turn the first into the second.
+_BUCKET_AXIS = {
+    "host_added": "capability",
+    "scope_widened": "capability",
+    "backends_added": "capability",
+    "emit_added": "taint",
+    "reach_weakened": "realm",
+    "cardinality_widened": "budget",
+    "retention_added": "retention",
+}
+
+#: The unknown direction is the one that has to red. A bucket labelled with an
+#: axis the barrier does not know would otherwise vanish from every axis of the
+#: diff, and an authority nobody measured reads as an authority that did not
+#: move. That is the fail-open shape the barrier exists to refuse, so it is an
+#: import-time failure rather than a silent drop.
+_UNKNOWN_AXES = sorted(set(_BUCKET_AXIS.values()) - set(AUTHORITY_AXES))
+if _UNKNOWN_AXES:
+    raise RuntimeError(
+        "canary: drift bucket(s) labelled with an axis "
+        f"`promotion_barrier.AUTHORITY_AXES` does not carry: {_UNKNOWN_AXES}")
+
 _AXIS_OF_BUCKET = {
-    "capability": ("host_added", "scope_widened", "backends_added"),
-    "taint": ("emit_added",),
-    "realm": ("reach_weakened",),
-    "budget": ("cardinality_widened",),
-    "retention": ("retention_added",),
+    axis: tuple(b for b, a in _BUCKET_AXIS.items() if a == axis)
+    for axis in AUTHORITY_AXES
+    if axis in set(_BUCKET_AXIS.values())
 }
 
 
@@ -408,7 +435,6 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     from ..audit_diff import (  # noqa: PLC0415 - read-only reuse
         audit_report, diff_backends, diff_capability_scopes, diff_cardinality,
         diff_crossings)
-    from ..promotion_barrier import AUTHORITY_AXES  # noqa: PLC0415
 
     prev, new = audit_report(running_ir), audit_report(candidate_ir)
     delta = diff_crossings(prev, new)

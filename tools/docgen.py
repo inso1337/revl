@@ -364,13 +364,16 @@ class VisionTierError(SystemExit):
 # tier `cordis-py`. A tier the register grows with no label here is a loud
 # failure rather than a silently missing row: a new tier that never reaches the
 # vision table is the drift this block exists to make impossible.
+#: The six runtime tiers and the runtime each one targets. Ordered as the
+#: self-host residual table prints them, because `RESIDUAL_TIERS` below is
+#: derived from these keys rather than restating them (issue #1332).
 VISION_TIER_RUNTIME = {
     "py": "cordis-py",
     "ts": "cordis (TypeScript, v4)",
-    "rust": "cordis-rs (Rust)",
-    "java": "cordis4j (Java)",
-    "wasm": "cordis-wasm",
     "go": "cordis-go (Go)",
+    "java": "cordis4j (Java)",
+    "rust": "cordis-rs (Rust)",
+    "wasm": "cordis-wasm",
 }
 
 # The self-host column of the register is the compiler compiling itself, not a
@@ -461,7 +464,12 @@ class SelfhostResidualError(SystemExit):
 # The order the two self-host documents print the tiers in. It is the order the
 # corpora were built in, not alphabetical, and it is fixed here so the table is
 # a function of the ledger and nothing else.
-RESIDUAL_TIERS = ("py", "ts", "go", "java", "rust", "wasm")
+#: The tiers the self-host residual is reported over, in print order.
+#: Taken from `VISION_TIER_RUNTIME` rather than typed again: this file
+#: already carried the tier set once, and a second copy in the same
+#: module is a second thing to keep in step with the eight other
+#: declarations of it in the tree (issue #1332).
+RESIDUAL_TIERS = tuple(VISION_TIER_RUNTIME)
 
 NATIVE_CHAIN_TEST = "tests/test_selfhost_compile.py"
 

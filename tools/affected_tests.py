@@ -61,7 +61,8 @@ BACKEND_TIERS = ("python", "go", "rust", "wasm", "java", "typescript")
 # is still covered by the folded goldens in tests/test_goldens.py + the frontend
 # ts-referencing tests, which is exactly what the FULL gate does for ts too.
 BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
-GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs")
+GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs",
+             "vocabulary")
 
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
@@ -563,7 +564,19 @@ def select(changed, root) -> dict:
 
     pytest_nodes: set[str] = set()
     backends: set[str] = set()
-    gates: set[str] = {"ruff"}  # lint is cheap; always run it
+    # `ruff` because lint is cheap. `vocabulary`
+    # (`tools/check_vocabulary_mirrors.py`) because it has NO path set to
+    # select on: it walks every `.py` under `src/revl` and `tools`, and a
+    # mirror is a relation BETWEEN two files, so the file that creates one is
+    # routinely neither of the two the ledger will name. Issue #1332 is the
+    # measurement: four new mirror classes reached `main` and reddened the
+    # required `lint` check, and none of the four introducing commits selected
+    # this gate -- including the one that selected the FULL gate, because
+    # `tools/pre_merge.sh` did not run the tool in any mode. The honest
+    # selector for a whole-tree read is "always", and the cost of always is
+    # 1.2s: 1.19s for `--check` over 1585 sites and 0.03s for `--self-test`,
+    # measured on this tree against a 15-110s affected run.
+    gates: set[str] = {"ruff", "vocabulary"}
     reasons: list[str] = []
 
     for f in changed:

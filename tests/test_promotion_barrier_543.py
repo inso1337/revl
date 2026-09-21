@@ -271,7 +271,18 @@ def test_the_controller_module_matches_its_registry_entry():
     assert consts["PRECONDITIONS"] + consts["MEASURED"] == path.stages
     assert consts["MEASURED"] == path.measured
     assert path.authority in consts["PRECONDITIONS"]
-    assert {pb.canonical_axis(a) for a in consts["AUTHORITY_AXES"]} \
+    # The axis set is no longer a literal to read off this module. Issue #1332
+    # collapsed the controller's own `AUTHORITY_AXES` tuple onto this module's,
+    # so the set it measures IS the registry's rather than being compared to
+    # it. What is left to hold is that the import is really what stands there:
+    # a fresh tuple would restore the drift surface the collapse removed.
+    assert "AUTHORITY_AXES" not in consts, (
+        "tools/evolution_controller.py declares its own AUTHORITY_AXES tuple "
+        "again; it must import promotion_barrier's")
+    assert _imports_name(full, "revl.promotion_barrier", "AUTHORITY_AXES"), (
+        "tools/evolution_controller.py no longer imports AUTHORITY_AXES from "
+        "revl.promotion_barrier")
+    assert {pb.canonical_axis(a) for a in pb.AUTHORITY_AXES} \
         == {pb.canonical_axis(a) for a in path.covers}
 
 
@@ -290,6 +301,17 @@ def test_the_shadow_promotion_module_matches_its_registry_entry():
     assert consts["STAGES"].index(path.authority) < len(consts["STAGES"])
     assert {pb.canonical_axis(a) for a in consts["AUTHORITY_AXES"]} \
         == {pb.canonical_axis(a) for a in path.covers}
+
+
+def _imports_name(path: str, module: str, name: str) -> bool:
+    """Does this module do `from <module> import <name>`, read without
+    importing it? The same AST read as `_module_tuples`, for the constants
+    that are imported rather than restated."""
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    return any(isinstance(node, ast.ImportFrom) and node.module == module
+               and any(alias.name == name for alias in node.names)
+               for node in ast.walk(tree))
 
 
 def _module_tuples(path: str) -> dict:
