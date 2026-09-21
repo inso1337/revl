@@ -191,11 +191,17 @@ def test_f2_go_component_limit_is_caught_at_the_gate_not_the_build(tmp_path):
     ir = _ir(tmp_path, _GO_ARROW)
     module = _placement._emit_gate_module("go")
     sliced = placement_slice(ir, {"Boss"})
-    # the divergence the fix closes: `emit` DROPS the component (a top-level fn
-    # is present) and succeeds, so the gate used to pass; `emit_placement` (the
-    # real build entry) keeps the component and raises the tier limit.
-    module.emit(sliced, "emitted")                 # OLD gate path: no error
+    # the divergence the fix closed: `emit` DROPPED the component (a top-level
+    # fn is present) and succeeded, so the gate used to pass, while
+    # `emit_placement`, the real build entry, kept the component and raised the
+    # tier limit. PR #1317 (issue #721) closed the other half: go refuses a
+    # document that mixes a top-level declaration with a component rather than
+    # answering with a module missing a section the author wrote. So BOTH paths
+    # raise now, for two different reasons, and neither one can drop the
+    # component quietly.
     import pytest
+    with pytest.raises(Exception):
+        module.emit(sliced, "emitted")             # no longer a silent drop
     with pytest.raises(Exception):
         module.emit_placement(sliced, "emitted")   # real build path: raises
     # the gate now uses emit_placement, so it refuses AT PLAN naming comp+tier
