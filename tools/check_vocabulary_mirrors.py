@@ -55,6 +55,64 @@ MIN_TOKENS is 4 because instance 2's vocabulary is exactly four field names.
 Three would be a coincidence budget, not a vocabulary: it raises the class
 count on this tree from 42 to 68 for token sets that small.
 
+A SECOND, NARROWER RULE: CLAIM-ANCHORED NEAR MISSES (issue #1336)
+-----------------------------------------------------------------
+Exact equality is blind in one direction, and issue #1336 is the instance.
+`tools/evolution_controller.py::Verdict` carried a THIRD copy of item 536's
+four verdict field names and its docstring said so. It had already grown a
+fifth key, `code`, so equality grouped the two copies that still agreed and
+never looked at the one that had left. The rule is strongest against copies
+still in step and blind to the one that has already drifted. The false claim
+sat in the place a reader is most likely to trust.
+
+RELAXING THE RELATION IS THE WRONG REPAIR, and it was measured rather than
+assumed. A STRICT SUPERSET with a bounded difference, at the tightest setting
+that still contains issue #1336's case -- a difference of ONE token and a
+minimum vocabulary of MIN_TOKENS -- over the tree as it stood at 9649f21c:
+
+    131 ordered pairs, of which ONE is the case the issue was filed for.
+    Transitive closure: 27 components, the largest 12 sites.
+
+A two-token difference gives 248 pairs and a 30-site component, which is PR
+#1295's blob rebuilt. Raising the minimum vocabulary to five drops to 63 pairs
+but LOSES the target, whose smaller side is exactly four tokens. No setting
+keeps the one true positive and suppresses the other 130: a 99% false-positive
+rate is not a gate, and it is the same finding PR #1295 already recorded.
+
+What works is not a fuzzier relation but a DIFFERENT ANCHOR. A vocabulary that
+SAYS it mirrors another is a strictly easier case than one that merely happens
+to, and this repository already resolves written citations
+(`tools/check_roadmap_claims.py`). So:
+
+  * a CLAIM is a vocabulary site whose own prose -- its docstring, the comment
+    block directly above it, or its class's docstring and comment for a method
+    -- contains one of CLAIM_CUES and names, in backticks, a module this scan
+    covers. Three citation spellings resolve, because the tree uses all three:
+    a path, a path with a declaration on it, and a dotted reference whose head
+    is an UNAMBIGUOUS module basename.
+
+  * the claim is SATISFIED when some site in a cited module spells exactly the
+    claiming site's vocabulary; a NEAR MISS when none does and the closest
+    differs by at most CLAIM_SLACK tokens; UNANCHORED otherwise.
+
+  * ONLY A NEAR MISS REDS. Unanchored is not a finding: most prose containing
+    "mirrors" is about something that is not a vocabulary, and firing on it is
+    the blob by another route.
+
+Measured on this tree (1590 sites): 100 sites carry a cue, 28 of those also
+resolve a module, and at CLAIM_SLACK = 1 that is 4 SATISFIED claims, 1 NEAR
+MISS and 23 UNANCHORED. Slack 2 gives 2 near misses and slack 3 gives 3:
+linear, not a cliff. It CANNOT CHAIN AT ALL -- a claim is one arrow from a
+named site to a named module, and nothing here takes a transitive closure --
+so the failure mode that rejected every similarity threshold does not exist
+for this rule. CLAIM_SLACK is 1 because one token is the smallest difference
+that is a difference, and issue #1336's case is exactly one token.
+
+The two rules are disjoint by construction. A satisfied claim is an equal pair,
+so the class rule already holds it; the claim rule earns its place entirely in
+the near-miss band, where the class rule says nothing. `--self-test` asserts
+that on every claim case, by reporting whether exact equality sees the pair.
+
 WHAT THE LEDGER IS, and why it is not an allowlist. `tests/fixtures/
 vocabulary_mirror_ledger.json` records every class this tree already has:
 the site names, the vocabulary they agree on, and a written reason. It is a
@@ -99,8 +157,12 @@ Usage:
 `--self-test` runs the gate against the three issue-#1285 instances themselves
 -- a new mirror introduced, a recorded one drifting apart on one side, a
 resolved one left stale -- plus a missing ledger, a vacuous scan and a clean
-baseline, and asserts the verdict on each. It runs in the `lint` job beside the
-gate. Never add `|| true`.
+baseline, and asserts the verdict on each. It then runs the claim rule against
+issue #1336's shape -- a claim that holds, the same claim off by one token,
+that near miss recorded and then resolved, its difference moved, a cue with no
+resolvable citation and a claim citing a module with no comparable vocabulary
+-- and asserts, for each, both the verdict AND whether exact equality sees the
+pair at all. It runs in the `lint` job beside the gate. Never add `|| true`.
 """
 
 from __future__ import annotations
@@ -125,6 +187,22 @@ MIN_TOKENS = 4
 #: Mapping-key readers whose first positional argument is the key.
 _KEY_METHODS = ("get", "setdefault", "pop")
 
+#: Literal phrases that make a declaration's prose a CLAIM about another
+#: declaration. Literal rather than a regex on purpose: the list is the rule,
+#: and a reader has to be able to audit it without running it.
+CLAIM_CUES = (
+    "mirror", "copy of", "copies of", "restate", "restated", "restates",
+    "re-declare", "redeclare", "same set", "same shape", "same vocabulary",
+    "same field", "same fields", "same key", "same keys", "same name",
+    "same names", "field names are", "must match", "in step with",
+    "kept in step", "hand-kept",
+)
+
+#: How far a claiming site's vocabulary may sit from the closest one in the
+#: module it cites and still be reported. One token is the smallest difference
+#: that is a difference, and issue #1336's case is exactly one token.
+CLAIM_SLACK = 1
+
 
 @dataclass(frozen=True)
 class Site:
@@ -141,6 +219,21 @@ class Site:
         """The ledger's stable id: names only, no line number (a line number
         churns on every edit above it and says nothing about the mirror)."""
         return f"{self.module}::{self.name}"
+
+
+@dataclass(frozen=True)
+class Claim:
+    """One site's written assertion that its vocabulary is another module's.
+
+    `site` is the claiming site's `sid`, `tokens` its vocabulary, `cue` the
+    phrase from `CLAIM_CUES` that made the prose a claim, and `cited` the
+    modules the prose names in backticks that this scan actually covers.
+    """
+
+    site: str
+    tokens: frozenset
+    cue: str
+    cited: tuple
 
 
 # --------------------------------------------------------------- extraction
@@ -236,6 +329,155 @@ def scan(root: pathlib.Path = REPO_ROOT) -> list[Site]:
     return found
 
 
+# ------------------------------------------------------------ claim reading
+
+def _prose_index(source: str) -> dict:
+    """`lineno -> the prose attached to the declaration that starts there`.
+
+    A declaration's prose is its own docstring, the comment block immediately
+    above it, and -- for a method -- its class's docstring and comment block
+    too. The class docstring counts because that is where a dataclass says what
+    its fields are, which is exactly where issue #1336's false claim lived.
+    """
+    lines = source.splitlines()
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    out: dict = {}
+
+    def lead(lineno: int) -> str:
+        i, buf = lineno - 2, []
+        while i >= 0 and lines[i].strip().startswith("#"):
+            buf.append(lines[i].strip().lstrip("#").strip())
+            i -= 1
+        return " ".join(reversed(buf))
+
+    def walk(body: list[ast.stmt]) -> None:
+        for node in body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                out[node.lineno] = lead(node.lineno)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out[node.lineno] = (ast.get_docstring(node) or "") + " " + lead(node.lineno)
+            elif isinstance(node, ast.ClassDef):
+                owned = (ast.get_docstring(node) or "") + " " + lead(node.lineno)
+                walk(node.body)
+                for sub in node.body:
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        out[sub.lineno] = out.get(sub.lineno, "") + " " + owned
+
+    walk(tree.body)
+    return out
+
+
+def _cue_in(text: str) -> str:
+    low = text.lower()
+    return next((c for c in CLAIM_CUES if c in low), "")
+
+
+def _cited_modules(text: str, self_module: str, modules: set,
+                   by_stem: dict) -> tuple:
+    """The scanned modules a claim's prose names, in backticks.
+
+    Three spellings resolve, because the tree uses all three: a repository path
+    (`tools/evolution_reward.py`), the same path with a declaration on it
+    (`tools/evolution_reward.py::Verdict`), and a dotted reference whose head
+    is a module basename (`policy.TAINT_FOLD_ORIGINS`). A basename resolves
+    ONLY when it is unambiguous across the scanned roots: a guess about which
+    of two modules was meant is a finding this gate has no business reporting.
+    """
+    out = set()
+    spans = text.split("`")
+    for raw in spans[1::2]:
+        for sep in ",;()[]":
+            raw = raw.replace(sep, " ")
+        for word in raw.split():
+            word = word.strip().strip(".,:;'\"")
+            if not word:
+                continue
+            if word in modules:
+                out.add(word)
+                continue
+            head = word.split("::")[0]
+            if head.endswith(".py"):
+                head = head[:-3]
+            stem = head.rsplit("/", 1)[-1].split(".")[0]
+            candidates = by_stem.get(stem) or ()
+            if len(candidates) == 1:
+                out |= set(candidates)
+    out.discard(self_module)
+    return tuple(sorted(out))
+
+
+def claims_in_source(source: str, module: str, sites: list[Site],
+                     modules: set, by_stem: dict) -> list[Claim]:
+    """Every claim one module's sites make. A site with no cue, or with a cue
+    and no resolvable citation, makes no claim and is not reported."""
+    prose = _prose_index(source)
+    found: list[Claim] = []
+    for site in sites:
+        text = prose.get(site.lineno) or ""
+        cue = _cue_in(text)
+        if not cue:
+            continue
+        cited = _cited_modules(text, module, modules, by_stem)
+        if cited:
+            found.append(Claim(site.sid, site.tokens, cue, cited))
+    return found
+
+
+def scan_claims(sites: list[Site], root: pathlib.Path = REPO_ROOT) -> list[Claim]:
+    """Every claim the scanned tree makes, in a stable order."""
+    modules = {s.module for s in sites}
+    by_stem: dict = {}
+    for module in modules:
+        by_stem.setdefault(pathlib.PurePosixPath(module).stem, []).append(module)
+    by_stem = {k: tuple(sorted(v)) for k, v in by_stem.items()}
+
+    by_module: dict = {}
+    for site in sites:
+        by_module.setdefault(site.module, []).append(site)
+
+    found: list[Claim] = []
+    for module in sorted(by_module):
+        source = (root / module).read_text(encoding="utf-8")
+        found.extend(claims_in_source(source, module, by_module[module],
+                                      modules, by_stem))
+    found.sort(key=lambda c: c.site)
+    return found
+
+
+def near_misses(sites: list[Site], claims: list[Claim]) -> list[dict]:
+    """The claims that are NEAR MISSES: no site in a cited module spells the
+    claiming site's vocabulary, and the closest one differs by at most
+    CLAIM_SLACK tokens.
+
+    A SATISFIED claim (some cited site spells it exactly) and an UNANCHORED one
+    (nothing in the cited modules is within slack) are both absent from this
+    list, for opposite reasons: the first is the claim holding, and the second
+    is prose about something that is not a vocabulary."""
+    by_module: dict = {}
+    for site in sites:
+        by_module.setdefault(site.module, []).append(site)
+    out = []
+    for claim in claims:
+        pool = [t for m in claim.cited for t in by_module.get(m, ())
+                if t.sid != claim.site]
+        if not pool or any(t.tokens == claim.tokens for t in pool):
+            continue
+        best = min(pool, key=lambda t: (len(claim.tokens ^ t.tokens), t.sid))
+        if len(claim.tokens ^ best.tokens) > CLAIM_SLACK:
+            continue
+        out.append({
+            "site": claim.site,
+            "mirrors": best.sid,
+            "only_here": sorted(claim.tokens - best.tokens),
+            "only_there": sorted(best.tokens - claim.tokens),
+        })
+    out.sort(key=lambda e: (e["site"], e["mirrors"]))
+    return out
+
+
 def classes(sites: list[Site]) -> list[dict]:
     """The mirror classes: sites whose vocabularies are exactly equal, spanning
     at least two distinct modules. A class is the inventory entry."""
@@ -254,15 +496,22 @@ def classes(sites: list[Site]) -> list[dict]:
 
 # --------------------------------------------------------------- the ledger
 
-def load_ledger(path: pathlib.Path) -> tuple[list[dict] | None, str | None]:
-    """The ledger's entries, or `(None, why)`. A ledger that cannot be read is
-    a failure, never an empty check."""
+def _read_ledger(path: pathlib.Path) -> tuple[dict | None, str | None]:
     if not path.exists():
         return None, f"the ledger is missing: {path}"
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return None, f"the ledger is unreadable: {path}: {exc}"
+    return doc, None
+
+
+def load_ledger(path: pathlib.Path) -> tuple[list[dict] | None, str | None]:
+    """The ledger's CLASS entries, or `(None, why)`. A ledger that cannot be
+    read is a failure, never an empty check."""
+    doc, err = _read_ledger(path)
+    if doc is None:
+        return None, err
     entries = doc.get("classes")
     if not isinstance(entries, list):
         return None, f"the ledger has no `classes` list: {path}"
@@ -274,7 +523,26 @@ def load_ledger(path: pathlib.Path) -> tuple[list[dict] | None, str | None]:
     return entries, None
 
 
-def ledger_text(entries: list[dict]) -> str:
+def load_claim_ledger(path: pathlib.Path) -> tuple[list[dict] | None, str | None]:
+    """The ledger's CLAIM entries: the near misses this tree already has, each
+    with the reason the difference is allowed to stand."""
+    doc, err = _read_ledger(path)
+    if doc is None:
+        return None, err
+    entries = doc.get("claims")
+    if not isinstance(entries, list):
+        return None, f"the ledger has no `claims` list: {path}"
+    for entry in entries:
+        if (not isinstance(entry, dict)
+                or not isinstance(entry.get("site"), str)
+                or not isinstance(entry.get("mirrors"), str)
+                or not isinstance(entry.get("only_here"), list)
+                or not isinstance(entry.get("only_there"), list)):
+            return None, f"a claim entry is malformed: {entry!r}"
+    return entries, None
+
+
+def ledger_text(entries: list[dict], claim_entries: list[dict] | None = None) -> str:
     """The ledger's one on-disk spelling, byte-identical under any interpreter
     that can run this file: names and tokens only, both sorted, no counts and
     no line numbers."""
@@ -290,6 +558,18 @@ def ledger_text(entries: list[dict]) -> str:
                      "note": e.get("note", "")}
                     for e in sorted(entries, key=lambda e: (sorted(e["sites"])[0],
                                                             sorted(e["sites"])))],
+        "//claims": ("Issue #1336. The CLAIM-ANCHORED near misses: a site whose "
+                     "prose says its vocabulary is another module's, where the "
+                     "closest vocabulary in that module is not quite the same "
+                     "one. Same ratchet, same shrink-only rule: a near miss "
+                     "that resolves has its entry DELETED."),
+        "claims": [{"site": e["site"],
+                    "mirrors": e["mirrors"],
+                    "only_here": sorted(e["only_here"]),
+                    "only_there": sorted(e["only_there"]),
+                    "note": e.get("note", "")}
+                   for e in sorted(claim_entries or [],
+                                   key=lambda e: (e["site"], e["mirrors"]))],
     }
     return json.dumps(doc, indent=2, sort_keys=False, ensure_ascii=False) + "\n"
 
@@ -407,9 +687,89 @@ def check(sites: list[Site], entries: list[dict] | None,
     return problems
 
 
+def check_claims(claims: list[Claim], observed: list[dict],
+                 entries: list[dict] | None,
+                 ledger_error: str | None) -> list[str]:
+    """Every reason this tree fails the CLAIM rule. An empty list is green.
+
+    Three ways to fail, the same three shapes the class rule has: an UNRECORDED
+    near miss, a RECORDED one whose difference moved, and a RECORDED one that
+    is no longer observed (which is the shrink-only clause -- resolving a near
+    miss DELETES its entry)."""
+    problems: list[str] = []
+
+    if entries is None:
+        return [f"{ledger_error}\n"
+                "    A ledger that cannot be read is a RED, not an empty check.\n"
+                "    Restore it from git, or author it with "
+                "`python3 tools/check_vocabulary_mirrors.py --write`."]
+
+    if not claims:
+        return ["VACUOUS CLAIM SCAN: not one vocabulary site in this tree says "
+                "it mirrors another module.\n"
+                "    This tree has always had some; the prose walk is broken. "
+                "A scan that finds nothing is not a clean tree."]
+
+    by_key = {(e["site"], e["mirrors"]): e for e in observed}
+    recorded = {(e["site"], e["mirrors"]): e for e in entries}
+    claiming = {c.site for c in claims}
+
+    for key, entry in sorted(recorded.items()):
+        site, mirrors = key
+        if not (entry.get("note") or "").strip():
+            problems.append(
+                f"NO RECORDED REASON for the near miss {site} -> {mirrors}.\n"
+                "    A difference that is allowed to stand needs the sentence "
+                "saying why. Write it.")
+        if key not in by_key:
+            why = ("the claim no longer names that module, or the site is gone"
+                   if site not in claiming
+                   else "the two vocabularies now agree exactly")
+            problems.append(
+                f"NAMED NEAR MISS NO LONGER OBSERVED: {site} -> {mirrors}\n"
+                f"    {why}.\n"
+                "    If the near miss was resolved -- by importing, by "
+                "extending rather than restating, or by putting the "
+                "vocabularies back in step -- DELETE this entry. The ledger is "
+                "shrink-only and a stale entry is a lie about the tree.")
+            continue
+        got = by_key[key]
+        if (sorted(got["only_here"]) != sorted(entry["only_here"])
+                or sorted(got["only_there"]) != sorted(entry["only_there"])):
+            problems.append(
+                f"NEAR MISS CHANGED: {site} -> {mirrors}\n"
+                f"    recorded: only here {sorted(entry['only_here']) or '-'}, "
+                f"only there {sorted(entry['only_there']) or '-'}\n"
+                f"    observed: only here {got['only_here'] or '-'}, "
+                f"only there {got['only_there'] or '-'}\n"
+                "    The recorded reason was written about a different "
+                "difference. Re-record it with `--write` and rewrite the "
+                "reason, or close the difference.")
+
+    for key, got in sorted(by_key.items()):
+        if key in recorded:
+            continue
+        problems.append(
+            f"UNRECORDED NEAR MISS: {got['site']}\n"
+            f"    says it mirrors the module that declares {got['mirrors']}, "
+            "and does not spell the same vocabulary.\n"
+            f"    only here:  {got['only_here'] or '-'}\n"
+            f"    only there: {got['only_there'] or '-'}\n"
+            "    This is issue #1336's shape: a written claim of agreement "
+            "that does not hold, which is worse than no claim at all.\n"
+            "    Make the claim true -- import the vocabulary, or extend it "
+            "in one declared place -- or, if the difference is deliberate, say "
+            "so in the prose AND record it in\n"
+            f"    {LEDGER.relative_to(REPO_ROOT).as_posix()} with "
+            "`python3 tools/check_vocabulary_mirrors.py --write`.")
+    return problems
+
+
 # --------------------------------------------------------------- the report
 
-def report(sites: list[Site], entries: list[dict] | None) -> str:
+def report(sites: list[Site], entries: list[dict] | None,
+           claims: list[Claim] | None = None,
+           claim_entries: list[dict] | None = None) -> str:
     found = classes(sites)
     notes = {}
     if entries:
@@ -424,7 +784,45 @@ def report(sites: list[Site], entries: list[dict] | None) -> str:
         note = notes.get(tuple(cls["sites"]))
         lines.append(f"    note: {note}" if note else "    note: (NOT RECORDED)")
         lines.append("")
+
+    if claims is None:
+        return "\n".join(lines)
+    observed = near_misses(sites, claims)
+    satisfied = len(claims) - len(observed) - _unanchored(sites, claims)
+    claim_notes = {(e["site"], e["mirrors"]): e.get("note", "")
+                   for e in (claim_entries or [])}
+    lines += [f"{len(claims)} claims (a site whose prose says its vocabulary is "
+              "another module's)",
+              f"    {satisfied} satisfied, {len(observed)} near miss(es), "
+              f"{_unanchored(sites, claims)} unanchored", ""]
+    for entry in observed:
+        lines.append(f"[near miss] {entry['site']} -> {entry['mirrors']}")
+        lines.append(f"    only here:  {entry['only_here'] or '-'}")
+        lines.append(f"    only there: {entry['only_there'] or '-'}")
+        note = claim_notes.get((entry["site"], entry["mirrors"]))
+        lines.append(f"    note: {note}" if note else "    note: (NOT RECORDED)")
+        lines.append("")
     return "\n".join(lines)
+
+
+def _unanchored(sites: list[Site], claims: list[Claim]) -> int:
+    """Claims whose cited modules hold nothing within slack. Counted for the
+    inventory only: an unanchored claim is prose about something that is not a
+    vocabulary, and firing on it is the blob this rule exists to avoid."""
+    by_module: dict = {}
+    for site in sites:
+        by_module.setdefault(site.module, []).append(site)
+    count = 0
+    for claim in claims:
+        pool = [t for m in claim.cited for t in by_module.get(m, ())
+                if t.sid != claim.site]
+        if not pool:
+            count += 1
+            continue
+        closest = min(len(claim.tokens ^ t.tokens) for t in pool)
+        if closest > CLAIM_SLACK:
+            count += 1
+    return count
 
 
 # --------------------------------------------------------------- self-test
@@ -450,6 +848,54 @@ def normalize(ir):
         comp["file"] = comp.get("file")
     return out
 '''
+
+
+# The claim cases (issue #1336). `d.py` is the definition; the others make a
+# written claim about it that either holds, is off by one token, or is prose
+# about something that is not a vocabulary at all.
+_CLAIM_DEF = '''
+FIELDS = ("component", "evidence", "reason", "verdict")
+'''
+
+_CLAIM_HOLDS = '''
+# The same field names as `src/revl/d.py`, kept in step by hand.
+ANSWER = {"component": 1, "evidence": 2, "reason": 3, "verdict": 4}
+'''
+
+_CLAIM_OFF_BY_ONE = '''
+# The same field names as `src/revl/d.py`, kept in step by hand.
+ANSWER = {"component": 1, "evidence": 2, "reason": 3, "verdict": 4, "code": 5}
+'''
+
+_CLAIM_NO_CITATION = '''
+# A hand-kept mirror of the answer shape the reducer downstream reads.
+ANSWER = {"alpha": 1, "beta": 2, "gamma": 3, "delta": 4, "epsilon": 5}
+'''
+
+_CLAIM_UNRELATED = '''
+# Mirrors the ordering `src/revl/d.py` walks; not its field names.
+ORDER = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh")
+'''
+
+
+def _claims_from(tree: dict[str, str], sites: list[Site]) -> list[Claim]:
+    modules = {s.module for s in sites}
+    by_stem: dict = {}
+    for module in modules:
+        by_stem.setdefault(pathlib.PurePosixPath(module).stem, []).append(module)
+    by_stem = {k: tuple(sorted(v)) for k, v in by_stem.items()}
+    out: list[Claim] = []
+    for name, text in sorted(tree.items()):
+        module = f"src/revl/{name}"
+        mine = [s for s in sites if s.module == module]
+        out.extend(claims_in_source(text, module, mine, modules, by_stem))
+    out.sort(key=lambda c: c.site)
+    return out
+
+
+def _claim_ledger_for(sites: list[Site], claims: list[Claim],
+                      note: str = "self-test") -> list[dict]:
+    return [dict(e, note=note) for e in near_misses(sites, claims)]
 
 
 def _ledger_for(sites: list[Site], note: str = "self-test") -> list[dict]:
@@ -520,6 +966,69 @@ def self_test() -> int:
     cases.append(("the control (an edit that touches no vocabulary) is green",
                   _sites_from(control), base_ledger, None, True))
 
+    # ---- issue #1336: the CLAIM rule, in the near-miss band exact equality
+    # cannot see. Each case declares whether exact equality sees a class at
+    # all, because "the class rule is SILENT here" is the whole claim this
+    # second rule makes for itself.
+    claim_base = {"d.py": _CLAIM_DEF, "e.py": _CLAIM_HOLDS}
+    claim_sites = _sites_from(claim_base)
+    held = _claims_from(claim_base, claim_sites)
+
+    claim_cases: list[tuple[str, list[Site], list[Claim], list[dict] | None,
+                            str | None, bool, bool]] = []
+
+    claim_cases.append(("a claim that HOLDS is green with an empty ledger",
+                        claim_sites, held, [], None, True, True))
+
+    # issue #1336 itself: the prose says the field names are the other
+    # module's, and this side has grown a fifth.
+    off = {"d.py": _CLAIM_DEF, "e.py": _CLAIM_OFF_BY_ONE}
+    off_sites = _sites_from(off)
+    off_claims = _claims_from(off, off_sites)
+    off_ledger = _claim_ledger_for(off_sites, off_claims)
+    claim_cases.append(("a claim OFF BY ONE TOKEN reds (issue #1336)",
+                        off_sites, off_claims, [], None, False, False))
+    claim_cases.append(("the same near miss, RECORDED with a reason, is green",
+                        off_sites, off_claims, off_ledger, None, True, False))
+    claim_cases.append(("a recorded near miss with NO REASON reds",
+                        off_sites, off_claims,
+                        _claim_ledger_for(off_sites, off_claims, note="  "),
+                        None, False, False))
+    claim_cases.append(("a RESOLVED near miss left in the ledger reds "
+                        "(shrink-only)",
+                        claim_sites, held, off_ledger, None, False, True))
+
+    # The difference moved inside the slack. The reason on file was written
+    # about the old difference, so it is no longer a reason.
+    moved = {"d.py": _CLAIM_DEF,
+             "e.py": _CLAIM_OFF_BY_ONE.replace('"code": 5', '"blocker": 5')}
+    moved_sites = _sites_from(moved)
+    claim_cases.append(("a recorded near miss whose DIFFERENCE MOVED reds",
+                        moved_sites, _claims_from(moved, moved_sites),
+                        off_ledger, None, False, False))
+
+    # The two controls that keep this rule narrow. Firing on either rebuilds
+    # the 27-site blob PR #1295 measured, by another route.
+    no_cite = dict(claim_base, f=_CLAIM_NO_CITATION)
+    no_cite = {"d.py": _CLAIM_DEF, "e.py": _CLAIM_HOLDS,
+               "f.py": _CLAIM_NO_CITATION}
+    no_cite_sites = _sites_from(no_cite)
+    claim_cases.append(("a cue with NO RESOLVABLE CITATION is not a finding",
+                        no_cite_sites, _claims_from(no_cite, no_cite_sites),
+                        [], None, True, True))
+    unrelated = {"d.py": _CLAIM_DEF, "e.py": _CLAIM_UNRELATED}
+    unrelated_sites = _sites_from(unrelated)
+    claim_cases.append(("a claim citing a module with NO comparable vocabulary "
+                        "is not a finding",
+                        unrelated_sites, _claims_from(unrelated, unrelated_sites),
+                        [], None, True, False))
+
+    claim_cases.append(("a VACUOUS claim scan reds rather than reading as a "
+                        "clean tree", claim_sites, [], [], None, False, True))
+    claim_cases.append(("a MISSING ledger reds rather than reading as nothing "
+                        "to check", claim_sites, held, None,
+                        "the ledger is missing: <self-test>", False, True))
+
     failures = 0
     for name, sites, entries, err, want_green in cases:
         problems = check(sites, entries, err)
@@ -531,11 +1040,27 @@ def self_test() -> int:
             failures += 1
             for line in problems:
                 print("        " + line.replace("\n", "\n        "))
+
+    for name, sites, claims, entries, err, want_green, want_class in claim_cases:
+        problems = check_claims(claims, near_misses(sites, claims), entries, err)
+        seen_by_equality = bool(classes(sites))
+        green = not problems
+        ok = green == want_green and seen_by_equality == want_class
+        print(f"  {'ok  ' if ok else 'FAIL'}  [claim] {name}"
+              f"  ({'green' if green else f'{len(problems)} problem(s)'}, "
+              f"exact equality "
+              f"{'groups them' if seen_by_equality else 'sees nothing'})")
+        if not ok:
+            failures += 1
+            for line in problems:
+                print("        " + line.replace("\n", "\n        "))
+
     if failures:
         print(f"\nself-test: {failures} case(s) did not behave as declared")
         return 1
-    print(f"\nself-test: {len(cases)} cases, the gate fires on each defect and "
-          "stays green on the baseline and the control")
+    print(f"\nself-test: {len(cases)} class cases and {len(claim_cases)} claim "
+          "cases, the gate fires on each defect and stays green on the "
+          "baseline and the controls")
     return 0
 
 
@@ -557,6 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
         return self_test()
 
     sites = scan()
+    claims = scan_claims(sites)
 
     if args.write:
         entries, _ = load_ledger(LEDGER)
@@ -564,29 +1090,42 @@ def main(argv: list[str] | None = None) -> int:
                  for e in (entries or [])}
         fresh = [dict(c, note=notes.get(tuple(c["sites"]), ""))
                  for c in classes(sites)]
+        claim_entries, _ = load_claim_ledger(LEDGER)
+        claim_notes = {(e["site"], e["mirrors"]): e.get("note", "")
+                       for e in (claim_entries or [])}
+        fresh_claims = [dict(e, note=claim_notes.get((e["site"], e["mirrors"]), ""))
+                        for e in near_misses(sites, claims)]
         LEDGER.parent.mkdir(parents=True, exist_ok=True)
-        LEDGER.write_text(ledger_text(fresh), encoding="utf-8")
-        missing = sum(1 for e in fresh if not (e["note"] or "").strip())
+        LEDGER.write_text(ledger_text(fresh, fresh_claims), encoding="utf-8")
+        missing = sum(1 for e in fresh + fresh_claims
+                      if not (e["note"] or "").strip())
         print(f"wrote {LEDGER.relative_to(REPO_ROOT).as_posix()}: "
-              f"{len(fresh)} classes, {missing} still needing a reason")
+              f"{len(fresh)} classes, {len(fresh_claims)} claim near misses, "
+              f"{missing} still needing a reason")
         return 0
 
     entries, err = load_ledger(LEDGER)
+    claim_entries, claim_err = load_claim_ledger(LEDGER)
 
     if args.check:
         problems = check(sites, entries, err)
+        problems += check_claims(claims, near_misses(sites, claims),
+                                 claim_entries, claim_err)
         if problems:
             print(f"{len(problems)} problem(s) -- issue #1285, closed "
-                  "vocabularies declared in more than one place:\n")
+                  "vocabularies declared in more than one place, and issue "
+                  "#1336, written claims of agreement that do not hold:\n")
             for problem in problems:
                 print("  " + problem.replace("\n", "\n  "))
                 print()
             return 1
         print(f"{len(sites)} vocabulary sites, "
-              f"{len(classes(sites))} mirror classes, all recorded and in step")
+              f"{len(classes(sites))} mirror classes, all recorded and in "
+              f"step; {len(claims)} claims, "
+              f"{len(near_misses(sites, claims))} recorded near miss(es)")
         return 0
 
-    print(report(sites, entries))
+    print(report(sites, entries, claims, claim_entries))
     return 0
 
 
