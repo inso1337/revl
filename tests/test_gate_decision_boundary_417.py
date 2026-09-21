@@ -157,9 +157,14 @@ def test_337_polyglot_mesh_receiver_is_gated_on_the_same_statement():
     assert "**not** the reference type" in contract
     assert "the verdict surface has no arm that could commit it" in contract
     # and the admission surface a seam MAY rely on is stated, with the scope a
-    # cached admission is only valid inside
+    # cached admission is only valid inside. Both halves of the surface have to
+    # be named there, or a seam cannot tell which claim it is caching: the
+    # interface declarations it always held, and the provide-method bodies the
+    # certifier types itself (docs/design/457 T6).
     assert "ADMISSION_SURFACE_ID" in contract
-    assert "interface declarations only" in contract
+    assert "interface declarations" in contract
+    assert "provide methods are" in contract
+    assert "does not defer them" in contract
 
 
 def test_338_rust_cargo_consumer_treats_the_gate_as_refuse_only():
