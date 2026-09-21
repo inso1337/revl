@@ -359,6 +359,11 @@ def test_selfhost_emitter_dependents_stay_narrow():
     r = sel("selfhost/emit_go.rvl")
     assert sorted(x for x in r["pytest"] if "selfhost" in x) == [
         "tests/test_selfhost_compile.py",
+        # Added by the named-file rule (issue #1342): this module reads
+        # `selfhost/emit_go.rvl` to measure which reference constructs the
+        # self-host emitters cover, so the file's content is its input. The
+        # list is one entry longer than the #431 shape and still narrow.
+        "tests/test_selfhost_coverage.py",
         "tests/test_selfhost_emit_go.py",
         "tests/test_selfhost_line_coverage.py",
     ]
@@ -688,3 +693,62 @@ def test_a_bench_document_is_not_a_scoring_corpus_document():
     r = sel("bench/codegen/zz_selector_probe.rvl")
     assert r["full"] is False
     assert "tests/test_corpus_provenance.py" not in r["pytest"]
+
+# --- a test's substance can live outside tests/ (issue #1342) -------------- #
+def test_a_wrapper_test_inherits_the_vocabulary_of_what_it_runs():
+    """The measured gap. `tests/test_flagship_demo_525.py` is a wrapper around
+    `demo/legacy_enterprise/run_demo.py`, and the demo is what shells out to
+    `revl audit`. The wrapper never spells `audit`, so the leaf-module word
+    heuristic — which read `tests/**` and nothing else — selected 133 tests for
+    a `src/revl/audit.py` change and not the one test that runs `revl audit`
+    end to end. `main` shipped a demo exiting 1 with every gate green."""
+    r = sel("src/revl/audit.py")
+    assert r["full"] is False
+    assert "tests/test_flagship_demo_525.py" in r["pytest"], (
+        "a change to src/revl/audit.py does not select the test that runs "
+        "`revl audit` through demo/legacy_enterprise/run_demo.py"
+    )
+
+
+def test_the_named_file_rule_is_derived_and_not_a_table():
+    """`companion_paths` reads the tests' own AST, so the four hand-written
+    tables it generalises are each a SUBSET of what it finds. Checked on the
+    bench table, the largest of them: every module declared bench-dependent
+    because it reads a `bench/` artifact must also be found by the derived
+    rule. The three entries that do not read one are excluded by name and are
+    the table's own documented exceptions."""
+    derived = at.tests_naming(ROOT, "bench/codegen/python/run.py")
+    assert "tests/test_71_codegen_perf_findings.py" in derived
+    named = {n for n in at.companion_paths(ROOT)
+             if any(p.startswith("bench/") for p in at.companion_paths(ROOT)[n])}
+    assert len(named) >= 5, sorted(named)
+
+
+def test_a_changed_file_selects_every_test_that_names_it():
+    """The reverse direction. `demo/legacy_enterprise/` is read by the item-521
+    tripwire, which globs the directory for a stale `MEASURED GAP` label — a
+    coupling no import graph and no word match can see."""
+    hits = at.tests_naming(ROOT, "demo/legacy_enterprise/run_demo.py")
+    assert "tests/test_ui_taint_classes_521.py" in hits
+    assert "tests/test_flagship_demo_525.py" in hits
+
+
+def test_the_slow_descent_test_stays_excluded_from_the_derived_rule():
+    """Issue #431's exclusion is a cost decision the derived rule must not
+    reopen: tests/test_selfhost_lower.py names selfhost/lower.rvl and runs for
+    >120s, which is what made the FULL fallback abort under the hook."""
+    r = sel("selfhost/lower.rvl")
+    assert r["full"] is False
+    assert "tests/test_selfhost_lower.py" not in r["pytest"]
+    assert "tests/test_selfhost_lower_ir.py" in r["pytest"]
+
+
+def test_named_paths_needs_a_separator_and_a_real_file():
+    """A bare `"src"` or `"demo"` is too coarse to be evidence of a read, and a
+    path that does not exist in the tree is prose. Both are dropped, or the
+    rule degenerates into selecting the whole suite for every change."""
+    named = at._named_paths(ROOT, 'P = ROOT / "demo" / "legacy_enterprise" / "run_demo.py"\n')
+    assert "demo/legacy_enterprise/run_demo.py" in named
+    assert "demo/legacy_enterprise" in named
+    assert "demo" not in named
+    assert at._named_paths(ROOT, 'X = "src"\nY = "no/such/file.py"\n') == frozenset()
