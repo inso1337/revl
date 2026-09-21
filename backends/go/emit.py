@@ -1042,6 +1042,12 @@ def _comp_infer(node, env: _Env):
         if t:
             return t
         return _v3_case_layout().get(node.get("case"), (None, None))[0]
+    if k == "fn":
+        # a call to a top-level `fn` (or extern) by name: its declared return
+        # type, off the per-emit registry. Without this a `firsts(xs).length()`
+        # could not tell a Str receiver from a List one and picked the List
+        # helper, so `revlListLen` was handed a string (issue #1321).
+        return _FN_RET.get(node.get("name"))
     if k == "match":
         # a match's value type is its scrutinee's
         return _comp_infer(node.get("scrutinee"), env)
@@ -1645,7 +1651,21 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             surface = _comp_infer(step.get("value"), env)
             if surface is not None:
                 env.var_types[step["name"]] = surface
-            out.append("%s%s := %s" % (pad, name, _expr(step["value"], env, surface)))
+            value = _expr(step["value"], env, surface)
+            # item 280, the method-body twin: a user-variant binding must hold
+            # its INTERFACE type, not the concrete case struct `:=` infers
+            # (`o := OutcomeFound{...}`). A later `match` type-switches on it,
+            # and Go rejects a type switch on a concrete struct ("o is not an
+            # interface"). `_go_v3_stmt` has pinned this on the pure tier since
+            # item 280; the method body reached the same shape only once the
+            # combined renderer started carrying documents that declare a type
+            # beside a component (issue #1321), and it never got the fix.
+            go_t = (_go_v3_type(surface, _V3_TYPES)
+                    if surface and _V3_TYPED_COMPONENTS and _V3_TYPES else "")
+            if go_t and _go_v3_is_interface(surface, _V3_TYPES):
+                out.append("%svar %s %s = %s" % (pad, name, go_t, value))
+            else:
+                out.append("%s%s := %s" % (pad, name, value))
             out.append("%s_ = %s" % (pad, name))
         elif s == "assign":
             name = _safe_local(step["name"])
@@ -10092,8 +10112,17 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
     global _COMP_NEEDS_STREAM_DRAIN
     global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+    global _FN_RET
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
+    # item 320 / issue #1321: the declared return type of every top-level fn
+    # and extern, which `_comp_infer` reads to type a call in a method body.
+    # `_emit` has built this since item 320; this path never did, so every
+    # method-body call answered `None` and a receiver-typed builtin guessed.
+    _FN_RET = {}
+    for _decl in list(functions) + list(externs):
+        if _decl.get("name"):
+            _FN_RET[_decl["name"]] = _decl.get("returns")
     _V3_MODE = True
     _V3_TYPES = types
     _V3_TYPED_COMPONENTS = True
