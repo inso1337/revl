@@ -73,6 +73,16 @@ module's own AST and asserts all three, so a later edit that computes a grant
 somewhere else, or issues a membership without the diff, fails a test rather
 than shipping.
 
+In :func:`promote` the diff is also ahead of the only reading that is a
+MEASUREMENT. A member's ``evidence`` is the count of attested receipts it
+accumulated while it worked; the ceiling diff is a property of the charter and
+the tier alone. Running the diff first means a tier the pool cannot lawfully
+issue is refused without the peer's record being read at all, which is item
+543's rule (issue #1222) that the authority diff gates entry to the measured
+stages rather than being weighed after them. This module is registered as a
+promotion path in :mod:`revl.promotion_barrier`, and that registry entry is
+what holds the order.
+
 Both entry and promotion diff the tier grant against the CHARTER CEILING, never
 against the tier below. A ladder that measured each rung against the previous
 one would let an error in rung 1 raise the ceiling for every rung above it; a
@@ -1033,6 +1043,21 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
             LINK_UNKNOWN_TIER,
             f"the charter declares no tier {tier!r}", peer_id=peer_id)
 
+    # The ceiling diff runs HERE, ahead of the evidence threshold, and that
+    # order is the point. `member.evidence` is the count of attested execution
+    # receipts the peer accumulated while it worked, which is an observation of
+    # what it did; the ceiling diff is a property of the charter and the tier
+    # and needs no observation at all. Item 543 (issue #1222) is the rule that
+    # the authority diff gates ENTRY to the stages that read measured evidence
+    # rather than being weighed after them, so a tier the pool cannot lawfully
+    # issue is refused without the peer's record ever being read. The call
+    # depends only on `(charter, tier, peer_id)`, so nothing about the grant it
+    # computes changes by standing earlier.
+    grant, refusal = _ceiling_precondition(charter, tier, peer_id, None)
+    if refusal is not None:
+        refusal["peer_id"] = peer_id
+        return refusal
+
     outside = sorted(set(evidence_key_ids) - set(charter.attest_key_ids))
     if outside:
         return _refusal(
@@ -1050,11 +1075,6 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
             f"{peer_id!r} has {member.evidence}; it stays at "
             f"{member.tier!r}", peer_id=peer_id,
             stays_at=member.tier, has=member.evidence, requires=required)
-
-    grant, refusal = _ceiling_precondition(charter, tier, peer_id, None)
-    if refusal is not None:
-        refusal["peer_id"] = peer_id
-        return refusal
 
     promoted = _issue_membership(
         peer_id, tier, grant, member.artifact_digest, member.admitted_at,
