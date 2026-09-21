@@ -16430,10 +16430,15 @@ fn parse_optok(one: String) -> OpTok {
         return OpTok { name: one.clone(), ps: vec![], sig: false, ok: bare_ident(&one, 0i64) };
     }
     let nm = one.revl_slice(0i64, lp);
-    if ((!bare_ident(&nm, 0i64)) || (one.revl_slice((one.revl_length()).checked_sub(1i64).expect("revl: Int overflow"), one.revl_length()) != ")")) {
+    let rp = one.revl_index_of(")");
+    if ((!bare_ident(&nm, 0i64)) || (rp < lp)) {
         return OpTok { name: String::from(""), ps: vec![], sig: false, ok: false };
     }
-    let inner = one.revl_slice((lp).checked_add(1i64).expect("revl: Int overflow"), (one.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+    let tail = one.revl_slice((rp).checked_add(1i64).expect("revl: Int overflow"), one.revl_length());
+    if ((tail != "") && ((tail.revl_slice(0i64, 1i64) != ":") || (tail.revl_length() < 2i64))) {
+        return OpTok { name: String::from(""), ps: vec![], sig: false, ok: false };
+    }
+    let inner = one.revl_slice((lp).checked_add(1i64).expect("revl: Int overflow"), rp);
     if (inner == "") {
         return OpTok { name: nm.clone(), ps: vec![], sig: true, ok: true };
     }

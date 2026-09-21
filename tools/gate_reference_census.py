@@ -348,7 +348,13 @@ def make_admission_certify(tables):
     Returns `certify(source) -> bool`: True when the source is inside the
     admission surface. The walk is total by construction — every step either
     consumes a token or returns False — because "skip what I do not recognise" is
-    the wave-through the surface exists to prevent."""
+    the wave-through the surface exists to prevent.
+
+    This mirrors the STANDALONE `certify`, which is the question
+    `revl_gate::issue_admission` asks and the one the census corpus can pose: a
+    census case is a source, not a source plus a running composition. So every
+    signature a component is typed over has to come from the source's own text,
+    exactly as it does in the rust when `running` is `None`."""
     scalars = frozenset(tables["scalars"])
     reserved = frozenset(tables["reserved"])
     keywords = frozenset(tables["keywords"])
@@ -356,8 +362,10 @@ def make_admission_certify(tables):
     def tokens(source: str):
         """The source as tokens, or None for a byte outside the alphabet. A
         literal, a number, an operator, a `[`, an `@` or a non-ASCII byte all
-        return None, which is how "carries no term the type layer decides" is
-        enforced at the bottom rather than argued at the top."""
+        return None, which is how "carries no term this certifier does not type
+        itself" is enforced at the bottom rather than argued at the top. `.` is
+        in the alphabet only because a provide-method body reaches a required
+        service through one."""
         out = []
         i, n = 0, len(source)
         while i < n:
@@ -381,7 +389,7 @@ def make_admission_certify(tables):
                 out.append("->")
                 i += 2
                 continue
-            if ch in "{}(),:=":
+            if ch in "{}(),:=.":
                 out.append(ch)
                 i += 1
                 continue
@@ -397,69 +405,286 @@ def make_admission_certify(tables):
     def is_declarable(token: str) -> bool:
         return is_name(token) and token not in reserved
 
-    def certify(source: str) -> bool:
-        toks = tokens(source)
-        if toks is None:
-            return False
+    def matching_brace(toks, open_at):
+        """The matching `}` for the `{` at `open_at`, by DEPTH. Depth is what
+        makes a mis-sliced block impossible: a nested brace the body grammar
+        does not allow is handed to the body walk, which refuses it, rather than
+        shortening the range and leaving the tail to be re-read."""
+        depth, i, n = 0, open_at, len(toks)
+        while i < n:
+            if toks[i] == "{":
+                depth += 1
+            elif toks[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+        return None
+
+    def parse_component(toks, at):
+        """`component <Name> (requires|provides <key>: <Service>)* { (provide
+        <key> { … })* }`, as `(component, next index)`."""
+        n = len(toks)
+        i = at + 1
+        if i >= n or not is_declarable(toks[i]):
+            return None
+        name = toks[i]
+        i += 1
+        reqs, provs = [], []
+        while i < n and toks[i] in ("requires", "provides"):
+            if (i + 3 >= n or not is_name(toks[i + 1]) or toks[i + 2] != ":"
+                    or not is_name(toks[i + 3])):
+                return None
+            (reqs if toks[i] == "requires" else provs).append(
+                (toks[i + 1], toks[i + 3]))
+            i += 4
+        if i >= n or toks[i] != "{":
+            return None
+        close = matching_brace(toks, i)
+        if close is None:
+            return None
+        i += 1
+        blocks = []
+        while i < close:
+            # `provide` is the ONLY statement a certified component body carries.
+            if (toks[i] != "provide" or i + 2 >= close or not is_name(toks[i + 1])
+                    or toks[i + 2] != "{"):
+                return None
+            inner = matching_brace(toks, i + 2)
+            if inner is None or inner >= close:
+                return None
+            blocks.append((toks[i + 1], i + 3, inner))
+            i = inner + 1
+        return {"name": name, "reqs": reqs, "provs": provs,
+                "blocks": blocks}, close + 1
+
+    def parse(toks):
+        """The source as declarations, or None. Shape only; the obligations
+        across declarations are `check`'s."""
         n = len(toks)
         aliases = [toks[i + 1] for i, tok in enumerate(toks)
                    if tok == "type" and i + 1 < n]
         known = scalars | set(aliases)
-        services: list[str] = []
+        services, components = [], []
         declared_aliases = 0
         i = 0
         while i < n:
             if toks[i] == "type":
                 if i + 3 >= n or toks[i + 2] != "=":
-                    return False
+                    return None
                 if not is_declarable(toks[i + 1]) or toks[i + 3] not in scalars:
-                    return False
+                    return None
                 declared_aliases += 1
                 i += 4
                 continue
+            if toks[i] == "component":
+                parsed = parse_component(toks, i)
+                if parsed is None:
+                    return None
+                comp, i = parsed
+                components.append(comp)
+                continue
             if toks[i] != "service" or i + 2 >= n:
-                return False
+                return None
             if not is_declarable(toks[i + 1]) or toks[i + 2] != "{":
-                return False
-            services.append(toks[i + 1])
+                return None
+            name = toks[i + 1]
             i += 3
-            methods: list[str] = []
+            methods = []
             while i < n and toks[i] != "}":
+                # An operation carrying a MARKING (`emission fn`, `async fn`,
+                # …) does not match here and leaves the surface whole.
                 if toks[i] != "fn" or i + 1 >= n or not is_name(toks[i + 1]):
-                    return False
-                methods.append(toks[i + 1])
+                    return None
+                mname = toks[i + 1]
                 i += 2
                 if i >= n or toks[i] != "(":
-                    return False
+                    return None
                 i += 1
-                params: list[str] = []
+                params = []
                 while i < n and toks[i] != ")":
                     if not is_name(toks[i]) or i + 2 >= n or toks[i + 1] != ":":
-                        return False
+                        return None
                     if toks[i + 2] not in known:
-                        return False
-                    params.append(toks[i])
+                        return None
+                    params.append((toks[i], toks[i + 2]))
                     i += 3
                     if i < n and toks[i] == ",":
                         i += 1
-                if i >= n or len(set(params)) != len(params):
-                    return False
+                pnames = [p[0] for p in params]
+                if i >= n or len(set(pnames)) != len(pnames):
+                    return None
                 i += 1  # the `)`
+                ret = None
                 if i < n and toks[i] == "->":
                     if i + 1 >= n or toks[i + 1] not in known:
-                        return False
+                        return None
+                    ret = toks[i + 1]
                     i += 2
-            if i >= n or len(set(methods)) != len(methods):
-                return False
+                methods.append({"name": mname, "params": params, "ret": ret})
+            mnames = [m["name"] for m in methods]
+            if i >= n or len(set(mnames)) != len(mnames):
+                return None
             i += 1  # the `}`
-        # The reference refuses a duplicate service and a duplicate method and
-        # the native gate does not, so the certifier carries those two
-        # obligations itself.
+            services.append({"name": name, "methods": methods})
+        return {"services": services, "aliases": aliases,
+                "components": components, "declared_aliases": declared_aliases}
+
+    def type_expr(toks, at, end, env, comp, text):
+        """The type of one body expression and the index past it, or None.
+
+        Two productions and no more: a bound PARAMETER read, and a call
+        `<required key>.<op>(<expr>, …)` on a service the component requires.
+        No arm guesses a type, which is what makes the return comparison in
+        `check_method` a real check."""
+        if at >= end or not is_name(toks[at]):
+            return None
+        if at + 1 >= end or toks[at + 1] != ".":
+            bound = dict(env).get(toks[at])
+            return None if bound is None else (bound, at + 1)
+        svc = dict(comp["reqs"]).get(toks[at])
+        if svc is None:
+            return None
+        if at + 3 >= end or not is_name(toks[at + 2]) or toks[at + 3] != "(":
+            return None
+        decl = next((s for s in text if s["name"] == svc), None)
+        if decl is None:
+            return None
+        sig = next((m for m in decl["methods"] if m["name"] == toks[at + 2]), None)
+        if sig is None or sig["ret"] is None:
+            return None
+        params = sig["params"]
+        i, args = at + 4, 0
+        while i < end and toks[i] != ")":
+            if args > 0:
+                if toks[i] != ",":
+                    return None
+                i += 1
+            typed = type_expr(toks, i, end, env, comp, text)
+            if typed is None:
+                return None
+            ty, i = typed
+            if args >= len(params) or params[args][1] != ty:
+                return None
+            args += 1
+        if i >= end or args != len(params):
+            return None
+        return sig["ret"], i + 1
+
+    def check_method(toks, at, end, decl, comp, text):
+        """`fn <op>(<param>, …) = <expr>` against the operation it implements,
+        as the index past it. No parameter annotation, no return annotation, no
+        block body: each is a form the reference has its own rules for."""
+        params, ret = decl["params"], decl["ret"]
+        if ret is None or ret not in scalars:
+            return None
+        if any(ty not in scalars for _, ty in params):
+            return None
+        i = at + 2  # past `fn <op>`
+        if i >= end or toks[i] != "(":
+            return None
+        i += 1
+        env = []
+        while i < end and toks[i] != ")":
+            if env:
+                if toks[i] != ",":
+                    return None
+                i += 1
+                if i >= end:
+                    return None
+            if not is_name(toks[i]):
+                return None
+            if len(env) >= len(params) or params[len(env)][0] != toks[i]:
+                return None
+            env.append(params[len(env)])
+            i += 1
+        if i >= end or len(env) != len(params):
+            return None
+        i += 1  # the `)`
+        if i >= end or toks[i] != "=":
+            return None
+        typed = type_expr(toks, i + 1, end, env, comp, text)
+        if typed is None or typed[0] != ret:
+            return None
+        return typed[1]
+
+    def check_block(toks, block, decl, comp, text):
+        """One `provide <key> { … }` body: exactly the declared operations, each
+        typed. A missing one, an extra one and a repeated one are all reference
+        refusals the composition gate does not make."""
+        key, start, end = block
+        seen, i = [], start
+        while i < end:
+            if toks[i] != "fn" or i + 1 >= end or not is_name(toks[i + 1]):
+                return None
+            name = toks[i + 1]
+            op = next((m for m in decl["methods"] if m["name"] == name), None)
+            if op is None or name in seen:
+                return None
+            seen.append(name)
+            i = check_method(toks, i, end, op, comp, text)
+            if i is None:
+                return None
+        if i != end or len(seen) != len(decl["methods"]):
+            return None
+        return len(seen)
+
+    def check_component(toks, comp, text):
+        """One component against the service table it is written over, as the
+        number of provide-method bodies typed."""
+        keys = [k for k, _ in comp["reqs"] + comp["provs"]]
+        if len(set(keys)) != len(keys):
+            return None
+        block_keys = [b[0] for b in comp["blocks"]]
+        if len(set(block_keys)) != len(block_keys) \
+                or len(block_keys) != len(comp["provs"]):
+            return None
+        # Standalone, every service a component names has to be in the text: the
+        # rust reads an AMBIENT one off the manifest wire, and there is no wire
+        # here.
+        for _, svc in comp["reqs"]:
+            if not any(s["name"] == svc for s in text):
+                return None
+        bodies = 0
+        for key, svc in comp["provs"]:
+            decl = next((s for s in text if s["name"] == svc), None)
+            block = next((b for b in comp["blocks"] if b[0] == key), None)
+            if decl is None or block is None:
+                return None
+            typed = check_block(toks, block, decl, comp, text)
+            if typed is None:
+                return None
+            bodies += typed
+        return bodies
+
+    def certify(source: str) -> bool:
+        toks = tokens(source)
+        if toks is None:
+            return False
+        parsed = parse(toks)
+        if parsed is None:
+            return False
+        services = [s["name"] for s in parsed["services"]]
+        components = [c["name"] for c in parsed["components"]]
+        aliases = parsed["aliases"]
+        # The reference refuses a duplicate service, method, alias and
+        # component, and the native gate does not make all of those refusals, so
+        # the certifier carries them itself.
         if len(set(services)) != len(services):
             return False
-        if len(set(aliases)) != len(aliases) or declared_aliases != len(aliases):
+        if len(set(aliases)) != len(aliases) \
+                or parsed["declared_aliases"] != len(aliases):
             return False
-        return not (set(services) & set(aliases))
+        if len(set(components)) != len(components):
+            return False
+        # One namespace per name, conservatively.
+        if set(services) & set(aliases) or set(components) & set(services) \
+                or set(components) & set(aliases):
+            return False
+        for comp in parsed["components"]:
+            if check_component(toks, comp, parsed["services"]) is None:
+                return False
+        return True
 
     return certify
 
@@ -646,6 +871,18 @@ ADMISSION_PROGRAMS = (
      "type Key = Str\ntype Size = Int32\n\nservice Cache {\n"
      "  fn read(k: Key) -> Size\n}\n"),
     ("interface_empty_service", "service Marker {\n}\n"),
+    # --- the provide-method half of the surface (issue #346, 457 T6) ---
+    ("component_identity_body",
+     "service S {\n  fn a(x: Int) -> Int\n}\n"
+     "component C provides s: S {\n  provide s {\n    fn a(x) = x\n  }\n}\n"),
+    ("component_requires_and_calls",
+     "service Store {\n  fn get(key: Str) -> Str\n}\n"
+     "service Cache {\n  fn lookup(key: Str) -> Str\n}\n"
+     "component Kv provides store: Store {\n"
+     "  provide store {\n    fn get(key) = key\n  }\n}\n"
+     "component CacheLayer requires store: Store provides cache: Cache {\n"
+     "  provide cache {\n    fn lookup(key) = store.get(key)\n  }\n}\n"),
+    ("component_no_provision", "component Idle {\n}\n"),
     # --- near misses: one token outside the surface each ---
     ("near_miss_duplicate_service",
      "service Dup {\n  fn a(x: Int) -> Int\n}\nservice Dup {\n  fn b(x: Int) -> Int\n}\n"),
@@ -657,9 +894,29 @@ ADMISSION_PROGRAMS = (
     ("near_miss_record_alias", "type Row = { id: Int }\n"),
     ("near_miss_shadows_builtin", "type Int = Str\n"),
     ("near_miss_unknown_type", "service S {\n  fn a(x: Mystery) -> Int\n}\n"),
-    ("near_miss_component",
-     "service S {\n  fn a(x: Int) -> Int\n}\n"
+    # --- near misses in the provide-method half ---
+    ("near_miss_component_unknown_service",
      "component C provides s: S {\n  provide s {\n    fn a(x) = x\n  }\n}\n"),
+    # The RETURN near miss (`fn a(x: Int) -> Str` implemented by `fn a(x) = x`)
+    # is deliberately NOT a corpus entry, and the reason is worth writing down:
+    # the reference refuses it `T1` and `admit_src` raises no objection, so it is
+    # a `false-admit/T1` — a real, pre-existing gap in the native gate's type
+    # layer (docs/design/457 T4), not something this surface introduced. Putting
+    # it in the corpus would widen a FAIL-OPEN baseline with a hand-written
+    # program that is not in the tree. The certifier's obligation to catch it is
+    # held directly instead, in
+    # `tests/test_gate_reference_census.py::test_the_admission_mirror_matches_
+    # the_rust` and in `admission.rs`'s own unit tests.
+    ("near_miss_component_missing_method",
+     "service S {\n  fn a(x: Int) -> Int\n  fn b(x: Int) -> Int\n}\n"
+     "component C provides s: S {\n  provide s {\n    fn a(x) = x\n  }\n}\n"),
+    ("near_miss_component_literal_body",
+     "service S {\n  fn a(x: Int) -> Int\n}\n"
+     "component C provides s: S {\n  provide s {\n    fn a(x) = 1\n  }\n}\n"),
+    ("near_miss_component_effect",
+     "service S {\n  fn a(x: Int) -> Int\n}\n"
+     "component C provides s: S {\n  let m = effect Map.new() undo m.drop()\n"
+     "  provide s {\n    fn a(x) = x\n  }\n}\n"),
 )
 
 
@@ -721,7 +978,8 @@ HARD = "false-admit"
 # The ISSUED-ADMISSION bypass, distinct from `false-admit`. The gate HAS an
 # admission arm now (`revl_gate::issue_admission`, issue #346): it upgrades a
 # no-objection to an issued admission where the source is inside the admission
-# surface, which is the region carrying no term the reference type layer decides.
+# surface: interface declarations, which carry no term at all, and components
+# whose provide-method bodies the certifier types itself (docs/design/457 T6).
 # So this bucket is a LIVE guard on every run, and the thing it guards is the most
 # dangerous class the gate can commit: a host reading a rust admission as a green
 # and running code the reference never admitted. Both engines exercise the arm and

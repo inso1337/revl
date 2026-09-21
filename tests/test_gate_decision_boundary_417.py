@@ -98,8 +98,15 @@ def test_the_crate_states_what_it_decides_and_does_not_decide():
     assert meta["verdict_arms"] == ["refused", "no_objection", "outside_frontier"]
     assert "admitted" not in meta["verdict_arms"]
     assert meta["admitted_layer"] == GEN.ADMITTED_LAYER
-    assert "interface declarations only" in GEN.ADMITTED_LAYER
-    assert "no term the reference type layer decides" in GEN.ADMITTED_LAYER
+    # The admission surface grew past interface declarations at docs/design/457
+    # T6: a component whose provide-method bodies are parameter reads and calls
+    # on a required service is inside it, because the certifier TYPES those
+    # bodies rather than deferring them. Both halves have to be named, or a
+    # reader cannot tell which claim the sentence is making.
+    assert "interface declarations" in GEN.ADMITTED_LAYER
+    assert "provide-method" in GEN.ADMITTED_LAYER
+    assert "every term in the region is one this gate types itself" \
+        in GEN.ADMITTED_LAYER
     # Both halves must be spelled out, or a reader cannot know where the gap is.
     assert "composition" in GEN.COVERED_LAYER and "guarantee" in GEN.COVERED_LAYER
     assert "NOT the reference type layer" in GEN.COVERED_LAYER
@@ -150,9 +157,14 @@ def test_337_polyglot_mesh_receiver_is_gated_on_the_same_statement():
     assert "**not** the reference type" in contract
     assert "the verdict surface has no arm that could commit it" in contract
     # and the admission surface a seam MAY rely on is stated, with the scope a
-    # cached admission is only valid inside
+    # cached admission is only valid inside. Both halves of the surface have to
+    # be named there, or a seam cannot tell which claim it is caching: the
+    # interface declarations it always held, and the provide-method bodies the
+    # certifier types itself (docs/design/457 T6).
     assert "ADMISSION_SURFACE_ID" in contract
-    assert "interface declarations only" in contract
+    assert "interface declarations" in contract
+    assert "provide methods are" in contract
+    assert "does not defer them" in contract
 
 
 def test_338_rust_cargo_consumer_treats_the_gate_as_refuse_only():

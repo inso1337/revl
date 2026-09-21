@@ -140,28 +140,78 @@ def _signature(params: object) -> str | None:
     return "(" + "|".join(rendered) + ")"
 
 
+#: The exact key set a PLAIN service operation's IR entry carries: a parameter
+#: list, a return type, and an `emission` flag that is False. Every other key in
+#: `lower.py`'s service table is a MARKING — `async`, `capabilities`,
+#: `commutative`, `idempotent`, `termination`, `cache`, `validated`, `route` —
+#: and each of them changes what the reference decides about a call. The return
+#: type is rendered only for an operation whose entry is exactly this set, so a
+#: marking the wire has no spelling for WITHHOLDS the return rather than
+#: shipping a signature that looks complete and is not. A marking added to
+#: `lower.py` later withholds on arrival, without an edit here.
+_PLAIN_METHOD_KEYS = frozenset({"params", "returns", "emission"})
+
+
+def _return_type(method: object) -> str | None:
+    """``Type`` for a plain operation's declared return, or None when the wire
+    says nothing about it.
+
+    The return is the half the wire withheld until issue #346's admission slice
+    needed it: a candidate's ``fn lookup(key) = store.get(key)`` is checked by
+    the reference against the RUNNING ``get``'s return, so a reader that cannot
+    see that return cannot decide the method and must withhold. None is the
+    silence, and it is returned for a marked operation, an operation with no
+    declared return, and a return whose spelling needs one of
+    `_WIRE_STRUCTURE`."""
+    if not isinstance(method, dict):
+        return None
+    if set(method) != _PLAIN_METHOD_KEYS or method.get("emission"):
+        return None
+    returns = method.get("returns")
+    if not isinstance(returns, str) or not returns:
+        return None
+    if any(ch in returns for ch in _WIRE_STRUCTURE + ":"):
+        return None
+    return returns
+
+
 def _operation(name: str, method: object) -> str:
-    """One operation token: the bare name, or the name followed by its declared
-    parameter list. The parameter list is the claim; its absence is silence."""
+    """One operation token: the bare name, the name followed by its declared
+    parameter list, or both followed by ``:Return``. Each half is a claim and
+    its absence is silence, so a reader may believe what is there and must
+    decide nothing about what is not."""
     if not _wire_name(name):
         return name
     signature = _signature(method.get("params")) if isinstance(method, dict) \
         else None
-    return name if signature is None else f"{name}{signature}"
+    if signature is None:
+        return name
+    returns = _return_type(method)
+    return f"{name}{signature}" if returns is None \
+        else f"{name}{signature}:{returns}"
 
 
 def _operations(entry: object) -> list[str]:
     """One service's declared operation tokens, in declaration order. An entry
     with no readable ``methods`` table renders as the empty surface: the IR's
     service table always carries one, and a service with no operation is a
-    legal (if idle) declaration."""
+    legal (if idle) declaration.
+
+    A service entry carrying anything beyond its ``methods`` table (today
+    ``commutative``) has every return WITHHELD, for the reason a marked
+    operation does: the entry-level marking is a fact about the operations that
+    the wire has no spelling for."""
     if not isinstance(entry, dict):
         return []
     methods = entry.get("methods")
+    plain = set(entry) == {"methods"}
     if isinstance(methods, dict):
-        return [_operation(name, method) for name, method in methods.items()]
+        return [_operation(name, method if plain else {"params":
+                           (method or {}).get("params")})
+                for name, method in methods.items()]
     if isinstance(methods, list):
-        return [_operation(m.get("name", ""), m)
+        return [_operation(m.get("name", ""),
+                           m if plain else {"params": m.get("params")})
                 for m in methods if isinstance(m, dict)]
     return []
 

@@ -4472,14 +4472,21 @@ def test_manifest_wire_projects_the_service_block():
     (issue #346), one level of the same claim down: `pa()` says `pa` takes no
     parameter, while a bare `pa` says nothing about its arguments. That is what
     lets the call be TYPED against the running declaration and not only
-    resolved against it."""
+    resolved against it.
+
+    A PLAIN operation carries its declared RETURN after the list
+    (`pa():Int`, docs/design/457 T6), the last level of the same claim: it is
+    what lets a candidate's provide-method body be typed against the running
+    declaration. An operation carrying any marking has its return WITHHELD, so
+    silence there is silence about the result."""
     from revl import manifest_wire
 
     ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
-    assert manifest_wire(ir).endswith(";!services;:A,pa();:B,pb()"), manifest_wire(ir)
+    assert manifest_wire(ir).endswith(";!services;:A,pa():Int;:B,pb():Int"), \
+        manifest_wire(ir)
     rows = manifest_wire(ir, replacing=("A",)).split(";")
     assert rows[-1] == "-A"
-    assert rows[-4:-1] == ["!services", ":A,pa()", ":B,pb()"]
+    assert rows[-4:-1] == ["!services", ":A,pa():Int", ":B,pb():Int"]
     # the composition rows keep their exact positions and order, so the G3 DFS
     # seed order cannot have moved
     assert rows[:rows.index("!services")] == manifest_wire(ir).split(
@@ -4740,8 +4747,8 @@ def test_manifest_wire_renders_the_route_rows():
     assert rows.index("Router<*kv") < rows.index("Router>kv/r1,r2"), rows
     # ... and the whole ordering of the combined wire, in one line
     assert rows == ["StoreA/kv/r1", "StoreB/kv/r2", "Router/api/", "Router<*kv",
-                    "Router>kv/r1,r2", "!services", ":Kv,get(k:Str)",
-                    ":Api,go(k:Str)"], rows
+                    "Router>kv/r1,r2", "!services", ":Kv,get(k:Str):Str",
+                    ":Api,go(k:Str):Str"], rows
     # the withdrawal row stays last, after the service block
     assert manifest_wire(ir, replacing=("StoreB",)).split(";")[-1] == "-StoreB"
     # a composition with no route renders no route row (the earlier slices are
