@@ -261,6 +261,87 @@ def _held_out_fence(root: Path) -> frozenset[str]:
     return frozenset()
 
 
+# The directories `tools/gate_reference_census.py` walks for `.rvl` documents
+# (roadmap item 542, issue #1331). Every document under one of them is a case in
+# a scoring corpus, so it needs a line in `tests/fixtures/corpus_provenance.json`
+# and reds `tests/test_corpus_provenance.py` without one. Nothing in the import
+# graph reaches from a `.rvl` to that test, so the manifest is selected only by
+# a rule that names it.
+#
+# A NEW document reached the manifest from every corpus directory but one, and
+# always through the FULL fail-safe (`tests/fixtures/**` and `examples/**` by
+# name, `stdlib/`, `selfhost/`, `demo/`, `tck/` and `dogfood/` as unmapped or
+# unreferenced paths). `backends/**` is the one: it has its own narrow rule, so
+# `backends/go/scenarios/<new>.rvl` selected 243 nodes, none of them the
+# manifest, and an undeclared document there reached main green. A REMOVED
+# document, which leaves a stale entry the same gate refuses, was narrower
+# still: `stdlib/json.rvl` selected 16. Measured on this tree before this rule.
+#
+# What this does not close, stated so the next reader does not overtrust it:
+# issue #1331's own document is not this shape. `tests/fixtures/**` was already
+# FULL, and PR #1271's head carried no `tests/test_corpus_provenance.py` at all
+# because the manifest landed on main four hours after that branch last took
+# main. No selection can run a gate the branch does not have; only a
+# merge-queue-style re-run on the merged tree can.
+#
+# DERIVED from the census by AST rather than restated, for the same reason
+# `held_out_fence` is: the census owns which directories it walks, and a copy
+# here would be free to go stale against it.
+_CORPUS_DIRS_CACHE: dict[Path, tuple] = {}
+
+
+def census_corpus_dirs(root: Path) -> tuple[str, ...]:
+    """`CORPUS_DIRS` as written in `tools/gate_reference_census.py`.
+
+    An EMPTY result means "could not read it", and the caller reads that as
+    "every `.rvl` is a corpus document". That is the opposite default from
+    `held_out_fence`'s, deliberately: a fence file that cannot be read is still
+    covered by the generic rules, while an unreadable corpus list would make a
+    scoring document select nothing at all, which is the fail-open direction
+    this rule exists to close. Over-selecting costs one 0.3s test module.
+    """
+    if root in _CORPUS_DIRS_CACHE:
+        return _CORPUS_DIRS_CACHE[root]
+    _CORPUS_DIRS_CACHE[root] = _census_corpus_dirs(root)
+    return _CORPUS_DIRS_CACHE[root]
+
+
+def _census_corpus_dirs(root: Path) -> tuple[str, ...]:
+    source = root / "tools" / "gate_reference_census.py"
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return ()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "CORPUS_DIRS" not in names:
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            return ()
+        return tuple(
+            e.value for e in node.value.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    return ()
+
+
+def _is_scoring_corpus_document(f: str, root: Path) -> bool:
+    """True when this path is an `.rvl` the census walks.
+
+    `EXTRA_DIRS` (`bench/`, `site/`, `docs/`, ...) is NOT read: the census walks
+    it only under `--everything`, and `corpus_provenance.enumerate_corpora`
+    calls `load_corpus` without it, so a document there is in no scoring corpus
+    and needs no manifest line.
+    """
+    if not f.endswith(".rvl"):
+        return False
+    dirs = census_corpus_dirs(root)
+    if not dirs:
+        return True
+    return any(f == d or f.startswith(d + "/") for d in dirs)
+
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -600,6 +681,18 @@ def select(changed, root) -> dict:
         if f in held_out_fence(root):
             pytest_nodes.add("tests/test_heldout_scoring.py")
             reasons.append(f"{f} (held-out scoring fence)")
+
+        # --- the corpus provenance manifest (issue #1331) ------------------ #
+        # Here for the same reason as the two blocks above: `backends/**` and
+        # `stdlib/**` are census corpus directories AND have their own rules
+        # further down that end in `continue`. A document that arrives in a
+        # scoring corpus must name its generation, and the manifest is the only
+        # thing that reads it. Added and deleted are the same rule: a removed
+        # document leaves a STALE entry, which the same gate refuses in the
+        # other direction.
+        if _is_scoring_corpus_document(f, root):
+            pytest_nodes.add("tests/test_corpus_provenance.py")
+            reasons.append(f"{f} (scoring corpus document -> provenance)")
 
         # --- structural: always FULL --------------------------------------- #
         if f == "Makefile":
