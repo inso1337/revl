@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4413,
+      "statements": 4431,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -198,7 +198,7 @@
           "_go_v3_construct": 29
         },
         "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead.": {
-          "_emit": 111
+          "_emit": 112
         },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_go_v3_expr": 48
@@ -270,6 +270,10 @@
         "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity.": {
           "_declares_secret": 16
         },
+        "issue #721: `_refuse_pure_path_component_drop` and its `_component_is_observable` predicate refuse a document whose component the pure typed-core path would DROP (a component with a provide method or an activation body, beside a top-level declaration). A corpus document cannot reach them: reaching them means the reference RAISES, and the byte-agreement oracle compares emitted bytes, so such a document would break the harness rather than cover the lines. They are pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_refuses_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_refused_by_name, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them.": {
+          "_component_is_observable": 6,
+          "_refuse_pure_path_component_drop": 8
+        },
         "stc-go component activation and provided-service implementation, including host acquisition/stubs and runtime imports. emit returns through _emit_v3_go for corpus modules before constructing these runtime sections; emit_go.rvl explicitly excludes components/services/provide/host effects. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path.": {
           "_acquire_value_go_type": 17,
           "_collect_host_calls": 10,
@@ -286,7 +290,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 3179
+      "uncovered_statements": 3194
     },
     "java": {
       "statements": 2793,
@@ -768,7 +772,7 @@
           "_ComponentEmitter._method": 4
         },
         "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
-          "_ComponentEmitter._method_step": 28
+          "_ComponentEmitter._method_step": 22
         },
         "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. Issue #957's `Map` subscript arm adds seven statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "emit": 43
@@ -816,15 +820,14 @@
         "`Map` subscript lowering (issue #957): `_scan_uses` sets the `map_index` gate that pulls the `_revl_map_index` helper into the module. No emit_py_corpus document indexes a `Map` \u2014 `lookup`/`has`/`set` are the Map surface the corpus exercises \u2014 and a document that did would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d), the same shape as the declared-`Secret[Map[K, V]]` entry). The reference half is pinned on all five tiers by tests/test_cross_tier_execution.py: the hit, the miss asserted by its reason, and a per-tier guard on the emitted lowering. Porting the arm to selfhost/emit_py.rvl is the corpus work that retires this entry.": {
           "_scan_uses": 1
         },
-        "backends/python/emit.py::_ComponentEmitter._method_control: issue #548 provide-method control flow (if/while/for/break/continue over a method's value computation) and its nested block step emitter. No byte-agreement corpus document contains method-level control flow, so no corpus document calls the helper; the fn-grammar if/while/for it mirrors is covered through the module _fn_stmt path.": {
-          "_ComponentEmitter._method_control": 19,
-          "_ComponentEmitter._method_control.block": 6
+        "backends/python/emit.py::_ComponentEmitter._method_control: issue #548 provide-method control flow. `_method_control` itself is covered now \u2014 emit_py_corpus/services_control_flow.rvl (issue #721) is the corpus document that reaches every arm of it. What is left is its nested `block` helper's EMPTY-arm `pass`, which is legal but is a shape no author writes, and the port's twin line is recorded under selfhost/py `method_block`.": {
+          "_ComponentEmitter._method_control.block": 2
         },
         "item 872 additivity arm of the `.transactional(scope=...)` kwarg: every witnessed extern in the corpus declares a capability (`emit_py_corpus/witnessed.rvl` declares `witnessed[fs]`), so the branch that emits NO `scope=` for a cap-less witnessed extern never runs under the oracle. That branch is the byte-identical additivity guarantee a pre-872 witnessed extern depends on, and reaching it from a corpus document means adding a `tests/fixtures` input, which is a gate-crate census input this item must not move.": {
           "_transactional_scope_kwargs": 1
         }
       },
-      "uncovered_statements": 678
+      "uncovered_statements": 649
     },
     "rust": {
       "statements": 3771,
@@ -1102,7 +1105,7 @@
           "_ts_inplace_write": 3
         },
         "Provide-method residuals: `_method_body` retains witnessed acquisition, generic non-call compensation snapshots, empty-list `any[]` fallback, nested-provide rejection and unknown-step rejection. Mutable/immutable locals, returns, await, Map CAS and call compensation are covered; witnessed transactions remain the named boundary": {
-          "_method_body": 37
+          "_method_body": 17
         },
         "Standalone transport only: `<module>` calls `_main`; `_main` parses `--runtime`, stdin/file JSON, usage and missing-argument errors, then writes `emit`. The oracle imports and calls `emit` directly, so these statements do not represent an emitter branch": {
           "<module>": 1,
@@ -1157,7 +1160,7 @@
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 542
+      "uncovered_statements": 522
     },
     "wasm": {
       "statements": 2887,
@@ -1692,7 +1695,7 @@
       "uncovered_statements": 179
     },
     "py": {
-      "statements": 2068,
+      "statements": 2105,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1791,6 +1794,9 @@
         "inline_template rejects guarded return with missing expression/condition. Such a value-returning guard is frontend-invalid; inline.rvl covers valid guarded templates. Reference _fn_inline_template has the identical null checks.": {
           "inline_template": 1
         },
+        "issue #721: `method_block` renders `pass` for an EMPTY provide-method control-flow arm, which is the one line of its own the reference's `block` helper adds. services_control_flow.rvl reaches every other statement; an empty arm is legal but writing one into a corpus document would pin a shape no author produces. The reference half of the same line is recorded under `_ComponentEmitter._method_control.block`.": {
+          "method_block": 1
+        },
         "item 872 additivity arm of the `.transactional(scope=...)` kwarg: every witnessed extern in the corpus declares a capability (`emit_py_corpus/witnessed.rvl` declares `witnessed[fs]`), so the branch that emits NO `scope=` for a cap-less witnessed extern never runs under the oracle. That branch is the byte-identical additivity guarantee a pre-872 witnessed extern depends on, and reaching it from a corpus document means adding a `tests/fixtures` input, which is a gate-crate census input this item must not move.": {
           "transactional_scope_kwargs": 1
         },
@@ -1807,7 +1813,7 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 103
+      "uncovered_statements": 104
     },
     "rust": {
       "statements": 4092,
@@ -1936,7 +1942,7 @@
       "uncovered_statements": 289
     },
     "ts": {
-      "statements": 2166,
+      "statements": 2204,
       "uncovered": {
         "Async emission-node negative tests: `emission_call_node` returns false for a non-call, a call whose target is not `req`, or a requirement method absent from the component's async operation keys. Async req calls and async arrows exercise its true branch": {
           "emission_call_node": 3

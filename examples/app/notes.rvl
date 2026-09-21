@@ -58,7 +58,7 @@ service NoteStore {
   fn get(id: Str) -> Opt[Note]
   fn all() -> List[Note]
   fn size() -> Int
-  emission fn create(row: Note)
+  emission[store] fn create(row: Note)
 }
 
 // The memory driver. Any other driver (sqlite, postgres) would provide this same
@@ -127,7 +127,7 @@ service NotesApi {
   fn list_notes(limit: Opt[Int]) -> Result[List[Note], ApiError]
 
   route post "/notes"
-  emission fn create_note(note: NewNote) -> Result[Note, ApiError]
+  emission[store] fn create_note(note: NewNote) -> Result[Note, ApiError]
 }
 
 // The HTTP component wires the endpoints to the store. Status and outcome come
@@ -303,7 +303,7 @@ service NotesConsoleRpc {
 type Asset = { path: Str, sha256: Str }
 
 service WebUI {
-  emission fn add_entry(
+  emission[webui] fn add_entry(
     dev_source: Asset,
     prod_manifest: Str,
     routes: List[Str],

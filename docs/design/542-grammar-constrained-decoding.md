@@ -1,7 +1,9 @@
 # 542: Compiling the typed model boundary into a decoding grammar
 
-Roadmap: item 513 (issue #1187), from the 2026-09-19 external review. Slice 1
-is LANDED with this note; slices 2 to 4 are designed here and not written.
+Roadmap: item 513 (issue #1187), from the 2026-09-19 external review. Slices 1,
+2 and 4 are LANDED. Slice 3 is designed here and not written, and section 6 says
+what it costs. Sections 0 to 8 are slice 1's note, revised only where slice 2
+measured something it had listed as unverified; sections 9 to 11 are new.
 
 Reconciles with: item 257 and `docs/design/257-typed-model-boundary.md` (the
 typed boundary, whose schema this compiles a second time), item 260 (the
@@ -87,6 +89,12 @@ the same rule from opposite sides: the compiler states, the provider performs.
 
 It constrains the decode, or it does not. revl does not model that, call it, or
 verify it.
+
+> Slice 2 refined the last clause and section 9.2 is the refinement. revl still
+> does not model or call a decode. It does now verify one thing, and only one:
+> a provider that *claims* to have honoured the stated grammar is held to the
+> claim. A provider that claims nothing is still not verified and still not
+> refused, for the reason the rest of this section gives.
 
 This is the boundary the item turns on, and getting it wrong in either
 direction breaks the feature. Pushing further, so that revl owns a decoder
@@ -227,26 +235,50 @@ operation and extern alike. `tests/test_decode_grammar_513.py` holds the
 derived grammar to accepting exactly what item 257's validator accepts, using a
 miniature GBNF recogniser so the property is checked rather than asserted.
 
-**Slice 2, the provider seam.** A provider that can constrain a decode reads
-`response_grammar` and passes it down; one that cannot ignores it. The seam is
-per tier and starts with `backends/python`, whose `_revl_validate` path already
-has the crossing's IR in hand. Nothing in slice 2 changes what the compiler
-derives.
+**Slice 2, the provider seam (LANDED).** A provider that can constrain a decode
+reads `response_grammar` and passes it down; one that cannot ignores it. The
+seam is per tier and starts with `backends/python`, whose `_revl_validate` path
+already has the crossing's IR in hand. Nothing in slice 2 changes what the
+compiler derives. Section 9 is the seam, and section 11 is what a real provider
+did with it.
 
-**Slice 3, `model.json[T](prompt)`.** The surface the issue sketches. It is a
-sugar over a `validated` emission whose return type is `T`, and it is
-deliberately last: the derivation and its refusal are the checkable part, and
-adding syntax before them would have shipped a keyword with nothing behind it.
-The one thing it adds that the modifier does not is a call site where `T` is
-written at the *use*, which needs the return type to be inferred from the type
-argument rather than read off the declaration.
+**Slice 3, `model.json[T](prompt)` (NOT landed).** The surface the issue
+sketches. It is a sugar over a `validated` emission whose return type is `T`,
+and it is deliberately last: the derivation and its refusal are the checkable
+part, and adding syntax before them would have shipped a keyword with nothing
+behind it. The one thing it adds that the modifier does not is a call site where
+`T` is written at the *use*, which needs the return type to be inferred from the
+type argument rather than read off the declaration.
 
-**Slice 4, dialect negotiation.** A second `format` for a provider whose
-structured-output mode is JSON-Schema-shaped rather than GBNF-shaped. It is an
-added value under the existing key, not a reinterpretation of these bytes, and
-item 515's device profile is where "does this member support constrained
-decoding" belongs, as section 9 of `docs/design/531-model-placement.md`
-already says.
+Calling it a sugar undersells it, and the cost is worth writing down before the
+next attempt starts. Today a service method cannot be generic at all: `service
+Model { emission validated fn json[T](h: Str) -> T }` is refused by the parser,
+which expects `(` where the `[` is. So slice 3 needs, in order:
+
+1. type parameters on a service-method declaration, and a type argument at an
+   `emit` call site, in the parser;
+2. unification of the call-site type argument into the return type in the
+   checker, since `T` appears in no argument and cannot be inferred from one;
+3. and then the part that is not sugar: `response_schema` and `response_grammar`
+   are derived in `_validated_response_ir` from the method's *declared* return
+   type and live on the method IR. With `T` supplied per use, two call sites of
+   one method state two different grammars, so **both keys move from the method
+   to the crossing**. That is an IR-shape change, which means all six emitters'
+   validate seams read them from the call node rather than from the method spec,
+   plus the goldens, the gate crate and the self-host ports.
+
+The honest summary is that slices 1, 2 and 4 are the derivation, the seam and
+the dialect, and slice 3 is a language feature that happens to use them.
+
+**Slice 4, dialect negotiation (LANDED).** A second `format` for a provider
+whose structured-output mode is JSON-Schema-shaped rather than GBNF-shaped. It
+is an added value under the existing key, not a reinterpretation of these bytes,
+and item 515's device profile is where "does this member support constrained
+decoding" belongs, as section 9 of `docs/design/531-model-placement.md` already
+says. Section 10 is the dialect. It landed with slice 2 rather than after it
+because the measurement in section 11 could not be taken without it: the
+endpoint available to measure against honours a JSON Schema and ignores a GBNF
+grammar, so a seam that spoke only GBNF had no real provider to be tested by.
 
 ## 7. Recursion, and what would have to change together
 
@@ -265,26 +297,379 @@ and the right place for the work.
 
 ## 8. Things stated here that are not verified
 
-**That a real decoder honours the grammar.** Nothing in this slice observes a
-decoder. The tests check that the derived grammar has the language the declared
-type describes; they cannot check that llama.cpp, or any other runtime,
-enforces it. This is the single largest unverified claim in the note, and it is
-why item 257's validator stays on rather than being relaxed in the presence of
-a grammar.
-
 **That the emitted GBNF parses in llama.cpp.** The agreement tests use a
 recogniser written for this file against the subset of GBNF the derivation
 emits. That establishes the language is right; it does not establish that
-llama.cpp's own parser accepts the same text. A slice-2 conformance check
-against a real GBNF parser is the honest way to close this, and it is not done.
+llama.cpp's own parser accepts the same text. A conformance check against a real
+GBNF parser is the honest way to close this, and it is still not done. Section
+11 measured an endpoint that ignores a GBNF grammar outright, so it did not
+close this either.
 
 **The emission-budget claim.** Section 1 says a constrained decode spends fewer
-retries. That is the mechanism working as designed, not a measurement. No
-before-and-after retry counts against a real model are reported here, and the
-roadmap item should not be read as claiming any.
+retries. Section 11 measured that a constrained decode produced a valid response
+on every sample and an unconstrained one did not, which is the mechanism, but it
+did not run the crossings under a declared `retry N` and count re-issues. No
+before-and-after retry counts are reported here, and the roadmap item should not
+be read as claiming any.
 
 **That the pinned member order is acceptable to every decoder.** Section 5
 argues it cannot cause a false reject, which is a property of the two revl-side
 derivations and is tested. Whether a particular decoder finds a fully ordered
-object grammar easy to compile, or whether the ordering degrades sample
-quality, is a provider question this note does not answer.
+object grammar easy to compile, or whether the ordering degrades sample quality,
+is a provider question this note still does not answer. What section 11.3 did
+measure is narrower and sharper: a provider honouring the OTHER dialect returned
+a different member order on two of three samples, which is why the two dialects
+are held to different standards.
+
+**That the honoured-check is sufficient.** Section 9.5 states the opposite
+outright: it is necessary and not sufficient, and says exactly what it cannot
+see.
+
+What this section used to say, and no longer does: that nothing in the item
+observes a decoder. Section 11 does.
+
+---
+
+## 9. The provider seam (slice 2)
+
+Slice 1 stated a grammar and nothing read it. This section is the half that
+lets a provider receive it, and the half that decides what happens when one
+says it honoured the grammar and did not.
+
+### 9.1 Three calls, and the line between them
+
+The seam is three runtime entry points. In the python tier they are
+`runtime.revl_decode_grammar`, `runtime.revl_constrain` and the `grammar`
+parameter of the existing `runtime.validate_response`.
+
+```
+revl_decode_grammar(key)            -> the stated constraint, or None
+revl_constrain(key, dialects)       -> (dialect, artifact, digest), or None
+validate_response(..., grammar=key) -> the existing seam, now also judging
+```
+
+`key` is the crossing's identity, `"Service.method"`. The emitted module
+registers every validated crossing's grammar once at import (`register_grammars`),
+so a provider finds the constraint for the crossing it is about to serve without
+the compiler having to thread it through a call signature it does not own. A
+document with no validated crossing emits no registry and is byte-identical to
+one compiled before this slice.
+
+The line between the first two calls is the whole design. **Reading is not
+taking.** A provider that only wants to look at the grammar -- to log it, to
+decide whether it can honour it, to cache a compiled artifact under its digest
+-- calls `revl_decode_grammar` and has promised nothing. A provider that calls
+`revl_constrain` is saying something much stronger: *I constrained this decode
+with exactly this artifact*. There is no separate declaration API and no
+capability flag, and that is deliberate: taking the artifact is the only way to
+use it, so the claim cannot drift away from the thing it is a claim about.
+
+A validated **extern** is deliberately not registered. Its `@py` body is the
+provider, so registering it would let that body take the constraint -- but this
+tier validates a service-method crossing and not an extern's return, so the
+claim would never be judged. An unjudgeable claim is worse than no claim.
+
+### 9.2 The decision: is an ignored grammar refused
+
+It is not, and it must not be. A provider that never takes the constraint is
+validated exactly as item 257 already validated it, gains no new way to be
+refused, and the crossing carries no claim that anything was constrained.
+
+This is not timidity, it is the same rule as section 5. The grammar's language
+is item 257's schema language narrowed by a pinned member order. Holding *every*
+provider to the grammar would turn a schema-valid completion whose members
+arrived in another order into a refusal -- a false reject, of a value the
+declared type accepts, produced by a provider that was never told it had to do
+anything. The caller's guarantee was never "the decoder was constrained"; it was
+"a response that is not of this shape does not reach the body", and refusing
+that response would break the second guarantee in order to pretend to the first.
+
+The sharp version of the question is a different one: *once a seam exists, can
+the IR come to claim a constraint nobody enforced?* That is where the answer is
+fail-closed:
+
+**A claim that was made is checked.** A provider that took the constraint and
+returned a completion outside it is a named refusal, `GrammarNotHonouredError`,
+and not an accepted value. So an ignored grammar is not a silent downgrade
+because nothing was claimed, and a claimed grammar is not a silent downgrade
+because the claim is verified. The only remaining fail-open shape -- a provider
+that constrains the decode, claims nothing, and is believed anyway -- does not
+exist, because nothing downstream is told the decode was constrained unless a
+claim was made.
+
+Two claims are refused, and they are different failures:
+
+* **the wrong grammar.** The provider names a digest this crossing does not
+  state. This is worse than not constraining at all: a caller reading the
+  crossing as pinned would be reading it as pinned to a type it was not pinned
+  to.
+* **the stated grammar, not honoured.** The provider names this crossing's
+  digest and the completion is outside the language. Section 9.5 is what "outside"
+  means in practice.
+
+`GrammarNotHonouredError` subclasses item 257's `ResponseValidationError`, which
+is not a shortcut. It is a response fault of the same kind and the same
+retryability -- a re-issued completion may well be honoured -- so it rides the
+existing `retry N` loop, re-issues only the completion, and surfaces the same
+terminal typed fault on exhaustion. What the subclass adds is a *name*: "the
+provider said it constrained this decode and it did not" is a different
+operational problem from "the model answered badly", and a diagnostic that
+cannot tell them apart sends the reader to the wrong place.
+
+The schema check runs first. A provider that took the constraint and returned
+prose has two problems, and naming the second one first would be unhelpful.
+
+### 9.3 What a provider integration looks like
+
+A provider is the host object bound to the crossing's require key. Constraining
+a decode is three added lines, and *not* constraining it is zero:
+
+```python
+from runtime import revl_constrain
+
+class OllamaModel:
+    def complete(self, prompt):
+        body = {"model": self.tag, "messages": [...], "stream": False}
+        taken = revl_constrain("Model.complete", ("json-schema", "gbnf"))
+        if taken:
+            dialect, artifact, _digest = taken
+            body["format" if dialect == "json-schema" else "grammar"] = artifact
+        return self.post("/api/chat", body)
+```
+
+`dialects` is in the provider's order of preference, and the seam hands back the
+first one this crossing can supply. A provider that cannot honour any of them
+passes a tuple the crossing does not match, or does not call `revl_constrain` at
+all, and is verified exactly as it was before.
+
+The trap the seam is shaped to avoid is the third line being written and the
+fourth not: taking the artifact and then failing to attach it to the request.
+That is precisely the case section 9.2 turns into a named refusal.
+
+### 9.4 A claim is spent by the completion it was made for
+
+The claim register is fiber-local and cleared unconditionally when the response
+settles, on the success path and on the schema-failure path alike. A claim
+cannot outlive the crossing it was made for and be spent on the next one, and in
+a retry loop each attempt makes its own.
+
+### 9.5 What the check can see, and what it cannot
+
+The provider hands revl a **decoded value**, not the bytes it decoded.
+Whitespace, number spelling and string escaping are gone before the seam runs,
+and no recogniser can recover them. What is *not* gone is member order, because
+a JSON object's key order survives decoding -- and member order is exactly what
+the GBNF derivation pins (section 5) and exactly what item 257's validator is
+blind to.
+
+So the honoured-check is: every member of a closed object is present, and in the
+order the grammar pins, recursively. That is precisely the **delta** between the
+two derivations, which is what makes it the only part worth checking separately:
+everything else the grammar says about a value, the validator has already said.
+
+It is therefore **necessary and not sufficient**. A provider that constrained
+with a different grammar that happens to pin the same order passes this check.
+The note states that rather than letting "the grammar was honoured" read as a
+proof. Closing it means the provider handing back the raw completion bytes
+alongside the decoded value, which is a change to the provider contract in all
+six tiers and is not made here.
+
+Two smaller limits, both of which fail in the safe direction and neither of
+which is fixed:
+
+* **A claim made in another task is lost.** The claim register is a contextvar,
+  and a provider that sets it inside a task it spawned rather than in the one the
+  crossing runs in leaves the parent seeing no claim. The completion is then
+  verified exactly as an unclaimed one, so a claim is dropped rather than
+  invented.
+* **The registry is per process, not per document.** `register_grammars` merges,
+  so two emitted modules loaded into one process that both declare
+  `Model.complete` share the key and the later registration wins. The digest
+  check catches a provider that then honours the wrong one, but the provider was
+  handed the wrong artifact to begin with. A document-scoped key is the fix and
+  is not made here.
+
+---
+
+## 10. The second dialect (slice 4)
+
+### 10.1 It adds no IR
+
+The `json-schema` dialect is a pure function of `response_schema`, which the
+crossing already carries. So the second dialect costs the IR nothing: the same
+crossing offers `gbnf` from `response_grammar["text"]` and `json-schema` from a
+derivation over the schema beside it, and the seam negotiates. "An added value
+under the existing key, not a reinterpretation of these bytes" turns out to be
+stronger than section 6 promised -- there is no new key at all.
+
+### 10.2 The two dialects must describe the same language
+
+A provider's *choice* of dialect must not change whether a completion is legal.
+That takes three rewrites, and leaving any of them out makes the dialects
+disagree:
+
+* `{"type": "string", "nullable": true}` becomes
+  `{"anyOf": [{"type": "string"}, {"type": "null"}]}`. `nullable` is an OpenAPI
+  3.0 keyword and not a JSON Schema one. A converter that does not know it drops
+  it, and the resulting constraint cannot emit `null` at all -- a narrowing of an
+  `Opt` that refuses the one value the author wrote the `Opt` for.
+* an object with `properties` is closed and every property is required. Item
+  257's schema closes only the variant arms, so a chatty extra member *inside* a
+  nested record validates while the GBNF does not admit it. Handing a provider
+  the un-rewritten schema would let an **honouring** provider produce a value
+  outside the grammar revl stated, which is the worst of the available bugs.
+* `contentEncoding: base64` is dropped and the node stays a plain string. This
+  is the one place the dialects genuinely differ: a `Bytes` field is
+  base64-constrained under `gbnf` and merely string-constrained under
+  `json-schema`. Item 257's validator does not check base64 either, so nothing
+  regresses, and it is written down rather than papered over.
+
+The agreement is tested the same way slice 1 tested the GBNF: a corpus holding
+both verdicts, on which the wire schema accepts exactly the values whose
+canonical rendering the grammar accepts.
+
+### 10.3 The dialect decides what the claim means
+
+The two dialects have different digests, so a claim names the artifact that was
+actually used and claiming one while having constrained with the other is
+detectable rather than believed.
+
+They are also held to different standards, and that asymmetry is the honest cost
+of the second dialect. The `gbnf` artifact is a grammar over strings, so
+honouring it implies the pinned member order and the honoured-check applies. The
+`json-schema` artifact is a schema over values, and **JSON Schema does not
+describe member order**, so a provider that honoured exactly what it was handed
+may legitimately return members in any order. Holding it to the GBNF's ordering
+would be the same false reject section 5 refuses.
+
+There is still a residue, and skipping it would have been fail-open. The artifact
+a `json-schema` provider was handed is the **wire** schema of section 10.2, which
+is strictly tighter than the one item 257 validates against: it closes the nested
+objects 257 leaves open and requires every member. So a `json-schema` claim is
+judged against the artifact that was actually handed over, not against the looser
+schema the validator happens to use. Concretely, a chatty extra member inside a
+nested record passes item 257's validator, is outside the GBNF, and is outside
+the wire schema -- so it is accepted from a provider that claimed nothing and
+refused from one that claimed either dialect.
+
+What the `json-schema` dialect does *not* buy is the member order, which is the
+only part of the GBNF's language that the wire schema cannot express. A reader
+who wants that part verified wants `gbnf`.
+
+---
+
+## 11. What a real provider actually did
+
+Slice 1's section 8 said nothing in the item observes a decoder, and called that
+its single largest unverified claim. This section is the observation. It was
+taken with `bench/decode_grammar_probe.py` against a local OpenAI-shaped endpoint
+(Ollama 0.33.3) serving a 35B-A3B Q4 local model, on the flagship `AgentTurn`
+response type, at temperature 0. Small numbers: the endpoint answered in four to
+eleven minutes per call, so the sample is three prompts per arm and is reported
+as three, not generalised.
+
+### 11.1 A real provider ignores a GBNF grammar in silence
+
+Two calls, the derived grammar attached as `grammar` at the top level and again
+inside `options`, which are the two places a llama.cpp-shaped server would read
+it. Both returned HTTP 200 and an ordinary unconstrained completion. No error, no
+warning, no field-unknown response.
+
+This is worth stating as a result rather than as a footnote. The fail-open case
+section 9.2 is about is not hypothetical and is not rare: it is what the most
+widely deployed local runtime does by default with the dialect this item emits.
+
+### 11.2 The same provider honours a JSON Schema
+
+Three prompts, run twice: once with nothing attached, once with the wire schema
+of section 10.2 attached as `format`.
+
+```
+control      n=3   valid 1/3   inside the stated GBNF 1/3
+json-schema  n=3   valid 3/3   inside the stated GBNF 1/3
+```
+
+The control arm is not vacuous. Its two failures are the same failure and it is
+an instructive one: asked in prose for a tagged JSON object, the model answered
+twice in its own native tool-call syntax,
+
+```
+<tool_call>
+<function=search>
+<parameter=query>
+today's tin price per metric ton LME spot
+</parameter>
+</function>
+</tool_call>
+```
+
+which is not JSON at all, so item 257's validator refuses it before schema
+validity is even in question. With the constraint attached, the same prompts at
+the same temperature produced a well-formed tagged object every time. That is
+section 1's argument, measured once: the shape stopped being something the model
+had to get right.
+
+### 11.3 The result that decided the design
+
+Look at the third column. **Two of the three correctly constrained completions
+are outside the GBNF this crossing states**, and both for the same reason:
+
+```
+$.value[0]: the stated grammar pins the members ['tool', 'args'];
+            the completion has ['args', 'tool']
+```
+
+The nested `Call` object came back with its members transposed. The value is
+schema-valid, the provider honoured exactly the artifact it was handed, and the
+completion is still outside the language of the GBNF, because the GBNF pins a
+member order (section 5) and JSON Schema cannot express one.
+
+The likely mechanism is visible in the data and is worth naming: `args` sorts
+before `tool`, `tag` sorts before `value`, and the one sample that *did* land
+inside the grammar is the one whose declared order happens to be alphabetical.
+A schema that crosses a transport as an unordered map comes out with its keys
+sorted, so the property order the wire schema was written with does not survive
+the trip.
+
+This is the measurement that answers the question slice 1 left open, and it
+answers it against the simpler design. Had slice 2 verified every completion
+against the grammar revl states, this provider -- which did the right thing, with
+the artifact revl gave it, on the first try -- would have been refused on two of
+its three samples. A named refusal of a correct completion is not an improvement
+on a silent acceptance of a correct completion; it is the false reject section 5
+forbids, arriving through the front door.
+
+So the contract is per dialect, and section 10.3 is not a hedge. `gbnf` promises
+a member order and is held to it. `json-schema` promises schema validity, is held
+to the wire schema it was handed, and is not held to an order it never carried.
+
+### 11.4 End to end through the seam
+
+The numbers above come from a probe that attaches the artifact itself. The seam
+was also run end to end, by the provider sketch of section 9.3: compile a
+validated crossing, register its grammars, let a provider take the constraint
+through `revl_constrain`, and judge the claim in `validate_response`. The same
+prompt, twice, differing only in whether the taken artifact was attached to the
+request:
+
+* **attached** -- `{"tag": "ToolCalls", "value": [{"args": "...", "tool":
+  "search"}]}`, accepted, with the claim judged against the wire schema and the
+  member order correctly not enforced;
+* **taken and not attached** -- the `<tool_call>` XML again, which does not parse
+  as JSON.
+
+That second row is the trap section 9.3 warns about, and it confirms the shape of
+the failure: a provider that takes the constraint and forgets to attach it does
+not get a subtly wrong value, it gets an unconstrained one.
+
+### 11.5 What this still does not show
+
+* **That the emitted GBNF parses in llama.cpp.** The endpoint ignores the
+  grammar field, so no GBNF parser saw these bytes. Section 8's entry stands.
+* **Anything about retry counts.** The crossings were not run under a declared
+  `retry N`, and no before-and-after re-issue counts are reported.
+* **Anything about a 7B-class model**, which is section 1's motivating case. This
+  is a 35B mixture-of-experts, and it failed the unconstrained arm twice out of
+  three anyway.
+* **A general rate.** Three prompts per arm is enough to show that each of these
+  outcomes happens, and is not enough to say how often.

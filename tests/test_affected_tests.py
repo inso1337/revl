@@ -547,3 +547,38 @@ def test_the_wheel_gate_stays_off_what_the_wheel_does_not_vendor():
             "the site-wheel gate. Every source change now pays for a wheel "
             "rebuild, which is the per-PR outage class roadmap 110c removed."
         )
+
+
+# --- census x provenance x construct-reach (issue #1215) -------------------- #
+def test_census_change_selects_the_construct_reach_ledger():
+    """The shadowing this pins: the census/provenance coupling rule (item 542)
+    matched `tools/gate_reference_census.py` and `continue`d, so the issue-#1215
+    rule sitting below it never ran and a census change silently stopped
+    selecting tests/test_oracle_construct_reach.py — the one test covering the
+    `gate_census` row that imports the census for its corpus walk and its fast
+    engine. Both couplings belong to the same file, so both must be selected."""
+    r = sel("tools/gate_reference_census.py")
+    assert r["full"] is False
+    for node in ("tests/test_gate_reference_census.py",
+                 "tests/test_corpus_provenance.py",
+                 "tests/test_oracle_construct_reach.py"):
+        assert node in r["pytest"], (
+            f"a change to the census does not select {node}. Both the item-542 "
+            "provenance coupling and the issue-#1215 construct-reach coupling "
+            "hang off this one file; a rule that answers only one of them is "
+            "the shadowing this test exists to catch."
+        )
+
+
+def test_provenance_change_keeps_its_own_coupling_only():
+    """The other half of the merge. `corpus_provenance.py` is not what the
+    `gate_census` row imports, so widening the census rule must not hand the
+    construct-reach ledger to every file the coupling rule matches."""
+    r = sel("tools/corpus_provenance.py")
+    assert r["full"] is False
+    assert "tests/test_gate_reference_census.py" in r["pytest"]
+    assert "tests/test_corpus_provenance.py" in r["pytest"]
+    assert "tests/test_oracle_construct_reach.py" not in r["pytest"], (
+        "corpus_provenance.py picked up the construct-reach ledger, which only "
+        "the census's own coupling calls for"
+    )

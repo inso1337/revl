@@ -162,7 +162,7 @@ _BASE = (
     "    return\n"
     "}\n"
     "service Ops {\n"
-    "  emission fn shout(sink: Str, msg: Str)\n"
+    "  emission[announce] fn shout(sink: Str, msg: Str)\n"
     "}\n"
     "component Agent provides ops: Ops {\n"
     "  provide ops {\n"
@@ -174,7 +174,7 @@ _BASE = (
 
 def _turn(i: int) -> str:
     return (
-        f"service Turn{i} {{ emission fn run(sink: Str) }}\n"
+        f"service Turn{i} {{ emission[ops] fn run(sink: Str) }}\n"
         f"component TurnComp{i} requires ops: Ops provides turn{i}: Turn{i} {{\n"
         f"  provide turn{i} {{\n"
         f'    fn run(sink) {{ emit ops.shout(sink, "from-{i}") }}\n'

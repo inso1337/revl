@@ -2721,6 +2721,66 @@ def _refuse_stream_document_top_level(ir: dict) -> None:
                 "or try `--backend py`" % (described, key, key))
 
 
+def _component_is_observable(comp: dict) -> bool:
+    """Does dropping this component lose something the author wrote?
+
+    The pure typed-core path routes PAST components (see `_emit`), which is
+    right for a document whose component is scaffolding around the record or
+    pure-fn shape the corpus case is actually about — an empty component, or a
+    bare `provides` with no methods, renders to nothing anyone can call. A
+    component with a method body or an activation step is a different matter:
+    dropping it answers with a module whose routes are simply absent."""
+    if comp.get("body"):
+        return True
+    for step in comp.get("provides") or []:
+        if step.get("methods"):
+            return True
+    return False
+
+
+def _refuse_pure_path_component_drop(ir: dict) -> None:
+    """Refuse a document whose component the pure typed-core path would DROP
+    (issue #721, item 458).
+
+    The pure path is chosen for any v3 document carrying a top-level `fn`,
+    type, extern or plain `test`, and it renders none of the components it
+    routes past. That is deliberate for an incidental component, and it is a
+    silent fail-open for every other one: a module `fn` beside a component with
+    provide methods is the ordinary shape of real revl code (every revl-harness
+    component file is exactly it), and go answered it with a compiling package
+    that had no services, no component and no routes at all — no error, on
+    either side of the fork.
+
+    There is no third path to send it down, so it is refused by name, the same
+    way a stream document carrying a dropped top-level section is
+    (`_refuse_stream_document_top_level`). Emitting a plausible module short of
+    the component the author wrote is the one outcome the tier must not
+    produce."""
+    dropped = [comp.get("name") or "<anonymous>"
+               for comp in (ir.get("components") or [])
+               if _component_is_observable(comp)]
+    if not dropped:
+        return
+    present = [described for _key, described, holds in _LIVE_PATH_DROPS
+               if holds(ir)]
+    for key, described in (("types", "a `type` declaration"),
+                           ("externs", "an `extern`")):
+        if ir.get(key):
+            present.append(described)
+    raise EmitError(
+        "this document declares %s and the component%s %s; go lowers a "
+        "document with a top-level declaration on the pure typed-core path, "
+        "which renders ordinary Go for the declarations but NOT the "
+        "component, and the live stc-go path that does render the component "
+        "renders no top-level `fn` or plain `test`. Emitting either way would "
+        "answer with a module missing a section you wrote, so the tier "
+        "refuses by name instead (issue #721) — split the component into its "
+        "own document, or try `--backend py`"
+        % (" and ".join(present) or "a top-level declaration",
+           "s" if len(dropped) > 1 else "",
+           ", ".join(repr(name) for name in dropped)))
+
+
 def _stream_head(node, env) -> str:
     """The stream a `subscribe` acquires: a plain source, or a `merge(a, b)`
     fan-in (item 130 Slice 3). Recursive — a merged stream is itself a stream.
@@ -9322,6 +9382,11 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         # document must stay on the stc-go runtime path even though it also
         # carries top-level `test` blocks (FR-5); the pure path would drop the
         # components and refuse the lifecycle steps.
+        if ir.get("components"):
+            # ... and the pure path drops every component it routes past,
+            # which is only acceptable while the component is incidental
+            # (issue #721; see the helper).
+            _refuse_pure_path_component_drop(ir)
         return _emit_v3_go(ir, package)
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS

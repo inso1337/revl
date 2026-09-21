@@ -289,6 +289,20 @@ jobs:
       # teeth are exercised on every PR. Never add `|| true`.
       - run: python3 tools/check_runtime_seams.py --self-test
       - run: python3 tools/check_runtime_seams.py
+      # issue #1285: a closed vocabulary declared in more than one place is
+      # recorded, and every recorded copy still spells the same vocabulary.
+      # Three lanes found this defect in one day in three unrelated subsystems
+      # (a type-to-schema mapping, an IR path normalization two of whose three
+      # copies had already drifted, and a taint-origin set an auto-approve
+      # decision INTERSECTS against), and none of the three was found by a
+      # gate. `tests/fixtures/vocabulary_mirror_ledger.json` is the ratchet: a
+      # new copy, a recorded copy drifting, and a stale entry all red, and a
+      # missing ledger reds rather than reading as nothing to check. Stdlib
+      # only and no subprocess, so it runs in this job, which installs no revl.
+      # The self-test runs FIRST and reds the gate against the three instances
+      # themselves. Never add `|| true`.
+      - run: python3 tools/check_vocabulary_mirrors.py --self-test
+      - run: python3 tools/check_vocabulary_mirrors.py --check
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
@@ -729,6 +743,104 @@ jobs:
           set -euo pipefail
           set -f
           pytest $SEL_PYTEST -q
+
+  # The held-out scoring set (roadmap item 537, issue #1207). Every other
+  # corpus that scores a change here is a file in this repository, so the
+  # reward is a function of the candidate's own input. This job scores the
+  # diff on a set of programs generated at score time from a seed that did
+  # not exist when the diff was written.
+  #
+  # THE SEED IS GENERATED IN THE JOB, not held in a repository secret, and
+  # that is deliberate rather than a workaround. This repository is public:
+  # GitHub does not expose secrets to a workflow triggered by a pull request
+  # from a fork, so a seed-from-secret job is unavailable on exactly the
+  # contributions it exists to judge, and `docs/design/535-held-out-scoring.md`
+  # rejects that shape under section 2.2. A freshly drawn seed is also
+  # STRICTLY HARDER to read than a long-lived one: the tool's residual 2.1.3 is
+  # that a seed leaks through a log or a verdict record, and a seed that exists
+  # for one run and is never recorded cannot have leaked before the diff was
+  # written. What it gives up is reproducibility, so the step prints the seed
+  # when and only when there is a finding to reproduce.
+  #
+  # The three exit statuses are NOT collapsed:
+  #   0  scored clean                          -> pass
+  #   1  scored, a zero-tolerance finding      -> FAIL
+  #   2  refused, `diff-reaches-fence`         -> pass, annotated for review
+  #   2  refused, anything else                -> FAIL
+  # Exit 2 on the fence is the one refusal that is not a failure of the check:
+  # the design's own words are that a candidate changing the scorer is making a
+  # semantic change, and REFUSED is the routing of that change to a human
+  # rather than a verdict about the candidate. Every other refusal means the
+  # question could not be asked, and a question that could not be asked has not
+  # been answered green. There is no path here that scores against the in-tree
+  # corpus when the draw is unavailable, which is the fail-open shape the item
+  # exists to prevent.
+  held-out:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # full history: the diff base has to be a real commit locally, and
+          # the seed check is a `git grep` over the tracked tree.
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - name: score the diff on a set it could not read
+        env:
+          # a branch name is attacker-controllable text, so it reaches the
+          # shell through env: and never as interpolated source -- the same
+          # rule `changes` and `root-suite-affected` follow.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="HEAD~1"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            base="origin/${BASE_REF}"
+          elif [ -n "${BEFORE_SHA:-}" ] \
+               && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            base="${BEFORE_SHA}"
+          fi
+          # One seed, this run only, never written down. `set +x` is not needed
+          # because nothing traces here, and the value is printed only on the
+          # failure path below where a reproducer is worth more than the draw.
+          seed="$(openssl rand -hex 32)"
+          status=0
+          REVL_HELDOUT_SEED="$seed" python3 tools/heldout_scoring.py \
+            --diff-base "$base" --count 200 --json /tmp/heldout.json || status=$?
+          refusal="$(python3 -c "import json;print(json.load(open('/tmp/heldout.json')).get('refusal') or '')" 2>/dev/null || echo "")"
+          if [ "$status" = "0" ]; then
+            echo "held-out scoring: clean on a draw this diff could not read."
+            exit 0
+          fi
+          if [ "$status" = "2" ]; then
+            case "$refusal" in
+              diff-reaches-fence:*)
+                echo "::warning title=held-out scoring refused::$refusal"
+                echo "This diff changes the scorer, so it was NOT scored by it."
+                echo "That is a semantic change to the gate and routes to human"
+                echo "review (docs/design/535-held-out-scoring.md section 3.2)."
+                exit 0
+                ;;
+            esac
+            echo "::error title=held-out scoring refused::$refusal"
+            echo "No score was produced, and none was substituted."
+            exit 1
+          fi
+          echo "::error title=held-out scoring found a divergence::seed $seed"
+          echo "Reproduce with:"
+          echo "  REVL_HELDOUT_SEED=$seed python3 tools/heldout_scoring.py \\"
+          echo "    --diff-base $base --count 200"
+          exit 1
 
   # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
   # container: a sandboxed process runs inside a boundary whose confinement
