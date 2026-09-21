@@ -286,21 +286,129 @@ def test_the_controller_module_matches_its_registry_entry():
         == {pb.canonical_axis(a) for a in path.covers}
 
 
-def test_the_shadow_promotion_module_matches_its_registry_entry():
-    """PR #1250 is unmerged at the time this landed, so this SKIPS with a
-    stated reason on a tree without it and binds when it arrives."""
-    full = os.path.join(ROOT, "src", "revl", "shadow_promotion.py")
-    if not os.path.exists(full):
-        pytest.skip("src/revl/shadow_promotion.py (item 518, PR #1250) is not "
-                    "on this tree; its registry entry is checked for shape by "
-                    "test_every_registered_path_has_the_barrier and bound to "
-                    "the module's own stage tuples once the PR lands")
+def test_the_shadow_promotion_entry_is_derived_from_the_module_not_copied():
+    """Issue #1338. The entry used to be a hand-written copy of the module's
+    stage tuples and its axis names, and the copy and the module were each
+    correct alone and disagreed the moment both were on `main`. There is now
+    one object: the entry IS the module's `STAGES` and `AUTHORITY_AXES`.
+
+    So what this test holds is not equality, which the derivation makes
+    tautological, but that the derivation is really what stands there. A fresh
+    literal in `promotion_barrier.py` would restore exactly the drift surface
+    issue #1338 was filed about, and that is what is asserted against."""
+    import revl.shadow_promotion as sp
+
     path = pb.BY_MODULE["src/revl/shadow_promotion.py"]
-    consts = _module_tuples(full)
-    assert path.authority in consts["STAGES"]
-    assert consts["STAGES"].index(path.authority) < len(consts["STAGES"])
-    assert {pb.canonical_axis(a) for a in consts["AUTHORITY_AXES"]} \
-        == {pb.canonical_axis(a) for a in path.covers}
+    assert path.stages[:len(sp.STAGES)] == tuple(sp.STAGES)
+    assert tuple(path.covers) == tuple(sp.AUTHORITY_AXES)
+
+    barrier = os.path.join(ROOT, "src", "revl", "promotion_barrier.py")
+    consts = _module_tuples(barrier)
+    assert "STAGES" not in consts, (
+        "src/revl/promotion_barrier.py restates a STAGES literal; the shadow "
+        "entry must read src/revl/shadow_promotion.py's own (issue #1338)")
+    assert _imports_module(barrier, "shadow_promotion"), (
+        "src/revl/promotion_barrier.py no longer imports shadow_promotion, so "
+        "its registry entry is a copy again (issue #1338)")
+
+    # The claims the derivation still leaves standing, and the reason it is a
+    # binding and not a tautology: `authority` is asserted to be a stage the
+    # module walks, and every spelling the module uses must be one the alias
+    # table knows.
+    assert path.authority in sp.STAGES
+    assert pb.check_path(path) is None
+    assert pb.check_axes(path) is None
+    for axis in sp.AUTHORITY_AXES:
+        assert pb.canonical_axis(axis) is not None, axis
+
+
+def test_the_peer_pool_module_reads_its_authority_diff_before_its_evidence():
+    """Issue #1338's other half. `src/revl/peer_pool.py` renders a PROMOTE
+    verdict and was not registered, and it is a real promotion path: `promote`
+    raises a member's tier, and a tier is caps and budgets.
+
+    Its measured stage is `evidence`, the count of attested receipts the member
+    accumulated while it worked. Its authority stage is `_ceiling_precondition`,
+    which depends only on the charter and the tier. The registry says the diff
+    comes first; this reads `promote`'s own body and holds it to that, so
+    moving the ceiling diff back below the evidence threshold reds here."""
+    path = pb.BY_MODULE["src/revl/peer_pool.py"]
+    assert path.index(path.authority) < path.index("evidence")
+
+    full = os.path.join(ROOT, "src", "revl", "peer_pool.py")
+    with open(full, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    body = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "promote")
+    ceiling = _first_line(body, lambda n: isinstance(n, ast.Call)
+                          and getattr(n.func, "id", None)
+                          == "_ceiling_precondition")
+    evidence = _first_line(body, lambda n: isinstance(n, ast.Attribute)
+                           and n.attr == "evidence"
+                           and getattr(n.value, "id", None) == "member")
+    assert ceiling is not None, "peer_pool.promote runs no ceiling diff"
+    assert evidence is not None, "peer_pool.promote reads no member evidence"
+    assert ceiling < evidence, (
+        "src/revl/peer_pool.py reads `member.evidence` at line "
+        f"{evidence} and runs `_ceiling_precondition` at line {ceiling}. The "
+        "authority diff gates ENTRY to the measured read (item 543, issue "
+        "#1222); it is not weighed after it")
+
+
+# ------------------------------------------------- the sweep's own exemptions
+
+def test_every_sweep_exemption_still_names_a_module_the_sweep_would_select():
+    """An exemption is a literal path with an argument, and it may not outlive
+    the module it was written for. A stale entry would be a path the sweep can
+    never reach, which reads as a ratchet and is a hole."""
+    assert pb.SWEEP_EXEMPT, "the exemption table is empty, so this proves nothing"
+    for rel, reason in pb.SWEEP_EXEMPT.items():
+        full = os.path.join(ROOT, *rel.split("/"))
+        assert os.path.exists(full), f"{rel} is exempt and does not exist"
+        with open(full, encoding="utf-8") as handle:
+            assert pb.renders_promotion(handle.read()), (
+                f"{rel} is exempt from a sweep that would not select it")
+        assert len(reason) > 40, f"{rel} is exempt with no argument"
+        assert rel not in pb.BY_MODULE, f"{rel} is both registered and exempt"
+
+
+def test_the_registry_and_the_exemptions_together_are_every_module_selected():
+    """The two halves of the sweep's answer, stated as one set. Every module in
+    this tree that renders a promotion verdict is either held to the rule or
+    argued out of it by name, and nothing is in neither."""
+    selected = set()
+    for base in pb.SEARCH_ROOTS:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, base)):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                full = os.path.join(dirpath, name)
+                with open(full, encoding="utf-8") as handle:
+                    if pb.renders_promotion(handle.read()):
+                        selected.add(os.path.relpath(full, ROOT)
+                                     .replace(os.sep, "/"))
+    accounted = {p.module for p in pb.REGISTRY
+                 if os.path.exists(os.path.join(ROOT, *p.module.split("/")))}
+    accounted |= set(pb.SWEEP_EXEMPT)
+    assert selected == accounted
+    assert len(selected) >= 5, "fewer modules selected than this tree has"
+
+
+def _first_line(node, predicate):
+    """The earliest line number under `node` at which `predicate` holds."""
+    lines = [n.lineno for n in ast.walk(node)
+             if predicate(n) and hasattr(n, "lineno")]
+    return min(lines) if lines else None
+
+
+def _imports_module(path: str, name: str) -> bool:
+    """Does this module import the sibling `name`, read without importing it?"""
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    return any(isinstance(node, ast.ImportFrom)
+               and any(alias.name == name for alias in node.names)
+               for node in ast.walk(tree))
 
 
 def _imports_name(path: str, module: str, name: str) -> bool:

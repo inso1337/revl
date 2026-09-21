@@ -112,30 +112,54 @@ one level up.
 `src/revl` and `tools` for a module that renders a promotion verdict and is
 not in it. The detector is syntactic and narrow: a module renders a promotion
 when it contains a string constant whose value is exactly `promote`, in any
-case. Over this tree that selects `src/revl/mcp/canary.py` and
-`tools/evolution_controller.py` and nothing else, and it selects
-`src/revl/shadow_promotion.py` when PR #1250 lands.
+case. Over `origin/main` at 9649f21c it selects six modules: the four in
+`REGISTRY` and the two in `SWEEP_EXEMPT`.
 
-A module that decided promotions without ever spelling the word would be
-missed. That is stated rather than hidden: the sweep is a ratchet against the
-ordinary case of a fourth path being added, not a proof that none can exist.
+It errs wide, and that is the direction to err in. A module whose verdict
+confers no authority is selected and has to be argued out by name. A module
+that decided promotions without ever spelling the word would be missed; that
+limit is stated rather than hidden, because the sweep is a ratchet against the
+ordinary case of a path being added, not a proof that none can escape.
 
-`src/revl/promotion_barrier.py` itself carries the token, because the rule
-contains the comparison that looks for it, so it is exempt by name and for
-that one reason. The exemption is a literal path and never a pattern, because
-a pattern is how a real promotion path ends up exempt by accident.
+`SWEEP_EXEMPT` is a table of literal paths, each with the argument for why the
+module is not a promotion path, and never a pattern, because a pattern is how
+a real promotion path ends up exempt by accident. Two entries:
+
+* `src/revl/promotion_barrier.py` itself, because the rule contains the
+  comparison that looks for the token.
+* `tools/evolution_progress.py`, whose `promote` renders the self-evolution
+  loop's generation verdict over candidates that have already been scored. It
+  deploys nothing, grants nothing, and no other module consumes its verdict.
+  The candidate admission that does confer authority is
+  `tools/evolution_controller.py`, whose `authority` precondition gates entry
+  to the `observe` stage those same scorecards are the evidence for, and that
+  module is registered.
+
+A test asserts every exempt path still exists and would still be selected by
+the detector, so an exemption cannot outlive the module it was written for,
+and a second test asserts that the registry and the exemptions together are
+exactly the set the detector selects.
 
 ### Something that holds the two implementations together
 
 The registry entries are BOUND to the modules. `tools/evolution_controller.py`'s
-own `PRECONDITIONS`, `MEASURED` and `AUTHORITY_AXES` tuples are read off the
-module by an AST walk (`tools/` is not a package, and an AST read cannot
-execute anything) and compared with what the registry declares. Moving
-`authority` after `shadow` there reds `tests/test_promotion_barrier_543.py`.
+own `PRECONDITIONS` and `MEASURED` tuples are read off the module by an AST
+walk (`tools/` is not a package, and an AST read cannot execute anything) and
+compared with what the registry declares. Moving `authority` after `shadow`
+there reds `tests/test_promotion_barrier_543.py`.
 
-`src/revl/shadow_promotion.py` is not on `main` at the time this landed, so
-its binding test skips with a stated reason and binds when PR #1250 arrives.
-Its registry entry is checked for shape either way.
+`src/revl/peer_pool.py` is bound the same way: the registry says its `ceiling`
+stage comes before its `evidence` stage, and the test reads `promote`'s body
+and refuses a tree where `_ceiling_precondition` runs after `member.evidence`.
+
+`src/revl/shadow_promotion.py` is not bound by comparison at all, because the
+entry is DERIVED from the module. Issue #1338 is what settled that: the first
+version of this registry hand-copied the module's stage tuples, the copy and
+the module were each correct alone, and the two disagreed the moment both were
+on `main`. `stages` is now the module's own `STAGES` and `covers` is its own
+`AUTHORITY_AXES`, imported. What the entry still claims, and what can still
+fail, is that the module walks a stage named `authority` and that every axis
+spelling it uses is one the alias table knows.
 
 ### The barrier, on the path that had none
 
