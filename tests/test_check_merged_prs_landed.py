@@ -202,3 +202,17 @@ def test_the_baseline_is_well_formed_and_documented():
         assert "agent/" in note or "#" in note, (
             f"#{num}: the note names neither the base branch it went to nor "
             f"the PR that carried it: {note!r}")
+
+
+def test_an_empty_pull_request_list_is_not_a_pass(tmp_path):
+    """The vacuous green. `gh pr list` exiting 0 with no rows -- a token
+    missing `pull-requests: read`, a changed API shape -- would otherwise
+    report that every merged PR is accounted for, having read none."""
+    t = _build_repo(tmp_path)
+    src = tmp_path / "none.json"
+    src.write_text("[]", encoding="utf-8")
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"unreachable": {}}), encoding="utf-8")
+    rc = chk.main(["--from-json", str(src), "--root", t["repo"],
+                   "--main-ref", "main", "--baseline", str(empty)])
+    assert rc == 2
