@@ -1,0 +1,94 @@
+// issue #721 / item 458 — the harness's migrated dispatch shape, reduced to the
+// sync surface. The revl-harness web shell routed every request through a
+// ternary chain and hoisted each conditional crossing into a module `fn`
+// (`maybe_run`, `maybe_ship`, `ws_claim`, `ws_begin_turn`, ...) that took the
+// emission as an arrow, because a provide-method body had no `if`. Items 548
+// and 681 gave it one, so the same routing is now written as a plain if-chain
+// with the crossing at statement level — and that shape had no byte-agreement
+// oracle over it at all: the corpus reached a provide-method `if` exactly once
+// (shadowing_near_misses.rvl, one arm, no emission, no loop) and never reached
+// a method `while`, `for`, `break` or `continue`.
+//
+// What this document pins, all inside one provide method:
+//   * the if-chain dispatch, with an `else` arm and a nested `if`
+//   * a `var` bound before the branch and ASSIGNED inside it, which is what
+//     replaces `maybe_run(go, …, arrow)` — the conditional crossing
+//   * a conditional EMISSION at statement level (`let t = emit gate.begin(…)`)
+//     and a bare `emit` step in a branch
+//   * `while` with `break`, and `for … of` with `continue`
+//   * a module `fn` called from a method arm (the `ws_refused` shape)
+//
+// The async half of the same shape (`async fn dispatch` awaiting a required
+// async operation inside a branch) is deliberately NOT here: the self-hosted
+// py/ts emitters do not carry provide-method async at all yet, so an async
+// document would diverge on the method signature rather than on the control
+// flow this document is the oracle for. It is named in docs/design/568.
+
+service Gate {
+  emission fn begin_turn(sid: Str) -> Str
+  emission fn claim_ticket(tool: Str, args: Str) -> Str
+  emission fn cancel_turn(sid: Str) -> Str
+  fn pending() -> Str
+}
+
+service Web {
+  emission fn dispatch(method: Str, path: Str, body: Str) -> Str
+}
+
+fn refused(verdict: Str) -> Str {
+  return "refused: this approval is single-use — " + verdict
+}
+
+fn key_tool(body: Str) -> Str {
+  return body.split("|")[0]
+}
+
+component WebShell requires gate: Gate provides web: Web {
+  provide web {
+    fn dispatch(method, path, body) {
+      if (method == "GET" && path == "/api/approvals") {
+        return gate.pending()
+      }
+      if (method == "POST" && path == "/api/cancel") {
+        emit gate.cancel_turn(body)
+        return "cancelled"
+      }
+      if (method == "POST" && path == "/api/run") {
+        var answer = ""
+        if (body != "") {
+          let turn = emit gate.begin_turn(body)
+          answer = turn.concat(":").concat(body)
+        } else {
+          answer = "empty"
+        }
+        return answer
+      }
+      if (method == "POST" && path == "/api/approve") {
+        let claim = emit gate.claim_ticket(key_tool(body), body)
+        if (claim != "ok") {
+          return refused(claim)
+        }
+        return "approved"
+      }
+      if (method == "GET" && path == "/api/trail") {
+        var trail = ""
+        var i = 0
+        while (i < 8) {
+          if (i > 3) {
+            break
+          }
+          trail = trail.concat(path.charAt(i))
+          i = i + 1
+        }
+        for (part of body.split(",")) {
+          if (part == "") {
+            continue
+          }
+          trail = trail.concat("|").concat(part)
+        }
+        return trail
+      }
+      return "404"
+    }
+  }
+}
