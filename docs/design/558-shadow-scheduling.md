@@ -336,3 +336,206 @@ unchanged and green, which is the statement that the additions to
    1000 and `1/2` selected 517 of 1000. The digest is not asserted to be
    uniform; what is asserted is that the selection is deterministic,
    order-independent, salt-sensitive, and exact at both ends.
+
+---
+
+## 10. Slice 3: the seam, and the four gaps section 9 left
+
+Slice 2 landed as PR #1297. Section 9 listed four things it did not do, and
+all four had one cause: nothing was wired to a running composition. Slice 3 is
+that wiring. `src/revl/shadow_runtime.py`, oracle
+`tests/test_shadow_runtime_518.py` (27 tests).
+
+### 10.1. The tier, and the five that are not wired
+
+**python only.** `backends/python/runtime.py` grew one hook,
+`revl_attach_shadow(observe)`, consulted inside `validate_retry`, the single
+seam every model completion in that tier crosses (item 121 section 2.1),
+after the response has validated:
+
+```python
+_revl_record_model_call(started, attempt + 1, budget + 1, value)
+revl_note_validated_completion(site)
+_revl_serve_shadow(_revl_recorded_crossing.get(), value)
+return validated
+```
+
+`revl.shadow_runtime.TierShadow` wires that hook to a
+`revl.shadow_routing.Scheduler`. Three properties of the placement, each a run
+rather than an assertion:
+
+* **The hook cannot change the answer.** Its return is discarded and
+  `validate_retry` returns the object `validate_response` produced. Measured
+  with a successor answering a different model name on every crossing.
+* **The successor's own completion does not re-enter the seam.** It crosses
+  the same `validate_retry`, so the tier holds a re-entrancy register for the
+  duration of the hook. Measured as a count: 21 crossings observed, not 42.
+* **An observer fault stops the shadow, not the run.** The tier catches it,
+  detaches, and keeps it in `revl_shadow_faults()`; `TierShadow.ledger()`
+  turns a non-empty fault list into a `shadow-faulted` refusal, because the
+  crossings that did accumulate are the ones before the fault and that is a
+  biased sample of the ones offered.
+
+**ts, rust, java, wasm and cordis(C) are NOT wired.** `WIRED_TIERS` and
+`UNWIRED_TIERS` say so in the module, and a test asserts both. No emitter
+changed on this branch, so there is nothing an emitter could have dropped: the
+hook is in the runtime shim an emitted component imports, not in emitted
+output. A tier is wired by growing the same hook at its own completion seam.
+
+`revl.shadow_routing.serve` is now a loop over a new `Scheduler`, which is the
+same selection, stamping and counting path taken one crossing at a time. There
+is deliberately not a second implementation: a running composition does not
+hold a list of crossings, and a batch form and a live form that disagreed
+about which crossings were shadowed would be two answers to the item's own
+question.
+
+### 10.2. What "runs", precisely
+
+There is no cordis activation. `import cordis` resolves in one CI job and in
+no local checkout. What runs is the tier's RECORDER (`backends/python/
+replay.py`) and its COMPLETION SEAM (`backends/python/runtime.py`), driven
+over the composition's declared steps, which is the same nesting
+`tests/test_250_model_decision_wal.py` calls "the way the recorder wires a
+live run": `Timeline.record_emission` inside `validate_retry`'s `make_call`.
+Every crossing key in the oracle is minted by that recorder. None is written
+down by the test.
+
+## 11. The recorded worlds, built
+
+`world_for(ir, component)` is `canary.slice_timeline`, called. A shadow over a
+live composition holds the two GENERATIONS' IRs, so it builds the two
+timelines instead of being handed them. The oracle compiles three generations
+of one component with `compile_source`:
+
+| generation | how it differs | recorded world |
+| --- | --- | --- |
+| incumbent | (the baseline) | (the baseline) |
+| sibling | an unrelated component added | identical step for step |
+| relocated | every `summarize` crossing moved into `classify` | same kinds, same labels, same order, different `slot` |
+
+The relocated one is item 496's own finding in `.rvl`: the flat step list is
+unchanged and the entry point is not.
+
+## 12. The stamp, derived
+
+Section 3.1 said `step_index` has no static producer in the tree. It has one,
+and it is item 496's walker. `canary.slice_timeline` appends each step through
+`replay.Timeline._add`, which assigns `Step.index = len(self.steps)`, the
+same assignment `Timeline.record_emission` makes at run time. So the static
+walk's emission indices ARE the crossing keys a run of that component mints,
+and each step's `detail["origin"]` names the provide method it is reached
+from, which is the action.
+
+`crossing_actions(ir, component)` is that map. It is used twice:
+
+* **At the seam**, by `Resolution.owns`: a component with two routed actions
+  offers both actions' crossings to one completion seam, and a schedule that
+  stamped all of them with its own action would manufacture section 1.1's
+  miscorrelation rather than prevent it. A crossing the composition attributes
+  elsewhere is never observed, never stamped, never counted. This was found by
+  running it: the first live drive of the oracle refused with `stamp-forged`
+  on the `classify` crossing, which is the derivation catching the wiring.
+* **After it**, by `check_stamps`: slice 2's `_check_entries` compares the
+  stamp against the PLAN, and both sides of that comparison are the
+  scheduler's own word. This compares it against the composition.
+
+The measurement that the derivation is about a run and not only about a file
+is `test_the_recorder_mints_the_indices_the_composition_declares`: the live
+recorder's emission keys equal the statically derived ones, on a drive of the
+composition.
+
+What remains an assumption, stated: the activation runs each declared step
+once, in source order, which is the premise `revl canary` already makes when
+it calls the static walk "the recorded world". A run that departs from it
+produces a crossing the composition declares at no index, and `check_stamps`
+REFUSES it (`stamp-underived`) rather than guessing an action for it.
+
+## 13. The realm, resolved
+
+Two lines, and they are `revl canary`'s:
+
+```python
+part = slice_partition(ir, route.realm)
+if not part["members"]:
+    ... REALM_UNKNOWN, naming slice_realms(ir)
+```
+
+The same call `canary.select_slice` makes, reading the same empty-`members`
+signal, and refusing with the same shape of message. A component that is not a
+member of the designated realm refuses too (`realm-unplaced`), because the
+realm is half of the `(component, realm)` attribution and a component
+attributed to a realm it is not isolated into attributes to nothing.
+
+## 14. Non-vacuity, live
+
+Every row is a drive of the compiled composition through the tier's recorder
+and completion seam. `offered` and `shadowed` are the ledger's counts and
+`cand calls` is counted in the candidate producer itself, not derived from
+the share.
+
+| case | decision | link | paired | agreement | offered | shadowed | cand calls | worlds | slo sup | slo read |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| shadow, sibling generation | PROMOTE | - | 20 | 1.00 | 20 | 20 | 20 | 20 | 0 | 0 |
+| live, relocated step | REVERT | `divergence-attributed` | 20 | 0.00 | 20 | 20 | 20 | 20 | 0 | 0 |
+| shadow, relocated step | REFUSE | `agreement-below-threshold` | 20 | 0.00 | 20 | 20 | 20 | 20 | 0 | 0 |
+| live, one differing answer | REVERT | `divergence-attributed` | 20 | 0.95 | 20 | 20 | 20 | 20 | 20 | 0 |
+| share `1/4` | PROMOTE | - | 7 | 1.00 | 20 | 7 | 7 | 7 | 0 | 0 |
+| share `0/1` | REFUSE | `evidence-missing` | - | - | 20 | 0 | 0 | 0 | 0 | 0 |
+
+Rows 1 and 2 are the promote and the revert, on the same twenty crossings of
+the same composition, differing only in which generation the candidate's world
+is built from. Rows 1 and 3 are the recorded-world leg's differential without
+the `live` rule in the way. Row 4 is section 5's sharpest case carried onto a
+live run: nineteen of twenty agree, the plan states 0.95, the accumulated
+agreement is EXACTLY 0.95, and the attributed divergence reverts it anyway
+while every observation carried a perfect SLO block that the gate read zero
+times.
+
+The two attributions in full, as the verdict prints them:
+
+```
+Classifier in realm `tenant_a` step 2: the recorded worlds differ at replay
+step 2 (emission model.complete('p0') [slot=1] -> emission
+model.complete('p0') [slot=0])
+
+Classifier in realm `tenant_a` step 5: chosen_digest '9320fca4...' ->
+'7e54a2aa...'
+```
+
+The first is invisible to a record comparison: both records name the same
+completion.
+
+## 15. One thing slice 2 derives that this measures
+
+Slice 2 derives the SERVED SIDE from the route: `live` means the candidate is
+answering, so an entry on a live route records `candidate`. An offline caller
+has nothing better. A seam does: this hook's return is discarded, so the
+incumbent answered, and `TierShadow` passes `INCUMBENT` to `Scheduler.offer`
+as a fact. `Scheduler.offer` grew a `served=` parameter for it and keeps slice
+2's derivation as the default, so `serve` is unchanged.
+
+A route served through this seam is a shadow whatever its `live` flag says.
+`live` selects the gate's rule, which is that the first attributed divergence
+reverts, and not who answered. A route whose successor really answers is a cutover, and
+this seam does not perform one.
+
+## 16. Still not verified, after slice 3
+
+1. **Five tiers are unwired.** Section 10.1. The claim here is about python.
+2. **No cordis activation ran.** Section 10.2. The recorder and the completion
+   seam ran; the runtime that drives an emitted component did not, because
+   `import cordis` does not resolve outside one CI job.
+3. **There is still no CLI.** `revl promote --plan` and the adapter that hands
+   this verdict to item 520's controller as its `shadow` stage record are
+   both untouched.
+4. **One activation, distinct crossings.** `shadow_promotion`'s
+   `_precondition_evidence` refuses a window that repeats a crossing, and a
+   second activation of one component mints the same keys again. So a window
+   is one activation's crossings, and accumulating across activations needs an
+   activation identity the crossing key does not carry. Not designed here.
+5. **The static walk's premise.** Section 12. A run that does not execute each
+   declared step once in source order refuses rather than mis-attributing,
+   which is the right direction and is not the same as handling it.
+6. **The share's statistical behaviour is still not a claim.** `1/4` selected
+   7 of 20 above. What is asserted is that the selection is deterministic,
+   order-independent and exact at both ends.
