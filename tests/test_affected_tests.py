@@ -518,6 +518,32 @@ def test_every_site_wheel_input_selects_the_site_wheel_gate():
     )
 
 
+def test_every_selection_carries_the_vocabulary_gate():
+    """Issue #1332. `tools/check_vocabulary_mirrors.py` walks every `.py` under
+    `src/revl` and `tools` and reports a RELATION between two of them, so the
+    commit that creates a mirror is routinely neither of the two files the
+    ledger will name. There is no path set to select it on.
+
+    Four classes reached `main` that way and reddened the required `lint`
+    check. The four introducing commits selected, between them, `ruff`,
+    `conformance`, `docs`, `site-wheel` and once the FULL gate -- and the FULL
+    gate did not carry it either, because `tools/pre_merge.sh` did not run the
+    tool in any mode. So the rule is "always", and the inputs below are chosen
+    to be as far from a vocabulary as the tree gets.
+    """
+    for f in ("backends/rust/emit.py", "stdlib/json.rvl", "README.md",
+              "src/revl/lexer.py", "tools/heldout_scoring.py",
+              "docs/process.md", "tests/test_goldens.py"):
+        assert "vocabulary" in sel(f)["gates"], (
+            f"{f} does not select the vocabulary-mirror gate. It reads the "
+            "whole tree, so every selection has to carry it."
+        )
+    assert "vocabulary" in at.GATES_ALL, (
+        "the FULL gate does not carry the vocabulary-mirror gate, which is the "
+        "hole that let issue #1332's four classes past a FULL pre-merge run."
+    )
+
+
 def test_a_vendored_python_backend_module_selects_the_wheel_gate_narrowly():
     """The #1092 path itself: a py-tier module the wheel vendors picks up the
     wheel gate, and does so WITHOUT escalating to FULL. Widening the selector

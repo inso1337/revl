@@ -47,9 +47,21 @@ def test_the_three_instances_issue_1285_was_filed_for_are_in_the_inventory():
     # 1: the type-to-schema mappings (issue #1272).
     assert "src/revl/mcp/schema.py::_JSON_TYPES" in found
     assert "src/revl/export_openapi.py::_SCALARS" in found
-    # 2: the IR path normalizations (issue #1276).
-    assert {"src/revl/bundle.py::_canonical_ir",
-            "src/revl/registry.py::_normalize_ir_for_attest"} <= found
+    # 2: the IR path normalizations (issue #1276). RESOLVED, and this is the
+    # shape the resolution takes, so the assertion is the inverse one. Both
+    # sites now delegate the rewriting to `attest.path_normalized_ir` and each
+    # names fewer than MIN_TOKENS field names of its own, so neither is a
+    # vocabulary site and the class is gone from the scan. The ledger entry
+    # went with it (shrink-only, issue #1332). Asserting the delegation and not
+    # just the absence is what keeps this a check: a copy re-grown here would
+    # put the class back.
+    assert not ({"src/revl/bundle.py::_canonical_ir",
+                 "src/revl/registry.py::_normalize_ir_for_attest"} & found)
+    for module in ("src/revl/bundle.py", "src/revl/registry.py"):
+        assert "attest.path_normalized_ir" in ROOT.joinpath(module).read_text(
+            encoding="utf-8"), (
+            f"{module} no longer delegates the IR path normalization to "
+            "attest.path_normalized_ir; issue #1276's duplication is back")
     # 3: the taint fold origins (issue #1195).
     assert {"src/revl/policy.py::TAINT_FOLD_ORIGINS",
             "src/revl/taint.py::_SOURCE_CLASS_SCOPES"} <= found
@@ -63,7 +75,13 @@ def test_the_taint_origin_mirror_is_recorded_as_one_class():
     key = ("src/revl/policy.py::TAINT_FOLD_ORIGINS",
            "src/revl/taint.py::_SOURCE_CLASS_SCOPES")
     assert key in classes
-    assert classes[key]["tokens"] == ["fs", "input", "model", "net", "web"]
+    # `screen` joined BOTH copies in one commit (item 521 Slice 2). That is the
+    # vocabulary moving, not a drift, and the ledger records the six-token
+    # spelling since issue #1332. Spelled out rather than read from the ledger:
+    # a test that takes its expectation from the artifact under test asserts
+    # nothing.
+    assert classes[key]["tokens"] == ["fs", "input", "model", "net", "screen",
+                                      "web"]
 
 
 def test_a_one_sided_addition_to_a_recorded_class_reds():
