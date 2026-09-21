@@ -226,18 +226,27 @@ def _undeclared(cap) -> bool:
     `None` to `*` rather than `set()`.
 
     WHAT IS DELIBERATELY NOT HERE, measured rather than assumed. A
-    `key:`-namespaced element - `lower._wire_cap`'s stand-in for a boundary
-    whose service method declares `emission` with no capability list - is also
-    an undeclared reach, and reading it as provably disjoint from the kernel is
-    the weaker answer. It is not refused in this slice, and the reason is a
-    measurement, not a preference: on this tree it is the ORDINARY spelling, so
-    refusing it turns 14 tests across 7 files red and changes what
-    `mcp.session.admit` accepts on every turn whose granted services spell
-    `emission` bare. That is a composition-side change - the operator's
-    services are the ones that would have to declare their tokens - and it is
-    not this item's to make. `docs/design/545-kernel-boundary-capability.md`
-    §7 carries it as the named residual, and
-    `tests/test_kernel_boundary_544.py` pins it so it stays visible.
+    `svc:`-namespaced element - `lower._undeclared_cap`'s stand-in for a
+    boundary whose service method declares `emission` with no capability list -
+    is also an undeclared reach, and reading it as provably disjoint from the
+    kernel is the weaker answer. Item 561 moved that element off the consumer's
+    wiring key and onto the SERVICE the method is declared on, which changes
+    what it is named BY and not whether it is undeclared: it is a nameable
+    token either way, so `cap_order.disjoint` still answers True against every
+    kernel token and this arm still admits it.
+
+    It is not refused in this slice, and the reason is a measurement, not a
+    preference: on this tree it is the ORDINARY spelling, so refusing it turns
+    tests red and changes what `mcp.session.admit` accepts on every turn whose
+    granted services spell `emission` bare. Item 545 measured 14 tests across 7
+    files; re-measured at item 561's head, after PR #1292 declared the shipped
+    compositions' tokens, it is 13 across the same 7. That is a
+    composition-side change - the operator's services are the ones that would
+    have to declare their tokens - and it is not this item's to make.
+    `docs/design/545-kernel-boundary-capability.md` §7 carries it as the named
+    residual, `docs/design/561-undeclared-emission-boundary.md` carries the
+    re-measurement, and `tests/test_kernel_boundary_544.py` pins it so it stays
+    visible.
     """
     return cap.token == "*"
 

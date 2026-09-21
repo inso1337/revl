@@ -330,15 +330,21 @@ def attenuation_coverage() -> list[str]:
 # `Leaker requires kv: KvB` reaches a different boundary under the same key,
 # and the fold saw `kv` on both sides and derived no widening
 # (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
-_WIRE_NS = "key:"
+# The same hole one declaration weaker: `Supervisor requires net: Net` spawning
+# `Worker requires net: Kv` where NEITHER service declares a token. The key is
+# not the boundary's name there either, so the element is the SERVICE
+# (`lower._undeclared_cap`, item 561).
+_UNDECLARED_NS = "svc:"
 
 
-def _wire_cap(key: str) -> str:
-    """`lower._wire_cap`: the attenuation-fold element for a wiring key that no
-    declaration tokens (a bare `emission`, a plain or unresolvable service).
-    The key gets its OWN namespace so a key spelling can never masquerade as a
-    declared token, and so two such boundaries still compare by name."""
-    return _WIRE_NS + key
+def _undeclared_cap(service: str) -> str:
+    """`lower._undeclared_cap`: the attenuation-fold element for an emission
+    that no declaration tokens (a bare `emission`, a plain or unresolvable
+    service), named by the SERVICE it is declared on. It gets its OWN namespace
+    so a derived spelling can never masquerade as a declared token, and two
+    such boundaries compare by the declaration rather than by a consumer's
+    local key."""
+    return _UNDECLARED_NS + service
 
 
 def _declared_cap(declared: str) -> str:
@@ -716,10 +722,10 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
             else:
                 mode, entries = bounds[(svc, meth)]
                 if mode == "any":
-                    # No declared token: the wiring key names the
-                    # boundary, in its own namespace for the fold and
-                    # bare for the bound.
-                    out.add((_wire_cap(root), root))
+                    # No declared token: the SERVICE names the boundary
+                    # for the fold, in its own namespace; the BOUND
+                    # column still reads the wiring key (item 561).
+                    out.add((_undeclared_cap(svc), root))
                 else:
                     for e in entries:
                         out.add((_declared_cap(e), _canon_cap(root, e)))
@@ -1400,18 +1406,18 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # service's emission declarations (the held side of attenuation).
             # K feeds the attenuation fold and nothing else, so it carries the
             # ATTENUATION spelling only: the declared token where the service
-            # declares one, the namespaced wiring key where it does not
+            # declares one, the namespaced SERVICE where it does not
             # (`lower._held_capabilities_pairs`, clause for clause).
             krows: list[tuple[str, str]] = []
             for local, svc in requires:
                 em = [(mode, ents) for (s, _m), (mode, ents) in bounds.items()
                       if s == svc and mode != "plain"]
                 if not em:
-                    krows.append((local, _wire_cap(local)))
+                    krows.append((local, _undeclared_cap(svc)))
                     continue
                 for mode, ents in em:
                     if mode == "any":
-                        krows.append((local, _wire_cap(local)))
+                        krows.append((local, _undeclared_cap(svc)))
                     else:
                         for e in ents:
                             krows.append((local, _declared_cap(e)))
