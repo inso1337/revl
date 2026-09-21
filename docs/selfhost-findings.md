@@ -1739,17 +1739,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     56 |                   56 (100%) |             43 (76.8%) |
-| ts   |     60 |                   60 (100%) |             44 (73.3%) |
+| py   |     57 |                   57 (100%) |             43 (75.4%) |
+| ts   |     61 |                   61 (100%) |             44 (72.1%) |
 | go   |     23 |                   23 (100%) |            23 (100.0%) |
 | java |     59 |                   59 (100%) |             50 (84.7%) |
 | rust |     40 |                   40 (100%) |             37 (92.5%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **259** | **259 (100%)** | **218 (84.2%)** |
+| **total** | **261** | **261 (100%)** | **218 (83.5%)** |
 
-Every one of the 259 documents is reproduced byte-for-byte by its
+Every one of the 261 documents is reproduced byte-for-byte by its
 self-host emitter when the emitter is fed the **reference** IR. 218 of
-them survive the **fully-native** chain, so all 41 residual documents
+them survive the **fully-native** chain, so all 43 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,9 +1779,10 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 13 residual of 56:
+`py`, 14 residual of 57:
 
 - `services_match.rvl`
+- `services_control_flow.rvl`
 - `services_interp.rvl`
 - `witnessed.rvl`
 - `witnessed_secret.rvl`
@@ -1795,7 +1796,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../examples/java_match.rvl`
 - `../../../src/revl/truc/components/cli.rvl`
 
-`ts`, 16 residual of 60:
+`ts`, 17 residual of 61:
 
 - `services_composite.rvl`
 - `component_exprs.rvl`
@@ -1813,6 +1814,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `property_edges.rvl`
 - `component_edges.rvl`
 - `cas_runtime.rvl`
+- `../emit_py_corpus/services_control_flow.rvl`
 
 `go`, 0 residual of 23:
 
