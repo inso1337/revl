@@ -1,7 +1,10 @@
 # Design: the private peer pool as an operable product (item 524, issue #1198)
 
-Status: slice 1 landed. The pool declaration, the join admission gate, the tier
-ladder, promotion on attested evidence and withdrawal are in
+Status: slice 1 landed; the receipt slice landed on top of it
+([566-pool-execution-receipts.md](566-pool-execution-receipts.md)), which is
+where promotion evidence is now recounted rather than believed. The pool
+declaration, the join admission gate, the tier ladder, promotion on attested
+evidence and withdrawal are in
 `src/revl/peer_pool.py` with `revl pool init | request | join | status |
 withdraw`. Dispatching work to a member over a wire is not here and is named
 under "What is left" with how to measure it.
@@ -237,9 +240,12 @@ advertised ceiling does not cover the entry grant.
 
 This is the pool declaration plus the gate for joining it. Nothing here opens a
 socket. Running work on a member, moving bytes over a wire and delivering a
-result are still the #421 network seam and the `tee_attestation` delivery path,
-and this module is deliberately their caller's data model rather than a second
-implementation of them.
+result are the machine boundary of roadmap item 118, and this module is
+deliberately their caller's data model rather than a second implementation of
+them. (This paragraph said "the #421 network seam" until item 524's receipt
+slice; that reference was wrong, and
+[566-pool-execution-receipts.md](566-pool-execution-receipts.md) says what the
+prerequisite actually is.)
 
 `revl pool` is operable today on one machine or two, with keys exchanged out of
 band:
@@ -273,7 +279,14 @@ mid-task leaving the ledger in a stated state. This slice lands the first and
 last of those. What remains:
 
 1. **Dispatch over the wire.** Handing an admitted member a unit of work needs
-   the #421 network seam. Measured by: two processes on two hosts, one `pool
+   a machine boundary. It does NOT need "the #421 network seam", which was a
+   wrong reference: roadmap item 421 is a capability and codegen audit. The
+   genuine prerequisite is roadmap item 118 (`revl deploy`, issue #79), whose
+   cross-machine channel, pinned host key, bundle staging, far-side
+   `deploy-admit` runner and signed COMMIT receipt are all built; what is
+   missing is the dispatcher that turns a unit of work into a request.
+   `deploy.VIA_PEER` exists to be refused by name, with reason
+   `peer-pool-unavailable`. Measured by: two processes on two hosts, one `pool
    join`, one task dispatched, the result returned. Today the pool can be stood
    up and joined across two machines by copying three files.
 2. **One-result delivery with a ledger.** `Roster.outstanding` is the shape a
@@ -282,11 +295,12 @@ last of those. What remains:
    what is outstanding. Measured by: a delivered-twice attempt is refused or
    recorded, never silently absorbed. `tee_attestation`'s admission ledger is
    the existing consumer to extend rather than duplicate.
-3. **Signed execution receipts feeding the evidence count.** `Membership.evidence`
-   is an integer a caller increments today. It should be the count of receipts
-   this pool has verified under a key in `attest_key_ids`, computed rather than
-   supplied. Measured by: setting `evidence` by hand stops being possible, and a
-   promotion cites the receipt digests it counted.
+3. **Signed execution receipts feeding the evidence count.** DONE, under item
+   524's receipt slice. `Membership.evidence` is derived from
+   `evidence_digests`, `promote` recounts from `(receipt, attestation)` pairs
+   and no longer takes a count or a key list from a caller, and a promotion
+   cites the receipt digests it counted. See
+   [566-pool-execution-receipts.md](566-pool-execution-receipts.md).
 4. **Asymmetric peer identity.** DONE, under issue #1278. The operator's pool
    directory holds only public keys, and a third party given a join and a public
    key reaches the same verdict the operator did. See
@@ -371,10 +385,10 @@ parametrized hostile-input test over ten malformed records.
 * The gate bounds what a peer may RECEIVE. It says nothing about what a peer
   DOES with what it received; that is the sandbox and seam's problem, and
   `peer_offer`'s design says the same thing about the same boundary.
-* `Membership.evidence` is supplied by the caller today, not computed from
-  verified receipts. Until item 3 of what is left lands, the promotion gate
-  checks that evidence was attested by an authorized key and that there is
-  enough of it, but it does not itself recount the receipts.
+* `Membership.evidence` WAS supplied by the caller. Item 524's receipt slice
+  closed that: it is now `len(evidence_digests)`, recounted by
+  `pool_receipt.count_evidence` from receipts the pool verified, and there is
+  no parameter through which a count can be stated.
 * The roster is a JSON file with no concurrency control. Two operators admitting
   at once on a shared directory would race. A single-writer operator is the
   assumed deployment and a durable multi-writer roster is not designed here.

@@ -327,11 +327,19 @@ def test_the_peer_pool_module_reads_its_authority_diff_before_its_evidence():
     verdict and was not registered, and it is a real promotion path: `promote`
     raises a member's tier, and a tier is caps and budgets.
 
-    Its measured stage is `evidence`, the count of attested receipts the member
-    accumulated while it worked. Its authority stage is `_ceiling_precondition`,
-    which depends only on the charter and the tier. The registry says the diff
-    comes first; this reads `promote`'s own body and holds it to that, so
-    moving the ceiling diff back below the evidence threshold reds here."""
+    Its measured stage is `evidence`, the count of attested execution receipts
+    the member accumulated while it worked, recounted by
+    `_evidence_precondition` (item 524). Its authority stage is
+    `_ceiling_precondition`, which depends only on the charter and the tier.
+    The registry says the diff comes first; this reads `promote`'s own body and
+    holds it to that, so moving the ceiling diff back below the evidence stage
+    reds here.
+
+    The evidence stage is located by EITHER spelling, whichever stands earlier:
+    the `_evidence_precondition` call that recounts the receipts, or a direct
+    `member.evidence` read. Before item 524 only the second existed, and taking
+    the earlier of the two means reintroducing a raw count read ahead of the
+    diff reds here as loudly as moving the call would."""
     path = pb.BY_MODULE["src/revl/peer_pool.py"]
     assert path.index(path.authority) < path.index("evidence")
 
@@ -343,13 +351,19 @@ def test_the_peer_pool_module_reads_its_authority_diff_before_its_evidence():
     ceiling = _first_line(body, lambda n: isinstance(n, ast.Call)
                           and getattr(n.func, "id", None)
                           == "_ceiling_precondition")
-    evidence = _first_line(body, lambda n: isinstance(n, ast.Attribute)
-                           and n.attr == "evidence"
-                           and getattr(n.value, "id", None) == "member")
+    evidence = _first_line(
+        body,
+        lambda n: (isinstance(n, ast.Call)
+                   and getattr(n.func, "id", None) == "_evidence_precondition")
+        or (isinstance(n, ast.Attribute) and n.attr == "evidence"
+            and getattr(n.value, "id", None) == "member"))
     assert ceiling is not None, "peer_pool.promote runs no ceiling diff"
-    assert evidence is not None, "peer_pool.promote reads no member evidence"
+    assert evidence is not None, (
+        "peer_pool.promote neither recounts evidence through "
+        "`_evidence_precondition` nor reads `member.evidence`, so it has no "
+        "measured stage for the diff to gate")
     assert ceiling < evidence, (
-        "src/revl/peer_pool.py reads `member.evidence` at line "
+        "src/revl/peer_pool.py reaches its evidence stage at line "
         f"{evidence} and runs `_ceiling_precondition` at line {ceiling}. The "
         "authority diff gates ENTRY to the measured read (item 543, issue "
         "#1222); it is not weighed after it")
