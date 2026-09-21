@@ -71,8 +71,9 @@ def _finite_float(value):
 #
 # Component-position refusals are real v1/v2 limits of the stc-go world: an
 # anonymous record literal has no declared record type to render (declaring
-# one routes the document to the typed-core path, which does not carry a live
-# component), match/arrow/`?.` have no lowering there yet, and bare Opt/Result
+# one moves the document to the v3 combined path, where the record type and
+# the live component are rendered together (issue #1321)), match/arrow/`?.`
+# have no lowering there yet, and bare Opt/Result
 # construction outside return position is refused by the tier's tuple-Opt
 # design. Each refusal names the limit and a workaround. `hole` is refused at
 # the document level by the pre-emit walk.
@@ -599,13 +600,15 @@ def _expr(node, env: _Env, expected=None) -> str:
         raise EmitError(
             "field access is only lowerable on a sized value's `.length` "
             "in the stc-go component world (records need a declared record "
-            "type, and declaring one routes the document to the typed-core "
-            "path, which carries no live component) - lift it into a "
-            "helper fn instead")
+            "type, and this document declares none) - declare the record "
+            "type, which moves the document to the v3 combined path where "
+            "the type and the component are rendered together, or lift it "
+            "into a helper fn instead")
     if kind == "fn":
         # a call to a top-level `fn` by name (component dialect). In the v3
         # typed-core world a document declaring a pure `fn` AND a component
-        # routes to the placement path, where the fn is a real declaration the
+        # routes to the combined path (`_emit_v3_combined`, reached from both
+        # `emit` and `emit_placement`), where the fn is a real declaration the
         # method body can call; otherwise unreachable in practice — a named
         # tier limit beats a fall-through.
         name = _v3_ident(node.get("name"), "function")
@@ -2719,6 +2722,31 @@ def _refuse_stream_document_top_level(ir: dict) -> None:
                 "module missing a section you wrote, so the tier refuses by name "
                 "instead (item 130 §4.6) — split the %s into its own document, "
                 "or try `--backend py`" % (described, key, key))
+
+
+def _component_is_observable(comp: dict) -> bool:
+    """Does dropping this component lose something the author wrote?
+
+    The pure typed-core path routes PAST components (see `_emit`), which is
+    right for a document whose component is scaffolding around the record or
+    pure-fn shape the corpus case is actually about — an empty component, or a
+    bare `provides` with no methods, renders to nothing anyone can call. A
+    component with a method body or an activation step is a different matter:
+    dropping it answers with a module whose routes are simply absent.
+
+    So this is the routing predicate that decides between the two (issue
+    #1321): False keeps the document on the pure path, byte-for-byte with the
+    frozen fixtures, and True sends it to `_emit_v3_combined`, which renders
+    the declarations AND the components in one package. The self-host port
+    mirrors it in `selfhost/emit_go.rvl::component_is_observable`, because the
+    documents it answers for are exactly the ones whose byte agreement with
+    this tier the port's marker suppression may keep."""
+    if comp.get("body"):
+        return True
+    for step in comp.get("provides") or []:
+        if step.get("methods"):
+            return True
+    return False
 
 
 def _stream_head(node, env) -> str:
@@ -9280,10 +9308,15 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     # removed now that the lowering exists.
 
     # ir_version-3 routing:
-    #   * No component, or any top-level pure declaration (functions / types /
-    #     externs / tests) present -> the pure typed-core path (`_emit_v3_go`):
-    #     ordinary Go, no stc runtime (the v3_* fixtures, and the pure-fn /
-    #     record / ADT / test corpus cases whose component is incidental).
+    #   * No component, or a top-level pure declaration (functions / types /
+    #     externs / tests) beside none but INCIDENTAL components -> the pure
+    #     typed-core path (`_emit_v3_go`): ordinary Go, no stc runtime (the
+    #     v3_* fixtures, and the pure-fn / record / ADT / test corpus cases
+    #     whose component is incidental).
+    #   * A top-level pure declaration beside an OBSERVABLE component -> the
+    #     combined path (`_emit_v3_combined`): both, in one package. Before
+    #     issue #1321 there was no such arm and the document took the pure
+    #     path, which renders none of the components it routes past.
     #   * A component and NOTHING top-level -> a live stc-go component whose
     #     method/step bodies use v3 expressions; the stc-go path below renders
     #     them with the converged expression renderer.
@@ -9322,6 +9355,17 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         # document must stay on the stc-go runtime path even though it also
         # carries top-level `test` blocks (FR-5); the pure path would drop the
         # components and refuse the lifecycle steps.
+        if any(_component_is_observable(comp)
+               for comp in (ir.get("components") or [])):
+            # ... and the pure path drops every component it routes past,
+            # which is only acceptable while the component is incidental
+            # (issue #721). A component with a method body or an activation
+            # step is not: dropping it answers with a module whose routes are
+            # simply absent. Carry the document on the combined renderer
+            # instead: the typed-core tier and the live stc-go components in
+            # one package, which the placement path has emitted since commit
+            # 6d258f9fe and `emit` never learned about (issue #1321).
+            return _emit_v3_combined(ir, package, placement=False)
         return _emit_v3_go(ir, package)
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
@@ -10009,18 +10053,32 @@ def _emit_go_bridge(ir: dict) -> list[str]:
 
 
 def _emit_v3_placement(ir: dict, package: str) -> str:
-    """A v3 typed-core composition for the placement runner, in ONE package:
-    the pure typed-core tier (record structs, ADT sealed interfaces, pure
-    `fn`s, externs, plain `test` blocks — ordinary Go) PLUS the live stc-go
-    components (service interfaces, keys, impls, load helpers) PLUS the
-    interop bridge. This is the go mirror of the rust tier's `_emit_v3`
-    (types + components in one module), extended with the bridge the placement
-    runner links against.
+    """The placement runner's half of the combined renderer (see
+    `_emit_v3_combined`): the same module, plus the interop bridge appended by
+    `_emit_placement`."""
+    return _emit_v3_combined(ir, package, placement=True)
+
+
+def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
+    """A v3 typed-core composition in ONE package: the pure typed-core tier
+    (record structs, ADT sealed interfaces, pure `fn`s, externs, plain `test`
+    blocks, ordinary Go) PLUS the live stc-go components (service interfaces,
+    keys, impls, load helpers). This is the go mirror of the rust tier's
+    `_emit_v3`, which renders types and components in one module.
+
+    Two callers reach it. `emit_placement` adds the interop bridge the
+    placement runner links against. `emit` uses it for a document whose
+    component the pure typed-core path would otherwise route past and DROP
+    (issue #1321). The combined module is the third path that fork was
+    missing, so the document is carried rather than refused.
 
     Record structs are emitted with EXPORTED, json-tagged fields (`_V3_TYPED_COMPONENTS`)
     so record values survive the bridge's plain-JSON wire encoding — the go
-    mirror of the rust tier's serde derives. The pure tier (`emit`) keeps
-    unexported fields byte-for-byte with the frozen fixtures."""
+    mirror of the rust tier's serde derives, and the same convention the live
+    stc-go path in `_emit` already uses for a document that declares types.
+    The pure tier (`_emit_v3_go`) keeps unexported fields byte-for-byte with
+    the frozen fixtures; no document that reaches the pure tier reaches here,
+    so no frozen output moves."""
     types = ir.get("types") or {}
     functions = ir.get("functions") or []
     externs = ir.get("externs") or []
@@ -10033,6 +10091,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     global _COMP_NEEDS_STRCONV
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
     global _COMP_NEEDS_STREAM_DRAIN
+    global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
     _V3_MODE = True
@@ -10046,6 +10105,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     _TIMER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
     _COMP_NEEDS_STREAM_DRAIN = False
+    _COMP_NEEDS_TEARDOWN = False
+    _COMP_NEEDS_METHOD_WITNESSED = False
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
     has_spawn = _spawn_targets(ir) and any(
@@ -10131,6 +10192,14 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         imports.append('\t"math"')
     if ctx.needs_strconv or _COMP_NEEDS_STRCONV:
         imports.append('\t"strconv"')
+    if _COMP_NEEDS_TEARDOWN:
+        # `runCompensationPhase`'s budget/deadline (`time`) and the two
+        # `REVL_COMPENSATION_*_MS` env reads (`os`, `strconv`). The live path
+        # in `_emit` guards each against Go's single-import rule by hand; this
+        # block is de-duplicated by the `sorted(set(imports))` below.
+        imports.append('\t"time"')
+        imports.append('\t"os"')
+        imports.append('\t"strconv"')
     if ctx.needs_strings:
         imports.append('\t"strings"')
     # The host runtime's Map.Keys and _V3_MAP_PREAMBLE's revlMapKeys both sort
@@ -10147,8 +10216,12 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
     out.append("// revl -> cordis-go (ir_version 3, typed-core + live components):")
-    out.append("// the pure typed-core tier (records/ADTs/pure fns) plus the stc-go")
-    out.append("// components and the interop bridge, in one package (placement).")
+    if placement:
+        out.append("// the pure typed-core tier (records/ADTs/pure fns) plus the stc-go")
+        out.append("// components and the interop bridge, in one package (placement).")
+    else:
+        out.append("// the pure typed-core tier (records/ADTs/pure fns) plus the stc-go")
+        out.append("// components, in one package.")
     out.append("package %s" % package)
     out.append("")
     if imports:
@@ -10289,6 +10362,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append(_V3_MAP_INDEX_HELPER)
     if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
+    if _COMP_NEEDS_TEARDOWN:
+        out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
     if _COMP_NEEDS_STREAM:

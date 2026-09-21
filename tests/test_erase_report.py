@@ -211,7 +211,10 @@ def test_no_residue_proof_holds_over_a_real_teardown(realms_ir):
 def test_report_is_a_versioned_self_describing_document(realms_ir):
     report = erase_report.build_report(realms_ir, "beta", prove_residue=False)
     assert report["kind"] == "revl.erase-report"
-    assert report["schema_version"] == "1.0"
+    # 1.1: item 522 added the additive `boundaryCrossings.uiResidue`
+    # member (a computer-use split), absent for a realm that crosses
+    # no computer-use verb. MINOR, per the module's own rule.
+    assert report["schema_version"] == "1.1"
     assert report["realm"] == "beta"
     # round-trips through JSON without loss (it is an interchange artifact)
     assert json.loads(json.dumps(report)) == report

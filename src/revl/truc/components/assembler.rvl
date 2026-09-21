@@ -12,13 +12,13 @@ use "workspace.rvl" { Workspace }
 use "planner.rvl" { Plan }
 
 pub service Assembler {
-  emission fn add(name: Str) -> Int
-  emission fn rm(name: Str) -> Int
-  emission fn assemble() -> Int
-  emission fn assemble_check() -> Int
-  emission fn apply(trustHostCode: Bool) -> Int
-  emission fn stack_check() -> Int
-  emission fn unknown(cmd: Str) -> Int
+  emission[fetch, gate, index, ws] fn add(name: Str) -> Int
+  emission[gate, ws] fn rm(name: Str) -> Int
+  emission[gate, ws] fn assemble() -> Int
+  emission[gate, ws] fn assemble_check() -> Int
+  emission[ws] fn apply(trustHostCode: Bool) -> Int
+  emission[ws] fn stack_check() -> Int
+  emission[ws] fn unknown(cmd: Str) -> Int
 }
 
 component Assembler

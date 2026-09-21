@@ -332,6 +332,64 @@ def _iter_realm_placements(node, out: list) -> None:
             _iter_realm_placements(value, out)
 
 
+def check_no_retention_policy(root_programs: list[Program],
+                              profile: AdmissionProfile) -> None:
+    """Refuse a `retention <name> { ... }` written by an untrusted author (544).
+
+    A retention policy is not a cache setting. `until` is the date past which a
+    `Retained[T, P]` value may no longer reach a persistence sink, `hold` is the
+    legal-hold exception that OVERRIDES that date, and `deleters` is who may
+    demand erasure. All three are authority, and `G-RETAIN` is the guarantee
+    over them. A self-evolution loop permitted to "update indexes and retention
+    policies" as ordinary behaviour tuning is a loop that can extend its own
+    deadline, which is an authority change wearing the clothes of a cache
+    setting - which is why `kernel.retention` is on the kernel side of item
+    544's boundary and why this refusal exists at the door rather than at a
+    later review stage.
+
+    Item 532 measured how subtle the surface already is with no loop touching
+    it: the retention refusal was argument-blind across a service seam, so a
+    value past its deadline reached a provider's store with the compiler
+    silent. A policy an untrusted author wrote for itself is not a surface this
+    gate should be reasoning about at all.
+
+    Root-scoped and structural, exactly like `check_no_extern` and
+    `check_no_asset`: a pre-granted module the turn `use`s carries the
+    OPERATOR'S policies and keeps them, and a `Retained[T, P]` qualifier naming
+    one of those stays legal - what the author may not do is mint the policy
+    that bounds its own data. It rides the `no_extern` flag rather than growing
+    a knob, for the reason `check_no_asset` gives: every field of this profile
+    is a property of the author, and a door that picks a subset is a door with
+    a hole in it.
+    """
+    if not profile.no_extern:
+        return
+    from .kernel_boundary import RETENTION  # noqa: PLC0415 - lazy, avoids a cycle
+    for program in root_programs:
+        for decl in getattr(program, "retentions", None) or []:
+            until = next((v[0] for k, v, _s, _l in decl.fields
+                          if k == "until" and v), None)
+            deadline = (f" (it declares `until: {until}`)" if until else "")
+            raise RevlError(
+                program.filename, decl.line,
+                f"admission refused: the untrusted-author profile forbids "
+                f"declaring a retention policy, but this source declares "
+                f"`retention {decl.name}`{deadline} - a retention deadline is "
+                f"an authority, not a cache setting, and an author that writes "
+                f"its own may extend the date its own data is held to "
+                f"(G-RETAIN)",
+                hint=f"{RETENTION.why}. A `Retained[T, P]` qualifier naming a "
+                     f"policy the trusted composition declares is unaffected: "
+                     f"what an untrusted author may not do is mint the policy "
+                     f"that bounds its own data. Drop the declaration and name "
+                     f"a policy the composition already carries, or have an "
+                     f"operator add it (item 520/544, "
+                     f"docs/design/545-kernel-boundary-capability.md)",
+                code="G-RETAIN", category="admission",
+                navigate=_granted_navigate(profile.granted),
+            )
+
+
 def check_no_realm_placement(root_programs: list[Program],
                              profile: AdmissionProfile) -> None:
     """Refuse if the untrusted-authored source names a REALM (item 334, slice 2).
@@ -771,6 +829,7 @@ def enforce_source(root_programs: list[Program],
     if profile.no_extern:
         check_no_extern(root_programs, profile)
         check_no_asset(root_programs, profile)  # item 459 F1
+        check_no_retention_policy(root_programs, profile)  # item 544
     if profile.no_declassify:
         check_no_declassify(root_programs, profile)
     # item 334 slice 2: the realm-placement refusal, root-scoped exactly as the

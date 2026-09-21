@@ -778,7 +778,7 @@ class ClassMap:
     def static_taint(self, component: str) -> frozenset[str]:
         """The static item-249 taint over-approximation for a crossing component:
         the post-endorsement origins (declassification already folded into
-        `comp["taint"]["reaches"]`) that reach a sink, intersected with the five
+        `comp["taint"]["reaches"]`) that reach a sink, intersected with the
         taint-fold origins (design §2.2). This is the honest recorded taint on a
         tier with the static audit and the admission floor on a tier without
         runtime value taint. Empty when the component touches no taint."""

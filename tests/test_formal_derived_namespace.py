@@ -5,10 +5,11 @@ given as lists, and once over sets DERIVED from a component shape, which is
 what makes the theorems statements about the program text rather than about an
 oracle. That derived layer has the same two namespaces the harness has:
 
-  * the DECLARED boundary — the token an `emission[...]` clause names, which is
-    what an attenuation edge compares across a component boundary, because two
-    components wire the same boundary under whatever local key each likes
-    (`lower._cap_keyed`);
+  * the DECLARED boundary — the token an `emission[...]` clause names, or, for
+    a method that names none, the SERVICE it is declared on
+    (`lower._cap_keyed` / `lower._undeclared_cap`). That is what an attenuation
+    edge compares across a component boundary, because two components wire the
+    same boundary under whatever local key each likes;
   * the WIRING KEY — the local `requires` spelling, which is what a statement
     actually contains and therefore what G6 confinement reads (`capKeys`).
 
@@ -47,9 +48,11 @@ GATE = ROOT / "formal" / "scripts" / "run_gate.sh"
 CHECK = ROOT / "formal" / "CheckAxioms.lean"
 REGISTRY = ROOT / "formal" / "scripts" / "nonvacuity.tsv"
 
-#: The reference program the derived layer's split witness tracks. Cited by
-#: name inside the Lean file, so a rename there must not leave it dangling.
+#: The reference programs the derived layer's split witnesses track. Cited by
+#: name inside the Lean file, so a rename there must not leave one dangling.
 FIXTURE = "tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl"
+UNDECLARED_FIXTURE = (
+    "tests/formal_corpus/g4_spawn_widens_undeclared_emission_same_key.rvl")
 
 #: The theorems whose conclusion is an attenuation fact. Every one of them must
 #: read the declared-boundary column; a wiring key among them is the defect.
@@ -134,19 +137,37 @@ def test_the_capability_column_names_what_it_reaches(decls):
     body = decls["capsOfDecls"]
     nonempty = body.split("| m :: ms =>", 1)
     assert len(nonempty) == 2, body
-    assert nonempty[1].strip().startswith("(m :: ms).map (declCap k)")
+    assert nonempty[1].strip().startswith("(m :: ms).map (declCap sv)")
     assert "⟨k," not in nonempty[1]
-    assert "[wireCap k]" in nonempty[0]
+    assert "[undeclCap sv]" in nonempty[0]
     # ...and `declCap` hands a declared capability back untouched.
     assert re.search(r"\|\s*some\s+d\s*=>\s*d\b", decls["declCap"])
-    assert re.search(r"\|\s*none\s*=>\s*wireCap\s+k\b", decls["declCap"])
+    assert re.search(r"\|\s*none\s*=>\s*undeclCap\s+sv\b", decls["declCap"])
 
 
-def test_a_key_with_nothing_declared_lands_in_the_reserved_namespace(decls):
-    """The one case where a key still names the boundary is namespaced, so it
-    cannot be read back as a declared token (`lower._wire_cap`)."""
-    assert re.search(r"def\s+wireCap\s*\(k\s*:\s*String\)\s*:\s*Cap\s*:="
-                     r"\s*⟨wireNS\s*\+\+\s*k,\s*\[\]⟩", decls["wireCap"])
+def test_the_undeclared_fallback_is_the_service_not_the_key(decls):
+    """Item 561. A method declaring `emission` with no capability list names no
+    token, and the element it falls back to must be the SERVICE it is declared
+    on. The wiring key is the consumer's spelling: two different boundaries
+    wired alike compare equal under it, which is the same laundering the
+    declared column was moved off in issue 1142."""
+    assert "undeclCap sv" in decls["declCap"]
+    assert "wireCap" not in decls["declCap"]
+    assert "undeclCap sv" in decls["capsOfDecls"]
+    # the namer receives both names, so the two columns can read different ones
+    assert re.search(r"abbrev\s+Namer\s*:=\s*String\s*→\s*String\s*→"
+                     r"\s*List\s+Decl\s*→\s*List\s+Cap", decls["Namer"])
+    assert re.search(r"def\s+capsOfDecls\s*\(_k\s*:\s*String\)\s*"
+                     r"\(sv\s*:\s*String\)", decls["capsOfDecls"])
+    assert re.search(r"def\s+boundsOfDecls\s*\(k\s*:\s*String\)\s*"
+                     r"\(_sv\s*:\s*String\)", decls["boundsOfDecls"])
+
+
+def test_a_service_with_nothing_declared_lands_in_the_reserved_namespace(decls):
+    """The element for a boundary no declaration names is namespaced, so it
+    cannot be read back as a declared token (`lower._undeclared_cap`)."""
+    assert re.search(r"def\s+undeclCap\s*\(s\s*:\s*String\)\s*:\s*Cap\s*:="
+                     r"\s*⟨undeclNS\s*\+\+\s*s,\s*\[\]⟩", decls["undeclCap"])
 
 
 def test_the_reserved_namespace_is_the_reference_s(decls):
@@ -155,9 +176,10 @@ def test_the_reserved_namespace_is_the_reference_s(decls):
     `src/revl` avoids."""
     from revl import lower
 
-    m = re.search(r'def\s+wireNS\s*:\s*String\s*:=\s*"([^"]*)"', decls["wireNS"])
-    assert m, decls["wireNS"]
-    assert m.group(1) == lower._WIRE_NS
+    m = re.search(r'def\s+undeclNS\s*:\s*String\s*:=\s*"([^"]*)"',
+                  decls["undeclNS"])
+    assert m, decls["undeclNS"]
+    assert m.group(1) == lower._UNDECLARED_NS
 
 
 def test_the_bound_column_still_names_the_wiring_key(decls):
@@ -220,7 +242,8 @@ def test_the_bridge_lemma_is_restated_for_both_columns(decls):
     body = decls["derived_held_tokens_are_declared_keys"]
     assert "capKeys (heldBounds I c)" in body
     assert "heldCaps I c" in body
-    assert "wireCap kv.1" in body
+    assert "undeclCap kv.2" in body
+    assert "wireCap kv.1" not in body
 
 
 # ------------------------------------------------------------ the split witness
@@ -265,12 +288,50 @@ def test_the_witness_states_both_verdicts(decls):
     assert "¬ SpawnsAdmitted witIface wProgLaunder 1" in body
 
 
+@pytest.mark.parametrize("name", ["same_key_different_boundary_refused",
+                                  "same_key_undeclared_boundary_refused"])
+def test_the_undeclared_witness_is_registered_too(decls, name):
+    """Item 561's witness rides the same registration as issue 1142's: named in
+    the Lean file, in `CheckAxioms.lean`, in `run_gate.sh`'s argv and cited by
+    a non-`concrete` row of the non-vacuity registry."""
+    assert name in decls
+    assert f"RevL.CapCeilings.{name}" in CHECK.read_text()
+    assert f"RevL.CapCeilings.{name}" in GATE.read_text()
+    rows = REGISTRY.read_text().splitlines()
+    assert len([r for r in rows if r.startswith(f"RevL.CapCeilings.{name}\t")]) == 1
+    cited = [r for r in rows if len(r.split("\t")) > 2
+             and f"RevL.CapCeilings.{name}" in r.split("\t")[2].split(",")]
+    assert cited, f"{name} is registered but no theorem cites it"
+
+
+def test_the_undeclared_witness_spells_one_key_over_two_services(decls):
+    """Non-vacuity for it, read off the Lean text: parent and child agree on
+    the key, disagree on the service, and NEITHER service declares a token -
+    or it is the declared witness again rather than item 561's."""
+    assert '("net", "NetBare")' in decls["wBareRouter"]
+    assert '("net", "KvBare")' in decls["wBareWork"]
+    table = decls["witIface"]
+    assert '"NetBare" then [none]' in table
+    assert '"KvBare" then [none]' in table
+
+
+def test_the_undeclared_witness_states_both_verdicts(decls):
+    """...and both halves, the same way: the bound column derives one list for
+    the two sides, and the capability column refuses the edge."""
+    body = decls["same_key_undeclared_boundary_refused"]
+    assert "bodyBounds witIface wBareWork = heldBounds witIface wBareRouter" in body
+    assert "Attenuates (heldBounds witIface wBareRouter)" in body
+    assert "¬ SpawnsAdmitted witIface wProgBare 1" in body
+    assert 'undeclCap "NetBare"' in body and 'undeclCap "KvBare"' in body
+
+
 def test_the_cited_reference_program_is_still_there(code):
     """The Lean file names the `.rvl` program its witness models. A citation
     that no longer resolves is a model claiming a correspondence it cannot
     have."""
-    assert FIXTURE in code.replace("\n", " ") or FIXTURE in LEAN.read_text()
-    assert (ROOT / FIXTURE).is_file()
+    for fixture in (FIXTURE, UNDECLARED_FIXTURE):
+        assert fixture in LEAN.read_text()
+        assert (ROOT / fixture).is_file()
 
 
 # --------------------------------------------------- the gate still names them

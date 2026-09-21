@@ -212,7 +212,7 @@ has exactly two members: `split`, the default, which returns the dissent; and
 admitting outcome**, and the spellings for one are enumerated so that the
 refusal can be precise:
 
-```revl reject G-MODEL-PLACE
+```revl reject G-COUNCIL-SPLIT
 model role edge on_device
 model role aux  on_device
 model role vast off_device
@@ -226,14 +226,14 @@ model council Release {
 ```
 
     `on_tie allow` in model council `Release` admits when the members disagree
-    (G-MODEL-PLACE)
+    (G-COUNCIL-SPLIT)
 
 That is the roadmap's own exit test for the declaration half, and its hint
 names both admitted outcomes so the fix does not require reading this note.
 
 The same shape refuses the rule that picks a member rather than aggregating:
 
-```revl reject G-MODEL-PLACE
+```revl reject G-COUNCIL-SPLIT
 model role edge on_device
 model role vast off_device
 
@@ -245,7 +245,7 @@ model council Release {
 ```
 
     `aggregate first` in model council `Release` resolves disagreement toward
-    one member's answer (G-MODEL-PLACE)
+    one member's answer (G-COUNCIL-SPLIT)
 
 ---
 
@@ -378,15 +378,16 @@ All of it lives in `src/revl/model_council.py`, beside the rules, the way
 `revl.model_route` holds item 512's. The parser reads the shape and validates
 nothing.
 
-Every refusal carries `G-MODEL-PLACE`. **No new guarantee code is registered.**
-The council is the placement family's second construct, not a second family:
-the code already reads "a model role declared `off_device` never receives a
-confidentiality origin, and an action reaches only the roles its `route model`
-block names", and every rule below is a rule about which roles a declaration
-binds and how. Registering a new code would also have needed either a
-reproducer under `examples/rejections/` or an `ACKNOWLEDGED` entry in
-`tools/tier_guarantees.py` for item 523's generated tier matrix, and adding a
-family for a slice that adds no new class of refusal is not worth either.
+**Superseded by `docs/design/557-council-disagreement.md` (issue #1190).**
+This slice filed all thirteen refusals under `G-MODEL-PLACE`, on the reading
+that the council is the placement family's second construct rather than a
+second family. Note 557 kept two of them there and gave the other eleven their
+own code, `G-COUNCIL-SPLIT`, for a reason this note did not weigh: a code is
+not a label, it is the `guarantee` and `fix` pair `revl.diagnostics.classify()`
+hands an agent so it can react without reading prose, and item 512's fix line
+says to route the origin to a role declared `on_device`, which is not the
+rewrite for any refusal in rows 1 and 3 to 13. The rows below still hold; the
+code column is 557 section 3's.
 
 | # | The decision | Direction |
 | - | ------------ | --------- |
@@ -537,45 +538,65 @@ anything the other three lanes read.
 
 `selfhost/*.rvl` is a second implementation that must agree with the reference,
 and its oracles catch divergence but not a missing feature. So the question is
-not whether the self-host implements `model council`, which it does not, but
-whether it can SILENTLY ADMIT a program the reference decides.
+not whether the self-host implements `model council`, but whether it can
+SILENTLY ADMIT a program the reference decides.
 
-Measured, on the gate built from `selfhost/lower.rvl` at this branch:
+**Ported.** Issue #1291 carried the declaration across, and
+`docs/design/556-model-council-selfhost.md` records what it decided and what it
+deliberately left alone. What follows is the measurement that made the port a
+follow-up rather than part of this slice.
+
+Measured on the gate built from `selfhost/lower.rvl` at the branch that landed
+this note:
 
 | program | reference | gate |
 | ------- | --------- | ---- |
 | the component with no model declaration (control) | admits | `''` (admits) |
 | `model role` alone (item 512, shipped) | admits | `BAD\|unexpected token at top level` |
 | a council with `aggregate unanimous` | admits | `BAD\|unexpected token at top level` |
-| the same council with `on_tie allow` | refuses `G-MODEL-PLACE` | `BAD\|unexpected token at top level` |
+| the same council with `on_tie allow` | refuses `G-COUNCIL-SPLIT` | `BAD\|unexpected token at top level` |
 | a shipped `retention` declaration (item 472) | admits | `BAD\|unexpected token at top level` |
 
-The gate refuses both, so it never admits a program whose aggregation it cannot
-decide. It errs in the false-reject direction, which is the direction the
-census docstring names as the one the crate is allowed to err in.
+The gate refused both councils, so it never admitted a program whose
+aggregation it could not decide. It erred in the false-reject direction, which
+is the direction the census docstring names as the one the crate is allowed to
+err in.
 
-The marker is the generic top-level parse refusal rather than a named one, for
-exactly the reason item 512's section 7 records: that is the state of every
-contextual top-level declaration the reference has added since the self-host's
+The marker was the generic top-level parse refusal rather than a named one, for
+exactly the reason item 512's section 7 records: that was the state of every
+contextual top-level declaration the reference had added since the self-host's
 top-level dispatch was written. The last two rows are the measurement that says
-so, on the same build: the gate gives the same answer to a shipped `retention`
-declaration and to `model role`, which item 512 landed. A named marker is item
-512's slice 3, and a `MODEL` marker covering both shapes `model` heads would
-serve this item too.
+so, on the same build: the gate gave the same answer to a shipped `retention`
+declaration and to `model role`, which item 512 landed.
 
-Because no `.rvl` in any corpus directory uses the construct, the census is
-unmoved: `--check` reports no change from the baseline, `false-reject` is still
-empty.
+The tag the port chose is `COUNCIL` rather than the `MODEL` marker this section
+originally expected to serve both shapes `model` heads. Section 1.1 of note 556
+records why: two constructs with two reference modules and two disjoint rule
+sets, so the tag is what tells a consumer which of them was refused. The tag is
+not a name for a code. Issue #1190 split the council's thirteen refusals across
+`G-COUNCIL-SPLIT` and `G-MODEL-PLACE` without moving the tag, and
+`SELFHOST_TAG_CODES` in `tools/tier_guarantees.py` maps `COUNCIL` to both.
 
-### 13.1 Why the fixtures are inline
+Because no `.rvl` in any corpus directory used the construct, the census was
+unmoved at this slice: `--check` reported no change from the baseline and
+`false-reject` was empty. It is still empty after the port, with the two
+fixtures section 13.1 was waiting for now in the corpus.
 
-The test programs live as strings in `tests/test_model_council_516.py` rather
-than in `examples/rejections/` or `tests/fixtures/`. Both are corpus roots for
-`tools/gate_reference_census.py`, and the self-host does not parse
-`model council`, so an ADMITTING fixture in either place would have become a
-`false-reject` census entry the moment it landed. This is item 512 section 6.1's
-decision, held for the same reason. A fixture belongs there when the self-host
-port lands, and moving it is then part of that slice's evidence.
+### 13.1 Why the fixtures were inline, and where they are now
+
+At this slice the test programs lived as strings in
+`tests/test_model_council_516.py` rather than in `examples/rejections/` or
+`tests/fixtures/`. Both are corpus roots for `tools/gate_reference_census.py`,
+and the self-host did not parse `model council`, so an ADMITTING fixture in
+either place would have become a `false-reject` census entry the moment it
+landed. This was item 512 section 6.1's decision, held for the same reason, and
+it ended "a fixture belongs there when the self-host port lands".
+
+The port landed, and two fixtures moved into the corpus with it:
+`examples/model_council.rvl`, the admitting program, and
+`examples/rejections/gcouncilsplit_on_tie_allow.rvl`, this item's exit test
+verbatim. `tests/test_model_council_516.py` keeps its inline programs and
+stays the standing guard.
 
 ---
 
@@ -585,7 +606,11 @@ Each slice is independently landable and carries its oracle in the same PR.
 `tests/test_model_council_516.py` is the standing guard on every one.
 
 **S1. The declaration, checked. LANDED with this note.** The surface of section
-2, the thirteen refusals of section 8, no IR, no new guarantee code.
+2, the thirteen refusals of section 8, no IR. Section 8's "no new guarantee
+code" was revisited by item 1190 and
+`docs/design/557-council-disagreement.md`, which registers
+`G-COUNCIL-SPLIT` for eleven of the thirteen; nothing else in this slice
+moved.
 
 **S2. Binding a council to an action.** A `route model` arm names a council
 where it today names a role, and the council's residence (section 6) is what

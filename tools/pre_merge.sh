@@ -294,6 +294,21 @@ else
     skip "ruff check" "no ruff and no uvx"
 fi
 
+# issue #1285 / issue #1332: the closed vocabularies this tree declares in more
+# than one place. Stdlib-only and whole-tree, so there is no path set to select
+# it on and it is always in the selection: a mirror is a relation between two
+# files and the commit that creates one is routinely neither of the two the
+# ledger names, which is how four classes reached `main` and reddened the
+# required `lint` check with every affected run before them green. The
+# self-test runs first, as with the vision gate, so a gate that stopped firing
+# is a red here and not a green line that checked nothing.
+if want gate vocabulary; then
+    step "vocabulary mirrors (self-test)" python3 tools/check_vocabulary_mirrors.py --self-test
+    step "vocabulary mirrors (--check)"   python3 tools/check_vocabulary_mirrors.py --check
+else
+    note "vocabulary mirrors (--check)"
+fi
+
 # 6. The formal backbone (formal/STATUS.md): lake build, then the axioms
 #    gate (no theorem may depend on sorryAx — an unfinished proof — or any
 #    project-defined axiom), then the harness census. Needs elan/lake;

@@ -89,6 +89,24 @@ Two engines, same buckets:
 `tests/test_gate_crate_admit.py::test_the_two_engines_agree` pins the two
 against each other so the cheap one stays honest.
 
+WHOSE EVIDENCE THIS IS (roadmap item 542, issue #1221)
+------------------------------------------------------
+The corpus is reached by `rglob` over eight directories, which is how it gets
+to ~850 programs with no list to maintain, and is also why a generated document
+is indistinguishable from a hand-written one at the point where it is counted
+as evidence. "The gate agrees with the reference over 848 programs" is worth
+what the independence of those 848 programs is worth, so every run prints a
+second table: per bucket, how many of its programs a model authored at or after
+a named generation, read from `tests/fixtures/corpus_provenance.json` by
+`tools/corpus_provenance.py`. An UNDECLARED document counts as model-authored,
+never as hand-written.
+
+That table is REPORTING ONLY. It adds no bucket, moves no verdict, and neither
+`--check` nor `--record` reads it, so a provenance change can never alter this
+tool's verdict about the gate. The provenance GATE, which fails when a scoring
+corpus crosses its declared independence floor, is
+`tools/corpus_provenance.py --check` and runs on its own.
+
 USAGE
 -----
     python3 tools/gate_reference_census.py                  # the census
@@ -804,6 +822,40 @@ def run(cases, engine, reference):
     return buckets, details
 
 
+def _provenance():
+    """`tools/corpus_provenance.py` as a module (roadmap item 542, issue #1221).
+
+    Loaded by path, and LAZILY: that file loads this one for the corpus tables,
+    so a module-level import on either side would re-enter the other while it
+    was still executing. Both sides import inside a function, so neither ever
+    does.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "census_corpus_provenance", ROOT / "tools" / "corpus_provenance.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def provenance_report(buckets: dict[str, list[str]], *, since: int) -> str:
+    """Per bucket, how much of the evidence the engine authored about itself.
+
+    This census's whole claim is "the gate agrees with the reference over N
+    programs", and that claim is worth what the independence of those N
+    programs is worth. Printing the count without the provenance split states
+    the first half of a fact whose second half is the load-bearing one; see
+    `tools/corpus_provenance.py` for why an undeclared document counts as
+    model-authored rather than as hand-written.
+
+    Reporting only: this adds no bucket, moves no verdict, and `--check` and
+    `--record` do not read it. The provenance GATE is
+    `tools/corpus_provenance.py --check`, which runs on its own.
+    """
+    provenance = _provenance()
+    return provenance.bucket_report(
+        buckets, provenance.Provenance.load(), since=since)
+
+
 def report(buckets: dict[str, list[str]], *, examples: int = 4) -> str:
     lines = []
     total = sum(len(v) for v in buckets.values())
@@ -874,6 +926,39 @@ def false_admissions(buckets: dict[str, list[str]]) -> list[str]:
     return sorted(buckets.get(ADMISSION, []))
 
 
+BASELINE_NOTE = (
+    "Recorded by `python3 tools/gate_reference_census.py --record`. Every "
+    "entry is a KNOWN gate/reference divergence over the census corpus; "
+    "`--check` fails on one that is not here, and on one here that no longer "
+    "diverges, so the allowance can only shrink in a diff somebody reads. A "
+    "`false-admit` entry is an OPEN GATE BYPASS, not an accepted state: the "
+    "list is capped by name in tests/test_gate_reference_census.py so it "
+    "cannot grow quietly while it is worked down."
+)
+
+
+def record_payload(buckets: dict[str, list[str]], details: dict) -> dict:
+    """Exactly what `--record` writes to the baseline.
+
+    Split out of `main` so the NEVER_BASELINED filter is reachable without
+    rewriting the committed baseline. It is the half of the zero-tolerance
+    mechanism `compare` does not hold: `compare` fails on a `false-admission`
+    however the baseline reads, and this drops one on the way in, so no
+    `--record` run can ever produce a baseline that grants one tolerance.
+    `tools/census_artifact.py` drives both halves with a synthetic member and
+    publishes the result, rather than asserting the property in prose.
+    """
+    return {
+        "note": BASELINE_NOTE,
+        "corpus_dirs": list(CORPUS_DIRS),
+        "buckets": {k: sorted(v) for k, v in sorted(buckets.items())
+                    if k.split("/", 1)[0] in TRACKED
+                    and k.split("/", 1)[0] not in NEVER_BASELINED},
+        "details": {cid: d for cid, d in details.items()
+                    if d["bucket"].split("/", 1)[0] not in NEVER_BASELINED},
+    }
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--engine", choices=sorted(ENGINES), default="selfhost")
@@ -888,6 +973,13 @@ def main(argv: list[str]) -> int:
                     help="rewrite the baseline from this run")
     ap.add_argument("--json", type=Path, help="write the full census here")
     ap.add_argument("--examples", type=int, default=4)
+    ap.add_argument("--since-generation", type=int, default=1,
+                    help="the generation at or after which a corpus document "
+                         "counts as model-authored in the provenance table "
+                         "(item 542); 1 means 'not independent of the loop'")
+    ap.add_argument("--no-provenance", action="store_true",
+                    help="skip the provenance table (it reads "
+                         "tests/fixtures/corpus_provenance.json)")
     args = ap.parse_args(argv)
 
     if (args.check or args.record) and (args.all or args.fuzz):
@@ -903,6 +995,10 @@ def main(argv: list[str]) -> int:
     buckets, details = run(cases, engine, reference)
     print(report(buckets, examples=args.examples))
 
+    if not args.no_provenance:
+        print()
+        print(provenance_report(buckets, since=args.since_generation))
+
     if args.json:
         args.json.write_text(json.dumps(
             {"engine": engine.name, "buckets": buckets, "details": details},
@@ -910,22 +1006,7 @@ def main(argv: list[str]) -> int:
 
     if args.record:
         BASELINE.write_text(json.dumps(
-            {"note": ("Recorded by `python3 tools/gate_reference_census.py "
-                      "--record`. Every entry is a KNOWN gate/reference "
-                      "divergence over the census corpus; `--check` fails on "
-                      "one that is not here, and on one here that no longer "
-                      "diverges, so the allowance can only shrink in a diff "
-                      "somebody reads. A `false-admit` entry is an OPEN GATE "
-                      "BYPASS, not an accepted state: the list is capped by "
-                      "name in tests/test_gate_reference_census.py so it "
-                      "cannot grow quietly while it is worked down."),
-             "corpus_dirs": list(CORPUS_DIRS),
-             "buckets": {k: sorted(v) for k, v in sorted(buckets.items())
-                         if k.split("/", 1)[0] in TRACKED
-                         and k.split("/", 1)[0] not in NEVER_BASELINED},
-             "details": {cid: d for cid, d in details.items()
-                         if d["bucket"].split("/", 1)[0] not in NEVER_BASELINED}},
-            indent=1, sort_keys=True) + "\n")
+            record_payload(buckets, details), indent=1, sort_keys=True) + "\n")
         print(f"\nrecorded {BASELINE.relative_to(ROOT)}")
         return 0
 
