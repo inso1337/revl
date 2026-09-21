@@ -481,6 +481,10 @@ REJECTIONS = {
     # drift rejections, which need a running composition and so cannot be a
     # single-file fixture.
     "service_compat_duplicate.rvl": "duplicate service `Cache`",
+    # G-COUNCIL-SPLIT (item 516, docs/design/543-model-council.md): a council
+    # aggregation written to admit on a tie. The fixture landed with commit
+    # 9a635f9c and this table did not follow it.
+    "gcouncilsplit_on_tie_allow.rvl": "admits when the members disagree",
 }
 
 # ------------------------------------------------------------------ coverage

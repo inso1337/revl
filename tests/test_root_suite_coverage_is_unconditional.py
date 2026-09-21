@@ -765,16 +765,22 @@ def test_the_selector_returns_a_non_empty_selection_for_every_fixture():
                 )
     for diff in SKIPPABLE_DIFFS:
         result = at.select(list(diff), ROOT)
-        # Two modules, and both are load-bearing for a docs-only pull request.
+        # Three modules, and each is load-bearing for a docs-only pull request.
         # `test_doc_examples.py` compiles the fenced examples. `test_check_
         # vision_claims.py` arrived with item 534 and is here for a reason that
         # reads like a tautology and is not: `tools/docgen.py --check` runs in
         # the `frontend` job, which a documentation-only diff SKIPS, so on
         # exactly the pull request that moves a document, the gate that judges
         # documents would not run. The selector is what collects it.
+        # `test_selfhost_residual_is_generated.py` arrived with issue #1300
+        # (PR #1304) for that same reason: the residual figure is generated
+        # into three documents, and `docgen --check` is the gate a docs-only
+        # diff skips. The list stays EXACT, so a fourth module still has to be
+        # costed here rather than added silently.
         assert sorted(result["pytest"]) == [
             "tests/test_check_vision_claims.py",
             "tests/test_doc_examples.py",
+            "tests/test_selfhost_residual_is_generated.py",
         ], (
             f"a documentation-only diff is not mapped to the doc sweep: "
             f"pytest={result['pytest']!r} reason={result['reason']!r}. If this "
