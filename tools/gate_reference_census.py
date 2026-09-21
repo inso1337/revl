@@ -135,6 +135,17 @@ for _p in (str(ROOT / "src"), str(ROOT / "tests")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+#: Where THIS tool's own sibling modules live, which is not the same question
+#: as `ROOT`. `ROOT` is the tree under measurement: the corpus is walked under
+#: it, the baseline is recorded against it, and a caller that measures a
+#: prepared tree redirects it. A sibling tool loaded by
+#: `spec_from_file_location` is part of this tool's OWN code and moves with
+#: this file, so resolving one off `ROOT` reads the measured tree for a module
+#: that was never in it. That conflation is what made `--record` raise
+#: `FileNotFoundError` on `tools/corpus_provenance.py` the moment item 542
+#: gave `main()` a provenance line to print.
+TOOLS = Path(__file__).resolve().parent
+
 BASELINE = ROOT / "tools" / "gate_reference_census_baseline.json"
 
 # The corpus directories the baseline is recorded over. Deliberately NOT the
@@ -240,7 +251,7 @@ def build_frontier_scan():
     holds it against the rust on the cases `frontier.rs`'s own unit tests cover.
     """
     spec = importlib.util.spec_from_file_location(
-        "census_build_gate_crate", ROOT / "tools" / "build_gate_crate.py")
+        "census_build_gate_crate", TOOLS / "build_gate_crate.py")
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
     tables = generator.frontier_tables()
@@ -353,7 +364,7 @@ def build_admission_certify():
     wording difference is not a divergence.
     """
     spec = importlib.util.spec_from_file_location(
-        "census_build_gate_crate_admission", ROOT / "tools" / "build_gate_crate.py")
+        "census_build_gate_crate_admission", TOOLS / "build_gate_crate.py")
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
     return make_admission_certify(generator.admission_tables())
@@ -713,7 +724,7 @@ def load_fuzz(count: int, seed: int, corpus):
     import random
 
     spec = importlib.util.spec_from_file_location(
-        "census_fuzz", ROOT / "tools" / "fuzz_frontend.py")
+        "census_fuzz", TOOLS / "fuzz_frontend.py")
     fuzz = importlib.util.module_from_spec(spec)
     # Registered before it executes: the module defines dataclasses, and
     # `@dataclass` looks its own module up in `sys.modules` while the class body
@@ -831,7 +842,7 @@ def _provenance():
     does.
     """
     spec = importlib.util.spec_from_file_location(
-        "census_corpus_provenance", ROOT / "tools" / "corpus_provenance.py")
+        "census_corpus_provenance", TOOLS / "corpus_provenance.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

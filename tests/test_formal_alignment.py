@@ -779,9 +779,27 @@ def test_the_gate_reports_the_ratchet_as_a_gate_failure(harness):
 
 def test_status_md_calls_the_two_buckets_ratcheted(status):
     """The document stops saying `out-of-fragment*` is informational for the
-    two that are now held to a ledger."""
+    two that are now held to a ledger.
+
+    The LABEL is the claim this holds. The two ratcheted COUNTS are held
+    exactly, because those come from the ledger rather than from the corpus
+    and the ledger only ever shrinks, so a closed hole has to be read in this
+    diff. The plain bucket's count is not: it is a census of the corpus and it
+    moves whenever a `.rvl` file lands anywhere in the tree.
+
+    Pinning that census here is how this test reached main red. `38` was
+    written when the corpus was 470 files; six files landed, the census read
+    40, and a test whose subject is a word failed on a number that no change
+    to the ratchet can move. `STATUS.md` is generated, so the block already
+    follows the corpus on its own; this asserts the part of it that a
+    regeneration cannot repair.
+    """
     block, _fatal, _align, _samples = status
-    assert "| `out-of-fragment-G5` | 10 | ratcheted |" in block
-    assert "| `out-of-fragment-G6` | 1 | ratcheted |" in block
-    assert "| `out-of-fragment` | 38 | informational |" in block
+    ledger = json.loads(
+        (ROOT / "formal" / "out_of_fragment_ledger.json").read_text(
+            encoding="utf-8"))
+    for bucket in ("out-of-fragment-G5", "out-of-fragment-G6"):
+        assert f"| `{bucket}` | {len(ledger[bucket])} | ratcheted |" in block
+    assert re.search(r"^\| `out-of-fragment` \| \d+ \| informational \|$",
+                     block, re.M), block
     assert "out_of_fragment_ledger.json" in block

@@ -561,12 +561,14 @@ def test_census_change_selects_the_construct_reach_ledger():
     assert r["full"] is False
     for node in ("tests/test_gate_reference_census.py",
                  "tests/test_corpus_provenance.py",
-                 "tests/test_oracle_construct_reach.py"):
+                 "tests/test_oracle_construct_reach.py",
+                 "tests/test_evolution_reward.py"):
         assert node in r["pytest"], (
-            f"a change to the census does not select {node}. Both the item-542 "
-            "provenance coupling and the issue-#1215 construct-reach coupling "
-            "hang off this one file; a rule that answers only one of them is "
-            "the shadowing this test exists to catch."
+            f"a change to the census does not select {node}. The item-542 "
+            "provenance coupling, the issue-#1215 construct-reach coupling "
+            "and the issue-#1328 self-evolution reward coupling all hang off "
+            "this one file; a rule that answers only some of them is the "
+            "shadowing this test exists to catch."
         )
 
 
