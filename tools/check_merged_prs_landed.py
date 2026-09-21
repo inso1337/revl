@@ -183,6 +183,18 @@ def main(argv=None) -> int:
                   "green", file=sys.stderr)
             return 2
 
+    # An empty list is not "nothing is stranded". A repository this old has
+    # hundreds of merged pull requests, so no rows means the read failed in a
+    # way that still exited 0 -- a token without `pull-requests: read`, a
+    # rewritten API response, a `--limit 0`. Reporting that green is the exact
+    # fail-open shape this check exists to remove.
+    if not prs:
+        print("read NO merged pull requests. That is not a result: this "
+              "repository has hundreds, so an empty list means the read "
+              "failed. Check the token's `pull-requests: read` scope and "
+              "`--limit`.", file=sys.stderr)
+        return 2
+
     baseline = load_baseline(args.baseline)
     findings, known, unanswerable = audit(
         prs, args.root, args.main_ref, baseline)
