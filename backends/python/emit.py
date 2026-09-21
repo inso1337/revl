@@ -79,6 +79,7 @@ _IMPORT_ALIAS = {
     "set_trace": "_revl_set_trace",
     "retry_idempotent": "_revl_retry_idempotent",
     "validate_response": "_revl_validate",
+    "register_grammars": "_revl_register_grammars",
     "validate_retry": "_revl_validate_retry",
     "validate_retry_async": "_revl_validate_retry_async",
     "produced_emit": "_revl_produced_emit",
@@ -1534,7 +1535,7 @@ class _ComponentEmitter:
             # `validated` call: `_validated_call` returns None.
             validated = self._validated_call(expr)
             if validated is not None:
-                schema, ctors, retry = validated
+                schema, ctors, retry, gkey = validated
                 if retry:
                     # item 257 (Slice 2, §5.2): the read-with-a-cost retry loop.
                     # On a `ResponseValidationError` the loop re-fires ONLY the
@@ -1552,17 +1553,23 @@ class _ComponentEmitter:
                     # produced edge honest-degrades to absent.
                     comp_site = self._completion_sites.get(id(expr))
                     tail = f", {comp_site!r}" if comp_site is not None else ""
+                    # item 513 slice 2: and the crossing's REGISTRY KEY for
+                    # the stated decoding grammar. A key, not the grammar text:
+                    # the text is already in the module's one registry, and
+                    # inlining it at every call site would put a multi-kilobyte
+                    # literal in the middle of an expression for no gain.
                     if awaited:
                         self.uses.add("validate_retry_async")
                         return (f"(await _revl_validate_retry_async("
                                 f"lambda: {rendered}, {retry}, {schema!r}, "
-                                f"{where!r}, {ctors}{tail}))")
+                                f"{where!r}, {ctors}{tail}, grammar={gkey!r}))")
                     self.uses.add("validate_retry")
                     return (f"_revl_validate_retry(lambda: {rendered}, {retry}, "
-                            f"{schema!r}, {where!r}, {ctors}{tail})")
+                            f"{schema!r}, {where!r}, {ctors}{tail}, "
+                            f"grammar={gkey!r})")
                 self.uses.add("validate_response")
                 return (f"_revl_validate({settled}, {schema!r}, {where!r}, "
-                        f"{ctors})")
+                        f"{ctors}, {gkey!r})")
             return settled
         if kind == "host":
             fn = expr.get("fn") or ""
@@ -1996,13 +2003,16 @@ class _ComponentEmitter:
 
     def _validated_call(self, expr: dict):
         """Item 257: if this `call` node is an `emit` on a `validated` service
-        emission (through a req key), return `(schema, ctors, retry)` for the
+        emission (through a req key), return `(schema, ctors, retry, key)` for the
         validate seam; else None. `schema` is the derived boundary schema carried
         on the method IR; `ctors` is a Python dict-literal mapping each case tag to
         its emitted ADT case class (or `None` when the validated return is not a
         tagged variant, e.g. a record or primitive, and the validated value is used
         as-is); `retry` is the Slice-2 validation-retry budget (§5.2), `0` when no
-        `retry` clause was declared (one attempt, the Slice-1 seam)."""
+        `retry` clause was declared (one attempt, the Slice-1 seam); `key` (item
+        513 slice 2) is this crossing's key in the module's grammar registry,
+        `"Service.method"` -- what a provider passes to `revl_constrain` and what
+        the validate seam resolves the stated grammar through."""
         target = expr.get("target")
         if not (isinstance(target, dict) and target.get("kind") == "req"):
             return None
@@ -2013,7 +2023,8 @@ class _ComponentEmitter:
             return None
         return (spec.get("response_schema"),
                 self._ctor_map(spec.get("response_schema")),
-                spec.get("retry") or 0)
+                spec.get("retry") or 0,
+                f"{svc_name}.{expr.get('method')}")
 
     # -- item 121 Slice 2: the model hop's static value-flow analysis ---------
     #
@@ -5129,6 +5140,47 @@ def _parallel_step_groups(ir: dict) -> dict:
         return {}
 
 
+def _grammar_registry(services: dict) -> dict:
+    """Item 513 slice 2: `{"Service.method": grammar}` for every VALIDATED
+    service emission in the document.
+
+    Two decisions are visible here.
+
+    A validated EXTERN is deliberately absent. Its `@py` body is the provider,
+    so registering it would let that body take the constraint and claim to have
+    honoured it -- but this tier never validates an extern's response (the
+    validate seam fires only at a service-method crossing), so the claim would
+    never be judged. An unjudgeable claim is worse than no claim, so the seam
+    offers none: `revl_constrain("extern:...")` finds nothing.
+
+    The `json-schema` dialect (slice 4) is composed HERE rather than bound in the
+    IR. It is a pure function of `response_schema`, which the crossing already
+    carries, so the second dialect costs the IR nothing and a tier that does not
+    want it simply does not compose it. When the frontend is not importable (a
+    backend-only context) the registry still carries the GBNF half, which the IR
+    holds outright, and the second dialect is absent rather than wrong.
+    """
+    try:
+        from revl.decode_grammar import json_schema_grammar_for  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - backend-only: the GBNF half still stands
+        json_schema_grammar_for = None
+    registry: dict = {}
+    for svc_name, svc in sorted((services or {}).items()):
+        for m_name, spec in sorted(((svc or {}).get("methods") or {}).items()):
+            grammar = spec.get("response_grammar")
+            if not grammar:
+                continue
+            entry = dict(grammar)
+            schema = spec.get("response_schema")
+            if json_schema_grammar_for is not None and schema is not None:
+                try:
+                    entry["wire_schema"] = json_schema_grammar_for(schema)
+                except Exception:  # noqa: BLE001 - never break codegen
+                    pass
+            registry[f"{svc_name}.{m_name}"] = entry
+    return registry
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
@@ -5178,6 +5230,12 @@ def emit(ir: dict) -> str:
         if spec.get("async")
     }
     _PY_USES_AS_ASYNC = False
+
+    # item 513 slice 2: the document's stated decoding grammars, keyed
+    # `Service.method`. Built here from the IR the compiler already bound and
+    # registered once at module import, so a provider can find the constraint
+    # for the crossing it is about to serve.
+    grammar_registry = _grammar_registry(services)
 
     # item 259 slice 2: the checked fan-out plan, per component (empty in a
     # backend-only context where the revl frontend is not importable, or when no
@@ -5255,6 +5313,10 @@ def emit(ir: dict) -> str:
         # item 421 F6: a declared secret type that reaches a `Map` also needs the
         # record field types emitted, so the walk can tell the two apart.
         | ({"declare_secret_types"} if secret_types else set())
+        # item 513 slice 2: the provider seam's registry, emitted only when the
+        # document HAS a validated crossing, so a document without one is
+        # byte-identical to one compiled before this slice.
+        | ({"register_grammars"} if grammar_registry else set())
     )
 
     # Delivery semantics (item 44): the reference runtime driver may auto-retry
@@ -5295,6 +5357,12 @@ def emit(ir: dict) -> str:
             for record, fields in sorted(secret_types.items())
         ) + "}"
         out.add(0, f"{_runtime_ref('declare_secret_types')}({rendered_secret_types})")
+        out.add(0)
+    # item 513 slice 2: the stated decoding grammars. One registry per module
+    # rather than a literal at each call site: the GBNF text of a real response
+    # type runs to kilobytes and a crossing refers to it by key.
+    if grammar_registry:
+        out.add(0, f"{_runtime_ref('register_grammars')}({grammar_registry!r})")
         out.add(0)
     # item 396 option B: a `@py ref` extern emits a lazy import thunk that caches
     # the resolved host symbol in this module-level dict and asserts its colour

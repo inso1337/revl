@@ -1393,7 +1393,10 @@ def test_the_completion_site_rides_the_seam():
     code = _emit_flow("""      let t = emit model.complete(["p"])
       return 1""")
     assert "_revl_validate_retry(lambda: _revl_ctx.model.complete(['p'])" in code
-    assert "'Agent.go#c1')" in code
+    # item 513 slice 2 appended the crossing's grammar-registry key after the
+    # site, so the site is no longer the last argument. What this test is about
+    # is unchanged: the site is present, positional, and names this crossing.
+    assert "'Agent.go#c1', grammar=" in code
 
 
 def test_a_crossing_reading_the_completions_binding_is_marked():
