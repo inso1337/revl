@@ -126,7 +126,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
 
-from . import cap_order, peer_authority, peer_offer
+from . import cap_order, deploy, peer_authority, peer_offer
 from .attest import NotCanonicalizable, _canonical_bytes, key_id
 from .lawful_retry import EffectClass
 
@@ -750,9 +750,14 @@ def _refusal(link: str, reason: str, **extra) -> dict:
     refusal into a crash on exactly the hostile input the refusal exists for.
     The link set is instead held STATICALLY. ``tests/test_peer_pool_admission``
     walks this module's AST and fails if any ``_refusal`` call names something
-    outside :data:`REFUSAL_LINKS`, or if a link in it is never reached."""
-    return {"kind": RECEIPT_KIND, "version": RECEIPT_VERSION,
-            "verdict": REFUSE, "link": link, "reason": reason, **extra}
+    outside :data:`REFUSAL_LINKS`, or if a link in it is never reached.
+
+    The field set itself is ``deploy.refusal_receipt`` (issue #1332), which
+    this module's own copy used to restate. The KIND and the VERSION stay this
+    module's: a pool receipt and a deploy receipt are different records, signed
+    in different domains so neither can be replayed as the other."""
+    return deploy.refusal_receipt(RECEIPT_KIND, RECEIPT_VERSION, link, reason,
+                                  **extra)
 
 
 def _tier_grant(charter: PoolCharter, tier: str,
