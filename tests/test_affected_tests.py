@@ -608,3 +608,83 @@ def test_provenance_change_keeps_its_own_coupling_only():
         "corpus_provenance.py picked up the construct-reach ledger, which only "
         "the census's own coupling calls for"
     )
+
+
+# --- the corpus provenance manifest: issue #1331 --------------------------- #
+def _census():
+    """The real `tools/gate_reference_census.py`, loaded as a module."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_census_for_selector", ROOT / "tools" / "gate_reference_census.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_every_census_corpus_directory_reaches_the_provenance_manifest():
+    """A document arriving in a scoring corpus must name its generation, and
+    `tests/test_corpus_provenance.py` is the only thing that reads the manifest.
+    No import graph reaches from a `.rvl` to that test, so it has to be SELECTED
+    wherever a document can land, or the declaration requirement fires on main
+    instead of on the branch, which is the red issue #1331 reports. Measured
+    before this rule: a new document under `backends/<tier>/**` selected 243
+    nodes and none of them was the manifest; every other corpus directory
+    reached it only through the FULL fail-safe.
+
+    The probe paths are DERIVED: the census's own directory list, and for each
+    one the directory an existing document actually sits in, so the shape under
+    test is `backends/go/scenarios/<new>.rvl` rather than a path no corpus
+    document has ever used. A ninth corpus directory shows up here the day the
+    census starts walking it.
+    """
+    census = _census()
+    dirs = census.CORPUS_DIRS
+    assert dirs, "gate_reference_census.py reported no corpus directories"
+    probes = []
+    for d in dirs:
+        # The directory an existing document sits in, or the corpus root when
+        # the directory holds none yet (`tck/` today, which the census walks
+        # regardless and which a first document would land in).
+        where = d
+        for doc in sorted((ROOT / d).rglob("*.rvl")) if (ROOT / d).is_dir() else []:
+            if set(census._SKIP_DIRS) & set(doc.parts):
+                continue
+            where = doc.parent.relative_to(ROOT).as_posix()
+            break
+        probes.append(f"{where}/zz_selector_probe.rvl")
+    assert len(probes) == len(dirs)
+    missing = []
+    for f in probes:
+        r = sel(f)
+        if not r["full"] and "tests/test_corpus_provenance.py" not in r["pytest"]:
+            missing.append(f)
+    assert not missing, (
+        "the census walks these directories for scoring documents, but a new "
+        "`.rvl` beside an existing one selects neither the FULL gate nor "
+        f"tests/test_corpus_provenance.py:\n  {missing}\n"
+        "An undeclared document would then reach main green."
+    )
+
+
+def test_a_backend_scenario_document_selects_the_manifest_without_going_full():
+    """The arm that was actually open. `backends/**` is a census corpus
+    directory AND has its own narrow rule, so `backends/go/scenarios/<new>.rvl`
+    selected the go suite and stopped: 243 nodes, none of them the manifest.
+    Closing it must not turn a corpus document into a FULL trigger either --
+    the manifest test is 0.3s and the go suite is already selected."""
+    r = sel("backends/go/scenarios/zz_selector_probe.rvl")
+    assert r["full"] is False, "a backend scenario document escalated to FULL"
+    assert "tests/test_corpus_provenance.py" in r["pytest"]
+    assert set(r["backends"]) == {"go"}, "the backend set widened"
+
+
+def test_a_bench_document_is_not_a_scoring_corpus_document():
+    """`bench/` is in the census's `EXTRA_DIRS`, which `load_corpus` walks only
+    under `--everything`, and `corpus_provenance.enumerate_corpora` does not ask
+    for it. A bench document is in no scoring corpus, needs no manifest line,
+    and must not drag the manifest test into every bench change."""
+    census = _census()
+    assert "bench" in census.EXTRA_DIRS and "bench" not in census.CORPUS_DIRS
+    r = sel("bench/codegen/zz_selector_probe.rvl")
+    assert r["full"] is False
+    assert "tests/test_corpus_provenance.py" not in r["pytest"]
