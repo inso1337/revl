@@ -449,7 +449,42 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: pip install -e ".[test]"
+      - id: install
+        run: pip install -e ".[test]"
+      # Issue #1358: every step below is INDEPENDENT of every other. They were
+      # plain steps, so GitHub's default `success()` condition made each one a
+      # precondition for the rest: `conformance.py --check-readme` had been
+      # failing on main against a stale conformance matrix, and that single
+      # staleness reported `skipped` for the four gates after it AND for
+      # `pytest tests/ -q`. The root suite was not running in CI, on main or on
+      # any pull request built from it. Measured on run 35636928793 (main,
+      # 421695acb): step 7 `failure`, steps 8 through 12 `skipped`. #1358
+      # counts what accumulated behind the green tick, including `docgen
+      # --check` drift growing from 3 findings to 9 with nothing reporting it.
+      #
+      # `!cancelled()` and not `always()`, deliberately. This workflow sets
+      # `cancel-in-progress: true`, so a superseded run is cancelled mid-job;
+      # under `always()` that run would still push through `pytest tests/`,
+      # spending the runner minutes that are this repository's actual
+      # throughput limit. `!cancelled()` runs after a FAILED step and stops
+      # after a CANCELLED one, which is exactly the distinction wanted.
+      #
+      # The `steps.install.outcome` conjunct is the one real dependency: if the
+      # package did not install there is no revl to check anything with, and
+      # six identical import errors are noise, not six findings.
+      #
+      # Not a separate job: `frontend` is a 3-version matrix, so splitting the
+      # gates out costs either three more runner slots or one slot plus its own
+      # `pip install -e ".[test]"`, and runner concurrency is what this
+      # repository queues on. Not a reorder either: putting `pytest tests/ -q`
+      # first only moves the silence, and would have moved it onto these five
+      # gates, since the root suite is the step that is currently red.
+      #
+      # The job still FAILS when any step fails -- nothing here is softened,
+      # branch protection is unaffected. What changes is that each step now
+      # reports its own verdict instead of the first failure speaking for six.
+      # `tests/test_ci_steps_are_independent.py` is what keeps this true.
+      #
       # roadmap 328: the README conformance + performance matrix is generated
       # from real emitter output, never authored. Fail the build if the
       # committed block drifts from a fresh generation — the same contract as
@@ -464,11 +499,14 @@ jobs:
       # arrives with no row on some tier — the case a hand-written support
       # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: python3 tools/selfhost_coverage.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # Issue #301: differential oracles only prove the constructs their corpus
       # spells. Keep a named reach report for every oracle, including lower_ir and
       # compile, so a new reference construct cannot hide behind a green oracle.
       - run: python3 tools/oracle_construct_reach.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # Roadmap item 542 / issue #1221: the census corpus and the emit corpora
       # are globbed, so a generated document enters them with no list to edit
       # and reads as evidence indistinguishable from a hand-written one. This
@@ -477,6 +515,7 @@ jobs:
       # hand-written), on a manifest line that outlived its document, and on a
       # scoring corpus below its declared independence floor.
       - run: python3 tools/corpus_provenance.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # issue #255: five docs carried source-derived content (the MCP verb
       # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
       # inventory, a test count) with nothing to keep them honest, and the one
@@ -488,6 +527,7 @@ jobs:
       # the check. Pure Python over the installed package, so it belongs beside
       # the matrix gate rather than in a new job.
       - run: python3 tools/docgen.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # roadmap 110c: the playground/site wheel freshness is NOT checked here,
       # and must not be. The wheel vendors the whole of src/revl, so a per-push
       # gate reddened CI on every source change to a bundled module (an outage
@@ -508,6 +548,7 @@ jobs:
       # runtime-integration tests skip cleanly when their host runtime is
       # absent (cordis-py fork, node/cordis, wasmtime, cordisc)
       - run: pytest tests/ -q
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
 
   backend-python:
     runs-on: ubuntu-latest
@@ -1480,7 +1521,8 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: "1.26"
-      - run: pip install -e ".[test]"
+      - id: install
+        run: pip install -e ".[test]"
       # emitted Go is compiled and executed against the pinned stc-go runtime
       # (fetched from the module proxy on a fresh runner), mirroring how the
       # rust tier gates against cordis-rs and java against cordis4j.
@@ -1488,6 +1530,7 @@ jobs:
       # file left five (opt gaps 280, reserved-word idents, result ctor 302,
       # router exec, stream exec 130) unrun. The root is ~6s.
       - run: pytest backends/go/ -q
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # The `go` half of the golden drift gate (issue #1089). Every other
       # target runs in `lint`; this one lives here because its producer
       # (`backends/go/regen.sh`) needs `gofmt` to make the emitted bytes
@@ -1497,9 +1540,18 @@ jobs:
       # `go test ./...` below compiles and runs the same modules, which is a
       # different property: this step is what says they are the bytes the
       # emitter produces today.
+      #
+      # Issue #1358's sweep found this job carrying the same shape as
+      # `frontend`: a drift gate sitting between two test steps, so a golden
+      # that a landing on main re-staled would report `skipped` for both
+      # `go test ./...` steps below and nobody would learn that the emitted Go
+      # stopped compiling. Same condition, same reasoning as `frontend`.
       - run: python3 tools/regen_goldens.py --check --strict go
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: cd backends/go/scenarios && go test ./...
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: cd backends/go/v3 && go test ./...
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
 
   # Issue #183, second half: the per-backend jobs above each run ONE root in
   # ONE process, so a state leak BETWEEN two backend roots is invisible to all
