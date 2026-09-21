@@ -744,6 +744,46 @@ jobs:
           set -f
           pytest $SEL_PYTEST -q
 
+  # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
+  # work absent from `main`, because each was merged into a base branch that
+  # had already been squash-merged; every required check on every one of them
+  # was green, and nothing in CI asked the question. This job asks it: for
+  # every merged pull request, is the merge commit GitHub recorded reachable
+  # from `main`?
+  #
+  # Reading the RECORD rather than the diff is the point, so it is UNGATED,
+  # like `root-suite-affected` and for the same reason: the defect it covers is
+  # "nobody was looking", and a check with an `if:` can report `skipping`,
+  # which is indistinguishable from a pass in the merge box. It costs one
+  # `gh pr list` and one `git merge-base --is-ancestor` per pull request.
+  #
+  # `fetch-depth: 0` is load-bearing twice over. The merge commits live on the
+  # base branches, not on main, so a single-branch clone does not have them --
+  # and the checker reports a commit it cannot see as UNKNOWN and fails rather
+  # than reading "absent from this clone" as "absent from main".
+  #
+  # A job-level `permissions` block REPLACES the workflow-level one rather than
+  # merging into it (issue #191), so `contents: read` is restated here beside
+  # the `pull-requests: read` that `gh pr list` needs.
+  merged-prs-landed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0
+      # Belt and braces over `fetch-depth: 0`: the merge commits this reads sit
+      # on the BASE branches, so every branch has to be present, not only the
+      # ref being built. A commit that is absent is reported UNKNOWN and fails
+      # the job rather than being read as "absent from main", so a missing
+      # fetch would be loud rather than wrong -- this makes it neither.
+      - run: git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}"
+
   # The held-out scoring set (roadmap item 537, issue #1207). Every other
   # corpus that scores a change here is a file in this repository, so the
   # reward is a function of the candidate's own input. This job scores the

@@ -385,6 +385,169 @@ def _node(p: Path) -> str:
     return f"tests/{p.name}"
 
 
+# --------------------------------------------------------------------------- #
+# Companion files: the repository files a test names outside tests/.           #
+# --------------------------------------------------------------------------- #
+# Issue #1342. Every text heuristic in this file reads `tests/**` and nothing
+# else, so a test whose SUBSTANCE lives in another file is invisible to all of
+# them. `tests/test_flagship_demo_525.py` is a thin wrapper that shells out to
+# `demo/legacy_enterprise/run_demo.py`; the demo is what runs `revl audit`,
+# `revl compile` and the computer-use verb set, and the wrapper names none of
+# it. A narrow change to `src/revl/audit.py` therefore selected 133 tests and
+# NOT the one test that runs `revl audit` end to end, which is how `main` came
+# to ship a demo that exits 1 with every gate green.
+#
+# That is the same shape as BENCH_DEPENDENT_TESTS, PROGRESS_COUNTER_SOURCES,
+# the census/provenance pair and `held_out_fence`: four hand-written tables of
+# "this test reads that file", each added after the gap it closes had already
+# reached `main`. The rule below is the general form, derived from the tests'
+# own source rather than restated here, so the fifth one does not have to be
+# noticed first. It is used in BOTH directions:
+#
+#   forward   a companion's text joins the test's own for the word/tier/stdlib
+#             heuristics, so a wrapper inherits the vocabulary of what it runs;
+#   reverse   a change to a named file selects every test that names it, which
+#             is what the four tables above each do for one path set.
+#
+# Paths are taken from the test's AST, not from a regex over its prose: a
+# `"a/b.py"` literal, and the trailing constant run of a `ROOT / "a" / "b.py"`
+# chain, which is how these files spell a repo path. A candidate counts only if
+# it exists in the tree and carries a separator; a bare `"src"` or `"demo"` is
+# too coarse to mean anything and is dropped. Comments and docstrings are NOT
+# a source of paths here: mentioning a file in prose is not reading it.
+_COMPANION_SUFFIXES = frozenset({
+    ".py", ".rvl", ".sh", ".md", ".json", ".toml", ".yml", ".yaml",
+    ".ts", ".mjs", ".go", ".rs", ".java", ".wat", ".ir",
+})
+# One companion file is read whole. The largest thing a test names today is
+# well under this; the cap is here so a future generated artifact cannot make
+# the selector quadratic in tree size.
+_COMPANION_MAX_BYTES = 512 * 1024
+
+
+def _path_suffix_segments(node: ast.AST) -> list[str]:
+    """The trailing run of string constants in a `x / "a" / "b"` chain.
+
+    `ROOT / "demo" / "legacy_enterprise" / "run_demo.py"` yields the three
+    segments; the `ROOT` name at the head is unresolvable and is where the walk
+    stops. A plain `"a/b"` constant yields itself.
+    """
+    out: list[str] = []
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        right = node.right
+        if not (isinstance(right, ast.Constant) and isinstance(right.value, str)):
+            return list(reversed(out))
+        out.append(right.value)
+        node = node.left
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        out.append(node.value)
+    return list(reversed(out))
+
+
+def _named_paths(root: Path, source: str) -> frozenset[str]:
+    """Repo-relative paths a python source names and that exist in the tree."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return frozenset()
+    candidates: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            segs = _path_suffix_segments(node)
+            # Every suffix of the chain, because the head may be a `parents[1]`
+            # expression OR an already-nested directory constant.
+            for i in range(len(segs)):
+                candidates.add("/".join(segs[i:]))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if "/" in node.value:
+                candidates.add(node.value)
+    out: set[str] = set()
+    for cand in candidates:
+        rel = cand.strip("/")
+        # A separator is what makes a candidate specific enough to be evidence.
+        # `tests/**` is excluded because the sibling-import rule already owns
+        # test-to-test edges, and a URL is not a repo path.
+        if "/" not in rel or rel.startswith(("http:", "https:", "tests/")):
+            continue
+        if ".." in rel.split("/"):
+            continue
+        if (root / rel).exists():
+            out.add(rel)
+    return frozenset(out)
+
+
+_COMPANION_CACHE: dict[Path, dict[str, frozenset[str]]] = {}
+
+
+def companion_paths(root: Path) -> dict[str, frozenset[str]]:
+    """test node -> the repo paths outside `tests/` that it names.
+
+    Cached per root, same shape and reason as `_READ_CACHE`: `select()` is
+    called a few hundred times in one run of `tests/test_affected_tests.py`.
+    """
+    cached = _COMPANION_CACHE.get(root)
+    if cached is None:
+        cached = {}
+        for p in _test_files(root):
+            named = _named_paths(root, _read(p))
+            if named:
+                cached[_node(p)] = named
+        _COMPANION_CACHE[root] = cached
+    return cached
+
+
+# The one test the reverse rule must not add. `tests/test_selfhost_lower.py` is
+# the >120s descent test issue #431 excluded from the `selfhost/lower.rvl`
+# selection ON PURPOSE: the FULL fallback aborted on it under the pre-commit
+# hook's --timeout, which is what made a whole class of edits unlandable. It
+# names `selfhost/lower.rvl`, so the derived rule would put it straight back.
+# The exclusion is a COST decision that predates this rule, and the coverage it
+# gives up is the coverage #431 already decided to give up; a general rule is
+# not a reason to reopen it silently. `tests/test_selfhost_lower_ir.py` holds
+# that file's IR narrowly and is selected instead.
+REVERSE_RULE_EXCLUDED = ("tests/test_selfhost_lower.py",)
+
+
+def tests_naming(root: Path, changed: str) -> set[str]:
+    """Tests that name `changed`, or a directory containing it."""
+    parts = changed.split("/")
+    prefixes = {"/".join(parts[:i]) for i in range(2, len(parts) + 1)}
+    return {
+        node for node, named in companion_paths(root).items()
+        if named & prefixes and node not in REVERSE_RULE_EXCLUDED
+    }
+
+
+_COMPANION_TEXT_CACHE: dict[tuple[Path, str], str] = {}
+
+
+def _companion_text(root: Path, p: Path) -> str:
+    """A test's own source, plus the source of every repo file it names.
+
+    This is what the word / tier / stdlib heuristics read, so a test that
+    delegates to a script or a fixture program is matched on that file's
+    vocabulary as well as its own.
+    """
+    node = _node(p)
+    key = (root, node)
+    if key in _COMPANION_TEXT_CACHE:
+        return _COMPANION_TEXT_CACHE[key]
+    parts: list[str] = [_read(p)]
+    for rel in sorted(companion_paths(root).get(node, ())):
+        q = root / rel
+        if not q.is_file() or q.suffix not in _COMPANION_SUFFIXES:
+            continue
+        try:
+            if q.stat().st_size > _COMPANION_MAX_BYTES:
+                continue
+        except OSError:
+            continue
+        parts.append(_read(q))
+    text = "\n".join(parts) if len(parts) > 1 else parts[0]
+    _COMPANION_TEXT_CACHE[key] = text
+    return text
+
+
 def _tier_tests(root: Path, tier: str) -> set[str]:
     """Frontend tests that reference a backend tier, by filename or content.
 
@@ -397,7 +560,8 @@ def _tier_tests(root: Path, tier: str) -> set[str]:
     path = re.compile(rf"backends/{re.escape(tier)}\b")
     out: set[str] = set()
     for p in _test_files(root):
-        if word.search(p.name) or word.search(_read(p)) or path.search(_read(p)):
+        text = _companion_text(root, p)
+        if word.search(p.name) or word.search(text) or path.search(text):
             out.add(_node(p))
     return out
 
@@ -431,6 +595,13 @@ def _stdlib_tests(root: Path, mod: str) -> set[str]:
     path_re = re.compile(rf"stdlib/{re.escape(mod)}\b")
     out: set[str] = set()
     for p in _test_files(root):
+        # The test's OWN text, deliberately not `_companion_text`: this match is
+        # on bare stdlib symbol names, which collide freely with words in any
+        # `.rvl` a test names, and the sound edge from a self-host file to a
+        # stdlib module is the `use` graph the caller already walks. Measured:
+        # feeding companions in here made a `stdlib/render.rvl` edit select
+        # `tests/test_selfhost_emit_go.py`, whose companion `selfhost/emit_go.rvl`
+        # merely spells a render symbol and does not `use` the module.
         text = _read(p)
         if p.name == f"test_{mod}.py" or p.name.startswith(f"test_{mod}_"):
             out.add(_node(p))
@@ -449,7 +620,7 @@ def _word_tests(root: Path, token: str) -> set[str]:
     word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])")
     out: set[str] = set()
     for p in _test_files(root):
-        if word.search(p.name) or word.search(_read(p)):
+        if word.search(p.name) or word.search(_companion_text(root, p)):
             out.add(_node(p))
     return out
 
@@ -697,6 +868,19 @@ def select(changed, root) -> dict:
         if _is_scoring_corpus_document(f, root):
             pytest_nodes.add("tests/test_corpus_provenance.py")
             reasons.append(f"{f} (scoring corpus document -> provenance)")
+
+        # --- a test NAMES this file (issue #1342) -------------------------- #
+        # The general form of the three blocks above and of
+        # BENCH_DEPENDENT_TESTS: a test that reads or runs a repository file is
+        # affected when that file moves, whether or not anyone has written the
+        # pair down. Derived from
+        # the tests' own source by `companion_paths`, and here rather than in a
+        # rule of its own because every path it can name also has a rule further
+        # down that ends in `continue`.
+        named_by = tests_naming(root, f)
+        if named_by:
+            pytest_nodes |= named_by
+            reasons.append(f"{f} (named by {len(named_by)} test(s))")
 
         # --- structural: always FULL --------------------------------------- #
         if f == "Makefile":
