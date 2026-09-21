@@ -9,10 +9,13 @@ naming who may admit and revoke, and a ledger that says what a peer leaving
 does and does not undo. Without that the guarantee is exercised only inside the
 test suite, which is exactly what issue #1198 reports.
 
-This module is that object, and only that object. It is the pool declaration
-plus the gate for JOINING it. Running work on a member, moving bytes over a
-wire and delivering a result are still ``#421``'s network seam and the
-``tee_attestation`` delivery path; nothing here opens a socket.
+This module is the pool declaration, the gate for JOINING it, and the
+promotion gate that recounts a member's evidence from signed execution
+receipts (``pool_receipt``, item 524's receipt slice,
+``docs/design/566-pool-execution-receipts.md``). Moving bytes over a wire and
+dispatching work to a member are not here and nothing here opens a socket;
+that needs roadmap item 118's machine boundary, because a peer IS a machine
+boundary.
 
 The trust progression, and where each arrow fails
 -------------------------------------------------
@@ -166,7 +169,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
 
-from . import cap_order, deploy, peer_authority, peer_identity, peer_offer
+from . import (
+    cap_order, deploy, peer_authority, peer_identity, peer_offer, pool_receipt,
+)
 from .attest import NotCanonicalizable, _canonical_bytes, key_id
 from .lawful_retry import EffectClass
 from .peer_identity import (
@@ -777,7 +782,13 @@ class Membership:
     budgets: Mapping[str, int]
     artifact_digest: str
     admitted_at: str
-    evidence: int = 0
+    #: The digests of the execution receipts this pool VERIFIED for this member
+    #: (`pool_receipt.count_evidence`). Not a count a caller states: a count
+    #: cannot be checked, and these can, because each one is the digest of a
+    #: record signed by the peer and attested by a key the charter names.
+    #: :attr:`evidence` is derived from this, so there is no parameter left
+    #: through which a peer's evidence can be asserted.
+    evidence_digests: tuple[str, ...] = ()
     receipts: int = 0
     effects_witnessed: int = 0
     #: How this member proved who it is: `asymmetric` (a key pair, so its join
@@ -790,6 +801,17 @@ class Membership:
     #: this is the public key a third party needs to re-check the ledger.
     key_id: str = ""
 
+    @property
+    def evidence(self) -> int:
+        """How many verified receipts this member holds. DERIVED, never set.
+
+        This was an integer field until item 524's receipt slice. A peer that
+        states its own evidence count is a peer that can state any evidence
+        count, and the count is the input to the one gate that RAISES a peer's
+        authority, so it is now arithmetic over
+        :attr:`evidence_digests` and nothing else."""
+        return len(self.evidence_digests)
+
     def grant(self) -> peer_authority.Grant:
         return peer_authority.Grant(holder=f"peer:{self.peer_id}",
                                     caps=self.caps, budgets=dict(self.budgets))
@@ -800,6 +822,7 @@ class Membership:
                 "budgets": {k: self.budgets[k] for k in sorted(self.budgets)},
                 "artifact_digest": self.artifact_digest,
                 "admitted_at": self.admitted_at, "evidence": self.evidence,
+                "evidence_digests": list(self.evidence_digests),
                 "receipts": self.receipts,
                 "effects_witnessed": self.effects_witnessed,
                 "identity": self.identity, "key_id": self.key_id}
@@ -878,7 +901,14 @@ class Roster:
                 budgets=dict(spec.get("budgets", {})),
                 artifact_digest=spec.get("artifact_digest", ""),
                 admitted_at=spec.get("admitted_at", ""),
-                evidence=int(spec.get("evidence", 0)),
+                # A stated `evidence` member on disk is IGNORED, deliberately.
+                # It is the shape the fail-open took: a roster file that says
+                # `"evidence": 99` used to be believed by the promotion gate.
+                # Only digests are read, and even those are recounted from the
+                # receipts themselves before they raise anyone's tier.
+                evidence_digests=tuple(
+                    d for d in spec.get("evidence_digests", ())
+                    if isinstance(d, str)),
                 receipts=int(spec.get("receipts", 0)),
                 effects_witnessed=int(spec.get("effects_witnessed", 0)),
                 identity=spec.get("identity", IDENTITY_SHARED_KEY),
@@ -997,17 +1027,23 @@ def _ceiling_precondition(charter: PoolCharter, tier: str, peer_id: str,
 
 def _issue_membership(peer_id: str, tier: str, grant: peer_authority.Grant,
                       artifact_digest: str, at: str, *,
-                      evidence: int = 0, receipts: int = 0,
+                      evidence_digests: Sequence[str] = (),
+                      receipts: int = 0,
                       effects_witnessed: int = 0,
                       identity: str = IDENTITY_SHARED_KEY,
                       key_id: str = "") -> Membership:
     """The single construction site of a :class:`Membership`. Takes the grant it
     is handed; it never computes one, so it cannot be reached with a grant the
-    ceiling diff did not produce."""
+    ceiling diff did not produce.
+
+    It takes receipt DIGESTS and no evidence count, so there is no argument
+    here through which a number can be asserted. The digests it is handed come
+    from :func:`pool_receipt.count_evidence`, which verified each one."""
     return Membership(peer_id=peer_id, tier=tier,
                       caps=tuple(sorted(grant.caps)), budgets=dict(grant.budgets),
                       artifact_digest=artifact_digest, admitted_at=at,
-                      evidence=evidence, receipts=receipts,
+                      evidence_digests=tuple(evidence_digests),
+                      receipts=receipts,
                       effects_witnessed=effects_witnessed,
                       identity=identity, key_id=key_id)
 
@@ -1279,21 +1315,71 @@ def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
     return receipt
 
 
+def _evidence_precondition(charter: PoolCharter, member: Membership,
+                           tier: str,
+                           receipts: Sequence[Any],
+                           directory: peer_identity.IdentityDirectory,
+                           when: datetime) -> tuple[
+                               Optional["pool_receipt.EvidenceCount"],
+                               Optional[dict]]:
+    """The ONLY function here that produces an evidence count, and it produces
+    either a count or a refusal.
+
+    Item 518's precondition shape, applied to the second thing a promotion
+    needs. :func:`_ceiling_precondition` is the only producer of a grant;
+    this is the only producer of a count, and :func:`promote` is the only
+    caller of either. A count that did not come from here cannot reach the
+    threshold comparison, because there is no other path to it.
+
+    The count is arithmetic over signed bytes. Nothing a caller says about how
+    much evidence a peer has is read at all."""
+    counted = pool_receipt.count_evidence(
+        receipts, pool_id=charter.pool_id, peer_id=member.peer_id,
+        artifact_digest=member.artifact_digest,
+        admitted_at=member.admitted_at,
+        attest_key_ids=charter.attest_key_ids, directory=directory, when=when)
+
+    required = charter.tiers[tier].evidence_required
+    if counted.counted < required:
+        refused = {link: sum(1 for r in counted.rejected if r.link == link)
+                   for link in sorted({r.link for r in counted.rejected})}
+        return None, _refusal(
+            LINK_PROMOTION_EVIDENCE,
+            f"tier {tier!r} requires {required} verified, attested receipts "
+            f"and {member.peer_id!r} has {counted.counted}; it stays at "
+            f"{member.tier!r}"
+            + (f" ({', '.join(f'{n} refused on {link}' for link, n in refused.items())})"
+               if refused else ""),
+            peer_id=member.peer_id, stays_at=member.tier,
+            has=counted.counted, requires=required, refused=refused)
+    return counted, None
+
+
 def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
             charter_key: bytes, roster: Roster,
-            evidence_key_ids: Sequence[str],
+            receipts: Sequence[Any],
+            directory: Optional[peer_identity.IdentityDirectory] = None,
             now: Optional[datetime] = None) -> dict:
     """Raise a member's tier, if and only if the evidence for that tier exists.
 
-    ``evidence_key_ids`` are the key fingerprints that signed the member's
-    accumulated execution receipts. Every one of them must be in the charter's
-    ``attest_key_ids``: a peer cannot attest its own promotion, and neither can
-    an operator who holds only admit authority.
+    ``receipts`` is a sequence of ``(execution_receipt, attestation)`` pairs.
+    They are RECOUNTED here, by :func:`pool_receipt.count_evidence`: each
+    receipt must be signed by the member's own pinned key, be about this pool,
+    this peer and the artifact digest this member was admitted with, be no
+    older than that admission, and carry an attestation signed by a key the
+    charter names in ``attest_key_ids``. A peer cannot attest its own
+    promotion, and neither can an operator who holds only admit authority.
+
+    There is no parameter through which an evidence COUNT can be supplied.
+    That was the fail-open this closes: ``Membership.evidence`` was an integer
+    a caller handed in, and the gate believed it. It is now
+    ``len(member.evidence_digests)``, and the digests are the receipts this
+    function verified.
 
     The failure direction is the one every arrow here takes. A member with too
-    little evidence, or with evidence signed by a key the charter does not name
-    for attesting, STAYS WHERE IT IS. It does not inherit the tier it asked for,
-    and it is not demoted either; a missing proof is not a violation.
+    few verified receipts, or whose receipts are attested by a key the charter
+    does not name, STAYS WHERE IT IS. It does not inherit the tier it asked
+    for, and it is not demoted either; a missing proof is not a violation.
 
     Like :func:`admit`, the tier grant is diffed against the charter ceiling and
     the diff is what produces the grant."""
@@ -1315,42 +1401,32 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
             LINK_UNKNOWN_TIER,
             f"the charter declares no tier {tier!r}", peer_id=peer_id)
 
-    # The ceiling diff runs HERE, ahead of the evidence threshold, and that
-    # order is the point. `member.evidence` is the count of attested execution
-    # receipts the peer accumulated while it worked, which is an observation of
-    # what it did; the ceiling diff is a property of the charter and the tier
-    # and needs no observation at all. Item 543 (issue #1222) is the rule that
-    # the authority diff gates ENTRY to the stages that read measured evidence
-    # rather than being weighed after them, so a tier the pool cannot lawfully
-    # issue is refused without the peer's record ever being read. The call
-    # depends only on `(charter, tier, peer_id)`, so nothing about the grant it
-    # computes changes by standing earlier.
+    # The ceiling diff runs HERE, ahead of the evidence stage, and that order
+    # is the point. The evidence count is arithmetic over the receipts the
+    # caller supplied, recounted by `_evidence_precondition`, which is an
+    # observation of what the peer did; the ceiling diff is a property of the
+    # charter and the tier and needs no observation at all. Item 543
+    # (issue #1222) is the rule that the authority diff gates ENTRY to the
+    # stages that read measured evidence rather than being weighed after them,
+    # so a tier the pool cannot lawfully issue is refused without a single
+    # receipt being verified. The call depends only on
+    # `(charter, tier, peer_id)`, so nothing about the grant it computes
+    # changes by standing earlier.
     grant, refusal = _ceiling_precondition(charter, tier, peer_id, None)
     if refusal is not None:
         refusal["peer_id"] = peer_id
         return refusal
 
-    outside = sorted(set(evidence_key_ids) - set(charter.attest_key_ids))
-    if outside:
-        return _refusal(
-            LINK_PROMOTION_EVIDENCE,
-            f"evidence signed by {', '.join(outside)}, which the charter does "
-            f"not name as attesting authority "
-            f"({', '.join(charter.attest_key_ids) or 'nobody'})",
-            peer_id=peer_id)
-
-    required = charter.tiers[tier].evidence_required
-    if member.evidence < required:
-        return _refusal(
-            LINK_PROMOTION_EVIDENCE,
-            f"tier {tier!r} requires {required} attested receipts and "
-            f"{peer_id!r} has {member.evidence}; it stays at "
-            f"{member.tier!r}", peer_id=peer_id,
-            stays_at=member.tier, has=member.evidence, requires=required)
+    counted, refusal = _evidence_precondition(
+        charter, member, tier, receipts,
+        directory if directory is not None else peer_identity.IdentityDirectory(),
+        when)
+    if refusal is not None:
+        return refusal
 
     promoted = _issue_membership(
         peer_id, tier, grant, member.artifact_digest, member.admitted_at,
-        evidence=member.evidence, receipts=member.receipts,
+        evidence_digests=counted.digests, receipts=member.receipts,
         effects_witnessed=member.effects_witnessed,
         identity=member.identity, key_id=member.key_id)
     roster.members[peer_id] = promoted
@@ -1360,7 +1436,13 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
         "from_tier": member.tier, "tier": tier,
         "caps": sorted(grant.caps),
         "budgets": {k: grant.budgets[k] for k in sorted(grant.budgets)},
-        "evidence": member.evidence, "at": _iso(when),
+        "evidence": counted.counted, "at": _iso(when),
+        # The promotion CITES the receipts it counted, so a third party can
+        # recheck the arithmetic without being told the answer.
+        "evidence_digests": list(counted.digests),
+        "evidence_tasks": list(counted.task_ids),
+        "evidence_key_ids": list(counted.attestor_key_ids),
+        "receipts_refused": [r.as_dict() for r in counted.rejected],
         "effect_ceiling": TIER_EFFECT_CEILING[tier].value,
     }
     roster.append(receipt)

@@ -339,41 +339,60 @@ def test_promotion_without_evidence_leaves_the_member_where_it_was():
     roster = fresh_roster(record)
     run_admit(record, make_join(record), roster=roster)
     receipt = pp.promote(record, "alpha", "replayable", charter_key=OP_KEY,
-                         roster=roster, evidence_key_ids=[key_id(ATTEST_KEY)])
+                         roster=roster, receipts=[])
     assert receipt["link"] == pp.LINK_PROMOTION_EVIDENCE
     assert receipt["stays_at"] == pp.ENTRY_TIER
     assert roster.members["alpha"].tier == pp.ENTRY_TIER
     assert roster.members["alpha"].caps == tuple(sorted(ENTRY_CAPS))
 
 
-def test_evidence_signed_by_a_key_the_charter_does_not_name_is_not_evidence():
-    """A peer cannot attest its own promotion, and neither can an operator who
-    holds only admit authority: the authority view splits admit from attest."""
+def test_an_evidence_count_cannot_be_stated_at_all():
+    """The fail-open item 524's receipt slice closes. `Membership.evidence` was
+    an integer a caller handed in and the promotion gate believed it; a peer
+    that states its own evidence count can state any evidence count.
+
+    It is now derived from the receipt digests the pool verified, so there is
+    no argument left to state it through. Asserted at the two places a number
+    used to enter: the constructor, and the roster file on disk."""
+    with pytest.raises(TypeError):
+        pp.Membership(peer_id="alpha", tier=pp.ENTRY_TIER, caps=(), budgets={},
+                      artifact_digest=GOOD_ARTIFACT, admitted_at="t",
+                      evidence=99)
+    with pytest.raises(TypeError):
+        pp._issue_membership("alpha", pp.ENTRY_TIER,
+                             pp.peer_authority.Grant(holder="peer:alpha",
+                                                     caps=(), budgets={}),
+                             GOOD_ARTIFACT, "t", evidence=99)
+
+    # A roster file that claims a count is read as claiming nothing. The member
+    # is otherwise intact, so this is the count being ignored and not the row
+    # being refused.
+    record = pp.sign_charter(make_charter(), OP_KEY)
+    roster = fresh_roster(record)
+    run_admit(record, make_join(record), roster=roster)
+    on_disk = roster.as_dict()
+    on_disk["members"]["alpha"]["evidence"] = 99
+    reloaded = pp.Roster.from_dict(on_disk)
+    assert reloaded.members["alpha"].evidence == 0
+    assert reloaded.members["alpha"].tier == pp.ENTRY_TIER
+
+
+def test_a_member_with_stored_digests_and_no_receipts_is_not_promoted():
+    """The digests a roster carries are a RECORD of what was counted, never an
+    input to the count. A roster that lists three digests and a caller that
+    presents no receipts gets the authority of a peer with no evidence."""
     record = pp.sign_charter(make_charter(), OP_KEY)
     roster = fresh_roster(record)
     run_admit(record, make_join(record), roster=roster)
     roster.members["alpha"] = pp._issue_membership(
         "alpha", pp.ENTRY_TIER, roster.members["alpha"].grant(), GOOD_ARTIFACT,
-        "t", evidence=99)
-    for forger in (ALPHA_KEY, OP_KEY):
-        receipt = pp.promote(record, "alpha", "replayable", charter_key=OP_KEY,
-                             roster=roster, evidence_key_ids=[key_id(forger)])
-        assert receipt["link"] == pp.LINK_PROMOTION_EVIDENCE
-        assert roster.members["alpha"].tier == pp.ENTRY_TIER
-
-
-def test_promotion_with_the_declared_evidence_raises_the_tier_and_the_grant():
-    record = pp.sign_charter(make_charter(), OP_KEY)
-    roster = fresh_roster(record)
-    run_admit(record, make_join(record), roster=roster)
-    roster.members["alpha"] = pp._issue_membership(
-        "alpha", pp.ENTRY_TIER, roster.members["alpha"].grant(), GOOD_ARTIFACT,
-        "t", evidence=3, receipts=3)
+        "t", evidence_digests=("d0" * 32, "d1" * 32, "d2" * 32))
+    assert roster.members["alpha"].evidence == 3
     receipt = pp.promote(record, "alpha", "replayable", charter_key=OP_KEY,
-                         roster=roster, evidence_key_ids=[key_id(ATTEST_KEY)])
-    assert receipt["verdict"] == pp.PROMOTE
-    assert roster.members["alpha"].tier == "replayable"
-    assert receipt["effect_ceiling"] == EffectClass.IDEMPOTENT_EXTERNAL.value
+                         roster=roster, receipts=[])
+    assert receipt["link"] == pp.LINK_PROMOTION_EVIDENCE
+    assert receipt["has"] == 0, "the count comes from the receipts, not the row"
+    assert roster.members["alpha"].tier == pp.ENTRY_TIER
 
 
 def test_promotion_and_not_a_member_and_unknown_tier_are_named():
@@ -381,14 +400,14 @@ def test_promotion_and_not_a_member_and_unknown_tier_are_named():
     roster = fresh_roster(record)
     assert pp.promote(record, "ghost", "replayable", charter_key=OP_KEY,
                       roster=roster,
-                      evidence_key_ids=[])["link"] == pp.LINK_NOT_A_MEMBER
+                      receipts=[])["link"] == pp.LINK_NOT_A_MEMBER
     assert pp.withdraw(record, "ghost", "x", charter_key=OP_KEY, roster=roster,
                        revoking_key_id=key_id(OP_KEY)
                        )["link"] == pp.LINK_NOT_A_MEMBER
     run_admit(record, make_join(record), roster=roster)
     assert pp.promote(record, "alpha", "durable", charter_key=OP_KEY,
                       roster=roster,
-                      evidence_key_ids=[])["link"] == pp.LINK_UNKNOWN_TIER
+                      receipts=[])["link"] == pp.LINK_UNKNOWN_TIER
 
 
 def test_a_tier_grant_wider_than_the_pool_ceiling_is_refused_at_every_rung():
@@ -404,7 +423,7 @@ def test_a_tier_grant_wider_than_the_pool_ceiling_is_refused_at_every_rung():
     roster = fresh_roster(record)
     run_admit(record, make_join(record), roster=roster)
     receipt = pp.promote(record, "alpha", "replayable", charter_key=OP_KEY,
-                         roster=roster, evidence_key_ids=[key_id(ATTEST_KEY)])
+                         roster=roster, receipts=[])
     assert receipt["link"] == pp.LINK_GRANT_CEILING
     assert 'fs.read(path="/etc")' in receipt["widened_caps"]
     assert roster.members["alpha"].tier == pp.ENTRY_TIER
@@ -488,14 +507,28 @@ def test_every_effect_class_is_either_ranked_or_named_unreachable():
 
 
 def admitted_pool():
-    record = pp.sign_charter(make_charter(), OP_KEY)
+    # A tier this pool grants on no evidence, so the fixture can run a REAL
+    # promotion and the ledger below carries a real PROMOTE event. What a
+    # promotion requires of receipts is tested in `test_pool_receipts_524.py`,
+    # which has the asymmetric identities that a receipt needs.
+    record = pp.sign_charter(make_charter(tiers={
+        pp.ENTRY_TIER: pp.TierGrant(caps=ENTRY_CAPS, budgets={"retries": 1}),
+        "replayable": pp.TierGrant(caps=('fs.read(path="/data")',),
+                                   budgets={"retries": 2},
+                                   evidence_required=0),
+    }), OP_KEY)
     roster = fresh_roster(record)
     run_admit(record, make_join(record), roster=roster)
-    roster.members["alpha"] = pp._issue_membership(
-        "alpha", pp.ENTRY_TIER, roster.members["alpha"].grant(), GOOD_ARTIFACT,
-        "t", evidence=3, receipts=3, effects_witnessed=2)
     pp.promote(record, "alpha", "replayable", charter_key=OP_KEY, roster=roster,
-               evidence_key_ids=[key_id(ATTEST_KEY)])
+               receipts=[])
+    # The history it goes on to accumulate. Opaque here: these stand for
+    # receipts the pool verified, and nothing reads a stored digest back.
+    promoted = roster.members["alpha"]
+    roster.members["alpha"] = pp._issue_membership(
+        "alpha", promoted.tier, promoted.grant(), GOOD_ARTIFACT,
+        promoted.admitted_at,
+        evidence_digests=("d0" * 32, "d1" * 32, "d2" * 32), receipts=3,
+        effects_witnessed=2)
     roster.outstanding["alpha"] = ["task-7", "task-9"]
     return record, roster
 
@@ -856,3 +889,47 @@ def test_a_refused_join_does_not_spend_the_peers_nonce():
     good = make_join(record, nonce="n-once")
     assert run_admit(record, good, roster=roster)["verdict"] == pp.ADMIT
     assert ("alpha", "n-once") in roster.spent_nonces
+
+
+def test_the_evidence_count_is_a_precondition_not_a_stage():
+    """Item 518's shape again, applied to the second thing a promotion needs.
+
+    `_ceiling_precondition` is the only producer of a grant and
+    `_evidence_precondition` is the only producer of a count, so a count that
+    did not come from the recount cannot reach the threshold comparison. A
+    behavioural test could only show the orderings it happened to try."""
+    tree = module_tree()
+    counters = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for call in ast.walk(node):
+            if isinstance(call, ast.Call) and \
+                    isinstance(call.func, ast.Attribute) and \
+                    call.func.attr == "count_evidence":
+                counters.add(node.name)
+    assert counters == {"_evidence_precondition"}, (
+        f"the evidence recount happens in {sorted(counters)}; it must happen "
+        f"in exactly one function")
+    assert functions_calling(tree, "_evidence_precondition") == {"promote"}
+
+
+def test_promote_never_reads_a_members_stored_evidence():
+    """The fail-open was `member.evidence` being an input. It is now an
+    OUTPUT: derived from the digests the recount produced. A `promote` that
+    read it back would have reopened the hole, so it is asserted structurally
+    rather than left to review."""
+    function = ast.parse(inspect.getsource(pp.promote).lstrip()).body[0]
+    reads = [node for node in ast.walk(function)
+             if isinstance(node, ast.Attribute)
+             and isinstance(node.value, ast.Name)
+             and node.value.id == "member"
+             and node.attr in ("evidence", "evidence_digests")]
+    assert reads == [], (
+        "`promote` reads the member's stored evidence; the count must come "
+        "from the receipts it verified")
+
+    taken = {arg.arg for arg in function.args.args + function.args.kwonlyargs}
+    assert "evidence_key_ids" not in taken, (
+        "`promote` still takes a caller-supplied list of evidence key ids")
+    assert "receipts" in taken, "`promote` must be handed the receipts"
