@@ -733,5 +733,17 @@
       ],
       "note": "The four generic triage reasons a coverage row may not use, declared once per coverage tool. A reason rejected by one tool and accepted by the other is a hole in the triage discipline both enforce."
     }
+  ],
+  "//claims": "Issue #1336. The CLAIM-ANCHORED near misses: a site whose prose says its vocabulary is another module's, where the closest vocabulary in that module is not quite the same one. Same ratchet, same shrink-only rule: a near miss that resolves has its entry DELETED.",
+  "claims": [
+    {
+      "site": "src/revl/mcp/session.py::Session._live_fingerprint",
+      "mirrors": "src/revl/apply.py::fingerprint",
+      "only_here": [],
+      "only_there": [
+        "manifest"
+      ],
+      "note": "The claim is about the OUTPUT shape and it holds: both return {components, loadOrder, provisions:[{key, provider}]}, and `apply._canon` reads exactly those three off either one, so the agreement is enforced where the two are compared. The extra token is `manifest`, which `apply.fingerprint` READS off the IR it is handed; the session copy reaches the same components through `run._components` and `run._load_order` and never names the manifest. An input key one side reads is not a field name the other is missing."
+    }
   ]
 }
