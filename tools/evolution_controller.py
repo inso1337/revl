@@ -144,6 +144,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.kernel_boundary import KERNEL_PATHS  # noqa: E402
+from revl.promotion_barrier import AUTHORITY_AXES  # noqa: E402
 
 # Exit statuses. REFUSE is distinct from ROLL_BACK for the same reason
 # `tools/heldout_scoring.py` separates REFUSED from DIVERGENT: a reader has to
@@ -236,9 +237,14 @@ AUTHORITY_FENCE = (
 # to `gate.py`'s set so the two cannot drift apart silently.
 DECIDER_SERVICES = ("Admission", "AdmitGate", "Gate", "Session")
 
-# The four authority axes the attenuation product accounts for
+# The authority axes the attenuation product accounts for
 # (`docs/capability-attenuation.md`), plus retention per issue #1223.
-AUTHORITY_AXES = ("capability", "taint", "budget", "realm", "retention")
+# IMPORTED from `src/revl/promotion_barrier.py`, not restated, for the
+# reason KERNEL_PATHS is: that module says in so many words that it is the
+# canonical axis set and that `AXIS_ALIASES` maps every other spelling in
+# the tree onto it, and this file had already shipped one copied constant
+# that drifted. An axis added there is measured here on the next run
+# instead of being read as UNMEASURED by a stale tuple.
 
 
 # ------------------------------------------------------------------ verdicts
