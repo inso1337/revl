@@ -44,6 +44,15 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   (`tools/residue-probe/`) and reports the leak set. Free — the probe calls no
   model. Imported by `run.py` to score fresh generations, and runnable
   standalone to re-score a committed corpus.
+- `decode_grammar_probe.py` — item 513's measurement: does a real provider
+  honour the decoding grammar revl states
+  (`docs/design/542-grammar-constrained-decoding.md`, §11)? Runs one prompt set
+  against a local OpenAI-shaped endpoint twice, once unconstrained and once with
+  the derived constraint attached, and scores every sample three ways: item
+  257's validator, a GBNF recogniser over the grammar revl derived, and the
+  member order that grammar pins. Needs a running model server, so CI never runs
+  it, and the arms are independent so a slow endpoint can be measured across
+  several invocations.
 
 ### The paradigm variant — bench the paradigm, not just the syntax
 
