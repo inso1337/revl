@@ -776,9 +776,17 @@ def test_the_selector_returns_a_non_empty_selection_for_every_fixture():
         # (PR #1304) for that same reason: the residual figure is generated
         # into three documents, and `docgen --check` is the gate a docs-only
         # diff skips.
+        # `test_docgen_check_runs_on_a_docs_only_diff.py` arrived with issue
+        # #1358 and generalises both: the two modules above each sample one
+        # generated block, and it runs every block and every coverage check
+        # `tools/docgen.py --check` runs. #1358 is why that mattered -- the
+        # `frontend` step was ALSO skipped on main, behind a failing
+        # `conformance --check-readme`, so the drift reached 9 findings with
+        # neither half of the gate reporting.
         required = {
             "tests/test_check_vision_claims.py",
             "tests/test_doc_examples.py",
+            "tests/test_docgen_check_runs_on_a_docs_only_diff.py",
             "tests/test_selfhost_residual_is_generated.py",
         }
         # The cost bound is the other half of what this pins, and it is still
