@@ -350,9 +350,21 @@ def named_guarantees() -> list[str]:
 #: rules, which is the drift the digest exists to catch (issue #989). It cites
 #: no numbered `(Gn)` tag, so listing it here adds it to the digest without
 #: changing the cited set :func:`discharged_guarantees` reads.
+#:
+#: `model_route` and `model_council` are here on that same rule, and each meets
+#: it twice over (issue #1311). `model_route` raises item 512's ten
+#: `G-MODEL-PLACE` / `G-SECRET-FLOW` declaration refusals, and its
+#: `CEILING_ORIGINS` is what `taint.py` reads at every `model.*` crossing to
+#: decide whether item 514's value-level refusal fires at all, the exact
+#: relationship `retention.PERSISTENCE_SINK_SCOPES` has with the same file.
+#: `model_council` is item 516's rule set, called from `lower.py` and refusing
+#: under `model_route.CODE`. Neither cites a `(Gn)` tag, so both are digest
+#: inputs and not cited codes, exactly as `retention` is.
+#: `tests/test_1311_model_routes_not_in_ir.py` pins it.
 RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "taint", "retention", "placement", "emission_analysis",
-                   "admit_profile", "holes", "diagnostics")
+                   "admit_profile", "holes", "diagnostics",
+                   "model_route", "model_council")
 
 #: The modules SCANNED for the G-codes the ruleset cites. `diagnostics` is
 #: excluded on purpose: it is the catalogue, and reading the list off the

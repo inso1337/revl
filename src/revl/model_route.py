@@ -63,6 +63,17 @@ ceiling is a CONFIDENTIALITY ceiling: it is the item-514 join of item 249's
 lattice with a declared residence, and it says nothing about which roles an
 action's non-confidential origins reach. That is the crossing side, slice 4.
 See the design doc's non-goals.
+
+It also writes NO IR, and that is a decision rather than an omission (issue
+#1311). The linked composition carries no route, no arm, no role and no
+residence, at any depth, and `tests/test_1311_model_routes_not_in_ir.py` scans
+a compiled document for the whole vocabulary to keep it that way. A consumer
+holding only a linked composition can derive the component's declared ACTIONS
+from its provide block and nothing else; the route table travels BY VALUE,
+from `check()` to the consumer that needs it, which is how item 517's decision
+object and item 518's `ShadowPlan.route_table` already read it. Section 4.1 of
+`docs/design/531-model-placement.md` is the contract, including what would
+justify an IR section later and why neither has landed.
 """
 
 from __future__ import annotations
