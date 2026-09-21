@@ -9,10 +9,13 @@ naming who may admit and revoke, and a ledger that says what a peer leaving
 does and does not undo. Without that the guarantee is exercised only inside the
 test suite, which is exactly what issue #1198 reports.
 
-This module is that object, and only that object. It is the pool declaration
-plus the gate for JOINING it. Running work on a member, moving bytes over a
-wire and delivering a result are still ``#421``'s network seam and the
-``tee_attestation`` delivery path; nothing here opens a socket.
+This module is the pool declaration, the gate for JOINING it, and the
+promotion gate that recounts a member's evidence from signed execution
+receipts (``pool_receipt``, item 524's receipt slice,
+``docs/design/566-pool-execution-receipts.md``). Moving bytes over a wire and
+dispatching work to a member are not here and nothing here opens a socket;
+that needs roadmap item 118's machine boundary, because a peer IS a machine
+boundary.
 
 The trust progression, and where each arrow fails
 -------------------------------------------------
@@ -28,9 +31,16 @@ the peer whose evidence passed.
    peer-supplied member is parsed, so an operator with no admit authority
    cannot use the gate as an oracle (:data:`LINK_ADMITTING_AUTHORITY`).
 3. **Identity is a key, not an address** -> the join record and the peer offer
-   inside it both carry a MAC under the peer's key, and the offer's own
-   ``peer_id`` must be the one the join claims (:data:`LINK_JOIN_SIGNATURE`,
-   :data:`LINK_OFFER_SIGNATURE`, :data:`LINK_OFFER_IDENTITY`).
+   inside it are both signed by the peer, under the same key and with the same
+   backing, and the offer's own ``peer_id`` must be the one the join claims
+   (:data:`LINK_JOIN_SIGNATURE`, :data:`LINK_OFFER_SIGNATURE`,
+   :data:`LINK_OFFER_IDENTITY`). Which backing is admitted is the charter's
+   ``identity_mode``, and a peer with a pinned public key may use only the
+   asymmetric one (:data:`LINK_IDENTITY_MODE`,
+   :data:`LINK_IDENTITY_DOWNGRADE`). A key the directory does not hold signs
+   nothing (:data:`LINK_UNKNOWN_KEY`); a key it holds as revoked or superseded
+   still VERIFIES what it signed and admits nobody
+   (:data:`LINK_REVOKED_KEY`).
 4. **The peer agreed to THESE terms** -> the join names the charter by digest,
    not by name, so a peer that signed up to a narrow charter is not admitted
    under a wider one that reuses the name (:data:`LINK_POOL_IDENTITY`).
@@ -103,18 +113,41 @@ reports three disjoint sets and never a single boolean:
 
 What the signatures do and do not prove
 ---------------------------------------
-Every MAC here is HMAC-SHA256 over canonical JSON with a per-protocol domain
-prefix, the construction ``attest`` and ``peer_offer`` already use, and the
-covered set is DERIVED FROM THE RECORD rather than from a hand-written field
-list (item 517's discipline, written after a receipt in this tree carried a
-``key_id`` that was added to the body after the MAC and so was covered by
-nothing). That gives AUTHENTICATION under a shared key. It does not give
-non-repudiation: the operator verifying a peer's join holds the same key that
-signs it and could have produced it. A private pool of operators who exchanged
-keys out of band is exactly the deployment where that is acceptable, and it is
-why this is the PRIVATE pool and not an open one. An asymmetric identity, which
-would make a peer's join provable to a third party, is remaining work and is
-named as such in ``docs/design/550-private-peer-pool.md``.
+Every signature here covers a per-protocol domain prefix plus the canonical
+bytes of the record, and the covered set is DERIVED FROM THE RECORD rather than
+from a hand-written field list (item 517's discipline, written after a receipt
+in this tree carried a ``key_id`` that was added to the body after the MAC and
+so was covered by nothing). Two backings sign that message:
+
+* ``hmac-sha256`` under a key both parties hold. AUTHENTICATION and nothing
+  more: the operator verifying a peer's join holds the key that signs it and
+  could have produced it, so a compromised operator key forges a join for every
+  peer whose key it holds, and no peer can prove to a third party what it did or
+  did not sign.
+* ``ecdsa-p256-sha256`` under the peer's own key pair
+  (:mod:`revl.peer_identity`, issue #1278). The verifier holds only the public
+  half, so a compromised operator key forges nothing, and any holder of that
+  public half can check the record. That is non-repudiation UNDER ONE STATED
+  ASSUMPTION, which is a deployment property and not a cryptographic one: the
+  private half was generated on the peer's machine and never left it. An
+  operator that generated a peer's key pair and handed it over can forge that
+  peer's signatures exactly as it could forge its MAC. ``pool keygen`` draws on
+  the peer's machine and ``peer_identity`` never moves a private scalar, so the
+  honest deployment is the default one, but the assumption is stated rather than
+  implied by the word "signed".
+
+The charter's ``identity_mode`` says which backings a pool admits, ``pool
+status`` reports the split per MEMBER, and there is no fallback in either
+direction: ``sign_alg`` selects one verifier and its failure is the answer. A
+peer the directory holds a key for cannot present a shared-key join at all, so
+learning a legacy secret does not step an asymmetric peer back onto it.
+
+What is NOT signed asymmetrically in this slice, stated rather than left to be
+discovered: the CHARTER is still MAC'd under the operator's symmetric key, and
+so is the ADMIT receipt. Both are the operator's own records, read by operators
+who already hold that key, and neither is a peer's claim about itself. Moving
+them is a separate change with a separate migration, and
+``docs/design/555-asymmetric-peer-identity.md`` says so.
 """
 
 from __future__ import annotations
@@ -126,9 +159,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
 
-from . import cap_order, peer_authority, peer_offer
+from . import cap_order, peer_authority, peer_identity, peer_offer, pool_receipt
 from .attest import NotCanonicalizable, _canonical_bytes, key_id
 from .lawful_retry import EffectClass
+from .peer_identity import (
+    IDENTITY_ASYMMETRIC,
+    IDENTITY_SHARED_KEY,
+    IdentityDirectory,
+    KEY_ACTIVE,
+    PeerIdentity,
+)
 
 # ---------------------------------------------------------------------------
 # envelope identities and MAC domains
@@ -146,7 +186,40 @@ JOIN_VERSION = "1.0"
 RECEIPT_KIND = "revl.pool-receipt"
 RECEIPT_VERSION = "1.0"
 
+#: The two identity backings a pool record may carry. `sign_alg` SELECTS the
+#: verifier; it never merely records which one was used. A record is checked
+#: under the algorithm it names and under no other, so a join whose asymmetric
+#: signature fails is REFUSED rather than retried as a MAC. There is deliberately
+#: no fallback: a downgrade an attacker can trigger is not a migration path, and
+#: "unverifiable" must land on refuse, not on the weaker check.
 SIGN_ALG = "hmac-sha256"
+SIGN_ALG_ECDSA = peer_identity.SIGN_ALG
+SIGN_ALGS: tuple[str, ...] = (SIGN_ALG, SIGN_ALG_ECDSA)
+
+#: What a charter admits. `asymmetric` is the setting issue #1278 exists to make
+#: available and the one `revl pool init` writes; `shared-key` is item 524's
+#: original deployment; `mixed` is the migration window, and it is the reason
+#: `pool status` reports the split per member rather than a single word. A mixed
+#: pool is as strong as its weakest member and the status output says so.
+MODE_ASYMMETRIC = "asymmetric"
+MODE_SHARED_KEY = "shared-key"
+MODE_MIXED = "mixed"
+IDENTITY_MODES: tuple[str, ...] = (MODE_ASYMMETRIC, MODE_SHARED_KEY, MODE_MIXED)
+
+#: Which identity backings each mode admits.
+MODE_ADMITS: dict[str, tuple[str, ...]] = {
+    MODE_ASYMMETRIC: (IDENTITY_ASYMMETRIC,),
+    MODE_SHARED_KEY: (IDENTITY_SHARED_KEY,),
+    MODE_MIXED: (IDENTITY_ASYMMETRIC, IDENTITY_SHARED_KEY),
+}
+
+#: The backing each `sign_alg` spelling means. A spelling not in this map is
+#: refused rather than defaulted.
+_ALG_IDENTITY: dict[str, str] = {
+    SIGN_ALG: IDENTITY_SHARED_KEY,
+    SIGN_ALG_ECDSA: IDENTITY_ASYMMETRIC,
+}
+
 SIGNATURE_FIELD = "signature"
 
 #: Three protocols, three domains. Without domain separation a charter, a join
@@ -157,6 +230,11 @@ SIGNATURE_FIELD = "signature"
 CHARTER_DOMAIN = b"revl.pool-charter/v1\x00"
 JOIN_DOMAIN = b"revl.pool-join/v1\x00"
 RECEIPT_DOMAIN = b"revl.pool-receipt/v1\x00"
+
+#: A withdrawal is its own protocol. It is signed by the OPERATOR's revoke key,
+#: not by the peer's, so a third party can check who removed whom without asking
+#: the operator that did it.
+WITHDRAWAL_DOMAIN = b"revl.pool-withdrawal/v1\x00"
 
 ADMIT = "ADMIT"
 REFUSE = "REFUSE"
@@ -191,6 +269,10 @@ LINK_GRANT_CEILING = "grant-ceiling"
 LINK_PROMOTION_EVIDENCE = "promotion-evidence"
 LINK_NOT_A_MEMBER = "not-a-member"
 LINK_UNKNOWN_TIER = "unknown-tier"
+LINK_IDENTITY_MODE = "identity-mode"
+LINK_IDENTITY_DOWNGRADE = "identity-downgrade"
+LINK_UNKNOWN_KEY = "unknown-key"
+LINK_REVOKED_KEY = "revoked-key"
 
 #: Every link this module can refuse on. A test asserts the set is exactly the
 #: links the code reaches, so a link cannot be added and left unreachable (which
@@ -214,6 +296,10 @@ REFUSAL_LINKS: tuple[str, ...] = (
     LINK_PROMOTION_EVIDENCE,
     LINK_NOT_A_MEMBER,
     LINK_UNKNOWN_TIER,
+    LINK_IDENTITY_MODE,
+    LINK_IDENTITY_DOWNGRADE,
+    LINK_UNKNOWN_KEY,
+    LINK_REVOKED_KEY,
 )
 
 # ---------------------------------------------------------------------------
@@ -363,6 +449,7 @@ class PoolCharter:
     artifact_digests: tuple[str, ...] = ()
     trust_floor: str = "verified"
     join_window_s: int = 300
+    identity_mode: str = MODE_MIXED
 
     def __post_init__(self) -> None:
         if not self.pool_id:
@@ -390,6 +477,12 @@ class PoolCharter:
             raise PoolError(
                 "join_window_s must be positive; a pool with no freshness "
                 "window accepts a join record forever")
+        if self.identity_mode not in IDENTITY_MODES:
+            raise PoolError(
+                f"unknown identity_mode {self.identity_mode!r}; a pool admits "
+                f"one of {', '.join(IDENTITY_MODES)}. There is no default: a "
+                f"pool whose identity backing was inferred is a pool nobody "
+                f"decided the strength of")
 
     def ceiling_grant(self) -> peer_authority.Grant:
         """The pool's own authority, as the delegator every tier grant is
@@ -418,6 +511,7 @@ class PoolCharter:
             "artifact_digests": sorted(self.artifact_digests),
             "trust_floor": self.trust_floor,
             "join_window_s": self.join_window_s,
+            "identity_mode": self.identity_mode,
             "sign_alg": SIGN_ALG,
         }
 
@@ -462,6 +556,9 @@ def _validate_charter_envelope(record: Mapping[str, Any]) -> str:
     window = record.get("join_window_s")
     if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
         return f"join_window_s is not a positive integer ({window!r})"
+    if record.get("identity_mode") not in IDENTITY_MODES:
+        return (f"identity_mode is {record.get('identity_mode')!r}, expected "
+                f"one of {', '.join(IDENTITY_MODES)}")
     return ""
 
 
@@ -508,7 +605,8 @@ def charter_from_record(record: Mapping[str, Any]) -> PoolCharter:
         attest_key_ids=tuple(record.get("attest_key_ids", ())),
         artifact_digests=tuple(record.get("artifact_digests", ())),
         trust_floor=record.get("trust_floor", "verified"),
-        join_window_s=int(record.get("join_window_s", 300)))
+        join_window_s=int(record.get("join_window_s", 300)),
+        identity_mode=record.get("identity_mode", MODE_MIXED))
 
 
 # ---------------------------------------------------------------------------
@@ -559,8 +657,23 @@ class JoinRequest:
         }
 
 
+def sign_join_identity(join: JoinRequest, identity: PeerIdentity) -> dict:
+    """Sign a join request with the peer's own ASYMMETRIC identity.
+
+    The result is verifiable by ANY holder of the peer's public key. The
+    :func:`sign_join` record is verifiable only by a holder of the peer's
+    secret, and in a shared-key pool that set includes every party that could
+    have forged it, which is why the two are not interchangeable and why the
+    gate refuses to substitute one for the other."""
+    body = join.body()
+    body["sign_alg"] = SIGN_ALG_ECDSA
+    return peer_identity.sign_record(JOIN_DOMAIN, body, identity)
+
+
 def sign_join(join: JoinRequest, key: bytes) -> dict:
-    """Sign a join request with the PEER's key."""
+    """Sign a join request with the PEER's shared key (item 524's original
+    backing). Authenticates; does not attribute. See
+    :func:`sign_join_identity`."""
     if not isinstance(key, (bytes, bytearray)) or not key:
         raise PoolError("signing key must be non-empty bytes")
     body = join.body()
@@ -571,10 +684,12 @@ def sign_join(join: JoinRequest, key: bytes) -> dict:
 
 def _validate_join_envelope(record: Mapping[str, Any]) -> str:
     for member, expected in (("kind", JOIN_KIND),
-                             ("version", JOIN_VERSION),
-                             ("sign_alg", SIGN_ALG)):
+                             ("version", JOIN_VERSION)):
         if record.get(member) != expected:
             return f"{member} is {record.get(member)!r}, expected {expected!r}"
+    if record.get("sign_alg") not in SIGN_ALGS:
+        return (f"sign_alg is {record.get('sign_alg')!r}, expected one of "
+                f"{', '.join(SIGN_ALGS)}")
     for member in ("pool_id", "charter_digest", "peer_id", "artifact_digest",
                    "nonce", "issued_at"):
         value = record.get(member)
@@ -587,12 +702,37 @@ def _validate_join_envelope(record: Mapping[str, Any]) -> str:
     return ""
 
 
+def verify_join_identity(record: Mapping[str, Any],
+                         public_key: bytes) -> tuple[bool, str]:
+    """Check an asymmetrically signed join against a PINNED public key.
+
+    ``(ok, reason)``; never raises. The key comes from the verifier's directory,
+    never from the record: a verifier that took the key out of the record it is
+    checking would accept anything an attacker signed with an attacker's key."""
+    if not isinstance(record, Mapping):
+        return False, "join request is not an object"
+    ok, reason = peer_identity.verify_record(JOIN_DOMAIN, record, public_key)
+    if not ok:
+        return False, reason
+    envelope = _validate_join_envelope(record)
+    if envelope:
+        return False, f"envelope refused: {envelope}"
+    return True, "valid: join request is authentic under the pinned public key"
+
+
 def verify_join(record: Mapping[str, Any], key: bytes) -> tuple[bool, str]:
-    """Check a signed join request. ``(ok, reason)``; never raises."""
+    """Check a SHARED-KEY signed join request. ``(ok, reason)``; never raises.
+
+    Refuses a record that names any other ``sign_alg`` before touching the MAC,
+    so an asymmetric join can never be answered by the symmetric verifier even
+    if a caller hands it one."""
     if not isinstance(key, (bytes, bytearray)) or not key:
         return False, "no verification key provided"
     if not isinstance(record, Mapping):
         return False, "join request is not an object"
+    if record.get("sign_alg") != SIGN_ALG:
+        return False, (f"sign_alg is {record.get('sign_alg')!r}; this verifier "
+                       f"checks {SIGN_ALG!r} and nothing else")
     given = record.get(SIGNATURE_FIELD)
     if not isinstance(given, str):
         return False, "join request has no signature"
@@ -630,9 +770,35 @@ class Membership:
     budgets: Mapping[str, int]
     artifact_digest: str
     admitted_at: str
-    evidence: int = 0
+    #: The digests of the execution receipts this pool VERIFIED for this member
+    #: (`pool_receipt.count_evidence`). Not a count a caller states: a count
+    #: cannot be checked, and these can, because each one is the digest of a
+    #: record signed by the peer and attested by a key the charter names.
+    #: :attr:`evidence` is derived from this, so there is no parameter left
+    #: through which a peer's evidence can be asserted.
+    evidence_digests: tuple[str, ...] = ()
     receipts: int = 0
     effects_witnessed: int = 0
+    #: How this member proved who it is: `asymmetric` (a key pair, so its join
+    #: is attributable to it by any holder of its public key) or `shared-key`
+    #: (a MAC, so its join is attributable to anyone holding the shared secret).
+    #: Recorded per MEMBER, not per pool, because during a migration a pool has
+    #: both and the pool is as strong as its weakest member.
+    identity: str = IDENTITY_SHARED_KEY
+    #: The fingerprint of the key that signed the join. For an asymmetric member
+    #: this is the public key a third party needs to re-check the ledger.
+    key_id: str = ""
+
+    @property
+    def evidence(self) -> int:
+        """How many verified receipts this member holds. DERIVED, never set.
+
+        This was an integer field until item 524's receipt slice. A peer that
+        states its own evidence count is a peer that can state any evidence
+        count, and the count is the input to the one gate that RAISES a peer's
+        authority, so it is now arithmetic over
+        :attr:`evidence_digests` and nothing else."""
+        return len(self.evidence_digests)
 
     def grant(self) -> peer_authority.Grant:
         return peer_authority.Grant(holder=f"peer:{self.peer_id}",
@@ -644,8 +810,10 @@ class Membership:
                 "budgets": {k: self.budgets[k] for k in sorted(self.budgets)},
                 "artifact_digest": self.artifact_digest,
                 "admitted_at": self.admitted_at, "evidence": self.evidence,
+                "evidence_digests": list(self.evidence_digests),
                 "receipts": self.receipts,
-                "effects_witnessed": self.effects_witnessed}
+                "effects_witnessed": self.effects_witnessed,
+                "identity": self.identity, "key_id": self.key_id}
 
 
 @dataclass(frozen=True)
@@ -721,9 +889,18 @@ class Roster:
                 budgets=dict(spec.get("budgets", {})),
                 artifact_digest=spec.get("artifact_digest", ""),
                 admitted_at=spec.get("admitted_at", ""),
-                evidence=int(spec.get("evidence", 0)),
+                # A stated `evidence` member on disk is IGNORED, deliberately.
+                # It is the shape the fail-open took: a roster file that says
+                # `"evidence": 99` used to be believed by the promotion gate.
+                # Only digests are read, and even those are recounted from the
+                # receipts themselves before they raise anyone's tier.
+                evidence_digests=tuple(
+                    d for d in spec.get("evidence_digests", ())
+                    if isinstance(d, str)),
                 receipts=int(spec.get("receipts", 0)),
-                effects_witnessed=int(spec.get("effects_witnessed", 0)))
+                effects_witnessed=int(spec.get("effects_witnessed", 0)),
+                identity=spec.get("identity", IDENTITY_SHARED_KEY),
+                key_id=spec.get("key_id", ""))
         roster.revoked = set(record.get("revoked", ()))
         roster.spent_nonces = {tuple(n) for n in record.get("spent_nonces", ())}
         roster.outstanding = {p: list(w)
@@ -833,21 +1010,48 @@ def _ceiling_precondition(charter: PoolCharter, tier: str, peer_id: str,
 
 def _issue_membership(peer_id: str, tier: str, grant: peer_authority.Grant,
                       artifact_digest: str, at: str, *,
-                      evidence: int = 0, receipts: int = 0,
-                      effects_witnessed: int = 0) -> Membership:
+                      evidence_digests: Sequence[str] = (),
+                      receipts: int = 0,
+                      effects_witnessed: int = 0,
+                      identity: str = IDENTITY_SHARED_KEY,
+                      key_id: str = "") -> Membership:
     """The single construction site of a :class:`Membership`. Takes the grant it
     is handed; it never computes one, so it cannot be reached with a grant the
-    ceiling diff did not produce."""
+    ceiling diff did not produce.
+
+    It takes receipt DIGESTS and no evidence count, so there is no argument
+    here through which a number can be asserted. The digests it is handed come
+    from :func:`pool_receipt.count_evidence`, which verified each one."""
     return Membership(peer_id=peer_id, tier=tier,
                       caps=tuple(sorted(grant.caps)), budgets=dict(grant.budgets),
                       artifact_digest=artifact_digest, admitted_at=at,
-                      evidence=evidence, receipts=receipts,
-                      effects_witnessed=effects_witnessed)
+                      evidence_digests=tuple(evidence_digests),
+                      receipts=receipts,
+                      effects_witnessed=effects_witnessed,
+                      identity=identity, key_id=key_id)
+
+
+def identity_backing(record: Mapping[str, Any]) -> Optional[str]:
+    """Which identity backing a record's ``sign_alg`` names, or ``None``.
+
+    ``None`` for anything not in :data:`_ALG_IDENTITY`, including a missing
+    member and an unhashable one. Nothing is defaulted: a record whose backing
+    could not be read is a record nobody knows the strength of, and the gate
+    refuses it. The string check is not decoration: a hostile record can carry
+    an object where a name belongs, and a dict lookup on it would raise on the
+    refusal path, which is the one path that must not."""
+    if not isinstance(record, Mapping):
+        return None
+    alg = record.get("sign_alg")
+    if not isinstance(alg, str):
+        return None
+    return _ALG_IDENTITY.get(alg)
 
 
 def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
-          charter_key: bytes, peer_keys: Mapping[str, bytes],
+          charter_key: bytes, peer_keys: Optional[Mapping[str, bytes]] = None,
           admitting_key_id: str, roster: Roster,
+          directory: Optional[IdentityDirectory] = None,
           now: Optional[datetime] = None) -> dict:
     """Decide whether a peer joins the pool, and at what tier.
 
@@ -861,8 +1065,29 @@ def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
     spent, and the decision is appended to the event ledger. On REFUSE nothing
     is mutated except the nonce ledger is NOT touched, so a refused join can be
     retried after the operator fixes the cause without burning the peer's nonce.
+
+    ``directory`` pins the peers' PUBLIC keys (issue #1278). ``peer_keys`` holds
+    the shared secrets item 524 started with. A pool may be handed either or
+    both, and the charter's ``identity_mode`` says which backings it admits;
+    what no combination produces is a fallback. Each of the three checks below
+    fails in the same direction:
+
+    * a record whose ``sign_alg`` is unreadable or not admitted by the charter
+      is refused (:data:`LINK_IDENTITY_MODE`), never read under a guess;
+    * a peer the directory holds ANY key for, in any state, must present an
+      asymmetric join; a shared-key join from it is refused
+      (:data:`LINK_IDENTITY_DOWNGRADE`), which is what stops an attacker who
+      learned a legacy secret from stepping the peer back onto it;
+    * a signature that does not verify refuses on
+      :data:`LINK_JOIN_SIGNATURE`, and a signature that verifies under a key
+      that is revoked or rotated away from refuses on
+      :data:`LINK_REVOKED_KEY`. The two are separate links because they are
+      separate findings: one is a forgery, the other is a real act by a key
+      that no longer acts.
     """
     when = now or _utc_now()
+    peer_keys = dict(peer_keys or {})
+    directory = directory if directory is not None else IdentityDirectory()
 
     ok, reason = verify_charter(charter_record, charter_key)
     if not ok:
@@ -882,16 +1107,76 @@ def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
     if not isinstance(join_record, Mapping):
         return _refusal(LINK_JOIN_SIGNATURE, "join request is not an object")
     claimed = join_record.get("peer_id")
-    if not isinstance(claimed, str) or claimed not in peer_keys:
+    if not isinstance(claimed, str) or not claimed or (
+            claimed not in peer_keys and not directory.has_identity(claimed)):
         return _refusal(
             LINK_UNKNOWN_PEER,
             f"no key is held for peer {claimed!r}; a private pool verifies a "
             f"peer against a key exchanged out of band, so an unknown peer has "
             f"no identity to check")
 
-    ok, reason = verify_join(join_record, peer_keys[claimed])
-    if not ok:
-        return _refusal(LINK_JOIN_SIGNATURE, f"join: {reason}", peer_id=claimed)
+    # Which backing does this record claim, and does this charter admit it? Read
+    # BEFORE any signature is checked, because choosing a verifier is the
+    # decision, and a gate that tries verifiers until one passes is a gate an
+    # attacker chooses the algorithm for.
+    backing = identity_backing(join_record)
+    if backing is None or backing not in MODE_ADMITS[charter.identity_mode]:
+        return _refusal(
+            LINK_IDENTITY_MODE,
+            f"the join is signed {join_record.get('sign_alg')!r}; this pool's "
+            f"identity mode is {charter.identity_mode!r}, which admits "
+            f"{', '.join(MODE_ADMITS[charter.identity_mode])}",
+            peer_id=claimed)
+
+    # A peer that HAS an asymmetric identity keeps it. The directory is
+    # consulted for any key in any state, not just an active one: a peer whose
+    # key was revoked has not stopped being an asymmetric peer, and treating it
+    # as one again would make revocation a route back to the weaker check.
+    if backing == IDENTITY_SHARED_KEY and directory.has_identity(claimed):
+        return _refusal(
+            LINK_IDENTITY_DOWNGRADE,
+            f"peer {claimed!r} has a pinned public key and presented a "
+            f"{SIGN_ALG} join; an identity does not step back to a shared "
+            f"secret because a record asked it to", peer_id=claimed)
+
+    pinned = None
+    if backing == IDENTITY_ASYMMETRIC:
+        key_fingerprint = join_record.get("key_id")
+        pinned = directory.lookup(claimed, key_fingerprint) \
+            if isinstance(key_fingerprint, str) else None
+        if pinned is None:
+            return _refusal(
+                LINK_UNKNOWN_KEY,
+                f"the join names key {key_fingerprint!r}, which is not pinned "
+                f"for peer {claimed!r}; a record does not introduce the key it "
+                f"is checked under", peer_id=claimed)
+        ok, reason = verify_join_identity(join_record, pinned.public_key)
+        if not ok:
+            return _refusal(LINK_JOIN_SIGNATURE, f"join: {reason}",
+                            peer_id=claimed)
+        status, status_reason = directory.authority(claimed, pinned.key_id,
+                                                    when=when)
+        if status != KEY_ACTIVE:
+            # The signature IS genuine. Saying so in the refusal is the point:
+            # the peer really signed this, and the key it signed with no longer
+            # carries authority. Collapsing the two into one link would lose the
+            # distinction the whole revocation story rests on.
+            return _refusal(
+                LINK_REVOKED_KEY,
+                f"the join verifies under key {pinned.key_id}, so the peer did "
+                f"sign it, and that key confers no authority now: "
+                f"{status_reason}", peer_id=claimed, key_status=status,
+                key_id=pinned.key_id)
+    else:
+        if claimed not in peer_keys:
+            return _refusal(
+                LINK_UNKNOWN_PEER,
+                f"no shared key is held for peer {claimed!r}",
+                peer_id=claimed)
+        ok, reason = verify_join(join_record, peer_keys[claimed])
+        if not ok:
+            return _refusal(LINK_JOIN_SIGNATURE, f"join: {reason}",
+                            peer_id=claimed)
 
     if join_record["pool_id"] != charter.pool_id:
         return _refusal(
@@ -929,7 +1214,24 @@ def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
             f"{roster.members[claimed].tier!r}", peer_id=claimed)
 
     offer_record = join_record["offer"]
-    ok, reason = peer_offer.verify_offer(offer_record, peer_keys[claimed])
+    # The offer is signed separately and must be signed the SAME way, by the
+    # same key. An asymmetric join carrying a shared-key offer would leave the
+    # advertised ceiling -- the member the grant is diffed against -- provable
+    # only to a secret holder, which is half a migration and reads as a whole
+    # one.
+    if identity_backing(offer_record) != backing:
+        return _refusal(
+            LINK_IDENTITY_DOWNGRADE,
+            f"the join is signed {join_record.get('sign_alg')!r} and carries "
+            f"an offer signed "
+            f"{offer_record.get('sign_alg') if isinstance(offer_record, Mapping) else None!r}; "
+            f"both halves of a peer's claim are backed the same way or neither "
+            f"is", peer_id=claimed)
+    if backing == IDENTITY_ASYMMETRIC:
+        ok, reason = peer_offer.verify_offer_identity(offer_record,
+                                                      pinned.public_key)
+    else:
+        ok, reason = peer_offer.verify_offer(offer_record, peer_keys[claimed])
     if not ok:
         return _refusal(LINK_OFFER_SIGNATURE, f"peer offer: {reason}",
                         peer_id=claimed)
@@ -975,7 +1277,10 @@ def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
         return refusal
 
     member = _issue_membership(claimed, ENTRY_TIER, grant,
-                               join_record["artifact_digest"], _iso(when))
+                               join_record["artifact_digest"], _iso(when),
+                               identity=backing,
+                               key_id=pinned.key_id if pinned is not None
+                               else str(join_record.get("key_id", "")))
     roster.members[claimed] = member
     roster.spent_nonces.add((claimed, join_record["nonce"]))
     receipt = {
@@ -987,26 +1292,77 @@ def admit(charter_record: Mapping[str, Any], join_record: Mapping[str, Any], *,
         "artifact_digest": join_record["artifact_digest"],
         "admitted_by": admitting_key_id, "at": _iso(when),
         "effect_ceiling": TIER_EFFECT_CEILING[ENTRY_TIER].value,
+        "identity": member.identity, "key_id": member.key_id,
     }
     roster.append(receipt)
     return receipt
 
 
+def _evidence_precondition(charter: PoolCharter, member: Membership,
+                           tier: str,
+                           receipts: Sequence[Any],
+                           directory: peer_identity.IdentityDirectory,
+                           when: datetime) -> tuple[
+                               Optional["pool_receipt.EvidenceCount"],
+                               Optional[dict]]:
+    """The ONLY function here that produces an evidence count, and it produces
+    either a count or a refusal.
+
+    Item 518's precondition shape, applied to the second thing a promotion
+    needs. :func:`_ceiling_precondition` is the only producer of a grant;
+    this is the only producer of a count, and :func:`promote` is the only
+    caller of either. A count that did not come from here cannot reach the
+    threshold comparison, because there is no other path to it.
+
+    The count is arithmetic over signed bytes. Nothing a caller says about how
+    much evidence a peer has is read at all."""
+    counted = pool_receipt.count_evidence(
+        receipts, pool_id=charter.pool_id, peer_id=member.peer_id,
+        artifact_digest=member.artifact_digest,
+        admitted_at=member.admitted_at,
+        attest_key_ids=charter.attest_key_ids, directory=directory, when=when)
+
+    required = charter.tiers[tier].evidence_required
+    if counted.counted < required:
+        refused = {link: sum(1 for r in counted.rejected if r.link == link)
+                   for link in sorted({r.link for r in counted.rejected})}
+        return None, _refusal(
+            LINK_PROMOTION_EVIDENCE,
+            f"tier {tier!r} requires {required} verified, attested receipts "
+            f"and {member.peer_id!r} has {counted.counted}; it stays at "
+            f"{member.tier!r}"
+            + (f" ({', '.join(f'{n} refused on {link}' for link, n in refused.items())})"
+               if refused else ""),
+            peer_id=member.peer_id, stays_at=member.tier,
+            has=counted.counted, requires=required, refused=refused)
+    return counted, None
+
+
 def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
             charter_key: bytes, roster: Roster,
-            evidence_key_ids: Sequence[str],
+            receipts: Sequence[Any],
+            directory: Optional[peer_identity.IdentityDirectory] = None,
             now: Optional[datetime] = None) -> dict:
     """Raise a member's tier, if and only if the evidence for that tier exists.
 
-    ``evidence_key_ids`` are the key fingerprints that signed the member's
-    accumulated execution receipts. Every one of them must be in the charter's
-    ``attest_key_ids``: a peer cannot attest its own promotion, and neither can
-    an operator who holds only admit authority.
+    ``receipts`` is a sequence of ``(execution_receipt, attestation)`` pairs.
+    They are RECOUNTED here, by :func:`pool_receipt.count_evidence`: each
+    receipt must be signed by the member's own pinned key, be about this pool,
+    this peer and the artifact digest this member was admitted with, be no
+    older than that admission, and carry an attestation signed by a key the
+    charter names in ``attest_key_ids``. A peer cannot attest its own
+    promotion, and neither can an operator who holds only admit authority.
+
+    There is no parameter through which an evidence COUNT can be supplied.
+    That was the fail-open this closes: ``Membership.evidence`` was an integer
+    a caller handed in, and the gate believed it. It is now
+    ``len(member.evidence_digests)``, and the digests are the receipts this
+    function verified.
 
     The failure direction is the one every arrow here takes. A member with too
-    little evidence, or with evidence signed by a key the charter does not name
-    for attesting, STAYS WHERE IT IS. It does not inherit the tier it asked for,
-    and it is not demoted either; a missing proof is not a violation.
+    few verified receipts, or whose receipts are attested by a key the charter
+    does not name, STAYS WHERE IT IS. It does not inherit the tier it asked
+    for, and it is not demoted either; a missing proof is not a violation.
 
     Like :func:`admit`, the tier grant is diffed against the charter ceiling and
     the diff is what produces the grant."""
@@ -1028,23 +1384,12 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
             LINK_UNKNOWN_TIER,
             f"the charter declares no tier {tier!r}", peer_id=peer_id)
 
-    outside = sorted(set(evidence_key_ids) - set(charter.attest_key_ids))
-    if outside:
-        return _refusal(
-            LINK_PROMOTION_EVIDENCE,
-            f"evidence signed by {', '.join(outside)}, which the charter does "
-            f"not name as attesting authority "
-            f"({', '.join(charter.attest_key_ids) or 'nobody'})",
-            peer_id=peer_id)
-
-    required = charter.tiers[tier].evidence_required
-    if member.evidence < required:
-        return _refusal(
-            LINK_PROMOTION_EVIDENCE,
-            f"tier {tier!r} requires {required} attested receipts and "
-            f"{peer_id!r} has {member.evidence}; it stays at "
-            f"{member.tier!r}", peer_id=peer_id,
-            stays_at=member.tier, has=member.evidence, requires=required)
+    counted, refusal = _evidence_precondition(
+        charter, member, tier, receipts,
+        directory if directory is not None else peer_identity.IdentityDirectory(),
+        when)
+    if refusal is not None:
+        return refusal
 
     grant, refusal = _ceiling_precondition(charter, tier, peer_id, None)
     if refusal is not None:
@@ -1053,8 +1398,9 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
 
     promoted = _issue_membership(
         peer_id, tier, grant, member.artifact_digest, member.admitted_at,
-        evidence=member.evidence, receipts=member.receipts,
-        effects_witnessed=member.effects_witnessed)
+        evidence_digests=counted.digests, receipts=member.receipts,
+        effects_witnessed=member.effects_witnessed,
+        identity=member.identity, key_id=member.key_id)
     roster.members[peer_id] = promoted
     receipt = {
         "kind": RECEIPT_KIND, "version": RECEIPT_VERSION, "verdict": PROMOTE,
@@ -1062,7 +1408,13 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
         "from_tier": member.tier, "tier": tier,
         "caps": sorted(grant.caps),
         "budgets": {k: grant.budgets[k] for k in sorted(grant.budgets)},
-        "evidence": member.evidence, "at": _iso(when),
+        "evidence": counted.counted, "at": _iso(when),
+        # The promotion CITES the receipts it counted, so a third party can
+        # recheck the arithmetic without being told the answer.
+        "evidence_digests": list(counted.digests),
+        "evidence_tasks": list(counted.task_ids),
+        "evidence_key_ids": list(counted.attestor_key_ids),
+        "receipts_refused": [r.as_dict() for r in counted.rejected],
         "effect_ceiling": TIER_EFFECT_CEILING[tier].value,
     }
     roster.append(receipt)
@@ -1070,7 +1422,10 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
 
 
 def withdraw(charter_record: Mapping[str, Any], peer_id: str, reason: str, *,
-             charter_key: bytes, roster: Roster, revoking_key_id: str,
+             charter_key: bytes, roster: Roster,
+             revoking_key_id: Optional[str] = None,
+             revoking_identity: Optional[PeerIdentity] = None,
+             directory: Optional[IdentityDirectory] = None,
              now: Optional[datetime] = None) -> dict:
     """Remove a peer and state, in three words, what that does.
 
@@ -1078,12 +1433,28 @@ def withdraw(charter_record: Mapping[str, Any], peer_id: str, reason: str, *,
     operator authority view is not decoration, and the key that may admit is not
     automatically the key that may revoke.
 
+    ``revoking_identity`` signs the withdrawal receipt asymmetrically, so a
+    third party holding the operator's revoke public key can check who removed
+    whom without asking the operator that did the removing. Passing it also
+    supplies ``revoking_key_id``, which removes the way the two could disagree.
+
+    ``directory`` is revoked against: the withdrawn peer's pinned key is marked
+    revoked at this instant. What that does and does not do is the item-546
+    split again, and the receipt says both halves. It removes the key's
+    AUTHORITY, which has an inverse and is now exercised. It does not remove the
+    key's ability to VERIFY: every join, offer and receipt the peer signed is
+    still checkable by anyone holding the public half, which is the property a
+    shared-key pool could not offer at all, because there revoking the key
+    destroyed the only means of checking the history.
+
     The returned receipt carries a :class:`Withdrawal`'s three disjoint sets.
     The member row disappears from the roster; the ADMISSION EVENT DOES NOT.
     That is the item-546 point made operationally: a withdrawn peer and a peer
     that never joined must not render the same, because the first one ran work
     whose effects are still in the world."""
     when = now or _utc_now()
+    if revoking_identity is not None:
+        revoking_key_id = revoking_identity.key_id
 
     ok, verify_reason = verify_charter(charter_record, charter_key)
     if not ok:
@@ -1119,9 +1490,20 @@ def withdraw(charter_record: Mapping[str, Any], peer_id: str, reason: str, *,
             "tier_reached": member.tier,
             "artifact_digest": member.artifact_digest,
             "admitted_at": member.admitted_at,
+            "identity": member.identity,
+            "key_id": member.key_id,
+            "signatures_verifiable": member.identity == IDENTITY_ASYMMETRIC,
             "note": ("withdrawal revokes authority; it does not un-observe the "
                      "work the peer already delivered, and the evidence below "
                      "is history, not a credential that survives removal"),
+            "identity_note": (
+                "the peer's key is revoked: it confers no authority and its "
+                "past signatures still verify under the public key above, so "
+                "what it signed remains attributable to it"
+                if member.identity == IDENTITY_ASYMMETRIC else
+                "this member was admitted on a shared key, so what it signed "
+                "is attributable to any holder of that secret and revoking it "
+                "leaves nothing a third party can re-check"),
         },
         # NEITHER. Named and handed on, because deciding replay versus
         # compensate is `lawful_retry.dispatch_on_loss`'s job and duplicating
@@ -1132,13 +1514,41 @@ def withdraw(charter_record: Mapping[str, Any], peer_id: str, reason: str, *,
     del roster.members[peer_id]
     roster.revoked.add(peer_id)
     roster.outstanding.pop(peer_id, None)
+    # EVERY key the peer holds, not only the one that signed its join. A peer
+    # that rotated after joining would otherwise leave the pool with an active
+    # key still pinned, which reads in `pool status` as an identity that may
+    # still act.
+    keys_revoked = []
+    if directory is not None:
+        for pinned in list(directory.keys.get(peer_id, ())):
+            if pinned.status == peer_identity.KEY_REVOKED:
+                continue
+            keys_revoked.append(directory.revoke(
+                peer_id, pinned.key_id,
+                reason=f"withdrawn from pool {charter.pool_id}: {reason}",
+                at=when).key_id)
     receipt = {
         "kind": RECEIPT_KIND, "version": RECEIPT_VERSION, "verdict": WITHDRAW,
         "pool_id": charter.pool_id, "revoked_by": revoking_key_id,
+        "keys_revoked": sorted(keys_revoked),
         **withdrawal.as_dict(),
     }
+    if revoking_identity is not None:
+        receipt = peer_identity.sign_record(WITHDRAWAL_DOMAIN, receipt,
+                                            revoking_identity)
     roster.append(receipt)
     return receipt
+
+
+def verify_withdrawal(record: Mapping[str, Any],
+                      public_key: bytes) -> tuple[bool, str]:
+    """Check a withdrawal receipt against the operator's revoke PUBLIC key.
+
+    This is the surface the exit criterion names: a withdrawal any holder of the
+    public key can verify. A withdrawal receipt that carries no asymmetric
+    signature is refused here rather than waved through, because "unsigned" and
+    "signed by somebody I cannot name" must not render the same."""
+    return peer_identity.verify_record(WITHDRAWAL_DOMAIN, record, public_key)
 
 
 def work_admissible(member: Membership,
@@ -1171,6 +1581,10 @@ def work_admissible(member: Membership,
 
 CHARTER_FILE = "charter.json"
 ROSTER_FILE = "roster.json"
+#: The pinned PUBLIC halves. A separate file from the roster because it has a
+#: different lifetime: a peer leaves the roster and its key stays here, revoked,
+#: so the ledger it signed is still checkable.
+IDENTITIES_FILE = "identities.json"
 
 
 def _read_json(path) -> Any:
@@ -1209,10 +1623,59 @@ def save_roster(directory, roster: Roster) -> None:
     _write_json(Path(directory) / ROSTER_FILE, roster.as_dict())
 
 
-def render_status(charter_record: Mapping[str, Any], roster: Roster) -> str:
-    """The operator view: who is in, at what tier, holding what, and the
-    authority view naming who may admit, revoke and attest."""
+def load_directory(pool_dir) -> IdentityDirectory:
+    """The pool's pinned public keys. A pool with no identities file has an
+    EMPTY directory, not an absent one: every peer is then unknown to the
+    asymmetric path, which is the fail-closed reading."""
+    from pathlib import Path  # noqa: PLC0415
+
+    path = Path(pool_dir) / IDENTITIES_FILE
+    if not path.exists():
+        return IdentityDirectory()
+    return IdentityDirectory.from_dict(_read_json(path))
+
+
+def save_directory(pool_dir, directory: IdentityDirectory) -> None:
+    from pathlib import Path  # noqa: PLC0415
+
+    _write_json(Path(pool_dir) / IDENTITIES_FILE, directory.as_dict())
+
+
+def identity_census(roster: Roster) -> dict:
+    """How each member proved who it is, counted.
+
+    The reason this is a report and not a flag: during a migration a pool holds
+    both backings, and a pool is as strong as its weakest member. A deployment
+    that shows one word for the whole pool hides exactly the member an attacker
+    would go for."""
+    counts = {IDENTITY_ASYMMETRIC: 0, IDENTITY_SHARED_KEY: 0}
+    for member in roster.members.values():
+        counts[member.identity] = counts.get(member.identity, 0) + 1
+    weakest = IDENTITY_SHARED_KEY if counts.get(IDENTITY_SHARED_KEY) \
+        else (IDENTITY_ASYMMETRIC if counts.get(IDENTITY_ASYMMETRIC) else "")
+    return {
+        "counts": counts,
+        "weakest": weakest,
+        "mixed": bool(counts.get(IDENTITY_ASYMMETRIC)
+                      and counts.get(IDENTITY_SHARED_KEY)),
+        "shared_key_members": sorted(
+            peer for peer, m in roster.members.items()
+            if m.identity == IDENTITY_SHARED_KEY),
+    }
+
+
+def render_status(charter_record: Mapping[str, Any], roster: Roster,
+                  directory: Optional[IdentityDirectory] = None) -> str:
+    """The operator view: who is in, at what tier, holding what, the authority
+    view naming who may admit, revoke and attest, and HOW EACH MEMBER PROVED WHO
+    IT IS.
+
+    The identity column is not decoration. A pool in the middle of the move to
+    key pairs has members of both kinds, and the one line that matters is the
+    one naming the members whose joins are still forgeable by a secret
+    holder."""
     charter = charter_from_record(charter_record)
+    census = identity_census(roster)
     lines = [f"pool {charter.pool_id}",
              f"  charter   {canonical_digest(charter_record)[:16]}",
              f"  ceiling   {', '.join(sorted(charter.ceiling)) or '(none)'}",
@@ -1221,16 +1684,33 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster) -> str:
              f"    admit   {', '.join(charter.admit_key_ids) or '(nobody)'}",
              f"    revoke  {', '.join(charter.revoke_key_ids) or '(nobody)'}",
              f"    attest  {', '.join(charter.attest_key_ids) or '(nobody)'}",
-             f"  members   {len(roster.members)}"]
+             f"  identity  mode={charter.identity_mode} "
+             f"{IDENTITY_ASYMMETRIC}={census['counts'][IDENTITY_ASYMMETRIC]} "
+             f"{IDENTITY_SHARED_KEY}={census['counts'][IDENTITY_SHARED_KEY]}"]
+    if census["mixed"]:
+        lines.append(
+            f"    WEAKEST LINK: {', '.join(census['shared_key_members'])} "
+            f"still join under a shared key, so their joins are forgeable by "
+            f"any holder of that secret")
+    lines.append(f"  members   {len(roster.members)}")
     for peer_id, member in sorted(roster.members.items()):
         ceiling = TIER_EFFECT_CEILING.get(member.tier)
         lines.append(
             f"    {peer_id}  tier={member.tier} "
             f"effects<={ceiling.value if ceiling else '?'} "
             f"evidence={member.evidence} "
+            f"identity={member.identity}"
+            f"{'/' + member.key_id if member.key_id else ''} "
             f"caps={', '.join(sorted(member.caps)) or '(none)'}")
     if roster.revoked:
         lines.append(f"  withdrawn {', '.join(sorted(roster.revoked))}")
+    if directory is not None and directory.keys:
+        lines.append("  keys")
+        for row in directory.summary():
+            lines.append(
+                f"    {row['peer_id']}  active={row['active_key_id'] or '(none)'} "
+                f"status={row['status']} superseded={row['superseded']} "
+                f"revoked={row['revoked']}")
     lines.append(f"  events    {len(roster.events)}")
     return "\n".join(lines)
 
@@ -1254,35 +1734,110 @@ def pool_command(args) -> int:
     # health check.
     if verb == "status":
         charter_record, roster = load_pool(args.dir)
+        identities = load_directory(args.dir)
         if getattr(args, "json", False):
             print(json.dumps({"charter": charter_record,
-                              "roster": roster.as_dict()},
+                              "roster": roster.as_dict(),
+                              "identities": identities.as_dict(),
+                              "identity_census": identity_census(roster)},
                              indent=2, sort_keys=True))
         else:
-            print(render_status(charter_record, roster))
+            print(render_status(charter_record, roster, identities))
         return 0
 
-    try:
-        key = resolve_key(getattr(args, "key", None))
-    except RevlError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 2
+    # `keygen` is the PEER's first step and touches no pool: it draws a key pair
+    # on the machine that will hold it. The private half is written 0600 and is
+    # never read by any other verb here; the public half is the file the peer
+    # hands the operator out of band.
+    if verb == "keygen":
+        identity = peer_identity.generate_identity(args.peer_id)
+        peer_identity.write_private_identity(args.out, identity)
+        peer_identity.write_public_identity(args.public, identity.public())
+        print(f"peer {args.peer_id} key {identity.key_id}\n"
+              f"  private  {args.out} (mode 0600, never copy it anywhere)\n"
+              f"  public   {args.public} (hand this to the operator and have "
+              f"them check the fingerprint above over a second channel)")
+        return 0
+
+    if verb == "register":
+        identities = load_directory(args.dir)
+        public = peer_identity.load_public_identity(args.public)
+        pinned = identities.register(public)
+        save_directory(args.dir, identities)
+        print(f"pinned {pinned.key_id} for peer {pinned.peer_id} "
+              f"at {pinned.not_before}")
+        return 0
+
+    if verb == "rotate":
+        identities = load_directory(args.dir)
+        public = peer_identity.load_public_identity(args.public)
+        old, new = identities.rotate(public, reason=args.reason)
+        save_directory(args.dir, identities)
+        print(f"peer {public.peer_id}: active key is now {new.key_id}\n"
+              f"  superseded {old.key_id if old else '(none)'} "
+              f"-- it still verifies everything it signed and authorises "
+              f"nothing from now on")
+        return 0
+
+    if verb == "revoke-key":
+        identities = load_directory(args.dir)
+        revoked = identities.revoke(args.peer_id, args.key_id,
+                                    reason=args.reason)
+        save_directory(args.dir, identities)
+        print(f"revoked {revoked.key_id} for peer {revoked.peer_id} "
+              f"at {revoked.not_after}\n"
+              f"  it confers no authority; the records it signed are still "
+              f"verifiable under its public half, so the history stays "
+              f"checkable")
+        return 0
+
+    # An identity key pair, when one was given, is what signs. The shared key is
+    # resolved only when it is not, and the two are never both used for one
+    # record: a record has one backing and the gate refuses a pair that mixes
+    # them.
+    identity = None
+    identity_path = getattr(args, "identity_key", None)
+    if identity_path:
+        try:
+            identity = peer_identity.load_private_identity(identity_path)
+        except (OSError, ValueError, peer_identity.IdentityError) as error:
+            print(f"error: {identity_path}: {error}", file=sys.stderr)
+            return 2
+
+    key = b""
+    if identity is None:
+        try:
+            key = resolve_key(getattr(args, "key", None))
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
 
     if verb == "init":
+        if not key:
+            try:
+                key = resolve_key(getattr(args, "key", None))
+            except RevlError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
         charter = PoolCharter(
             pool_id=args.pool_id,
             ceiling=tuple(args.ceiling or ()),
             tiers={ENTRY_TIER: TierGrant(caps=tuple(args.entry_caps or ()))},
             admit_key_ids=(key_id(key),),
-            revoke_key_ids=(key_id(key),),
+            revoke_key_ids=(key_id(key),) + tuple(
+                peer_identity.load_public_identity(path).key_id
+                for path in (args.revoke_identity or ())),
             attest_key_ids=(key_id(key),),
             artifact_digests=tuple(args.artifact or ()),
-            trust_floor=args.trust_floor)
+            trust_floor=args.trust_floor,
+            identity_mode=args.identity)
         record = sign_charter(charter, key)
         _write_json(f"{args.dir}/{CHARTER_FILE}", record)
         roster = Roster(charter.pool_id, canonical_digest(record))
         save_roster(args.dir, roster)
-        print(render_status(record, roster))
+        identities = load_directory(args.dir)
+        save_directory(args.dir, identities)
+        print(render_status(record, roster, identities))
         return 0
 
     if verb == "request":
@@ -1296,31 +1851,61 @@ def pool_command(args) -> int:
             attestation=peer_offer.Attestation(
                 trust=args.trust, region=args.region, hardware=args.hardware),
             grant_ceiling=tuple(args.ceiling or ()))
+        # Both halves are backed the same way. The gate refuses a join whose
+        # offer is signed differently, so producing such a pair here would only
+        # move the refusal later.
+        if identity is not None:
+            signed_offer = peer_offer.sign_offer_identity(offer, identity)
+        else:
+            signed_offer = peer_offer.sign_offer(offer, key)
         join = JoinRequest(
             pool_id=charter_record["pool_id"],
             charter_digest=canonical_digest(charter_record),
             peer_id=args.peer_id,
-            offer=peer_offer.sign_offer(offer, key),
+            offer=signed_offer,
             artifact_digest=args.artifact,
             nonce=secrets.token_hex(16),
             issued_at=_iso(_utc_now()))
-        _write_json(args.out, sign_join(join, key))
+        if identity is not None:
+            record = sign_join_identity(join, identity)
+        else:
+            record = sign_join(join, key)
+        _write_json(args.out, record)
+        named_key = record.get("key_id", "")
         print(f"wrote join request for {args.peer_id} against charter "
-              f"{join.charter_digest[:16]} to {args.out}")
+              f"{join.charter_digest[:16]} to {args.out}\n"
+              f"  backing  {record['sign_alg']} key {named_key}")
         return 0
 
+    # `join` and `withdraw` are OPERATOR verbs and the charter is signed with
+    # the operator's symmetric key, so that key is resolved for them whether or
+    # not an identity was also given.
+    if not key:
+        try:
+            key = resolve_key(getattr(args, "key", None))
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+
     charter_record, roster = load_pool(args.dir)
+    identities = load_directory(args.dir)
 
     if verb == "join":
         join_record = _read_json(args.join)
-        peer_key = resolve_key(args.peer_key)
+        peer_keys = {}
+        if getattr(args, "peer_key", None):
+            peer_keys = {join_record.get("peer_id", ""):
+                         resolve_key(args.peer_key)}
         receipt = admit(charter_record, join_record, charter_key=key,
-                        peer_keys={join_record.get("peer_id", ""): peer_key},
+                        peer_keys=peer_keys, directory=identities,
                         admitting_key_id=key_id(key), roster=roster)
     elif verb == "withdraw":
         receipt = withdraw(charter_record, args.peer, args.reason,
                            charter_key=key, roster=roster,
-                           revoking_key_id=key_id(key))
+                           directory=identities,
+                           revoking_identity=identity,
+                           revoking_key_id=None if identity is not None
+                           else key_id(key))
     else:  # pragma: no cover - argparse constrains the verb set
         raise AssertionError(f"unknown pool verb {verb!r}")
 
@@ -1328,4 +1913,5 @@ def pool_command(args) -> int:
     if receipt["verdict"] == REFUSE:
         return 1
     save_roster(args.dir, roster)
+    save_directory(args.dir, identities)
     return 0
