@@ -1263,6 +1263,14 @@ def select(changed, root) -> dict:
             # without this line the gate would miss precisely the pull request
             # that moves one of these documents.
             pytest_nodes.add("tests/test_selfhost_residual_is_generated.py")
+            # issue #1358: the two modules above sample ONE generated block
+            # each. This one runs what the CI step runs, every block in
+            # `docgen.BLOCKS` and every check in `docgen.CHECKS`, so a block
+            # added to the generator is covered on a docs-only diff with no
+            # list to remember to edit. It is here for the same reason they
+            # are: `docgen --check` has no home outside the `frontend` job,
+            # and a docs-only diff skips that job.
+            pytest_nodes.add("tests/test_docgen_check_runs_on_a_docs_only_diff.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 
