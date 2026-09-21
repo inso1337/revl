@@ -191,19 +191,30 @@ def test_f2_go_component_limit_is_caught_at_the_gate_not_the_build(tmp_path):
     ir = _ir(tmp_path, _GO_ARROW)
     module = _placement._emit_gate_module("go")
     sliced = placement_slice(ir, {"Boss"})
-    # the divergence the fix closed: `emit` DROPPED the component (a top-level
-    # fn is present) and succeeded, so the gate used to pass, while
+    # The divergence this case was written around: `emit` DROPPED the component
+    # (a top-level fn is present) and succeeded, so the gate passed, while
     # `emit_placement`, the real build entry, kept the component and raised the
-    # tier limit. PR #1317 (issue #721) closed the other half: go refuses a
-    # document that mixes a top-level declaration with a component rather than
-    # answering with a module missing a section the author wrote. So BOTH paths
-    # raise now, for two different reasons, and neither one can drop the
-    # component quietly.
+    # tier limit. One artifact, two answers, and the gate was reading the one
+    # that had thrown the component away.
+    #
+    # PR #1317 (issue #721) closed half of it: `emit` refused a document mixing
+    # a top-level declaration with a component rather than answering with a
+    # module missing a section the author wrote. Both paths raised, but for two
+    # different reasons, so the artifact still had two answers.
+    #
+    # Issue #1321 closed it at the source: `emit` carries the component on the
+    # same combined renderer `emit_placement` uses, so both entry points reach
+    # the same arrow limit and say the same sentence. Assert the AGREEMENT: a
+    # regression that reopens the split shows up here either as one of the two
+    # succeeding, or as the two disagreeing about why they refused.
     import pytest
-    with pytest.raises(Exception):
-        module.emit(sliced, "emitted")             # no longer a silent drop
-    with pytest.raises(Exception):
-        module.emit_placement(sliced, "emitted")   # real build path: raises
+    with pytest.raises(Exception) as plain:
+        module.emit(sliced, "emitted")
+    with pytest.raises(Exception) as build:
+        module.emit_placement(sliced, "emitted")
+    assert "arrow is not lowerable" in str(plain.value)
+    assert str(plain.value) == str(build.value), (
+        "`emit` and `emit_placement` must answer one document one way")
     # the gate now uses emit_placement, so it refuses AT PLAN naming comp+tier
     problem = tier_capability_gate(
         ir, {"Handler": "pp", "Boss": "pg"}, {"pp": "py", "pg": "go"})
