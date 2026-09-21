@@ -7,8 +7,11 @@ stdlib module picks only the tests that touch its public API.
 """
 from __future__ import annotations
 
+import ast
+import subprocess
 import importlib.util
 import io
+import sys
 import tokenize
 from pathlib import Path
 
@@ -781,6 +784,302 @@ def test_a_directory_counts_only_when_the_test_walks_it():
     assert at._named_paths(ROOT, holds) == frozenset()
     walks = holds + 'for f in P.glob("*.py"):\n    pass\n'
     assert "demo/legacy_enterprise" in at._named_paths(ROOT, walks)
+
+# --- structural: no arm of the dispatch loop may be unreachable ------------ #
+# issue #1315. `select()` dispatches each changed path through a flat list of
+# `if` arms, nearly all of which end in `continue` or `return`. That shape lets
+# a later arm be shadowed by an earlier one, and it did: a second arm matching
+# `tools/gate_reference_census.py` sat below the arm that already matched it, so
+# the selection issue #1215 added for it -- a census change runs
+# tests/test_oracle_construct_reach.py -- had never once run. Two lanes found it
+# by accident on the same day, which is not a detection strategy.
+#
+# The check is per-arm coverage over the selector's own source: derive witness
+# paths from each arm's condition, run the selector on them, and trace which arm
+# actually takes them. An arm that its own witness cannot reach is dead code.
+# Literal arms are checked per literal, so an arm that names two files and is
+# shadowed for one of them reds as loudly as one shadowed for both -- which is
+# why the #1215 selection was folded INTO the arm that fires rather than ordered
+# ahead of it.
+_PROBE = "zzarmprobe"
+
+
+def _is_f(node) -> bool:
+    return isinstance(node, ast.Name) and node.id == "f"
+
+
+def _members(module, node):
+    """`SOME_SET` or `helper(root)` resolved to its strings, else None."""
+    if isinstance(node, ast.Name):
+        value = getattr(module, node.id, None)
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        fn = getattr(module, node.func.id, None)
+        value = fn(ROOT) if callable(fn) else None
+    else:
+        return None
+    if isinstance(value, (set, frozenset, tuple, list)) and all(
+            isinstance(x, str) for x in value):
+        return sorted(value)
+    return None
+
+
+def _conjunction(calls):
+    """A path satisfying a conjunction of `f.startswith` / `f.endswith` /
+    `Path(f).name.startswith` calls, e.g. `tests/test_zzarmprobe.py`."""
+    prefixes, name_prefix, suffix = [""], "", ""
+    for call in calls:
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+            return None
+        method, receiver = call.func.attr, call.func.value
+        arg = call.args[0] if len(call.args) == 1 else None
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            values = [arg.value]
+        elif isinstance(arg, (ast.Tuple, ast.List)) and arg.elts and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in arg.elts):
+            values = [e.value for e in arg.elts]
+        else:
+            return None
+        if _is_f(receiver) and method == "startswith":
+            prefixes = values
+        elif _is_f(receiver) and method == "endswith":
+            suffix = values[0]
+        elif method == "startswith" and ast.unparse(receiver) == "Path(f).name":
+            name_prefix = values[0]
+        else:
+            return None
+    return [p + name_prefix + _PROBE + suffix for p in prefixes]
+
+
+#: Dispatch arms whose condition is a NAMED predicate rather than a shape this
+#: checker can read off the AST. Each entry says how to build a path the
+#: predicate accepts, derived from the module rather than hard-coded, so the
+#: witness follows the predicate if its definition moves.
+#:
+#: This is a TABLE on purpose, exactly like `SELFHOST_TAG_CODES`: a predicate
+#: absent from it yields no witness, `_witnesses` returns None, and the arm is
+#: reported as unknown-reachability. Guessing a witness for an unrecognised
+#: predicate would be the fail-open direction - it would certify an arm nobody
+#: had shown to be reachable.
+def _witness_scoring_corpus_document(module):
+    """`_is_scoring_corpus_document(f, root)`: an `.rvl` the census walks."""
+    dirs = module.census_corpus_dirs(ROOT)
+    if not dirs:
+        return None
+    return [f"{sorted(dirs)[0].rstrip('/')}/zz_armprobe{_PROBE_RVL}"]
+
+
+def _witness_named_by_a_test(module):
+    """`named_by = tests_naming(root, f)` then `if named_by:` (issue #1342).
+
+    The arm fires for any repository path some test names in its own source.
+    The witness is ASKED of the selector rather than invented: walk the tracked
+    tools and source files and return the first the selector itself says a test
+    names. If nothing in the tree is named by any test, the rule is genuinely
+    unreachable and this returns None, which reds - the right answer.
+    """
+    for rel in _tracked_candidates():
+        try:
+            if module.tests_naming(ROOT, rel):
+                return [rel]
+        except Exception:
+            return None
+    return None
+
+
+def _tracked_candidates():
+    """Tracked `tools/*.py` and `src/revl/*.py`, in a stable order."""
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "tools/*.py", "src/revl/*.py"],
+        capture_output=True, text=True)
+    return [line for line in out.stdout.split("\n") if line.strip()]
+
+
+_PREDICATE_WITNESSES = {
+    "_is_scoring_corpus_document": _witness_scoring_corpus_document,
+}
+
+#: Arms whose condition is a plain NAME bound just above from a call this
+#: checker can attribute. Same table discipline as `_PREDICATE_WITNESSES`: a
+#: name absent from it stays unknown rather than being guessed reachable.
+_BOUND_NAME_WITNESSES = {
+    "named_by": _witness_named_by_a_test,
+}
+
+_PROBE_RVL = ".rvl"
+
+
+def _named_predicate_witnesses(module, cond):
+    """Witnesses for `somepredicate(f, ...)`, or None if it is not in the
+    table. A predicate this checker does not recognise stays unknown."""
+    if not isinstance(cond, ast.Call) or not isinstance(cond.func, ast.Name):
+        return None
+    build = _PREDICATE_WITNESSES.get(cond.func.id)
+    if build is None:
+        return None
+    if not cond.args or not _is_f(cond.args[0]):
+        return None
+    return build(module)
+
+
+def _witnesses(module, cond):
+    """Every path an arm's condition says it wants, or None when this checker
+    cannot read the condition's shape."""
+    if isinstance(cond, ast.BoolOp) and isinstance(cond.op, ast.Or):
+        out = []
+        for value in cond.values:
+            part = _witnesses(module, value)
+            if part is None:
+                return None
+            out.extend(part)
+        return out
+    if isinstance(cond, ast.BoolOp) and isinstance(cond.op, ast.And):
+        return _conjunction(cond.values)
+    if isinstance(cond, ast.Name):
+        build = _BOUND_NAME_WITNESSES.get(cond.id)
+        return build(module) if build is not None else None
+    if isinstance(cond, ast.Call):
+        named = _named_predicate_witnesses(module, cond)
+        if named is not None:
+            return named
+        return _conjunction([cond])
+    if isinstance(cond, ast.Compare) and _is_f(cond.left) and len(cond.ops) == 1:
+        op, rhs = cond.ops[0], cond.comparators[0]
+        if isinstance(op, ast.Eq) and isinstance(rhs, ast.Constant):
+            return [rhs.value]
+        if isinstance(op, ast.In):
+            if isinstance(rhs, (ast.Tuple, ast.List, ast.Set)):
+                if all(isinstance(e, ast.Constant) for e in rhs.elts):
+                    return [e.value for e in rhs.elts]
+                return None
+            return _members(module, rhs)
+    return None
+
+
+def _dispatch_arms(module, source: str):
+    """One record per arm of `select()`'s `for f in changed:` loop.
+
+    `top` marks an arm of the dispatch itself. Arms nested inside one are
+    collected too, but their condition has to be about `f` to be checkable: a
+    nested `if oracle:` is a detail of an arm that already fired, while a nested
+    `if f == ...` is a selection rule and shadows exactly like a flat one.
+    """
+    tree = ast.parse(source)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "select")
+    loop = next(n for n in ast.walk(fn)
+                if isinstance(n, ast.For) and getattr(n.target, "id", "") == "f")
+    arms = []
+    for node in loop.body:
+        if not isinstance(node, ast.If):
+            continue
+        nested = [n for stmt in node.body for n in ast.walk(stmt)
+                  if isinstance(n, ast.If)]
+        for arm, top in [(node, True)] + [(n, False) for n in nested]:
+            lines = {n.lineno for stmt in arm.body for n in ast.walk(stmt)
+                     if hasattr(n, "lineno")}
+            arms.append({
+                "src": ast.unparse(arm.test),
+                "line": arm.lineno,
+                "lines": lines,
+                "witnesses": _witnesses(module, arm.test),
+                "top": top,
+                "has_else": bool(arm.orelse),
+            })
+    return arms
+
+
+def _lines_taken(module, path: str) -> set[int]:
+    """Line numbers executed inside `select` for a one-file change list."""
+    taken: set[int] = set()
+    code = module.select.__code__
+
+    def trace_lines(frame, event, arg):
+        if event == "line":
+            taken.add(frame.f_lineno)
+        return trace_lines
+
+    def trace_calls(frame, event, arg):
+        return trace_lines if frame.f_code is code else None
+
+    previous = sys.gettrace()
+    sys.settrace(trace_calls)
+    try:
+        module.select([path], ROOT)
+    finally:
+        sys.settrace(previous)
+    return taken
+
+
+def unreachable_arms(module, source: str) -> list[str]:
+    """`"<line>: <condition> (<witness>)"` for every arm no witness reaches."""
+    dead = []
+    for arm in _dispatch_arms(module, source):
+        witnesses = arm["witnesses"]
+        if witnesses is None:
+            continue
+        for witness in witnesses:
+            if not (_lines_taken(module, witness) & arm["lines"]):
+                dead.append(f"{arm['line']}: {arm['src']} ({witness!r})")
+    return dead
+
+
+def test_no_dispatch_arm_of_the_selector_is_unreachable():
+    source = (ROOT / "tools" / "affected_tests.py").read_text(encoding="utf-8")
+    arms = _dispatch_arms(at, source)
+    assert len(arms) > 20, "the dispatch loop did not parse; check _dispatch_arms"
+
+    for arm in arms:
+        assert not (arm["top"] and arm["has_else"]), (
+            f"line {arm['line']}: the dispatch arm `{arm['src']}` grew an else "
+            "branch. This checker models a flat if/continue dispatch; teach it "
+            "the new shape before trusting it again."
+        )
+        if arm["witnesses"] is None:
+            assert not arm["top"], (
+                f"line {arm['line']}: no witness path can be derived for the "
+                f"dispatch arm `{arm['src']}`, so its reachability is unknown. "
+                "Extend _witnesses() to read this condition's shape."
+            )
+            continue
+        assert arm["witnesses"], (
+            f"line {arm['line']}: the arm `{arm['src']}` matches nothing at "
+            "all: its collection is empty, so the rule is dead on arrival."
+        )
+
+    dead = unreachable_arms(at, source)
+    assert not dead, (
+        "unreachable selector arm(s). A path the rule names never reaches it, "
+        "because an arm above matches the same path and ends in `continue` or "
+        "`return`, so the selection below has no effect and the tests it names "
+        "run only in a FULL sweep. Fold the selection into the arm that fires. "
+        "Do not simply move this arm up: that shadows the arm above for the "
+        "same path, which is the same defect with a smaller blast radius.\n  "
+        + "\n  ".join(dead)
+    )
+
+
+def test_the_unreachable_arm_check_reds_on_a_shadowed_arm(tmp_path):
+    """The control. Shadow one arm in a copy of the selector and the checker has
+    to name it, with its condition and the witness that no longer reaches it."""
+    source = (ROOT / "tools" / "affected_tests.py").read_text(encoding="utf-8")
+    anchor = '        if f == "tools/check_site_wheel.py":'
+    assert source.count(anchor) == 1, "the anchor arm moved; re-point the control"
+    shadowed = source.replace(anchor, (
+        '        if f.startswith("tools/check_"):\n'
+        '            reasons.append(f)\n'
+        '            continue\n' + anchor), 1)
+
+    copy = tmp_path / "affected_tests_shadowed.py"
+    copy.write_text(shadowed, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("at_shadowed", copy)
+    mutant = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mutant)
+
+    dead = unreachable_arms(mutant, shadowed)
+    assert any("tools/check_site_wheel.py" in d for d in dead), (
+        "the checker did not notice a deliberately shadowed arm; it cannot be "
+        f"trusted to notice the next real one. Reported: {dead}")
 
 
 def test_a_candidate_the_filesystem_cannot_answer_for_is_not_an_exception():
