@@ -978,7 +978,8 @@ HARD = "false-admit"
 # The ISSUED-ADMISSION bypass, distinct from `false-admit`. The gate HAS an
 # admission arm now (`revl_gate::issue_admission`, issue #346): it upgrades a
 # no-objection to an issued admission where the source is inside the admission
-# surface, which is the region carrying no term the reference type layer decides.
+# surface: interface declarations, which carry no term at all, and components
+# whose provide-method bodies the certifier types itself (docs/design/457 T6).
 # So this bucket is a LIVE guard on every run, and the thing it guards is the most
 # dangerous class the gate can commit: a host reading a rust admission as a green
 # and running code the reference never admitted. Both engines exercise the arm and

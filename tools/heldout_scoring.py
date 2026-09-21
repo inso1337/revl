@@ -280,8 +280,11 @@ def changed_from_base(root: Path, base: str):
 # ------------------------------------------------------------------- the grammar
 
 # The admission surface: the region `crates/revl-gate` will ISSUE an admission
-# for, which is the region carrying no term the reference type layer decides.
-# Interface declarations and transparent scalar aliases, and nothing else.
+# for. The generator below draws from its INTERFACE half — service signatures and
+# transparent scalar aliases, the part that carries no term at all. The surface
+# also holds components whose provide-method bodies the certifier types itself
+# (docs/design/457 T6); drawing those is a separate generator and not this one,
+# so a program from here is inside the surface but does not exhaust it.
 _SCALARS = ("Int", "Int32", "Float", "Str", "Bool", "Bytes")
 
 # Deliberately ordinary words. A generated program that is obviously generated
