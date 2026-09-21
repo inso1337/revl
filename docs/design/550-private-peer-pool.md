@@ -178,9 +178,12 @@ It does not give non-repudiation: the operator verifying a peer's join holds the
 same key that signs it and could have produced it. A private pool of operators
 who exchanged keys out of band is the deployment where that is acceptable, and
 it is why this is the private pool and not an open one. It also means a
-compromised operator key forges joins for every peer whose key it holds. An
-asymmetric peer identity, which would make a join provable to a third party and
-would let an operator hold only public keys, is remaining work below.
+compromised operator key forges joins for every peer whose key it holds.
+Asymmetric peer identity, which makes a join provable to a third party and lets
+an operator hold only public keys, landed on top of this slice under issue #1278
+and is designed in
+[design/555-asymmetric-peer-identity.md](555-asymmetric-peer-identity.md). The
+HMAC path described here remains as the `shared-key` identity mode.
 
 Nor does a signature prove good behaviour. It proves provenance. What a peer may
 RECEIVE is bounded here; what a malicious peer DOES with received authority is
@@ -284,9 +287,12 @@ last of those. What remains:
    this pool has verified under a key in `attest_key_ids`, computed rather than
    supplied. Measured by: setting `evidence` by hand stops being possible, and a
    promotion cites the receipt digests it counted.
-4. **Asymmetric peer identity.** Named above. Measured by: the operator's pool
+4. **Asymmetric peer identity.** DONE, under issue #1278. The operator's pool
    directory holds only public keys, and a third party given a join and a public
-   key reaches the same verdict the operator did.
+   key reaches the same verdict the operator did. See
+   [design/555-asymmetric-peer-identity.md](555-asymmetric-peer-identity.md) for
+   the key lifecycle, what the signature binds member by member, and what the
+   non-repudiation claim rests on.
 5. **`run --pool private`.** Running a composition against the pool is the
    product surface the item names and it depends on 1 and 2. Measured by: a
    program with a `pure` component runs on a `probation` member end to end.
@@ -360,7 +366,8 @@ parametrized hostile-input test over ten malformed records.
 
 * An HMAC authenticates under a shared key. It does not prove authorship to a
   third party and a compromised operator key forges joins for every peer whose
-  key it holds. Asymmetric identity is item 4 of what is left.
+  key it holds. That is why a pool should run in `asymmetric` identity mode;
+  the `shared-key` mode kept here carries this limit unchanged.
 * The gate bounds what a peer may RECEIVE. It says nothing about what a peer
   DOES with what it received; that is the sandbox and seam's problem, and
   `peer_offer`'s design says the same thing about the same boundary.

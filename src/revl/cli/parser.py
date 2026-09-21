@@ -1682,6 +1682,73 @@ def build_parser() -> argparse.ArgumentParser:
     pool_init.add_argument("--key", metavar="PATH",
                            help="the operator signing key (falls back to "
                                 "REVL_ATTEST_KEY_FILE / REVL_ATTEST_KEY)")
+    pool_init.add_argument(
+        "--identity", default="asymmetric",
+        choices=["asymmetric", "shared-key", "mixed"],
+        help="which identity backing this pool admits (default: asymmetric). "
+             "`asymmetric` means every peer proves itself with a key pair, so "
+             "a compromised operator key cannot forge a peer's join. "
+             "`shared-key` is the original MAC backing. `mixed` admits both "
+             "during a migration, and `pool status` then names the members "
+             "still on the weaker one")
+    pool_init.add_argument(
+        "--revoke-identity", action="append", metavar="PATH",
+        help="a public identity file whose fingerprint may also revoke. "
+             "Repeatable. Give this when withdrawals should be signed with a "
+             "key pair, so a third party can check who removed whom")
+
+    pool_keygen = pool_sub.add_parser(
+        "keygen",
+        help="the PEER side: draw a key pair on this machine. The private half "
+             "is written 0600 and never leaves; the public half is what the "
+             "operator pins")
+    pool_keygen.add_argument("--peer-id", required=True, metavar="ID",
+                             help="this peer's stable identity")
+    pool_keygen.add_argument("--out", required=True, metavar="PATH",
+                             help="where to write the PRIVATE half. Treat this "
+                                  "file as the identity itself: anyone holding "
+                                  "it can sign as this peer")
+    pool_keygen.add_argument("--public", required=True, metavar="PATH",
+                             help="where to write the public half, the file "
+                                  "handed to the operator out of band")
+
+    pool_register = pool_sub.add_parser(
+        "register",
+        help="pin a peer's public key. The only way a key enters the pool's "
+             "directory: a join request cannot introduce the key it is checked "
+             "under")
+    pool_register.add_argument("--dir", required=True, metavar="DIR",
+                               help="the pool directory")
+    pool_register.add_argument("--public", required=True, metavar="PATH",
+                               help="the peer's public identity file. Check "
+                                    "its fingerprint against what the peer "
+                                    "told you over a second channel before "
+                                    "pinning it")
+
+    pool_rotate = pool_sub.add_parser(
+        "rotate",
+        help="replace a peer's active key. The old key stays in the directory "
+             "and keeps verifying what it signed; it authorises nothing from "
+             "the rotation onward")
+    pool_rotate.add_argument("--dir", required=True, metavar="DIR",
+                             help="the pool directory")
+    pool_rotate.add_argument("--public", required=True, metavar="PATH",
+                             help="the peer's NEW public identity file")
+    pool_rotate.add_argument("--reason", default="rotation", metavar="TEXT",
+                             help="why, recorded against the superseded key")
+
+    pool_revoke_key = pool_sub.add_parser(
+        "revoke-key",
+        help="withdraw a key's authority. It keeps verifying, so the records "
+             "it signed stay checkable by anyone holding the public half")
+    pool_revoke_key.add_argument("--dir", required=True, metavar="DIR",
+                                 help="the pool directory")
+    pool_revoke_key.add_argument("--peer-id", required=True, metavar="ID",
+                                 help="the peer whose key is revoked")
+    pool_revoke_key.add_argument("--key-id", required=True, metavar="FP",
+                                 help="the key fingerprint to revoke")
+    pool_revoke_key.add_argument("--reason", required=True, metavar="TEXT",
+                                 help="why, recorded against the key")
 
     pool_request = pool_sub.add_parser(
         "request",
@@ -1713,8 +1780,15 @@ def build_parser() -> argparse.ArgumentParser:
     pool_request.add_argument("--hardware", default="", metavar="NAME",
                               help="the hardware facet this peer attests")
     pool_request.add_argument("--key", metavar="PATH",
-                              help="this peer's key, the one exchanged with the "
-                                   "operator out of band")
+                              help="this peer's SHARED key, the one exchanged "
+                                   "with the operator out of band. Used only "
+                                   "when --identity-key is not given")
+    pool_request.add_argument("--identity-key", metavar="PATH",
+                              help="this peer's private identity file from "
+                                   "`pool keygen`. The join and the offer are "
+                                   "both signed with it, and the result is "
+                                   "verifiable by any holder of the public "
+                                   "half rather than only by the operator")
 
     pool_join = pool_sub.add_parser(
         "join",
@@ -1725,10 +1799,12 @@ def build_parser() -> argparse.ArgumentParser:
                            help="the pool directory")
     pool_join.add_argument("--join", required=True, metavar="PATH",
                            help="the peer's signed join request (JSON)")
-    pool_join.add_argument("--peer-key", required=True, metavar="PATH",
-                           help="the key exchanged with this peer out of band, "
-                                "which its join request and its peer offer are "
-                                "both verified against")
+    pool_join.add_argument("--peer-key", metavar="PATH",
+                           help="the SHARED key exchanged with this peer out "
+                                "of band. Needed only for a legacy shared-key "
+                                "join; a peer with a pinned public key is "
+                                "verified against that and a shared-key join "
+                                "from it is refused")
     pool_join.add_argument("--key", metavar="PATH",
                            help="the operator signing key; its fingerprint must "
                                 "be in the charter's admit authority")
@@ -1757,6 +1833,12 @@ def build_parser() -> argparse.ArgumentParser:
     pool_withdraw.add_argument("--key", metavar="PATH",
                                help="the operator signing key; its fingerprint "
                                     "must be in the charter's revoke authority")
+    pool_withdraw.add_argument(
+        "--identity-key", metavar="PATH",
+        help="an operator private identity file. The withdrawal receipt is "
+             "then signed with it, so any holder of the matching public key "
+             "can check who removed whom. Its fingerprint must be in the "
+             "charter's revoke authority (see `pool init --revoke-identity`)")
 
     attest_cmd = sub.add_parser(
         "attest",
