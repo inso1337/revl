@@ -948,28 +948,69 @@ component Shell requires gate: Gate provides web: Web {
 """
 
 
-def test_go_refuses_a_component_the_pure_path_would_drop():
+def test_go_carries_a_component_the_pure_path_would_drop():
     # A module `fn` beside a component with provide methods is the ordinary
     # shape of real revl code — every revl-harness component file is exactly it,
     # and it is what a migrated dispatch looks like once `maybe_run`-style
     # helpers come out and the route calls a plain helper from an `if` arm.
     #
-    # go routes any v3 document carrying a top-level declaration to the pure
+    # go routed any v3 document carrying a top-level declaration to the pure
     # typed-core path, which renders ordinary Go for the declarations and drops
     # every component it routes past. For this draft it answered with 6185 bytes
     # of stdlib preamble and two free functions: no services, no component, no
-    # routes, and no error on either side of the fork. It refuses by name now.
+    # routes, and no error on either side of the fork (issue #721). PR #1317
+    # made it refuse by name; issue #1321 carries it instead, on the combined
+    # renderer the placement path has used since 6d258f9fe.
+    #
+    # Both halves have to be in the answer. Rendering the component at the cost
+    # of the `fn` the pure path was chosen for would be the same defect pointed
+    # the other way.
     emitter = backend_emitter("go")
     ir = compile_source(DROPPED_COMPONENT_DRAFT, "x.rvl")
-    with pytest.raises(Exception) as excinfo:
-        emitter.emit(ir)
-    message = str(excinfo.value)
-    assert "'Shell'" in message, "the refusal names the component it will not carry"
-    assert "refuses by name" in message
+    out = emitter.emit(ir)
+    assert "func refused(verdict string) string {" in out, (
+        "the top-level `fn` the pure path was chosen for")
+    assert 'Name: "Shell",' in out, "the component the pure path was dropping"
+    assert "func (revlSelf *Shell_web) Dispatch(path string) string {" in out
+    assert "revlSelf.gate.Claim(path)" in out, "the route's crossing"
+    assert "func LoadShell(" in out, "and something that can boot it"
+    assert "return refused(claim)" in out, (
+        "the `if` arm calls the module helper from inside the method body, "
+        "the crossing between the two halves this fork used to make impossible")
+
+
+def test_the_carried_module_brings_the_preamble_its_component_needs():
+    # Carrying the component is only half of it: the module has to BUILD.
+    #
+    # `tests/fixtures/emit_java_corpus/comp_multi_effect.rvl` is a `fn` beside a
+    # component whose provide method writes `emit bus.send(…) compensate
+    # bus.retract(…)`, which lowers to a `RevlFrame` teardown accumulator. The
+    # live stc-go path in `_emit` appends that preamble (and the `time` / `os` /
+    # `strconv` imports `runCompensationPhase` reads its budget from) when
+    # `_COMP_NEEDS_TEARDOWN` is set; the combined renderer did neither, because
+    # until issue #1321 only `emit_placement` reached it and its own callers had
+    # not hit the case. `go build` over the carried corpus said so: 56 of 123
+    # modules failed, 40 of them on `undefined: newRevlFrame` alone.
+    #
+    # A compile error is loud, unlike the drop this issue is about, but a tier
+    # that answers with Go that does not build has not carried anything.
+    emitter = backend_emitter("go")
+    doc = ROOT / "tests" / "fixtures" / "emit_java_corpus" / "comp_multi_effect.rvl"
+    ir = compile_source(doc.read_text(encoding="utf-8"))
+    out = emitter.emit(ir)
+    assert 'Name: "Relay",' in out, "the component is carried"
+    assert "func origin() int64 {" in out, "beside the `fn` that routed it"
+    assert "_revlFrame := newRevlFrame()" in out, "the method opens a frame"
+    assert "func newRevlFrame() *RevlFrame {" in out, (
+        "...and the module has to DEFINE it: the combined renderer used to "
+        "emit the call site with no preamble behind it")
+    for module in ('"time"', '"os"', '"strconv"'):
+        assert "\t%s\n" % module in out, (
+            "runCompensationPhase reads its budget from %s" % module)
 
 
 def test_go_still_carries_the_same_component_without_the_top_level_fn():
-    # The boundary: the refusal is about the ROUTING, not about the control
+    # The boundary: the fork was about the ROUTING, not about the control
     # flow. Drop the module `fn` and the identical component lowers on the live
     # stc-go path, if-chain and crossing intact.
     emitter = backend_emitter("go")
@@ -995,15 +1036,16 @@ def test_the_component_drop_census_reports_zero_silent_drops():
     # tools/go_component_drop_census.py is the reproducible half of the #721
     # finding: it reads the routing predicate off the go emitter, calls the
     # emitter, and counts the documents that come back as Go with a declared
-    # component's name absent. At this branch's base (ae8533ce3) it reported
-    # 126 such documents tree-wide; the refusal makes that count zero by
-    # construction, and a regression that reintroduces the silent path shows up
-    # here as a non-zero SILENT count rather than as a quietly emptier artifact.
+    # component's name absent. At PR #1317's base (ae8533ce3) it reported 126
+    # such documents tree-wide. The count is zero either way now: #1317 by
+    # refusing, #1321 by carrying. A regression that reintroduces the
+    # silent path shows up here as a non-zero SILENT count rather than as a
+    # quietly emptier artifact.
     #
     # The walk is the whole tree and takes minutes, so this case runs the
-    # census over one directory: the corpus root that holds the document the
-    # migration added, which is routed past an observable component and would
-    # be silent without the refusal.
+    # census predicate over one document: the corpus fixture the migration
+    # added, which is routed past an observable component and was silent before
+    # either change.
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -1017,5 +1059,9 @@ def test_the_component_drop_census_reports_zero_silent_drops():
         "the fixture must declare a component worth not dropping, or this "
         "case proves nothing"
     )
-    with pytest.raises(Exception, match="refuses by name"):
-        backend_emitter("go").emit(ir)
+    out = backend_emitter("go").emit(ir)
+    missing = [comp["name"] for comp in ir["components"]
+               if comp["name"] not in out]
+    assert not missing, (
+        "the census counts exactly this: go returned Go source with %r absent "
+        "and raised nothing" % (missing,))
