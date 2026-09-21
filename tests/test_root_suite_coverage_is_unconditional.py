@@ -775,13 +775,22 @@ def test_the_selector_returns_a_non_empty_selection_for_every_fixture():
         # `test_selfhost_residual_is_generated.py` arrived with issue #1300
         # (PR #1304) for that same reason: the residual figure is generated
         # into three documents, and `docgen --check` is the gate a docs-only
-        # diff skips. The list stays EXACT, so a fourth module still has to be
-        # costed here rather than added silently.
-        assert sorted(result["pytest"]) == [
+        # diff skips.
+        required = {
             "tests/test_check_vision_claims.py",
             "tests/test_doc_examples.py",
             "tests/test_selfhost_residual_is_generated.py",
-        ], (
+        }
+        # The cost bound is the other half of what this pins, and it is still
+        # EXACT: a module not named here cannot join the docs-only selection
+        # without being costed in this list. The one addition is this module
+        # itself, which NAMES `docs/arithmetic.md` as a fixture, so issue
+        # #1342's derived named-file rule re-runs it when that document moves.
+        # It only reaches the selection for the diffs that name it, which is
+        # why this is a bound rather than one equality.
+        allowed = required | {"tests/test_root_suite_coverage_is_unconditional.py"}
+        selected = set(result["pytest"])
+        assert required <= selected <= allowed, (
             f"a documentation-only diff is not mapped to the doc sweep: "
             f"pytest={result['pytest']!r} reason={result['reason']!r}. If this "
             "changed, re-cost the fast path: documentation-only pull requests "

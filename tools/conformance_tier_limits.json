@@ -1,0 +1,75 @@
+{
+  "comment": [
+    "Which deliberate emitter refusals the conformance matrix is allowed to",
+    "publish as `lim`, a tier limit. Issue #1342, issue #1347.",
+    "",
+    "`lim` is read as 'this tier cannot express this construct'. An emitter",
+    "can also refuse for a reason that is about the DOCUMENT the corpus built",
+    "rather than about the construct under test, and the matrix has no way to",
+    "tell those apart from the exception alone: both arrive as the tier's own",
+    "EmitError. Publishing the second as `lim` understates the tier, in the",
+    "fail-open direction for a reader deciding whether revl suits them.",
+    "",
+    "So a refusal is `lim` only if it is written down here, with the reason it",
+    "is a capability limit. Anything else is UNCLASSIFIED, and an unclassified",
+    "cell stops `--write-readme` and `--check-readme` rather than being",
+    "downgraded. `message_prefix` is what makes an entry perishable: the entry",
+    "applies only while the emitter still refuses for the reason recorded, so",
+    "a rewritten refusal drops back to unclassified instead of inheriting a",
+    "judgement made about different words.",
+    "",
+    "NOT listed, on purpose: go's issue-#721 refusal of a document holding",
+    "both a top-level declaration and an observable component. It fires on 24",
+    "of the 61 cases because `_component()` builds nearly every case in that",
+    "shape, and all 24 emit on go once the component half is removed. That is",
+    "a fact about the corpus, not about the tier. Issue #1347 decides what the",
+    "matrix should say instead; until it does, this file leaves those cells",
+    "unclassified and the generator refuses to publish them."
+  ],
+  "limits": {
+    "java::method/arrow param binds in method scope (FR-1)": {
+      "reason": "a declared function type has no nominal target type on the JVM, so the emitter has nothing to emit the lambda against. A capability limit of the tier.",
+      "message_prefix": "a declared function type"
+    },
+    "wasm::component/config field": {
+      "reason": "the cordis-wasm runtime has no instantiation-config channel, so a config block has no lowering. A capability limit of the runtime.",
+      "message_prefix": "C: config blocks are not lowerable"
+    },
+    "wasm::component/fail (A8)": {
+      "reason": "the cordis-wasm runtime has no instantiation-config channel, so a config block has no lowering. The same capability limit as component/config field.",
+      "message_prefix": "C: config blocks are not lowerable"
+    },
+    "wasm::component/effect + undo": {
+      "reason": "the host builtin Map.new is not on the cordis-wasm tier. A capability limit of the runtime's builtin set.",
+      "message_prefix": "C: host builtin 'Map.new' is not available"
+    },
+    "wasm::component/block effect setup": {
+      "reason": "the host builtin Map.new is not on the cordis-wasm tier. A capability limit of the runtime's builtin set.",
+      "message_prefix": "C: host builtin 'Map.new' is not available"
+    },
+    "wasm::method/method-time effect": {
+      "reason": "the host builtin Map.new is not on the cordis-wasm tier. A capability limit of the runtime's builtin set.",
+      "message_prefix": "C: host builtin 'Map.new' is not available"
+    },
+    "wasm::method/arrow param binds in method scope (FR-1)": {
+      "reason": "arrow values have no lowering on this tier. A capability limit.",
+      "message_prefix": "C.s.f: arrow values are not lowerable"
+    },
+    "wasm::expr/true division": {
+      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "C.s.f: type 'Float' is not lowerable"
+    },
+    "wasm::expr/float equality": {
+      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "feq: parameter a: type 'Float' is not lowerable"
+    },
+    "wasm::type/Float service": {
+      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "C: s.f param 'x': type 'Float' is not lowerable"
+    },
+    "wasm::type/Map service": {
+      "reason": "Map is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "C: s.f param 'x': type 'Map[Str, Int]' is not lowerable"
+    }
+  }
+}
