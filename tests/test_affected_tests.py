@@ -710,18 +710,36 @@ def test_a_wrapper_test_inherits_the_vocabulary_of_what_it_runs():
     )
 
 
-def test_the_named_file_rule_is_derived_and_not_a_table():
-    """`companion_paths` reads the tests' own AST, so the four hand-written
-    tables it generalises are each a SUBSET of what it finds. Checked on the
-    bench table, the largest of them: every module declared bench-dependent
-    because it reads a `bench/` artifact must also be found by the derived
-    rule. The three entries that do not read one are excluded by name and are
-    the table's own documented exceptions."""
-    derived = at.tests_naming(ROOT, "bench/codegen/python/run.py")
-    assert "tests/test_71_codegen_perf_findings.py" in derived
-    named = {n for n in at.companion_paths(ROOT)
-             if any(p.startswith("bench/") for p in at.companion_paths(ROOT)[n])}
-    assert len(named) >= 5, sorted(named)
+def test_the_derived_rule_does_not_replace_the_hand_written_tables():
+    """The honest limit of the derived rule, pinned so nobody deletes a table
+    believing this covers it.
+
+    `companion_paths` sees a path a test SPELLS. It does not see one the test
+    computes, walks to from a root it holds in a variable, or declares only in
+    prose. Of the 18 modules in BENCH_DEPENDENT_TESTS, exactly three spell a
+    `bench/` path, so the derived rule finds three of eighteen. It is a
+    complement to those tables, not their replacement."""
+    cp = at.companion_paths(ROOT)
+    spelled = {t for t, paths in cp.items()
+               if any(p.startswith("bench/") for p in paths)}
+    declared = set(at.BENCH_DEPENDENT_TESTS)
+    assert spelled, "no test spells a bench path; the extractor found nothing"
+    assert len(spelled) < len(declared), (
+        "the derived rule now finds at least as many bench-dependent modules "
+        "as the table declares. Re-read the table: it may be replaceable, "
+        "which would be worth doing deliberately."
+    )
+
+
+def test_prose_is_not_a_dependency():
+    """A path named only in a docstring is a citation, not a read.
+    `tests/test_71_codegen_perf_findings.py` cites `bench/codegen/python/run.py`
+    in its module docstring and is declared in BENCH_DEPENDENT_TESTS for it;
+    the derived rule must not double as a prose scanner, or every document that
+    mentions a file would select every test that mentions the document."""
+    named = at._named_paths(ROOT, '"""See bench/codegen/python/run.py."""\n')
+    assert named == frozenset(), named
+    assert "tests/test_71_codegen_perf_findings.py" in at.BENCH_DEPENDENT_TESTS
 
 
 def test_a_changed_file_selects_every_test_that_names_it():
@@ -747,8 +765,19 @@ def test_named_paths_needs_a_separator_and_a_real_file():
     """A bare `"src"` or `"demo"` is too coarse to be evidence of a read, and a
     path that does not exist in the tree is prose. Both are dropped, or the
     rule degenerates into selecting the whole suite for every change."""
-    named = at._named_paths(ROOT, 'P = ROOT / "demo" / "legacy_enterprise" / "run_demo.py"\n')
+    named = at._named_paths(
+        ROOT, 'P = ROOT / "demo" / "legacy_enterprise" / "run_demo.py"\n')
     assert "demo/legacy_enterprise/run_demo.py" in named
-    assert "demo/legacy_enterprise" in named
     assert "demo" not in named
     assert at._named_paths(ROOT, 'X = "src"\nY = "no/such/file.py"\n') == frozenset()
+
+
+def test_a_directory_counts_only_when_the_test_walks_it():
+    """Twenty modules name `src/revl`, almost all of them to put it on
+    `sys.path`. Reading that as "depends on every file under it" made a
+    one-module change select 213 tests against 92. A directory is evidence
+    only when the test enumerates one."""
+    holds = 'P = ROOT / "demo" / "legacy_enterprise"\n'
+    assert at._named_paths(ROOT, holds) == frozenset()
+    walks = holds + 'for f in P.glob("*.py"):\n    pass\n'
+    assert "demo/legacy_enterprise" in at._named_paths(ROOT, walks)

@@ -398,16 +398,29 @@ def _node(p: Path) -> str:
 # to ship a demo that exits 1 with every gate green.
 #
 # That is the same shape as BENCH_DEPENDENT_TESTS, PROGRESS_COUNTER_SOURCES,
-# the census/provenance pair and `held_out_fence`: four hand-written tables of
-# "this test reads that file", each added after the gap it closes had already
-# reached `main`. The rule below is the general form, derived from the tests'
-# own source rather than restated here, so the fifth one does not have to be
-# noticed first. It is used in BOTH directions:
+# the census/provenance pair, `held_out_fence` and the corpus provenance
+# manifest: five hand-written tables of "this test reads that file", each added
+# after the gap it closes had already reached `main`. The rule below is the
+# derivable part of that relation, taken from the tests' own source rather than
+# restated here.
 #
-#   forward   a companion's text joins the test's own for the word/tier/stdlib
-#             heuristics, so a wrapper inherits the vocabulary of what it runs;
+# It does NOT replace those tables, and the difference is measured: of the 18
+# modules BENCH_DEPENDENT_TESTS declares, exactly three SPELL a `bench/` path.
+# The rest reach it through a computed root, a directory walk, or a declaration
+# made only in prose, and no AST can see those. The tables stay; what this adds
+# is that a dependency somebody wrote down plainly no longer has to be noticed
+# by a human first. `tests/test_affected_tests.py` pins that split so a table
+# is not deleted in the belief that this covers it.
+#
+# It is used in BOTH directions:
+#
+#   forward   a companion's text joins the test's own for the leaf-module word
+#             heuristic, so a wrapper inherits the vocabulary of what it runs;
+#             NOT for the tier or stdlib heuristics, which match common words
+#             and are already covered by name -- see each one for its measured
+#             reason;
 #   reverse   a change to a named file selects every test that names it, which
-#             is what the four tables above each do for one path set.
+#             is what the five tables above each do for one path set.
 #
 # Paths are taken from the test's AST, not from a regex over its prose: a
 # `"a/b.py"` literal, and the trailing constant run of a `ROOT / "a" / "b.py"`
@@ -415,6 +428,11 @@ def _node(p: Path) -> str:
 # it exists in the tree and carries a separator; a bare `"src"` or `"demo"` is
 # too coarse to mean anything and is dropped. Comments and docstrings are NOT
 # a source of paths here: mentioning a file in prose is not reading it.
+
+# Which companions contribute TEXT to the forward heuristic: code and data a
+# test executes or reads as input, plus the documents it compiles examples out
+# of. Over-selecting here is the safe direction and it is cheap -- including
+# `.md` costs six extra nodes on the widest selection measured.
 _COMPANION_SUFFIXES = frozenset({
     ".py", ".rvl", ".sh", ".md", ".json", ".toml", ".yml", ".yaml",
     ".ts", ".mjs", ".go", ".rs", ".java", ".wat", ".ir",
@@ -444,14 +462,40 @@ def _path_suffix_segments(node: ast.AST) -> list[str]:
     return list(reversed(out))
 
 
+# A directory a test names is only evidence of a dependency when the test WALKS
+# it. Twenty test modules name `src/revl`, almost all of them to put it on
+# `sys.path` or to hand it to a subprocess; treating that as "reads every file
+# under it" made a one-module `src/revl/**` change select 213 tests instead of
+# 92. Eight of the twenty really do enumerate the directory, and those are the
+# ones a new file under it can break. Matched on the call rather than on the
+# path, because the path says nothing about what is done with it.
+_WALKS_A_DIRECTORY = re.compile(
+    r"\b(?:r?glob|iterdir|scandir|listdir|walk)\s*\(")
+
+
 def _named_paths(root: Path, source: str) -> frozenset[str]:
-    """Repo-relative paths a python source names and that exist in the tree."""
+    """Repo-relative paths a python source names and that exist in the tree.
+
+    A FILE counts on its own. A DIRECTORY counts only if `source` also walks
+    one: see `_WALKS_A_DIRECTORY`.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return frozenset()
+    # Docstrings are prose, and this file's own comment says so: naming a file
+    # in a paragraph is not reading it. They are the statement-level string
+    # expressions, so they are dropped before the walk rather than filtered
+    # after it.
+    docstrings = {
+        id(n.value) for n in ast.walk(tree)
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+        and isinstance(n.value.value, str)
+    }
     candidates: set[str] = set()
     for node in ast.walk(tree):
+        if id(node) in docstrings:
+            continue
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             segs = _path_suffix_segments(node)
             # Every suffix of the chain, because the head may be a `parents[1]`
@@ -471,7 +515,10 @@ def _named_paths(root: Path, source: str) -> frozenset[str]:
             continue
         if ".." in rel.split("/"):
             continue
-        if (root / rel).exists():
+        target = root / rel
+        if target.is_file():
+            out.add(rel)
+        elif target.is_dir() and _WALKS_A_DIRECTORY.search(source):
             out.add(rel)
     return frozenset(out)
 
@@ -524,9 +571,9 @@ _COMPANION_TEXT_CACHE: dict[tuple[Path, str], str] = {}
 def _companion_text(root: Path, p: Path) -> str:
     """A test's own source, plus the source of every repo file it names.
 
-    This is what the word / tier / stdlib heuristics read, so a test that
-    delegates to a script or a fixture program is matched on that file's
-    vocabulary as well as its own.
+    This is what the leaf-module word heuristic reads, so a test that delegates
+    to a script or a fixture program is matched on that file's vocabulary as
+    well as its own. The tier and stdlib heuristics deliberately do not use it.
     """
     node = _node(p)
     key = (root, node)
@@ -560,7 +607,16 @@ def _tier_tests(root: Path, tier: str) -> set[str]:
     path = re.compile(rf"backends/{re.escape(tier)}\b")
     out: set[str] = set()
     for p in _test_files(root):
-        text = _companion_text(root, p)
+        # The test's OWN text, deliberately not `_companion_text`. A tier name
+        # is a common word: nearly every script and `.rvl` a test names spells
+        # `go` or `rust` somewhere, so inheriting companions here selected 322
+        # of 623 tests for a `backends/go/emit.py` change against 243 before,
+        # and 201 against 112 for wasm -- a third of the suite bought by a
+        # match that is not evidence the test exercises the tier. The holes
+        # this rule would have covered are already covered by name:
+        # REFERENCE_EMITTER_ORACLE and REFERENCE_EMITTER_ALWAYS select the
+        # oracles that reach `backends/<tier>/emit.py` without spelling it.
+        text = _read(p)
         if word.search(p.name) or word.search(text) or path.search(text):
             out.add(_node(p))
     return out
@@ -618,9 +674,16 @@ def _word_tests(root: Path, token: str) -> set[str]:
     `import revl.<mod>` call-sites and CLI-subcommand / feature-name references.
     """
     word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])")
+    # A dunder is a Python IDIOM, not a name a test uses to refer to the
+    # module: every script in the tree carries `if __name__ == "__main__":`.
+    # Matching it across companions made `src/revl/__main__.py` select 191 of
+    # 623 tests, which is a match on the language rather than on the change, so
+    # a dunder is read out of the test's own text only.
+    idiom = token.startswith("__") and token.endswith("__")
     out: set[str] = set()
     for p in _test_files(root):
-        if word.search(p.name) or word.search(_companion_text(root, p)):
+        text = _read(p) if idiom else _companion_text(root, p)
+        if word.search(p.name) or word.search(text):
             out.add(_node(p))
     return out
 
