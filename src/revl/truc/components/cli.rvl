@@ -61,7 +61,7 @@ fn parse_cmd(argv: List[Str]) -> Cmd {
 }
 
 pub service Cli {
-  emission fn run(argv: List[Str]) -> Int
+  emission[asm, ship] fn run(argv: List[Str]) -> Int
 }
 
 component CliDispatch requires asm: Assembler, ship: Shipper provides cli: Cli {

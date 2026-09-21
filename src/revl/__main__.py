@@ -398,7 +398,8 @@ def _run_audit(args, ir: dict) -> int:
         # and `--json` already build; a violation refuses admission with a
         # why-trace naming the offending chain.
         from .audit_diff import audit_report  # noqa: PLC0415
-        from .policy import evaluate, load_policy, render_report  # noqa: PLC0415
+        from .policy import (approval_admission, evaluate,  # noqa: PLC0415
+                             load_policy, render_report)
 
         policy = load_policy(args.policy)
         audit = audit_report(ir)
@@ -428,6 +429,21 @@ def _run_audit(args, ir: dict) -> int:
                               evidence=evidence, origins=origins,
                               trusted_publishers=trusted, key=key,
                               evidence_ir=evidence_ir)
+        # item 522 (issue #1196), the confirmation gate's missing half.
+        # `capability C requires approval` is the operator's authority raising
+        # `C` to confirm-required. `policy.approval_admission` enforces it —
+        # but it was only ever CALLED from `mcp.session`, so it was a session
+        # gate, and the surface an operator actually reads before shipping,
+        # `revl audit --policy`, reported the very same composition CLEAN.
+        # Measured on this tree before this line: a computer-use agent that
+        # reaches `ui.click` with no covering `with` edge, under a policy
+        # reading `capability ui.click requires approval`, printed "boundary
+        # policy: clean — every component's reach is within its declared
+        # authority" and exited 0, while loading it in a session refused it.
+        # A gate whose static surface says clean is a gate an operator learns
+        # not to consult. `evaluate` is untouched (every other caller keeps its
+        # exact contract); this is the ONE surface that claimed to be the gate.
+        violations = violations + approval_admission(policy, ir)
         if args.json:
             print(json.dumps(
                 {"policy": args.policy,

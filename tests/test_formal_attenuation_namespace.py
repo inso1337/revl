@@ -10,8 +10,8 @@ surfaces read it, in namespaces that are not the same:
   * the spawn ATTENUATION fold (`W`) compares a parent's grant against a
     child's demand ACROSS a component boundary. Two components wire the same
     boundary under whatever key each likes, so the element there is the
-    DECLARED token (`lower._cap_keyed`), or the key in its own `key:` namespace
-    where nothing declares one (`lower._wire_cap`).
+    DECLARED token (`lower._cap_keyed`), or the SERVICE in its own `svc:`
+    namespace where nothing declares one (`lower._undeclared_cap`).
 
 Exporting both sides of the fold under the wiring key is a laundering hole:
 `Supervisor requires kv: KvA` spawning `Leaker requires kv: KvB` reaches a
@@ -36,8 +36,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-#: The reproducer: one wiring key, two different declared boundaries.
+#: The reproducers: one wiring key, two different boundaries. The first
+#: declares its two tokens (issue 1142); the second declares nothing at all
+#: (issue #1265), which is the spelling most of this corpus actually uses.
 FIXTURE = "tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl"
+UNDECLARED_FIXTURE = (
+    "tests/formal_corpus/g4_spawn_widens_undeclared_emission_same_key.rvl")
 
 #: The bound case that must survive the separation, and is LOAD-BEARING for it
 #: (`test_the_bound_case_is_not_vacuous`): `Db.execute` is declared
@@ -89,6 +93,29 @@ def test_the_reference_refuses_the_same_key_widening():
     assert "granting it `kv_b`" in str(excinfo.value)
 
 
+def test_the_reference_refuses_it_with_nothing_declared_either(tsv):
+    """Item 561. The same shape where NEITHER service names a token: the key is
+    still not the boundary's name, so the element is the service. Without this
+    the fold was blind to the widening for the majority spelling in the tree.
+    """
+    from revl import compile_files
+    from revl.diagnostics import classify
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError) as excinfo:
+        compile_files([str(ROOT / UNDECLARED_FIXTURE)])
+    assert classify(excinfo.value)["code"] == "G4"
+    assert "granting it `Kv`" in str(excinfo.value)
+    binds = {(r[2], r[3]) for r in _rows(tsv, "R", UNDECLARED_FIXTURE)}
+    assert binds == {("Boss", "net"), ("Worker", "net")}
+
+
+def test_the_model_derives_the_undeclared_widening(verdicts):
+    """...and the model derives it too, which is the half a differential
+    oracle cannot report by agreeing."""
+    assert verdicts.spawns[(UNDECLARED_FIXTURE, "Boss", "Worker")] == "fail"
+
+
 def test_the_fixture_spells_one_key_over_two_boundaries(tsv):
     """Non-vacuity for the fixture itself: parent and child must actually
     agree on the wiring key and disagree on the boundary, or it is not the
@@ -109,7 +136,7 @@ def test_the_attenuation_fold_carries_no_bare_wiring_key(tsv, harness):
     """The invariant behind the fix, over the WHOLE corpus rather than the one
     fixture: every element of the attenuation surface (`A`, `K`, and the `F`
     row's cap column) is the unnameable `*`, a declared capability of that
-    file, or a wiring key in its own `key:` namespace. A bare key among them
+    file, or a service in its own `svc:` namespace. A bare key among them
     is a name in the wrong namespace, which is what let the widening through.
     """
     declared: dict[str, set[str]] = {}
@@ -119,7 +146,7 @@ def test_the_attenuation_fold_carries_no_bare_wiring_key(tsv, harness):
     for kind, col in (("A", 3), ("K", 4), ("F", 6)):
         for r in _rows(tsv, kind):
             cap = r[col]
-            if cap == "*" or cap.startswith(harness._WIRE_NS):
+            if cap == "*" or cap.startswith(harness._UNDECLARED_NS):
                 continue
             if cap not in declared.get(r[1], set()):
                 leaked.append(f"{kind} {r[1]} {cap}")
@@ -129,9 +156,9 @@ def test_the_attenuation_fold_carries_no_bare_wiring_key(tsv, harness):
 def test_the_two_namespaces_cannot_collide(tsv, harness):
     """A declared token never lands in the wiring-key namespace, so a key
     spelling can never masquerade as a boundary (`lower._cap_keyed`'s own
-    reason for `_wire_cap` having a namespace at all)."""
+    reason for `_undeclared_cap` having a namespace at all)."""
     assert not [r[4] for r in _rows(tsv, "Q")
-                if r[4].startswith(harness._WIRE_NS)]
+                if r[4].startswith(harness._UNDECLARED_NS)]
 
 
 # ------------------------------------------- what `_canon_cap` was right about

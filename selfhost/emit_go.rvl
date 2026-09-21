@@ -1600,9 +1600,19 @@ fn overflow32_preamble() -> List[Str] {
 // document-level answers. Its PURE typed-core path — the one this slice mirrors
 // — routes PAST the components of a document that also carries top-level
 // declarations and emits ordinary Go for those declarations alone; both sides
-// then drop the same thing, and 38 documents in the tree are byte-identical on
-// this tier for exactly that reason. A marker there would name a gap that is
+// then drop the same thing, and the documents that reach it are byte-identical
+// on this tier for exactly that reason. A marker there would name a gap that is
 // not there and cost every one of those agreements.
+//
+// Issue #1321 narrowed which documents reach it. The reference carries an
+// OBSERVABLE component, one with an activation body or a provide method, on
+// its combined renderer now, declarations AND components in one package, and
+// routes past only an INCIDENTAL one. So the exception narrows with it: where
+// the reference carries, there is no agreement left for a marker to cost, and
+// staying silent would mean answering a 6-kilobyte reference module with a
+// component-free one and no sign that anything was missing. That is the exact
+// failure the marker convention exists to prevent, so `component_is_observable`
+// below mirrors the reference predicate the routing now branches on.
 //
 // Everywhere else the marker is free, and it was badly needed. A document whose
 // components are ALL it declares never reaches the pure path: the reference
@@ -1616,17 +1626,23 @@ fn overflow32_preamble() -> List[Str] {
 // reference's for that document and there is no agreement left to protect.
 //
 // So the suppression is narrow and checkable without reading a component STEP:
-// pure declarations present AND no deferred test section. What it still leaves
-// silent is item 130's STREAM DIVERSION — a document that holds a stream is
-// sent to the live path even when it carries top-level declarations, which a
-// typed-event program always does (the event's record declaration is what puts
-// a `types` entry in the document). Three documents in the tree are in that
-// state. Mirroring it would mean reading the `subscribe` / `stream-iter`
-// discriminants, and tools/selfhost_coverage.py takes a port's construct table
-// straight off those spellings: reading one here would move them out of the
-// blind-spot ledger's `unported` baseline and claim a port of the stream
-// lowering this slice does not have. A marker is a refusal, not an
-// implementation. The residual is pinned by a test rather than left to prose.
+// pure declarations present, no deferred test section, and no observable
+// component. `component_is_observable` reads the LENGTH of a component's `body`
+// (not the discriminant of any step inside it), so it states the reference's
+// routing without claiming a port of a lowering this slice does not have. That
+// matters because tools/selfhost_coverage.py takes a port's construct table
+// straight off the `value_str(value_field(n, "kind"))` spellings: reading a
+// `subscribe` or `stream-iter` discriminant here would move them out of the
+// blind-spot ledger's `unported` baseline and claim a stream port. A marker is
+// a refusal, not an implementation.
+//
+// The observable arm also subsumes item 130's STREAM DIVERSION, which the
+// suppression used to leave silent: a document that holds a stream is sent to
+// the reference's live path even when it carries top-level declarations, which
+// a typed-event program always does (the event's record declaration is what
+// puts a `types` entry in the document). Its components have bodies, so they
+// are observable, so they are named now, without this file reading a single
+// stream spelling.
 //
 // Markers are one per entry, in document order — the same total-dispatch
 // convention every expression- and step-level arm in this file already uses.
@@ -1636,11 +1652,31 @@ fn carries_pure_declarations(ir: Any) -> Bool {
   return value_list(value_field(ir, "externs")).length() > 0
 }
 
+// The reference's `_component_is_observable`: does routing past this component
+// lose something the author wrote? An activation step or a provide method puts
+// something in the component's `body`; an empty `component C { }` renders to
+// nothing anyone can call. The reference's own helper also walks a `provides`
+// entry for `methods`, which is unreachable on a frontend-produced document:
+// a `provides` clause with no `provide` block is refused at compile time (A9)
+// and a provide method IS a `body` step, so the length of `body` is the whole
+// predicate here.
+fn component_is_observable(c: Any) -> Bool {
+  return value_list(value_field(c, "body")).length() > 0
+}
+
+fn any_component_is_observable(comps: List[Any]) -> Bool {
+  for (c of comps) {
+    if (component_is_observable(c)) { return true }
+  }
+  return false
+}
+
 fn uncarried_components(ir: Any) -> List[Str] {
   let comps = value_list(value_field(ir, "components"))
   if (comps.length() == 0) { return [] }
   let deferred_tests = value_list(value_field(ir, "tests")).length() > 0
-  if (carries_pure_declarations(ir) && !deferred_tests) { return [] }
+  if (carries_pure_declarations(ir) && !deferred_tests
+      && !any_component_is_observable(comps)) { return [] }
   var out = []
   for (c of comps) {
     out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)

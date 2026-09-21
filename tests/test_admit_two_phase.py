@@ -52,7 +52,7 @@ needs_cordis = pytest.mark.skipif(
 
 _SRC_C = (
     "extern emission fn announce(sink: Str, msg: Str) = @py { return }\n"
-    "service Ops { emission fn shout(sink: Str, msg: Str) }\n"
+    "service Ops { emission[announce] fn shout(sink: Str, msg: Str) }\n"
     "component Agent provides ops: Ops {\n"
     "  provide ops { fn shout(sink, msg) { emit announce(sink, msg) } }\n"
     "}\n"
@@ -68,7 +68,7 @@ _SRC_NOOP = (
 
 _SRC_OTHER = (
     "extern emission fn announce(sink: Str, msg: Str) = @py { return }\n"
-    "service Ops { emission fn shout(sink: Str, msg: Str) }\n"
+    "service Ops { emission[announce] fn shout(sink: Str, msg: Str) }\n"
     "component Herald provides ops: Ops {\n"
     "  provide ops { fn shout(sink, msg) { emit announce(sink, msg) } }\n"
     "}\n"
@@ -77,7 +77,7 @@ _SRC_OTHER = (
 # An untrusted per-turn source with NO host code of its own — it only forwards
 # to the granted `ops`, the shape `test_admit_approval_gate` gates.
 _TURN_FORWARD = (
-    "service Turn { emission fn run(sink: Str, msg: Str) }\n"
+    "service Turn { emission[ops] fn run(sink: Str, msg: Str) }\n"
     "component TurnComp requires ops: Ops provides turn: Turn {\n"
     "  provide turn {\n"
     '    fn run(sink, msg) { emit ops.shout(sink, msg) }\n'

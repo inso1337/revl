@@ -88,7 +88,7 @@ isolation, the exhaustive crossing list) from what no type system can
 
 The default rendering leads with the honest-scope header, then the three
 numbered sections. `--json` emits a versioned, self-describing document
-(`kind: "revl.erase-report"`, `schema_version: "1.0"`) in the additive-only
+(`kind: "revl.erase-report"`, `schema_version: "1.1"`) in the additive-only
 spirit of the interchange format (docs/interchange-format.md) — a consumer can
 gate on the MAJOR version and ignore members it does not recognise.
 

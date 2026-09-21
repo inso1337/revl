@@ -10,12 +10,12 @@
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
 }
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
   // an emission: `put` writes the cache log through `db`, and a service
   // declaration is an upper bound on what its providers may do
-  emission fn put(key: Str, value: Str)
+  emission[db] fn put(key: Str, value: Str)
 }

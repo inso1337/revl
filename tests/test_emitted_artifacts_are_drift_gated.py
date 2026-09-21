@@ -459,3 +459,141 @@ def test_the_interpreter_and_placement_checks_can_fail(tmp_path):
         + proc.stdout + proc.stderr)
     assert "go" not in _lint_check_targets(), \
         "the `go` target is listed in `lint`, where it can only skip"
+
+
+# --- twinned outputs: one emission, committed at two paths -----------------
+#
+# Issue #1288, and the third shape of the same week's bug: a mechanism that
+# existed and could not see the thing it named.
+#
+# `produce_rust` binds ONE emission to two committed paths,
+# `backends/rust/golden/user_cache.rs` and the placement runner's
+# `src/components.rs`. `--check` did compare both against a fresh generation,
+# so it did fire — but it fired as "1 file(s) differ from a fresh generation",
+# which is the sentence a stale golden prints, on a PR that had not touched
+# rust at all. The real fact is narrower and decides what to do: these two are
+# one emission from one input, so one of them moving alone is a defect
+# whichever version is the right one. It was mis-diagnosed twice before a lane
+# isolated it.
+#
+# The stray bytes were an `ir_version 3` emission of `examples/outcome.rvl`
+# (the reference IR for this target is `"ir_version": 1`, and `ir_version` is
+# stamped from the input, so they could not have come from this producer). They
+# were the placement runner's per-composition codegen, which used to write that
+# committed module and not put it back; a docs commit swept the leftover up.
+#
+# So the invariant is declared as data on the target, and checked twice: by
+# `regen_goldens.py`'s worker, where a producer that acquires an UNdeclared
+# twin pair is refused outright, and here, off disk, with no emitter and no
+# toolchain — which is what makes it fire on the PR that moves the file.
+
+
+def _twin_groups() -> list[tuple[object, tuple[str, ...]]]:
+    return [(target, group)
+            for target in _regen_goldens().TARGETS for group in target.twins]
+
+
+def test_at_least_one_target_declares_twinned_outputs():
+    """A gate with nothing to gate is not a gate. If the rust target ever stops
+    committing its emission twice, delete this section rather than leaving it
+    green over nothing."""
+    assert _twin_groups(), (
+        "no golden target declares `twins=`, so the byte-identity check below "
+        "compares nothing")
+
+
+def test_every_twin_group_names_real_files_its_own_target_declares():
+    """A twin group is only as good as its paths: an undeclared or misspelled
+    member is a group that silently covers one file."""
+    for target, group in _twin_groups():
+        assert len(group) >= 2, f"{target.name}: a twin group of {len(group)} path(s)"
+        assert len(set(group)) == len(group), f"{target.name}: repeated path in {group}"
+        for rel in group:
+            assert rel in target.files, (
+                f"{target.name} declares {rel} as a twin but does not declare it as "
+                f"a file it owns, so nothing regenerates or compares it")
+            assert (ROOT / rel).is_file(), f"{target.name}: {rel} does not exist"
+
+
+def test_twinned_goldens_are_byte_identical_on_disk():
+    """The gate. No emitter, no toolchain, no subprocess: it reads the committed
+    bytes, so it reds on the commit that moves one of them."""
+    registry = _regen_goldens()
+
+    def read(rel: str) -> bytes | None:
+        path = ROOT / rel
+        return path.read_bytes() if path.is_file() else None
+
+    mismatched: list[str] = []
+    for target in registry.TARGETS:
+        mismatched += registry.twin_mismatches(target, read)
+    assert not mismatched, (
+        "committed golden(s) that one producer emits identically have diverged:\n  "
+        + "\n  ".join(mismatched)
+        + "\nRegenerate that target (python3 tools/regen_goldens.py <target>) and "
+          "review BOTH files' diffs. A file that moved on its own was written by "
+          "something other than its producer.")
+
+
+def test_the_twin_check_can_actually_fail():
+    """Teeth, driven off a synthetic tree: the exact shape of #1288 (one member
+    replaced) and the one next to it (one member missing) must both be caught,
+    and an untouched group must not be."""
+    registry = _regen_goldens()
+    target, group = _twin_groups()[0]
+
+    same = dict.fromkeys(group, b"one emission\n")
+    assert registry.twin_mismatches(target, same.get) == [], \
+        "a group whose members agree was reported as a mismatch"
+
+    moved_alone = dict(same)
+    moved_alone[group[-1]] = b"//! ir_version 3\n"
+    reported = registry.twin_mismatches(target, moved_alone.get)
+    assert len(reported) == 1, reported
+    assert group[0] in reported[0] and group[-1] in reported[0], reported
+
+    absent = {group[0]: b"one emission\n"}
+    assert registry.twin_mismatches(target, absent.get), \
+        "a missing twin reads as a pass, so deleting one member is invisible"
+
+
+def test_an_undeclared_twin_pair_is_refused_at_the_producer():
+    """The other direction, and the one that keeps this section honest as
+    targets are added: a producer that starts writing one emission to two paths
+    without declaring it must not be allowed to go quiet the way rust did."""
+    registry = _regen_goldens()
+    silent = registry.Target(name="fake", what="", files=("a.rs", "b.rs", "c.rs"))
+    assert registry.undeclared_twins(silent, {"a.rs": "X", "b.rs": "X", "c.rs": "Y"}) \
+        == [("a.rs", "b.rs")]
+    assert registry.undeclared_twins(silent, {"a.rs": "X", "b.rs": "Y"}) == []
+
+    declared = registry.Target(name="fake", what="", files=("a.rs", "b.rs"),
+                               twins=(("a.rs", "b.rs"),))
+    assert registry.undeclared_twins(declared, {"a.rs": "X", "b.rs": "X"}) == []
+    # ...and a declaration the producer does not back is refused too, so the
+    # group cannot rot into a claim nothing checks.
+    assert registry.stale_twin_declarations(declared, {"a.rs": "X", "b.rs": "Y"}) \
+        == [("a.rs", "b.rs")]
+    assert registry.stale_twin_declarations(declared, {"a.rs": "X", "b.rs": "X"}) == []
+
+
+def test_the_real_targets_declare_every_twin_pair_they_emit():
+    """Applied to the shipped registry rather than a fixture: no target may own
+    two byte-identical committed files without saying so. This is the check that
+    would have made #1288 a one-line registry edit instead of a cross-PR
+    diagnosis. It reads the committed bytes of each target's declared FILES (a
+    target that names a directory brings its own `--check`), so it needs no
+    emitter and runs everywhere."""
+    registry = _regen_goldens()
+    by_bytes: list[str] = []
+    for target in registry.TARGETS:
+        produced = {rel: (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+                    for rel in target.files
+                    if (ROOT / rel).is_file()}
+        for group in registry.undeclared_twins(target, produced):
+            by_bytes.append(f"{target.name}: {', '.join(group)}")
+    assert not by_bytes, (
+        "golden target(s) own byte-identical committed files that no `twins=` "
+        "group covers:\n  " + "\n  ".join(by_bytes)
+        + "\nIf they are one emission, declare them; if the match is a "
+          "coincidence, this check is in the wrong place and should say so.")
