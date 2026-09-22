@@ -5153,6 +5153,12 @@ def _grammar_registry(services: dict) -> dict:
     never be judged. An unjudgeable claim is worse than no claim, so the seam
     offers none: `revl_constrain("extern:...")` finds nothing.
 
+    That is an argument for withholding the GRAMMAR, and it stands. It is not an
+    argument for withholding the DIAGNOSTIC, which is what it silently also did
+    until issue #1382: the author wrote `validated`, the module came out
+    byte-identical to one without it, and nothing said so. The refusal is in
+    `_refuse_validated_externs` below; read the two together.
+
     The `json-schema` dialect (slice 4) is composed HERE rather than bound in the
     IR. It is a pure function of `response_schema`, which the crossing already
     carries, so the second dialect costs the IR nothing and a tier that does not
@@ -5181,11 +5187,78 @@ def _grammar_registry(services: dict) -> dict:
     return registry
 
 
+def _refuse_validated_externs(ir: dict) -> None:
+    """Items 257/513, issue #1382: refuse a `validated` EXTERN by name.
+
+    The sibling of `_grammar_registry`, and the other half of one decision.
+    That function explains why a validated extern is absent from the grammar
+    registry: its `@py` body IS the provider, so a registered grammar would be a
+    claim nothing judges, and an unjudgeable claim is worse than no claim. That
+    argument is sound, and it is an argument for withholding the GRAMMAR. It was
+    also, until this gate, doing duty as an argument for withholding the
+    DIAGNOSTIC, which does not follow: its own premise says an unjudgeable claim
+    is worse than no claim, and accepting the modifier silently is precisely
+    letting the author make one and walk away believing it holds.
+
+    The two carriers are not symmetric on this tier, which is why the refusal is
+    narrower than PR #1381's:
+
+      * a `validated` service OPERATION is lowered here, and stays lowered.
+        `_validated_call` fires at a `key.method(...)` crossing, where revl owns
+        the receiving side: check the completion against `response_schema`, build
+        the declared value through `_ctor_map`, raise a typed fault when it does
+        not conform, honour the Slice-2 `retry` budget. That is the whole seam,
+        and this tier is the only one that has it.
+
+      * a `validated` EXTERN has no such crossing. The seam never fires, the
+        grammar is never offered, and the emitted module is byte-identical to the
+        same extern written WITHOUT `validated` (measured 829 chars either way on
+        c6e8847a5). On this carrier the python tier has exactly as little to give
+        as the five tiers PR #1381 made refuse, so it refuses the same way.
+
+    DECLARATION-keyed, matching `validated_boundary.validated_crossings`: the
+    extern wrapper reaches the emitted module whether or not this document also
+    calls it.
+
+    Deliberately NOT wired into `--target temporal`. That target READS this
+    modifier on an extern: `emit_temporal._retry_class` pins a `validated`
+    crossing to at-most-once so a completion is never re-billed as an idempotent
+    write, and its two renderings of one keyed extern differ (5807 vs 6507 chars,
+    `test_validated_pins_to_at_most_once_even_when_keyed`). A refusal there would
+    delete a tested guarantee.
+
+    Raised as `EmitError`, this tier's own refusal channel, so `emit.py` keeps
+    working when run standalone with no `revl` package importable.
+    """
+    for ext in ir.get("externs") or []:
+        if not ext.get("validated"):
+            continue
+        name = ext.get("name") or "?"
+        raise EmitError(
+            f"`validated` extern `{name}` needs a crossing this tier can check, "
+            f"and an extern is not one. The python tier validates a completion at "
+            f"a SERVICE-METHOD crossing, where revl owns the receiving side: it "
+            f"checks the response against the schema derived from the return "
+            f"type, builds the declared value from the validated payload, raises "
+            f"a typed validation fault when it does not conform, and honours the "
+            f"`retry` budget. An extern's host body IS the provider, so the seam "
+            f"has nowhere to fire and the derived grammar would be a claim "
+            f"nothing judges (see `_grammar_registry`). Lowering it anyway emits "
+            f"a module byte-identical to the same extern written WITHOUT "
+            f"`validated`: a checked boundary in the source and an unchecked one "
+            f"in the output, which no byte oracle can catch. So the tier refuses "
+            f"by name rather than answering with less than it was given (items "
+            f"257 and 513, issue #1382). Drop `validated` to accept an unchecked "
+            f"boundary, or declare the crossing as a `service` emission, which "
+            f"this tier lowers in full.")
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
     _refuse_holes(ir)
+    _refuse_validated_externs(ir)
     if ir.get("ir_version") not in (IR_VERSION, 2, 3):
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
 
