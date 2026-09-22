@@ -18,14 +18,14 @@
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
 }
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
   // the probe target: what module scope the emitted module was evaluated in.
   fn module_scope() -> Str
-  emission fn put(key: Str, value: Str)
+  emission[db] fn put(key: Str, value: Str)
 }
 
 // Verbatim host source on both tiers. The ts body is the point; the py body

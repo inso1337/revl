@@ -47,7 +47,7 @@ type Draft = { body: Str }
 service Store {
   fn get(id: Str) -> Opt[Note]
   fn list() -> List[Note]
-  emission fn create(draft: Draft) -> Str
+  emission[store] fn create(draft: Draft) -> Str
 }
 
 // ---------------------------------------------------------------- the driver

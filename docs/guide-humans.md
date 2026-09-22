@@ -301,6 +301,7 @@ below; the exhaustive per-command flag reference is
 | `revl metrics --trace FILE` | capability-aware runtime metrics over a `run --trace` JSONL: emissions by capability, failures by G-rule, average lifecycle duration | [revl-metrics.md](revl-metrics.md) |
 | `revl profile --trace FILE` | diff a component's declared emission surface against what a run actually emitted, flagging over-declaration | [revl-profile.md](revl-profile.md) |
 | `revl attest FILES` | sign a portable record that this exact composition was admitted (IR hash + verdict + guarantees + timestamp); `--verify` checks one, and `--certificate` signs a component certificate stating the per-guarantee coverage and caveats as well | [revl-attest.md](revl-attest.md) |
+| `revl pool init|request|join|status|withdraw` | stand up a private peer pool and admit peers to it: a signed charter, an append-only roster, an entry tier that is sent pure work only, and a withdrawal that says what it revokes, retains and orphans | [design/550-private-peer-pool.md](design/550-private-peer-pool.md) |
 | `revl dash` | the supervisor's cockpit: a read-only live view over a session or recorded run, the dependency graph, causal trace, and pending-decisions queue | [dash.md](dash.md) |
 | `revl serve --mcp FILES` | serve a booted composition's own provided operations as MCP tools (`--config`, `--composition`) | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp serve` | the compiler itself as an MCP server (`--files` default composition, `--restore SNAPSHOT.json`) | [mcp-bridge.md](mcp-bridge.md) |

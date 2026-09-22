@@ -100,14 +100,21 @@ def test_json_rejects_admitting_secret():
         parse_policy(doc)
 
 
-def test_secret_not_in_the_five_origins():
+def test_secret_is_not_a_taint_fold_origin():
+    """`secret` is refused by G-SECRET at the crossing (item 256), so it can
+    never be `admit`-ed. The set itself is pinned EXACTLY rather than by
+    membership: it is the set `approval.static_taint` intersects a component's
+    recorded taint with, so an origin silently missing from it is an origin
+    dropped from the taint an auto-approve decision is made against. `screen`
+    joined it with item 521 Slice 2, for exactly that reason."""
     assert "secret" not in TAINT_FOLD_ORIGINS
-    assert TAINT_FOLD_ORIGINS == frozenset({"web", "net", "fs", "model", "input"})
+    assert TAINT_FOLD_ORIGINS == frozenset(
+        {"web", "net", "fs", "model", "input", "screen"})
 
 
 def test_negative_guarantee_is_the_complement():
     rule = _only_rule("component a may auto-approve kv.get admitting web-taint")
-    assert rule.negative_guarantee() == frozenset({"net", "fs", "model", "input"})
+    assert rule.negative_guarantee() == TAINT_FOLD_ORIGINS - {"web"}
     bare = _only_rule("component a may auto-approve kv.get")
     assert bare.negative_guarantee() == TAINT_FOLD_ORIGINS
 
