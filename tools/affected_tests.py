@@ -1177,6 +1177,17 @@ def select(changed, root) -> dict:
             if f == "tools/gate_reference_census.py":
                 pytest_nodes.add("tests/test_oracle_construct_reach.py")
                 detail += " + construct-reach oracle"
+                # issue #1328: the self-evolution reward loads this module and
+                # redirects its `ROOT`, and `tools/evolution_reward.py` carries
+                # a copy of the census's `NEVER_BASELINED` and its baseline
+                # path that `test_the_scorer_mirrors_the_census_never_baselined
+                # _set` holds to equality. A census change that moved either ran
+                # neither, so `--record` against a prepared tree started raising
+                # on a sibling tool and main went red on a file no gate had
+                # selected. Third coupling on the same file; the two above are
+                # not the whole of what reads it.
+                pytest_nodes.add("tests/test_evolution_reward.py")
+                detail += " + self-evolution reward"
             reasons.append(f"{f} ({detail})")
             continue
         if f == "tools/check_site_wheel.py":

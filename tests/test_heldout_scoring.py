@@ -23,13 +23,15 @@ draw never reached the guard REFUSES instead of reporting clean.
 from __future__ import annotations
 
 import ast
+import functools
 import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -481,41 +483,168 @@ print(json.dumps({"verdict": record["verdict"], "files": sorted(files)}))
 '''
 
 
+BASELINE = "tools/gate_reference_census_baseline.json"
+
+
 def test_every_repo_path_the_scorer_names_is_classified():
     """The static half of the closure check.
 
     `sys.modules` cannot see a file loaded through `spec_from_file_location`
     without being registered, which is how the census loads the crate
-    generator and the python emitter. This reads the literal `ROOT / "..."`
-    joins out of the fenced files instead, so a newly named repo path has to
-    be classified before this passes.
+    generator and the python emitter. This reads the repo paths out of the
+    fenced files instead, so a newly named repo path has to be classified
+    before this passes.
 
     The files scanned are DERIVED from `HELD_OUT_FENCE`. They used to be a
     hand-written pair naming two of the five, and a path first named in
     `tools/build_gate_crate.py` was therefore scanned by nothing: the same
-    drift this test exists to catch, one level up. A fence entry this scanner
-    cannot parse is a refusal rather than a silent skip.
+    drift this test exists to catch, one level up. A fence entry no reader in
+    `_FENCE_READERS` handles is a refusal rather than a silent skip.
+
+    A DATA file on the fence is read, not exempted. The census baseline is on
+    the fence because the bypass allowance is read out of it, and it names
+    around ninety repo paths of its own: the corpus program each recorded
+    divergence is keyed on, and the `corpus_dirs` the census walks. Those
+    decide what the allowance covers exactly as the `ROOT / "..."` joins in
+    the fenced python do, so holding them is the same obligation. Exempting
+    the suffix would leave every one of them held by nothing, which is the
+    silence the refusal was added to remove.
     """
-    unscannable = [p for p in heldout.HELD_OUT_FENCE if not p.endswith(".py")]
+    unscannable = [p for p in heldout.HELD_OUT_FENCE if _fence_reader(p) is None]
     assert not unscannable, (
         "a fenced file this scanner cannot read, so paths it names are held "
         "by nothing: " + ", ".join(unscannable))
     named = set()
     for tool in heldout.HELD_OUT_FENCE:
-        named |= _root_joins(ROOT / tool)
+        named |= _fence_reader(tool)(ROOT / tool)
     assert named, "the scanner found no ROOT-relative path at all"
     unclassified = sorted(p for p in named if heldout.classify(p) is None)
     assert not unclassified, (
         "the scorer names repo paths in no category: "
         + ", ".join(unclassified))
 
+    # Not vacuous on the data half: a `.json` reader that returned an empty
+    # set would satisfy every assertion above while holding none of the
+    # corpus paths the allowance is keyed on. Anchored on the file's own
+    # contents rather than a count, so recording a divergence does not edit
+    # this.
+    recorded = {path
+                for entries in json.loads(
+                    (ROOT / BASELINE).read_text(encoding="utf-8"))["buckets"]
+                .values()
+                for path in entries}
+    assert recorded, "the baseline records no divergence to hold"
+    assert recorded <= named, sorted(recorded - named)
+
+
+def test_a_fenced_data_file_naming_an_unclassified_path_is_caught(tmp_path):
+    """The control for the case above, on the reader that was added for it.
+
+    The `.py` reader's failure direction is covered by the fence's own
+    history. This is the same failure one suffix over: a baseline that starts
+    keying an entry on a path in no category has widened what the allowance
+    covers from outside the subject, and the reader has to report it rather
+    than return an empty set.
+    """
+    blob = {
+        "buckets": {"false-admit/T1": ["tools/scorer_helper_nobody_declared.py"]},
+        "corpus_dirs": ["examples"],
+        "note": "not a path: tools/ and examples are named in prose here.",
+    }
+    # Outside the tree on purpose. A control written under `ROOT` has to be
+    # spelled here as a path, and this file is on the fence, so the closure
+    # check above would report the control itself as an unclassified path.
+    scratch = tmp_path / "baseline_control.json"
+    scratch.write_text(json.dumps(blob), encoding="utf-8")
+    named = _json_paths(scratch)
+
+    assert "tools/scorer_helper_nobody_declared.py" in named
+    assert heldout.classify("tools/scorer_helper_nobody_declared.py") is None
+    # The structured entries are read and the prose is not, the same boundary
+    # the python reader draws by reading `ROOT / "..."` joins and not comments.
+    assert "examples" in named
+    assert not any(" " in path for path in named)
+
+
+def test_a_fence_entry_no_reader_handles_still_refuses():
+    """#1314's refusal, kept after the `.json` reader closed its first case.
+
+    Teaching the scanner one data format must not turn the refusal back into
+    the skip it replaced: a suffix with no reader is still held by nothing.
+    """
+    assert _fence_reader("tools/heldout_scoring.py") is _root_joins
+    assert _fence_reader(BASELINE) is _json_paths
+    for unreadable in ("pyproject.toml", "crates/revl-gate/src/lib.rs",
+                       "selfhost/lower.rvl", "Makefile"):
+        assert _fence_reader(unreadable) is None
+
+
+@functools.lru_cache(maxsize=1)
+def _top_level_entries():
+    """The repository's own top-level names, read from the tree.
+
+    Derived rather than listed so a new top-level directory does not need
+    this file edited to be recognised as the start of a repo path.
+    """
+    return frozenset(entry.name for entry in ROOT.iterdir())
+
+
+_PATH_SHAPE = re.compile(r"[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*")
+
+
+def _json_paths(path: Path):
+    """Repo-relative paths a JSON data file names.
+
+    Every string in the document, at any depth and as a key as well as a
+    value, whose whole text is path-shaped and whose first segment is a
+    top-level entry of this repository. That is what picks
+    `examples/rejections/t13_unknown_match_case.rvl` and `tests/fixtures` out
+    of the baseline and leaves `false-admit/T1`, `no_objection` and the
+    reference messages alone.
+
+    Whole strings only. A path mentioned inside a sentence is not read, which
+    is the boundary the python reader already draws by reading `ROOT / "..."`
+    joins rather than comments, and stating it here keeps the two halves of
+    the scanner honest about the same limit instead of one of them pretending
+    to a reach it does not have.
+    """
+    out = set()
+    top = _top_level_entries()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(key)
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, str):
+            if _PATH_SHAPE.fullmatch(node) and node.split("/", 1)[0] in top:
+                out.add(node)
+
+    walk(json.loads(path.read_text(encoding="utf-8")))
+    return out
+
+
+#: The names a fenced python file may spell a repo path from, and the
+#: repo-relative prefix each one stands for. `TOOLS` exists because `ROOT` in
+#: `tools/gate_reference_census.py` answers two questions at once -- the tree
+#: under measurement, and where that tool's own sibling modules live -- and
+#: splitting them is what stops a redirected `ROOT` from looking for a tool
+#: inside the measured tree. The scanner has to know BOTH names: a base it
+#: does not know makes every path spelled from it invisible here, which is the
+#: same hole one spelling over.
+_PATH_BASES = {"ROOT": (), "TOOLS": ("tools",)}
+
 
 def _root_joins(path: Path):
-    """Repo-relative paths spelled `ROOT / "a" / "b"` in `path`.
+    """Repo-relative paths spelled `<base> / "a" / "b"` in `path`.
 
-    Only the MAXIMAL join of each chain: `ROOT / "tools" / "x.py"` contains
-    `ROOT / "tools"` as a sub-expression, and reporting the directory as well
-    as the file would make the classification ask about a prefix nobody wrote.
+    `<base>` is any name in `_PATH_BASES`. Only the MAXIMAL join of each
+    chain: `ROOT / "tools" / "x.py"` contains `ROOT / "tools"` as a
+    sub-expression, and reporting the directory as well as the file would make
+    the classification ask about a prefix nobody wrote.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     inner = {
@@ -537,11 +666,24 @@ def _root_joins(path: Path):
                 break
             parts.append(cursor.right.value)
             cursor = cursor.left
-        if not parts or not (isinstance(cursor, ast.Name)
-                             and cursor.id == "ROOT"):
+        if not parts or not isinstance(cursor, ast.Name) \
+                or cursor.id not in _PATH_BASES:
             continue
-        out.add("/".join(reversed(parts)))
+        out.add("/".join(_PATH_BASES[cursor.id] + tuple(reversed(parts))))
     return out
+
+
+#: How a fenced file is read for the repo paths it names, keyed by suffix. A
+#: fence entry whose suffix is absent here is REFUSED by
+#: `test_every_repo_path_the_scorer_names_is_classified`, never skipped: the
+#: fence decides what counts as a divergence, and a member nothing can read
+#: holds nothing.
+_FENCE_READERS = {".py": _root_joins, ".json": _json_paths}
+
+
+def _fence_reader(path: str):
+    """The reader for a fenced path, or None if no reader handles its suffix."""
+    return _FENCE_READERS.get(PurePosixPath(path).suffix)
 
 
 # --------------------------------------------------------------------------
