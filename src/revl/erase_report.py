@@ -17,6 +17,9 @@ artifact scoped to a single realm:
      reached host extern the realm's components make, read from the G8
      boundary surface (`revl.query.Composition`), each tagged as compensated
      (a `compensate` clause is attached) or bare (nothing was done about it).
+     A computer-use crossing is tagged with one of item 522's five residue
+     states instead, because `bare` covers three outcomes there and two of the
+     three readings are false for it.
 
   3. OTHER REALMS PROVABLY UNTOUCHED — the withdrawal cascade (`revl.query.
      withdrawal`, EXACT precision) of the realm's components. G2 makes each
@@ -56,6 +59,76 @@ ERASE_REPORT_KIND = "revl.erase-report"
 # the difference between "we deleted the data" (false) and "we can prove the
 # in-process state is gone and here is exactly what already left the system"
 # (what this artifact actually establishes).
+#: What an auditor must do about one computer-use crossing, one clause per
+#: residue state `ui_transaction` computes (roadmap item 522, issue #1293).
+#:
+#: THE VOCABULARY IS DERIVED, NOT RESTATED. `_residue_caveats` builds the
+#: printed lines from `uitx.WEAKEST_FIRST` and refuses to build them at all
+#: when the two sets differ, so the English note below and the states the
+#: report actually tags cannot drift apart. That is the same shape as the
+#: `layer_state.OUTCOMES` set-equality oracle in
+#: `tests/test_ui_transaction_phases_522.py`: one definition, checked, rather
+#: than a second copy kept by hand.
+#:
+#: The clause each state gets is the reason this mapping exists. One sentence
+#: used to cover all five, and it was false for two of them: it told an
+#: auditor that a crossing "left the system with nothing done about it ... so
+#: it can be handled out of band", which is wrong for `untouched` (a read
+#: changed nothing, so there is nothing to handle) and wrong for
+#: `uncompensated` (no inverse exists, so it cannot be handled by running
+#: one). Those two readings are what item 522 measured and what this note now
+#: states separately.
+OUT_OF_BAND: dict[str, str] = {
+    uitx.UNREGISTERED:
+        "an `unregistered` computer-use crossing left the system and an "
+        "inverse for it EXISTS that nobody declared. That one can be handled "
+        "out of band, and this report cannot tell you with what: the "
+        "declaration that would have named the inverse is the thing that is "
+        "missing.",
+    uitx.UNCOMPENSATED:
+        "an `uncompensated` computer-use crossing left the system and NO "
+        "inverse exists. It cannot be handled out of band by running one, and "
+        "no run of any compensation set changes that. It is residue and this "
+        "report names it as residue.",
+    uitx.COMPENSATED:
+        "a `compensated` computer-use crossing left the system and an offset "
+        "landed. The offset is not a restoration: the first crossing still "
+        "happened and anything that already observed it still observed it "
+        "(paper §6.1).",
+    uitx.RESTORED:
+        "a `restored` computer-use crossing had its declared inverse run and "
+        "the state the step changed is back the way it was. What the step "
+        "showed or sent on the way there still left the system; `restored` "
+        "is a claim about the target's state, not about observation.",
+    uitx.UNTOUCHED:
+        "an `untouched` computer-use crossing changed no state the target "
+        "owns. There is nothing to restore and nothing to handle out of "
+        "band, and a report that asks an auditor to handle it is wrong.",
+}
+
+
+def _residue_caveats() -> list[str]:
+    """The DOES NOT PROVE clauses for the computer-use residue states, weakest
+    first — one per state, built from `uitx.WEAKEST_FIRST` rather than written
+    out again.
+
+    FAILURE DIRECTION: a state that `ui_transaction` computes and this module
+    has no clause for fails the import, loudly, here. The alternative is a
+    report that tags a crossing with a word its own honest-scope header never
+    explains, and a header that goes quiet about a state is the defect this
+    function exists to prevent.
+    """
+    states, clauses = set(uitx.WEAKEST_FIRST), set(OUT_OF_BAND)
+    if states != clauses:
+        raise AssertionError(
+            "erase_report.OUT_OF_BAND and ui_transaction.WEAKEST_FIRST "
+            "disagree: no clause for "
+            f"{sorted(states - clauses) or 'nothing'}, clause for unknown "
+            f"state {sorted(clauses - states) or 'nothing'}. The DOES NOT "
+            "PROVE note must name every residue state the report can tag.")
+    return [OUT_OF_BAND[state] for state in uitx.WEAKEST_FIRST]
+
+
 HONEST_SCOPE = {
     "title": "What this report proves — and what it does not",
     "proves": [
@@ -79,8 +152,12 @@ HONEST_SCOPE = {
         "a downstream trigger, a webhook, a human that observed a crossing) is "
         "outside this system and outside this proof. The state-gone proof is "
         "about in-process runtime state only.",
-        "a bare crossing left the system with nothing done about it; the "
-        "report lists it precisely so it can be handled out of band.",
+        "a bare emission or bare host extern left the system with nothing "
+        "done about it; the report lists it precisely so it can be handled "
+        "out of band. `bare` is still the right word for those: nothing "
+        "classifies them more finely, and the two-state tag says everything "
+        "the boundary surface knows.",
+        *_residue_caveats(),
     ],
     "reference": "paper §6.1; docs/replay.md §4.2; docs/erase-report.md",
 }

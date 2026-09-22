@@ -27,7 +27,7 @@ and the honest map of what is missing are in
 | 2 | descending the ladder widens the reach and the drift gate fails | G8, item 21 | `revl audit --diff` lists six added crossings |
 | 3 | `emission[ui]` is refused | G8, item 521 | the root is not an enumerable boundary |
 | 4 | `emission[ui.drag]` is refused | G8, item 521 | the refusal enumerates the five real verbs |
-| 5 | screen content reaching a shell sink is refused | G9, item 249 | the diagnostic names the origin `screen.observe` |
+| 5 | screen content reaching a shell sink is refused, with and without the author's qualifier | G9, item 249 | the diagnostic names the origin class `screen` and the tainting path |
 | 6 | `ui.download` and `ui.click` may not declare `compensate`; `ui.text` must | G4, item 522 | three refusals, each naming the verb's class |
 | 7 | `confidential -> drafter` is refused | item 512 | the action, origin, role and residence, by name |
 | 8 | the operator's floor refuses the `ui.download` rung | item 33 | a policy violation with a why-trace |
