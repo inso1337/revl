@@ -1248,9 +1248,9 @@ def test_the_read_gap_that_closed_is_an_agreement_now(consumer):
 # --------------------------------------------------------------- fail closed
 
 
-def _generated_frontier() -> tuple[list[str], list[str], int]:
-    """The two lexical tables and the size bound the crate was GENERATED with,
-    read out of `src/frontier.rs`.
+def _generated_frontier() -> tuple[list[str], list[str], list[str], int]:
+    """The three tables and the size bound the crate was GENERATED with, read
+    out of `src/frontier.rs`.
 
     Read rather than hand-listed for a reason this test learned the hard way:
     the probes below used to name `.is_digit()` and `.str()`, item 391 ported
@@ -1264,15 +1264,19 @@ def _generated_frontier() -> tuple[list[str], list[str], int]:
         return re.findall(r'"([^"]+)"', match.group(1)) if match else []
 
     bound = re.search(r"MAX_SOURCE_BYTES: usize = (\d+);", src)
-    return table("EXCLUDED_KEYWORDS"), table("EXCLUDED_BUILTINS"), int(bound.group(1))
+    return (table("EXCLUDED_KEYWORDS"), table("EXCLUDED_BUILTINS"),
+            table("EXCLUDED_CAPABILITY_ROOTS"), int(bound.group(1)))
 
 
 def _frontier_probes() -> list[tuple[str, str]]:
     """One probe per live frontier trigger. The size bound is always live; the
-    two lexical tables contribute a probe only while they have an entry (both
-    are empty at this generation — the self-host lexes every reference keyword
-    and lowers every reference stdlib builtin)."""
-    keywords, builtins, bound = _generated_frontier()
+    three tables contribute a probe only while they have an entry. The two
+    lexical ones are empty at this generation (the self-host lexes every
+    reference keyword and lowers every reference stdlib builtin); the
+    capability-root one is NOT, because the self-host runs none of item 521's
+    admission rules and a no-objection there would be agreement by silence
+    (design `docs/design/532-typed-computer-use.md` §9)."""
+    keywords, builtins, roots, bound = _generated_frontier()
     probes = [("oversized source",
                "fn id(x: Int) -> Int { return x } " * (bound // 30 + 1))]
     if builtins:
@@ -1281,6 +1285,11 @@ def _frontier_probes() -> list[tuple[str, str]]:
     if keywords:
         probes.append((f"excluded keyword {keywords[0]}",
                        f"fn f() -> Int {{ {keywords[0]} }}"))
+    for root in roots:
+        probes.append((
+            f"reserved capability root {root}",
+            f"extern emission[{root}.observe] fn look(r: Str) -> Str\n"
+            f"  = @py {{ return \"\" }}\n"))
     return probes
 
 

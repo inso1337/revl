@@ -613,9 +613,27 @@ class TrustStore:
         return self.keys.get(kid)
 
 
-def _refusal(link: str, reason: str, **extra) -> dict:
-    return {"kind": RECEIPT_KIND, "version": RECEIPT_VERSION,
+def refusal_receipt(kind: str, version: str, link: str, reason: str,
+                    **extra) -> dict:
+    """The five fields every refusal receipt in this tree carries, in one
+    place: the record's `kind` and `version`, the REFUSE verdict, the named
+    LINK the check failed at, and the reason.
+
+    It takes `kind`/`version` rather than reading this module's because two
+    protocols mint refusals with this shape and they are DELIBERATELY not the
+    same record: `revl.deploy.receipt` is an admission decision about a bundle
+    and `revl.pool-receipt` is a join decision about a peer, and each is signed
+    in its own domain precisely so one can never be replayed as the other. What
+    they share is the field set, and that is what lives here. It was declared
+    twice before issue #1332, once in each module, with nothing holding the two
+    spellings together.
+    """
+    return {"kind": kind, "version": version,
             "verdict": REFUSE, "link": link, "reason": reason, **extra}
+
+
+def _refusal(link: str, reason: str, **extra) -> dict:
+    return refusal_receipt(RECEIPT_KIND, RECEIPT_VERSION, link, reason, **extra)
 
 
 def _parse_timestamp(value) -> Optional[float]:

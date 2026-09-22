@@ -30,7 +30,7 @@ it** rather than supplying a convincing placeholder. That choice is the whole
 discipline here. A demo with a stub in the middle is worse than an honest one
 with a gap, because the demo is the artifact people point at, and a stub in it
 becomes a claim the project did not earn. `demo/legacy_enterprise/run_demo.py`
-is the result: ten steps, 44 assertions, one command, no runtime, and a
+is the result: ten steps, 46 assertions, one command, no runtime, and a
 section 5 that lists what it does not show.
 
 ---
@@ -70,11 +70,11 @@ depends on it instead of quietly rewording the demo's output.
 | 2 | descending the ladder widens the reach and the drift gate fails | G8, item 21 | `revl audit --diff` lists six added crossings by token |
 | 3 | `emission[ui]` is refused | G8, item 521 | the refusal says the root is not an enumerable boundary |
 | 4 | `emission[ui.drag]` is refused | G8, item 521 | the refusal enumerates the five admissible verbs |
-| 5 | screen content reaching a shell sink is refused | G9, item 249 | the diagnostic names the origin `screen.observe` and the declared declassification points |
+| 5 | screen content reaching a shell sink is refused, with and without the author's qualifier | G9, item 249 | the diagnostic names the origin class `screen`, the tainting path and the declared declassification points |
 | 6 | `ui.download` and `ui.click` may not declare `compensate`; `ui.text` must | G4, item 522 | three refusals, each naming the verb's registry class |
 | 7 | `confidential -> drafter` is refused | item 512 | the refusal names the action, the origin, the role and the residence |
 | 8 | the operator's floor refuses the `ui.download` rung | item 33 | a policy violation with a why-trace through `fetch_receipt` |
-| 9 | the recovery status is bare for two crossings and compensated for one | G4, item 546 | `revl erase-report` and its own "compensation is not inversion" |
+| 9 | the recovery status is uncompensated for two crossings, restored for one and untouched for two | G4, item 546 | `revl erase-report` and its own "compensation is not inversion" |
 | + | the admitted whole is signed and the signature is checkable | item 127 | `revl attest`, then `--verify --against` accepting the original and rejecting a changed composition |
 
 Six of the ten steps are refusals. That is the intended proportion. The
@@ -90,11 +90,12 @@ became a command would be the failure this whole family exists to prevent. On
 this tree the program is refused with the origin named:
 
 ```
-untrusted value (screen.observe) flows into a shell command at argument 1
+untrusted value (screen) flows into a shell command at argument 1
 of `run` - untrusted input cannot directly create authority (G9)
 ```
 
-Section 4 states the part of that refusal which is not yet the system's doing.
+Section 4 states which part of that refusal is the system's doing and which
+is the author's, and how that split moved when item 521 slice 2 landed.
 
 ### 2.2 The irreversible step, and the word that may not cover it
 
@@ -170,6 +171,21 @@ appear as fenced blocks in this document instead, where
 Here is the agent's computer-use half, compiled by that gate:
 
 ```revl
+// Item 521 slice 4's target record. Any program declaring an actuation verb
+// carries it, and every field the registry names is required.
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
 extern emission[screen.observe] fn read_pane(region: Str) -> Untrusted[Str]
   = @py { return "" }
 
@@ -177,16 +193,16 @@ extern pure fn clear_amount_field()
   = @py { return None }
 
 // `ui.text` is compensatable, so the registry REQUIRES an inverse.
-extern emission[ui.text] fn type_amount(target: Str, amount: Str)
+extern emission[ui.text] fn type_amount(target: UiTarget, amount: Str)
   compensate clear_amount_field()
   = @py { return None }
 
 // `ui.click` is unknown and `ui.download` is irreversible. Neither may carry
-// a `compensate`, so both report bare.
-extern emission[ui.click] fn actuate(target: Str)
+// a `compensate`, so both report UNCOMPENSATED.
+extern emission[ui.click] fn actuate(target: UiTarget)
   = @py { return None }
 
-extern emission[ui.download] fn fetch_receipt(target: Str) -> Str
+extern emission[ui.download] fn fetch_receipt(target: UiTarget) -> Str
   = @py { return "" }
 ```
 
@@ -201,27 +217,33 @@ extern emission[ui.download] fn fetch_receipt(target: Str) -> Str
 
 ---
 
-## 4. The measurement that changed what this demo claims
+## 4. The measurement that changed what this demo claims, and how it moved
 
 Item 521's design says `screen` joins the source classes, so that the return
 of a `screen.observe` crossing is `Untrusted` **by derivation, not by an
 author's qualifier** - the direction item 249 insists on, because a
 classification an author can lower is one a careless author lowers.
 
-That is slice 2 and it has not landed. On main, `revl.taint._SOURCE_CLASS_SCOPES`
-is `{"web", "net", "fs", "model", "input"}` and `ui` is not in
-`_SINK_CLASS_SCOPES` either. Both halves were measured on this branch with one
-program and one edit:
+That is slice 2. When this demo was first written it had not landed: on the
+base at the time, `revl.taint._SOURCE_CLASS_SCOPES` was
+`{"web", "net", "fs", "model", "input"}` and `ui` was in neither that set nor
+`_SINK_CLASS_SCOPES`, so the demo asserted the gap under the label `MEASURED GAP`. Slice 2
+landed in PR #1284 and the label would now be a false claim, so the step
+asserts the derivation instead. Three outcomes, all asserted by the runner:
 
 * with the author's `-> Untrusted[Str]`, the shell sink is refused under G9 and
-  the message names `screen.observe`;
-* with the qualifier removed and nothing else changed, **the same program
-  admits**.
+  the message names the origin CLASS, `screen`, with the tainting path
+  `read_pane() -> run`;
+* with the qualifier removed and nothing else changed, under `--taint-strict`
+  **the same program is still refused**, on the derived origin class alone;
+* with the qualifier removed and no `--taint-strict`, it **admits**.
 
-So the refusal in step 5 is real and the discipline behind it is currently the
-author's. The demo asserts both outcomes, the second under the label
-`MEASURED GAP`, rather than showing only the refusal. A demo that printed the
-refusal alone would be making the project's argument on the author's behalf.
+The third bullet is not a leftover of the gap, it is the profile gate working:
+every item-249 derived class is gated on `taint_strict` so that a program
+compiled without it is unchanged, and slice 2's classes are gated the same way
+for the same reason. The demo asserts all three rather than only the first,
+because a qualifier an author can delete to turn a check off is not a
+containment, and a derivation nobody can watch fire is not a measurement.
 
 ---
 
@@ -255,17 +277,28 @@ enforcement belongs to whoever owns the loop and only the check belongs here.
 
 **5.4 There is no pause before the irreversible step.** The roadmap's exit
 text for item 525 asks for one, reusing the existing approval authority. It
-cannot be assembled today. `confirm-required` is a real class in
-`revl.ui_family`, and the registry's own text says no verb is born in it: it
-is the class a token is RAISED to by the operator's approval authority, and
-slice 1 of item 522 does not implement the raise
-(`docs/design/538-ui-transactions.md` section 6 carries the measurement). Item
-344 records the matching constraint from the other side: `await approval` is
-activation-body-only, so a per-call typed approval on a `ui.*` crossing makes
-the consuming component unadmittable. A `capability ui.click requires approval`
-rule was written on this branch and `revl audit --policy` reports the policy
-clean, because the gate the rule arms is a session gate and this demo has no
-session. Showing a pause here would have meant writing one.
+still cannot be assembled, but less of it is missing than when this document
+was first written, and the difference is worth stating precisely because the
+old text is now false in two places.
+
+`confirm-required` is a real class in `revl.ui_family`, and the registry's own
+text says no verb is born in it: it is the class a token is RAISED to by the
+operator's approval authority. Item 522 slice 2 (PR #1287) implements that
+raise, taking `docs/design/538-ui-transactions.md` section 6's third option,
+the operator-side one. It also removed the defect that made the raise useless
+as a static gate: `policy.approval_admission` was called only from
+`revl.mcp.session`, so `revl audit --policy` reported a composition clean and
+exited 0 while a session refused the same composition. It now runs the same
+gate, and `revl audit ladder.rvl --policy <a rule raising ui.click>` refuses
+this demo's own agent with a why-trace through `actuate`.
+
+What is still missing is the pause itself, and item 344 records why from the
+other side: `await approval` is activation-body-only, so a per-call typed
+approval on a `ui.*` crossing inside a `provide` method - which is where a
+computer-use loop lives - makes the consuming component unadmittable. So the
+operator can refuse the crossing before it ships and cannot yet be asked to
+confirm it while it runs. The demo's own policy raises nothing, so the gate
+does not fire on it; showing a pause here would still have meant writing one.
 
 **5.5 There is no postcondition verification.** The demo asserts admission-time
 facts. Verifying that the application's state actually changed after a
@@ -305,9 +338,11 @@ each one produces an artifact a reader can diff.
 **The execution half cannot be assembled yet**, and the blocking set is small
 and nameable: **item 539** (the substrate, upstream `revl-harness#11`), which
 5.1, 5.3 and 5.5 all reduce to; **item 538** (the provider side, upstream
-`revl-harness#10`) for 5.2; and **item 522 slice 2 plus item 344** for 5.4, the
-confirmation raise. Items 524 and the 515-520 batch widen the demo but block
-nothing in it.
+`revl-harness#10`) for 5.2; and **item 344** for the remaining half of 5.4,
+the per-call confirmation pause. Item 522 slice 2 (PR #1287) landed the
+operator-side raise and the static gate over it, so 5.4 is now a narrower
+gap than this document first recorded. Items 524 and the 515-520 batch widen
+the demo but block nothing in it.
 
 Two of those three are upstream on purpose. The review's own framing is that
 revl is the authority, policy, lifecycle, evidence and recovery kernel and the

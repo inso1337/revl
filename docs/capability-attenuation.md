@@ -43,13 +43,39 @@ unnameable host `*`). This is the spawner's *own* authority — deliberately
 lacks by routing it through one child into another.
 
 **Reached** — what an instance can actually do. A component's `emit` steps name
-the boundaries its code crosses (`_collect_emit_caps`): the required key of
-every emission, and `*` for a host emission or first-class dispatch that no key
-can name. Closed over the spawn graph, so a child that itself spawns a
-grandchild reaching `kv_c` *reaches* `kv_c` too. This is more precise than a
-component's *declared* emission surface: a worker that only ever emits through
-`kv_a` provably does not reach `kv_b`, whatever its service's bare `emission`
-promises — the reach is bounded by the keys it wires through `requires`.
+the boundaries its code crosses (`_collect_emit_caps_pairs`), and `*` for a host
+emission or first-class dispatch that nothing can name. Closed over the spawn
+graph, so a child that itself spawns a grandchild reaching `kv_c` *reaches*
+`kv_c` too. This is more precise than a component's *declared* emission surface:
+a worker that only ever emits through `kv_a` provably does not reach `kv_b`,
+whatever its service's bare `emission` promises — the reach is bounded by what
+it wires through `requires`.
+
+### What names a boundary here
+
+Both sides of the fold are spelled in the **boundary's** namespace, never in a
+component's local `requires` spelling. Two components wire the same boundary
+under whatever key each likes, so comparing keys compares two identifiers that
+name nothing in common — and renaming a child's key was enough to launder a
+boundary past the rule above.
+
+| the method being crossed | the element |
+|---|---|
+| declares `emission[db]` | the declared token, `db` |
+| declares `emission` with no list | the **service** it is declared on |
+| a host emission, or a first-class dispatch | the unnameable `*` |
+
+The middle row is item 561 (issue #1265): a method that declines to name what it
+reaches leaves the boundary with exactly one name it owns, the declaration it
+sits on. Naming it by the consumer's key instead made a parent wired `net: Net`
+and a child wired `net: Kv` compare equal, which is the same widening the top
+row refuses. `docs/design/561-undeclared-emission-boundary.md` has the
+measurement, including why `*` is the wrong element here even though it is the
+right one for a disjointness question.
+
+The G4 **provider** bound is a different question and still reads the wiring key
+(`docs/capabilities.md` §3), as does G6 confinement: a statement spells a key,
+so that is what those rules have to talk about.
 
 The check, at admission of every activation-body spawn:
 
