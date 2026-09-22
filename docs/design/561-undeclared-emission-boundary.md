@@ -186,9 +186,10 @@ fourth corner of that fixture family: one key, two services, no declaration.
   boundaries behind one service name. The element conflates them, exactly as the
   wiring key did and exactly as `*` would. Naming them apart means changing what
   the synthesizer spells, which is its own item.
-* **The kernel-boundary arm is closed** (issue #1265's exit step, below).
-  What it cost was not what this note predicted, and the gap is worth reading:
-  the number here was measured against the wrong rule.
+* **The kernel-boundary arm is still open.** Issue #1265's exit asks for one
+  more step after this one, and it is still not taken. The cost this note
+  quoted for it was wrong in both directions, which is the subject of the
+  section below.
 * **The G4 upper bound on a bare method is still absent.** A provider of a
   service whose method declares no token may emit through anything, and nothing
   in this note changes that: `_method_emissions`'s subset check runs only when
@@ -197,116 +198,113 @@ fourth corner of that fixture family: one key, two services, no declaration.
   what the *fold* does with a method that never declares one.
 
 
-## The kernel arm, and why its cost was mismeasured
+## The kernel arm, re-measured, and what actually blocks it
 
-Issue #1265's exit asks for one more step after the fold: that the undeclared
-element join the `*` arm in `kernel_boundary._undeclared`, so an undeclared
-reach is no longer read as provably disjoint from the kernel. This note
-deferred it on a measurement - 13 tests across 7 files, re-run from item 545's
-14 after PR #1292 declared this repository's own compositions - and called the
-remainder an operator-facing surface belonging to its own item.
+Issue #1265's exit asks that the undeclared element join the `*` arm in
+`kernel_boundary._undeclared`, so an undeclared reach is no longer read as
+provably disjoint from the kernel, and that
+`test_the_key_namespaced_residual_is_still_admitted` flip from documenting the
+gap to asserting its closure. Item 545 costed that at 14 tests across 7 files
+and this note re-measured 13 after PR #1292. Neither number was the cost of the
+step, and the step is still not takeable. Both halves of that are worth writing
+down, because the next lane will otherwise measure the same wrong thing twice.
 
-Re-measured at `32db56d9` the same experiment gives **17 tests across the same
-7 files**, not 13. It went UP, and the direction is the useful part: `main`
-grew four more tests that depend on the arm not firing. But the number was
-never the cost of the rule, because the rule it measures is not the rule the
-exit asks for.
+### The number was measuring the wrong rule
 
-### The namespace carries two facts
+Re-measured at `32db56d9`, making `_undeclared` true of the whole `svc:`
+namespace turns **17 tests red across the same 7 files**, up from 13.
 
+But that experiment does not implement the rule the exit asks for.
 `_held_capabilities_pairs` builds a `svc:` element on two different occasions:
 
 | occasion | what it means | is the reach undeclared? |
 |---|---|---|
 | a required service with a bare `emission` method | an effect is declared, its reach is not | **yes** |
-| a required service with NO emission method at all | there is no effect | **no - the opposite** |
+| a required service with NO emission method at all | there is no effect | **no, the opposite** |
 
 The second exists only so the coverage fold has a boundary identity to compare
-(the docstring says so: "a child cannot reach a non-emission service"). It is a
-proof that the wiring reaches nothing, and the tree enforces it: a provider of
-a plain `fn` that emits is refused under G4 with `` `Kv.get` is declared plain,
-but this implementation reaches `fs.write` ``.
+(its docstring says so: "a child cannot reach a non-emission service"). It is a
+proof that the wiring reaches nothing, and the tree enforces that proof: a
+provider of a plain `fn` that emits is refused under G4 with `` `Kv.get` is
+declared plain, but this implementation reaches `fs.write` ``.
 
-Once both are `Cap`s they are the same token shape, so a predicate that reads
-the namespace alone cannot tell them apart. Making `_undeclared` true of the
-whole `svc:` namespace therefore refuses a candidate that composes only **pure**
-services, which is the ordinary admitted turn. That is what 16 of the 17 reds
-are. The seventeenth is the pinned residual itself.
+Once both are `Cap`s the token cannot tell them apart, so a predicate that
+reads the namespace alone refuses a candidate composing only **pure** services,
+which is the ordinary admitted turn. That is what 16 of the 17 reds are.
 
-### The rule the exit actually asks for
+The rule the exit asks for has to ask the DECLARATIONS instead: the set of
+services with at least one `emission` method and no capability token, computed
+where the service table is and passed to the fold, rather than inferred from a
+token that never carried the fact. Measured that way at the same head the cost
+is **9 tests across 4 files**, not 17 and not 13.
 
-Answer the question where the declarations are. `lower._undeclared_emission_
-services` names the services with at least one `emission` method and no
-capability token; `_check_kernel_boundary` turns those into elements and passes
-them to `kernel_boundary.offending`, which keeps the judgement (an undeclared
-reach is not provably disjoint from the kernel) and stops inferring the fact
-from a token that never carried it.
+### Why the tightening still cannot land
 
-Measured the same way at the same head: **1 test across 1 file**, and it is
-`test_the_key_namespaced_residual_is_still_admitted`, the pin whose whole job
-was to flip; it does, as `test_the_undeclared_service_element_is_refused`. The
-other 150 tests in those 7 files pass unchanged and none is edited: the
-baseline there is 151 passed / 8 skipped, this branch 156 / 8, the five extra
-being new controls.
+The 9 reds are not the blocker either, and this is the part the earlier
+measurements never reached. **Eight of the nine are invisible without `cordis`
+installed**, because the modules that hold them skip entirely without it
+(`test_334_propose_handle_binding.py`, `test_gate_surface.py`,
+`test_replay.py`). A lane measuring on a plain frontend venv sees one red and
+concludes the step is free. It is not.
 
-The distinction this note drew between the two folds holds, and it is why the
-arm is takeable here rather than deferrable. The fold asks **coverage**, where
-`*` is the wrong element: `cap_order.covers(*, *)` is True, so resolving both
-sides of an undeclared emission to `*` admits the laundering. The kernel asks
-**disjointness**, where `*` is the right one: `cap_order.disjoint(*, x)` is
-False for every `x`. Both columns are pinned in
-`test_the_two_predicates_disagree_about_the_unnameable_element`, because the
-proposal that made `*` the fold element was argued from "covered by nothing"
-and that sentence is true of one predicate and false of the other.
+What the ninth and the eight are pointing at is this:
+`revl.mcp.server.AuthoringTrust.profile()` compiles **all** agent-authored
+source under `untrusted_author`, on the DEFAULT trust level, with only the
+reach allowlist left off. That is `revl_load` and `revl_swap`, not just
+`revl_admit`. So the tightening does not change what a per-turn candidate may
+reach; it changes what an agent may **load at all**. Concretely, with the arm
+live:
 
-### Why a bare `emission` is not provably disjoint from the kernel
-
-Not by analogy with `*`, and not because "undeclared" sounds like "unbounded".
-Because the declaration bounds nothing, and that is measurable on this tree:
-`_method_emissions` runs its subset check only when a token is declared, so
-
-```revl
-service Kv { emission fn put(k: Str) -> Str }
-component KvProvider requires fs: Fs provides kv: Kv {
-  provide kv { fn put(k) { emit fs.write("x") return "v" } }
-}
+```
+revl_load(examples/user_cache.rvl)  ->  REFUSED (G8), on the default trust
+                                        level, with nothing granted
 ```
 
-compiles. A candidate holding `kv: Kv` reaches whatever that provider reaches,
-and nothing in the composition states that it stops short of the kernel. Give
-`Kv.put` a token and the same candidate admits, because the reach is now a name
-the kernel's set can be compared against. One source, two declarations,
-opposite verdicts.
+`examples/user_cache.rvl` declares `Database.execute` and `Cache.put` as bare
+`emission`, and it is this repository's primary demo composition. PR #1292
+declined to give it tokens for a stated reason: it is pinned byte-for-byte to a
+hand-maintained reference IR (`examples/user_cache.ir.json`) that
+`tools/regen_goldens.py` feeds to every backend. The same applies to
+`examples/migrator.rvl`, to `stdlib/server.rvl`'s `Server` (whose provider is
+synthesized per `host` row, so no fixed token is true for every composition),
+and to the registry components (published release artifacts whose source bytes
+are attested).
 
-### What stops being accepted
+So the migration an operator would need is not one they can take. It is the
+composition half, on the files PR #1292 measured as unchangeable in place, and
+issue #1265 sequenced it first for exactly this reason: "the repair is to make
+the operator's services declare their tokens, not to start refusing programs
+that were admitted yesterday on a surface people are using."
 
-Scoped to `undeclared_reaches_kernel`, which is the untrusted-author profile
-and nothing else: `mcp.session.admit` and `revl_admit`, a non-first-party
-composition row, and the gate's candidate compile. The first-party tree is the
-subject of the loop rather than a candidate passing through admission, so its
-459 bare emission methods are untouched.
+### What the follow-up item needs
 
-A per-turn candidate is refused under `G8` when it wires a granted service
-whose `emission` method names no capability token. It is the candidate's
-`requires` that decides and not what it provides, and the declaration that
-decides may be the operator's rather than the candidate's: a turn does not
-redeclare the running composition's services, and the manifest's declarations
-are in the same table the fold reads
-(`test_the_granted_service_may_be_declared_only_in_the_running_manifest`).
+* The composition half finished on the declined files: `examples/user_cache.
+  rvl` and `examples/migrator.rvl` through their reference IR,
+  `stdlib/server.rvl`'s synthesizer, and the registry components through a
+  version bump.
+* The de-conflation above, which is a precondition and not an optimisation: the
+  arm is wrong without it, refusing every candidate that composes a pure
+  service.
+* Its own operator-facing announcement, stating that an agent's `revl_load` and
+  `revl_swap`, not only `revl_admit`, stop accepting a source that wires a
+  service whose `emission` names no token.
+* A measurement taken **with `cordis` installed**, or the eight reds that decide
+  the question are not observed at all.
 
-Three fixes, and an operator can take the third without owning the service:
-declare the token on the service's emission methods, drop the wiring, or stop
-granting that service to untrusted candidates.
+One design was considered and is recorded unmeasured rather than adopted:
+scoping the arm to a service the candidate does not itself provide, on the
+argument that a provider in the candidate's own source already contributes its
+reach to the fold, so the undeclared-ness is not load-bearing there. That would
+admit `examples/user_cache.rvl`, which provides its own `Database`. It is a new
+rule, it has not been checked against either predicate, and it is named here as
+a starting point for that item rather than as a conclusion.
 
-On this tree the granted-side services that spell `emission` bare are
-`stdlib/server.rvl`'s `Server` (`get`, `post`, `put`, `patch`, `delete`,
-`head`) and the registry's `Database.execute` and `Cache.put`
-(`audited_database`, `mysql_database`, `pg_database`, `user_cache`). Neither is
-repaired here, and neither is an oversight. PR #1292 stated why it declined
-both: the registry components are published release artifacts whose source
-bytes are attested, so editing one in place is a release rather than a
-refactor and they should carry tokens through a version bump; and `Server`'s
-provider is synthesized per `host` row with the extern named from the row's
-label, so no fixed token is true for every composition and making one true
-means changing what the synthesizer spells. An operator granting either to a
-per-turn candidate takes the third fix until those land.
+### The two predicates, since the arm turns on them
+
+The distinction this note drew holds and is now pinned as a test rather than as
+a sentence. The fold asks **coverage**, where `*` is the wrong element:
+`cap_order.covers(*, *)` is True, so resolving both sides of an undeclared
+emission to `*` admits the laundering. The kernel asks **disjointness**, where
+`*` is the right one: `cap_order.disjoint(*, x)` is False for every `x`. A
+proposal argued from "`*` is covered by nothing" is true of one predicate and
+false of the other, and that argument has already produced one regression.

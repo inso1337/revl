@@ -326,77 +326,48 @@ def test_the_formal_corpus_carries_the_undeclared_corner():
     assert "granting it `Kv`" in str(excinfo.value)
 
 
-# ---------------------------------------------- the kernel arm (the exit step)
+# ------------------------------------------- the two predicates, as a test
 #
-# The fold above asks COVERAGE. The admission kernel asks DISJOINTNESS, of the
-# same element, and gets a different answer: `cap_order.covers(*, *)` is True
-# while `disjoint(*, x)` is False, so `*` is fail-closed for one predicate and
-# fail-open for the other. Issue #1265's exit asks for the second question to
-# be answered, and these hold the two halves of that answer on one source.
-
-
-def _kernel_pair(declaration: str) -> str:
-    return """
-service Task { emission fn go() -> Int }
-service Bare { emission%s fn cross(row: Str) -> Int }
-
-component Candidate requires b: Bare provides task: Task {
-  provide task {
-    fn go() {
-      emit b.cross("x")
-      return 0
-    }
-  }
-}
-""" % declaration
+# The fold above asks COVERAGE. The admission kernel (item 544) asks
+# DISJOINTNESS, of the same element, and gets a different answer. The arms
+# measured above turn on that difference, and so does the kernel-boundary step
+# issue #1265's exit still leaves open, so it is pinned here rather than
+# restated in prose each time somebody proposes `*`.
 
 
 def test_the_two_predicates_disagree_about_the_unnameable_element():
-    """The measured trap, kept as a test rather than as a sentence.
+    """`*` is fail-OPEN for coverage and fail-CLOSED for disjointness.
 
     An earlier proposal made `*` the fold element on the strength of "covered
-    by nothing". That is true of `disjoint` and false of `covers`, so the
-    proposal was a regression - it admitted the laundering. Any future proposal
-    about `*` has to answer both columns, and this is where they are."""
+    by nothing". That sentence is true of `disjoint` and false of `covers`, and
+    the proposal was a regression: `covers(*, *)` is True, so resolving BOTH
+    sides of an undeclared emission to `*` admits the widening, which
+    `test_the_unnameable_star_arm_admits_the_widening` above measures. Any
+    future proposal about `*` has to answer both columns, and this is where
+    they are."""
     star = cap_order.Cap("*", ())
     named = cap_order.parse_cap("kernel.admission")
-    assert cap_order.covers(star, star) is True        # fail-OPEN for coverage
-    assert cap_order.disjoint(star, named) is False    # fail-CLOSED for it
+
+    assert cap_order.covers(star, star) is True      # fail-OPEN for coverage
+    assert cap_order.disjoint(star, star) is False   # fail-CLOSED for disjoint
+    assert cap_order.disjoint(star, named) is False  # disjoint from nothing
 
 
-def test_the_kernel_refuses_the_undeclared_wiring_and_admits_the_declared_one():
-    """One source, two declarations, opposite verdicts at the kernel boundary.
+def test_the_derived_element_is_provably_disjoint_from_a_named_boundary():
+    """And that is precisely why the kernel-boundary arm still admits it.
 
-    The undeclared spelling is refused because a bare `emission` bounds its
-    provider nowhere, so the candidate may reach whatever the provider reaches.
-    The declared spelling names a boundary the kernel's own set can be compared
-    against, and it admits. Scoped to the untrusted-author profile, which is
-    what `mcp.session.admit` compiles a per-turn candidate under."""
-    from revl.admit_profile import AdmissionProfile  # noqa: PLC0415
+    The element this note lands is a NAMEABLE token, so `disjoint` answers True
+    against a kernel token and `kernel_boundary` reads it as provably
+    independent. Closing that (issue #1265's remaining exit step) is therefore
+    not a matter of the order growing a rule; it is a matter of the kernel
+    check being told which `svc:` elements have an undeclared reach.
+    `docs/design/561-undeclared-emission-boundary.md` carries why it is still
+    open."""
+    named = cap_order.parse_cap("kernel.admission")
+    derived = lower._undeclared_cap("Kv")
 
-    profile = AdmissionProfile.untrusted_author({"Bare", "Task"})
-    with pytest.raises(RevlError) as excinfo:
-        compile_source(_kernel_pair(""), "candidate.rvl", profile=profile)
-    assert excinfo.value.code == "G8"
-    assert "wires `Bare`" in (excinfo.value.hint or "")
-    compile_source(_kernel_pair("[rowcap]"), "candidate.rvl", profile=profile)
-
-
-def test_the_kernel_arm_reads_the_declaration_not_the_namespace():
-    """A service with no emission method also produces a `svc:` element, and
-    it means the opposite: a plain `fn` bounds its provider under G4, so the
-    wiring reaches nothing. Refusing on the namespace alone refuses a candidate
-    that composes only pure services."""
-    from revl.admit_profile import AdmissionProfile  # noqa: PLC0415
-
-    src = """
-service Plain { fn ping(row: Str) -> Int }
-service Task { emission fn go() -> Int }
-component Candidate requires p: Plain provides task: Task {
-  provide task { fn go() { return p.ping("x") } }
-}
-"""
-    profile = AdmissionProfile.untrusted_author({"Plain", "Task"})
-    compile_source(src, "candidate.rvl", profile=profile)
-    assert lower._undeclared_emission_services(
-        {"Plain": type("S", (), {"methods": {}})()}) == frozenset()
+    assert cap_order.disjoint(derived, named) is True
+    assert cap_order.covers(derived, derived) is True
+    # `*` is top of the order and covers nothing but itself, in BOTH directions
+    assert cap_order.covers(cap_order.Cap("*", ()), derived) is False
+    assert cap_order.covers(derived, cap_order.Cap("*", ())) is False
