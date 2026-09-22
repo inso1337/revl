@@ -29,12 +29,27 @@ closed:
   `div_trunc`/`mod`/`to_str` (c6).
 
 Per-tier remainders (pre-existing, documented, NOT #548 language gaps): the wasm
-tier does not lower a `Float` value (c2) or an Opt method (c8). Those two assert
-wasm refuses; the other six emit on all six tiers — item 458 landed the
-method-body `for (x of xs)` walk, so c4/c7 (the old #681 remainder) now emit and
-run on wasm too.
+tier does not lower a `Float` value (c2) or an Opt method (c8). Each remainder
+asserts a NAMED refusal rather than being skipped. Item 458 landed the
+method-body `for (x of xs)` walk, so c4/c7 (the old #681 remainder) emit and run
+on wasm too.
+
+**Why the tier cases assert what came back, not that emit returned.** For months
+`lexer`, `money` and `normalizer` passed a case named "emits on all tiers" while
+go answered them with a package that had no component in it at all: go routed a
+document carrying a top-level `fn` to its pure typed-core path, which renders
+the declarations and DROPS every component it routes past, and raised nothing
+(issue #721). Three of these eight were in that state and the gate could not
+see it, because calling `emit(ir)` and discarding the result only ever tests
+that the emitter did not raise. `assert_tier_carried_the_components` closes
+that: every tier that returns must have the component's name and each of its
+provide-method names somewhere in what it returned. Issue #1321 made go carry
+those documents on the combined renderer, so all eight now emit on all six
+tiers, but the gate is what makes that claim checkable rather than assumed.
 """
 
+import copy
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -50,6 +65,58 @@ from _backend_import import backend_emitter  # noqa: E402
 from revl import RevlError, compile_files, compile_source  # noqa: E402
 
 ALL_TIERS = ["python", "typescript", "go", "java", "rust", "wasm"]
+
+
+def _emitted_text(tier, ir):
+    """What a tier answered with, as text. wasm answers with a dict of
+    sections rather than one source string; every check below is a substring
+    search, so render it once here instead of special-casing each call."""
+    out = backend_emitter(tier).emit(copy.deepcopy(ir))
+    return out if isinstance(out, str) else json.dumps(out, default=str)
+
+
+def _provide_method_names(comp):
+    for step in comp.get("body") or []:
+        for method in step.get("methods") or []:
+            yield method["name"]
+
+
+def _spellings(name):
+    """The name as written, PascalCase and camelCase. Tiers case-mangle a
+    method name (`positive_max` -> `PositiveMax` on go and java); the component
+    name itself is carried verbatim by all six, but accept the same set for it
+    so a future renaming convention does not read as a drop."""
+    parts = name.split("_")
+    return {name,
+            "".join(part.capitalize() for part in parts),
+            parts[0] + "".join(part.capitalize() for part in parts[1:])}
+
+
+def assert_tier_carried_the_components(tier, ir, text):
+    """A tier's `emit` RETURNING is not evidence that it rendered what it was
+    given (issue #721 / #1321).
+
+    go dropped every component of a document that also declared a top-level
+    `fn` and raised nothing, so three of the eight below passed a case named
+    "emits on all tiers" while go answered with a package that had no
+    component, no service and no route in it. Nothing catches an emitter that
+    renders less than it was given and says nothing: a wrong lowering is
+    caught by a byte oracle and a refusal by its message, but silence is caught
+    only by looking at what came back.
+
+    So look: every declared component's name, and every provide method it
+    declares, has to appear somewhere in the answer.
+    """
+    for comp in ir["components"]:
+        assert any(spelling in text for spelling in _spellings(comp["name"])), (
+            "%s returned %d bytes with no sign of component %r. A tier that "
+            "cannot carry a component must refuse by name, not answer with a "
+            "module the component is missing from"
+            % (tier, len(text), comp["name"]))
+        for method in _provide_method_names(comp):
+            assert any(spelling in text for spelling in _spellings(method)), (
+                "%s rendered component %r but not its provide method %r"
+                % (tier, comp["name"], method))
 
 
 # --------------------------------------------------------------------------- #
@@ -222,8 +289,8 @@ IN_MEMORY = [
     ("grader", GRADER, ALL_TIERS),
     ("stats", STATS, FIVE_TIERS),        # wasm: no Float value
     ("csv", CSV, ALL_TIERS),             # wasm method-body `for` landed (item 458)
-    ("lexer", LEXER, ALL_TIERS),
-    ("money", MONEY, ALL_TIERS),
+    ("lexer", LEXER, ALL_TIERS),    # go carries it since issue #1321
+    ("money", MONEY, ALL_TIERS),    # go carries it since issue #1321
     ("summarizer", SUMMARIZER, ALL_TIERS),  # wasm method-body `for` landed (item 458)
     ("config", CONFIG, FIVE_TIERS),      # wasm: no Opt method
 ]
@@ -267,13 +334,22 @@ def test_all_eight_components_present():
 def test_component_emits_on_supported_tiers(name, source, tiers):
     ir = compile_source(source)
     for tier in tiers:
-        backend_emitter(tier).emit(ir)  # raises on failure
+        # raises on failure, and `assert_tier_carried_the_components` is what
+        # makes NOT raising mean something (see its docstring)
+        assert_tier_carried_the_components(tier, ir, _emitted_text(tier, ir))
 
 
 def test_normalizer_emits_on_all_tiers(tmp_path):
+    # `use`d stdlib functions are top-level `fn`s in the compiled document, so
+    # the normalizer is the shape go used to route to the pure typed-core path
+    # and answer with a component-free package (#721). go carries it now
+    # (#1321), and this case checks the component is in the answer rather than
+    # that the call returned. That is the assertion that was missing while three of
+    # these eight passed it over a go package with no component in it.
     ir = _compile_with_stdlib(NORMALIZER, tmp_path)
+    assert ir["components"], "the case proves nothing without a component"
     for tier in ALL_TIERS:
-        backend_emitter(tier).emit(ir)
+        assert_tier_carried_the_components(tier, ir, _emitted_text(tier, ir))
 
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +366,32 @@ def test_wasm_remainder_is_a_clear_refusal(name, source, reason):
     with pytest.raises(Exception) as excinfo:
         backend_emitter("wasm").emit(ir)
     assert reason in str(excinfo.value)
+
+
+@pytest.mark.parametrize("name,source,component,helper", [
+    ("lexer", LEXER, "Describe", None),
+    ("money", MONEY, "Price", "format_cents"),
+])
+def test_go_carries_the_component_beside_the_top_level_declaration(
+        name, source, component, helper):
+    # issue #721 / #1321: these two are "realistic" in exactly the way the
+    # review meant, a helper `fn` or a `type` beside the component that uses
+    # it, and that is the shape go's pure typed-core routing used to drop.
+    # It answered `money` with 6185 bytes of stdlib preamble and two free
+    # functions: no services, no component, no routes, no error.
+    #
+    # go carries the document on the combined renderer now, so BOTH halves are
+    # in the answer: the top-level declaration the pure path was there for, and
+    # the component the pure path was dropping.
+    ir = compile_source(source)
+    out = backend_emitter("go").emit(ir)
+    assert_tier_carried_the_components("go", ir, out)
+    assert "stc.Component" in out, "the component is live, not a bare struct"
+    assert f'Name: "{component}"' in out
+    if helper:
+        assert f"func {helper}(" in out, (
+            "the top-level declaration the pure path was chosen for is still "
+            "rendered; carrying the component must not cost it")
 
 
 # --------------------------------------------------------------------------- #

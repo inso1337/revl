@@ -117,7 +117,15 @@ REDACTED_SECRET = "<redacted:secret>"
 # both, which is what keeps the permissive `Secret[T]` receiver rule unreachable
 # by a bound key and the total-refusal bound-key rule unreachable by a `Secret[T]`
 # value (CRITICAL 1 fix, §4a / §7).
-_ORIGIN_CLASSES = {"web", "net", "fs", "model", "input", "secret", "confidential"}
+# `screen` (item 521 Slice 2, docs/design/532-typed-computer-use.md §5) is an
+# ordinary origin class: a screenshot, an OCR result and a window title are
+# content, and `docs/prompt-injection-resistance.md` already states the rule for
+# content. It is listed HERE and not only in `_SOURCE_CLASS_SCOPES` because
+# `_origin_of` resolves an origin by the token's dotted head, so a class absent
+# from this set mints the literal token (`screen.observe`) as its origin, which
+# no source-class test, no `route model` arm and no policy rule would match.
+_ORIGIN_CLASSES = {"web", "net", "fs", "model", "input", "secret",
+                   "confidential", "screen"}
 
 # The same set, public and frozen, for the surfaces that key a DECLARATION by an
 # origin class rather than derive one: `route model`'s arms (item 512,
@@ -130,11 +138,27 @@ ORIGIN_CLASSES = frozenset(_ORIGIN_CLASSES)
 # `_sink_of`/`_origin_of` are the derivation, `_SINK_CLASS_SCOPES` the sink-class
 # set of residual-risk 5. `policy` binds the moment a policy-writing crossing
 # exists in-language (none does today; the scope is reserved so the row is ready).
-_SINK_CLASS_SCOPES = {"shell", "exec", "terminal", "policy"}
+#
+# `ui` (item 521 Slice 2) is a sink class for the same reason `shell` is: a UI
+# actuation is a position where the value IS the authority. Which control gets
+# clicked, which field receives generated key input, which target is fetched to
+# the host — each is chosen by the argument, so an untrusted argument chooses
+# the boundary crossing. The head rule is refined by ONE verb: `ui.find` is a
+# source and not a sink (`ui_family.is_taint_sink`, and the argument is written
+# down there), because it is the family's declared consumer of observed content.
+_SINK_CLASS_SCOPES = {"shell", "exec", "terminal", "policy", "ui"}
 # scopes whose emission return mints a source under taint-strict mode. `secret`
 # is deliberately excluded — it arrives with item 256's own bound-emission rule,
 # not the generic strict derivation.
-_SOURCE_CLASS_SCOPES = {"web", "net", "fs", "model", "input"}
+#
+# `screen` (item 521 Slice 2) is here so that screen-derived content is untrusted
+# BY DERIVATION rather than by an author remembering to write `Untrusted[Str]`.
+# Measured on `dfecba2a` before this landed: with the qualifier written out, a
+# screen-derived value reaching a shell sink was refused under G9; with the
+# qualifier removed and nothing else changed, the same program was admitted. That
+# is the fail-open direction, and it contradicts item 521's own premise that
+# every UI target is untrusted input rather than a trusted reference.
+_SOURCE_CLASS_SCOPES = {"web", "net", "fs", "model", "input", "screen"}
 
 
 def _model_crossing_of(capabilities) -> str | None:
@@ -154,10 +178,23 @@ def _sink_of(capabilities) -> str | None:
     """The derived sink-class a crossing's capability scope grants (Slice D), or
     `None` when the scope is not a sink. Sibling of `_origin_of`: a shell / exec /
     terminal-scoped crossing is a sink even with no `Trusted[T]` qualifier, because
-    sink-ness comes from the side that grants authority, not from the author."""
+    sink-ness comes from the side that grants authority, not from the author.
+
+    One refinement below the head, and it is the registry's call rather than
+    this module's: a computer-use token under the `ui` root is a sink only when
+    `ui_family.is_taint_sink` says so, which excludes `ui.find` (item 521
+    Slice 2, design §5 — `ui.find` consumes observed content and produces a
+    claim, so treating its arguments as authority would make the family's own
+    observe/find/click program unwritable without endorsing the observation
+    before anything had looked at it)."""
+    from . import ui_family as _uif  # noqa: PLC0415 - leaf module, no cycle
+
     for cap in capabilities or ():
-        head = str(cap).split(".", 1)[0]
+        token = str(cap).split("(", 1)[0]
+        head = token.split(".", 1)[0]
         if head in _SINK_CLASS_SCOPES:
+            if _uif.is_reserved(token) and not _uif.is_taint_sink(token):
+                continue
             return head
     return None
 
@@ -384,9 +421,22 @@ def witness_receiver_position(decl, declared_params: dict) -> bool:
 def _origin_of(capabilities) -> str:
     """The coarse origin label a crossing mints, derived from its declared
     capability scope, never guessed (Decision 2, the G8 caveat). `emission[web]`
-    -> `web`; `emission[web.fetch]` -> `web`; an unscoped crossing -> `input`."""
+    -> `web`; `emission[web.fetch]` -> `web`; an unscoped crossing -> `input`.
+
+    The computer-use registry is consulted FIRST, for the one token whose head
+    does not answer the question: `ui.find`'s head is the SINK root, so the head
+    rule would mint the literal string `ui.find` as an origin that no source
+    class, no `route model` arm and no `<origin>-taint` policy rule matches. It
+    mints `screen`, because what makes a resolved target untrusted is that it
+    was derived by looking at a screen (item 521 Slice 2, design §5)."""
+    from . import ui_family as _uif  # noqa: PLC0415 - leaf module, no cycle
+
     for cap in capabilities or ():
-        head = str(cap).split(".", 1)[0]
+        token = str(cap).split("(", 1)[0]
+        ui_origin = _uif.source_origin(token)
+        if ui_origin is not None:
+            return ui_origin
+        head = token.split(".", 1)[0]
         if head in _ORIGIN_CLASSES:
             return head
         return str(cap)
@@ -484,6 +534,13 @@ class TaintModel:
     # program that declares no `route model` block, and a component absent from
     # it declared none, which is the fact the `unrouted` verdict reads.
     model_routes: dict = field(default_factory=dict)
+    # item 512 slice 4: the program's validated `model role` table, as
+    # `{name: Role}`, from the same `revl.model_route` pass. It is what makes a
+    # `model.<tail>` capability token readable as a PLACEMENT rather than as an
+    # operation name: the tail names a role only when a role by that name was
+    # declared, so a program that declares none leaves every `model.*` crossing
+    # exactly the operation token it has always been.
+    model_roles: dict = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
@@ -494,20 +551,40 @@ class TaintModel:
         through `secret_receivers` (item 256 Slice 3); a `route` clause engages it
         through `untrusted_params` (item 457 — a routed operation's parameters are
         request values, so the operation carries an `input` origin whether or not
-        the author wrote a qualifier)."""
+        the author wrote a qualifier).
+
+        A `route model` block engages it too, through `model_routes` (item 512
+        slice 4). That entry is NOT a taint surface and is the odd one here, so
+        the reason is worth writing down: the crossing side asks where a call
+        GOES, which is a property of the capability token and the block, and no
+        value has to be tainted for the question to have an answer. Gating it
+        behind a qualifier would make a placement rule that fires only on the
+        programs that happen to carry one - a rule silently inactive over most
+        of its own surface, which is the fail-open shape the item exists to
+        remove. A program with no block is unaffected, so nothing that compiles
+        today starts walking."""
         return bool(self.sources or self.sinks or self.untrusted_params
                     or self.declassifiers or self.declared_endorse
                     or self.secret_receivers or self.secret_config
-                    or self.retained_params or self.retention_policies)
+                    or self.retained_params or self.retention_policies
+                    or self.model_routes)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
     """A best-effort human name for a sink, for the diagnostic (Decision 4)."""
-    caps = {str(c).split(".", 1)[0] for c in (capabilities or ())}
+    from . import ui_family as _uif  # noqa: PLC0415 - leaf module, no cycle
+
+    caps = {str(c).split("(", 1)[0].split(".", 1)[0]
+            for c in (capabilities or ())}
     if "shell" in caps or "terminal" in caps or "exec" in caps:
         return "a shell command"
     if "policy" in caps:
         return "a policy update"
+    # item 521 Slice 2: named by the ROLE, not the root, so the diagnostic says
+    # what makes the position authority. `ui.find` never reaches here (it is not
+    # a sink), so the phrase is never printed for a read.
+    if any(_uif.is_taint_sink(str(c)) for c in (capabilities or ())):
+        return "a UI actuation"
     if "cap" in caps or "capability" in caps:
         return "a capability name"
     return f"the trusted sink `{name}`"
@@ -1516,6 +1593,7 @@ class _FlowChecker:
                                             node, via)
                     self._check_model_ceiling(cross, cap, [arg_taints[index]],
                                               node, via, first_index=index)
+                    self._check_model_reach(cross, cap, node)
 
     def _on_sink(self, sink_name: str, kind: str, index: int, arg_taint: Taint,
                  node, internal_via: tuple) -> None:
@@ -1663,6 +1741,52 @@ class _FlowChecker:
                     self.filename, self._line_of(node), message,
                     hint=hint, code=_mr.CODE, category=_mr.CATEGORY,
                 )
+
+    def _check_model_reach(self, crossing: str, capability: str, node) -> None:
+        """The crossing side of the model placement (item 512, slice 4).
+
+        `check()` decided which roles the action MAY reach; this decides which
+        it DOES. A crossing whose declared capability is `model.<R>`, with `R`
+        a declared `model role`, is placed on `R`, and an action that wrote a
+        `route model` block reaches exactly the roles that block names. A
+        crossing on any other role is refused.
+
+        WHICH WAY IT FAILS. Toward refusing, and it never widens: the block is
+        the complete list, so the answer to "this crossing goes somewhere the
+        block does not name" is a refusal and not an added arm. That is the
+        property item 515's own inheritance note asks for - a scheduler must
+        not be able to pick a role no arm names - and a permission that a later
+        item can widen from the outside is not a permission.
+
+        WHAT IT DELIBERATELY DOES NOT DO. An action with NO block is untouched,
+        the same line `admits()` draws for an unrouted component: a program
+        that declared no placement is judged by the rules that judged it before
+        item 512, and making `route model` mandatory is a different item. A
+        program that declares no `model role` is untouched twice over, because
+        `role_of_crossing` then reads every `model.*` token as the operation
+        name it has always been.
+
+        It runs AFTER the origin ceiling at both call sites, on purpose. A
+        crossing can be both misplaced and carrying a confidential value, and
+        the value side is the half a confidential input can actually be lost
+        through, so its diagnostic is the one the author should see first.
+        """
+        from . import model_route as _mr  # noqa: PLC0415 - import cycle
+
+        if self.infer or not self.enforce:
+            return
+        if not self.action or self.route_arms is None:
+            return
+        role = _mr.role_of_crossing(capability, self.model.model_roles)
+        if role is None or role in _mr.reach_of(self.route_arms):
+            return
+        message, hint = _mr.reach_refusal(
+            role, self.action, self.component or "this component", crossing,
+            capability, self.route_arms)
+        raise RevlError(
+            self.filename, self._line_of(node), message,
+            hint=hint, code=_mr.CODE, category=_mr.CATEGORY,
+        )
 
     def _refuse_secret(self, sink_name: str, kind: str, index: int | None,
                        arg_taint: Taint, node) -> None:
@@ -2197,6 +2321,7 @@ class _FlowChecker:
         if _mcap is not None:
             self._on_model_crossing(callee, _mcap, arg_taints, node, (callee,))
             self._check_model_ceiling(callee, _mcap, arg_taints, node)
+            self._check_model_reach(callee, _mcap, node)
 
         # item 472: a retained value reaching a PERSISTENCE SINK. Checked in the
         # same position as the disclosure crossing above, and before the

@@ -316,3 +316,170 @@ def test_cli_missing_key_errors(tmp_path, capsys, monkeypatch):
     rc = main(["attest", comp])
     assert rc == 1
     assert "no signing key" in capsys.readouterr().err
+
+
+# ------------------------------------------------- composition identity vs path
+#
+# Issue #1276, triaged as INCIDENTAL rather than deliberate. The compiler
+# stamps each component with the path it was compiled from
+# (`components[*].source`, mirrored into `manifest.components[*].file`) and
+# spells it relative to the WORKING DIRECTORY, so `attest.canonical_hash` was
+# hashing where the file sat as well as what it said.
+#
+# Nothing in the project ever decided that. The opposite is decided four times
+# over: `docs/bundle.md` resolves a named design fork with "The result is
+# location-independent: a bundle built in one directory verifies from any
+# other"; roadmap item 305 records the bundle's own version of this as a bug it
+# FIXED ("an IR path-normalization bug so verify is location-independent");
+# `docs/design/474-component-certificates.md` keeps `subject.filename` out of
+# identity on purpose ("the same bytes under another path verify"); and
+# `bundle`, `registry` and `truc reproduce` each already stripped these exact
+# fields before hashing, two of them from copies that had drifted apart. The
+# plain `revl attest` path — the one with no bundle around it — was the single
+# producer that never got the normalization, because the normalization lived in
+# the callers instead of at the boundary where the hash is taken.
+#
+# These tests pin the verdict so the next reader does not re-derive it.
+
+def test_identical_bytes_at_two_paths_attest_to_one_composition_hash(tmp_path):
+    """The exit criterion of #1276. Two copies of one composition, byte for
+    byte, in two directories: one identity."""
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "a.rvl").write_text(BASE)
+    (right / "a.rvl").write_text(BASE)
+
+    from revl.compiler import compile_files  # noqa: PLC0415
+
+    assert (A.canonical_hash(compile_files([str(left / "a.rvl")]))
+            == A.canonical_hash(compile_files([str(right / "a.rvl")])))
+
+
+def test_one_file_verifies_against_itself_under_another_path_spelling(
+        tmp_path, capsys, monkeypatch):
+    """The failure that made this worth fixing rather than documenting.
+
+    ONE unchanged file, named by two spellings of its own path (absolute, then
+    bare from inside its own directory). Before the fix the second spelling
+    reported `hash mismatch: the composition changed since it was attested` —
+    a false statement about a file nobody touched, and the worst one to print,
+    because a consumer who meets it learns to ignore hash mismatches."""
+    home = tmp_path / "checkout"
+    home.mkdir()
+    comp = home / "a.rvl"
+    comp.write_text(BASE)
+    keyf = _key_file(tmp_path)
+
+    assert main(["attest", str(comp), "--key", keyf, "--json"]) == 0
+    att_path = tmp_path / "att.json"
+    att_path.write_text(capsys.readouterr().out)
+
+    monkeypatch.chdir(home)
+    rc = main(["attest", str(att_path), "--verify", "--against", "a.rvl",
+               "--key", keyf])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "VALID" in out
+
+
+def test_a_changed_composition_under_the_same_basename_still_mismatches(
+        tmp_path, capsys):
+    """Normalizing the path must not cost the check its teeth: identity is
+    location-independent, not content-independent. Same basename, different
+    directory, DIFFERENT composition — still a hash mismatch."""
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "a.rvl").write_text(BASE)
+    (right / "a.rvl").write_text(CHANGED)
+    keyf = _key_file(tmp_path)
+
+    assert main(["attest", str(left / "a.rvl"), "--key", keyf, "--json"]) == 0
+    att_path = tmp_path / "att.json"
+    att_path.write_text(capsys.readouterr().out)
+
+    rc = main(["attest", str(att_path), "--verify", "--against",
+               str(right / "a.rvl"), "--key", keyf])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "hash mismatch" in out
+
+
+def test_the_repair_is_at_the_hashing_boundary_and_not_in_the_ir(tmp_path):
+    """Where the fix is NOT. The canonical IR spelling is a project invariant —
+    `selfhost/*.rvl` must reproduce the reference's IR bytes exactly, so moving
+    it moves every emit oracle, both gate crates and the census at once. The
+    compiled IR still carries the path it was compiled from, for diagnostics
+    and why-traces; only `canonical_hash` normalizes, and only for the hash."""
+    from revl.compiler import compile_files  # noqa: PLC0415
+    from revl import formatter  # noqa: PLC0415
+
+    import os  # noqa: PLC0415
+
+    left = tmp_path / "deep" / "nested"
+    right = tmp_path / "elsewhere"
+    left.mkdir(parents=True)
+    right.mkdir()
+    (left / "a.rvl").write_text(BASE)
+    (right / "a.rvl").write_text(BASE)
+    ir = compile_files([str(left / "a.rvl")])
+    other = compile_files([str(right / "a.rvl")])
+
+    # The IR itself is unchanged: it still names where it came from, so a
+    # diagnostic and a why-trace can still point at the file on disk. The two
+    # canonical IR documents therefore still DIFFER...
+    assert all(os.path.dirname(c["source"]) for c in ir["components"])
+    assert formatter._canonical_ir(ir) != formatter._canonical_ir(other)
+    # ...while the two identities agree. That is the whole shape of the repair.
+    assert A.canonical_hash(ir) == A.canonical_hash(other)
+
+    # and `path_normalized_ir` never mutates its argument
+    normalized = A.path_normalized_ir(ir)
+    assert normalized is not ir
+    assert all(os.path.dirname(c["source"]) for c in ir["components"])
+    assert all(c["source"] == "a.rvl" for c in normalized["components"])
+
+
+def test_one_definition_of_the_normalization(tmp_path):
+    """`truc.reproduce._normalized_ir` records what two copies of this rule
+    cost last time: a near-copy missed `components[].source`, so the reproduce
+    tier could never match an attestation the publisher had signed, and a dead
+    check cannot fail. Every producer now routes through one function."""
+    from revl.compiler import compile_files  # noqa: PLC0415
+    from revl import bundle, registry  # noqa: PLC0415
+    from revl.truc import reproduce  # noqa: PLC0415
+
+    comp = tmp_path / "a.rvl"
+    comp.write_text(BASE)
+    ir = compile_files([str(comp)])
+    expected = A.canonical_hash(ir)
+
+    for produced in (bundle._canonical_ir(ir),
+                     registry._normalize_ir_for_attest(ir),
+                     reproduce._normalized_ir(ir),
+                     A.path_normalized_ir(ir)):
+        assert A.canonical_hash(produced) == expected
+    # idempotent: normalizing an already-normalized document is a no-op
+    assert (A.path_normalized_ir(A.path_normalized_ir(ir))
+            == A.path_normalized_ir(ir))
+
+
+def test_documents_that_carry_no_source_path_hash_over_unchanged_bytes():
+    """`canonical_hash` is also the identity of documents that are not
+    compositions at all — a TEE bundle or result (`tee_attestation`), a
+    retention report (`erasure_receipt`), a conformance corpus
+    (`tools/conformance_cert.py`). Those hashes must not have moved, so the
+    normalization is a no-op, returning the caller's own object, whenever
+    there is no cwd-dependent path to rewrite."""
+    import hashlib  # noqa: PLC0415
+
+    for doc in ({"kind": "revl.tee.bundle", "measurement": "ab" * 32},
+                {"report": {"replicas": 3}, "components": ["not", "rows"]},
+                {"components": [{"name": "A", "source": "a.rvl"}]},
+                {"manifest": {"components": [{"name": "A", "file": "a.rvl"}]}}):
+        assert A.path_normalized_ir(doc) is doc
+        assert (A.canonical_hash(doc)
+                == hashlib.sha256(A._canonical_bytes(doc)).hexdigest())

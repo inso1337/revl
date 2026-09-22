@@ -75,6 +75,86 @@ def test_honest_scope_header_is_present(realms_ir):
     assert "enumerates" in blob and "does not undo" in blob
 
 
+# ------------------------------- the note and the states are one definition
+#
+# Issue #1293. The header used to carry ONE sentence for every crossing it
+# could not undo: "a bare crossing left the system with nothing done about it
+# ... so it can be handled out of band". Item 522 split the per-crossing lines
+# into five states and left that sentence alone, so the render printed it
+# directly above the `[UNCOMPENSATED]` and `[untouched]` lines that refute it.
+#
+# These are the set-equality oracle, the same shape as the `layer_state.
+# OUTCOMES` one in `tests/test_ui_transaction_phases_522.py`: the English note
+# is DERIVED from the computed vocabulary, so neither can grow a word the
+# other does not have.
+
+
+def test_every_residue_state_has_a_clause_and_no_clause_invents_a_state():
+    """`OUT_OF_BAND` is keyed by the states `ui_transaction` computes, exactly.
+    A sixth state there with no clause here would print a tag the header never
+    explains; a clause here for a state the report cannot tag would be the
+    header describing something that never appears."""
+    from revl import ui_transaction as uitx
+    assert set(erase_report.OUT_OF_BAND) == set(uitx.WEAKEST_FIRST)
+
+
+def test_the_note_is_built_from_the_state_order_not_written_out_again():
+    """Weakest first, one line per state, in `WEAKEST_FIRST` order. Reading
+    the clauses off that tuple is what makes the two sets unable to disagree;
+    an equal-but-hand-kept list would pass the set check above and still drift
+    in order or wording."""
+    from revl import ui_transaction as uitx
+    caveats = erase_report._residue_caveats()
+    assert caveats == [erase_report.OUT_OF_BAND[s] for s in uitx.WEAKEST_FIRST]
+    assert [line for line in erase_report.HONEST_SCOPE["doesNotProve"]
+            if line in caveats] == caveats
+
+
+def test_a_state_with_no_clause_fails_loudly_rather_than_going_unsaid(
+        monkeypatch):
+    """The failure direction. A state added to `ui_transaction` with nothing
+    said about it here must break this module, not silently leave the header
+    quiet about a tag the report prints."""
+    from revl import ui_transaction as uitx
+    monkeypatch.setattr(
+        uitx, "WEAKEST_FIRST", uitx.WEAKEST_FIRST + ("invented",))
+    with pytest.raises(AssertionError) as refused:
+        erase_report._residue_caveats()
+    assert "invented" in str(refused.value)
+
+
+def test_the_note_no_longer_claims_an_uncompensated_crossing_can_be_handled(
+        realms_ir):
+    """The measured defect. `uncompensated` means no inverse EXISTS, so the
+    one thing the old sentence promised an auditor - run it out of band - is
+    the one thing that cannot be done."""
+    report = erase_report.build_report(realms_ir, "alpha", prove_residue=False)
+    lines = report["honestScope"]["doesNotProve"]
+    assert not any(line.startswith("a bare crossing left the system")
+                   for line in lines)
+    unc = erase_report.OUT_OF_BAND["uncompensated"]
+    assert "no inverse exists" in unc.lower()
+    assert "cannot be handled out of band" in unc
+
+
+def test_the_note_says_a_read_needs_no_handling_at_all():
+    """`untouched` is the other false reading: `read_pane` is `screen.observe`
+    and changed nothing, so asking an auditor to handle it is the report
+    over-reporting its own residue."""
+    unt = erase_report.OUT_OF_BAND["untouched"]
+    assert "nothing to handle out of band" in unt
+    assert "changed no state the target owns" in unt
+
+
+def test_emissions_keep_the_word_bare_because_it_is_still_correct_for_them():
+    """Only computer-use crossings gained the finer vocabulary. An emission
+    with no `compensate` clause is still `bare`, the headline counts still
+    call it that, and the header still says what `bare` means."""
+    blob = " ".join(erase_report.HONEST_SCOPE["doesNotProve"])
+    assert "a bare emission or bare host extern left the system" in blob
+    assert "`bare` is still the right word for those" in blob
+
+
 def test_render_leads_with_scope_and_names_the_realm(realms_ir):
     report = erase_report.build_report(realms_ir, "alpha", prove_residue=False)
     text = erase_report.render(report)
@@ -211,7 +291,10 @@ def test_no_residue_proof_holds_over_a_real_teardown(realms_ir):
 def test_report_is_a_versioned_self_describing_document(realms_ir):
     report = erase_report.build_report(realms_ir, "beta", prove_residue=False)
     assert report["kind"] == "revl.erase-report"
-    assert report["schema_version"] == "1.0"
+    # 1.1: item 522 added the additive `boundaryCrossings.uiResidue`
+    # member (a computer-use split), absent for a realm that crosses
+    # no computer-use verb. MINOR, per the module's own rule.
+    assert report["schema_version"] == "1.1"
     assert report["realm"] == "beta"
     # round-trips through JSON without loss (it is an interchange artifact)
     assert json.loads(json.dumps(report)) == report

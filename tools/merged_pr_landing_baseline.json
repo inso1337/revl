@@ -1,0 +1,30 @@
+{
+  "comment": [
+    "Pull requests GitHub reports as MERGED whose merge commit is not reachable",
+    "from `main`, and which tools/check_merged_prs_landed.py therefore reports",
+    "as KNOWN rather than as a finding. Issue #1342.",
+    "",
+    "Every entry was merged into a base branch other than `main`. Two things",
+    "produce that: a base branch that had already been squash-merged, which",
+    "strands the work; and a stacked PR whose parent branch was later squashed",
+    "to main, which carries the work under a different commit. The checker",
+    "cannot tell those apart from ancestry alone - a squash breaks the link in",
+    "both cases - so each note below records what was MEASURED on main, and",
+    "says so when the claim is second-hand instead.",
+    "",
+    "This ratchet SHRINKS ONLY. An entry whose merge commit becomes reachable",
+    "from main has been merged properly after all, and the checker FAILS until",
+    "the entry is deleted. An entry may never be added to turn a red check",
+    "green: a new stranding is a defect to fix."
+  ],
+  "unreachable": {
+    "1236": "stacked on agent/146-lower-component-methods. CARRIED: tools/tier_guarantees.py and tests/test_tier_guarantee_matrix.py, both added by this merge, are on main.",
+    "1296": "merged into agent/1196-ui-transaction-phases, already squashed to main. Work reported carried by PR #1325 (issue #1342); not independently verified here - it added no files, so there is no cheap witness.",
+    "1305": "merged into agent/1198-private-peer-pool. STRANDED: src/revl/pool_receipt.py and docs/design/566-pool-execution-receipts.md, both added by this merge, are absent from main.",
+    "1308": "merged into agent/81-stream-tiers. STRANDED: `document_holds_stream`, added by this merge to selfhost/emit_go.rvl, is absent from main's copy of that file.",
+    "1309": "merged into agent/1192-shadow-routing. STRANDED: src/revl/shadow_runtime.py and tests/test_shadow_runtime_518.py, both added by this merge, are absent from main.",
+    "1318": "merged into agent/1307-heldout-fence-red, already squashed to main. REWORKED: main carries test_census_change_selects_the_construct_reach_ledger via PR #1322, which is this PR's finding under a different name. The test names this merge added are not on main.",
+    "1319": "merged into agent/1311-model-routes-in-ir, already squashed to main. CARRIED: tests/test_ruleset_modules_completeness.py, added by this merge, is on main via PR #1346.",
+    "1320": "merged into agent/1195-ui-taint-classes, already squashed to main. STRANDED: src/revl/ui_action.py, docs/design/565-ui-target-binding.md and three test modules, all added by this merge, are absent from main. Work reported carried by PR #1325."
+  }
+}

@@ -1600,9 +1600,19 @@ fn overflow32_preamble() -> List[Str] {
 // document-level answers. Its PURE typed-core path — the one this slice mirrors
 // — routes PAST the components of a document that also carries top-level
 // declarations and emits ordinary Go for those declarations alone; both sides
-// then drop the same thing, and 38 documents in the tree are byte-identical on
-// this tier for exactly that reason. A marker there would name a gap that is
+// then drop the same thing, and the documents that reach it are byte-identical
+// on this tier for exactly that reason. A marker there would name a gap that is
 // not there and cost every one of those agreements.
+//
+// Issue #1321 narrowed which documents reach it. The reference carries an
+// OBSERVABLE component, one with an activation body or a provide method, on
+// its combined renderer now, declarations AND components in one package, and
+// routes past only an INCIDENTAL one. So the exception narrows with it: where
+// the reference carries, there is no agreement left for a marker to cost, and
+// staying silent would mean answering a 6-kilobyte reference module with a
+// component-free one and no sign that anything was missing. That is the exact
+// failure the marker convention exists to prevent, so `component_is_observable`
+// below mirrors the reference predicate the routing now branches on.
 //
 // Everywhere else the marker is free, and it was badly needed. A document whose
 // components are ALL it declares never reaches the pure path: the reference
@@ -1615,15 +1625,24 @@ fn overflow32_preamble() -> List[Str] {
 // defers the whole test section, so its bytes already differ from the
 // reference's for that document and there is no agreement left to protect.
 //
-// So the suppression is narrow: pure declarations present AND no deferred test
-// section AND the document does not hold a stream (`document_holds_stream`
-// below, item 130's diversion). The stream half used to be missing, and it was
-// the worst of the three to be missing, because it is the half that is ALWAYS
-// armed: a typed-event program always carries a top-level declaration, since
-// the event's record declaration is what puts a `types` entry in the document
-// in the first place. So the suppression fired on exactly the documents the
-// reference diverts to the live path, and the port answered them with its
-// banner and the record type and nothing else.
+// So the suppression is narrow and checkable without reading a component STEP:
+// pure declarations present, no deferred test section, and no observable
+// component. `component_is_observable` reads the LENGTH of a component's `body`
+// (not the discriminant of any step inside it), so it states the reference's
+// routing without claiming a port of a lowering this slice does not have. That
+// matters because tools/selfhost_coverage.py takes a port's construct table
+// straight off the `value_str(value_field(n, "kind"))` spellings: reading a
+// `subscribe` or `stream-iter` discriminant here would move them out of the
+// blind-spot ledger's `unported` baseline and claim a stream port. A marker is
+// a refusal, not an implementation.
+//
+// The observable arm also subsumes item 130's STREAM DIVERSION, which the
+// suppression used to leave silent: a document that holds a stream is sent to
+// the reference's live path even when it carries top-level declarations, which
+// a typed-event program always does (the event's record declaration is what
+// puts a `types` entry in the document). Its components have bodies, so they
+// are observable, so they are named now, without this file reading a single
+// stream spelling.
 //
 // Markers are one per entry, in document order — the same total-dispatch
 // convention every expression- and step-level arm in this file already uses.
@@ -1633,89 +1652,21 @@ fn carries_pure_declarations(ir: Any) -> Bool {
   return value_list(value_field(ir, "externs")).length() > 0
 }
 
-// One case the suppression above must NOT cover: a component that declares a
-// required `Stream[T]` COEFFECT (item 130 §6b, issue #81).
-//
-// The suppression buys byte agreements, and an agreement is only worth
-// protecting where the reference PRODUCES BYTES. Here it produces none: the
-// reference refuses the whole document by name on this tier, because a
-// requirement resolves against a SERVICE and a `Stream[T]` is not one. So the
-// marker is free — there is no agreement left to cost — and without it this
-// port answered such a document with its banner plus whatever top-level
-// declarations came along and nothing else. Measured on `957e9b1b`, the
-// §6c coeffect program is 242 bytes here (banner + the event's record type),
-// against an `EmitError` from the reference, with no marker anywhere in the
-// output. A stated refusal made silent by the port is exactly the failure
-// item 130's exit names.
-//
-// The discriminant is a requirement's declared TYPE TEXT, not a stream step
-// spelling: this reads `requires`, which this port already walks. It is a
-// separate arm from `document_holds_stream` below because a required
-// `Stream[T]` is refused by the reference BEFORE any step is examined, so a
-// component that declares one and holds no step is still not carried here.
-fn requires_a_stream(comp: Any) -> Bool {
-  let rq = value_field(comp, "requires")
-  for (k of value_keys(rq)) {
-    if (value_str(value_field(rq, k)).startsWith("Stream[")) { return true }
-  }
-  return false
+// The reference's `_component_is_observable`: does routing past this component
+// lose something the author wrote? An activation step or a provide method puts
+// something in the component's `body`; an empty `component C { }` renders to
+// nothing anyone can call. The reference's own helper also walks a `provides`
+// entry for `methods`, which is unreachable on a frontend-produced document:
+// a `provides` clause with no `provide` block is refused at compile time (A9)
+// and a provide method IS a `body` step, so the length of `body` is the whole
+// predicate here.
+fn component_is_observable(c: Any) -> Bool {
+  return value_list(value_field(c, "body")).length() > 0
 }
 
-fn any_requires_a_stream(comps: List[Any]) -> Bool {
+fn any_component_is_observable(comps: List[Any]) -> Bool {
   for (c of comps) {
-    if (requires_a_stream(c)) { return true }
-  }
-  return false
-}
-
-// Item 130's STREAM DIVERSION, mirrored off `backends/go/emit.py`'s
-// `_document_holds_stream` (design note 563, issue #81).
-//
-// A component that holds a stream is never incidental. Its subscription is a
-// bracket with an inverse, so a module emitted without it would build, run,
-// look healthy and never subscribe. The reference therefore diverts such a
-// document AWAY from the pure typed-core path this slice mirrors and onto the
-// live stc-go path, which keeps the component and materializes its record
-// types. Three arms, and this port carries all three, because each one alone
-// is enough to make the component non-incidental:
-//
-//   * a `stream-iter` body step (the `every … in` / `on … as` loop),
-//   * the `subscribe` flag on a bracket acquisition,
-//   * a bare `Stream.*` host acquisition, which is the source-only program
-//     (`let src = effect Stream.source() undo src.close()` with nothing
-//     reading it): no flag and no loop step, but a live host listener with a
-//     `Close` inverse on the teardown stack all the same.
-//
-// This port lowers none of that. What it does with the answer is the opposite
-// of the suppression: a diverted document gets its components NAMED, one
-// marker each, because there is no byte agreement left to protect. The
-// reference emits a whole stc-go module and this port cannot, so the only two
-// honest answers are the reference's bytes or a refusal that says which
-// component was not carried. Silence is not one of them: measured on this
-// branch's base `b3b0d8556`, `backends/go/testdata/stream_event_130.rvl`
-// answered with 242 characters against the reference's 38858, with no marker
-// anywhere in the output, and a reader of those bytes could not tell a tier
-// that refuses the stream surface from one whose lowering is missing.
-//
-// Reading these three discriminants is what moves `step=stream-iter`,
-// `subscribe=<true>` and `kind=host` out of the go tier's `unported` baseline
-// in tests/fixtures/selfhost_blind_spots.json and into its `blind` list. That
-// is the accurate classification and not a claim of a port: `blind` records a
-// discriminant this file branches on that no corpus document reaches, which is
-// exactly true of a refusal predicate. The ledger entry says so in as many
-// words. A marker is a refusal, not an implementation.
-fn document_holds_stream(comps: List[Any]) -> Bool {
-  for (c of comps) {
-    for (step of value_list(value_field(c, "body"))) {
-      if (value_str(value_field(step, "step")) == "stream-iter") { return true }
-      if (value_bool(value_field(step, "subscribe"))) { return true }
-      // `acquire` itself is a revl keyword, so the local is `acq`.
-      let acq = value_field(step, "acquire")
-      if (value_str(value_field(acq, "kind")) == "host"
-          && value_str(value_field(acq, "fn")).startsWith("Stream.")) {
-        return true
-      }
-    }
+    if (component_is_observable(c)) { return true }
   }
   return false
 }
@@ -1725,8 +1676,7 @@ fn uncarried_components(ir: Any) -> List[Str] {
   if (comps.length() == 0) { return [] }
   let deferred_tests = value_list(value_field(ir, "tests")).length() > 0
   if (carries_pure_declarations(ir) && !deferred_tests
-      && !any_requires_a_stream(comps)
-      && !document_holds_stream(comps)) { return [] }
+      && !any_component_is_observable(comps)) { return [] }
   var out = []
   for (c of comps) {
     out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)

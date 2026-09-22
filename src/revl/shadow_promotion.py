@@ -80,6 +80,18 @@ different path is the case a promotion exists to allow. `residence` is not
 compared either, for the same reason and because the two roles differ by
 construction.
 
+Two records naming the same completion is not the whole of agreement. When a
+shadow observation also carries the two RECORDED WORLDS (`replay.Timeline`
+objects in `revl.mcp.canary`'s own format), :func:`accumulate` compares them
+with `canary.compare_timelines` and a difference there is a divergence too,
+reported under :data:`WORLD_COMPARISON`. Item 496 is why: it measured a
+generation that named the same completion, recorded a different world, and was
+certified equivalent and promoted. Nothing about that comparison is restated
+here. It is called, so its key stays item 496's and the attribution stays the
+one it fixed. When the comparator cannot be imported at all, a pair carrying
+two worlds DIVERGES rather than agreeing, because "the comparison did not run"
+must not read as "the worlds matched".
+
 A pair whose prompt bindings do not match, or whose binding was SUPPRESSED on
 either side, is not comparable and refuses (`BINDING_INCOMPARABLE`,
 `BINDING_SUPPRESSED`). Two answers to possibly-different questions cannot
@@ -156,6 +168,7 @@ PUBLIC SURFACE
 ``Promotion``             — the verdict
 ``admit(plan, obs, ...)`` — records -> pairs, fail-closed
 ``accumulate(pairs)``     — pairs -> ``Tally`` (the post-barrier reduction)
+``refused(plan, ...)``    : a REFUSE verdict for a CALLER's own precondition
 ``decide(plan, obs, ...)``— the whole gate
 ``render(promotion)``     — one human-readable report
 """
@@ -195,6 +208,19 @@ DECISIONS = (PROMOTE, REFUSE, REVERT)
 #: the completion that was taken, and the outcome. See the module header for
 #: what is excluded and why.
 AGREEMENT_MEMBERS = ("chosen_digest", "outcome")
+
+#: The name a divergence carries when the two RECORDED WORLDS differ although
+#: both records named the same completion. This is not a member of a record: it
+#: is the verdict of `revl.mcp.canary.compare_timelines` over the two
+#: `replay.Timeline` objects a shadow observation may carry, which is item
+#: 496's own comparison and its own attribution, reused rather than restated.
+#:
+#: A pair AGREES when the two :data:`AGREEMENT_MEMBERS` match AND, when both
+#: worlds were recorded, the two worlds compare identical step-for-step. Item
+#: 496 measured why the second half is load-bearing: two generations can name
+#: the same completion and still record different worlds, and the direction of
+#: that miss is fail-open, because "no divergence" is the promoting branch.
+WORLD_COMPARISON = "recorded-world"
 
 #: The axes an authority diff is measured on. EVERY one must be present in a
 #: plan's `authority_diff`; a missing axis is `DIFF_UNMEASURED` and not an
@@ -399,17 +425,38 @@ class Observation:
     a test MEASURES on a real run rather than something this docstring
     asserts, and so that a future caller that starts reading it shows up in the
     verdict instead of silently changing what the gate means.
+
+    ``realm`` is the realm the shadow was served in. It is DECLARED by the
+    scheduler (`revl.shadow_routing`) and not read off a record: item 517's
+    body is a closed vocabulary keyed by `(component, step_index)` and names
+    no realm. It is part of the QUESTION, so it is carried onto the
+    :class:`Pair` in public and a divergence reports it, which is what makes
+    the attribution the `(component, realm)` pair `revl canary` attributes to.
+
+    ``incumbent_world`` and ``candidate_world`` are the two RECORDED WORLDS,
+    as `replay.Timeline` objects in `revl.mcp.canary`'s own format. They are
+    optional because a record-only window is still a window; when both are
+    present :func:`accumulate` compares them with `canary.compare_timelines`
+    and a difference is a divergence even when both records named the same
+    completion.
     """
 
-    __slots__ = ("incumbent", "candidate", "_slo", "slo_reads")
+    __slots__ = ("incumbent", "candidate", "_slo", "slo_reads", "realm",
+                 "incumbent_world", "candidate_world")
 
     def __init__(self, incumbent: Mapping[str, Any],
                  candidate: Mapping[str, Any],
-                 slo: Optional[Mapping[str, Any]] = None):
+                 slo: Optional[Mapping[str, Any]] = None,
+                 realm: Optional[str] = None,
+                 incumbent_world: Any = None,
+                 candidate_world: Any = None):
         self.incumbent = incumbent
         self.candidate = candidate
         self._slo = dict(slo) if isinstance(slo, Mapping) else slo
         self.slo_reads = 0
+        self.realm = realm
+        self.incumbent_world = incumbent_world
+        self.candidate_world = candidate_world
 
     @property
     def slo(self) -> Optional[Mapping[str, Any]]:
@@ -425,18 +472,28 @@ class Observation:
         must not itself trip the counter the claim rests on."""
         return self._slo is not None
 
+    @property
+    def has_world(self) -> bool:
+        """Whether BOTH recorded worlds were supplied. One world is not a
+        comparison, so a pair with one is compared on its records alone."""
+        return (self.incumbent_world is not None
+                and self.candidate_world is not None)
+
 
 @dataclass(frozen=True)
 class Pair:
     """One admitted shadow pair.
 
-    The public members are the QUESTION: which crossing, which two roles,
-    under which policy, on which two host profiles, bound to which input.
-    A precondition reads these.
+    The public members are the QUESTION: which crossing, in which realm,
+    which two roles, under which policy, on which two host profiles, bound to
+    which input. A precondition reads these.
 
-    The ANSWER lives in ``_incumbent`` and ``_candidate`` and is read only by
-    :func:`accumulate`, which runs after the precondition walk. A precondition
-    is handed a tuple of these and cannot compute agreement from it.
+    The ANSWER lives in ``_incumbent``, ``_candidate`` and the two recorded
+    worlds, and is read only by :func:`accumulate`, which runs after the
+    precondition walk. A precondition is handed a tuple of these and cannot
+    compute agreement from it. ``realm`` is on the public side because it says
+    WHERE the shadow was served, not what it answered; it is the second half
+    of the `(component, realm)` attribution `revl canary` reports.
 
     No member of an :class:`Observation`'s ``slo`` block is carried here. The
     metric evidence does not cross the barrier at all, which is a stronger
@@ -453,6 +510,9 @@ class Pair:
     binding_value: Optional[str]
     _incumbent: Mapping[str, Any]
     _candidate: Mapping[str, Any]
+    realm: Optional[str] = None
+    _incumbent_world: Any = None
+    _candidate_world: Any = None
 
     def _answer(self, record: Mapping[str, Any]) -> dict:
         """The two :data:`AGREEMENT_MEMBERS`, read off one record.
@@ -649,6 +709,9 @@ def admit(plan: ShadowPlan, observations: Sequence[Observation], *,
             binding_value=values[0],
             _incumbent=obs.incumbent,
             _candidate=obs.candidate,
+            realm=getattr(obs, "realm", None),
+            _incumbent_world=getattr(obs, "incumbent_world", None),
+            _candidate_world=getattr(obs, "candidate_world", None),
         ))
     return (tuple(pairs), None)
 
@@ -943,20 +1006,53 @@ STAGES = (tuple(name for name, _ in PLAN_PRECONDITIONS)
 
 @dataclass(frozen=True)
 class Divergence:
-    """One pair whose two answers differ, attributed."""
+    """One pair whose two answers differ, attributed.
+
+    ``member`` is the member of the record that differed, or
+    :data:`WORLD_COMPARISON` when the records agreed and the two recorded
+    worlds did not. ``realm`` is the realm the shadow was served in, so the
+    attribution is the `(component, realm)` pair `revl canary` reports.
+
+    When it is the world that diverged, ``at_step`` is the index of the first
+    differing step and ``at_field`` is which of item 496's compared fields
+    told the two apart. ``at_field`` matters for the case item 496 was filed
+    about: a relocated step has the same kind and the same label on both
+    sides, so a report that printed only those two would print the two sides
+    identically and say nothing."""
 
     crossing: tuple
     member: str
     incumbent: Any
     candidate: Any
+    realm: Optional[str] = None
+    at_step: Optional[int] = None
+    at_field: Optional[str] = None
+
+    @property
+    def attribution(self) -> tuple:
+        """``(component, realm)``, the pair item 496's comparison names.
+
+        The realm is ``None`` on a window whose scheduler did not declare one,
+        and the component half is always present because it is the crossing
+        key's own first member."""
+        return (self.crossing[0], self.realm)
 
     def as_dict(self) -> dict:
         return {"crossing": list(self.crossing), "member": self.member,
-                "incumbent": self.incumbent, "candidate": self.candidate}
+                "incumbent": self.incumbent, "candidate": self.candidate,
+                "realm": self.realm, "at_step": self.at_step,
+                "at_field": self.at_field,
+                "attribution": list(self.attribution)}
 
     def describe(self) -> str:
-        return (f"{self.crossing[0]} step {self.crossing[1]}: {self.member} "
-                f"{self.incumbent!r} -> {self.candidate!r}")
+        where = f"{self.crossing[0]} step {self.crossing[1]}"
+        if self.realm is not None:
+            where = f"{self.crossing[0]} in realm `{self.realm}` step " \
+                    f"{self.crossing[1]}"
+        if self.member == WORLD_COMPARISON and self.at_step is not None:
+            return (f"{where}: the recorded worlds differ at replay step "
+                    f"{self.at_step} ({self.incumbent} -> {self.candidate})")
+        return f"{where}: {self.member} {self.incumbent!r} -> {self.candidate!r}"
 
 
 @dataclass(frozen=True)
@@ -988,18 +1084,96 @@ class Tally:
                 "divergences": [d.as_dict() for d in self.divergences]}
 
 
-def accumulate(action_class: tuple, pairs: Sequence[Pair]) -> Tally:
+def _resolve_comparator() -> Optional[Callable]:
+    """`revl.mcp.canary.compare_timelines`, or ``None``.
+
+    Resolved lazily for the same reason the verifier is: this module must be
+    importable without dragging the MCP surface in, and an unavailable
+    comparator must not turn into a skipped comparison. The call site treats
+    ``None`` as a DIVERGENCE rather than as agreement, because "the comparison
+    did not run" and "the two worlds matched" are the two branches item 496
+    measured the cost of confusing."""
+    try:
+        from .mcp.canary import compare_timelines  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - absence is the case being handled
+        return None
+    return compare_timelines
+
+
+def _world_divergence(pair: Pair,
+                      compare: Optional[Callable]) -> Optional[Divergence]:
+    """Compare the pair's two recorded worlds, or ``None`` when it carries
+    fewer than two.
+
+    The comparison is `revl.mcp.canary.compare_timelines` verbatim. That
+    function walks the two `replay.Timeline` step lists in lock-step and
+    reports the first index whose key differs, where the key is item 496's
+    `(kind, label, undo, compensate, slot)`, the `slot` being the half of a
+    step's provenance that is behaviour rather than a name. Nothing about that
+    comparison is restated here; it is called."""
+    left, right = pair._incumbent_world, pair._candidate_world
+    if left is None or right is None:
+        return None
+    if compare is None:
+        return Divergence(
+            pair.crossing, WORLD_COMPARISON,
+            "comparator unavailable", "comparator unavailable",
+            realm=pair.realm)
+    verdict = compare(left, right)
+    if not verdict.get("diverged"):
+        return None
+    field = verdict.get("field")
+    baseline = verdict.get("baseline") or {}
+    candidate = verdict.get("candidate") or {}
+    return Divergence(
+        pair.crossing, WORLD_COMPARISON,
+        _step_name(baseline, field), _step_name(candidate, field),
+        realm=pair.realm, at_step=verdict.get("atIndex"), at_field=field)
+
+
+def _step_name(step: Mapping[str, Any], field: Optional[str] = None) -> str:
+    """A step as one string, for a divergence's two sides.
+
+    ``absent`` when the generation had no step at that index, which is
+    canary's length-mismatch shape. The discriminating field is appended
+    because item 496's whole finding is a pair of steps that agree on `kind`
+    and `label` and differ on `slot`: rendering only the first two would print
+    both sides of that divergence identically."""
+    if not step:
+        return "absent"
+    rendered = f"{step.get('kind')} {step.get('label')}"
+    if field and field not in ("length", "kind", "label") and field in step:
+        rendered += f" [{field}={step[field]}]"
+    return rendered
+
+
+def accumulate(action_class: tuple, pairs: Sequence[Pair], *,
+               compare: Optional[Callable] = None,
+               _resolve: Callable = _resolve_comparator) -> Tally:
     """Reduce admitted pairs to one :class:`Tally`.
 
     This is the ONLY function in the module that reads what a model said. It
     is reached only after the precondition walk in :func:`decide` has returned
     nothing, and the object it produces does not exist before that point.
 
-    A pair diverges on the FIRST member of :data:`AGREEMENT_MEMBERS` that
-    differs, and the divergence carries the crossing, so the attribution is to
-    an exact `(component, step_index)` and an exact member. That pair-of-names
-    is the whole output when a shadow disagrees, and it is what a threshold on
-    a counter cannot produce."""
+    A pair is compared twice, and disagreeing on either is a divergence:
+
+    1. on the members of :data:`AGREEMENT_MEMBERS`, which is what the
+       decision said;
+    2. on the two RECORDED WORLDS, when both were recorded, which is what
+       the answer then did, compared by
+       `revl.mcp.canary.compare_timelines`.
+
+    The second is not a refinement of the first. Item 496 is the measurement
+    that says so: two generations can name the same completion and record
+    different worlds, and the fail-open direction is exactly that miss,
+    because "no divergence" is the branch that promotes.
+
+    Either way the divergence carries the crossing and the realm, so the
+    attribution is to an exact `(component, realm)` and an exact step or
+    member. That pair-of-names is the whole output when a shadow disagrees,
+    and it is what a threshold on a counter cannot produce."""
+    comparator = compare if compare is not None else _resolve()
     agreed = 0
     divergences = []
     for pair in pairs:
@@ -1008,8 +1182,11 @@ def accumulate(action_class: tuple, pairs: Sequence[Pair]) -> Tally:
         for member in AGREEMENT_MEMBERS:
             if left.get(member) != right.get(member):
                 difference = Divergence(pair.crossing, member,
-                                        left.get(member), right.get(member))
+                                        left.get(member), right.get(member),
+                                        realm=pair.realm)
                 break
+        if difference is None:
+            difference = _world_divergence(pair, comparator)
         if difference is None:
             agreed += 1
         else:
@@ -1124,6 +1301,28 @@ def _verdict(plan: ShadowPlan, decision: str, refusal: Optional[Refusal],
         threshold=getattr(plan, "threshold", None),
         refusal=refusal, preconditions=tuple(full), tally=tally,
         restoration=restoration, slo_reads=reads, slo_supplied=supplied)
+
+
+def refused(plan: ShadowPlan, link: str, reason: str, *, stage: str,
+            where: Optional[tuple] = None,
+            observations: Sequence[Observation] = ()) -> Promotion:
+    """A ``REFUSE`` verdict for a precondition a CALLER owns.
+
+    `revl.shadow_routing` schedules the shadow and therefore owns three checks
+    this module cannot make: that the window is the declared action's, that it
+    was served in the declared realm, and that the incumbent's answer was the
+    one used. Those are preconditions in exactly the sense the walk in
+    :func:`decide` uses, properties of the declaration read before any
+    answer, so their refusals belong in this module's verdict shape rather
+    than in a second one beside it.
+
+    No tally is built and none can be: the caller reaches this before it calls
+    :func:`decide`, so ``measurements_read`` is false and every stage of the
+    gate is recorded as not reached. ``stage`` names the caller's own stage
+    and is reported alongside them."""
+    trail = [{"stage": stage, "status": "refused", "link": link}]
+    return _verdict(plan, REFUSE, Refusal(link, reason, where), trail, None,
+                    None, list(observations))
 
 
 def decide(plan: ShadowPlan, observations: Sequence[Observation], *,

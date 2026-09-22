@@ -1306,3 +1306,153 @@ def test_str_helpers_do_not_materialize_the_whole_string():
     _has(src, "\t\t\treturn string([]rune(s)[a:b])")
     _has(src, "\t\trs := []rune(s)")
     assert "[]rune" not in src.split("func revlStrSplit")[1].split("\n}")[0]
+
+
+# ---------------------------------------------------------------------------
+# `Int.to_int32` in a component method body, and the arrow beside it (#1347).
+#
+# The conformance matrix reads a refusal as "this tier cannot express this
+# construct". Two go cells were unclassified after issue #1321 carried the
+# mixed document, and they were not the same kind of thing: one was a stdlib
+# arm that had never been written on this path, the other is a real limit of
+# the component world. These pin the difference, which is what the matrix
+# publishes.
+
+_TO_INT32_COMPONENT = (
+    "service S { fn f(x: Int) -> Int }\n"
+    "component C provides s: S {\n"
+    "  provide s { fn f(x) { let a = x.to_int32()\n"
+    "    return a.to_int() } }\n"
+    "}"
+)
+
+
+def test_to_int32_lowers_in_a_provide_method():
+    """The narrow had an arm on the pure typed-core path and none in a method
+    body, while the widen `to_int` beside it had both — so `.to_int32()` in a
+    component reached the unknown-method fall-through. It is the same checked
+    helper either way."""
+    src = emit.emit(_compile(_TO_INT32_COMPONENT), package="emitted")
+    _has(src, "\ta := revlToI32(x)")
+    assert src.count("func revlToI32") == 1, (
+        "the checked narrow must be declared exactly once — Go rejects a "
+        "redeclaration, and both the typed-core assembly and the component "
+        "preamble can ask for it")
+
+
+def test_to_int32_is_declared_once_when_a_top_level_fn_narrows_too():
+    """The combined path renders the typed-core tier and the live components
+    into ONE package, so the two producers of the helper must not both write
+    it."""
+    src = emit.emit(_compile(
+        "fn narrow(x: Int) -> Int32 { return x.to_int32() }\n"
+        + _TO_INT32_COMPONENT), package="emitted")
+    assert src.count("func revlToI32") == 1, src.count("func revlToI32")
+
+
+def test_an_arrow_in_a_method_body_is_refused_with_no_top_level_declaration():
+    """The other cell, and the reason it IS published as a tier limit: the
+    refusal is not about the document carrying a top-level declaration beside
+    the component (issue #721's shape, carried since issue #1321). It fires on
+    a document that is only a component, because the stc-go component world has
+    no type to render a general arrow's closure against."""
+    with pytest.raises(emit.EmitError, match="arrow is not lowerable"):
+        emit.emit(_compile(
+            "service S { fn f(x: Int) -> Int }\n"
+            "component C provides s: S {\n"
+            "  provide s { fn f(x) { let g = v => v + 1\n"
+            "    return g(x) } }\n"
+            "}"), package="emitted")
+
+
+# ---------------------------------------------------------------------------
+# issue #1376: Opt/Result construction inside a ternary in RETURN position
+# ---------------------------------------------------------------------------
+#
+# The tier carries `Opt[T]` as the return tuple `(T, bool)` and `Result[T, E]`
+# as `(T, E, bool)`, so a construction has no single-expression Go form and the
+# value IIFE the ordinary ternary arm builds cannot carry one. `_emit_return`
+# knew how to spread a construction it found at the top of the returned
+# expression, and `if (c) { return Some(n) }  return None` already emitted, but
+# the same method written as a ternary reached `_expr` and refused. Five other
+# tiers lower all of these; the refusal was the emitter's, not the runtime's.
+
+_TERNARY_OPT = (
+    "service Bus { fn maybe(n: Int) -> Opt[Int] }\n"
+    "component Env provides bus: Bus {\n"
+    "  provide bus { fn maybe(n) = (n > 0) ? Some(n) : None }\n"
+    "}"
+)
+
+
+def test_a_ternary_over_opt_in_return_position_spreads_into_the_tuple():
+    src = emit.emit(_compile(_TERNARY_OPT), package="emitted")
+    body = _body(src, "(revlSelf *Env_bus) Maybe")
+    _has(body, "if (n > 0) {")
+    _has(body, "return n, true")
+    _has(body, "return 0, false")
+    assert "func() *int" not in body, (
+        "the Opt value IIFE cannot carry a two-value return; the ternary has "
+        "to become an `if` statement")
+
+
+def test_a_ternary_over_result_in_return_position_spreads_into_the_tuple():
+    src = emit.emit(_compile(
+        "service Bus { fn pick(n: Int) -> Result[Int, Str] }\n"
+        "component Env provides bus: Bus {\n"
+        "  provide bus { fn pick(n) = (n > 0) ? Ok(n) : Err(\"neg\") }\n"
+        "}"), package="emitted")
+    body = _body(src, "(revlSelf *Env_bus) Pick")
+    _has(body, "return n, \"\", true")
+    _has(body, "return 0, \"neg\", false")
+
+
+def test_a_nested_ternary_and_a_mixed_branch_spread_the_same_way():
+    """The spread recurses, so a ternary inside a ternary and a branch that is
+    an Opt-valued CALL rather than a construction both take the ordinary
+    return lowering."""
+    src = emit.emit(_compile(
+        "service Bus { fn maybe(n: Int) -> Opt[Int] }\n"
+        "component Env requires up: Bus provides bus: Bus {\n"
+        "  provide bus { fn maybe(n) = (n > 0) ? ((n > 5) ? Some(n) : Some(0))"
+        " : up.maybe(n) }\n"
+        "}"), package="emitted")
+    body = _body(src, "(revlSelf *Env_bus) Maybe")
+    _has(body, "if (n > 0) {")
+    _has(body, "if (n > 5) {")
+    _has(body, "return n, true")
+    _has(body, "return 0, true")
+    _has(body, "return revlSelf.up.Maybe(n)")
+
+
+def test_a_construction_in_a_true_value_position_is_still_a_named_limit():
+    """The restriction that remains is the one the message always claimed: a
+    construction bound to a local has no value form on this tier, because the
+    component world spells an Opt VALUE as `*T` and nothing in that world
+    consumes one. It refuses by name rather than emitting something plausible."""
+    with pytest.raises(emit.EmitError, match="only supported in return position"):
+        emit.emit(_compile(
+            "service Bus { fn maybe(n: Int) -> Opt[Int] }\n"
+            "component Env provides bus: Bus {\n"
+            "  provide bus { fn maybe(n) { let o = Some(n)\n"
+            "    return o } }\n"
+            "}"), package="emitted")
+
+
+def test_nullish_in_a_method_let_binds_the_payload_not_the_opt():
+    """Found behind the #1376 refusal: `_comp_infer` took the LEFT operand's
+    type for every binary operator, so `let a = bus.maybe(x) ?? 0` inferred
+    `Opt[Int]` and declared the local as the PURE tier's `RevlOpt[int64]` — a
+    name no component package defines — while assigning it an `int64`. Nothing
+    had measured it because the only document that binds a `??` in a method
+    body also held the ternary that refused."""
+    src = emit.emit(_compile(
+        "service Bus { fn maybe(n: Int) -> Opt[Int] }\n"
+        "service S { fn f(x: Int) -> Int }\n"
+        "component C requires bus: Bus provides s: S {\n"
+        "  provide s { fn f(x) { let a = bus.maybe(x) ?? 0\n"
+        "    return a } }\n"
+        "}"), package="emitted")
+    body = _body(src, "(revlSelf *C_s) F")
+    assert "RevlOpt" not in body, body
+    _has(body, "a := func() int")

@@ -25,12 +25,12 @@ extern emission fn append_line(h: LedgerHandle, line: Str) = @py { pass }
 // ---------- services ----------
 
 service Ledger {
-  emission fn record(line: Str)
+  emission[append_line] fn record(line: Str)
 }
 
 service JobQueue {
   fn status(id: Str) -> Opt[Str]
-  emission fn submit(id: Str, payload: Str)
+  emission[audit] fn submit(id: Str, payload: Str)
 }
 
 service Aggregator {
